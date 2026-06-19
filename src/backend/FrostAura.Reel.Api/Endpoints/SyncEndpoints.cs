@@ -85,6 +85,11 @@ public static class SyncEndpoints
                     Kind = JobKind.DeltaSync,
                     Priority = 0, // user asked — interactive priority
                     EnqueuedAt = DateTime.UtcNow,
+                    // Force a full refetch, not an activity-diffed delta. A user hitting "sync now"
+                    // wants the authoritative state — and Trakt does not bump last_activities
+                    // watched_at when history is *removed*, so a diffed delta would silently skip a
+                    // removal and the change would never land. Mirrors the nightly reconcile.
+                    CursorJson = """{"Force":true}""",
                 });
                 await db.SaveChangesAsync(ct);
             }

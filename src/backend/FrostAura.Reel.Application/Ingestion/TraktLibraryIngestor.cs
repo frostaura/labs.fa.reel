@@ -57,10 +57,15 @@ public class TraktLibraryIngestor(
             .ToDictionaryAsync(p => p.TitleId, ct);
 
         var now = DateTime.UtcNow;
+        // /sync/watched/shows is a complete snapshot, so the set of title ids it returns is the
+        // current truth. Any progress row whose show is absent here had its history removed on
+        // Trakt — reconciled away below so it leaves Continue Watching.
+        var returnedTitleIds = new HashSet<Guid>(watchedShows.Count);
         foreach (var item in watchedShows)
         {
             var title = GetOrAddTitle(titlesByTraktId, MediaType.Show, item.Show.Ids.Trakt, now);
             IngestMapper.ApplyShow(title, item.Show);
+            returnedTitleIds.Add(title.Id);
 
             var distinctEpisodes = IngestMapper.CountDistinctWatchedEpisodes(item);
             var fullyWatched = IngestMapper.IsFullyWatched(MediaType.Show, item.Plays, distinctEpisodes, title.AiredEpisodes);
@@ -91,8 +96,22 @@ public class TraktLibraryIngestor(
             }
         }
 
-        logger.LogInformation("Ingested {Shows} watched shows ({Episodes} episodes) for {AccountId}.",
-            watchedShows.Count, episodeCount, accountId);
+        // Reconcile removals: a show that no longer appears in the watched snapshot (history
+        // cleared on Trakt) must not keep its in-progress row. ShowWatchProgress is purely
+        // ingest-derived — never written by a local action — so deleting against the snapshot is
+        // safe. Without this, "remove from history" never propagates and the show is stuck in
+        // Continue Watching forever.
+        var removedFromHistory = progressByTitleId.Values
+            .Where(p => !returnedTitleIds.Contains(p.TitleId))
+            .ToList();
+        foreach (var orphan in removedFromHistory)
+        {
+            db.ShowWatchProgresses.Remove(orphan);
+        }
+
+        logger.LogInformation(
+            "Ingested {Shows} watched shows ({Episodes} episodes) for {AccountId}; reconciled away {Removed} progress rows no longer in Trakt history.",
+            watchedShows.Count, episodeCount, accountId, removedFromHistory.Count);
         return (watchedShows.Count, episodeCount);
     }
 
