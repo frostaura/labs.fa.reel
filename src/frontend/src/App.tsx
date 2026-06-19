@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, matchPath, useLocation, type Location } from "react-router-dom";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
 import Landing from "./pages/Landing";
@@ -14,10 +14,23 @@ import TasteDna from "./pages/TasteDna";
 import SearchResults from "./pages/SearchResults";
 import RatePicker from "./pages/RatePicker";
 
-export default function App() {
+/**
+ * Title detail is a fixed-overlay modal that cards open with `state.backgroundLocation`. When that
+ * marker is present we pin the main <Routes> to the background location so the page underneath
+ * (Home and its carousels, Saved, search results…) stays MOUNTED while the modal is on top —
+ * closing it then reveals the same DOM with scroll positions intact, instead of remounting the
+ * page and snapping every carousel back to the start. Scoped to /title only: Person is a full-page
+ * view, so it (and any other route) always navigates normally even if a link supplied a background.
+ */
+function AppRoutes() {
+  const location = useLocation();
+  const background = (location.state as { backgroundLocation?: Location } | null)?.backgroundLocation;
+  const isTitleOverlay = !!background && matchPath("/title/:mediaType/:tmdbId", location.pathname) != null;
+  const mainLocation = isTitleOverlay ? background! : location;
+
   return (
-    <BrowserRouter>
-      <Routes>
+    <>
+      <Routes location={mainLocation}>
         <Route path="/" element={<Landing />} />
         <Route path="/auth/trakt/callback" element={<TraktCallback />} />
         <Route
@@ -47,6 +60,28 @@ export default function App() {
         </Route>
         <Route path="*" element={<Navigate to="/home" replace />} />
       </Routes>
+
+      {/* Title overlay rendered on top of the kept-mounted background page. */}
+      {isTitleOverlay && (
+        <Routes>
+          <Route
+            path="/title/:mediaType/:tmdbId"
+            element={
+              <RequireAuth>
+                <TitleDetail />
+              </RequireAuth>
+            }
+          />
+        </Routes>
+      )}
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppRoutes />
     </BrowserRouter>
   );
 }
