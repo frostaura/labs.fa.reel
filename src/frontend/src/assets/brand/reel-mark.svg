@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none" role="img" aria-label="FrostAura Reel mark">
+  <defs>
+    <linearGradient id="fa-reel-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#BAE6FD" />
+      <stop offset="100%" stop-color="#60A5FA" />
+    </linearGradient>
+  </defs>
+  <!-- reel sweep: an open lens-ring unspooling toward the taste-spark (Foresight's arc language) -->
+  <path d="M32.6 15.16 A 13.5 13.5 0 1 1 24.84 7.4" stroke="url(#fa-reel-grad)" stroke-width="2.25" stroke-linecap="round" opacity="0.8" />
+  <!-- play triangle: watch — the cinema focal, corners softened by a round-join stroke -->
+  <path d="M16 13.7 L 27.2 20 L 16 26.3 Z" fill="url(#fa-reel-grad)"
+        stroke="url(#fa-reel-grad)" stroke-width="2.6" stroke-linejoin="round" />
+  <!-- four-point compass star: FrostAura family DNA + the "for you" spark, seated in the reel's opening -->
+  <g transform="translate(31 9)">
+    <path d="M0 -4.2 L 1 -1 L 4.2 0 L 1 1 L 0 4.2 L -1 1 L -4.2 0 L -1 -1 Z" fill="#E0F2FE" />
+  </g>
+</svg>

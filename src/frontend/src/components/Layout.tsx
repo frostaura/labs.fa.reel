@@ -9,6 +9,7 @@ import SearchBox from "./search/SearchBox";
 import MobileTabBar from "./MobileTabBar";
 import Footer from "./Footer";
 import RealtimeSync from "./RealtimeSync";
+import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,8 +54,9 @@ export default function Layout() {
       <RealtimeSync />
       <header className="sticky top-0 z-40 border-b border-fa-edge/50 bg-fa-ink/80 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 h-14 flex items-center gap-4">
-          <Link to="/home" className="text-lg font-light tracking-wide text-fa-frost-bright">
-            Reel
+          <Link to="/home" aria-label="Reel home" className="flex items-center gap-2 shrink-0 hover:opacity-80 transition">
+            <img src={reelMark} alt="" aria-hidden className="h-7 w-7 shrink-0" />
+            <span className="text-lg font-light tracking-wide text-fa-frost-bright">Reel</span>
           </Link>
           {/* Inline nav lives on desktop; mobile uses the bottom tab bar. Icon-only — the label
               rides aria-label + native title tooltip so it stays accessible. */}
