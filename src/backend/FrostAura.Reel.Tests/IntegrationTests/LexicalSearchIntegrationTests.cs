@@ -81,6 +81,7 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
         var accountId = await SeedAccountAsync();
         var ratedOnly = await SeedTitleAsync("Rated Long Ago", ["comedy"], []);
         var inProgress = await SeedTitleAsync("Half Watched Show", ["comedy"], []);
+        var savedForLater = await SeedTitleAsync("Already On My List", ["comedy"], []);
         await SeedTitleAsync("Genuinely New", ["comedy"], []);
 
         await using (var db = fixture.CreateContext(new AccountContext()))
@@ -107,6 +108,16 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
                 FirstSyncedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
             });
+            // Saved for later — a decision already made; lives on Saved, not in the picks
+            // (founder addition 2026-06-19).
+            db.UserTitleReactions.Add(new UserTitleReaction
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = savedForLater,
+                Kind = ReactionKind.SaveForLater,
+                CreatedAt = DateTime.UtcNow,
+            });
             await db.SaveChangesAsync();
         }
 
@@ -115,6 +126,7 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
         Assert.Contains(results, r => r.Title.Name == "Genuinely New");
         Assert.DoesNotContain(results, r => r.Title.Name == "Rated Long Ago");
         Assert.DoesNotContain(results, r => r.Title.Name == "Half Watched Show");
+        Assert.DoesNotContain(results, r => r.Title.Name == "Already On My List");
     }
 
     private async Task<Guid> SeedAccountAsync()

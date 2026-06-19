@@ -374,7 +374,8 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          dispatch(api.util.invalidateTags(["Saved"]));
+          // Feed: a saved title drops out of the picks (server filters it at read time).
+          dispatch(api.util.invalidateTags(["Saved", "Feed"]));
         } catch {
           patch.undo();
         }
@@ -390,7 +391,8 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          dispatch(api.util.invalidateTags(["Saved"]));
+          // Unsaving makes it eligible again — refresh Saved and the feed.
+          dispatch(api.util.invalidateTags(["Saved", "Feed"]));
         } catch {
           patch.undo();
         }

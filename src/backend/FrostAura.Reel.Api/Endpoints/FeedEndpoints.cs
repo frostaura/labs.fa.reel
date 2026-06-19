@@ -44,6 +44,24 @@ public static class FeedEndpoints
                 .OrderBy(x => x.Item.Row).ThenBy(x => x.Item.Rank)
                 .ToListAsync(ct);
 
+            // The snapshot is materialized, so reactions made since the build can leave a title in
+            // the feed that no longer belongs there. Drop anything the user has since saved (it's a
+            // decision already made — it lives on Saved) or marked not-interested, without waiting
+            // for a rebuild. EligibilityQueryBuilder already excludes both at build time; this keeps
+            // an already-built feed honest between builds.
+            var snapshotTitleIds = items.Select(x => x.Title.Id).ToList();
+            var excludedTitleIds = (await db.UserTitleReactions
+                    .Where(r => r.AccountId == account.Id && r.RevokedAt == null
+                        && (r.Kind == ReactionKind.SaveForLater || r.Kind == ReactionKind.NotInterested)
+                        && snapshotTitleIds.Contains(r.TitleId))
+                    .Select(r => r.TitleId)
+                    .ToListAsync(ct))
+                .ToHashSet();
+            if (excludedTitleIds.Count > 0)
+            {
+                items = items.Where(x => !excludedTitleIds.Contains(x.Title.Id)).ToList();
+            }
+
             var nowUtc = DateTime.UtcNow;
 
             // Best-effort streaming strips from the shared availability cache (populated as titles

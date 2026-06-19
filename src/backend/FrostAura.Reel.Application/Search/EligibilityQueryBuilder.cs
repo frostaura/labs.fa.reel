@@ -13,9 +13,11 @@ namespace FrostAura.Reel.Application.Search;
 /// Eligible for DISCOVERY = zero interaction footprint (founder-locked 2026-06-12: "never show
 /// things I've already seen"): no watch history at all — even partial; in-progress lives on the
 /// continue-watching surface only — no rating (rated implies seen, including titles rated
-/// without a logged play), not actively NotInterested, and inside the account's
-/// content-preference rules. Maturity ceilings compare certification ordinals in memory
-/// (certification systems don't order in SQL) via <see cref="PassesMaturity"/>.
+/// without a logged play), not actively NotInterested, not already saved for later (founder
+/// addition 2026-06-19: a title you've put on your watchlist is a decision already made — it
+/// lives on Saved, not back in the picks), and inside the account's content-preference rules.
+/// Maturity ceilings compare certification ordinals in memory (certification systems don't order
+/// in SQL) via <see cref="PassesMaturity"/>.
 /// </summary>
 public class EligibilityQueryBuilder(IReelDbContext db)
 {
@@ -26,7 +28,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
             && !db.UserTitleReactions.Any(r =>
                 r.AccountId == accountId && r.TitleId == t.Id
-                && r.Kind == ReactionKind.NotInterested && r.RevokedAt == null));
+                && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.SaveForLater)
+                && r.RevokedAt == null));
     }
 
     /// <summary>
