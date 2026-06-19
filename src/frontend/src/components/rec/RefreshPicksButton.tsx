@@ -10,6 +10,10 @@ import { useRebuildFeedMutation, useTriggerSyncMutation } from "../../store/api"
  * itself rebuild the feed). Both jobs surface in the header sync pill; on `job-completed`,
  * RealtimeSync invalidates the Feed/TasteDna tags, so the picks refresh themselves once ready.
  *
+ * Renders as a compact square icon button sized to the adjacent BrowseFilters segments
+ * (`p-1.5` + `h-4` icon ≈ the segment's `p-0.5` + `py-1` + 11px caption ≈ 30px), mirroring their
+ * `rounded-lg border-fa-edge bg-fa-glass` chrome so it reads as a peer control.
+ *
  * BuildFeed is Founder-gated server-side; a 403 for other tiers is swallowed and the Trakt sync
  * still lands. `busy` covers both the in-flight enqueue calls and any active pipeline job (so a
  * background sync started elsewhere also disables the button), and drives the spinner.
@@ -32,12 +36,12 @@ export default function RefreshPicksButton() {
       type="button"
       onClick={refresh}
       disabled={busy}
-      className="fa-button shrink-0"
-      data-testid="refresh-picks"
+      aria-label={busy ? "Refreshing your picks" : "Refresh — sync Trakt and regenerate picks"}
       title="Pull the latest from Trakt, then regenerate tonight's picks"
+      data-testid="refresh-picks"
+      className="inline-flex items-center justify-center rounded-lg border border-fa-edge bg-fa-glass p-1.5 text-fa-frost transition hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright disabled:opacity-50 disabled:pointer-events-none"
     >
       <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
-      <span className="hidden sm:inline">{busy ? "Refreshing…" : "Refresh"}</span>
     </button>
   );
 }
