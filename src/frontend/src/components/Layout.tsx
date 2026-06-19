@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Settings as SettingsIcon, FlaskConical } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
 import { useDispatch } from "react-redux";
 import type { AppDispatch } from "../store";
@@ -18,9 +18,16 @@ import {
 } from "./ui/dropdown-menu";
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `px-3 py-1.5 rounded-md text-sm transition ${
+  `inline-flex items-center justify-center px-2.5 py-2 rounded-md transition ${
     isActive ? "text-fa-frost-bright bg-fa-glass-strong" : "text-fa-frost/80 hover:text-fa-frost-bright hover:bg-fa-glass"
   }`;
+
+/** Desktop header tabs — icon-only, mirroring the mobile bottom bar's icon set. */
+const NAV_TABS = [
+  { to: "/home", label: "Home", Icon: Home },
+  { to: "/saved", label: "Saved", Icon: Bookmark },
+  { to: "/dna", label: "Taste DNA", Icon: Fingerprint },
+] as const;
 
 export default function Layout() {
   const { data: session } = useGetSessionQuery();
@@ -49,17 +56,14 @@ export default function Layout() {
           <Link to="/home" className="text-lg font-light tracking-wide text-fa-frost-bright">
             Reel
           </Link>
-          {/* Inline nav lives on desktop; mobile uses the bottom tab bar. */}
+          {/* Inline nav lives on desktop; mobile uses the bottom tab bar. Icon-only — the label
+              rides aria-label + native title tooltip so it stays accessible. */}
           <nav className="hidden md:flex items-center gap-1">
-            <NavLink to="/home" className={navLinkClass}>
-              Home
-            </NavLink>
-            <NavLink to="/saved" className={navLinkClass}>
-              Saved
-            </NavLink>
-            <NavLink to="/dna" className={navLinkClass}>
-              Taste DNA
-            </NavLink>
+            {NAV_TABS.map(({ to, label, Icon }) => (
+              <NavLink key={to} to={to} className={navLinkClass} aria-label={label} title={label}>
+                <Icon className="h-5 w-5" />
+              </NavLink>
+            ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 flex-1 justify-end">
             <div className="hidden md:block flex-1 max-w-md">
