@@ -292,7 +292,9 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+          // Seen+rated → the title has an interaction footprint now; drop it from the picks
+          // (server filters it at read time) alongside the taste/saved refresh.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "Feed"]));
         } catch {
           patch.undo();
         }
@@ -312,6 +314,8 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // "Not interested" should leave the feed immediately.
+          dispatch(api.util.invalidateTags(["Feed"]));
         } catch {
           patch.undo();
         }
@@ -327,6 +331,8 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // Re-eligible — let the feed pick it back up.
+          dispatch(api.util.invalidateTags(["Feed"]));
         } catch {
           patch.undo();
         }
