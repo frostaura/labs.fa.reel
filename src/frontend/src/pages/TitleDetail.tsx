@@ -16,6 +16,7 @@ import PosterImage from "../components/rec/PosterImage";
 import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import WhereToWatch from "../components/title/WhereToWatch";
 import CastMemberCard from "../components/title/CastMemberCard";
+import FadeScrollRow from "../components/FadeScrollRow";
 import type { CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
@@ -32,11 +33,11 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
   return (
     <div className="space-y-2">
       <p className="fa-overline text-fa-frost-dim">{label}</p>
-      <div className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
+      <FadeScrollRow className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
         {people.map((p) => (
           <CastMemberCard key={p.personId} member={p} />
         ))}
-      </div>
+      </FadeScrollRow>
     </div>
   );
 }

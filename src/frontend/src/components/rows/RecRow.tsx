@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { FeedCard } from "../../store/feedTypes";
 import RecCard from "../rec/RecCard";
+import FadeScrollRow from "../FadeScrollRow";
 
 interface Props {
   title: ReactNode;
@@ -16,13 +17,13 @@ export default function RecRow({ title, items }: Props) {
   return (
     <section className="space-y-3">
       <h2 className="fa-section-title text-base">{title}</h2>
-      <div className="flex gap-4 overflow-x-auto snap-x pb-2 -mx-1 px-1 [scrollbar-width:thin]">
+      <FadeScrollRow className="flex gap-4 overflow-x-auto snap-x pb-2 -mx-1 px-1 [scrollbar-width:thin]">
         {items.map((card) => (
           <div key={card.titleId} className="snap-start">
             <RecCard card={card} />
           </div>
         ))}
-      </div>
+      </FadeScrollRow>
     </section>
   );
 }

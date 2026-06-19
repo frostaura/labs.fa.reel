@@ -4,6 +4,7 @@ import type { ContinueEntry } from "../../store/feedTypes";
 import PosterImage from "../rec/PosterImage";
 import { formatEpisodeRef } from "../../lib/format";
 import { useMarkDroppedMutation } from "../../store/api";
+import FadeScrollRow from "../FadeScrollRow";
 
 /** In-progress shows with the next episode front and centre, in resume-likelihood order. */
 export default function ContinueWatchingRow({ entries }: { entries: ContinueEntry[] }) {
@@ -17,7 +18,7 @@ export default function ContinueWatchingRow({ entries }: { entries: ContinueEntr
   return (
     <section className="space-y-3">
       <h2 className="fa-section-title text-base">Continue watching</h2>
-      <div className="flex gap-4 overflow-x-auto snap-x pb-2 -mx-1 px-1 [scrollbar-width:thin]">
+      <FadeScrollRow className="flex gap-4 overflow-x-auto snap-x pb-2 -mx-1 px-1 [scrollbar-width:thin]">
         {entries.map((entry) => {
           const next = formatEpisodeRef(entry.nextEpisodeSeason, entry.nextEpisodeNumber);
           const pct = Math.round(entry.completionPct * 100);
@@ -61,7 +62,7 @@ export default function ContinueWatchingRow({ entries }: { entries: ContinueEntr
             </Link>
           );
         })}
-      </div>
+      </FadeScrollRow>
     </section>
   );
 }

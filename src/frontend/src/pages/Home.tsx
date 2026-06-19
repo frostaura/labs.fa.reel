@@ -5,6 +5,7 @@ import RecCardHero from "../components/rec/RecCardHero";
 import RecRow from "../components/rows/RecRow";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
+import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import { DEFAULT_BROWSE_FILTER, matchesBrowseFilter, matchesMedia } from "../lib/browseFilter";
 
 /** The hybrid home: tonight's-picks hero answering one question, rows below for grazing. */
@@ -33,7 +34,12 @@ export default function Home() {
             </p>
           )}
         </div>
-        {!building && (feed?.hero.length ?? 0) > 0 && <BrowseFilters value={filter} onChange={setFilter} />}
+        {!building && (
+          <div className="flex items-center gap-2">
+            {(feed?.hero.length ?? 0) > 0 && <BrowseFilters value={filter} onChange={setFilter} />}
+            <RefreshPicksButton />
+          </div>
+        )}
       </div>
 
       {isLoading || building ? (
