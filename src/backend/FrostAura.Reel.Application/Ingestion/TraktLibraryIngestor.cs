@@ -28,12 +28,13 @@ public class TraktLibraryIngestor(
         events.Publish(accountId, PipelineEventTypes.IngestProgress, Progress("movies", watchedMovies.Count));
 
         var titlesByTraktId = await LoadTitleMapAsync(MediaType.Movie, watchedMovies.Select(m => m.Movie.Ids.Trakt), ct);
+        var titlesByTmdbId = await LoadTitleMapByTmdbAsync(MediaType.Movie, watchedMovies.Select(m => m.Movie.Ids.Tmdb), ct);
         var watchedByTitleId = await LoadWatchedMapAsync(accountId, ct);
 
         var now = DateTime.UtcNow;
         foreach (var item in watchedMovies)
         {
-            var title = GetOrAddTitle(titlesByTraktId, MediaType.Movie, item.Movie.Ids.Trakt, now);
+            var title = ResolveOrAddTitle(titlesByTraktId, titlesByTmdbId, MediaType.Movie, item.Movie.Ids.Trakt, item.Movie.Ids.Tmdb, now);
             IngestMapper.ApplyMovie(title, item.Movie);
             UpsertWatched(watchedByTitleId, accountId, title.Id, item.Plays, item.LastWatchedAt,
                 IngestMapper.IsFullyWatched(MediaType.Movie, item.Plays, 0, null), now);
@@ -51,6 +52,7 @@ public class TraktLibraryIngestor(
         events.Publish(accountId, PipelineEventTypes.IngestProgress, Progress("episodes", episodeCount));
 
         var titlesByTraktId = await LoadTitleMapAsync(MediaType.Show, watchedShows.Select(s => s.Show.Ids.Trakt), ct);
+        var titlesByTmdbId = await LoadTitleMapByTmdbAsync(MediaType.Show, watchedShows.Select(s => s.Show.Ids.Tmdb), ct);
         var watchedByTitleId = await LoadWatchedMapAsync(accountId, ct);
         var progressByTitleId = await db.ShowWatchProgresses
             .Where(p => p.AccountId == accountId)
@@ -63,7 +65,7 @@ public class TraktLibraryIngestor(
         var returnedTitleIds = new HashSet<Guid>(watchedShows.Count);
         foreach (var item in watchedShows)
         {
-            var title = GetOrAddTitle(titlesByTraktId, MediaType.Show, item.Show.Ids.Trakt, now);
+            var title = ResolveOrAddTitle(titlesByTraktId, titlesByTmdbId, MediaType.Show, item.Show.Ids.Trakt, item.Show.Ids.Tmdb, now);
             IngestMapper.ApplyShow(title, item.Show);
             returnedTitleIds.Add(title.Id);
 
@@ -122,6 +124,8 @@ public class TraktLibraryIngestor(
 
         var movieMap = await LoadTitleMapAsync(MediaType.Movie, ratings.Where(r => r.Movie is not null).Select(r => r.Movie!.Ids.Trakt), ct);
         var showMap = await LoadTitleMapAsync(MediaType.Show, ratings.Where(r => r.Show is not null).Select(r => r.Show!.Ids.Trakt), ct);
+        var movieMapByTmdb = await LoadTitleMapByTmdbAsync(MediaType.Movie, ratings.Where(r => r.Movie is not null).Select(r => r.Movie!.Ids.Tmdb), ct);
+        var showMapByTmdb = await LoadTitleMapByTmdbAsync(MediaType.Show, ratings.Where(r => r.Show is not null).Select(r => r.Show!.Ids.Tmdb), ct);
         var existing = await db.UserRatings
             .Where(r => r.AccountId == accountId)
             .ToDictionaryAsync(r => (r.SubjectType, r.TitleId, r.SeasonNumber, r.EpisodeNumber), ct);
@@ -135,13 +139,13 @@ public class TraktLibraryIngestor(
 
             if (item.Movie is not null)
             {
-                title = GetOrAddTitle(movieMap, MediaType.Movie, item.Movie.Ids.Trakt, now);
+                title = ResolveOrAddTitle(movieMap, movieMapByTmdb, MediaType.Movie, item.Movie.Ids.Trakt, item.Movie.Ids.Tmdb, now);
                 IngestMapper.ApplyMovie(title, item.Movie);
                 subjectType = RatingSubjectType.Movie;
             }
             else if (item.Show is not null)
             {
-                title = GetOrAddTitle(showMap, MediaType.Show, item.Show.Ids.Trakt, now);
+                title = ResolveOrAddTitle(showMap, showMapByTmdb, MediaType.Show, item.Show.Ids.Trakt, item.Show.Ids.Tmdb, now);
                 IngestMapper.ApplyShow(title, item.Show);
                 (subjectType, season, episode) = item.Type switch
                 {
@@ -181,8 +185,13 @@ public class TraktLibraryIngestor(
         return ratings.Count;
     }
 
-    /// <summary>Next-episode enrichment for the most-resumable shows (budget-capped, best-effort).</summary>
-    public async Task EnrichNextEpisodesAsync(Guid accountId, string token, int budget, CancellationToken ct)
+    /// <summary>
+    /// Next-episode enrichment for the most-resumable shows (budget-capped, best-effort).
+    /// <paramref name="onProgress"/> receives (done, total) after each show so a caller can surface
+    /// a live x / y — this is the one ingest phase with genuine per-item granularity.
+    /// </summary>
+    public async Task EnrichNextEpisodesAsync(
+        Guid accountId, string token, int budget, CancellationToken ct, Func<int, int, Task>? onProgress = null)
     {
         var candidates = await db.ShowWatchProgresses
             .Where(p => p.AccountId == accountId)
@@ -191,6 +200,7 @@ public class TraktLibraryIngestor(
             .Join(db.Titles.Where(t => t.TraktId != null), p => p.TitleId, t => t.Id, (p, t) => new { Progress = p, TraktId = t.TraktId!.Value })
             .ToListAsync(ct);
 
+        var done = 0;
         foreach (var candidate in candidates)
         {
             try
@@ -205,6 +215,12 @@ public class TraktLibraryIngestor(
             catch (HttpRequestException ex)
             {
                 logger.LogDebug(ex, "Next-episode enrichment failed for trakt show {TraktId}; continuing.", candidate.TraktId);
+            }
+
+            done++;
+            if (onProgress is not null)
+            {
+                await onProgress(done, candidates.Count);
             }
         }
     }
@@ -233,16 +249,57 @@ public class TraktLibraryIngestor(
         return map;
     }
 
-    private Title GetOrAddTitle(Dictionary<long, Title> map, MediaType mediaType, long traktId, DateTime now)
+    private async Task<Dictionary<long, Title>> LoadTitleMapByTmdbAsync(MediaType mediaType, IEnumerable<long?> tmdbIds, CancellationToken ct)
     {
-        if (!map.TryGetValue(traktId, out var title))
+        var ids = tmdbIds.Where(id => id is not null).Select(id => id!.Value).Distinct().ToList();
+        var map = new Dictionary<long, Title>(ids.Count);
+        foreach (var chunk in ids.Chunk(1000))
         {
-            title = new Title { Id = Guid.NewGuid(), MediaType = mediaType, TraktId = traktId, CreatedAt = now };
-            map[traktId] = title;
-            db.Titles.Add(title);
+            var titles = await db.Titles
+                .Where(t => t.MediaType == mediaType && t.TmdbId != null && chunk.Contains(t.TmdbId.Value))
+                .ToListAsync(ct);
+            foreach (var title in titles)
+            {
+                map[title.TmdbId!.Value] = title;
+            }
         }
 
-        return title;
+        return map;
+    }
+
+    /// <summary>
+    /// Resolves the catalog Title for a Trakt subject, deduping by BOTH Trakt id and TMDB id. A title
+    /// can already exist under its TMDB id alone (discovered via TMDB, no Trakt id yet); matching only
+    /// on Trakt id would then insert a second row and violate the (MediaType, TmdbId) unique index,
+    /// failing the whole SaveChanges. Newly created titles are indexed into both maps so later items
+    /// in the same batch reuse them.
+    /// </summary>
+    private Title ResolveOrAddTitle(
+        Dictionary<long, Title> byTrakt, Dictionary<long, Title> byTmdb,
+        MediaType mediaType, long traktId, long? tmdbId, DateTime now)
+    {
+        if (byTrakt.TryGetValue(traktId, out var existing))
+        {
+            return existing;
+        }
+
+        if (tmdbId is { } tid && byTmdb.TryGetValue(tid, out var byTmdbHit))
+        {
+            // Adopt the TMDB-discovered row; ApplyMovie/ApplyShow stamps its TraktId. Index it under
+            // the Trakt id so any later item in this batch resolves to the same instance.
+            byTrakt[traktId] = byTmdbHit;
+            return byTmdbHit;
+        }
+
+        var created = new Title { Id = Guid.NewGuid(), MediaType = mediaType, TraktId = traktId, CreatedAt = now };
+        byTrakt[traktId] = created;
+        if (tmdbId is { } newTid)
+        {
+            byTmdb[newTid] = created;
+        }
+
+        db.Titles.Add(created);
+        return created;
     }
 
     private async Task<Dictionary<Guid, WatchedTitle>> LoadWatchedMapAsync(Guid accountId, CancellationToken ct) =>

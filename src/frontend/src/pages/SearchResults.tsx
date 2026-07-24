@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Mic, Send, Sparkles } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { DEFAULT_BROWSE_FILTER, matchesMedia } from "../lib/browseFilter";
+import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { PhaseData } from "../lib/askReelStream";
@@ -63,7 +65,10 @@ export default function SearchResults() {
     };
   }, [seed, send, resume]);
 
-  const visible = cards.filter((c) => matchesMedia(c.mediaType, filter));
+  const removedSet = new Set(useSelector(selectRemovedKeys));
+  const visible = cards
+    .filter((c) => matchesMedia(c.mediaType, filter))
+    .filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
 
   const submit = (text: string) => {
@@ -163,6 +168,11 @@ export default function SearchResults() {
                   <div className="absolute top-2 right-2 reel-rise">
                     <PredictedRatingBadge rating={card.predictedRating} />
                   </div>
+                )}
+                {card.seen && (
+                  <span className="absolute top-2 left-2 rounded-full bg-fa-ink/80 px-2 py-0.5 fa-caption text-fa-frost-dim ring-1 ring-fa-edge">
+                    Seen
+                  </span>
                 )}
               </div>
               <p className="mt-2 fa-body text-fa-frost-bright truncate" title={card.name}>{card.name}</p>

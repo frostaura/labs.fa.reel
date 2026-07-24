@@ -28,18 +28,28 @@ public class BuildFeedJobHandler(
     IReelDbContext db,
     FeatureVectorBuilder featureBuilder,
     CandidateGenerator candidateGenerator,
-    EligibilityQueryBuilder eligibility,
+    CandidateRetriever candidateRetriever,
     TitleHydrator hydrator,
     IModelEngine engine,
+    OnlineResidualModel residualModel,
     IPipelineEventHub events,
     ILogger<BuildFeedJobHandler> logger) : IJobHandler
 {
-    private const int FirstPassPool = 1200;
+    // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
+    // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
+    // wasn't already popular; the ANN arm lifts that recall ceiling before the model re-ranks.
+    private const int FirstPassPopPool = 700;
+    private const int FirstPassAnnPool = 500;
     private const int ShortlistSize = 220;
     private const int HeroSize = 5;
     private const decimal HeroConfidenceFloor = 7.5m;
     private const int AnchorRowCount = 3;
     private const int RowSize = 10;
+    private const int RowMinMembers = 4; // a row below this reads worse than no row, so it's dropped
+    // Preference-tag re-rank nudge: a title whose plot embedding sits close to a declared preference
+    // tag ("things I'm into") gets at most a +10% lift on top of the model's rating — enough to
+    // sharpen ordering toward stated taste, never enough to float a weak prediction over a strong one.
+    private const double PreferenceTagWeight = 0.10;
 
     public JobKind Kind => JobKind.BuildFeed;
 
@@ -59,6 +69,9 @@ public class BuildFeedJobHandler(
 
         var now = DateTime.UtcNow;
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
+        // The online residual head for this Active artifact, loaded once and folded into every score
+        // (first-pass ranking + final predicted rating). Zero head ⇒ no change from the base model.
+        var residual = await residualModel.LoadAsync(accountId, artifact.Id, ct);
         var minPredictedRaw = await db.ContentFilters
             .Where(f => f.AccountId == accountId && f.Kind == Domain.Filters.FilterKind.MinPredictedRating)
             .Select(f => f.Value)
@@ -72,18 +85,25 @@ public class BuildFeedJobHandler(
         await candidateGenerator.RefreshPoolAsync(taste, account.Region, ct);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
+        // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
+        // slice over the user's taste centroids — so a well-matched but unpopular title actually
+        // enters scoring — then the FastTree model re-ranks the union exactly as before. The
+        // retriever applies the same eligibility rule, the poster/tmdbId lane, and the maturity gate.
         ReportProgress(job, accountId, 30, "Scoring the field");
-        var pool = await eligibility.EligibleTitles(accountId)
-            .Where(t => t.TmdbId != null && t.PosterPath != null)
-            .OrderByDescending(t => t.TmdbPopularity)
-            .Take(FirstPassPool)
-            .ToListAsync(ct);
-        pool = pool.Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling)).ToList();
+        var pool = (await candidateRetriever.RetrieveAsync(
+            accountId,
+            taste,
+            lane: q => q.Where(t => t.TmdbId != null && t.PosterPath != null),
+            popCount: FirstPassPopPool,
+            annCount: FirstPassAnnPool,
+            maturityCeiling: account.Settings.MaturityCeiling,
+            ct)).ToList();
 
         var poolVectors = await featureBuilder.BuildAsync(taste, pool.Select(t => t.Id).ToList(), now, ct);
         var poolIds = pool.Where(t => poolVectors.ContainsKey(t.Id)).Select(t => t.Id).ToList();
         var firstPass = engine.Score(artifact.ArtifactBytes, poolIds.Select(id => poolVectors[id]).ToArray());
-        var shortlistIds = poolIds.Zip(firstPass, (id, score) => (id, score))
+        var shortlistIds = poolIds.Zip(firstPass, (id, score) =>
+                (id, score: score + (float)OnlineResidualModel.Residual(residual.Weights, residual.Bias, poolVectors[id])))
             .OrderByDescending(x => x.score)
             .Take(ShortlistSize)
             .Select(x => x.id)
@@ -108,7 +128,13 @@ public class BuildFeedJobHandler(
             ordered.Select(t => finalVectors[t.Id]).ToArray(),
             FeatureSchema.AllNames());
 
-        var candidates = ordered.Zip(scored, (title, row) => new Candidate(title, row)).ToList();
+        // The residual is a scalar correction on the numeric score used for ranking + PredictedRating;
+        // the contribution list stays the base model's (a scalar can't be split into per-feature parts).
+        var candidates = ordered.Zip(scored, (title, row) =>
+        {
+            var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, finalVectors[title.Id]);
+            return new Candidate(title, row, Math.Clamp((decimal)adjusted, 0m, 10m));
+        }).ToList();
         await PersistScoresAsync(accountId, artifact.Id, candidates, now, ct);
 
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
@@ -138,16 +164,17 @@ public class BuildFeedJobHandler(
         await db.SaveChangesAsync(ct);
 
         events.Publish(accountId, PipelineEventTypes.StageChanged, new Dictionary<string, object?> { ["stage"] = "FeedReady" });
-        events.Publish(accountId, PipelineEventTypes.FeedReady, new Dictionary<string, object?> { ["snapshotId"] = snapshot.Id });
+        events.Publish(accountId, PipelineEventTypes.FeedReady, new Dictionary<string, object?>
+        {
+            ["snapshotId"] = snapshot.Id,
+            ["generatedAt"] = snapshot.GeneratedAt,
+        });
         events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
         logger.LogInformation("Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored).",
             snapshot.Id, accountId, candidates.Count);
     }
 
-    private sealed record Candidate(Title Title, ScoredRow Row)
-    {
-        public decimal Predicted => Math.Clamp((decimal)Row.Score, 0m, 10m);
-    }
+    private sealed record Candidate(Title Title, ScoredRow Row, decimal Predicted);
 
     private async Task PersistScoresAsync(Guid accountId, Guid artifactId, IReadOnlyList<Candidate> candidates, DateTime now, CancellationToken ct)
     {
@@ -183,34 +210,70 @@ public class BuildFeedJobHandler(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
         IReadOnlyList<Candidate> candidates, decimal minPredicted, DateTime now, CancellationToken ct)
     {
-        // Best-affinity person per title (for honest "you rate X 9.1" sentences).
+        // Per-title, per-role best-affinity person, restricted to people the user has actually rated
+        // (count ≥ 2). Keying by role lets the why-sentence cite the person matching the contribution
+        // (a directorAffinity clause names a director, never an actor); restricting to rated people
+        // means no clause ever names someone outside the user's taste. The Role column is load-bearing.
         var shortIds = candidates.Select(c => c.Title.Id).ToList();
         var credits = await db.TitleCredits
             .Where(c => shortIds.Contains(c.TitleId))
-            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.PersonId, p.Name })
+            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.PersonId, c.Role, p.Name })
             .ToListAsync(ct);
-        var bestPersonByTitle = credits
-            .Where(c => taste.PersonRatings.ContainsKey(c.PersonId) && taste.PersonRatings[c.PersonId].Count >= 2)
+        var personsByTitle = credits
+            .Where(c => taste.PersonRatings.TryGetValue(c.PersonId, out var r) && r.Count >= 2)
             .GroupBy(c => c.TitleId)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(c => new
-                {
-                    c.Name,
-                    Affinity = TasteMath.ShrunkenMean(taste.PersonRatings[c.PersonId], taste.UserMean),
-                })
-                    .OrderByDescending(x => x.Affinity)
-                    .First());
+                g => (IReadOnlyDictionary<Domain.Catalog.CreditRole, ExplanationTemplater.PersonAffinity>)g
+                    .GroupBy(c => c.Role)
+                    .ToDictionary(
+                        rg => rg.Key,
+                        rg => rg
+                            .Select(c => new ExplanationTemplater.PersonAffinity(
+                                c.Name, TasteMath.ShrunkenMean(taste.PersonRatings[c.PersonId], taste.UserMean)))
+                            .OrderByDescending(p => p.Affinity)
+                            .First()));
 
         // Anchors: the user's top loved titles by name.
         var anchorTitles = await db.Titles
             .Where(t => taste.TopLovedTitleIds.Contains(t.Id))
             .ToDictionaryAsync(t => t.Id, ct);
-        var anchors = taste.TopLovedTitleIds
-            .Where(anchorTitles.ContainsKey)
-            .Select(id => anchorTitles[id])
-            .Take(AnchorRowCount)
-            .ToList();
+
+        // Drift-aware anchor selection. TopLovedTitleIds is rating-first (all-time favourites), so the
+        // rows drift stale as taste moves. Reserve ONE anchor slot for the loved title whose plot
+        // embedding sits nearest the user's RECENT-taste centroid — so "Because you loved" reflects
+        // where taste is now — then fill the rest from the all-time order. Falls back to the plain
+        // top-loved order when there's no recent-centroid signal or the loved set isn't embedded.
+        var lovedInOrder = taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList();
+        var anchorIds = new List<Guid>();
+        if (taste.RecentCentroid is { } recentCentroid)
+        {
+            var driftPick = taste.LovedEmbeddings
+                .Where(kv => anchorTitles.ContainsKey(kv.Key))
+                .Select(kv => (Id: kv.Key, Sim: Cosine(kv.Value, recentCentroid)))
+                .OrderByDescending(x => x.Sim)
+                .Select(x => (Guid?)x.Id)
+                .FirstOrDefault();
+            if (driftPick is { } pick)
+            {
+                anchorIds.Add(pick);
+            }
+        }
+
+        foreach (var id in lovedInOrder)
+        {
+            if (anchorIds.Count >= AnchorRowCount)
+            {
+                break;
+            }
+
+            if (!anchorIds.Contains(id))
+            {
+                anchorIds.Add(id);
+            }
+        }
+
+        var anchors = anchorIds.Select(id => anchorTitles[id]).ToList();
 
         // Plot-embedding cosine for "because you loved" similarity + hero diversity — far richer
         // than genre overlap. Falls back to genre Jaccard for any title not yet embedded.
@@ -222,17 +285,26 @@ public class BuildFeedJobHandler(
                 ? Cosine(va, vb)
                 : GenreJaccard(a, b);
 
+        // Post-scoring preference-tag boost. The declared tags never touched the feed before — only
+        // Ask Reel. Here they become a bounded, multiplicative re-rank nudge on TOP of the model's
+        // rating: a title whose plot embedding is close to any tag lifts by ≤ PreferenceTagWeight.
+        // Tag vectors load once per build; titles without an embedding (or users without tags) get a
+        // neutral 1.0 — this only sharpens ordering, it never changes the displayed model rating.
+        var tagVectors = await LoadPreferenceTagVectorsAsync(account.Id, ct);
+        double PreferenceBoost(Title t) =>
+            tagVectors.Count > 0 && embByTitle.TryGetValue(t.Id, out var vec)
+                ? 1d + (PreferenceTagWeight * TagAffinity(vec, tagVectors))
+                : 1d;
+
         string WhyThis(Candidate candidate, string? anchorName)
         {
-            var best = bestPersonByTitle.GetValueOrDefault(candidate.Title.Id);
-            var topGenre = candidate.Title.Genres.FirstOrDefault(g => taste.GenreRatings.ContainsKey(g))
-                ?? candidate.Title.Genres.FirstOrDefault();
+            var persons = personsByTitle.GetValueOrDefault(candidate.Title.Id) ?? ExplanationTemplater.NoPersons;
+            var ratedGenres = candidate.Title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet();
             return ExplanationTemplater.BuildSentence(new ExplanationTemplater.Context(
                 candidate.Title,
                 candidate.Row.TopContributions,
-                best?.Name,
-                best?.Affinity ?? 0m,
-                topGenre,
+                persons,
+                ratedGenres,
                 anchorName));
         }
 
@@ -251,7 +323,7 @@ public class BuildFeedJobHandler(
         // Hero: greedy pick with genre-diversity shaping (MMR with Jaccard until embeddings land).
         var heroPool = candidates
             .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, minPredicted) && c.Title.PosterPath != null)
-            .OrderByDescending(c => c.Predicted * Freshness(c.Title))
+            .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
             .ToList();
         var hero = new List<Candidate>();
         foreach (var candidate in heroPool)
@@ -271,6 +343,19 @@ public class BuildFeedJobHandler(
         if (hero.Count < HeroSize)
         {
             hero.AddRange(heroPool.Except(hero).Take(HeroSize - hero.Count));
+        }
+
+        // Never open blank: if the 7.5 confidence floor left the hero short — a sparse-history user
+        // whose best predictions all sit below it — backfill from the top remaining scored candidates
+        // (poster + min-predicted only, floor dropped). The free-tier home is the hero alone, so an
+        // empty hero is an empty product. These are honest model rankings, just lower-confidence.
+        if (hero.Count < HeroSize)
+        {
+            var chosen = hero.Select(h => h.Title.Id).ToHashSet();
+            hero.AddRange(candidates
+                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= minPredicted)
+                .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
+                .Take(HeroSize - hero.Count));
         }
 
         // Supersede previous snapshots, write the new one.
@@ -316,17 +401,55 @@ public class BuildFeedJobHandler(
         }
 
         var used = hero.Select(h => h.Title.Id).ToHashSet();
+
+        // The discover pool skews popular, so the deep-cuts bar is the lower-popularity 70th
+        // percentile + a modest predicted floor. Computed here (not just before the deep-cuts row)
+        // so the quota-reservation pass below can see the same threshold.
+        var popThreshold = candidates.Count > 0
+            ? candidates.Select(c => c.Title.TmdbPopularity ?? 0m).OrderBy(p => p).ElementAt(candidates.Count * 7 / 10)
+            : 0m;
+
+        // Diversity / anti-starvation: the Because-you-loved rows greedily consume the best-matching
+        // candidates against the SHARED `used` set. On a thin model that drains the pool before Deep
+        // cuts / New for you can reach their RowMinMembers floor, so those rows silently vanish. We
+        // reserve each later row's top-few candidates BEFORE the anchor fill so they survive. The
+        // shared `used` set still guarantees no title repeats across the feed — reserved titles are
+        // only WITHHELD from the greedy loved fill here, never pre-added, and remain free to place.
+        bool IsDeepCut(Candidate c) => c.Predicted >= Math.Max(6m, minPredicted)
+            && (c.Title.TmdbPopularity ?? 0m) < popThreshold;
+        bool IsNewForYou(Candidate c) => c.Predicted >= minPredicted
+            && (c.Title.ReleasedAt ?? c.Title.FirstAiredAt) is { } r && (now - r).TotalDays <= 900;
+
+        var reserved = new HashSet<Guid>();
+        foreach (var id in candidates
+                     .Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c))
+                     .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
+                     .Take(RowMinMembers)
+                     .Select(c => c.Title.Id))
+        {
+            reserved.Add(id);
+        }
+
+        foreach (var id in candidates
+                     .Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c))
+                     .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
+                     .Take(RowMinMembers)
+                     .Select(c => c.Title.Id))
+        {
+            reserved.Add(id);
+        }
+
         foreach (var anchor in anchors)
         {
             var members = candidates
-                .Where(c => !used.Contains(c.Title.Id) && c.Predicted >= minPredicted)
+                .Where(c => !used.Contains(c.Title.Id) && !reserved.Contains(c.Title.Id) && c.Predicted >= minPredicted)
                 .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
                 .Where(x => x.Sim > 0.15d)
-                .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim))
+                .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
                 .Take(RowSize)
                 .ToList();
 
-            if (members.Count < 4)
+            if (members.Count < RowMinMembers)
             {
                 continue; // a thin row reads worse than no row
             }
@@ -339,18 +462,14 @@ public class BuildFeedJobHandler(
         }
 
         // ── v1.1 rows: Deep cuts (high predicted × low popularity) + New & for you ──────────
-        // The discover pool skews popular (sorted by popularity), so the deep-cuts bar is the
-        // lower-popularity 70th percentile + a modest predicted floor — populated when it can be.
-        var popThreshold = candidates.Count > 0
-            ? candidates.Select(c => c.Title.TmdbPopularity ?? 0m).OrderBy(p => p).ElementAt(candidates.Count * 7 / 10)
-            : 0m;
+        // Reserved quotas above guarantee these rows can still reach their floor even after the
+        // loved fill; the greedy top-slice selection is otherwise unchanged.
         var deepCuts = candidates
-            .Where(c => !used.Contains(c.Title.Id) && c.Predicted >= Math.Max(6m, minPredicted)
-                && (c.Title.TmdbPopularity ?? 0m) < popThreshold)
-            .OrderByDescending(c => c.Predicted)
+            .Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c))
+            .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
             .Take(RowSize)
             .ToList();
-        if (deepCuts.Count >= 4)
+        if (deepCuts.Count >= RowMinMembers)
         {
             for (var i = 0; i < deepCuts.Count; i++)
             {
@@ -360,12 +479,11 @@ public class BuildFeedJobHandler(
         }
 
         var newForYou = candidates
-            .Where(c => !used.Contains(c.Title.Id) && c.Predicted >= minPredicted
-                && (c.Title.ReleasedAt ?? c.Title.FirstAiredAt) is { } r && (now - r).TotalDays <= 900)
-            .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title))
+            .Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c))
+            .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
             .Take(RowSize)
             .ToList();
-        if (newForYou.Count >= 4)
+        if (newForYou.Count >= RowMinMembers)
         {
             for (var i = 0; i < newForYou.Count; i++)
             {
@@ -388,6 +506,28 @@ public class BuildFeedJobHandler(
         }
 
         return snapshot;
+    }
+
+    /// <summary>The account's embedded preference-tag vectors — the source of the ranking boost.</summary>
+    private async Task<List<float[]>> LoadPreferenceTagVectorsAsync(Guid accountId, CancellationToken ct)
+    {
+        var rows = await db.UserPreferenceTags
+            .Where(t => t.AccountId == accountId && t.Embedding != null)
+            .Select(t => t.Embedding!)
+            .ToListAsync(ct);
+        return rows.Select(v => v.ToArray()).ToList();
+    }
+
+    /// <summary>Max cosine of a title's plot embedding to any preference tag (0 when there are none).</summary>
+    private static double TagAffinity(float[] titleVec, IReadOnlyList<float[]> tagVecs)
+    {
+        var best = 0d;
+        foreach (var tag in tagVecs)
+        {
+            best = Math.Max(best, Cosine(titleVec, tag));
+        }
+
+        return best;
     }
 
     private static double Cosine(float[] a, float[] b)

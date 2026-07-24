@@ -183,6 +183,9 @@ public class OpenRouterSearchInterpreter(
         "genres (array of slugs from EXACTLY this set: action, adventure, animation, comedy, crime, documentary, " +
         "drama, family, fantasy, history, horror, music, mystery, romance, science-fiction, thriller, war, western), " +
         "keywords (array of up to 5 lowercase concept phrases, e.g. \"shark\", \"serial killer\", \"heist\"), " +
+        "people (array of {name, role} where role is \"director\", \"cast\", or \"any\" — for any named filmmaker or " +
+        "actor, e.g. \"movies Christopher Nolan directs\" → people:[{\"name\":\"Christopher Nolan\",\"role\":\"director\"}]; " +
+        "never put a person's name in keywords or freeText), " +
         "mediaTypes (array; any of \"movie\", \"tv\"; empty means both), minYear (integer or null), and freeText " +
         "(a concise literal-title search string, usually echoing the request). Map intent to that genre set only; " +
         "put anything specific (subjects, settings, vibes) into keywords. Output strictly valid JSON.";

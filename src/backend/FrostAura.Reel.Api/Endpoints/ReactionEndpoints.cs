@@ -1,5 +1,7 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -27,7 +29,8 @@ public static class ReactionEndpoints
         // ── Seen it + rate: one gesture ─────────────────────────────────────────────────
         group.MapPost("/rating", async (
             string mediaType, long tmdbId, RateRequest request,
-            IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
+            OnlineResidualModel residual, CancellationToken ct) =>
         {
             if (request.Rating is < 1 or > 10)
             {
@@ -100,13 +103,21 @@ public static class ReactionEndpoints
                 }
             }
 
+            // Teach the online residual head the fresh label FIRST (target = the rating), so the
+            // rebuild enqueued next already scores with the updated correction.
+            await residual.ObserveAsync(accountId, title.Id, request.Rating, 1.0, ct);
+
+            // A fresh rating is the strongest taste signal there is — regenerate the feed now (reuses
+            // the Active model) so the picks reflect it within seconds, not at the nightly build.
+            await feedRefresh.RequestRebuildAsync(accountId, "in-app rating", ct);
+
             await db.SaveChangesAsync(ct);
             return Results.Ok(new { userRating = rating.Rating, isFullyWatched = request.MarkWatched });
         });
 
         group.MapDelete("/rating", async (
             string mediaType, long tmdbId,
-            IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -123,6 +134,8 @@ public static class ReactionEndpoints
             {
                 db.UserRatings.Remove(rating);
                 Enqueue(db, accountId, OutboxKind.RemoveRating, title, null, null);
+                // Retracting a rating both changes taste and makes the title eligible again — rebuild.
+                await feedRefresh.RequestRebuildAsync(accountId, "rating retracted", ct);
                 await db.SaveChangesAsync(ct);
             }
 
@@ -132,7 +145,8 @@ public static class ReactionEndpoints
         // ── Not interested / save for later ─────────────────────────────────────────────
         group.MapPost("/reactions/not_interested", async (
             string mediaType, long tmdbId, ReactionRequest request,
-            IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
+            OnlineResidualModel residual, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -155,6 +169,10 @@ public static class ReactionEndpoints
                     Reason = ParseReason(request.Reason),
                     CreatedAt = DateTime.UtcNow,
                 });
+                // A rejection is a soft-negative label — nudge the residual down (target 2, softer weight).
+                await residual.ObserveAsync(accountId, title.Id, 2.0, 0.8, ct);
+                // Rebuild so the rejected title is replaced by the next-best pick, not just left as a gap.
+                await feedRefresh.RequestRebuildAsync(accountId, "not interested", ct);
                 await db.SaveChangesAsync(ct);
             }
 
@@ -195,7 +213,8 @@ public static class ReactionEndpoints
 
         group.MapPost("/reactions/save_for_later", async (
             string mediaType, long tmdbId,
-            IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
+            OnlineResidualModel residual, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -234,6 +253,11 @@ public static class ReactionEndpoints
 
                 Enqueue(db, accountId, OutboxKind.AddToWatchlist, title, null, null);
                 Enqueue(db, accountId, OutboxKind.ListAdd, title, null, null);
+                // A save is a mild positive intent — nudge the residual up (target 7.5, light weight).
+                await residual.ObserveAsync(accountId, title.Id, 7.5, 0.4, ct);
+                // Saved-for-later is an exclusion on the suggestion surfaces (it lives on Saved), so
+                // rebuild to backfill the slot it vacates with the next-best pick.
+                await feedRefresh.RequestRebuildAsync(accountId, "saved for later", ct);
                 await db.SaveChangesAsync(ct);
             }
 
@@ -242,7 +266,7 @@ public static class ReactionEndpoints
 
         group.MapDelete("/reactions/{kind}", async (
             string mediaType, long tmdbId, string kind,
-            IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -283,6 +307,13 @@ public static class ReactionEndpoints
 
                     Enqueue(db, accountId, OutboxKind.RemoveFromWatchlist, title, null, null);
                     Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
+                }
+
+                // Revoking not-interested / save makes the title a suggestion candidate again —
+                // rebuild so it can re-earn a slot live. (Dropped is continue-watching only.)
+                if (reactionKind is ReactionKind.NotInterested or ReactionKind.SaveForLater)
+                {
+                    await feedRefresh.RequestRebuildAsync(accountId, "reaction revoked", ct);
                 }
 
                 await db.SaveChangesAsync(ct);

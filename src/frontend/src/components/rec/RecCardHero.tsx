@@ -5,11 +5,20 @@ import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
 import PredictedRatingBadge from "./PredictedRatingBadge";
 import { formatRuntime } from "../../lib/format";
 
+interface HeroProps {
+  cards: FeedCard[];
+  /** Infinite scroll — tonight's picks never run out; fired as the carousel nears its end. */
+  loadMore?: () => void;
+  loading?: boolean;
+}
+
+const NEAR_END_PX = 1200;
+
 /**
- * Tonight's-picks hero: 3–5 big confident picks in a snap carousel. Backdrop art with the
- * frost scrim carrying an oversized why-this — the answer to "what should I watch tonight".
+ * Tonight's-picks hero: big confident picks in a snap carousel that scrolls forever — backdrop art
+ * with the frost scrim carrying an oversized why-this, the answer to "what should I watch tonight".
  */
-export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
+export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
   const [active, setActive] = useState(0);
   const location = useLocation();
 
@@ -23,6 +32,9 @@ export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
         onScroll={(e) => {
           const el = e.currentTarget;
           setActive(Math.round((el.scrollLeft / Math.max(1, el.scrollWidth - el.clientWidth)) * (cards.length - 1)));
+          if (loadMore && el.scrollLeft + el.clientWidth >= el.scrollWidth - NEAR_END_PX) {
+            loadMore();
+          }
         }}
       >
         {cards.map((card, index) => {
@@ -60,8 +72,14 @@ export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
             </Link>
           );
         })}
+        {loading && (
+          <div
+            className="relative w-[min(92%,860px)] shrink-0 snap-center overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 aspect-[16/8.5] reel-shimmer"
+            aria-hidden
+          />
+        )}
       </div>
-      {cards.length > 1 && (
+      {cards.length > 1 && cards.length <= 8 && (
         <div className="flex justify-center gap-1.5" aria-hidden>
           {cards.map((card, index) => (
             <span

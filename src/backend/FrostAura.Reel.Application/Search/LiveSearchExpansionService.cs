@@ -11,6 +11,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Pgvector;
+using Pgvector.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Application.Search;
 
@@ -41,7 +42,9 @@ public sealed class LiveSearchExpansionService(
 {
     private const int MaxCandidates = 40;
     private const int ReturnCount = 24;
+    private const int PersonReturnCount = 40; // a filmography can run long — show more than a vibe match
     private const int HydrateScoreSlice = 12;
+    private const int SemanticNeighbourCount = 40; // semantic kNN pull size — mirrors the TMDB arm's ceiling
     private const int RerankBatch = 6;
     private const int SearchPages = 1;
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
@@ -92,14 +95,36 @@ public sealed class LiveSearchExpansionService(
             var agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct);
             await emit("assistant-message", new { text = agentReply.Reply });
 
-            // ── Discover candidate titles (cached per intent; TMDB fetch single-flighted) ────
-            var candidateIds = await DiscoverCandidateIdsAsync(agentReply.Intent, region, ct);
-            await emit("phase", new { stage = "discovered", found = candidateIds.Count, scored = 0 });
+            // A named-person query ("all movies Nolan directs") is a lookup: it relaxes the
+            // unseen-only rule (ContentFilteredTitles keeps watched titles, badged) so the
+            // filmography is complete, and it skips the semantic arm (a filmography is not a vibe
+            // match). Every other query stays unseen-only (EligibleTitles).
+            var isPersonQuery = agentReply.Intent.People is { Count: > 0 };
 
-            // ── Filter to ELIGIBLE (unseen) + maturity + not-already-shown-this-conversation ─
+            // ── Discover candidate titles — TWO arms unioned ─────────────────────────────────
+            //   • TMDB discovery (cached per intent; the firehose single-flighted) — genre / keyword
+            //     / title-search / person-credit pulls that widen the catalogue from the outside.
+            //   • Semantic kNN (this call — cheap, always fresh, kept OUTSIDE the TMDB cache so the
+            //     cache key stays a pure function of intent) — pgvector cosine over the user's own
+            //     embedded UNSEEN catalogue against a concept embedding of the turn. THE recall fix:
+            //     a vibe like "fantastically futuristic, tense" that TMDB genre/keyword search whiffs
+            //     on — and whose few hits a heavy watcher has already seen — still surfaces the
+            //     nearest-by-meaning unseen titles we already hold. Both flow through the SAME
+            //     eligible → embed → cosine-prerank → score → rerank pipeline below.
+            var candidateIds = await DiscoverCandidateIdsAsync(agentReply.Intent, region, ct);
+            var semanticIds = isPersonQuery
+                ? new List<Guid>()
+                : await SemanticNeighbourIdsAsync(accountId, agentReply, ct);
+            var discovered = candidateIds.Concat(semanticIds).Distinct().ToList();
+            await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
+
+            // ── Filter to candidates + maturity + not-already-shown-this-conversation ─────────
             var shownSet = shownTmdbIds.ToHashSet();
-            var eligible = (await eligibility.EligibleTitles(accountId)
-                    .Where(t => candidateIds.Contains(t.Id))
+            var baseQuery = isPersonQuery
+                ? eligibility.ContentFilteredTitles(accountId)
+                : eligibility.EligibleTitles(accountId);
+            var eligible = (await baseQuery
+                    .Where(t => discovered.Contains(t.Id))
                     .ToListAsync(ct))
                 .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
                 .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
@@ -107,6 +132,14 @@ public sealed class LiveSearchExpansionService(
             if (eligible.Count == 0)
             {
                 await emit("done", new { results = Array.Empty<object>(), reason = "no fresh matches — try another angle" });
+                return;
+            }
+
+            // Person queries are a filmography, not a vibe match: order chronologically, badge what
+            // you've seen, score for the predicted-rating badge — but never re-order or cull by fit.
+            if (isPersonQuery)
+            {
+                await StreamFilmographyAsync(accountId, agentReply.Intent, eligible, taste, now, emit, ct);
                 return;
             }
 
@@ -128,9 +161,12 @@ public sealed class LiveSearchExpansionService(
                 await emit("candidate", Card(title, sim, predicted: null));
             }
 
-            // ── Hydrate + personally score the top slice ─────────────────────────────────────
+            // ── Hydrate + personally score EVERY returned card ───────────────────────────────
+            // Score all ReturnCount cards, not just the head slice — otherwise every card past the
+            // first slice renders a default ~6.0 predicted-rating badge instead of a real per-user
+            // score. OnDemandScorer batches, so one call covers the whole set.
             await emit("phase", new { stage = "scoring", found = ranked.Count, scored = 0 });
-            var sliceIds = ranked.Take(HydrateScoreSlice).Select(x => x.Title.Id).ToList();
+            var sliceIds = ranked.Select(x => x.Title.Id).ToList();
             await HydrateAsync(sliceIds, ct);
             var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
             foreach (var id in sliceIds)
@@ -159,11 +195,11 @@ public sealed class LiveSearchExpansionService(
             await emit("done", new
             {
                 results = final,
-                reason = $"Pulled {candidateIds.Count} from the wider catalogue; {eligible.Count} unseen, ranked for you.",
+                reason = $"Pulled {discovered.Count} from the wider catalogue; {eligible.Count} unseen, ranked for you.",
             });
             logger.LogInformation(
-                "Ask Reel '{Query}': {Discovered} discovered, {Eligible} eligible, {Scored} scored, {Reranked} reranked.",
-                trimmed, candidateIds.Count, eligible.Count, sliceIds.Count, fitById.Count);
+                "Ask Reel '{Query}': {Discovered} discovered ({Tmdb} TMDB + {Semantic} semantic), {Eligible} eligible, {Scored} scored, {Reranked} reranked.",
+                trimmed, discovered.Count, candidateIds.Count, semanticIds.Count, eligible.Count, sliceIds.Count, fitById.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -245,8 +281,154 @@ public sealed class LiveSearchExpansionService(
         return ids;
     }
 
+    /// <summary>
+    /// The semantic discovery arm — pgvector cosine kNN over the account's own embedded UNSEEN
+    /// catalogue against a concept embedding of the turn. The recall fix for vibe queries: TMDB
+    /// genre/keyword/title search whiffs on "fantastically futuristic, tense", and a heavy watcher
+    /// has already seen most of the little it does return, so discovery starves. Embedding the
+    /// agent's concept text and pulling the nearest-by-meaning UNSEEN titles surfaces matches we
+    /// already hold that no keyword names. Restricts to eligible ids BEFORE ordering by cosine
+    /// (mirrors <see cref="CandidateRetriever"/>'s AnnPullAsync) — the catalogue is dominated by the
+    /// user's seen library, so a global-nearest-then-filter query returns almost nothing. Returns
+    /// empty on any failure ⇒ the TMDB arm carries the turn alone (no regression).
+    /// </summary>
+    private async Task<List<Guid>> SemanticNeighbourIdsAsync(Guid accountId, AgentReply agentReply, CancellationToken ct)
+    {
+        var concept = ConceptText(agentReply);
+        if (concept.Length == 0)
+        {
+            return [];
+        }
+
+        float[] queryVec;
+        try
+        {
+            var embedded = await embeddings.EmbedAsync([concept], ct);
+            if (embedded.Length == 0 || embedded[0].Length == 0)
+            {
+                return [];
+            }
+
+            queryVec = embedded[0];
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel semantic arm: concept embedding failed; falling back to TMDB-only discovery.");
+            return [];
+        }
+
+        var vector = new Vector(queryVec);
+        var eligibleIds = eligibility.EligibleTitles(accountId).Select(t => t.Id);
+        return await db.TitleEmbeddings
+            .Where(e => eligibleIds.Contains(e.TitleId))
+            .OrderBy(e => e.Embedding.CosineDistance(vector))
+            .Take(SemanticNeighbourCount)
+            .Join(db.Titles, e => e.TitleId, t => t.Id, (e, t) => t.Id)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// The richest concept text available for the semantic seed — the agent's reply plus the
+    /// interpreted free-text, keywords, and genres. This is the "fantastically futuristic, tense,
+    /// high-energy" phrasing the query embedding is built from; it embeds in the SAME vector space
+    /// as the title embeddings (one <see cref="IEmbeddingProvider"/> by construction).
+    /// </summary>
+    private static string ConceptText(AgentReply agentReply)
+    {
+        var intent = agentReply.Intent;
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(agentReply.Reply))
+        {
+            parts.Add(agentReply.Reply.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(intent.FreeText))
+        {
+            parts.Add(intent.FreeText.Trim());
+        }
+
+        if (intent.Keywords.Count > 0)
+        {
+            parts.Add(string.Join(", ", intent.Keywords));
+        }
+
+        if (intent.Genres.Count > 0)
+        {
+            parts.Add(string.Join(", ", intent.Genres));
+        }
+
+        return string.Join(". ", parts).Trim();
+    }
+
+    /// <summary>
+    /// Streams a person's filmography: chronological (newest first), already-watched entries kept
+    /// and badged, the top slice scored for the predicted-rating badge — but never re-ordered or
+    /// culled by LLM fit, because the user asked for the WHOLE list, not a recommendation.
+    /// </summary>
+    private async Task StreamFilmographyAsync(
+        Guid accountId, SearchIntent intent, List<Title> eligible,
+        FeatureVectorBuilder.TasteState taste, DateTime now, Emit emit, CancellationToken ct)
+    {
+        var ordered = eligible
+            .OrderByDescending(t => t.ReleasedAt ?? t.FirstAiredAt ?? DateTime.MinValue)
+            .Take(PersonReturnCount)
+            .ToList();
+
+        var seenIds = await SeenTitleIdsAsync(accountId, ordered.Select(t => t.Id).ToList(), ct);
+        foreach (var t in ordered)
+        {
+            await emit("candidate", Card(t, similarity: null, predicted: null, seen: seenIds.Contains(t.Id)));
+        }
+
+        // Score the top slice for the badge (no re-rank — the order is the filmography).
+        var sliceIds = ordered.Take(HydrateScoreSlice).Select(t => t.Id).ToList();
+        await HydrateAsync(sliceIds, ct);
+        var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+        foreach (var id in sliceIds)
+        {
+            await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
+        }
+
+        var results = ordered
+            .Select(t => Card(t, similarity: null,
+                predicted: scores.TryGetValue(t.Id, out var p) ? (decimal?)p : null,
+                seen: seenIds.Contains(t.Id)))
+            .ToList();
+
+        var who = intent.People is { Count: > 0 } ? intent.People[0] : null;
+        var verb = who?.Role == PersonRole.Director ? "directed by" : who?.Role == PersonRole.Cast ? "starring" : "from";
+        var reason = who is null
+            ? $"{ordered.Count} titles in this filmography."
+            : $"{ordered.Count} titles {verb} {who.Name}.";
+        await emit("done", new { results, reason });
+        logger.LogInformation("Ask Reel filmography: {Count} titles for {Person}.", ordered.Count, who?.Name ?? "?");
+    }
+
+    /// <summary>The subset of the given title ids the account has watched or rated (for "seen" badges).</summary>
+    private async Task<HashSet<Guid>> SeenTitleIdsAsync(Guid accountId, IReadOnlyList<Guid> titleIds, CancellationToken ct)
+    {
+        var watched = await db.WatchedTitles
+            .Where(w => w.AccountId == accountId && titleIds.Contains(w.TitleId))
+            .Select(w => w.TitleId).ToListAsync(ct);
+        var rated = await db.UserRatings
+            .Where(r => r.AccountId == accountId && titleIds.Contains(r.TitleId))
+            .Select(r => r.TitleId).ToListAsync(ct);
+        return watched.Concat(rated).ToHashSet();
+    }
+
     private async Task<IReadOnlyList<TmdbListItem>> FetchFromTmdbAsync(SearchIntent intent, string? region, CancellationToken ct)
     {
+        // A named-person query resolves to that person's TMDB credits — a name has no business in
+        // keyword/title search. Falls through to the normal path only if no person resolves.
+        if (intent.People is { Count: > 0 } people)
+        {
+            var credits = await FetchPeopleCreditsAsync(people, intent, ct);
+            if (credits.Count > 0)
+            {
+                return credits;
+            }
+        }
+
         var movieGenreIds = intent.Genres.Where(TmdbGenres.SlugToIds.ContainsKey)
             .Select(g => TmdbGenres.SlugToIds[g].Movie).OfType<int>().ToList();
         var tvGenreIds = intent.Genres.Where(TmdbGenres.SlugToIds.ContainsKey)
@@ -285,6 +467,41 @@ public sealed class LiveSearchExpansionService(
             .GroupBy(i => (i.IsMovie, i.Id))
             .Select(g => g.First())
             .OrderByDescending(i => i.Popularity)
+            .Take(MaxCandidates)
+            .ToList();
+    }
+
+    /// <summary>Resolve each named person → their TMDB credits (role-sliced), unioned + deduped, newest first.</summary>
+    private async Task<IReadOnlyList<TmdbListItem>> FetchPeopleCreditsAsync(IReadOnlyList<PersonQuery> people, SearchIntent intent, CancellationToken ct)
+    {
+        var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
+        var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
+        DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
+
+        var all = new List<TmdbListItem>();
+        foreach (var person in people.Take(2))
+        {
+            var resolved = await tmdb.SearchPersonAsync(person.Name, ct);
+            if (resolved is null)
+            {
+                continue;
+            }
+
+            var role = person.Role switch
+            {
+                PersonRole.Director => PersonCreditRole.Director,
+                PersonRole.Cast => PersonCreditRole.Cast,
+                _ => PersonCreditRole.Any,
+            };
+            all.AddRange(await tmdb.GetPersonCreditsAsync(resolved.Id, role, ct));
+        }
+
+        return all
+            .Where(i => i.IsMovie ? wantMovies : wantTv)
+            .Where(i => after is null || i.ReleasedAt is null || i.ReleasedAt >= after)
+            .GroupBy(i => (i.IsMovie, i.Id))
+            .Select(g => g.First())
+            .OrderByDescending(i => i.ReleasedAt ?? DateTime.MinValue)
             .Take(MaxCandidates)
             .ToList();
     }
@@ -450,7 +667,7 @@ public sealed class LiveSearchExpansionService(
         await emit("done", new { results = cards, reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords" });
     }
 
-    private static object Card(Title t, double? similarity, decimal? predicted, double? fit = null, string? why = null) => new
+    private static object Card(Title t, double? similarity, decimal? predicted, double? fit = null, string? why = null, bool seen = false) => new
     {
         titleId = t.Id,
         mediaType = t.MediaType.ToString(),
@@ -463,6 +680,7 @@ public sealed class LiveSearchExpansionService(
         predictedRating = predicted,
         fit,
         why,
+        seen,
     };
 
     private static double Cosine(float[] a, float[] b)
@@ -488,7 +706,8 @@ public sealed class LiveSearchExpansionService(
 
     private static string IntentKey(SearchIntent intent) =>
         $"{string.Join(',', intent.Genres.OrderBy(g => g))}|{string.Join(',', intent.Keywords.OrderBy(k => k))}|" +
-        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m))}|{intent.MinYear}|{NormalizeQuery(intent.FreeText)}";
+        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m))}|{intent.MinYear}|{NormalizeQuery(intent.FreeText)}|" +
+        $"{string.Join(',', (intent.People ?? []).Select(p => $"{p.Name}:{p.Role}").OrderBy(p => p))}";
 
     private static string CacheKey(string intentKey) => $"askreel:ids:{intentKey}";
 

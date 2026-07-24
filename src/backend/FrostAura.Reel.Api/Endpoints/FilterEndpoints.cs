@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Filters;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +13,7 @@ namespace FrostAura.Reel.Api.Endpoints;
 /// </summary>
 public static class FilterEndpoints
 {
-    public record FiltersPayload(string[] ExcludeGenres, string[] IncludeGenres, string[] ExcludeKeywords, string? MaturityCeiling, decimal? MinPredictedRating);
+    public record FiltersPayload(string[] ExcludeGenres, string[] IncludeGenres, string[] ExcludeKeywords, string? MaturityCeiling, decimal? MinPredictedRating, string[] Languages);
 
     public record PinRequest(string Pin, string? CurrentPin);
 
@@ -27,16 +28,21 @@ public static class FilterEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             var filters = await db.ContentFilters.Where(f => f.AccountId == accountContext.AccountId!.Value).ToListAsync(ct);
             var minRaw = filters.FirstOrDefault(f => f.Kind == FilterKind.MinPredictedRating)?.Value;
+            var languages = filters.Where(f => f.Kind == FilterKind.Language).Select(f => f.Value).ToArray();
             return Results.Ok(new FiltersPayload(
                 filters.Where(f => f.Kind == FilterKind.ExcludeGenre).Select(f => f.Value).ToArray(),
                 filters.Where(f => f.Kind == FilterKind.IncludeGenre).Select(f => f.Value).ToArray(),
                 filters.Where(f => f.Kind == FilterKind.ExcludeKeyword).Select(f => f.Value).ToArray(),
                 account?.Settings.MaturityCeiling,
-                minRaw is not null && decimal.TryParse(minRaw, System.Globalization.CultureInfo.InvariantCulture, out var minValue) ? minValue : null));
+                minRaw is not null && decimal.TryParse(minRaw, System.Globalization.CultureInfo.InvariantCulture, out var minValue) ? minValue : null,
+                // No rows ⇒ the account is on the English-only default; surface that to the UI so the
+                // English chip reads as selected rather than blank.
+                languages.Length > 0 ? languages : ["en"]));
         });
 
         group.MapPut("/filters", async (
-            FiltersPayload payload, IReelDbContext db, IAccountContext accountContext, HttpContext http, CancellationToken ct) =>
+            FiltersPayload payload, IReelDbContext db, IAccountContext accountContext,
+            FeedRefreshCoordinator feedRefresh, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -69,6 +75,9 @@ public static class FilterEndpoints
 
             AddAll(payload.ExcludeGenres, FilterKind.ExcludeGenre);
             AddAll(payload.IncludeGenres, FilterKind.IncludeGenre);
+            // Languages: persist the chosen allow-list. An empty selection is stored as no rows,
+            // which the eligibility builder reads as the English-only default; "*" means all.
+            AddAll(payload.Languages, FilterKind.Language);
             // Umbrella terms ("lgbtq") expand to their TMDB keyword family; each member
             // round-trips to the UI as its own removable chip.
             AddAll(Application.Search.KeywordFilterExpansion.Expand(payload.ExcludeKeywords), FilterKind.ExcludeKeyword);
@@ -84,6 +93,12 @@ public static class FilterEndpoints
                 });
             }
             account.Settings.MaturityCeiling = string.IsNullOrWhiteSpace(payload.MaturityCeiling) ? null : payload.MaturityCeiling;
+
+            // Content rules just changed — the Active feed was built against the OLD filters, so a
+            // newly-excluded genre / tightened maturity ceiling would linger until the next build.
+            // Enqueue a reactive rebuild (reuses the Active model) so the feed re-filters immediately;
+            // it commits in the same SaveChanges as the filter change.
+            await feedRefresh.RequestRebuildAsync(accountId, "content filters changed", ct);
 
             await db.SaveChangesAsync(ct);
             return Results.Ok(payload);

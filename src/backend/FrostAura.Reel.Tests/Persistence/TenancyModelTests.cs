@@ -61,6 +61,6 @@ public class TenancyModelTests
     {
         using var db = CreateContext();
         var tableCount = db.Model.GetEntityTypes().Count(t => !t.IsOwned());
-        Assert.Equal(34, tableCount); // +UserPersonRating, +UserPreferenceTag, +SearchConversation, +SearchTurn (2026-06-17)
+        Assert.Equal(35, tableCount); // +UserPersonRating, +UserPreferenceTag, +SearchConversation, +SearchTurn (2026-06-17); +OnlineModelState (2026-07-05)
     }
 }

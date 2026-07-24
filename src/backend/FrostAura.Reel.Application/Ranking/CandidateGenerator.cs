@@ -125,6 +125,9 @@ public class CandidateGenerator(
             title.PosterPath ??= item.PosterPath;
             title.BackdropPath ??= item.BackdropPath;
             title.Overview ??= item.Overview;
+            // Carry the discovery language so an English candidate isn't dropped by the English-only
+            // eligibility default before full hydration runs. ??= so a hydrated value is never clobbered.
+            title.Language ??= string.IsNullOrWhiteSpace(item.OriginalLanguage) ? null : item.OriginalLanguage.ToLowerInvariant();
             title.TmdbPopularity = item.Popularity;
             title.TmdbVoteAverage = item.VoteAverage;
             title.TmdbVoteCount = item.VoteCount;

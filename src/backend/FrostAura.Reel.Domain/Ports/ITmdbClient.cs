@@ -33,6 +33,16 @@ public interface ITmdbClient
     /// <summary>Free-text title search (/search/movie or /search/tv). Interactive priority.</summary>
     Task<IReadOnlyList<TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default);
 
+    /// <summary>Resolve a person's name to their TMDB record (/search/person) — top match, or null. Interactive priority.</summary>
+    Task<TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default);
+
+    /// <summary>
+    /// A person's filmography (/person/{id}/combined_credits), sliced by <paramref name="role"/>:
+    /// Director → crew where job == "Director"; Cast → cast; Any → both. Drives "all movies by X".
+    /// Interactive priority.
+    /// </summary>
+    Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default);
+
     /// <summary>
     /// Discover by MULTIPLE genre + keyword ids (OR-joined for recall) — the Ask Reel concept
     /// firehose, distinct from the single-genre feed <see cref="DiscoverAsync"/>. Interactive priority.

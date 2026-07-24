@@ -6,6 +6,17 @@ public record TmdbWatchProvider(int ProviderId, string Name, string? LogoPath, i
 /// <summary>A TMDB keyword (concept tag) — resolved from free text to drive concept discovery.</summary>
 public record TmdbKeyword(int Id, string Name);
 
+/// <summary>A TMDB person (search/person) — resolves a name to an id for credit lookups.</summary>
+public record TmdbPerson(long Id, string Name, string? KnownForDepartment);
+
+/// <summary>Which slice of a person's filmography to pull from combined_credits.</summary>
+public enum PersonCreditRole
+{
+    Director,
+    Cast,
+    Any,
+}
+
 /// <summary>One entry of a TMDB list payload (discover/trending) — enough to seed a candidate.</summary>
 public record TmdbListItem(
     long Id,
@@ -18,7 +29,11 @@ public record TmdbListItem(
     decimal VoteAverage,
     int VoteCount,
     DateTime? ReleasedAt,
-    int[] GenreIds);
+    int[] GenreIds,
+    /// <summary>TMDB original_language (ISO-639-1, e.g. "en") — carried through discovery/search so
+    /// freshly-upserted candidates get a real language and aren't dropped by the English-only
+    /// eligibility default before they're hydrated. Null when the list row didn't carry it.</summary>
+    string? OriginalLanguage = null);
 
 /// <summary>
 /// TMDB genre-id ↔ Trakt-style slug mapping (movie and TV id spaces differ). Slugs align with

@@ -32,7 +32,11 @@ public class OpenRouterSearchAgent(
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
-    public bool IsAvailable => true;
+    // Honest availability: a real key, or an explicit test stub. A keyless production install used to
+    // report available and present the deterministic stub's order as "LLM curation" — now the
+    // curation pass is correctly skipped and callers fall back to pure model order. Mirrors
+    // OpenRouterAttributeExtractor so every OpenRouter-backed capability gates identically.
+    public bool IsAvailable => ApiKey is not null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
@@ -221,7 +225,10 @@ public class OpenRouterSearchAgent(
         "then resolve the request into a discovery spec. Return ONLY a JSON object: reply (string), genres (array of " +
         "slugs from EXACTLY: action, adventure, animation, comedy, crime, documentary, drama, family, fantasy, history, " +
         "horror, music, mystery, romance, science-fiction, thriller, war, western), keywords (array of up to 5 concept " +
-        "phrases), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (int or null), freeText (literal-title " +
+        "phrases), people (array of {name, role} where role is \"director\", \"cast\", or \"any\" — extract any named " +
+        "filmmaker or actor; e.g. \"movies Christopher Nolan directs\" → people:[{\"name\":\"Christopher Nolan\",\"role\":\"director\"}], " +
+        "\"films with Tom Hardy\" → people:[{\"name\":\"Tom Hardy\",\"role\":\"cast\"}]; do NOT put a person's name in keywords " +
+        "or freeText), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (int or null), freeText (literal-title " +
         "search string). Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
     private const string RerankSystemPrompt =

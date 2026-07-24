@@ -9,6 +9,11 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
+    <!-- Override the vulnerable Microsoft.OpenApi 2.0.0 that AspNetCore.OpenApi 10.0.9 pulls
+         transitively (GHSA-v5pm-xwqc-g5wc, high severity — affects <= 2.7.4) with the first patched
+         2.x release so the audited Silver build restores clean and stays on the 2.x line
+         AspNetCore.OpenApi expects. Remove once AspNetCore.OpenApi ships a patched transitive. -->
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

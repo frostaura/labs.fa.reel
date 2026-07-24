@@ -104,7 +104,7 @@ public class ShowProgressReconcileTests(PostgresFixture fixture)
         public void Publish(Guid accountId, string type, IReadOnlyDictionary<string, object?> data) { }
 
         public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(
-            Guid accountId, [EnumeratorCancellation] CancellationToken ct)
+            Guid accountId, long? lastEventId, [EnumeratorCancellation] CancellationToken ct)
         {
             await Task.CompletedTask;
             yield break;

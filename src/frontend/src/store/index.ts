@@ -3,12 +3,14 @@ import { setupListeners } from "@reduxjs/toolkit/query";
 import { api } from "./api";
 import onboarding from "./onboardingSlice";
 import syncUi from "./syncSlice";
+import removedTitles from "./removedTitlesSlice";
 
 export const store = configureStore({
   reducer: {
     [api.reducerPath]: api.reducer,
     onboarding,
     syncUi,
+    removedTitles,
   },
   middleware: (gDM) => gDM().concat(api.middleware),
 });

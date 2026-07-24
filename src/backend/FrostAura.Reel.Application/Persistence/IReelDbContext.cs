@@ -48,6 +48,7 @@ public interface IReelDbContext
     DbSet<ModelArtifact> ModelArtifacts { get; }
     DbSet<EvaluationResult> EvaluationResults { get; }
     DbSet<TitleScore> TitleScores { get; }
+    DbSet<OnlineModelState> OnlineModelStates { get; }
 
     DbSet<FeedSnapshot> FeedSnapshots { get; }
     DbSet<FeedItem> FeedItems { get; }

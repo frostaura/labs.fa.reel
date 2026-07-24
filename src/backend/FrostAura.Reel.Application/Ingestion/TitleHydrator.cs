@@ -50,6 +50,12 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb)
         title.TmdbPopularity = details.Popularity;
         title.TmdbVoteAverage = details.VoteAverage;
         title.TmdbVoteCount = details.VoteCount;
+        // TMDB original_language — the only language signal for discovery titles (Trakt sets it for
+        // library titles via IngestMapper). Powers the language allow-list / English-only default.
+        if (!string.IsNullOrWhiteSpace(details.OriginalLanguage))
+        {
+            title.Language = details.OriginalLanguage.ToLowerInvariant();
+        }
         title.RuntimeMinutes ??= details.Runtime;
         title.Overview ??= details.Overview;
         title.Tagline ??= details.Tagline;

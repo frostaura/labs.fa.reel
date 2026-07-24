@@ -30,6 +30,34 @@ export interface FeedPayload {
   lockedRowCount: number;
 }
 
+/** A genre rail the home page renders beneath the personalised rows; filled via /feed/more. */
+export interface GenreRail {
+  slug: string;
+  label: string;
+}
+
+/** Request body for the infinite-scroll lane (POST /feed/more). */
+export interface MoreFeedRequest {
+  row: string;
+  anchorTitleId?: string | null;
+  genre?: string | null;
+  excludeTitleIds: string[];
+  limit?: number;
+  /** Active browse-filter medium ("movie" | "show"); omit for "all". Makes paging media-aware
+   * server-side so a Movies lane fills with movies (deepening from TMDB) instead of dead-ending. */
+  mediaType?: string;
+}
+
+/**
+ * Response for the infinite-scroll lane. `exhausted` is the server's explicit "this lane is
+ * genuinely dry" signal (it already tried to deepen from TMDB) — distinct from a caught network
+ * error, which the client must NOT treat as exhaustion.
+ */
+export interface MoreFeedResponse {
+  items: FeedCard[];
+  exhausted: boolean;
+}
+
 export interface ContinueEntry {
   titleId: string;
   mediaType: "Movie" | "Show";

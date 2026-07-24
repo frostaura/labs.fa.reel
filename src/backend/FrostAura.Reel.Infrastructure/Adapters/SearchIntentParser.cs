@@ -29,10 +29,11 @@ internal static class SearchIntentParser
             ? yr : null;
         var freeText = root.TryGetProperty("freeText", out var f) && f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } s
             ? s : fallbackText;
+        var people = ParsePeople(root);
 
         // A model that returned nothing usable still gets the heuristic's keywords so discovery
-        // never fires empty.
-        if (genres.Length == 0 && keywords.Length == 0)
+        // never fires empty — but a named person IS the discovery signal, so it shortcuts that.
+        if (genres.Length == 0 && keywords.Length == 0 && people.Count == 0)
         {
             return heuristicFallback with
             {
@@ -41,6 +42,39 @@ internal static class SearchIntentParser
             };
         }
 
-        return new SearchIntent(genres, keywords, media, freeText, minYear);
+        return new SearchIntent(genres, keywords, media, freeText, minYear, people);
+    }
+
+    /// <summary>Parses a "people":[{"name","role"}] array — role ∈ director|cast|any (default any).</summary>
+    private static IReadOnlyList<PersonQuery> ParsePeople(JsonElement root)
+    {
+        if (!root.TryGetProperty("people", out var arr) || arr.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<PersonQuery>();
+        foreach (var el in arr.EnumerateArray().Take(3))
+        {
+            var name = el.ValueKind == JsonValueKind.String
+                ? el.GetString()
+                : el.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var roleStr = el.ValueKind == JsonValueKind.Object && el.TryGetProperty("role", out var r) && r.ValueKind == JsonValueKind.String
+                ? r.GetString()?.Trim().ToLowerInvariant() : null;
+            var role = roleStr switch
+            {
+                "director" or "directed" or "directing" => PersonRole.Director,
+                "cast" or "actor" or "actress" or "star" or "starring" => PersonRole.Cast,
+                _ => PersonRole.Any,
+            };
+            result.Add(new PersonQuery(name.Trim(), role));
+        }
+
+        return result;
     }
 }

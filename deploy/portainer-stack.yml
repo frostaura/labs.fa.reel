@@ -1,0 +1,107 @@
+# Portainer stack for fa.reel — the FrostAura standard deploy chain.
+# CI pushes multi-arch images to Docker Hub; this stack pulls them.
+# Create the stack in Portainer with this file, set the env vars below in the
+# Portainer stack editor, then set repo variable DEPLOY_ENABLED=true and the
+# PORTAINER_* secrets in GitHub so deploy-portainer re-pulls on every main push.
+#
+# Required stack env vars: DOCKERHUB_USERNAME, POSTGRES_PASSWORD, JWT_SECRET,
+# TRAKT_CLIENT_ID, TRAKT_CLIENT_SECRET, TMDB_READ_ACCESS_TOKEN, OPENROUTER_API_KEY,
+# EMBEDDINGS_API_KEY, APP_PUBLIC_URL (https://reel.frostaura.net), TRAKT_REDIRECT_URI.
+# Expose ${GATEWAY_PORT:-8090} via the host Cloudflared tunnel to reel.frostaura.net.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16   # documented deviation: vector + trigram extensions required
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-reel}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reel} -d ${POSTGRES_DB:-reel}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: ${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME is required}/reel-backend:latest
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-reel};Username=${POSTGRES_USER:-reel};Password=${POSTGRES_PASSWORD}
+      Database__AutoMigrateOnStartup: "true"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_ISSUER: ${JWT_ISSUER:-frostaura-reel}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-frostaura-reel-app}
+      TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID:-}
+      TRAKT_CLIENT_SECRET: ${TRAKT_CLIENT_SECRET:-}
+      TRAKT_REDIRECT_URI: ${TRAKT_REDIRECT_URI:-}
+      TMDB_READ_ACCESS_TOKEN: ${TMDB_READ_ACCESS_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-5.4-mini}
+      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-openai}
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
+      EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-1536}
+      EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://openrouter.ai/api/v1}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:?APP_PUBLIC_URL is required}
+      CORS_ALLOWED_ORIGINS: ${APP_PUBLIC_URL}
+      GEOIP_DEFAULT_REGION: ${GEOIP_DEFAULT_REGION:-US}
+    healthcheck:
+      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health >/dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: ${DOCKERHUB_USERNAME}/reel-frontend:latest
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  gateway:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8090}:80"
+    configs:
+      - source: reel_nginx
+        target: /etc/nginx/nginx.conf
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
+configs:
+  reel_nginx:
+    content: |
+      events {}
+      http {
+        client_max_body_size 10m;
+        server {
+          listen 80;
+          location /api/ {
+            proxy_pass http://backend:5000/;
+            proxy_set_header Host $$host;
+            proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $$scheme;
+            proxy_buffering off;           # SSE
+            proxy_read_timeout 3600s;
+          }
+          location / {
+            proxy_pass http://frontend:80/;
+            proxy_set_header Host $$host;
+          }
+        }
+      }
+
+volumes:
+  postgres_data:

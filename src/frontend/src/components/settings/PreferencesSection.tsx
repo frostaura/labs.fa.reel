@@ -18,6 +18,22 @@ const GENRES = [
 
 const MATURITY = ["", "G", "PG", "PG-13", "R"];
 
+const ALL_LANGUAGES = "*";
+
+/** Common original languages offered in the picker; the catalogue skews heavily English. */
+const LANGUAGES: { code: string; label: string }[] = [
+  { code: "en", label: "English" },
+  { code: "es", label: "Spanish" },
+  { code: "fr", label: "French" },
+  { code: "de", label: "German" },
+  { code: "it", label: "Italian" },
+  { code: "ja", label: "Japanese" },
+  { code: "ko", label: "Korean" },
+  { code: "zh", label: "Chinese" },
+  { code: "hi", label: "Hindi" },
+  { code: "pt", label: "Portuguese" },
+];
+
 const UNLOCK_KEY = "reel.pinUnlock";
 const UNLOCK_TTL_MS = 5 * 60 * 1000;
 
@@ -90,6 +106,28 @@ export default function PreferencesSection() {
     });
   };
 
+  const languages = draft?.languages ?? ["en"];
+  const allLanguages = languages.includes(ALL_LANGUAGES);
+
+  const toggleLanguage = (code: string) => {
+    if (!draft) return;
+    // Picking a specific language while "all" is on narrows to just that language.
+    if (allLanguages) {
+      setDraft({ ...draft, languages: [code] });
+      return;
+    }
+    const has = languages.includes(code);
+    const next = has ? languages.filter((l) => l !== code) : [...languages, code];
+    // English is the floor — clearing every language reverts to the English-only default rather
+    // than an empty (which would read as "no titles").
+    setDraft({ ...draft, languages: next.length > 0 ? next : ["en"] });
+  };
+
+  const toggleAllLanguages = () => {
+    if (!draft) return;
+    setDraft({ ...draft, languages: allLanguages ? ["en"] : [ALL_LANGUAGES] });
+  };
+
   if (locked) {
     return (
       <section className="fa-card p-5 space-y-3" data-testid="prefs-locked">
@@ -125,6 +163,44 @@ export default function PreferencesSection() {
         <p className="fa-caption text-fa-frost-dim mt-1">
           None active by default. An exclusion is airtight — it applies to the hero, every row and all search.
         </p>
+      </div>
+
+      {/* Languages — allow-list. English-only is the default. */}
+      <div className="space-y-2">
+        <p className="fa-overline text-fa-frost-dim">languages</p>
+        <p className="fa-caption text-fa-frost-dim">
+          Only recommend titles in these languages. English only by default.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            onClick={toggleAllLanguages}
+            className={`rounded-full border px-2.5 py-1 fa-caption transition ${
+              allLanguages
+                ? "border-fa-frost/60 bg-fa-frost/15 text-fa-frost-bright"
+                : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
+            }`}
+            data-testid="lang-all"
+          >
+            All languages
+          </button>
+          {LANGUAGES.map(({ code, label }) => {
+            const on = !allLanguages && languages.includes(code);
+            return (
+              <button
+                key={code}
+                onClick={() => toggleLanguage(code)}
+                className={`rounded-full border px-2.5 py-1 fa-caption transition ${
+                  on
+                    ? "border-fa-frost/60 bg-fa-frost/15 text-fa-frost-bright"
+                    : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
+                } ${allLanguages ? "opacity-50" : ""}`}
+                data-testid={`lang-${code}`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Genre exclusions */}

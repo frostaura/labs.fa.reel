@@ -17,6 +17,8 @@ export interface AskCard {
   /** Phase B: hyper-personal LLM fit + reason; absent until reranked. */
   fit?: number | null;
   why?: string | null;
+  /** Person/filmography queries surface already-watched titles, badged. */
+  seen?: boolean;
 }
 
 export interface PhaseData {

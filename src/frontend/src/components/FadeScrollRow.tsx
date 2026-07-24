@@ -12,7 +12,19 @@ const FADE = "3.5rem";
  * clips card hover/focus rings. Drop-in for the shared `flex … overflow-x-auto` row markup: pass
  * the same className through.
  */
-export default function FadeScrollRow({ className, children }: { className?: string; children: ReactNode }) {
+const NEAR_END_PX = 800;
+
+export default function FadeScrollRow({
+  className,
+  children,
+  onNearEnd,
+}: {
+  className?: string;
+  children: ReactNode;
+  /** Fired (idempotently — the caller must guard) when the scroll nears its right edge, or when
+   *  content doesn't yet overflow. Powers infinite-scroll page fetches and initial auto-fill. */
+  onNearEnd?: () => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false });
 
@@ -23,7 +35,14 @@ export default function FadeScrollRow({ className, children }: { className?: str
     const left = el.scrollLeft > 4;
     const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
     setEdges((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
-  }, []);
+
+    // Within NEAR_END_PX of the right edge — or not overflowing yet — pull the next page. The
+    // caller's in-flight guard makes repeated fires safe; ResizeObserver re-measures after the
+    // appended cards land, so a short row keeps filling until it overflows or the lane runs dry.
+    if (onNearEnd && el.scrollLeft + el.clientWidth >= el.scrollWidth - NEAR_END_PX) {
+      onNearEnd();
+    }
+  }, [onNearEnd]);
 
   useEffect(() => {
     measure();

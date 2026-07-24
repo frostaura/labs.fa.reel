@@ -17,6 +17,8 @@ import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import WhereToWatch from "../components/title/WhereToWatch";
 import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
+import InfiniteRecRow from "../components/rows/InfiniteRecRow";
+import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
 import type { CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
@@ -196,7 +198,7 @@ export default function TitleDetail() {
                         <button
                           key={value}
                           onClick={() => {
-                            rate({ ...args, rating: value });
+                            rate({ ...args, titleId: title.titleId, rating: value });
                             setRatePickerOpen(false);
                           }}
                           className={`h-9 w-8 rounded-md border text-sm tabular-nums transition ${
@@ -215,7 +217,9 @@ export default function TitleDetail() {
 
                 <button
                   onClick={() =>
-                    title.userState.savedForLater ? unsave(args) : save(args)
+                    title.userState.savedForLater
+                      ? unsave({ ...args, titleId: title.titleId })
+                      : save({ ...args, titleId: title.titleId })
                   }
                   className={title.userState.savedForLater ? "fa-button-primary" : "fa-button"}
                   data-testid="save-button"
@@ -225,7 +229,7 @@ export default function TitleDetail() {
                 </button>
 
                 {title.userState.notInterested ? (
-                  <button onClick={() => undoNotInterested(args)} className="fa-button border-fa-danger/40 text-fa-danger">
+                  <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button border-fa-danger/40 text-fa-danger">
                     <Undo2 className="h-4 w-4" /> Not interested — undo
                   </button>
                 ) : (
@@ -236,10 +240,10 @@ export default function TitleDetail() {
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => notInterested(args)}>Just not for me</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, reason: "genre" })}>Not my genre</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, reason: "tone" })}>Wrong tone</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId })}>Just not for me</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 )}
@@ -301,6 +305,21 @@ export default function TitleDetail() {
               {/* Where to watch */}
               {title.tmdbId != null && (
                 <WhereToWatch mediaType={mediaType} tmdbId={title.tmdbId} />
+              )}
+
+              {/* More like this — semantic kNN to THIS title, re-ranked by your model; infinite.
+                  Empty seed → it self-loads its first page on mount (like the genre rails). Keyed on
+                  the title id so navigating between titles remounts a clean, correctly-anchored rail. */}
+              {title.titleId && (
+                <section className="space-y-2">
+                  <InfiniteRecRow
+                    key={`similar:${title.titleId}`}
+                    title={<span className="text-fa-frost-bright">More like this</span>}
+                    context={{ row: "similar", anchorTitleId: title.titleId, genre: null }}
+                    seed={[]}
+                    filter={DEFAULT_BROWSE_FILTER}
+                  />
+                </section>
               )}
             </div>
           </>

@@ -2,14 +2,17 @@ using System.Collections.Concurrent;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Sync;
 
 /// <summary>
-/// Resolves a usable Trakt access token for a connection, refreshing proactively when fewer
-/// than 30 days remain. Trakt refresh tokens are SINGLE-USE — refresh is serialized per
-/// account so two concurrent jobs can't burn the same refresh token and strand the link.
+/// Resolves a usable Trakt access token for a connection, refreshing proactively only when it is
+/// genuinely near expiry (see <see cref="RefreshAhead"/>) and reactively on a 401. Trakt refresh
+/// tokens are SINGLE-USE and the refresh endpoint is capped at 2/hour, so every path re-reads the
+/// stored token from the DB inside a per-account gate before refreshing — an OAuth re-link or a
+/// sibling job may have already rotated it, and adopting that beats burning a scarce refresh.
 /// </summary>
 public class TraktTokenStore(
     IReelDbContext db,
@@ -18,7 +21,13 @@ public class TraktTokenStore(
     ILogger<TraktTokenStore> logger)
 {
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> RefreshLocks = new();
-    private static readonly TimeSpan RefreshAhead = TimeSpan.FromDays(30);
+
+    // Proactive-refresh lead time. Trakt access tokens here live ~7 days, so a 30-day lead meant
+    // EVERY sync refreshed an otherwise-valid token — hammering oauth/token until Trakt 429'd the
+    // whole account and every sync stalled. A short lead means we ride a healthy token until it is
+    // genuinely near expiry; the reactive 401 self-heal (ForceRefreshAsync) covers a token that
+    // dies early, so this is purely about not burning refreshes (and rate budget) for nothing.
+    private static readonly TimeSpan RefreshAhead = TimeSpan.FromDays(2);
 
     public async Task<string> GetValidAccessTokenAsync(TraktConnection connection, CancellationToken ct = default)
     {
@@ -36,13 +45,42 @@ public class TraktTokenStore(
         await gate.WaitAsync(ct);
         try
         {
-            // Another waiter may have refreshed while we queued.
-            if (connection.ExpiresAt - DateTime.UtcNow > RefreshAhead)
+            // Re-read straight from the DB inside the gate: a sibling job or an out-of-band OAuth
+            // re-link may have rotated the token while we queued, in which case there is nothing to
+            // refresh. Using the caller's tracked entity here would miss that and burn a refresh.
+            var (stored, storedEncrypted, storedExpiry) = await ReadStoredAsync(connection.Id, ct);
+            connection.AccessTokenEncrypted = storedEncrypted;
+            connection.ExpiresAt = storedExpiry;
+            if (storedExpiry - DateTime.UtcNow > RefreshAhead)
             {
-                return secretProtector.Unprotect(connection.AccessTokenEncrypted);
+                return stored;
             }
 
-            return await RefreshAndPersistAsync(connection, ct);
+            try
+            {
+                return await RefreshAndPersistAsync(connection, ct);
+            }
+            catch (Exception ex) when (storedExpiry > DateTime.UtcNow)
+            {
+                // A *proactive* refresh is an optimization, not a hard requirement: if Trakt rejects
+                // it (e.g. a transient 429) while the current token is still valid, fall back to that
+                // token rather than failing the whole sync. The reactive 401 path handles a token
+                // that has actually died. Without this, one throttled refresh sinks every sync.
+                logger.LogWarning(ex,
+                    "Proactive Trakt refresh failed for {AccountId}; using the still-valid token (expires {ExpiresAt:o}).",
+                    connection.AccountId, storedExpiry);
+
+                // RefreshAndPersistAsync flips Status to RefreshFailed on a transport error before it
+                // rethrows; the token is still valid, so keep the connection Active to avoid a
+                // spurious "re-link required" prompt.
+                if (connection.Status == ConnectionStatus.RefreshFailed)
+                {
+                    connection.Status = ConnectionStatus.Active;
+                    await db.SaveChangesAsync(CancellationToken.None);
+                }
+
+                return stored;
+            }
         }
         finally
         {
@@ -68,10 +106,17 @@ public class TraktTokenStore(
         await gate.WaitAsync(ct);
         try
         {
-            var current = secretProtector.Unprotect(connection.AccessTokenEncrypted);
+            // Read the token straight from the DB — NOT the caller's tracked entity, which may be a
+            // stale snapshot from before an out-of-band rotation (an OAuth re-link, or a sibling job
+            // that already refreshed). If the stored token differs from the one that just 401'd,
+            // adopt it rather than spending a refresh against Trakt's 2/hour cap. This is precisely
+            // what stops a long-running job from looping on 429 after the account was re-linked
+            // underneath it — the reason a stuck sync could previously never recover on its own.
+            var (current, currentEncrypted, _) = await ReadStoredAsync(connection.Id, ct);
             if (!string.Equals(current, staleToken, StringComparison.Ordinal))
             {
-                return current; // a concurrent caller already refreshed — don't burn the new refresh token
+                connection.AccessTokenEncrypted = currentEncrypted;
+                return current;
             }
 
             return await RefreshAndPersistAsync(connection, ct);
@@ -80,6 +125,19 @@ public class TraktTokenStore(
         {
             gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Reads the current stored credentials straight from the database (a projection, so it bypasses
+    /// the caller's tracked entity) — the authority on whether an out-of-band rotation has happened.
+    /// </summary>
+    private async Task<(string Plain, string Encrypted, DateTime ExpiresAt)> ReadStoredAsync(Guid connectionId, CancellationToken ct)
+    {
+        var row = await db.TraktConnections
+            .Where(c => c.Id == connectionId)
+            .Select(c => new { c.AccessTokenEncrypted, c.ExpiresAt })
+            .FirstAsync(ct);
+        return (secretProtector.Unprotect(row.AccessTokenEncrypted), row.AccessTokenEncrypted, row.ExpiresAt);
     }
 
     /// <summary>Exchanges the stored refresh token for a fresh pair and persists it. Caller holds the gate.</summary>

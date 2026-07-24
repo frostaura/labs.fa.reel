@@ -17,6 +17,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Pgvector;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -64,8 +65,158 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         Assert.Contains(events, e => e.Event == "done");
     }
 
+    [Fact]
+    public async Task A_director_query_returns_the_filmography_including_watched_titles()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        // Inception is already watched — a director filmography is a lookup, so it must STILL appear,
+        // badged seen (unlike a vibe search, which excludes watched titles).
+        await SeedSeenTitleAsync(accountId, tmdbId: 27205, name: "Inception");
+
+        var tmdb = new FakeTmdbClient
+        {
+            PersonResult = new TmdbPerson(525, "Christopher Nolan", "Directing"),
+            PersonCredits =
+            [
+                new(27205, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878]),
+                new(577922, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878]),
+            ],
+        };
+        var agent = new FakePersonAgent(new PersonQuery("Christopher Nolan", PersonRole.Director));
+        var (service, events) = BuildService(accountId, tmdb, out var emit, agent);
+
+        await service.StreamAsync("show me all movies Christopher Nolan directs", region: "US", emit, CancellationToken.None);
+
+        Assert.True(tmdb.PersonCreditFetches > 0, "the director query must route through person credits, not keyword/title search");
+
+        var done = Assert.Single(events, e => e.Event == "done");
+        var results = done.Data.GetProperty("results").EnumerateArray().ToList();
+        var names = results.Select(r => r.GetProperty("name").GetString()).ToList();
+        Assert.Contains("Inception", names);
+        Assert.Contains("Tenet", names); // both his films
+
+        // The watched one is badged seen; the unseen one is not.
+        var inception = results.Single(r => r.GetProperty("name").GetString() == "Inception");
+        Assert.True(inception.GetProperty("seen").GetBoolean());
+        var tenet = results.Single(r => r.GetProperty("name").GetString() == "Tenet");
+        Assert.False(tenet.GetProperty("seen").GetBoolean());
+    }
+
+    [Fact]
+    public async Task A_vibe_query_returns_multiple_semantic_neighbours_from_the_embedded_catalog()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        // Four UNSEEN titles that already carry embeddings — the semantic arm's raw material.
+        await SeedEmbeddedUnseenTitleAsync(tmdbId: 157336, name: "Interstellar", seed: 1);
+        await SeedEmbeddedUnseenTitleAsync(tmdbId: 335984, name: "Blade Runner 2049", seed: 2);
+        await SeedEmbeddedUnseenTitleAsync(tmdbId: 693134, name: "Dune: Part Two", seed: 3);
+        await SeedEmbeddedUnseenTitleAsync(tmdbId: 438631, name: "Dune", seed: 4);
+
+        // TMDB whiffs on the vibe (EmptyDiscovery) — so any results MUST come from the semantic arm
+        // over the embedded catalogue, which is exactly the recall the founder wanted restored.
+        var tmdb = new FakeTmdbClient { EmptyDiscovery = true };
+        var (service, events) = BuildService(accountId, tmdb, out var emit, new FakeVibeAgent());
+
+        await service.StreamAsync("something fantastically futuristic and tense", region: "US", emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done");
+        var names = done.Data.GetProperty("results").EnumerateArray()
+            .Select(r => r.GetProperty("name").GetString()!)
+            .ToList();
+        Assert.True(names.Count > 1, $"the semantic arm should surface multiple embedded neighbours; got {names.Count}");
+        Assert.Contains(names, n => n is "Interstellar" or "Blade Runner 2049" or "Dune" or "Dune: Part Two");
+    }
+
+    /// <summary>A canned agent that resolves a turn straight to a vibe intent (genres + keywords, no person).</summary>
+    private sealed class FakeVibeAgent : ISearchAgent
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => "fake-vibe-agent";
+
+        public Task<AgentReply> InterpretAsync(
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            Task.FromResult(new AgentReply(
+                "Fantastically futuristic, tense, high-energy science fiction.",
+                new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null)));
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+    }
+
+    /// <summary>Seeds a global, English, UNSEEN title that already carries a normalized embedding.</summary>
+    private async Task SeedEmbeddedUnseenTitleAsync(long tmdbId, string name, int seed)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = tmdbId,
+            TraktSlug = string.Empty,
+            Name = name,
+            Genres = ["science-fiction"],
+            Language = "en",
+            Overview = "A futuristic, tense sci-fi journey.",
+            LastMetadataRefreshAt = DateTime.UtcNow, // already hydrated → no live TMDB fetch during the test
+            CreatedAt = DateTime.UtcNow,
+        };
+        db.Add(title);
+
+        var v = new float[1536];
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] = (float)Math.Sin(seed + i);
+        }
+
+        var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] /= norm;
+        }
+
+        db.TitleEmbeddings.Add(new TitleEmbedding
+        {
+            TitleId = title.Id,
+            Embedding = new Vector(v),
+            EmbeddingModel = EmbeddingText.Model,
+            SourceTextHash = EmbeddingText.Hash(name),
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A canned agent that resolves a turn straight to a named-person intent (no LLM).</summary>
+    private sealed class FakePersonAgent(PersonQuery person) : ISearchAgent
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => "fake-person-agent";
+
+        public Task<AgentReply> InterpretAsync(
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            Task.FromResult(new AgentReply(
+                $"Here are films {person.Role} {person.Name}.",
+                new SearchIntent([], [], [], message, null, [person])));
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+    }
+
     private (LiveSearchExpansionService Service, List<(string Event, JsonElement Data)> Events) BuildService(
-        Guid accountId, ITmdbClient tmdb, out LiveSearchExpansionService.Emit emit)
+        Guid accountId, ITmdbClient tmdb, out LiveSearchExpansionService.Emit emit, ISearchAgent? agent = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -78,11 +229,14 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         var recorder = new ApiUsageRecorder(scopeFactory, NullLogger<ApiUsageRecorder>.Instance);
         var interpreter = new OpenRouterSearchInterpreter(
             new HttpClient(), recorder, config, NullLogger<OpenRouterSearchInterpreter>.Instance);
-        var searchAgent = new OpenRouterSearchAgent(
+        var searchAgent = agent ?? new OpenRouterSearchAgent(
             new HttpClient(), interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
+        var engine = new FastTreeModelEngine();
+        var residualModel = new OnlineResidualModel(
+            db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance);
         var service = new LiveSearchExpansionService(
             db,
             scoped,
@@ -93,7 +247,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb),
             featureBuilder,
-            new OnDemandScorer(db, featureBuilder, new FastTreeModelEngine()),
+            new OnDemandScorer(db, featureBuilder, engine, residualModel),
             new LexicalSearchService(eligibility),
             new CatalogWorkCoordinator(),
             new MemoryCache(new MemoryCacheOptions()),
@@ -157,6 +311,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     {
         public int ConceptFetches;
 
+        /// <summary>When set, concept discovery returns nothing — proving the semantic arm carries recall alone.</summary>
+        public bool EmptyDiscovery;
+
         private static readonly TmdbListItem[] Movies =
         [
             new(579, true, "Jaws 2", "/jaws2.jpg", null, "A killer shark returns to Amity.", 50m, 6.5m, 900, new DateTime(1978, 6, 16, 0, 0, 0, DateTimeKind.Utc), [27, 53]),
@@ -172,11 +329,24 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
         {
             Interlocked.Increment(ref ConceptFetches);
-            return Task.FromResult<IReadOnlyList<TmdbListItem>>(movies ? Movies : []);
+            return Task.FromResult<IReadOnlyList<TmdbListItem>>(EmptyDiscovery || !movies ? [] : Movies);
         }
 
         public Task<IReadOnlyList<TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public int PersonCreditFetches;
+        public TmdbPerson? PersonResult;
+        public IReadOnlyList<TmdbListItem> PersonCredits = [];
+
+        public Task<TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default) =>
+            Task.FromResult(PersonResult);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref PersonCreditFetches);
+            return Task.FromResult(PersonCredits);
+        }
 
         public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<TmdbTitleDetails?>(new TmdbTitleDetails(

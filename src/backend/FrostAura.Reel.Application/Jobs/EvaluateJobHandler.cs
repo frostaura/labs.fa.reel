@@ -25,10 +25,33 @@ public class EvaluateJobHandler(
             ? hp.GetRawText()
             : TrainJobHandler.DefaultHyperparams;
 
+        // A validated model feeds the feed — but the Active artifact exists (Train persisted it)
+        // whether or not the leakage-clean split has enough clean holdout to score a lift. So the feed
+        // build chains unconditionally; only the metrics ledger depends on the eval outcome. This is
+        // what keeps a freshly-trained sub-50-rating account from opening to a permanently blank feed.
+        async Task EnsureFeedBuildAsync()
+        {
+            var hasFeedBuild = await db.SyncJobs.AnyAsync(
+                j => j.AccountId == accountId && j.Kind == JobKind.BuildFeed
+                    && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
+            if (!hasFeedBuild)
+            {
+                db.SyncJobs.Add(new SyncJob
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    Kind = JobKind.BuildFeed,
+                    Priority = 1,
+                    EnqueuedAt = DateTime.UtcNow,
+                });
+            }
+        }
+
         var outcome = await harness.RunAsync(accountId, hyperparams, ct);
         if (outcome is null)
         {
-            job.ProgressMessage = "evaluation skipped — not enough clean data";
+            job.ProgressMessage = "evaluation skipped — not enough clean data; feed built from the trained model";
+            await EnsureFeedBuildAsync();
             await db.SaveChangesAsync(ct);
             return;
         }
@@ -48,20 +71,7 @@ public class EvaluateJobHandler(
             $"iteration {outcome.Run.Iteration}: lift {outcome.Result.RelativeImprovement:P0} — gate {(outcome.Result.PassedGate ? "passed" : "not met")}";
 
         // Chain: a validated model feeds the feed.
-        var hasFeedBuild = await db.SyncJobs.AnyAsync(
-            j => j.AccountId == accountId && j.Kind == JobKind.BuildFeed
-                && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
-        if (!hasFeedBuild)
-        {
-            db.SyncJobs.Add(new SyncJob
-            {
-                Id = Guid.NewGuid(),
-                AccountId = accountId,
-                Kind = JobKind.BuildFeed,
-                Priority = 1,
-                EnqueuedAt = DateTime.UtcNow,
-            });
-        }
+        await EnsureFeedBuildAsync();
 
         await db.SaveChangesAsync(ct);
 

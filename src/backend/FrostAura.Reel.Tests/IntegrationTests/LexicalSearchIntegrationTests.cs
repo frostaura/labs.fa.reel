@@ -129,7 +129,28 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
         Assert.DoesNotContain(results, r => r.Title.Name == "Already On My List");
     }
 
-    private async Task<Guid> SeedAccountAsync()
+    [Fact]
+    public async Task Restricted_maturity_profile_never_sees_over_ceiling_titles()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // A kids-guarded profile (ceiling PG-13) searching a comedy concept must never surface an
+        // R-rated match — maturity is a safety gate, not a preference, so it bites even when the
+        // over-ceiling title is the strongest concept match.
+        var accountId = await SeedAccountAsync(maturityCeiling: "PG-13");
+        await SeedTitleAsync("Family Comedy", ["comedy"], ["feel-good"], certification: "PG");
+        await SeedTitleAsync("Raunchy Comedy", ["comedy"], ["parody"], certification: "R");
+
+        var results = await SearchAsync(accountId, "funny");
+
+        Assert.Contains(results, r => r.Title.Name == "Family Comedy");
+        Assert.DoesNotContain(results, r => r.Title.Name == "Raunchy Comedy");
+    }
+
+    private async Task<Guid> SeedAccountAsync(string? maturityCeiling = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var account = new Account
@@ -140,12 +161,13 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
             LastSeenAt = DateTime.UtcNow,
             PipelineStageChangedAt = DateTime.UtcNow,
         };
+        account.Settings.MaturityCeiling = maturityCeiling;
         db.Add(account);
         await db.SaveChangesAsync();
         return account.Id;
     }
 
-    private async Task<Guid> SeedTitleAsync(string name, string[] genres, string[] keywords)
+    private async Task<Guid> SeedTitleAsync(string name, string[] genres, string[] keywords, string? certification = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var id = Guid.NewGuid();
@@ -158,6 +180,10 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
             Name = name,
             Genres = genres,
             Keywords = keywords,
+            Certification = certification,
+            // English by default: the eligibility builder excludes null-language titles under the
+            // English-only default, which would otherwise mask what each assertion checks.
+            Language = "en",
             TmdbPopularity = 50,
             CreatedAt = DateTime.UtcNow,
         });

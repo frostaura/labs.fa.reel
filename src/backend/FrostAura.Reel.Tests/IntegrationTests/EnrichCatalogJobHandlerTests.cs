@@ -248,7 +248,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         public void Publish(Guid accountId, string type, IReadOnlyDictionary<string, object?> data) { }
 
         public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(
-            Guid accountId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+            Guid accountId, long? lastEventId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
             await Task.CompletedTask;
             yield break;

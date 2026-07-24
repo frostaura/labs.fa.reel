@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
@@ -17,10 +18,12 @@ public static class SearchEndpoints
     {
         var group = app.MapGroup("/api/search").RequireAccount();
 
-        // Typeahead with the personal lens: watched titles appear (badged), content filters
-        // are airtight, predicted ratings decorate everything the model has scored.
+        // Typeahead with the personal lens: watched titles appear (badged), content filters and the
+        // maturity ceiling are airtight, and the shortlist is scored LIVE against the Active model so
+        // the best-for-you matches float up rather than the merely-popular ones.
         group.MapGet("/typeahead", async (
-            string q, IReelDbContext db, IAccountContext accountContext, EligibilityQueryBuilder eligibility, CancellationToken ct) =>
+            string q, IReelDbContext db, IAccountContext accountContext,
+            EligibilityQueryBuilder eligibility, OnDemandScorer scorer, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
@@ -29,15 +32,34 @@ public static class SearchEndpoints
             }
 
             var term = q.Trim();
+            var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
 
-            // ContentFilteredTitles (not EligibleTitles): watched titles legitimately appear
-            // here badged — but every exclusion still applies, airtight.
-            var titles = await eligibility.ContentFilteredTitles(accountId)
+            // ContentFilteredTitles (not EligibleTitles): watched titles legitimately appear here
+            // badged — but every exclusion still applies, airtight. Over-fetch by popularity, then
+            // apply the in-memory maturity gate (certifications don't order in SQL) and keep 8, so a
+            // restricted profile still lands a full shortlist instead of a starved one.
+            var matched = await eligibility.ContentFilteredTitles(accountId)
                 .Where(t => EF.Functions.ILike(t.Name, $"%{term}%"))
                 .Where(t => !db.UserTitleReactions.Any(r =>
                     r.AccountId == accountId && r.TitleId == t.Id && r.Kind == ReactionKind.NotInterested && r.RevokedAt == null))
                 .OrderByDescending(t => t.TmdbPopularity)
-                .Take(8)
+                .Take(24)
+                .ToListAsync(ct);
+
+            var candidates = EligibilityQueryBuilder.WithinMaturity(matched, maturityCeiling).Take(8).ToList();
+            var candidateIds = candidates.Select(t => t.Id).ToList();
+
+            // Live per-user scoring of the ≤8 survivors against the Active artifact (cheap: one model
+            // load + one taste build). No model yet ⇒ empty map ⇒ order falls back to popularity.
+            var predicted = await scorer.ScoreAsync(accountId, candidateIds, DateTime.UtcNow, ct);
+            var watchedFull = (await db.WatchedTitles
+                .Where(w => w.AccountId == accountId && candidateIds.Contains(w.TitleId) && w.IsFullyWatched)
+                .Select(w => w.TitleId)
+                .ToListAsync(ct)).ToHashSet();
+
+            var titles = candidates
+                .OrderByDescending(t => predicted.TryGetValue(t.Id, out var p) ? p : decimal.MinValue)
+                .ThenByDescending(t => t.TmdbPopularity ?? 0)
                 .Select(t => new
                 {
                     titleId = t.Id,
@@ -46,14 +68,10 @@ public static class SearchEndpoints
                     name = t.Name,
                     year = t.Year,
                     posterPath = t.PosterPath,
-                    isFullyWatched = db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id && w.IsFullyWatched),
-                    predictedRating = db.TitleScores
-                        .Where(s => s.AccountId == accountId && s.TitleId == t.Id)
-                        .OrderByDescending(s => s.ScoredAt)
-                        .Select(s => (decimal?)s.PredictedRating)
-                        .FirstOrDefault(),
+                    isFullyWatched = watchedFull.Contains(t.Id),
+                    predictedRating = predicted.TryGetValue(t.Id, out var p) ? (decimal?)p : null,
                 })
-                .ToListAsync(ct);
+                .ToList();
 
             var people = await db.Persons
                 .Where(p => EF.Functions.ILike(p.Name, $"%{term}%"))
@@ -73,6 +91,7 @@ public static class SearchEndpoints
             EligibilityQueryBuilder eligibility,
             LexicalSearchService lexical,
             IEmbeddingProvider embeddings,
+            OnDemandScorer scorer,
             CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(request.Query))
@@ -82,6 +101,8 @@ public static class SearchEndpoints
 
             var accountId = accountContext.AccountId!.Value;
             var minPredicted = await MinPredictedFloorAsync(db, accountId, ct);
+            var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
+            var now = DateTime.UtcNow;
 
             if (embeddings.IsAvailable && await db.TitleEmbeddings.AnyAsync(ct))
             {
@@ -93,29 +114,42 @@ public static class SearchEndpoints
                 // returns almost nothing — the unseen titles rarely crack the global top-N.
                 var eligibleIds = eligibility.EligibleTitles(accountId).Select(t => t.Id);
 
+                // Over-fetch to 32: the in-memory maturity gate trims below this before we keep 24, so
+                // a restricted profile isn't starved. Pull the Title entity so the gate + live scorer
+                // have everything they need without a second round-trip.
                 var hits = await db.TitleEmbeddings
                     .Where(e => eligibleIds.Contains(e.TitleId))
                     .OrderBy(e => e.Embedding.CosineDistance(queryVector))
-                    .Take(24)
+                    .Take(32)
                     .Join(db.Titles, e => e.TitleId, t => t.Id, (e, t) => new
                     {
-                        titleId = t.Id,
-                        mediaType = t.MediaType.ToString(),
-                        tmdbId = t.TmdbId,
-                        name = t.Name,
-                        year = t.Year,
-                        posterPath = t.PosterPath,
-                        genres = t.Genres,
+                        Title = t,
                         similarity = 1 - e.Embedding.CosineDistance(queryVector),
-                        predictedRating = db.TitleScores
-                            .Where(s => s.AccountId == accountId && s.TitleId == t.Id)
-                            .OrderByDescending(s => s.ScoredAt)
-                            .Select(s => (decimal?)s.PredictedRating)
-                            .FirstOrDefault(),
                     })
                     .ToListAsync(ct);
 
-                var ranked = hits
+                var safe = hits
+                    .Where(h => EligibilityQueryBuilder.PassesMaturity(h.Title, maturityCeiling))
+                    .Take(24)
+                    .ToList();
+
+                // Score the survivors LIVE against the Active artifact — no more stale TitleScores or
+                // null→6.0 guessing; an unscored title (no model yet) still shows, just unranked.
+                var predictedById = await scorer.ScoreAsync(accountId, safe.Select(h => h.Title.Id).ToList(), now, ct);
+
+                var ranked = safe
+                    .Select(h => new
+                    {
+                        titleId = h.Title.Id,
+                        mediaType = h.Title.MediaType.ToString(),
+                        tmdbId = h.Title.TmdbId,
+                        name = h.Title.Name,
+                        year = h.Title.Year,
+                        posterPath = h.Title.PosterPath,
+                        genres = h.Title.Genres,
+                        similarity = h.similarity,
+                        predictedRating = predictedById.TryGetValue(h.Title.Id, out var p) ? (decimal?)p : null,
+                    })
                     .Where(h => h.predictedRating == null || h.predictedRating >= minPredicted)
                     .OrderByDescending(h => (h.similarity * 0.6) + ((double)(h.predictedRating ?? 6m) / 10d * 0.4))
                     .ToList();
@@ -123,14 +157,11 @@ public static class SearchEndpoints
                 return Results.Ok(new { available = true, mode = "semantic", reason = (string?)null, results = (object)ranked });
             }
 
-            // Lexical engine — concept/genre/keyword matching with typo tolerance.
+            // Lexical engine — concept/genre/keyword matching with typo tolerance (maturity gate
+            // applied inside the service). Score the hits live, same as the embedding path.
             var lexicalHits = await lexical.SearchAsync(accountId, request.Query, 24, ct);
             var titleIds = lexicalHits.Select(h => h.Title.Id).ToList();
-            var scores = await db.TitleScores
-                .Where(s => s.AccountId == accountId && titleIds.Contains(s.TitleId))
-                .GroupBy(s => s.TitleId)
-                .Select(g => new { TitleId = g.Key, Predicted = g.OrderByDescending(s => s.ScoredAt).First().PredictedRating })
-                .ToDictionaryAsync(s => s.TitleId, s => s.Predicted, ct);
+            var scores = await scorer.ScoreAsync(accountId, titleIds, now, ct);
 
             var maxScore = lexicalHits.Count > 0 ? lexicalHits.Max(h => h.MatchScore) : 1d;
             var results = lexicalHits

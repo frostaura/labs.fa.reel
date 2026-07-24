@@ -26,11 +26,22 @@ public static class SseEndpoints
 
             await http.Response.Body.FlushAsync(ct);
 
+            // On auto-reconnect the browser echoes the last id it saw as Last-Event-ID; the hub replays
+            // the buffered events past it so a missed feed-ready still lands. Absent/garbage → full live.
+            var lastEventId = long.TryParse(http.Request.Headers["Last-Event-ID"].FirstOrDefault(), out var since)
+                ? since
+                : (long?)null;
+
             try
             {
-                await foreach (var sseEvent in hub.SubscribeAsync(accountId, ct))
+                await foreach (var sseEvent in hub.SubscribeAsync(accountId, lastEventId, ct))
                 {
-                    await http.Response.WriteAsync($"event: {sseEvent.Type}\ndata: {sseEvent.JsonData}\n\n", ct);
+                    // Emit the id: line only for real events (seq > 0). Heartbeats carry seq 0 and must
+                    // NOT write id: 0, which would reset the client's Last-Event-ID cursor to the start.
+                    var frame = sseEvent.Seq > 0
+                        ? $"id: {sseEvent.Seq}\nevent: {sseEvent.Type}\ndata: {sseEvent.JsonData}\n\n"
+                        : $"event: {sseEvent.Type}\ndata: {sseEvent.JsonData}\n\n";
+                    await http.Response.WriteAsync(frame, ct);
                     await http.Response.Body.FlushAsync(ct);
                 }
             }

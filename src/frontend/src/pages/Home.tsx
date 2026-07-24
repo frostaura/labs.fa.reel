@@ -1,26 +1,39 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useDispatch } from "react-redux";
 import { Lock } from "lucide-react";
-import { useGetContinueWatchingQuery, useGetFeedQuery, useGetSessionQuery } from "../store/api";
-import RecCardHero from "../components/rec/RecCardHero";
-import RecRow from "../components/rows/RecRow";
+import {
+  useGetContinueWatchingQuery,
+  useGetFeedGenresQuery,
+  useGetFeedQuery,
+  useGetSessionQuery,
+} from "../store/api";
+import { removalsCleared } from "../store/removedTitlesSlice";
+import InfiniteHero from "../components/rec/InfiniteHero";
+import InfiniteRecRow from "../components/rows/InfiniteRecRow";
+import GenreRow from "../components/rows/GenreRow";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
-import { DEFAULT_BROWSE_FILTER, matchesBrowseFilter, matchesMedia } from "../lib/browseFilter";
+import { DEFAULT_BROWSE_FILTER, matchesMedia } from "../lib/browseFilter";
 
-/** The hybrid home: tonight's-picks hero answering one question, rows below for grazing. */
+/** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
   const { data: session } = useGetSessionQuery();
   const { data: feed, isLoading } = useGetFeedQuery();
   const { data: continueWatching } = useGetContinueWatchingQuery();
   const [filter, setFilter] = useState(DEFAULT_BROWSE_FILTER);
+  const dispatch = useDispatch();
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;
+  const resetKey = feed?.generatedAt ?? "";
 
-  const hero = (feed?.hero ?? []).filter((c) => matchesBrowseFilter(c, filter));
-  const rows = (feed?.rows ?? [])
-    .map((row) => ({ ...row, items: row.items.filter((c) => matchesBrowseFilter(c, filter)) }))
-    .filter((row) => row.items.length > 0);
+  // A rebuild re-seeds every row from the server (which already excludes removed titles), so the
+  // session's removal set is now redundant — clear it to avoid masking re-eligible titles.
+  useEffect(() => {
+    if (resetKey) dispatch(removalsCleared());
+  }, [resetKey, dispatch]);
+
+  const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
   const continueFiltered = (continueWatching ?? []).filter((e) => matchesMedia(e.mediaType, filter));
 
   return (
@@ -58,17 +71,13 @@ export default function Home() {
         </div>
       ) : (
         <>
-          {hero.length === 0 ? (
-            <p className="fa-body text-fa-frost-dim text-center py-8">Nothing matches this filter — try widening it.</p>
-          ) : (
-            <RecCardHero cards={hero} />
-          )}
+          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} />
 
           <ContinueWatchingRow entries={continueFiltered} />
 
-          {rows.map((row) => (
-            <RecRow
-              key={`${row.kind}:${row.anchorTitleId ?? row.title}`}
+          {(feed?.rows ?? []).map((row) => (
+            <InfiniteRecRow
+              key={`${row.kind}:${row.anchorTitleId ?? row.title}:${filter.media}:${resetKey}`}
               title={
                 row.kind === "because-you-loved" ? (
                   <>
@@ -78,8 +87,14 @@ export default function Home() {
                   <span className="text-fa-frost-bright">{row.title}</span>
                 )
               }
-              items={row.items}
+              context={{ row: row.kind, anchorTitleId: row.anchorTitleId, genre: null }}
+              seed={row.items}
+              filter={filter}
             />
+          ))}
+
+          {(genres ?? []).map((g) => (
+            <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />
           ))}
 
           {(feed?.lockedRowCount ?? 0) > 0 && (

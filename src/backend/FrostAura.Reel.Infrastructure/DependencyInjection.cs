@@ -62,9 +62,23 @@ public static class DependencyInjection
         services.AddHttpClient<ITraktClient, TraktClient>(client =>
         {
             client.BaseAddress = new Uri("https://api.trakt.tv/");
-            client.Timeout = TimeSpan.FromSeconds(30);
+            // The library snapshots (/sync/watched/shows?extended=full for a 3k-title account) are a
+            // single multi-MB response that routinely streams for >30s. Let the resilience pipeline's
+            // TotalRequestTimeout govern instead — a finite HttpClient cap would pre-empt it and the
+            // request would die with Polly's "didn't complete within '00:00:30'" before the body lands.
+            client.Timeout = Timeout.InfiniteTimeSpan;
             client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
-        }).AddStandardResilienceHandler();
+        }).AddStandardResilienceHandler(o =>
+        {
+            // Defaults (10s per attempt / 30s total) are far too tight for the un-paginated watched +
+            // ratings snapshots. /sync/watched/shows?extended=full for a heavy account streams for
+            // minutes; a 90s attempt still timed out mid-download, failed the sync, and it retried in
+            // a spiral. Give one attempt real room to finish, inside a generous total that still
+            // allows a retry. CircuitBreaker sampling must stay ≥ 2× the attempt timeout (validator).
+            o.AttemptTimeout.Timeout = TimeSpan.FromMinutes(4);
+            o.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(10);
+            o.CircuitBreaker.SamplingDuration = TimeSpan.FromMinutes(8);
+        });
 
         services.AddHttpClient<ITmdbClient, TmdbClient>(client =>
         {
@@ -112,6 +126,7 @@ public static class DependencyInjection
         // ── ML engine ──────────────────────────────────────────────────────────────────────
         services.AddSingleton<IModelEngine, Ml.FastTreeModelEngine>();
         services.AddScoped<Application.Ml.FeatureVectorBuilder>();
+        services.AddScoped<Application.Ml.OnlineResidualModel>();
         services.AddScoped<Application.Ml.OnDemandScorer>();
         services.AddScoped<Application.Ml.EvalHarness>();
 
@@ -120,12 +135,16 @@ public static class DependencyInjection
         services.AddScoped<Application.Search.LexicalSearchService>();
         services.AddScoped<Application.Search.LiveSearchExpansionService>();
         services.AddScoped<Application.Ranking.CandidateGenerator>();
+        services.AddScoped<Application.Ranking.CandidateRetriever>();
+        services.AddScoped<Application.Ranking.FeedPaginator>();
+        services.AddScoped<Application.Ranking.FeedRefreshCoordinator>();
         services.AddScoped<Application.Ingestion.TitleHydrator>();
 
         // ── Pipeline: event hub, token store, ingestor, job handlers, schedulers ──────────
         services.AddSingleton<IPipelineEventHub, PipelineEventHub>();
         services.AddScoped<TraktTokenStore>();
         services.AddScoped<Application.Sync.OutboxDispatcher>();
+        services.AddScoped<Application.Sync.ManagedListReconciler>();
         services.AddScoped<Application.Ingestion.TraktLibraryIngestor>();
         services.AddScoped<IJobHandler, FullIngestJobHandler>();
         services.AddScoped<IJobHandler, DeltaSyncJobHandler>();
@@ -139,6 +158,7 @@ public static class DependencyInjection
         services.AddHostedService<TraktDeltaPollService>();
         services.AddHostedService<NightlyReconcileService>();
         services.AddHostedService<CatalogGrowthService>();
+        services.AddHostedService<TitleLanguageBackfillService>();
         services.AddHostedService<TokenRefreshService>();
         services.AddHostedService<TraktOutboxDispatcherService>();
 

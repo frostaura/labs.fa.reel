@@ -63,6 +63,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<ModelArtifact> ModelArtifacts => Set<ModelArtifact>();
     public DbSet<EvaluationResult> EvaluationResults => Set<EvaluationResult>();
     public DbSet<TitleScore> TitleScores => Set<TitleScore>();
+    public DbSet<OnlineModelState> OnlineModelStates => Set<OnlineModelState>();
 
     // Feed
     public DbSet<FeedSnapshot> FeedSnapshots => Set<FeedSnapshot>();
@@ -241,6 +242,10 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(s => new { s.AccountId, s.ModelArtifactId, s.PredictedRating }).IsDescending(false, false, true);
             e.Property(s => s.ContributionsJson).HasColumnType("jsonb");
         });
+
+        // One residual head per account (upserted on every event); unique so the online update
+        // has a single row to load-modify-write against.
+        modelBuilder.Entity<OnlineModelState>(e => e.HasIndex(s => s.AccountId).IsUnique());
 
         // ── Feed ───────────────────────────────────────────────────────────────────────────
         modelBuilder.Entity<FeedSnapshot>(e =>

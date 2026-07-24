@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
+using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Application.Search;
 
@@ -46,11 +47,12 @@ public class EligibilityQueryBuilder(IReelDbContext db)
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeKeyword
                 && (t.Name.ToLower().Contains(f.Value.ToLower())
                     || (t.Overview != null && t.Overview.ToLower().Contains(f.Value.ToLower()))
-                    // Both directions: TMDB keyword contains the filter ("lgbt themes" ⊇ "lgbt"),
-                    // or the filter is the longer form of the keyword ("lgbtq" ⊇ "lgbt"). The
-                    // length guard stops short keywords from swallowing unrelated filters.
-                    || t.Keywords.Any(k => k.Contains(f.Value.ToLower())
-                        || (k.Length >= 4 && f.Value.ToLower().StartsWith(k))))));
+                    // A TMDB keyword phrase containing the filter word is a real match
+                    // ("lgbt themes" ⊇ "lgbt"). The old reverse arm — filter.StartsWith(keyword) with a
+                    // length≥4 guard — over-excluded: filter "warehouse" swallowed the unrelated "ware"
+                    // keyword. Dropped; when filter and keyword are equal this forward Contains already
+                    // matches, so the only thing lost was the fragile longer-form prefix.
+                    || t.Keywords.Any(k => k.Contains(f.Value.ToLower())))));
 
         // Include-genres are an allowlist when present: at least one must match.
         query = query.Where(t =>
@@ -58,8 +60,41 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             || t.Genres.Any(g => db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre && f.Value == g)));
 
+        // Language allow-list. No rows configured ⇒ English-only by default (founder ask
+        // 2026-06-30: "English only"). A sentinel "*" row opts every language back in. A title with
+        // an unknown (null) language reads as not-English and is excluded unless "*" is set — the
+        // founder asked for English, not "English plus anything we failed to tag".
+        query = query.Where(t =>
+            db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value == "*")
+            || (t.Language != null
+                && db.ContentFilters.Any(f =>
+                    f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value != "*" && f.Value == t.Language.ToLower()))
+            || (!db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language)
+                && t.Language == "en"));
+
         return query;
     }
+
+    /// <summary>
+    /// The account's certification ceiling (null = unrestricted) — the one lookup every search
+    /// surface shares before applying <see cref="PassesMaturity"/>. Kept here (not re-queried per
+    /// endpoint) so typeahead, /semantic, lexical, and Ask Reel all read the ceiling the same way;
+    /// the feed path already threads <c>account.Settings.MaturityCeiling</c> from the loaded account.
+    /// </summary>
+    public async Task<string?> MaturityCeilingAsync(Guid accountId, CancellationToken ct)
+    {
+        var account = await db.Accounts.FirstOrDefaultAsync(a => a.Id == accountId, ct);
+        return account?.Settings.MaturityCeiling;
+    }
+
+    /// <summary>
+    /// Drops over-ceiling titles from an already-materialized sequence — the shared in-memory gate
+    /// every search surface applies (certification ordinals don't order in SQL, so this can't push
+    /// into the query). Callers over-fetch before calling so a restricted profile still lands enough
+    /// survivors.
+    /// </summary>
+    public static IEnumerable<Title> WithinMaturity(IEnumerable<Title> titles, string? maturityCeiling) =>
+        maturityCeiling is null ? titles : titles.Where(t => PassesMaturity(t, maturityCeiling));
 
     /// <summary>In-memory maturity gate — apply after materializing (certification ordering is app logic).</summary>
     public static bool PassesMaturity(Title title, string? maturityCeiling)

@@ -17,10 +17,17 @@ public sealed class PipelineEventHub : IPipelineEventHub
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
+    // Small per-account replay window so a reconnecting EventSource can catch the handful of events it
+    // missed during the drop (Last-Event-ID). 64 comfortably spans an onboarding burst; anything older
+    // is the sync-status poll's job to reconcile.
+    private const int ReplayBufferSize = 64;
+
     private sealed class AccountStream
     {
         public long Seq;
         public readonly ConcurrentDictionary<Guid, Channel<PipelineSseEvent>> Subscribers = new();
+        public readonly object ReplayLock = new();
+        public readonly Queue<PipelineSseEvent> Replay = new();
     }
 
     private readonly ConcurrentDictionary<Guid, AccountStream> _streams = new();
@@ -31,7 +38,18 @@ public sealed class PipelineEventHub : IPipelineEventHub
         var seq = Interlocked.Increment(ref stream.Seq);
 
         var payload = new Dictionary<string, object?>(data) { ["seq"] = seq };
-        var sseEvent = new PipelineSseEvent(type, JsonSerializer.Serialize(payload, JsonOptions));
+        var sseEvent = new PipelineSseEvent(type, JsonSerializer.Serialize(payload, JsonOptions), seq);
+
+        // Retain in the bounded ring first, so a subscriber that registers-then-replays can never miss
+        // an event published in that window (a duplicate is harmless — the client dedupes on seq).
+        lock (stream.ReplayLock)
+        {
+            stream.Replay.Enqueue(sseEvent);
+            while (stream.Replay.Count > ReplayBufferSize)
+            {
+                stream.Replay.Dequeue();
+            }
+        }
 
         foreach (var channel in stream.Subscribers.Values)
         {
@@ -39,7 +57,7 @@ public sealed class PipelineEventHub : IPipelineEventHub
         }
     }
 
-    public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(Guid accountId, [EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(Guid accountId, long? lastEventId, [EnumeratorCancellation] CancellationToken ct)
     {
         var stream = _streams.GetOrAdd(accountId, _ => new AccountStream());
         var subscriberId = Guid.NewGuid();
@@ -48,7 +66,23 @@ public sealed class PipelineEventHub : IPipelineEventHub
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
         });
+        // Register before snapshotting the replay window: any event published from here on reaches the
+        // live channel, so the replay + live streams together cover the gap with no hole (only overlap).
         stream.Subscribers[subscriberId] = channel;
+
+        if (lastEventId is { } since)
+        {
+            List<PipelineSseEvent> missed;
+            lock (stream.ReplayLock)
+            {
+                missed = stream.Replay.Where(e => e.Seq > since).ToList();
+            }
+
+            foreach (var replayed in missed)
+            {
+                yield return replayed;
+            }
+        }
 
         try
         {

@@ -6,11 +6,16 @@ public enum FilterKind
 {
     ExcludeGenre,
     IncludeGenre,
-    ExcludeTheme,
     ExcludeKeyword,
     MaxMaturity,
     /// <summary>Floor on the predicted rating for recommendation surfaces (value = "6.5").</summary>
     MinPredictedRating,
+    /// <summary>
+    /// Allowed original language (value = ISO-639-1 code, e.g. "en"). Allow-list: when any rows
+    /// exist a title's language must match one. The sentinel "*" allows every language. With no
+    /// rows at all the account defaults to English-only (founder ask 2026-06-30).
+    /// </summary>
+    Language,
 }
 
 /// <summary>

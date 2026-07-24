@@ -30,4 +30,11 @@ public interface IModelEngine
 
     /// <summary>Scores with per-row feature contributions — the explainability contract behind every card.</summary>
     ScoredRow[] ScoreWithContributions(byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5);
+
+    /// <summary>
+    /// Like <see cref="ScoreWithContributions"/>, but reuses the model loaded once and cached by
+    /// <paramref name="modelKey"/> — the request-path explainable scorer behind infinite-scroll
+    /// feed pages, so paging doesn't re-deserialize the artifact on every fetch.
+    /// </summary>
+    ScoredRow[] ScoreWithContributionsCached(Guid modelKey, byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5);
 }

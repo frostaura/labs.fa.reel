@@ -102,6 +102,82 @@ public class TmdbClient(
         return GetListAsync(path + q, movies, RatePriority.Interactive, ct);
     }
 
+    public async Task<TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        await rateGate.AcquireAsync(RatePriority.Interactive, ct);
+        usageRecorder.Record(ApiProvider.Tmdb);
+
+        using var request = AuthGet($"search/person?query={Uri.EscapeDataString(name)}&include_adult=false");
+        using var response = await httpClient.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<PersonSearchDto>(JsonOptions, ct);
+        // TMDB ranks /search/person by relevance+popularity, so the first valid result is the match.
+        var best = (dto?.Results ?? []).FirstOrDefault(p => p.Id > 0 && !string.IsNullOrWhiteSpace(p.Name));
+        return best is null ? null : new TmdbPerson(best.Id, best.Name!, best.KnownForDepartment);
+    }
+
+    public async Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default)
+    {
+        await rateGate.AcquireAsync(RatePriority.Interactive, ct);
+        usageRecorder.Record(ApiProvider.Tmdb);
+
+        using var request = AuthGet($"person/{personId}/combined_credits");
+        using var response = await httpClient.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            return [];
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<CombinedCreditsDto>(JsonOptions, ct);
+        if (dto is null)
+        {
+            return [];
+        }
+
+        var picked = new List<PersonCreditDto>();
+        if (role is PersonCreditRole.Cast or PersonCreditRole.Any)
+        {
+            picked.AddRange(dto.Cast ?? []);
+        }
+
+        if (role is PersonCreditRole.Director)
+        {
+            picked.AddRange((dto.Crew ?? []).Where(c => string.Equals(c.Job, "Director", StringComparison.OrdinalIgnoreCase)));
+        }
+        else if (role is PersonCreditRole.Any)
+        {
+            picked.AddRange(dto.Crew ?? []);
+        }
+
+        return picked
+            // A person can hold several roles on one title (writer+director, etc.) — collapse to one.
+            .Where(c => c.Id > 0 && (c.Title ?? c.Name) is not null && c.MediaType is "movie" or "tv")
+            .GroupBy(c => (c.MediaType, c.Id))
+            .Select(g => g.First())
+            .Select(c => new TmdbListItem(
+                c.Id,
+                c.MediaType == "movie",
+                (c.Title ?? c.Name)!,
+                c.PosterPath,
+                c.BackdropPath,
+                c.Overview,
+                c.Popularity,
+                c.VoteAverage,
+                c.VoteCount,
+                ParseDate(c.ReleaseDate ?? c.FirstAirDate),
+                c.GenreIds ?? []))
+            .ToList();
+    }
+
     public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
@@ -211,7 +287,8 @@ public class TmdbClient(
                 r.VoteAverage,
                 r.VoteCount,
                 ParseDate(r.ReleaseDate ?? r.FirstAirDate),
-                r.GenreIds ?? []))
+                r.GenreIds ?? [],
+                r.OriginalLanguage))
             .ToList();
     }
 
@@ -231,6 +308,31 @@ public class TmdbClient(
 
     private sealed record KeywordResultDto(int Id, string? Name);
 
+    private sealed record PersonSearchDto(PersonResultDto[]? Results);
+
+    private sealed record PersonResultDto(
+        long Id,
+        string? Name,
+        [property: JsonPropertyName("known_for_department")] string? KnownForDepartment);
+
+    private sealed record CombinedCreditsDto(PersonCreditDto[]? Cast, PersonCreditDto[]? Crew);
+
+    private sealed record PersonCreditDto(
+        long Id,
+        string? Title,
+        string? Name,
+        [property: JsonPropertyName("media_type")] string? MediaType,
+        [property: JsonPropertyName("poster_path")] string? PosterPath,
+        [property: JsonPropertyName("backdrop_path")] string? BackdropPath,
+        string? Overview,
+        decimal Popularity,
+        [property: JsonPropertyName("vote_average")] decimal VoteAverage,
+        [property: JsonPropertyName("vote_count")] int VoteCount,
+        [property: JsonPropertyName("release_date")] string? ReleaseDate,
+        [property: JsonPropertyName("first_air_date")] string? FirstAirDate,
+        [property: JsonPropertyName("genre_ids")] int[]? GenreIds,
+        string? Job);
+
     private sealed record ListDto(ListResultDto[]? Results);
 
     private sealed record ListResultDto(
@@ -245,7 +347,8 @@ public class TmdbClient(
         [property: JsonPropertyName("vote_count")] int VoteCount,
         [property: JsonPropertyName("release_date")] string? ReleaseDate,
         [property: JsonPropertyName("first_air_date")] string? FirstAirDate,
-        [property: JsonPropertyName("genre_ids")] int[]? GenreIds);
+        [property: JsonPropertyName("genre_ids")] int[]? GenreIds,
+        [property: JsonPropertyName("original_language")] string? OriginalLanguage = null);
 
     private async Task<TmdbTitleDetails?> GetDetailsAsync(string path, CancellationToken ct)
     {
@@ -335,11 +438,13 @@ public class TmdbClient(
             cast,
             crew,
             trailer?.Key,
-            keywords);
+            keywords,
+            dto.OriginalLanguage);
     }
 
     private sealed record DetailsDto(
         long Id,
+        [property: JsonPropertyName("original_language")] string? OriginalLanguage,
         [property: JsonPropertyName("poster_path")] string? PosterPath,
         [property: JsonPropertyName("backdrop_path")] string? BackdropPath,
         decimal Popularity,
