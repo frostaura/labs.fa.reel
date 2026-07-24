@@ -25,7 +25,7 @@ Dean Martin (founder). Dev/test Trakt profile `deanmar09` (public).
 - **Fewer than 5 external users willing to link a profile within 60 days of MVP.**
 
 ## Graduation pathway
-`Technologies/` once the recurring-revenue path is proven (the graduation pattern formerly exemplified by `fa.foresight`, killed 2026-07-24). `Ventures/` only on standalone-brand traction. If Trakt refuses commercial use, kill the product but keep the engine: the per-user feature/training/eval machinery is reusable elsewhere.
+`Technologies/` once the recurring-revenue path is proven — the standard Labs → Technologies graduation pattern. `Ventures/` only on standalone-brand traction. If Trakt refuses commercial use, kill the product but keep the engine: the per-user feature/training/eval machinery is reusable elsewhere.
 
 ## Conventions & invariants
 - **No manual pipelines (founder-locked).** OAuth wireup, ingestion, feature extraction, training and evaluation all run inside the app, driven by per-user config. Ad-hoc scripts and notebooks are never the path of record.
@@ -48,7 +48,7 @@ Local Postgres publishes on **5433**, not 5432 (5432 is taken on the dev Mac). C
 **Footguns, already paid for:** Trakt and TMDB sit behind Cloudflare, which 403s UA-less requests — the explicit User-Agent on the typed clients is load-bearing. All `DateTime`s normalize through a model-wide UTC converter, because Trakt's date-only fields arrive `Kind=Unspecified` and Npgsql refuses them.
 
 ## Where docs live
-`docs/product-spec.md` holds every locked v1 UX decision and is binding. Note that its §11 references a `docs/brand/assets/` directory that does not exist.
+`docs/product-spec.md` holds every locked v1 UX decision and is binding. `docs/concept.md` is the original pitch; `docs/screenshots/` holds the Playwright QA captures. Known drift between the spec and what exists is tracked in [`MEMORY.md`](MEMORY.md), not here.
 
 ## Never do this here
 - Never surface a title with any interaction footprint on a suggestion surface.
