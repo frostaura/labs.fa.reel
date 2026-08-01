@@ -32,6 +32,15 @@ cd src/frontend && npm install && npm run dev   # http://localhost:5173
 
 Create a Trakt API app at <https://trakt.tv/oauth/applications> with redirect URI `http://localhost:5173/auth/trakt/callback` for dev.
 
+## Deployment
+
+```bash
+make docker-ready        # build both images + boot the stack + health-probe it (the CI gate)
+make release-validation  # lint + build + test + e2e + docker-ready
+```
+
+Pushes to `main` build multi-arch images on native amd64/arm64 runners, publish `reel-backend` / `reel-frontend` to Docker Hub, and redeploy the Portainer stack behind `reel.frostaura.net`. Required secrets, the `DEPLOY_ENABLED` gate, and Portainer stack setup are documented in [`docs/deployment.md`](docs/deployment.md).
+
 ## Data sources & attribution
 
 - **Trakt** — watch history, ratings, in-progress shows, write-back (ratings, watchlist, the managed "Reel — Up Next" list).
