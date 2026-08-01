@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { ExternalLink, ListChecks } from "lucide-react";
 import { useGetSavedQuery } from "../store/api";
 import PosterImage from "../components/rec/PosterImage";

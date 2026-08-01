@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router";
 import { Bookmark, BookmarkCheck, Eye, EyeOff, Play, Undo2, X } from "lucide-react";
 import {
   useGetTitleQuery,

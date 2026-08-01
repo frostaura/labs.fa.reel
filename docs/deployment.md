@@ -8,10 +8,18 @@ Every push to `main` runs `.github/workflows/ci.yml`. Jobs gate in this order:
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
-| Quality | `Backend`, `Frontend`, `Frontend E2E`, `Backend Integration (Postgres + pgvector)`, `Security Scan` | PRs + `main` |
-| Deployability | `Docker Build & Stack Smoke` | PRs + `main` |
+| Quality | `Backend`, `Frontend`, `Frontend E2E`, `Backend Integration (Postgres + pgvector)`, `Security Scan` | PRs + `main` + weekly |
+| Deployability | `Docker Build & Stack Smoke` | PRs + `main` + weekly |
 | Publish | `Build {Backend,Frontend} ({amd64,arm64})` → `Create … Multi-arch Manifest` | `main` only |
 | Deploy | `Re-pull image and redeploy on Portainer` | `main` only, gated (see below) |
+
+### The weekly rot check
+
+CI also runs on a schedule (Mondays 06:00 UTC). This is not redundant with the PR runs: the quality gates fail on *newly published* advisories, independent of whether anyone touched the code. NuGet's NU1903 audit breaks `dotnet restore` outright under `TreatWarningsAsErrors`, and `npm audit --audit-level=high` fails the security job. A repo sitting idle therefore stops being buildable without anyone finding out.
+
+That is not hypothetical — it is what happened between 2026-06-18 and 2026-08-01. Two unrelated advisory sets landed (`System.Security.Cryptography.Xml`, `Microsoft.OpenApi`, and four npm packages) and nothing surfaced them until the next push, at which point a fresh `:latest` could not have been produced. The weekly run bounds that blind spot to seven days.
+
+Publish jobs are push-only, so a scheduled run verifies without ever deploying.
 
 The publish jobs build per-architecture on native runners (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64) and then join them into a single multi-arch manifest — no QEMU emulation. Published tags:
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
 import { useExchangeTraktCodeMutation } from "../store/api";
 import { consumeOauthState, parseCallbackParams } from "../lib/traktOauth";
 

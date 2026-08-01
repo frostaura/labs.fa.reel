@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
 import { Eye, Search, Sparkles } from "lucide-react";
 import { useSearchTypeaheadQuery } from "../../store/api";
 import { posterUrl } from "../../lib/tmdbImages";

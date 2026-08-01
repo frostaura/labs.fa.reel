@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { Star } from "lucide-react";
 import type { CreditPerson } from "../../store/titleTypes";
 import { profileUrl } from "../../lib/tmdbImages";

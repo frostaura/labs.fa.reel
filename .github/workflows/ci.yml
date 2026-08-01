@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly rot check (Mondays 06:00 UTC). The quality gates fail on newly published
+  # advisories — NuGet NU1903 breaks `dotnet restore` outright under TreatWarningsAsErrors,
+  # and `npm audit --audit-level=high` fails the security job — so a repo with no commits
+  # silently stops being buildable. That is exactly what happened between 2026-06-18 and
+  # 2026-08-01: two independent advisory sets landed and nothing surfaced them until the
+  # next push. This run surfaces it within a week instead. Publish jobs are push-only and
+  # skip here, so a scheduled run never deploys.
+  schedule:
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:

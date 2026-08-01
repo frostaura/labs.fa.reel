@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import type { FeedCard } from "../../store/feedTypes";
 import PosterImage from "./PosterImage";
 import PredictedRatingBadge from "./PredictedRatingBadge";
