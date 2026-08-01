@@ -90,8 +90,14 @@ function blend(c: AskCard): number {
  */
 export function useAskReelChat() {
   const [state, dispatch] = useReducer(reducer, initial);
+  // Mirrors the latest committed state so `send` can stay identity-stable instead of taking a
+  // dependency on every state change. Written after commit rather than during render: a render
+  // can be discarded under concurrent rendering, which would leave the ref describing state
+  // that never committed. `send` only runs from user events, well after the effect has flushed.
   const stateRef = useRef(state);
-  stateRef.current = state;
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
   const abortRef = useRef<AbortController | null>(null);
 
   const send = useCallback((message: string, fresh = false) => {

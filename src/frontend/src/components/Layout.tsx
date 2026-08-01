@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { LogOut, Settings as SettingsIcon, FlaskConical } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
@@ -31,9 +31,14 @@ export default function Layout() {
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
-  useEffect(() => {
+  // Adjusted during render rather than in an effect: an effect would paint the panel open on
+  // the new route first and then close it, a visible flash plus a cascading render.
+  const navKey = `${location.pathname}${location.search}`;
+  const [lastNavKey, setLastNavKey] = useState(navKey);
+  if (navKey !== lastNavKey) {
+    setLastNavKey(navKey);
     setMobileSearchOpen(false);
-  }, [location.pathname, location.search]);
+  }
 
   const handleSignOut = async () => {
     await logout().unwrap().catch(() => undefined);

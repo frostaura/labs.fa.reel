@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Lock, ShieldCheck, X } from "lucide-react";
 import {
   useGetFiltersQuery,
@@ -48,15 +48,13 @@ export default function PreferencesSection() {
   const [unlockedPin, setUnlockedPin] = useState<string | null>(readUnlock);
   const [pinEntry, setPinEntry] = useState("");
   const [pinError, setPinError] = useState(false);
-  const [draft, setDraft] = useState<FiltersPayload | null>(null);
+  // Local edits only; the server value is the fallback. Holding a copy of `saved` in state and
+  // syncing it in an effect duplicated the same data in two places and cost a cascading render
+  // on every load — deriving it means there is nothing to keep in sync.
+  const [draftEdit, setDraft] = useState<FiltersPayload | null>(null);
+  const draft = draftEdit ?? saved ?? null;
   const [flash, setFlash] = useState<string | null>(null);
   const [newPin, setNewPin] = useState("");
-
-  useEffect(() => {
-    if (saved && draft === null) {
-      setDraft(saved);
-    }
-  }, [saved, draft]);
 
   const pinConfigured = session?.pinConfigured ?? false;
   const locked = pinConfigured && unlockedPin === null;
