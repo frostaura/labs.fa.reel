@@ -12,7 +12,7 @@ import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
-import type { PhaseData } from "../lib/askReelStream";
+import type { AskCard, PhaseData } from "../lib/askReelStream";
 
 /**
  * "Ask Reel" — a conversational discovery agent. The first turn comes from the search box (?q=);
@@ -49,11 +49,10 @@ function narrate(phase: PhaseData | null): string {
 export default function SearchResults() {
   const [params, setParams] = useSearchParams();
   const seed = params.get("q") ?? "";
-  const location = useLocation();
   const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
   const {
-    turns, status, phase, cards, reason, send, resume, loadMore, reask, setMediaTypes,
+    turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
     exhausted, appending, canRetry,
   } = useAskReelChat();
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -98,6 +97,7 @@ export default function SearchResults() {
   // and the server narrows discovery, so what arrives already matches.
   const removedSet = new Set(useSelector(selectRemovedKeys));
   const visible = cards.filter((c) => !removedSet.has(c.titleId));
+  const outsideVisible = outsideCards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
@@ -138,7 +138,9 @@ export default function SearchResults() {
     : status === "error"
       ? "Search hit a snag."
       : status === "done"
-        ? visible.length === 0 ? "No matches for that one." : `${visible.length} picks ready.`
+        ? visible.length + outsideVisible.length === 0
+          ? "No matches for that one."
+          : `${visible.length + outsideVisible.length} picks ready.`
         : "";
 
   return (
@@ -207,6 +209,10 @@ export default function SearchResults() {
               data-testid="askreel-chip"
               onClick={() => send(chip, false)}
               disabled={streaming}
+              // Both the tooltip and aria-disabled, so a disabled chip explains itself instead of
+              // just greying out — to pointers and to assistive tech alike.
+              title={streaming ? "Wait for the current results to finish" : undefined}
+              aria-disabled={streaming}
               className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 disabled:opacity-40 transition-colors"
             >
               {chip}
@@ -230,7 +236,7 @@ export default function SearchResults() {
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
-      ) : status === "done" && visible.length === 0 ? (
+      ) : status === "done" && visible.length === 0 && outsideVisible.length === 0 ? (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="semantic-empty">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-body text-fa-frost-bright">No matches for that one</p>
@@ -238,41 +244,31 @@ export default function SearchResults() {
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4" data-testid="semantic-results">
-          {visible.map((card) => (
-            <Link
-              key={card.titleId}
-              to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
-              state={{ backgroundLocation: location }}
-              className="group block focus:outline-none reel-rise"
-            >
-              <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
-                <PosterImage path={card.posterPath} alt={card.name} size="w185" />
-                {/* Prediction and crowd score, stacked so the grid's narrowest cell (two columns
-                    on a phone) still reads both. `hasPredictedRating` covers NaN as well as null,
-                    and a title with no community score simply shows one badge — never a dash. */}
-                {(hasPredictedRating(card.predictedRating) || hasPredictedRating(card.crowdRating)) && (
-                  <div className="absolute top-2 right-2 flex flex-col items-end gap-1 reel-rise">
-                    {hasPredictedRating(card.predictedRating) && <PredictedRatingBadge rating={card.predictedRating} />}
-                    {hasPredictedRating(card.crowdRating) && (
-                      <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} />
-                    )}
-                  </div>
-                )}
-                {card.seen && (
-                  <span className="absolute top-2 left-2 rounded-full bg-fa-ink/80 px-2 py-0.5 fa-caption text-fa-frost-dim ring-1 ring-fa-edge">
-                    Seen
-                  </span>
-                )}
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4" data-testid="semantic-results">
+            {visible.map((card) => (
+              <ResultCard key={card.titleId} card={card} />
+            ))}
+          </div>
+
+          {/* The honest channel: titles that trip something the user excluded, shown ONLY when
+              the clean picks could not fill the floor — flagged and fenced off under their own
+              header, each captioned server-side with which exclusion it trips, never mixed into
+              the grid above. */}
+          {outsideVisible.length > 0 && (
+            <div className="space-y-3 border-t border-fa-frost/10 pt-5" data-testid="askreel-outside">
+              <div>
+                <p className="fa-body text-fa-frost-dim">Outside your request — closest we could get</p>
+                <p className="fa-caption text-fa-frost-dim/70">These match the vibe but hit something you excluded.</p>
               </div>
-              <p className="mt-2 fa-body text-fa-frost-bright truncate" title={card.name}>{card.name}</p>
-              <p className="fa-caption text-fa-frost-dim">{card.year ?? ""}</p>
-              {card.why && (
-                <p className="fa-caption text-fa-frost/80 line-clamp-2" title={card.why}>{card.why}</p>
-              )}
-            </Link>
-          ))}
-        </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+                {outsideVisible.map((card) => (
+                  <ResultCard key={card.titleId} card={card} />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {/* Infinite scroll: the sentinel sits below the grid and pulls the next page of the same
@@ -296,7 +292,7 @@ export default function SearchResults() {
       {/* The provenance footnote ("12 picks ranked for you, from 50 pulled"). Only ever shown
           alongside actual results — on an empty answer it was a second, contradictory message
           under the empty state. */}
-      {reason && status === "done" && !appending && visible.length > 0 && (
+      {reason && status === "done" && !appending && (visible.length > 0 || outsideVisible.length > 0) && (
         <p className="fa-caption text-fa-frost-dim text-center">{reason}</p>
       )}
 
@@ -353,6 +349,46 @@ export default function SearchResults() {
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * One Ask Reel result card — identical for clean picks and the outside-request channel (the only
+ * difference between the two is WHERE they render and what their server-written `why` says).
+ */
+function ResultCard({ card }: { card: AskCard }) {
+  const location = useLocation();
+  return (
+    <Link
+      to={`/title/${card.mediaType.toLowerCase()}/${card.tmdbId}`}
+      state={{ backgroundLocation: location }}
+      className="group block focus:outline-none reel-rise"
+    >
+      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
+        <PosterImage path={card.posterPath} alt={card.name} size="w185" />
+        {/* Prediction and crowd score, stacked so the grid's narrowest cell (two columns
+            on a phone) still reads both. `hasPredictedRating` covers NaN as well as null,
+            and a title with no community score simply shows one badge — never a dash. */}
+        {(hasPredictedRating(card.predictedRating) || hasPredictedRating(card.crowdRating)) && (
+          <div className="absolute top-2 right-2 flex flex-col items-end gap-1 reel-rise">
+            {hasPredictedRating(card.predictedRating) && <PredictedRatingBadge rating={card.predictedRating} />}
+            {hasPredictedRating(card.crowdRating) && (
+              <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} />
+            )}
+          </div>
+        )}
+        {card.seen && (
+          <span className="absolute top-2 left-2 rounded-full bg-fa-ink/80 px-2 py-0.5 fa-caption text-fa-frost-dim ring-1 ring-fa-edge">
+            Seen
+          </span>
+        )}
+      </div>
+      <p className="mt-2 fa-body text-fa-frost-bright truncate" title={card.name}>{card.name}</p>
+      <p className="fa-caption text-fa-frost-dim">{card.year ?? ""}</p>
+      {card.why && (
+        <p className="fa-caption text-fa-frost/80 line-clamp-2" title={card.why}>{card.why}</p>
+      )}
+    </Link>
   );
 }
 

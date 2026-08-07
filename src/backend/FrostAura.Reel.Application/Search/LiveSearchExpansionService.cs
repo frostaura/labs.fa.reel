@@ -64,7 +64,12 @@ public sealed class LiveSearchExpansionService(
     /// <summary>How many picks survive when the account's rating floor would otherwise return none.</summary>
     private const int MinFloorRelaxedCount = 6;
 
-    /// <summary>Penalty applied to the blend per matched negation ("less horror", "no ghosts").</summary>
+    /// <summary>
+    /// Per-match weight inside <see cref="NegationDemerit"/> ("less horror", "no ghosts"). Since
+    /// the hard partition landed, the demerit's only live role is the contradicts-vs-clean test —
+    /// it no longer subtracts from the final blend, because a penalty that merely demotes can
+    /// still interleave rejected titles among clean ones.
+    /// </summary>
     private const double NegationPenalty = 0.22;
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
@@ -240,10 +245,13 @@ public sealed class LiveSearchExpansionService(
             var seedText = RankingSeedText(agentReply, trimmed);
             var queryVec = (await embeddings.EmbedAsync([seedText], ct))[0];
 
-            // Negation is applied BEFORE the cut, not after it. Titles that contradict what the
-            // user ruled out are held back as a reserve rather than dropped outright, so an
-            // over-eager exclusion can still never empty the screen — but as long as enough clean
-            // candidates exist, the rejected ones simply do not appear.
+            // Negation is applied BEFORE the cut, not after it — and it is HARD. Titles that
+            // contradict what the user ruled out never appear as ordinary picks: with enough clean
+            // candidates they are dropped outright, and only when the clean set cannot fill the
+            // MinResults floor do the closest contradicting ones appear — explicitly flagged as
+            // outside the request, ordered after every clean pick, captioned with WHICH exclusion
+            // they trip. (The old top-up refilled to ReturnCount unflagged, which is how "no
+            // horror please" returned seven horror titles with why-lines admitting the violation.)
             var scoredPool = eligible
                 .Where(t => vectorsByTitle.ContainsKey(t.Id))
                 .Select(t => (Title: t, Sim: Cosine(queryVec, vectorsByTitle[t.Id])))
@@ -254,15 +262,12 @@ public sealed class LiveSearchExpansionService(
                 .ThenBy(x => x.Title.Id)
                 .ToList();
 
-            var contradicts = scoredPool.Where(x => NegationDemerit(x.Title, intent) > 0).ToList();
-            var clean = scoredPool.Where(x => NegationDemerit(x.Title, intent) == 0).ToList();
-            var ranked = clean.Take(ReturnCount).ToList();
-            if (ranked.Count < ReturnCount && contradicts.Count > 0)
+            var (ranked, outside) = PartitionByNegation(scoredPool, intent);
+            if (outside.Count > 0)
             {
-                ranked.AddRange(contradicts.Take(ReturnCount - ranked.Count));
                 logger.LogInformation(
-                    "Ask Reel '{Query}': only {Clean} candidates cleared the exclusions; topped up with {Topped} demoted ones.",
-                    trimmed, clean.Count, ranked.Count - clean.Count);
+                    "Ask Reel '{Query}': only {Clean} candidates cleared the exclusions; showing {Outside} contradicting ones flagged as outside the request.",
+                    trimmed, ranked.Count, outside.Count);
             }
 
             foreach (var (title, sim) in ranked)
@@ -270,12 +275,19 @@ public sealed class LiveSearchExpansionService(
                 await emit("candidate", Card(title, sim, predicted: null));
             }
 
+            foreach (var (title, sim) in outside)
+            {
+                await emit("candidate", Card(title, sim, predicted: null, outsideRequest: true));
+            }
+
             // ── Hydrate + personally score EVERY returned card ───────────────────────────────
-            // Score all ReturnCount cards, not just the head slice — otherwise every card past the
-            // first slice renders a default ~6.0 predicted-rating badge instead of a real per-user
-            // score. OnDemandScorer batches, so one call covers the whole set.
-            await emit("phase", new { stage = "scoring", found = ranked.Count, scored = 0 });
-            var sliceIds = ranked.Select(x => x.Title.Id).ToList();
+            // Score all returned cards (outside ones included — they still carry the badges), not
+            // just the head slice — otherwise every card past the first slice renders a default
+            // ~6.0 predicted-rating badge instead of a real per-user score. OnDemandScorer
+            // batches, so one call covers the whole set.
+            var returned = ranked.Concat(outside).ToList();
+            await emit("phase", new { stage = "scoring", found = returned.Count, scored = 0 });
+            var sliceIds = returned.Select(x => x.Title.Id).ToList();
             await HydrateAsync(sliceIds, ct);
             var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
             foreach (var id in sliceIds)
@@ -283,26 +295,44 @@ public sealed class LiveSearchExpansionService(
                 await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
             }
 
-            // ── Live per-movie LLM re-rank (the hyper-personal layer) ────────────────────────
-            await emit("phase", new { stage = "ranking", found = ranked.Count, scored = sliceIds.Count });
+            // ── Live per-movie LLM re-rank (the hyper-personal layer) — CLEAN cards only ─────
+            // Outside cards never reach the LLM why generation: asked to pitch a title the user
+            // ruled out, it cheerfully admitted the violation ("exactly what they want to avoid").
+            // Their caption is the deterministic statement of which exclusion they trip, streamed
+            // as a candidate-reranked frame so live cards pick it up the same way clean cards pick
+            // up their LLM why.
+            await emit("phase", new { stage = "ranking", found = returned.Count, scored = sliceIds.Count });
             var fitById = await RerankStreamAsync(accountId, trimmed, tasteSummary, ranked, scores, emit, ct);
+            foreach (var (title, _) in outside)
+            {
+                await emit("candidate-reranked", new
+                {
+                    titleId = title.Id,
+                    fit = (double?)null,
+                    why = OutsideWhy(NegationMatches(title, intent)),
+                });
+            }
 
             // ── Final blend: relevance × personal score × hyper-personal fit ─────────────────
-            var blended = ranked
+            // The old `- negationPenalty` term is gone: the partition supersedes it. A demoting
+            // penalty could still interleave contradicting titles among clean ones; the partition
+            // keeps them in a separate block that always trails every clean pick.
+            List<(Title Title, double Sim, decimal? Predicted, RerankResult? Fit, double Blend)> BlendPool(
+                IReadOnlyList<(Title Title, double Sim)> pool) => pool
                 .Select(x =>
                 {
                     var predicted = scores.TryGetValue(x.Title.Id, out var p) ? (decimal?)p : null;
                     var fit = fitById.TryGetValue(x.Title.Id, out var fr) ? fr : null;
                     var tagBoost = vectorsByTitle.TryGetValue(x.Title.Id, out var vec) ? TagAffinity(vec, tagVectors) : 0d;
-                    // Negations demote, they never cull — a rejected trait should push a title down
-                    // the list, not risk emptying it.
-                    var penalty = NegationDemerit(x.Title, intent);
-                    var blend = (x.Sim * 0.32) + ((double)(predicted ?? 6m) / 10d * 0.23) + ((fit?.Fit ?? 0.5d) * 0.35) + (tagBoost * 0.10) - penalty;
-                    return (x.Title, x.Sim, predicted, Fit: fit, Blend: blend);
+                    var blend = (x.Sim * 0.32) + ((double)(predicted ?? 6m) / 10d * 0.23) + ((fit?.Fit ?? 0.5d) * 0.35) + (tagBoost * 0.10);
+                    return (x.Title, x.Sim, Predicted: predicted, Fit: fit, Blend: blend);
                 })
                 .OrderByDescending(x => x.Blend)
                 .ThenBy(x => x.Title.Id)
                 .ToList();
+
+            var blended = BlendPool(ranked);
+            var blendedOutside = BlendPool(outside);
 
             // The account's minimum-predicted-rating filter is an explicit instruction and has to
             // reach THIS surface too. It only ever lived in the (now removed) /semantic endpoint,
@@ -311,7 +341,7 @@ public sealed class LiveSearchExpansionService(
             var floorRelaxed = false;
             if (floor > 0m)
             {
-                var abovefloor = blended.Where(x => x.predicted is null || x.predicted >= floor).ToList();
+                var abovefloor = blended.Where(x => x.Predicted is null || x.Predicted >= floor).ToList();
                 if (abovefloor.Count > 0)
                 {
                     blended = abovefloor;
@@ -326,21 +356,30 @@ public sealed class LiveSearchExpansionService(
                 }
             }
 
+            // Outside cards ALWAYS trail every clean pick, each block ordered by its own blend,
+            // and each outside card carries the flag plus its honest deterministic caption.
             var final = blended
-                .Select(x => Card(x.Title, x.Sim, x.predicted, x.Fit?.Fit, x.Fit?.Why))
+                .Select(x => Card(x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why))
+                .Concat(blendedOutside.Select(x => Card(
+                    x.Title, x.Sim, x.Predicted, fit: null,
+                    why: OutsideWhy(NegationMatches(x.Title, intent)),
+                    outsideRequest: true)))
                 .ToList();
 
             // Report what was RETURNED, not what was pulled. The old wording was derived purely
             // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —
-            // the numbers described a result set the user could not see.
+            // the numbers described a result set the user could not see. When contradicting titles
+            // were shown, say so — the split is the honesty the old top-up lacked.
             await emit("done", new
             {
                 results = final,
                 reason = final.Count == 0
                     ? "no fresh matches — try another angle"
-                    : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
-                        + (relaxation > 0 ? " (widened to find enough)" : "")
-                        + (floorRelaxed ? $" (nothing cleared your {floor:0.#} rating floor, so it was relaxed)" : "") + ".",
+                    : blendedOutside.Count > 0
+                        ? $"{blended.Count} picks matched everything you asked; {blendedOutside.Count} closest-but-outside shown separately."
+                        : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
+                            + (relaxation > 0 ? " (widened to find enough)" : "")
+                            + (floorRelaxed ? $" (nothing cleared your {floor:0.#} rating floor, so it was relaxed)" : "") + ".",
             });
             // Logs `final` too: the count the user actually sees is the one worth alerting on, and
             // its absence is what let an empty result set look healthy in the logs.
@@ -550,8 +589,9 @@ public sealed class LiveSearchExpansionService(
 
     /// <summary>
     /// How much a title contradicts what the user ruled out. Each matched negated genre or keyword
-    /// costs one <see cref="NegationPenalty"/>; capped so even a title that trips every negation
-    /// stays rankable rather than being effectively removed.
+    /// costs one <see cref="NegationPenalty"/>. Any non-zero value routes the title into the
+    /// flagged outside-request partition (<see cref="PartitionByNegation"/>) — it never reaches
+    /// the screen as an ordinary pick.
     /// </summary>
     private static double NegationDemerit(Title title, SearchIntent intent)
     {
@@ -569,6 +609,61 @@ public sealed class LiveSearchExpansionService(
 
         return Math.Min(hits * NegationPenalty, 0.66);
     }
+
+    /// <summary>
+    /// Splits the similarity-ordered pool into the picks that honour every negation and the
+    /// flagged "outside your request" reserve. Clean titles fill up to <see cref="ReturnCount"/>;
+    /// contradicting ones are DROPPED whenever the clean set reaches <see cref="MinResults"/>, and
+    /// otherwise top up only to that floor — flagged, never silently mixed in. This is the hard
+    /// guarantee behind "no horror please": a contradicting title can reach the screen only as an
+    /// explicitly-labelled closest-but-outside card.
+    /// </summary>
+    internal static (List<(Title Title, double Sim)> Ranked, List<(Title Title, double Sim)> Outside) PartitionByNegation(
+        IReadOnlyList<(Title Title, double Sim)> scoredPool, SearchIntent intent)
+    {
+        var contradicts = scoredPool.Where(x => NegationDemerit(x.Title, intent) > 0).ToList();
+        var clean = scoredPool.Where(x => NegationDemerit(x.Title, intent) == 0).ToList();
+        var ranked = clean.Take(ReturnCount).ToList();
+        var outside = ranked.Count < MinResults && contradicts.Count > 0
+            ? contradicts.Take(MinResults - ranked.Count).ToList()
+            : [];
+        return (ranked, outside);
+    }
+
+    /// <summary>
+    /// The excluded genres/keywords a title actually trips, phrased for the outside-request
+    /// caption ("a horror title", "one that matches ‘ghosts’"). Mirrors
+    /// <see cref="NegationDemerit"/> exactly, so a title partitioned as contradicting always has
+    /// at least one match to name.
+    /// </summary>
+    internal static IReadOnlyList<string> NegationMatches(Title title, SearchIntent intent)
+    {
+        var matches = new List<string>();
+        if (intent.ExcludeGenres is { Count: > 0 } badGenres && title.Genres is { Length: > 0 })
+        {
+            matches.AddRange(title.Genres
+                .Where(g => badGenres.Contains(g, StringComparer.OrdinalIgnoreCase))
+                .Select(g => $"a {g.ToLowerInvariant()} title"));
+        }
+
+        if (intent.ExcludeKeywords is { Count: > 0 } badWords)
+        {
+            var haystack = $"{title.Name} {title.Overview}";
+            matches.AddRange(badWords
+                .Where(w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase))
+                .Select(w => $"one that matches ‘{w}’"));
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// The honest deterministic caption for an outside-request card. Replaces the LLM why — which
+    /// cheerfully admitted violations ("exactly what they want to avoid") — with a plain statement
+    /// of the first exclusion the title trips.
+    /// </summary>
+    internal static string OutsideWhy(IReadOnlyList<string> matches) =>
+        $"Closest match we could find, but it's {(matches.Count > 0 ? matches[0] : "outside what you asked for")} — which you asked to skip.";
 
     /// <summary>
     /// The text the ranking query vector is built from — the interpreted POSITIVE signal only
@@ -984,25 +1079,31 @@ public sealed class LiveSearchExpansionService(
         await emit("done", new { results = cards, reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords" });
     }
 
-    private static object Card(Title t, double? similarity, decimal? predicted, double? fit = null, string? why = null, bool seen = false) => new
-    {
-        titleId = t.Id,
-        mediaType = t.MediaType.ToString(),
-        tmdbId = t.TmdbId,
-        name = t.Name,
-        year = t.Year,
-        posterPath = t.PosterPath,
-        genres = t.Genres,
-        similarity,
-        predictedRating = predicted,
-        // The community number the personal prediction is read against — same resolver as the feed
-        // cards, so a title's badge cannot say 7.4 here and 6.9 on the home page.
-        crowdRating = CrowdRating.For(t),
-        crowdVotes = CrowdRating.VotesFor(t),
-        fit,
-        why,
-        seen,
-    };
+    private static object Card(
+        Title t, double? similarity, decimal? predicted, double? fit = null, string? why = null,
+        bool seen = false, bool outsideRequest = false) => new
+        {
+            titleId = t.Id,
+            mediaType = t.MediaType.ToString(),
+            tmdbId = t.TmdbId,
+            name = t.Name,
+            year = t.Year,
+            posterPath = t.PosterPath,
+            genres = t.Genres,
+            similarity,
+            predictedRating = predicted,
+            // The community number the personal prediction is read against — same resolver as the feed
+            // cards, so a title's badge cannot say 7.4 here and 6.9 on the home page.
+            crowdRating = CrowdRating.For(t),
+            crowdVotes = CrowdRating.VotesFor(t),
+            fit,
+            why,
+            seen,
+            // True only for the closest-but-outside reserve — a card that trips one of the user's
+            // exclusions and is shown, flagged, solely because the clean picks could not fill the
+            // floor. Additive: old clients simply ignore it.
+            outsideRequest,
+        };
 
     private static double Cosine(float[] a, float[] b)
     {

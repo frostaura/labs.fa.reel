@@ -13,6 +13,7 @@ using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Telemetry;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -137,6 +138,123 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         Assert.Contains(names, n => n is "Interstellar" or "Blade Runner 2049" or "Dune" or "Dune: Part Two");
     }
 
+    [Fact]
+    public async Task An_exclusion_with_enough_clean_candidates_never_shows_a_contradicting_title()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        // Titles are GLOBAL and this collection shares one database, so anything another test
+        // seeded is unseen-eligible here too. Mark it all watched so the clean/contradicting
+        // counts below are exactly the ones this test seeds.
+        await MarkAllExistingTitlesSeenAsync(accountId);
+
+        // 14 clean thrillers (≥ MinResults) and 6 horror titles. The old top-up refilled to
+        // ReturnCount with the horror ones, unflagged — the QA-confirmed defect.
+        for (var i = 0; i < 14; i++)
+        {
+            await SeedEmbeddedUnseenTitleAsync(9000 + i, $"Clean Thriller {i}", seed: 10 + i, genres: ["thriller"], overview: "A tense pursuit.");
+        }
+
+        for (var i = 0; i < 6; i++)
+        {
+            await SeedEmbeddedUnseenTitleAsync(9500 + i, $"Haunting {i}", seed: 40 + i, genres: ["horror"], overview: "A haunting.");
+        }
+
+        var tmdb = new FakeTmdbClient { EmptyDiscovery = true };
+        var (service, events) = BuildService(accountId, tmdb, out var emit, new FakeExclusionAgent());
+
+        await service.StreamAsync("a tense thriller, no horror please", region: "US", emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done");
+        var results = done.Data.GetProperty("results").EnumerateArray().ToList();
+        Assert.NotEmpty(results);
+        Assert.All(results, r =>
+        {
+            Assert.DoesNotContain("horror", r.GetProperty("genres").EnumerateArray().Select(g => g.GetString()));
+            Assert.False(r.GetProperty("outsideRequest").GetBoolean());
+        });
+
+        // Nothing contradicting reaches the stream either — not even flagged.
+        var candidates = events.Where(e => e.Event == "candidate").ToList();
+        Assert.All(candidates, c => Assert.False(c.Data.GetProperty("outsideRequest").GetBoolean()));
+    }
+
+    [Fact]
+    public async Task Too_few_clean_candidates_show_a_flagged_outside_channel_after_the_clean_picks()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        // Same isolation guard as above: only the titles seeded below may be eligible, or the
+        // clean count drifts with whatever other tests happened to run first.
+        await MarkAllExistingTitlesSeenAsync(accountId);
+
+        // Only 5 clean → the floor tops up with 7 contradicting titles, flagged and trailing.
+        for (var i = 0; i < 5; i++)
+        {
+            await SeedEmbeddedUnseenTitleAsync(9600 + i, $"Clean Thriller {i}", seed: 10 + i, genres: ["thriller"], overview: "A tense pursuit.");
+        }
+
+        for (var i = 0; i < 8; i++)
+        {
+            await SeedEmbeddedUnseenTitleAsync(9700 + i, $"Haunting {i}", seed: 40 + i, genres: ["horror"], overview: "A haunting.");
+        }
+
+        var tmdb = new FakeTmdbClient { EmptyDiscovery = true };
+        var (service, events) = BuildService(accountId, tmdb, out var emit, new FakeExclusionAgent());
+
+        await service.StreamAsync("a tense thriller, no horror please", region: "US", emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done");
+        var results = done.Data.GetProperty("results").EnumerateArray().ToList();
+        var outsideFlags = results.Select(r => r.GetProperty("outsideRequest").GetBoolean()).ToList();
+
+        Assert.Equal(5, outsideFlags.Count(f => !f));
+        Assert.Equal(7, outsideFlags.Count(f => f)); // MinResults(12) − 5, never up to ReturnCount
+
+        // Outside cards NEVER interleave: every clean pick precedes every flagged one.
+        Assert.Equal(outsideFlags.OrderBy(f => f), outsideFlags);
+
+        // Every flagged card is a genuine contradiction wearing the honest deterministic caption,
+        // never an LLM pitch.
+        foreach (var r in results.Where(r => r.GetProperty("outsideRequest").GetBoolean()))
+        {
+            Assert.Contains("horror", r.GetProperty("genres").EnumerateArray().Select(g => g.GetString()));
+            Assert.Equal(
+                "Closest match we could find, but it's a horror title — which you asked to skip.",
+                r.GetProperty("why").GetString());
+        }
+
+        Assert.Equal(
+            "5 picks matched everything you asked; 7 closest-but-outside shown separately.",
+            done.Data.GetProperty("reason").GetString());
+    }
+
+    /// <summary>A canned agent that wants thrillers and explicitly rules horror out.</summary>
+    private sealed class FakeExclusionAgent : ISearchAgent
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => "fake-exclusion-agent";
+
+        public Task<AgentReply> InterpretAsync(
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            Task.FromResult(new AgentReply(
+                "Tense thrillers, steering clear of horror.",
+                new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+    }
+
     /// <summary>A canned agent that resolves a turn straight to a vibe intent (genres + keywords, no person).</summary>
     private sealed class FakeVibeAgent : ISearchAgent
     {
@@ -156,7 +274,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     }
 
     /// <summary>Seeds a global, English, UNSEEN title that already carries a normalized embedding.</summary>
-    private async Task SeedEmbeddedUnseenTitleAsync(long tmdbId, string name, int seed)
+    private async Task SeedEmbeddedUnseenTitleAsync(long tmdbId, string name, int seed, string[]? genres = null, string? overview = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -166,9 +284,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             TmdbId = tmdbId,
             TraktSlug = string.Empty,
             Name = name,
-            Genres = ["science-fiction"],
+            Genres = genres ?? ["science-fiction"],
             Language = "en",
-            Overview = "A futuristic, tense sci-fi journey.",
+            Overview = overview ?? "A futuristic, tense sci-fi journey.",
             LastMetadataRefreshAt = DateTime.UtcNow, // already hydrated → no live TMDB fetch during the test
             CreatedAt = DateTime.UtcNow,
         };
@@ -276,6 +394,34 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         db.Add(account);
         await db.SaveChangesAsync();
         return account.Id;
+    }
+
+    /// <summary>
+    /// Marks every title already in the shared database as watched for this account, so a test's
+    /// eligible pool contains exactly what it seeds afterwards. Titles are global and the postgres
+    /// collection runs on one database, so without this a test's clean/contradicting counts depend
+    /// on which sibling tests ran first.
+    /// </summary>
+    private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var titleIds = await db.Titles.Select(t => t.Id).ToListAsync();
+        foreach (var titleId in titleIds)
+        {
+            db.WatchedTitles.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleId,
+                Plays = 1,
+                IsFullyWatched = true,
+                LastWatchedAt = DateTime.UtcNow,
+                FirstSyncedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
     }
 
     private async Task SeedSeenTitleAsync(Guid accountId, long tmdbId, string name)

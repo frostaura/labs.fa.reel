@@ -86,6 +86,26 @@ export const initialChatState: State = {
   conversationId: null, appending: false, lastQuery: "", exhausted: false,
 };
 
+function blend(c: AskCard): number {
+  return (c.similarity ?? 0) * 0.35 + ((c.predictedRating ?? 6) / 10) * 0.25 + (c.fit ?? 0.5) * 0.4;
+}
+
+/**
+ * The stream-stable order: clean ids before outside ids, each block sorted by the personal blend.
+ * Applied ONLY when a `phase` or `done` frame arrives — `candidate` appends and `scored`/`reranked`
+ * update card data in place, so rows stop jumping under the cursor on every SSE event (the old
+ * behaviour re-sorted at render time, live). Array.sort is stable, so equal blends keep arrival
+ * order and identical inputs render identically.
+ */
+export function partitionedOrder(order: string[], byId: Record<string, AskCard>): string[] {
+  const present = order.filter((id) => byId[id]);
+  const byBlend = (a: string, b: string) => blend(byId[b]) - blend(byId[a]);
+  return [
+    ...present.filter((id) => !byId[id].outsideRequest).sort(byBlend),
+    ...present.filter((id) => byId[id].outsideRequest).sort(byBlend),
+  ];
+}
+
 export function chatReducer(state: State, action: Action): State {
   switch (action.type) {
     case "userTurn": {
@@ -112,7 +132,9 @@ export function chatReducer(state: State, action: Action): State {
       };
     }
     case "phase":
-      return { ...state, status: "streaming", phase: action.data };
+      // A phase boundary is the ONLY mid-stream moment the rows may re-order (see
+      // partitionedOrder) — a settle-then-shuffle rhythm instead of jumping on every event.
+      return { ...state, status: "streaming", phase: action.data, order: partitionedOrder(state.order, state.byId) };
     case "conversation":
       return { ...state, conversationId: action.data.id };
     case "resume":
@@ -160,7 +182,7 @@ export function chatReducer(state: State, action: Action): State {
         : incoming;
       const gained = order.length - state.order.length;
       return {
-        ...state, byId, order, status: "done", shown, appending: false,
+        ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
         reason: state.appending && gained === 0 ? state.reason : action.data.reason,
         exhausted: state.appending ? gained === 0 : false,
       };
@@ -170,14 +192,12 @@ export function chatReducer(state: State, action: Action): State {
   }
 }
 
-function blend(c: AskCard): number {
-  return (c.similarity ?? 0) * 0.35 + ((c.predictedRating ?? 6) / 10) * 0.25 + (c.fit ?? 0.5) * 0.4;
-}
-
 /**
  * Drives a multi-turn Ask Reel conversation: each turn streams from /api/search/ask with the
- * prior transcript + the tmdbIds already shown (so nothing repeats), accumulates cards (re-sorted
- * live by the personal blend), and records the reply. `fresh` starts a new conversation.
+ * prior transcript + the tmdbIds already shown (so nothing repeats), accumulates cards in a
+ * stream-stable order (appended on arrival, re-sorted only at phase boundaries and on done —
+ * see partitionedOrder), and records the reply. Cards flagged outsideRequest are returned
+ * separately as `outsideCards`, never mixed into `cards`. `fresh` starts a new conversation.
  */
 export function useAskReelChat() {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
@@ -267,9 +287,13 @@ export function useAskReelChat() {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const cards = state.order.map((id) => state.byId[id]).filter(Boolean).sort((a, b) => blend(b) - blend(a));
+  // NO render-time sort: `order` is the state's stream-stable order, so rows only ever move when
+  // the reducer re-sorts it (phase / done) — sorting here is what made cards jump on every event.
+  const all = state.order.map((id) => state.byId[id]).filter(Boolean);
+  const cards = all.filter((c) => !c.outsideRequest);
+  const outsideCards = all.filter((c) => c.outsideRequest);
   return {
-    turns: state.turns, status: state.status, phase: state.phase, cards, reason: state.reason,
+    turns: state.turns, status: state.status, phase: state.phase, cards, outsideCards, reason: state.reason,
     send, resume, loadMore, reask, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
     /** True once the last question has been asked, so a retry has something to replay. */
     canRetry: state.lastQuery.length > 0,

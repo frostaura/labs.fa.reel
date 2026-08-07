@@ -9,6 +9,7 @@ import {
   nextBootstrap,
   type ChatTurn,
 } from "./useAskReelChat";
+import type { AskCard } from "./askReelStream";
 
 /**
  * Regression for "reload mid-conversation and lose every refinement". The ?q= seed used to sit in
@@ -177,10 +178,72 @@ describe("conversation payload caps", () => {
   });
 });
 
-/** Minimal card — only the fields the reducer's no-repeat bookkeeping actually reads. */
-function card(n: number) {
+/**
+ * Regression for cards jumping rows on every SSE event. The hook used to re-sort at render time,
+ * so each scored/reranked frame could shuffle the grid under the cursor. The rule these pin:
+ * candidates append in arrival order, data-only events (scored / reranked) never move a row, and
+ * the order re-sorts ONLY at a phase boundary or on done — clean ids first, outside ids after,
+ * each block by the personal blend.
+ */
+describe("chatReducer — stream-stable ordering", () => {
+  // Weak arrives first, strong second: blend(weak) < blend(strong), so any live re-sort would
+  // flip them immediately — which is exactly what must NOT happen between phase frames.
+  const weak = card(1, { similarity: 0.1 });
+  const strong = card(2, { similarity: 0.9 });
+  const streamed = [weak, strong].reduce(
+    (s, c) => chatReducer(s, { type: "candidate", data: c }),
+    chatReducer(initialChatState, { type: "userTurn", message: "tense thriller", fresh: true }),
+  );
+
+  it("appends candidates in arrival order, even when a later card outranks an earlier one", () => {
+    expect(streamed.order).toEqual(["t1", "t2"]);
+  });
+
+  it("does not reorder on scored — a data-only event updates the card in place", () => {
+    const scored = chatReducer(streamed, { type: "scored", data: { titleId: "t2", predictedRating: 9.9 } });
+    expect(scored.order).toEqual(["t1", "t2"]);
+    expect(scored.byId.t2.predictedRating).toBe(9.9);
+  });
+
+  it("does not reorder on reranked either", () => {
+    const reranked = chatReducer(streamed, { type: "reranked", data: { titleId: "t2", fit: 0.99, why: "spot on" } });
+    expect(reranked.order).toEqual(["t1", "t2"]);
+    expect(reranked.byId.t2.fit).toBe(0.99);
+  });
+
+  it("re-sorts by blend when a phase frame arrives", () => {
+    const phased = chatReducer(streamed, { type: "phase", data: { stage: "scoring", found: 2, scored: 0 } });
+    expect(phased.order).toEqual(["t2", "t1"]);
+  });
+
+  it("re-sorts on done", () => {
+    const done = chatReducer(streamed, {
+      type: "done",
+      data: { reason: "2 picks", results: [weak, strong] },
+    });
+    expect(done.order).toEqual(["t2", "t1"]);
+  });
+
+  it("never interleaves outside cards among clean ones, however strong their blend", () => {
+    // The outside card outranks every clean card on blend — the partition must still trail it.
+    const outside = card(3, { similarity: 1, predictedRating: 10, fit: 1, outsideRequest: true });
+    const withOutside = chatReducer(streamed, { type: "candidate", data: outside });
+
+    const phased = chatReducer(withOutside, { type: "phase", data: { stage: "ranking", found: 3, scored: 3 } });
+    expect(phased.order).toEqual(["t2", "t1", "t3"]);
+
+    const done = chatReducer(withOutside, {
+      type: "done",
+      data: { reason: "2 picks matched everything you asked; 1 closest-but-outside shown separately.", results: [weak, strong, outside] },
+    });
+    expect(done.order).toEqual(["t2", "t1", "t3"]);
+  });
+});
+
+/** Minimal card — only the fields the reducer's bookkeeping and ordering actually read. */
+function card(n: number, extra: Partial<AskCard> = {}): AskCard {
   return {
     titleId: `t${n}`, mediaType: "Movie" as const, tmdbId: n, name: `Title ${n}`, year: 2020,
-    posterPath: null, genres: [], similarity: 0.5, predictedRating: 7,
+    posterPath: null, genres: [], similarity: 0.5, predictedRating: 7, ...extra,
   };
 }

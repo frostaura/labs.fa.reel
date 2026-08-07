@@ -22,6 +22,12 @@ export interface AskCard {
   why?: string | null;
   /** Person/filmography queries surface already-watched titles, badged. */
   seen?: boolean;
+  /**
+   * True for a closest-but-outside card: it trips one of the user's exclusions and is shown,
+   * flagged, only because the clean picks could not fill the floor. Rendered in its own section
+   * under the main grid, never interleaved. Absent on older servers (= false).
+   */
+  outsideRequest?: boolean;
 }
 
 export interface PhaseData {
