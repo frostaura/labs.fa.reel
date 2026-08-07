@@ -7,6 +7,7 @@ import {
   useMarkDroppedMutation,
   useUndropMutation,
   useRateTitleMutation,
+  useUnrateTitleMutation,
   useSaveForLaterMutation,
   useUndoNotInterestedMutation,
   useUnsaveForLaterMutation,
@@ -101,6 +102,7 @@ export default function TitleDetail() {
   const { data: title, isLoading } = useGetTitleQuery(args);
 
   const [rate] = useRateTitleMutation();
+  const [unrate] = useUnrateTitleMutation();
   const [notInterested] = useMarkNotInterestedMutation();
   const [undoNotInterested] = useUndoNotInterestedMutation();
   const [markDropped] = useMarkDroppedMutation();
@@ -247,7 +249,24 @@ export default function TitleDetail() {
                               {value}
                             </button>
                           ))}
+                          {title.userState.userRating != null && (
+                            <button
+                              onClick={() => {
+                                unrate(args);
+                                setRatePickerOpen(false);
+                              }}
+                              className="fa-button-ghost text-fa-frost-dim ml-2"
+                              data-testid="clear-rating"
+                            >
+                              Clear rating
+                            </button>
+                          )}
                         </div>
+                        <p className="fa-caption text-fa-frost-dim/70 mt-2">
+                          {title.mediaType === "Movie"
+                            ? "Also logs a play on your Trakt history — cleared if you remove the rating."
+                            : "Ratings sync to Trakt — your episode history is never touched."}
+                        </p>
                       </PopoverContent>
                     </Popover>
 

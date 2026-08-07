@@ -686,6 +686,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("Plays")
                         .HasColumnType("integer");
 
+                    b.Property<DateTime?>("ReelLoggedWatchedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("TitleId")
                         .HasColumnType("uuid");
 

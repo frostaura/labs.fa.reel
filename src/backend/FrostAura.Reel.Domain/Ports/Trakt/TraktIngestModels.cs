@@ -71,6 +71,19 @@ public record TraktSeasonRef(int Number);
 
 public record TraktEpisodeRef(int? Season, int Number, string? Title);
 
+/// <summary>
+/// One /sync/history event. Id is the event id /sync/history/remove deletes by; exactly one of
+/// movie/show is set (episode events carry both episode and show).
+/// </summary>
+public record TraktHistoryItem(
+    long Id,
+    DateTime WatchedAt,
+    string Action,
+    string Type,
+    TraktMovie? Movie,
+    TraktShow? Show,
+    TraktEpisodeRef? Episode);
+
 /// <summary>GET shows/{id}/progress/watched essentials.</summary>
 public record TraktShowProgress(int Aired, int Completed, TraktNextEpisode? NextEpisode);
 

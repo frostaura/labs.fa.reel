@@ -290,7 +290,10 @@ export const api = createApi({
         }
       },
     }),
-    rateTitle: b.mutation<{ userRating: number }, { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }>({
+    rateTitle: b.mutation<
+      { userRating: number; watchedLogged?: boolean },
+      { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }
+    >({
       // titleId rides along only to key the local removal set; it must not leak into the POST body.
       query: ({ mediaType, tmdbId, titleId: _titleId, ...body }) => ({ url: `titles/${mediaType}/${tmdbId}/rating`, method: "POST", body }),
       async onQueryStarted({ titleId, mediaType, tmdbId, rating }, { dispatch, queryFulfilled }) {
@@ -305,6 +308,24 @@ export const api = createApi({
           // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
           // Deliberately does NOT invalidate Feed — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+        } catch {
+          patch.undo();
+        }
+      },
+    }),
+    unrateTitle: b.mutation<{ userRating: null }, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/rating`, method: "DELETE" }),
+      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+        const patch = dispatch(
+          api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
+            draft.userState.userRating = null;
+          })
+        );
+        try {
+          await queryFulfilled;
+          // Un-rating changes taste and (for a Reel-logged movie) reverses the play — same
+          // downstream surfaces as rateTitle.
           dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
         } catch {
           patch.undo();
@@ -543,6 +564,7 @@ export const {
   useRatePersonMutation,
   useUnratePersonMutation,
   useRateTitleMutation,
+  useUnrateTitleMutation,
   useMarkNotInterestedMutation,
   useUndoNotInterestedMutation,
   useMarkDroppedMutation,

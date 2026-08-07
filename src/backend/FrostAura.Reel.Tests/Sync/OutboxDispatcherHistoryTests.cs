@@ -1,0 +1,169 @@
+using System.Text.Json;
+using FrostAura.Reel.Application.Sync;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Ports.Trakt;
+using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Tests.Fakes;
+using FrostAura.Reel.Tests.IntegrationTests;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace FrostAura.Reel.Tests.Sync;
+
+/// <summary>
+/// The history side of the outbox dispatcher, on real Postgres with a recording Trakt fake:
+/// a show AddToHistory entry is a permanent defect (a bare show object on sync/history marks
+/// every aired episode watched — the ~801-fake-plays corruption) and must dead-letter without
+/// any POST; RemoveFromHistory anchors on watched_at ± 5 minutes and removes exactly the event
+/// ids Trakt returns; an entry whose window holds no events is Sent (idempotent removal).
+/// </summary>
+[Collection("postgres")]
+public class OutboxDispatcherHistoryTests(PostgresFixture fixture)
+{
+    private static readonly TimeSpan AnchorWindow = TimeSpan.FromMinutes(5);
+
+    [Fact]
+    public async Task Show_add_to_history_entry_dead_letters_without_posting()
+    {
+        if (!fixture.Available)
+        {
+            return; // no Postgres available — covered in CI's backend-integration job
+        }
+
+        var accountId = await SeedAccountWithConnectionAsync();
+        var entryId = await SeedEntryAsync(accountId, OutboxKind.AddToHistory, MediaType.Show, watchedAt: DateTime.UtcNow);
+
+        var trakt = new StubTraktClient();
+        await RunOnceAsync(accountId, trakt);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var entry = await verify.TraktOutbox.SingleAsync(o => o.Id == entryId);
+        Assert.Equal(OutboxStatus.DeadLetter, entry.Status);
+        Assert.Equal("history writeback is movie-only", entry.Error);
+        Assert.Empty(trakt.SyncBatches); // and above all: nothing was POSTed to sync/history
+    }
+
+    [Fact]
+    public async Task Remove_from_history_reads_the_anchor_window_and_removes_exactly_the_returned_ids()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountWithConnectionAsync();
+        var watchedAt = new DateTime(2026, 8, 1, 20, 15, 0, DateTimeKind.Utc);
+        var traktId = Random.Shared.NextInt64(1, long.MaxValue);
+        var entryId = await SeedEntryAsync(accountId, OutboxKind.RemoveFromHistory, MediaType.Movie, watchedAt, traktId);
+
+        var trakt = new StubTraktClient
+        {
+            History =
+            [
+                new TraktHistoryItem(111, watchedAt, "watch", "movie", null, null, null),
+                new TraktHistoryItem(222, watchedAt.AddSeconds(1), "watch", "movie", null, null, null),
+            ],
+        };
+        await RunOnceAsync(accountId, trakt);
+
+        var call = Assert.Single(trakt.HistoryCalls);
+        Assert.Equal(("movies", traktId, watchedAt - AnchorWindow, watchedAt + AnchorWindow), call);
+
+        var (endpoint, payload) = Assert.Single(trakt.SyncBatches);
+        Assert.Equal("sync/history/remove", endpoint);
+        var ids = JsonSerializer.SerializeToElement(payload).GetProperty("ids")
+            .EnumerateArray().Select(e => e.GetInt64()).ToArray();
+        Assert.Equal([111L, 222L], ids);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var entry = await verify.TraktOutbox.SingleAsync(o => o.Id == entryId);
+        Assert.Equal(OutboxStatus.Sent, entry.Status);
+    }
+
+    [Fact]
+    public async Task Remove_from_history_with_no_events_in_window_is_sent_without_posting()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountWithConnectionAsync();
+        var entryId = await SeedEntryAsync(accountId, OutboxKind.RemoveFromHistory, MediaType.Movie, DateTime.UtcNow);
+
+        var trakt = new StubTraktClient { History = [] };
+        await RunOnceAsync(accountId, trakt);
+
+        Assert.Single(trakt.HistoryCalls);
+        Assert.Empty(trakt.SyncBatches); // nothing to remove ⇒ nothing POSTed — removal is idempotent
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var entry = await verify.TraktOutbox.SingleAsync(o => o.Id == entryId);
+        Assert.Equal(OutboxStatus.Sent, entry.Status);
+    }
+
+    private async Task RunOnceAsync(Guid accountId, StubTraktClient trakt)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var tokenStore = new TraktTokenStore(db, trakt, new IdentityProtector(), NullLogger<TraktTokenStore>.Instance);
+        var dispatcher = new OutboxDispatcher(db, trakt, tokenStore, NullLogger<OutboxDispatcher>.Instance);
+        await dispatcher.RunOnceAsync(CancellationToken.None);
+    }
+
+    private async Task<Guid> SeedAccountWithConnectionAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"outbox-{Guid.NewGuid():N}",
+            CreatedAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            PipelineStageChangedAt = DateTime.UtcNow,
+        };
+        db.Add(account);
+        db.TraktConnections.Add(new TraktConnection
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            AccessTokenEncrypted = "token",
+            RefreshTokenEncrypted = "refresh",
+            ExpiresAt = DateTime.UtcNow.AddDays(30), // far enough out that no refresh path fires
+            Status = ConnectionStatus.Active,
+        });
+        await db.SaveChangesAsync();
+        return account.Id;
+    }
+
+    private async Task<Guid> SeedEntryAsync(
+        Guid accountId, OutboxKind kind, MediaType mediaType, DateTime? watchedAt, long? traktId = null)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var payload = new OutboxDispatcher.OutboxPayload(
+            Guid.NewGuid(), mediaType, TmdbId: Random.Shared.NextInt64(1, long.MaxValue),
+            TraktId: traktId ?? Random.Shared.NextInt64(1, long.MaxValue), Rating: null, WatchedAt: watchedAt);
+        var entry = new TraktOutboxEntry
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            PayloadJson = JsonSerializer.Serialize(payload),
+            EnqueuedAt = DateTime.UtcNow,
+            NextAttemptAt = DateTime.UtcNow.AddMinutes(-1),
+        };
+        db.TraktOutbox.Add(entry);
+        await db.SaveChangesAsync();
+        return entry.Id;
+    }
+
+    /// <summary>The dispatcher never inspects token contents — pass-through beats crypto here.</summary>
+    private sealed class IdentityProtector : ISecretProtector
+    {
+        public string Protect(string plaintext) => plaintext;
+
+        public string Unprotect(string ciphertext) => ciphertext;
+    }
+}

@@ -31,6 +31,13 @@ public class OutboxDispatcher(
         TimeSpan.FromHours(24), TimeSpan.FromHours(24),
     ];
 
+    /// <summary>
+    /// Half-width of the watched_at window used to find the history event a RemoveFromHistory
+    /// entry anchors on — wide enough to absorb clock skew between Reel and Trakt, narrow enough
+    /// to never sweep up an unrelated ingested play.
+    /// </summary>
+    private static readonly TimeSpan RemoveAnchorWindow = TimeSpan.FromMinutes(5);
+
     public record OutboxPayload(
         Guid TitleId,
         [property: JsonConverter(typeof(JsonStringEnumConverter))] MediaType MediaType,
@@ -151,6 +158,30 @@ public class OutboxDispatcher(
                 return;
             }
 
+            if (kind == OutboxKind.RemoveFromHistory)
+            {
+                await DispatchRemoveFromHistoryAsync(token, sendable, ct);
+                return;
+            }
+
+            if (kind == OutboxKind.AddToHistory)
+            {
+                // Shows must NEVER ride sync/history: Trakt treats a bare show object as "mark
+                // every aired episode watched", fabricating hundreds of plays from one tap.
+                // History write-back is movie-only, so a show entry here is a permanent defect —
+                // dead-letter it rather than retrying a corruption.
+                foreach (var (entry, _) in sendable.Where(p => p.Payload.MediaType == MediaType.Show))
+                {
+                    FailPermanently(entry, "history writeback is movie-only");
+                }
+
+                sendable = sendable.Where(p => p.Payload.MediaType == MediaType.Movie).ToList();
+                if (sendable.Count == 0)
+                {
+                    return;
+                }
+            }
+
             object BatchBody(bool withRating, bool withWatchedAt) => new
             {
                 movies = sendable.Where(p => p.Payload.MediaType == MediaType.Movie)
@@ -188,9 +219,7 @@ public class OutboxDispatcher(
             var now = DateTime.UtcNow;
             foreach (var (entry, _) in sendable)
             {
-                entry.Status = OutboxStatus.Sent;
-                entry.SentAt = now;
-                entry.Error = null;
+                MarkSent(entry, now);
             }
         }
         catch (HttpRequestException ex) when (allowRefresh && ex.StatusCode == HttpStatusCode.Unauthorized)
@@ -205,6 +234,52 @@ public class OutboxDispatcher(
             {
                 Fail(entry, ex.Message);
             }
+        }
+    }
+
+    /// <summary>
+    /// Removes exactly the history events a Reel-logged play created: reads the item's history
+    /// inside watched_at ± <see cref="RemoveAnchorWindow"/>, then deletes those event ids. An
+    /// entry with no anchor (null WatchedAt) or no surviving events is Sent — removal is
+    /// idempotent. Ingested plays outside the window are untouchable by construction.
+    /// </summary>
+    private async Task DispatchRemoveFromHistoryAsync(
+        string token, List<(TraktOutboxEntry Entry, OutboxPayload Payload)> sendable, CancellationToken ct)
+    {
+        var ids = new List<long>();
+        var anchored = new List<TraktOutboxEntry>();
+        foreach (var (entry, payload) in sendable)
+        {
+            if (payload.WatchedAt is not { } watchedAt)
+            {
+                MarkSent(entry, DateTime.UtcNow); // nothing to anchor on — nothing to remove
+                continue;
+            }
+
+            var type = payload.MediaType == MediaType.Movie ? "movies" : "shows";
+            var history = await trakt.GetHistoryAsync(
+                token, type, payload.TraktId!.Value,
+                watchedAt - RemoveAnchorWindow, watchedAt + RemoveAnchorWindow, RatePriority.Interactive, ct);
+            if (history.Count == 0)
+            {
+                MarkSent(entry, DateTime.UtcNow); // already gone on Trakt — idempotent
+                continue;
+            }
+
+            ids.AddRange(history.Select(h => h.Id));
+            anchored.Add(entry);
+        }
+
+        // /sync/history/remove caps at 100 ids per call — chunk to stay under it.
+        foreach (var chunk in ids.Chunk(100))
+        {
+            await trakt.PostSyncBatchAsync(token, "sync/history/remove", new { ids = chunk }, RatePriority.Interactive, ct);
+        }
+
+        var now = DateTime.UtcNow;
+        foreach (var entry in anchored)
+        {
+            MarkSent(entry, now);
         }
     }
 
@@ -257,6 +332,21 @@ public class OutboxDispatcher(
             RatePriority.Interactive, ct);
         connection.ManagedListTraktId = listId;
         return listId;
+    }
+
+    private static void MarkSent(TraktOutboxEntry entry, DateTime now)
+    {
+        entry.Status = OutboxStatus.Sent;
+        entry.SentAt = now;
+        entry.Error = null;
+    }
+
+    /// <summary>A permanent defect (not a transient fault) — dead-letter immediately, no backoff.</summary>
+    private static void FailPermanently(TraktOutboxEntry entry, string error)
+    {
+        entry.AttemptCount++;
+        entry.Status = OutboxStatus.DeadLetter;
+        entry.Error = error;
     }
 
     private static void Fail(TraktOutboxEntry entry, string error)

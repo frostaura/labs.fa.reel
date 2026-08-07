@@ -39,6 +39,13 @@ public interface ITraktClient
     /// <summary>The 1-call delta gate: raw /sync/last_activities JSON for snapshot diffing.</summary>
     Task<string> GetLastActivitiesRawAsync(string accessToken, RatePriority priority, CancellationToken ct = default);
 
+    /// <summary>
+    /// History events for one item — /sync/history/{type}/{traktId} (type is "movies" | "shows"),
+    /// optionally windowed by start_at/end_at, walked page by page like every other collection.
+    /// Each event carries the id needed for a surgical /sync/history/remove.
+    /// </summary>
+    Task<IReadOnlyList<TraktHistoryItem>> GetHistoryAsync(string accessToken, string type, long traktId, DateTime? startAt, DateTime? endAt, RatePriority priority, CancellationToken ct = default);
+
     /// <summary>Resolves a TMDB id to its Trakt id (discovery titles lack one until write-back).</summary>
     Task<long?> ResolveTraktIdByTmdbAsync(string accessToken, long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default);
 

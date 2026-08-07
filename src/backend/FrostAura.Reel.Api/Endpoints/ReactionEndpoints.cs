@@ -31,116 +31,12 @@ public static class ReactionEndpoints
             string mediaType, long tmdbId, RateRequest request,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
             OnlineResidualModel residual, CancellationToken ct) =>
-        {
-            if (request.Rating is < 1 or > 10)
-            {
-                return Results.BadRequest(new { error = "rating must be 1-10" });
-            }
-
-            var accountId = accountContext.AccountId!.Value;
-            var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
-            if (title is null)
-            {
-                return Results.NotFound();
-            }
-
-            var now = DateTime.UtcNow;
-            var subjectType = title.MediaType == MediaType.Movie ? RatingSubjectType.Movie : RatingSubjectType.Show;
-
-            var rating = await db.UserRatings.FirstOrDefaultAsync(
-                r => r.AccountId == accountId && r.TitleId == title.Id && r.SubjectType == subjectType
-                    && r.SeasonNumber == 0 && r.EpisodeNumber == 0, ct);
-            if (rating is null)
-            {
-                rating = new UserRating
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = title.Id,
-                    SubjectType = subjectType,
-                };
-                db.UserRatings.Add(rating);
-            }
-
-            rating.Rating = request.Rating;
-            rating.RatedAt = now;
-            rating.SyncedAt = now;
-            rating.Source = RatingSource.Reel;
-
-            Enqueue(db, accountId, OutboxKind.AddRating, title, request.Rating, null);
-
-            if (request.MarkWatched)
-            {
-                var watched = await db.WatchedTitles.FirstOrDefaultAsync(
-                    w => w.AccountId == accountId && w.TitleId == title.Id, ct);
-                if (watched is null)
-                {
-                    watched = new WatchedTitle
-                    {
-                        Id = Guid.NewGuid(),
-                        AccountId = accountId,
-                        TitleId = title.Id,
-                        FirstSyncedAt = now,
-                    };
-                    db.WatchedTitles.Add(watched);
-                }
-
-                watched.Plays += 1;
-                watched.LastWatchedAt = now;
-                watched.IsFullyWatched = true; // "seen it" is the user's word — eligibility honours it
-                watched.UpdatedAt = now;
-
-                Enqueue(db, accountId, OutboxKind.AddToHistory, title, null, now);
-
-                // A watched save leaves the live queue automatically.
-                var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
-                    m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
-                if (listItem is not null)
-                {
-                    listItem.RemovedAt = now;
-                    listItem.RemovalReason = ListRemovalReason.Watched;
-                    Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
-                }
-            }
-
-            // Teach the online residual head the fresh label FIRST (target = the rating), so the
-            // rebuild enqueued next already scores with the updated correction.
-            await residual.ObserveAsync(accountId, title.Id, request.Rating, 1.0, ct);
-
-            // A fresh rating is the strongest taste signal there is — regenerate the feed now (reuses
-            // the Active model) so the picks reflect it within seconds, not at the nightly build.
-            await feedRefresh.RequestRebuildAsync(accountId, "in-app rating", ct);
-
-            await db.SaveChangesAsync(ct);
-            return Results.Ok(new { userRating = rating.Rating, isFullyWatched = request.MarkWatched });
-        });
+            await RateAsync(mediaType, tmdbId, request, db, accountContext.AccountId!.Value, feedRefresh, residual, ct));
 
         group.MapDelete("/rating", async (
             string mediaType, long tmdbId,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh, CancellationToken ct) =>
-        {
-            var accountId = accountContext.AccountId!.Value;
-            var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
-            if (title is null)
-            {
-                return Results.NotFound();
-            }
-
-            var subjectType = title.MediaType == MediaType.Movie ? RatingSubjectType.Movie : RatingSubjectType.Show;
-            var rating = await db.UserRatings.FirstOrDefaultAsync(
-                r => r.AccountId == accountId && r.TitleId == title.Id && r.SubjectType == subjectType
-                    && r.SeasonNumber == 0 && r.EpisodeNumber == 0, ct);
-            if (rating is not null)
-            {
-                db.UserRatings.Remove(rating);
-                Enqueue(db, accountId, OutboxKind.RemoveRating, title, null, null);
-                // Retracting a rating both changes taste and makes the title eligible again — rebuild.
-                await feedRefresh.RequestRebuildAsync(accountId, "rating retracted", ct);
-                await db.SaveChangesAsync(ct);
-            }
-
-            return Results.Ok(new { userRating = (short?)null });
-        });
+            await RemoveRatingAsync(mediaType, tmdbId, db, accountContext.AccountId!.Value, feedRefresh, ct));
 
         // ── Not interested / save for later ─────────────────────────────────────────────
         group.MapPost("/reactions/not_interested", async (
@@ -327,6 +223,176 @@ public static class ReactionEndpoints
 
             return Results.Ok(new { revoked = kind });
         });
+    }
+
+    /// <summary>
+    /// The "seen it + rate" gesture. Idempotent on the same value (a duplicate click must not
+    /// re-send anything), and Trakt history is movie-only: a show rating never touches watched
+    /// state — writing a bare show to sync/history marks EVERY aired episode watched. Public so
+    /// integration tests exercise the exact endpoint semantics without an HTTP host.
+    /// </summary>
+    public static async Task<IResult> RateAsync(
+        string mediaType, long tmdbId, RateRequest request,
+        IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
+        OnlineResidualModel residual, CancellationToken ct)
+    {
+        if (request.Rating is < 1 or > 10)
+        {
+            return Results.BadRequest(new { error = "rating must be 1-10" });
+        }
+
+        var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
+        if (title is null)
+        {
+            return Results.NotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        var subjectType = title.MediaType == MediaType.Movie ? RatingSubjectType.Movie : RatingSubjectType.Show;
+
+        var rating = await db.UserRatings.FirstOrDefaultAsync(
+            r => r.AccountId == accountId && r.TitleId == title.Id && r.SubjectType == subjectType
+                && r.SeasonNumber == 0 && r.EpisodeNumber == 0, ct);
+        var watched = await db.WatchedTitles.FirstOrDefaultAsync(
+            w => w.AccountId == accountId && w.TitleId == title.Id, ct);
+
+        if (rating is not null && rating.Rating == request.Rating)
+        {
+            // Same value already stored — return current state and change NOTHING: no outbox
+            // rows, no play increments, no residual observation, no feed rebuild.
+            return Results.Ok(new
+            {
+                userRating = rating.Rating,
+                isFullyWatched = watched?.IsFullyWatched ?? false,
+                watchedLogged = false,
+            });
+        }
+
+        if (rating is null)
+        {
+            rating = new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                SubjectType = subjectType,
+            };
+            db.UserRatings.Add(rating);
+        }
+
+        rating.Rating = request.Rating;
+        rating.RatedAt = now;
+        rating.SyncedAt = now;
+        rating.Source = RatingSource.Reel;
+
+        Enqueue(db, accountId, OutboxKind.AddRating, title, request.Rating, null);
+
+        // Trakt history write-back is movie-only, and only for a movie Reel has no play for yet —
+        // an already-watched movie (plays from ingest) gets the rating alone. The one play Reel
+        // logs is anchored on ReelLoggedWatchedAt so un-rating can reverse exactly that play.
+        var logWatched = title.MediaType == MediaType.Movie && request.MarkWatched;
+        var watchedLogged = false;
+        if (logWatched && (watched is null || watched.Plays == 0))
+        {
+            if (watched is null)
+            {
+                watched = new WatchedTitle
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    TitleId = title.Id,
+                    FirstSyncedAt = now,
+                };
+                db.WatchedTitles.Add(watched);
+            }
+
+            watched.Plays = 1;
+            watched.LastWatchedAt = now;
+            watched.IsFullyWatched = true; // "seen it" is the user's word — eligibility honours it
+            watched.ReelLoggedWatchedAt = now;
+            watched.UpdatedAt = now;
+            watchedLogged = true;
+
+            Enqueue(db, accountId, OutboxKind.AddToHistory, title, null, now);
+
+            // A watched save leaves the live queue automatically.
+            var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
+                m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
+            if (listItem is not null)
+            {
+                listItem.RemovedAt = now;
+                listItem.RemovalReason = ListRemovalReason.Watched;
+                Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
+            }
+        }
+
+        // Teach the online residual head the fresh label FIRST (target = the rating), so the
+        // rebuild enqueued next already scores with the updated correction.
+        await residual.ObserveAsync(accountId, title.Id, request.Rating, 1.0, ct);
+
+        // A fresh rating is the strongest taste signal there is — regenerate the feed now (reuses
+        // the Active model) so the picks reflect it within seconds, not at the nightly build.
+        await feedRefresh.RequestRebuildAsync(accountId, "in-app rating", ct);
+
+        await db.SaveChangesAsync(ct);
+        return Results.Ok(new
+        {
+            userRating = rating.Rating,
+            isFullyWatched = watched?.IsFullyWatched ?? false,
+            watchedLogged,
+        });
+    }
+
+    /// <summary>
+    /// Un-rate, reversibly: alongside the rating removal, a movie play that Reel itself logged
+    /// (anchored on ReelLoggedWatchedAt) is reversed — locally and via RemoveFromHistory on
+    /// Trakt. Ingested plays are never touched. Public for integration tests, like RateAsync.
+    /// </summary>
+    public static async Task<IResult> RemoveRatingAsync(
+        string mediaType, long tmdbId, IReelDbContext db, Guid accountId,
+        FeedRefreshCoordinator feedRefresh, CancellationToken ct)
+    {
+        var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
+        if (title is null)
+        {
+            return Results.NotFound();
+        }
+
+        var subjectType = title.MediaType == MediaType.Movie ? RatingSubjectType.Movie : RatingSubjectType.Show;
+        var rating = await db.UserRatings.FirstOrDefaultAsync(
+            r => r.AccountId == accountId && r.TitleId == title.Id && r.SubjectType == subjectType
+                && r.SeasonNumber == 0 && r.EpisodeNumber == 0, ct);
+        if (rating is not null)
+        {
+            db.UserRatings.Remove(rating);
+            Enqueue(db, accountId, OutboxKind.RemoveRating, title, null, null);
+
+            if (title.MediaType == MediaType.Movie)
+            {
+                var watched = await db.WatchedTitles.FirstOrDefaultAsync(
+                    w => w.AccountId == accountId && w.TitleId == title.Id, ct);
+                if (watched?.ReelLoggedWatchedAt is { } loggedAt)
+                {
+                    Enqueue(db, accountId, OutboxKind.RemoveFromHistory, title, null, loggedAt);
+                    if (watched.Plays <= 1)
+                    {
+                        db.WatchedTitles.Remove(watched); // the Reel-logged play was the only one
+                    }
+                    else
+                    {
+                        watched.Plays -= 1;
+                        watched.ReelLoggedWatchedAt = null;
+                        watched.UpdatedAt = DateTime.UtcNow;
+                    }
+                }
+            }
+
+            // Retracting a rating both changes taste and makes the title eligible again — rebuild.
+            await feedRefresh.RequestRebuildAsync(accountId, "rating retracted", ct);
+            await db.SaveChangesAsync(ct);
+        }
+
+        return Results.Ok(new { userRating = (short?)null });
     }
 
     private static void Enqueue(IReelDbContext db, Guid accountId, OutboxKind kind, Title title, short? rating, DateTime? watchedAt)

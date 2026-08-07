@@ -109,6 +109,34 @@ public class TraktClient(
     public async Task<IReadOnlyList<TraktRatingItem>> GetRatingsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
         await GetAllPagesAsync<TraktRatingItem>("sync/ratings?extended=full", WatchedPageLimit, accessToken, priority, ct);
 
+    /// <summary>Trakt caps /sync/history at 100 per page, matching the /sync/history/remove batch size.</summary>
+    private const int HistoryPageLimit = 100;
+
+    // /sync/history/{type}/{id} is the surgical read that makes history removal safe: it returns
+    // the individual event ids inside a watched_at window, so the remove endpoint can delete
+    // exactly the plays Reel logged and nothing else. Paginated like every other collection.
+    public async Task<IReadOnlyList<TraktHistoryItem>> GetHistoryAsync(string accessToken, string type, long traktId, DateTime? startAt, DateTime? endAt, RatePriority priority, CancellationToken ct = default)
+    {
+        var path = $"sync/history/{type}/{traktId}";
+        var query = new List<string>();
+        if (startAt is { } start)
+        {
+            query.Add($"start_at={Uri.EscapeDataString(start.ToString("O"))}");
+        }
+
+        if (endAt is { } end)
+        {
+            query.Add($"end_at={Uri.EscapeDataString(end.ToString("O"))}");
+        }
+
+        if (query.Count > 0)
+        {
+            path = $"{path}?{string.Join('&', query)}";
+        }
+
+        return await GetAllPagesAsync<TraktHistoryItem>(path, HistoryPageLimit, accessToken, priority, ct);
+    }
+
     public async Task<TraktShowProgress?> GetShowProgressAsync(string accessToken, long showTraktId, RatePriority priority, CancellationToken ct = default) =>
         await GetApiAsync<TraktShowProgress>($"shows/{showTraktId}/progress/watched?hidden=false&specials=false", accessToken, priority, ct);
 
