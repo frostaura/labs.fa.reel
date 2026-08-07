@@ -58,7 +58,13 @@ public class BuildFeedJobHandler(
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildFeed requires an account.");
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var artifact = await db.ModelArtifacts
-            .FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active, ct);
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            // Newest-first rather than an unordered FirstOrDefault: a filtered unique
+            // index makes two Active artifacts unrepresentable today, but an unordered
+            // read would silently start flipping predictions between models the moment
+            // that index changed. Deterministic by construction costs nothing here.
+            .OrderByDescending(a => a.Version)
+            .FirstOrDefaultAsync(ct);
         if (artifact is null)
         {
             logger.LogWarning("BuildFeed skipped for {AccountId}: no active model artifact.", accountId);

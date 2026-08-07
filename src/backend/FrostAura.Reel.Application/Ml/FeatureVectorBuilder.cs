@@ -348,7 +348,18 @@ public class FeatureVectorBuilder(IReelDbContext db)
             vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, self));
 
             // ── Show engagement ────────────────────────────────────────────────────────
-            vector[s++] = (float)taste.ShowEngagement.GetValueOrDefault(id, 0m);
+            // showEngagement is the mean of the user's own episode/season ratings for THIS show, so
+            // it is non-zero only for a show they have already watched — and the founder-locked
+            // zero-interaction-footprint rule guarantees a scored candidate never has. It is
+            // therefore always 0 at serving time and only ever non-zero during training: the same
+            // train/serve skew as the embedding and affinity leaks, just quieter, because a
+            // train-only signal teaches the model to lean on something that can never fire in
+            // production.
+            //
+            // Held at 0 on both paths rather than deleted, so v2 feature indices stay put — the
+            // slot is dead weight FastTree will simply never split on, and removing it is a
+            // schema-version decision to take deliberately, not a side effect of this fix.
+            vector[s++] = 0f;
 
             // ── LLM attributes ─────────────────────────────────────────────────────────
             if (attributes.TryGetValue(id, out var attrs))

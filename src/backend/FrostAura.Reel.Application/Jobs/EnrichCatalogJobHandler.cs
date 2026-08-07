@@ -303,7 +303,22 @@ public class EnrichCatalogJobHandler(
                 Priority = 1,
                 EnqueuedAt = DateTime.UtcNow,
             });
-            await db.SaveChangesAsync(ct);
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex) when (TrainJobHandler.IsUniqueViolation(ex))
+            {
+                // Check-then-insert, and this is the loser of the race: a concurrent enqueue (the
+                // manual /model/train endpoint, or the nightly reconcile) already queued a Train
+                // job, and the partial unique index on SyncJobs(AccountId, Kind) WHERE Status IN
+                // ('Pending','Running') correctly refused the duplicate. Losing that race means the
+                // work is already scheduled, which is exactly the desired end state — so it is not
+                // an error to propagate and fail the enrich job over.
+                db.SyncJobs.Local.Clear();
+                logger.LogDebug("Train already queued for {AccountId} by a concurrent enqueue.", accountId);
+            }
         }
     }
 

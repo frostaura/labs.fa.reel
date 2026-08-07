@@ -82,7 +82,13 @@ public sealed class OnlineResidualModel(
         {
             // No base model yet ⇒ nothing to correct.
             var artifact = await db.ModelArtifacts
-                .FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active, ct);
+                .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            // Newest-first rather than an unordered FirstOrDefault: a filtered unique
+            // index makes two Active artifacts unrepresentable today, but an unordered
+            // read would silently start flipping predictions between models the moment
+            // that index changed. Deterministic by construction costs nothing here.
+            .OrderByDescending(a => a.Version)
+            .FirstOrDefaultAsync(ct);
             if (artifact is null)
             {
                 return;
