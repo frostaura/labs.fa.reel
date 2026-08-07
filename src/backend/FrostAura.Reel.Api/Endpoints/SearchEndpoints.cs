@@ -36,14 +36,24 @@ public static class SearchEndpoints
             var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
 
             // ContentFilteredTitles (not EligibleTitles): watched titles legitimately appear here
-            // badged — but every exclusion still applies, airtight. Over-fetch by popularity, then
-            // apply the in-memory maturity gate (certifications don't order in SQL) and keep 8, so a
+            // badged — but every exclusion still applies, airtight. Over-fetch, then apply the
+            // in-memory maturity gate (certifications don't order in SQL) and keep 8, so a
             // restricted profile still lands a full shortlist instead of a starved one.
+            //
+            // Match on substring OR trigram similarity. Substring alone is exact-spelling-only:
+            // "inceptoin" and "spiderman" both returned literally nothing, because ILIKE '%term%'
+            // cannot see past a transposed letter or a missing hyphen. pg_trgm has been installed
+            // and declared in every migration since the project started — and is half the reason
+            // this project deviates from the house postgres image to pgvector/pgvector:pg16 — but
+            // nothing ever queried it. Exact substring still wins the ordering, so a correctly
+            // spelled query is unaffected; fuzzy matches only fill in behind it.
             var matched = await eligibility.ContentFilteredTitles(accountId)
-                .Where(t => EF.Functions.ILike(t.Name, $"%{term}%"))
+                .Where(t => EF.Functions.ILike(t.Name, $"%{term}%") || EF.Functions.TrigramsAreSimilar(t.Name, term))
                 .Where(t => !db.UserTitleReactions.Any(r =>
                     r.AccountId == accountId && r.TitleId == t.Id && r.Kind == ReactionKind.NotInterested && r.RevokedAt == null))
-                .OrderByDescending(t => t.TmdbPopularity)
+                .OrderByDescending(t => EF.Functions.ILike(t.Name, $"%{term}%"))
+                .ThenByDescending(t => EF.Functions.TrigramsSimilarity(t.Name, term))
+                .ThenByDescending(t => t.TmdbPopularity)
                 .Take(24)
                 .ToListAsync(ct);
 
@@ -75,115 +85,14 @@ public static class SearchEndpoints
                 .ToList();
 
             var people = await db.Persons
-                .Where(p => EF.Functions.ILike(p.Name, $"%{term}%"))
+                .Where(p => EF.Functions.ILike(p.Name, $"%{term}%") || EF.Functions.TrigramsAreSimilar(p.Name, term))
+                .OrderByDescending(p => EF.Functions.ILike(p.Name, $"%{term}%"))
+                .ThenByDescending(p => EF.Functions.TrigramsSimilarity(p.Name, term))
                 .Take(4)
                 .Select(p => new { personId = p.Id, name = p.Name, knownFor = p.KnownForDepartment, profilePath = p.ProfilePath })
                 .ToListAsync(ct);
 
             return Results.Ok(new { titles, people });
-        });
-
-        // Natural-language search: embedding-ranked when the OpenAI key is configured,
-        // otherwise the typo-tolerant lexical engine — Ask Reel always answers.
-        group.MapPost("/semantic", async (
-            SemanticRequest request,
-            IReelDbContext db,
-            IAccountContext accountContext,
-            EligibilityQueryBuilder eligibility,
-            LexicalSearchService lexical,
-            IEmbeddingProvider embeddings,
-            OnDemandScorer scorer,
-            CancellationToken ct) =>
-        {
-            if (string.IsNullOrWhiteSpace(request.Query))
-            {
-                return Results.BadRequest(new { error = "query is required" });
-            }
-
-            var accountId = accountContext.AccountId!.Value;
-            var minPredicted = await MinPredictedFloorAsync(db, accountId, ct);
-            var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
-            var now = DateTime.UtcNow;
-
-            if (embeddings.IsAvailable && await db.TitleEmbeddings.AnyAsync(ct))
-            {
-                var vectors = await embeddings.EmbedAsync([request.Query.Trim()], ct);
-                var queryVector = new Vector(vectors[0]);
-
-                // Restrict the kNN to ELIGIBLE titles BEFORE ordering by cosine. The catalog is
-                // dominated by the user's seen library, so a "top-N then filter to unseen" query
-                // returns almost nothing — the unseen titles rarely crack the global top-N.
-                var eligibleIds = eligibility.EligibleTitles(accountId).Select(t => t.Id);
-
-                // Over-fetch to 32: the in-memory maturity gate trims below this before we keep 24, so
-                // a restricted profile isn't starved. Pull the Title entity so the gate + live scorer
-                // have everything they need without a second round-trip.
-                var hits = await db.TitleEmbeddings
-                    .Where(e => eligibleIds.Contains(e.TitleId))
-                    .OrderBy(e => e.Embedding.CosineDistance(queryVector))
-                    .Take(32)
-                    .Join(db.Titles, e => e.TitleId, t => t.Id, (e, t) => new
-                    {
-                        Title = t,
-                        similarity = 1 - e.Embedding.CosineDistance(queryVector),
-                    })
-                    .ToListAsync(ct);
-
-                var safe = hits
-                    .Where(h => EligibilityQueryBuilder.PassesMaturity(h.Title, maturityCeiling))
-                    .Take(24)
-                    .ToList();
-
-                // Score the survivors LIVE against the Active artifact — no more stale TitleScores or
-                // null→6.0 guessing; an unscored title (no model yet) still shows, just unranked.
-                var predictedById = await scorer.ScoreAsync(accountId, safe.Select(h => h.Title.Id).ToList(), now, ct);
-
-                var ranked = safe
-                    .Select(h => new
-                    {
-                        titleId = h.Title.Id,
-                        mediaType = h.Title.MediaType.ToString(),
-                        tmdbId = h.Title.TmdbId,
-                        name = h.Title.Name,
-                        year = h.Title.Year,
-                        posterPath = h.Title.PosterPath,
-                        genres = h.Title.Genres,
-                        similarity = h.similarity,
-                        predictedRating = predictedById.TryGetValue(h.Title.Id, out var p) ? (decimal?)p : null,
-                    })
-                    .Where(h => h.predictedRating == null || h.predictedRating >= minPredicted)
-                    .OrderByDescending(h => (h.similarity * 0.6) + ((double)(h.predictedRating ?? 6m) / 10d * 0.4))
-                    .ToList();
-
-                return Results.Ok(new { available = true, mode = "semantic", reason = (string?)null, results = (object)ranked });
-            }
-
-            // Lexical engine — concept/genre/keyword matching with typo tolerance (maturity gate
-            // applied inside the service). Score the hits live, same as the embedding path.
-            var lexicalHits = await lexical.SearchAsync(accountId, request.Query, 24, ct);
-            var titleIds = lexicalHits.Select(h => h.Title.Id).ToList();
-            var scores = await scorer.ScoreAsync(accountId, titleIds, now, ct);
-
-            var maxScore = lexicalHits.Count > 0 ? lexicalHits.Max(h => h.MatchScore) : 1d;
-            var results = lexicalHits
-                .Select(h => new
-                {
-                    titleId = h.Title.Id,
-                    mediaType = h.Title.MediaType.ToString(),
-                    tmdbId = h.Title.TmdbId,
-                    name = h.Title.Name,
-                    year = h.Title.Year,
-                    posterPath = h.Title.PosterPath,
-                    genres = h.Title.Genres,
-                    similarity = Math.Round(h.MatchScore / maxScore, 3),
-                    matchedOn = h.MatchedOn,
-                    predictedRating = scores.TryGetValue(h.Title.Id, out var predicted) ? (decimal?)predicted : null,
-                })
-                .Where(h => h.predictedRating == null || h.predictedRating >= minPredicted)
-                .OrderByDescending(h => (h.similarity * 0.55) + ((double)(h.predictedRating ?? 6m) / 10d * 0.45))
-                .ToList();
-
-            return Results.Ok(new { available = true, mode = "lexical", reason = (string?)null, results = (object)results });
         });
 
         // Live "Ask Reel": pulls matching titles from TMDB on the fly, embeds + personally scores
@@ -250,18 +159,24 @@ public static class SearchEndpoints
                 db.SearchConversations.Add(conversation);
             }
 
+            // A continuation replays a question that is already in the transcript, so it must not
+            // be recorded again — only its results differ.
             if (conversation is not null)
             {
                 conversation.LastTurnAt = now;
-                db.SearchTurns.Add(new Domain.Search.SearchTurn
+                if (!request.Continuation)
                 {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    ConversationId = conversation.Id,
-                    Role = "user",
-                    Text = message,
-                    CreatedAt = now,
-                });
+                    db.SearchTurns.Add(new Domain.Search.SearchTurn
+                    {
+                        Id = Guid.NewGuid(),
+                        AccountId = accountId,
+                        ConversationId = conversation.Id,
+                        Role = "user",
+                        Text = message,
+                        CreatedAt = now,
+                    });
+                }
+
                 await db.SaveChangesAsync(ct);
                 await emit("conversation", new { id = conversation.Id });
             }
@@ -283,7 +198,7 @@ public static class SearchEndpoints
                 // client navigated away mid-stream — normal teardown
             }
 
-            if (conversation is not null && assistantText is { Length: > 0 })
+            if (conversation is not null && !request.Continuation && assistantText is { Length: > 0 })
             {
                 db.SearchTurns.Add(new Domain.Search.SearchTurn
                 {
@@ -322,32 +237,21 @@ public static class SearchEndpoints
         });
     }
 
-    public record SemanticRequest(string Query);
 
-    public record AskTurn(string? Role, string? Text);
-
-    /// <summary>
-    /// <paramref name="MediaTypes"/> carries the UI's movie/TV toggle. It has to reach the server:
-    /// filtering the returned cards client-side meant a turn that surfaced only shows rendered
-    /// nothing under "Movies", with the footer still cheerfully reporting the unfiltered count.
-    /// Values are "movie"/"tv"; empty or absent means no constraint.
-    /// </summary>
     public record AskRequest(
         string Query,
         List<AskTurn>? History,
         List<long>? ShownTmdbIds,
         Guid? ConversationId,
-        List<string>? MediaTypes);
+        List<string>? MediaTypes,
+        // True when this request is a continuation of a question the user already asked — an
+        // infinite-scroll page, or a re-ask triggered by toggling the media filter. The endpoint
+        // used to have no way to tell those from a genuine new question, so it wrote a fresh
+        // user+assistant SearchTurn pair for every scroll page and every filter click. The user
+        // never saw that duplication live (the client hides it), but the persisted transcript
+        // filled with repeats and the resumed conversation showed the same question over and over.
+        bool Continuation = false);
 
-    /// <summary>The account's MinPredictedRating floor (0 = off) — recommendation surfaces only.</summary>
-    public static async Task<decimal> MinPredictedFloorAsync(IReelDbContext db, Guid accountId, CancellationToken ct)
-    {
-        var raw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
-            .Select(f => f.Value)
-            .FirstOrDefaultAsync(ct);
-        return raw is not null && decimal.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, out var value)
-            ? Math.Clamp(value, 0m, 10m)
-            : 0m;
-    }
+    public record AskTurn(string? Role, string? Text);
+
 }

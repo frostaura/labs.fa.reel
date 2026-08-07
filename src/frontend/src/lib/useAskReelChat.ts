@@ -215,7 +215,7 @@ export function useAskReelChat() {
           : { type: "userTurn", message: msg, fresh },
     );
 
-    streamAskReel({ query: msg, history, shownTmdbIds, conversationId, mediaTypes: mediaRef.current }, (ev) => {
+    streamAskReel({ query: msg, history, shownTmdbIds, conversationId, mediaTypes: mediaRef.current, continuation: kind !== "turn" }, (ev) => {
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data }); break;
         case "conversation": dispatch({ type: "conversation", data: ev.data }); break;

@@ -19,26 +19,6 @@ export interface TypeaheadPayload {
   people: { personId: string; name: string; knownFor: string | null; profilePath: string | null }[];
 }
 
-export interface SemanticResult {
-  titleId: string;
-  mediaType: "Movie" | "Show";
-  tmdbId: number | null;
-  name: string;
-  year: number | null;
-  posterPath: string | null;
-  genres: string[];
-  similarity: number;
-  matchedOn?: string[];
-  predictedRating: number | null;
-}
-
-export interface SemanticPayload {
-  available: boolean;
-  mode?: "semantic" | "lexical";
-  reason: string | null;
-  results: SemanticResult[];
-}
-
 export interface FiltersPayload {
   excludeGenres: string[];
   includeGenres: string[];
@@ -474,9 +454,6 @@ export const api = createApi({
       query: (q) => `search/typeahead?q=${encodeURIComponent(q)}`,
       keepUnusedDataFor: 30,
     }),
-    searchSemantic: b.query<SemanticPayload, string>({
-      query: (query) => ({ url: "search/semantic", method: "POST", body: { query } }),
-    }),
     getModelMetrics: b.query<ModelMetrics, void>({
       query: () => "metrics/model",
       providesTags: ["Lab"],
@@ -543,7 +520,6 @@ export const {
   useGetSavedQuery,
   useGetTasteDnaQuery,
   useSearchTypeaheadQuery,
-  useSearchSemanticQuery,
   useGetFiltersQuery,
   useUpdateFiltersMutation,
   useGetPreferenceTagsQuery,

@@ -72,6 +72,13 @@ export interface AskReelRequest {
    * rendered an empty screen under "Movies".
    */
   mediaTypes?: string[];
+  /**
+   * True when this replays a question already in the transcript — an infinite-scroll page or a
+   * re-ask from the media toggle. The server writes a user+assistant SearchTurn pair per request,
+   * so without this every scroll page and every filter click permanently duplicated the question
+   * in the stored conversation, even though the client hides the repeat on screen.
+   */
+  continuation?: boolean;
 }
 
 /** Streams /api/search/ask, invoking onEvent per parsed SSE frame. Resolves when the stream ends. */
