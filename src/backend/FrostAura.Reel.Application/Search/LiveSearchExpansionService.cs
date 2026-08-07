@@ -160,6 +160,18 @@ public sealed class LiveSearchExpansionService(
                 ? eligibility.ContentFilteredTitles(accountId)
                 : eligibility.EligibleTitles(accountId);
 
+            // ── Resolve reference titles ("like Blade Runner but more emotional") ────────────
+            // Each named comparison resolves to a catalogue title with an embedding; those vectors
+            // are blended into the query vector so the semantic neighbourhood of the reference —
+            // not just the abstract concept words — drives what surfaces. The references
+            // themselves are excluded from the results (the user just named them; recommending
+            // one back is junk), but NO footprint record is written: naming a film as a
+            // comparison is not evidence of having watched it.
+            var (referenceTitles, referenceVectors) = isPersonQuery
+                ? (new List<Title>(), new List<float[]>())
+                : await ResolveReferenceTitlesAsync(intent, ct);
+            var referenceIds = referenceTitles.Select(t => t.Id).ToHashSet();
+
             // ── Discover, widening until there is enough to rank ─────────────────────────────
             // Each pass relaxes one more constraint. An under-filled pool is treated as "we did not
             // look hard enough yet", never as "there is nothing" — the ladder bottoms out at a pull
@@ -173,7 +185,7 @@ public sealed class LiveSearchExpansionService(
                 var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
                 var semanticIds = isPersonQuery
                     ? new List<Guid>()
-                    : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, ct);
+                    : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, referenceVectors, ct);
                 discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
                 await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
 
@@ -186,9 +198,21 @@ public sealed class LiveSearchExpansionService(
                         .ToListAsync(ct))
                     .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
                     .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
+                    // Never recommend a reference back: "like Blade Runner" must not answer with
+                    // Blade Runner. Excluded from the pool, not recorded as any reaction.
+                    .Where(t => !IsReference(t, referenceIds))
                     .Where(t => MatchesMedia(t, intent.MediaTypes))
                     .Where(t => MatchesYear(t, pass))
                     .ToList();
+
+                // The runtime ceiling ("under 90 minutes") applies to the POOL, not just to TMDB
+                // discovery — the semantic arm knows nothing about runtimes. Unknown-runtime
+                // titles survive only as a floor top-up: absence of a runtime is not evidence it
+                // fits, but an empty screen is worse than a candidate of unknown length.
+                if (!isPersonQuery)
+                {
+                    eligible = ApplyRuntimeCeiling(eligible, intent.MaxRuntimeMinutes, MinResults);
+                }
 
                 if (eligible.Count >= MinResults || isPersonQuery)
                 {
@@ -209,9 +233,12 @@ public sealed class LiveSearchExpansionService(
                         .ToListAsync(ct))
                     .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
                     .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
-                    // Deliberately NOT year-filtered: this is the last resort that exists so the
-                    // screen is never empty, and every narrower constraint has already failed to
-                    // fill it. Media type stays because the user set it explicitly in the UI.
+                    .Where(t => !IsReference(t, referenceIds))
+                    // Deliberately NOT year- or runtime-filtered: this is the last resort that
+                    // exists so the screen is never empty, and every narrower constraint has
+                    // already failed to fill it. Media type stays because the user set it
+                    // explicitly in the UI; the reference exclusion stays because recommending
+                    // the comparison title back is wrong at any level of desperation.
                     .Where(t => MatchesMedia(t, intent.MediaTypes))
                     .ToList();
                 relaxation = MaxRelaxations;
@@ -244,6 +271,11 @@ public sealed class LiveSearchExpansionService(
             // raw text only when the intent carries no positive signal at all.
             var seedText = RankingSeedText(agentReply, trimmed);
             var queryVec = (await embeddings.EmbedAsync([seedText], ct))[0];
+
+            // Reference anchoring: pull the query vector towards the mean of the named titles'
+            // embeddings, so "like Blade Runner but more emotional" ranks by proximity to Blade
+            // Runner's actual neighbourhood rather than to the bare words. No-op without references.
+            queryVec = BlendQueryVector(queryVec, referenceVectors);
 
             // Negation is applied BEFORE the cut, not after it — and it is HARD. Titles that
             // contradict what the user ruled out never appear as ordinary picks: with enough clean
@@ -302,7 +334,18 @@ public sealed class LiveSearchExpansionService(
             // as a candidate-reranked frame so live cards pick it up the same way clean cards pick
             // up their LLM why.
             await emit("phase", new { stage = "ranking", found = returned.Count, scored = sliceIds.Count });
-            var fitById = await RerankStreamAsync(accountId, trimmed, tasteSummary, ranked, scores, emit, ct);
+
+            // When the turn named comparison titles, tell the rerank model so the why-lines can
+            // name the concrete connection ("shares Blade Runner's neon melancholy") instead of
+            // re-deriving the request from keywords. Folded into the query string, so the per-
+            // (account,title,query) fit cache keys stay reference-aware for free.
+            var referenceNames = referenceTitles.Count > 0
+                ? referenceTitles.Select(t => t.Name).ToList()
+                : (intent.ReferenceTitles ?? []).ToList();
+            var rerankQuery = referenceNames.Count > 0
+                ? $"{trimmed}\nThe user wants something like: {string.Join(", ", referenceNames)}"
+                : trimmed;
+            var fitById = await RerankStreamAsync(accountId, rerankQuery, tasteSummary, ranked, scores, emit, ct);
             foreach (var (title, _) in outside)
             {
                 await emit("candidate-reranked", new
@@ -483,10 +526,11 @@ public sealed class LiveSearchExpansionService(
     /// user's seen library, so a global-nearest-then-filter query returns almost nothing. Returns
     /// empty on any failure ⇒ the TMDB arm carries the turn alone (no regression).
     /// </summary>
-    private async Task<List<Guid>> SemanticNeighbourIdsAsync(Guid accountId, AgentReply agentReply, CancellationToken ct)
+    private async Task<List<Guid>> SemanticNeighbourIdsAsync(
+        Guid accountId, AgentReply agentReply, IReadOnlyList<float[]> referenceVectors, CancellationToken ct)
     {
         var concept = ConceptText(agentReply);
-        if (concept.Length == 0)
+        if (concept.Length == 0 && referenceVectors.Count == 0)
         {
             return [];
         }
@@ -494,19 +538,32 @@ public sealed class LiveSearchExpansionService(
         float[] queryVec;
         try
         {
-            var embedded = await embeddings.EmbedAsync([concept], ct);
-            if (embedded.Length == 0 || embedded[0].Length == 0)
+            if (concept.Length > 0)
             {
-                return [];
-            }
+                var embedded = await embeddings.EmbedAsync([concept], ct);
+                if (embedded.Length == 0 || embedded[0].Length == 0)
+                {
+                    return [];
+                }
 
-            queryVec = embedded[0];
+                queryVec = embedded[0];
+            }
+            else
+            {
+                // No concept text at all but the user named references — anchor purely on them.
+                queryVec = new float[referenceVectors[0].Length];
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Ask Reel semantic arm: concept embedding failed; falling back to TMDB-only discovery.");
             return [];
         }
+
+        // Blend the reference-title embeddings in, so the kNN pull happens in the reference's
+        // neighbourhood — this is what makes "like Blade Runner" DISCOVER Blade Runner's semantic
+        // neighbours instead of merely re-ranking whatever the keywords happened to fetch.
+        queryVec = BlendQueryVector(queryVec, referenceVectors);
 
         var vector = new Vector(queryVec);
         var eligibleIds = eligibility.EligibleTitles(accountId).Select(t => t.Id);
@@ -516,6 +573,154 @@ public sealed class LiveSearchExpansionService(
             .Take(SemanticNeighbourCount)
             .Join(db.Titles, e => e.TitleId, t => t.Id, (e, t) => t.Id)
             .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Resolves the intent's reference titles ("like Blade Runner") to catalogue rows with
+    /// embeddings. Local exact-name match first (cheap, and the reference is usually famous enough
+    /// to be in the catalogue already); TMDB title search + the standard upsert path otherwise.
+    /// Every step degrades to skipping the reference — anchoring is an enrichment, and a turn must
+    /// never fail because a comparison could not be resolved.
+    /// </summary>
+    private async Task<(List<Title> Titles, List<float[]> Vectors)> ResolveReferenceTitlesAsync(
+        SearchIntent intent, CancellationToken ct)
+    {
+        var names = intent.ReferenceTitles ?? [];
+        if (names.Count == 0)
+        {
+            return ([], []);
+        }
+
+        var resolved = new List<Title>();
+        foreach (var name in names.Take(3))
+        {
+            try
+            {
+                var title = await FindReferenceLocallyAsync(name, ct) ?? await ResolveReferenceViaTmdbAsync(name, ct);
+                if (title is not null && resolved.All(t => t.Id != title.Id))
+                {
+                    resolved.Add(title);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Ask Reel: resolving reference title '{Name}' failed; anchoring without it.", name);
+            }
+        }
+
+        if (resolved.Count == 0)
+        {
+            return ([], []);
+        }
+
+        await EnsureEmbeddedAsync(resolved, ct);
+        var vectors = await LoadVectorsAsync(resolved.Select(t => t.Id).ToList(), ct);
+        return (resolved, resolved.Where(t => vectors.ContainsKey(t.Id)).Select(t => vectors[t.Id]).ToList());
+    }
+
+    /// <summary>
+    /// Exact-name catalogue lookup (case-insensitive, most popular first) — the typeahead-style
+    /// resolution for a title the user names verbatim. Deliberately NOT fuzzy: a wrong anchor is
+    /// worse than a missing one, and the TMDB fallback handles near-miss spellings.
+    /// </summary>
+    private async Task<Title?> FindReferenceLocallyAsync(string name, CancellationToken ct)
+    {
+        var lower = name.ToLowerInvariant();
+        return await db.Titles
+            .Where(t => t.Name.ToLower() == lower)
+            .OrderByDescending(t => t.TmdbPopularity)
+            .ThenBy(t => t.Id)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
+    /// TMDB best-hit resolution for a reference the catalogue doesn't hold, through the SAME
+    /// upsert path discovery uses so dedup and field semantics hold. Searches both media types:
+    /// the reference is an anchor, not a result, so a UI "movies only" filter must not stop
+    /// "movies like Severance" from anchoring on the show.
+    /// </summary>
+    private async Task<Title?> ResolveReferenceViaTmdbAsync(string name, CancellationToken ct)
+    {
+        var hits = (await tmdb.SearchTitlesAsync(true, name, 1, ct))
+            .Concat(await tmdb.SearchTitlesAsync(false, name, 1, ct))
+            .OrderByDescending(i => i.Popularity)
+            .ToList();
+        if (hits.Count == 0)
+        {
+            return null;
+        }
+
+        var best = hits[0];
+        var ids = await UpsertAndCollectIdsAsync([best], ct);
+        return ids.Count == 0
+            ? null
+            : await db.Titles.FirstOrDefaultAsync(t => t.Id == ids[0], ct);
+    }
+
+    /// <summary>
+    /// The reference-anchored query vector: <c>normalize(concept + 0.5 × mean(references))</c>.
+    /// The concept keeps the majority weight — "like Blade Runner but MORE EMOTIONAL" must still
+    /// honour the modifier — while the reference mean drags the query into the named titles'
+    /// actual neighbourhood. Pure and internal so the math is pinned by unit tests. Returns the
+    /// concept unchanged when no usable reference vector matches its dimensionality.
+    /// </summary>
+    internal static float[] BlendQueryVector(float[] concept, IReadOnlyList<float[]> referenceVectors)
+    {
+        var usable = referenceVectors.Where(v => v.Length == concept.Length).ToList();
+        if (usable.Count == 0)
+        {
+            return concept;
+        }
+
+        var blended = new double[concept.Length];
+        for (var i = 0; i < concept.Length; i++)
+        {
+            double mean = 0;
+            foreach (var reference in usable)
+            {
+                mean += reference[i];
+            }
+
+            blended[i] = concept[i] + (0.5d * (mean / usable.Count));
+        }
+
+        var norm = Math.Sqrt(blended.Sum(x => x * x));
+        return norm <= 0
+            ? concept
+            : blended.Select(x => (float)(x / norm)).ToArray();
+    }
+
+    /// <summary>
+    /// True when the title IS one of the turn's resolved reference anchors. A reference is a
+    /// place to search NEAR, never an answer: "like Blade Runner" returning Blade Runner is
+    /// junk, and the exclusion is a pool filter — never a footprint record, because naming a
+    /// film as a comparison is not evidence of having watched it.
+    /// </summary>
+    internal static bool IsReference(Title title, IReadOnlySet<Guid> referenceIds) =>
+        referenceIds.Contains(title.Id);
+
+    /// <summary>
+    /// The runtime post-filter for "under 90 minutes": titles with a KNOWN runtime over the
+    /// ceiling are always dropped; unknown-runtime titles are kept only as a top-up to
+    /// <paramref name="floor"/> when the known-and-fitting set alone cannot fill it — absence of
+    /// a runtime is not evidence of fit, but an empty screen is the worse failure. No ceiling ⇒
+    /// the pool passes through untouched. Internal so the tolerance rule is pinned by unit tests.
+    /// </summary>
+    internal static List<Title> ApplyRuntimeCeiling(List<Title> pool, int? maxRuntimeMinutes, int floor)
+    {
+        if (maxRuntimeMinutes is not { } ceiling)
+        {
+            return pool;
+        }
+
+        var fits = pool.Where(t => t.RuntimeMinutes is { } m && m <= ceiling).ToList();
+        if (fits.Count >= floor)
+        {
+            return fits;
+        }
+
+        var unknown = pool.Where(t => t.RuntimeMinutes is null).Take(floor - fits.Count);
+        return fits.Concat(unknown).ToList();
     }
 
     /// <summary>
@@ -830,13 +1035,13 @@ public sealed class LiveSearchExpansionService(
         var tasks = new List<Task<IReadOnlyList<TmdbListItem>>>();
         if (wantMovies)
         {
-            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, excludeMovieGenreIds, excludeKeywordIds, before, ct));
+            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, excludeMovieGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct));
             tasks.Add(tmdb.SearchTitlesAsync(true, intent.FreeText, SearchPages, ct));
         }
 
         if (wantTv)
         {
-            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, excludeTvGenreIds, excludeKeywordIds, before, ct));
+            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, excludeTvGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct));
             tasks.Add(tmdb.SearchTitlesAsync(false, intent.FreeText, SearchPages, ct));
         }
 
@@ -1128,9 +1333,12 @@ public sealed class LiveSearchExpansionService(
     private static string NormalizeQuery(string query) =>
         string.Join(' ', query.ToLowerInvariant().Split([' ', '\t', '\n'], StringSplitOptions.RemoveEmptyEntries));
 
+    // MaxYear and MaxRuntimeMinutes are part of the key because both change the TMDB discover
+    // query — omitting them would serve "under 90 minutes" a cached unconstrained pull.
     private static string IntentKey(SearchIntent intent) =>
         $"{string.Join(',', intent.Genres.OrderBy(g => g))}|{string.Join(',', intent.Keywords.OrderBy(k => k))}|" +
-        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m))}|{intent.MinYear}|{NormalizeQuery(intent.FreeText)}|" +
+        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m))}|{intent.MinYear}|{intent.MaxYear}|" +
+        $"{intent.MaxRuntimeMinutes}|{NormalizeQuery(intent.FreeText)}|" +
         $"{string.Join(',', (intent.People ?? []).Select(p => $"{p.Name}:{p.Role}").OrderBy(p => p))}";
 
     private static string CacheKey(string intentKey) => $"askreel:ids:{intentKey}";

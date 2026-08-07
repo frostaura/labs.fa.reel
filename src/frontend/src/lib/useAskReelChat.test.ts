@@ -7,6 +7,7 @@ import {
   chatReducer,
   initialChatState,
   nextBootstrap,
+  showMoodPresets,
   type ChatTurn,
 } from "./useAskReelChat";
 import type { AskCard } from "./askReelStream";
@@ -237,6 +238,29 @@ describe("chatReducer — stream-stable ordering", () => {
       data: { reason: "2 picks matched everything you asked; 1 closest-but-outside shown separately.", results: [weak, strong, outside] },
     });
     expect(done.order).toEqual(["t2", "t1", "t3"]);
+  });
+});
+
+/**
+ * The preset mood chips belong to the cold start only: any transcript (typed OR resumed), any
+ * card on screen, or an in-flight stream means the page is a conversation now, and the presets
+ * must yield to the refine chips.
+ */
+describe("showMoodPresets", () => {
+  it("shows on a genuinely fresh page", () => {
+    expect(showMoodPresets(0, 0, false)).toBe(true);
+  });
+
+  it("hides the moment a transcript exists — including a resumed one", () => {
+    expect(showMoodPresets(1, 0, false)).toBe(false);
+  });
+
+  it("hides while a turn is streaming", () => {
+    expect(showMoodPresets(0, 0, true)).toBe(false);
+  });
+
+  it("hides when cards are on screen", () => {
+    expect(showMoodPresets(0, 3, false)).toBe(false);
   });
 });
 

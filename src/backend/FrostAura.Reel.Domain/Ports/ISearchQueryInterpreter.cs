@@ -41,7 +41,17 @@ public sealed record SearchIntent(
     // exclusion plus a ranking penalty — never as a hard cull, so a negation can narrow the
     // ordering but can never empty the result set.
     IReadOnlyList<string>? ExcludeGenres = null,
-    IReadOnlyList<string>? ExcludeKeywords = null);
+    IReadOnlyList<string>? ExcludeKeywords = null,
+    // Titles the user names as COMPARISONS ("like Blade Runner but more emotional", "similar to
+    // Severance") — not things to return, but anchors to search NEAR. Resolved to catalogue titles
+    // with embeddings so their semantic neighbours dominate discovery; the named title itself is
+    // excluded from the results (the user has plainly seen or at least knows it). Nullable with a
+    // null default so every existing construction site stays valid; treat null as empty.
+    IReadOnlyList<string>? ReferenceTitles = null,
+    // An upper runtime bound in minutes ("under 90 minutes" → 90). Applied to TMDB discovery
+    // (with_runtime.lte) AND as a post-filter on the final pool, because the semantic arm knows
+    // nothing about runtimes.
+    int? MaxRuntimeMinutes = null);
 
 public interface ISearchQueryInterpreter
 {

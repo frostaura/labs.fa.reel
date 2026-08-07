@@ -9,7 +9,7 @@ import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import { nextBootstrap, useAskReelChat } from "../lib/useAskReelChat";
+import { nextBootstrap, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
 
@@ -20,6 +20,14 @@ import type { AskCard, PhaseData } from "../lib/askReelStream";
  * "less intense", "more like the first one") — never repeating a title.
  */
 const REFINE_CHIPS = ["Only movies", "Only TV", "Something lighter", "More intense", "More like the first one"];
+
+/** Cold-start mood presets — one tap seeds a whole first turn on an otherwise empty page. */
+const MOOD_PRESETS = [
+  "Under 90 minutes, feel-good",
+  "Something dark and gripping",
+  "Family movie night",
+  "True-story tension",
+];
 
 /** Maps the browse toggle to the wire values the server understands ([] = no constraint). */
 function mediaTypesFor(filter: BrowseFilter): string[] {
@@ -196,6 +204,31 @@ export default function SearchResults() {
               {phase.scored > 0 ? `${phase.scored} scored` : `${phase.found} found`}
             </span>
           )}
+        </div>
+      )}
+
+      {/* Cold-start mood presets — a fresh /search with nothing asked yet gets four one-tap
+          seeds ABOVE the composer instead of a blank page. Gone the moment a conversation
+          exists (typed, streamed, or resumed) — from then on the refine chips own this space. */}
+      {showMoodPresets(turns.length, cards.length + outsideCards.length, streaming) && (
+        <div className="fa-card p-6 max-w-xl mx-auto space-y-4 text-center">
+          <div className="space-y-1">
+            <p className="fa-body text-fa-frost-bright">What are you in the mood for?</p>
+            <p className="fa-caption text-fa-frost-dim">Tap one to start, or ask in your own words below.</p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-2">
+            {MOOD_PRESETS.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                data-testid="askreel-preset"
+                onClick={() => send(preset)}
+                className="fa-caption rounded-full border border-fa-frost/25 px-4 py-1.5 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

@@ -263,7 +263,7 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page,
-            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null,
+            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
             CancellationToken ct = default) =>
             throw new NotSupportedException();
 

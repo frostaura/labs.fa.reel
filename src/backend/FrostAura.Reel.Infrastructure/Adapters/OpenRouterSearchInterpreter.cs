@@ -428,7 +428,11 @@ public class OpenRouterSearchInterpreter(
         "never put a person's name in keywords or freeText), " +
         "mediaTypes (array; any of \"movie\", \"tv\"; empty means both), minYear (integer or null), maxYear " +
         "(integer or null), excludeGenres (array of slugs from the same set), excludeKeywords (array of lowercase " +
-        "phrases), and freeText (a concise literal-title search string, usually echoing the request). " +
+        "phrases), referenceTitles (array of movie/show titles the user names as COMPARISONS — \"like Blade Runner " +
+        "but more emotional\" → referenceTitles:[\"Blade Runner\"]; extract only explicitly named titles, and keep " +
+        "them OUT of keywords and freeText), maxRuntimeMinutes (integer or null — an upper runtime bound in " +
+        "minutes: \"under 90 minutes\" → 90; null when no length constraint is given), " +
+        "and freeText (a concise literal-title search string, usually echoing the request). " +
         "Map intent to that genre set only; put anything specific (subjects, settings, vibes) into keywords. " +
         "NEGATION IS CRITICAL: anything the user says they do NOT want (\"no ghosts\", \"not horror\", \"less gore\", " +
         "\"anything but musicals\") goes in excludeGenres/excludeKeywords and MUST NOT appear in genres or keywords — " +

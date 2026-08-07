@@ -30,6 +30,16 @@ export function capShown(shown: number[]): number[] {
   return shown.slice(-MAX_SHOWN_IDS);
 }
 
+/**
+ * Whether the preset mood chips ("Under 90 minutes, feel-good", …) should show: only on a
+ * genuinely fresh Ask Reel — no transcript, no cards on screen, nothing streaming. The moment a
+ * conversation exists (including one resumed from a previous visit) the presets yield to the
+ * refine chips, which are about THIS thread rather than a cold start.
+ */
+export function showMoodPresets(turnCount: number, cardCount: number, streaming: boolean): boolean {
+  return turnCount === 0 && cardCount === 0 && !streaming;
+}
+
 export type BootstrapAction = "seed" | "resume" | "none";
 
 /**

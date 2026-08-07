@@ -299,25 +299,10 @@ public class BuildFeedJobHandler(
         // (count ≥ 2). Keying by role lets the why-sentence cite the person matching the contribution
         // (a directorAffinity clause names a director, never an actor); restricting to rated people
         // means no clause ever names someone outside the user's taste. The Role column is load-bearing.
+        // Single-sourced in VerifiedPeople — the title endpoint's tap-through breakdown reads the
+        // same data, so the card sentence and the detail chips can never disagree.
         var shortIds = candidates.Select(c => c.Title.Id).ToList();
-        var credits = await db.TitleCredits
-            .Where(c => shortIds.Contains(c.TitleId))
-            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.PersonId, c.Role, p.Name })
-            .ToListAsync(ct);
-        var personsByTitle = credits
-            .Where(c => taste.PersonRatings.TryGetValue(c.PersonId, out var r) && r.Count >= 2)
-            .GroupBy(c => c.TitleId)
-            .ToDictionary(
-                g => g.Key,
-                g => (IReadOnlyDictionary<Domain.Catalog.CreditRole, ExplanationTemplater.PersonAffinity>)g
-                    .GroupBy(c => c.Role)
-                    .ToDictionary(
-                        rg => rg.Key,
-                        rg => rg
-                            .Select(c => new ExplanationTemplater.PersonAffinity(
-                                c.Name, TasteMath.ShrunkenMean(taste.PersonRatings[c.PersonId], taste.UserMean)))
-                            .OrderByDescending(p => p.Affinity)
-                            .First()));
+        var personsByTitle = VerifiedPeople.BestByRole(await VerifiedPeople.ForTitlesAsync(db, taste, shortIds, ct));
 
         // LLM-derived tone per candidate, for the templater's anchor-link clause. The templater
         // prints a tone ONLY when it passes the closed vocabulary — rows extracted before

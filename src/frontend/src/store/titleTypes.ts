@@ -34,6 +34,21 @@ export interface PersonPayload {
   }[];
 }
 
+/** One verified person behind a person-affinity contribution bar (mirrors ContributionDetails). */
+export interface ContributionPerson {
+  personId: string;
+  name: string;
+  yourAverage: number;
+  titleCount: number;
+}
+
+/** The tap-through behind one contribution bar: person features carry people, era features a note. */
+export interface ContributionDetail {
+  feature: string;
+  people?: ContributionPerson[] | null;
+  note?: string | null;
+}
+
 export interface TitleDetailPayload {
   titleId: string;
   mediaType: "Movie" | "Show";
@@ -60,6 +75,7 @@ export interface TitleDetailPayload {
     contributions: { feature: string; value: number }[];
     scoredAt: string;
   } | null;
+  contributionDetails: ContributionDetail[];
   userState: {
     isFullyWatched: boolean;
     plays: number;

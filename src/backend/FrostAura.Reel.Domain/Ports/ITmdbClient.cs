@@ -56,12 +56,15 @@ public interface ITmdbClient
     /// </para>
     /// <paramref name="releasedBefore"/> closes the upper end of a decade query — without it
     /// "80s sci-fi" pulls 1980-to-today ordered by popularity.
+    /// <paramref name="maxRuntimeMinutes"/> maps to <c>with_runtime.lte</c> ("under 90 minutes") —
+    /// discovery-side only; the caller still post-filters the final pool, because the semantic arm
+    /// bypasses TMDB entirely.
     /// </summary>
     Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page,
         IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-        DateTime? releasedBefore = null, CancellationToken ct = default);
+        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default);
 
     /// <summary>Watch providers for one title in one region (JustWatch-powered; attribution required).</summary>
     Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default);

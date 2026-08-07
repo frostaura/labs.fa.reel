@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { Bookmark, BookmarkCheck, Eye, EyeOff, Play, Undo2, X } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { Bookmark, BookmarkCheck, ChevronDown, Eye, EyeOff, Play, Undo2, X } from "lucide-react";
 import {
   useGetTitleQuery,
   useMarkNotInterestedMutation,
@@ -20,7 +20,7 @@ import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
-import type { CreditPerson } from "../store/titleTypes";
+import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
@@ -96,6 +96,26 @@ function featureLabel(feature: string): string {
   return feature.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
 }
 
+/**
+ * The tap-through payload for one contribution bar, when the server has something verified to
+ * show. lovedCastCount rides the castAffinity detail — the templater treats the two as the same
+ * "cast you rate highly" story, so the tap-through must too.
+ */
+function detailFor(feature: string, details: ContributionDetail[] | undefined): ContributionDetail | undefined {
+  const byFeature = (f: string) => details?.find((d) => d.feature === f);
+  return byFeature(feature) ?? (feature === "lovedCastCount" ? byFeature("castAffinity") : undefined);
+}
+
+/** Avatar fallback: up to two initials from a person's name ("Denis Villeneuve" → "DV"). */
+function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0]!.toUpperCase())
+    .join("");
+}
+
 export default function TitleDetail() {
   const { mediaType = "movie", tmdbId = "0" } = useParams();
   const navigate = useNavigate();
@@ -112,6 +132,8 @@ export default function TitleDetail() {
   const [unsave] = useUnsaveForLaterMutation();
   const [trailerOpen, setTrailerOpen] = useState(false);
   const [ratePickerOpen, setRatePickerOpen] = useState(false);
+  // Which contribution bar's tap-through is open ("why not?" — who/what drives the feature).
+  const [expandedFeature, setExpandedFeature] = useState<string | null>(null);
 
   // The card the user tapped, captured once on mount. Radix restores focus to its `DialogTrigger`,
   // and this dialog has none — it is opened by routing, not by a trigger — so without this, closing
@@ -329,9 +351,11 @@ export default function TitleDetail() {
                         {title.prediction.contributions.slice(0, 5).map((contribution) => {
                           const max = Math.max(...title.prediction!.contributions.map((c) => Math.abs(c.value))) || 1;
                           const positive = contribution.value >= 0;
-                          return (
-                            <div key={contribution.feature} className="flex items-center gap-3">
-                              <span className="fa-caption text-fa-frost w-44 truncate">{featureLabel(contribution.feature)}</span>
+                          const detail = detailFor(contribution.feature, title.contributionDetails);
+                          const expanded = expandedFeature === contribution.feature;
+                          const bar = (
+                            <>
+                              <span className="fa-caption text-fa-frost w-44 truncate text-left">{featureLabel(contribution.feature)}</span>
                               <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
                                 <div
                                   className={`h-full rounded-full ${positive ? "bg-fa-success/70" : "bg-fa-danger/60"}`}
@@ -342,6 +366,55 @@ export default function TitleDetail() {
                                 {contribution.value >= 0 ? "+" : ""}
                                 {contribution.value.toFixed(1)}
                               </span>
+                            </>
+                          );
+                          // A bar with nothing verified behind it stays a plain row — no chevron
+                          // that opens onto an empty panel.
+                          if (!detail) {
+                            return (
+                              <div key={contribution.feature} className="flex items-center gap-3 pr-[1.375rem]">
+                                {bar}
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={contribution.feature}>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedFeature(expanded ? null : contribution.feature)}
+                                aria-expanded={expanded}
+                                className="flex w-full items-center gap-3 rounded-md -mx-1 px-1 hover:bg-fa-frost/5 transition-colors"
+                              >
+                                {bar}
+                                <ChevronDown
+                                  className={`h-3.5 w-3.5 shrink-0 text-fa-frost-dim transition-transform ${expanded ? "rotate-180" : ""}`}
+                                />
+                              </button>
+                              {expanded && (
+                                <div data-testid="contribution-details" className="ml-1 mt-1.5 mb-1 space-y-1.5">
+                                  {detail.people?.length ? (
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {detail.people.map((p) => (
+                                        <Link
+                                          key={p.personId}
+                                          to={`/person/${p.personId}`}
+                                          className="inline-flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-2.5 py-1 hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
+                                        >
+                                          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-fa-frost/20 text-xs font-medium text-fa-frost-bright">
+                                            {initials(p.name)}
+                                          </span>
+                                          <span className="fa-caption text-fa-frost-bright">{p.name}</span>
+                                          <span className="fa-caption text-fa-frost-dim tabular-nums">
+                                            you rate them {p.yourAverage.toFixed(1)}
+                                          </span>
+                                        </Link>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    detail.note && <p className="fa-caption text-fa-frost-dim">{detail.note}</p>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           );
                         })}

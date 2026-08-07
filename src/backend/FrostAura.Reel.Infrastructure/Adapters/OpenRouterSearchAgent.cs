@@ -332,8 +332,12 @@ public class OpenRouterSearchAgent(
         "filmmaker or actor; e.g. \"movies Christopher Nolan directs\" → people:[{\"name\":\"Christopher Nolan\",\"role\":\"director\"}], " +
         "\"films with Tom Hardy\" → people:[{\"name\":\"Tom Hardy\",\"role\":\"cast\"}]; do NOT put a person's name in keywords " +
         "or freeText), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (integer or null), maxYear (integer or " +
-        "null), freeText (literal-title search string), excludeGenres (array of the same genre slugs) and excludeKeywords " +
-        "(array of concept phrases). " +
+        "null), freeText (literal-title search string), excludeGenres (array of the same genre slugs), excludeKeywords " +
+        "(array of concept phrases), referenceTitles (array of movie/show titles the user names as COMPARISONS — " +
+        "\"like Blade Runner but more emotional\" → referenceTitles:[\"Blade Runner\"], \"similar to Severance\" → " +
+        "referenceTitles:[\"Severance\"]; extract only explicitly named titles, keep them OUT of keywords and freeText) " +
+        "and maxRuntimeMinutes (integer or null — an upper runtime bound in minutes: \"under 90 minutes\" → 90, " +
+        "\"quick watch\"/\"short film\" → 100; null when the user gives no length constraint). " +
         "NEGATION IS CRITICAL: anything the user rejects or wants less of — \"less horror\", \"no ghosts\", \"not a musical\", " +
         "\"I don't want X\" — belongs ONLY in excludeGenres/excludeKeywords and MUST NOT appear in genres/keywords, because " +
         "those are used to FETCH titles and would hand them exactly what they just rejected. e.g. \"more thriller and less " +

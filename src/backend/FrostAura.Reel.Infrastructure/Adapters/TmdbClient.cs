@@ -176,7 +176,7 @@ public class TmdbClient(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page,
         IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-        DateTime? releasedBefore = null, CancellationToken ct = default)
+        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default)
     {
         var path = movies ? "discover/movie" : "discover/tv";
         // vote_count.gte is lower than the feed's discover (50) — concept queries want recall over
@@ -213,6 +213,13 @@ public class TmdbClient(
         if (releasedBefore is { } before)
         {
             query += $"&{dateField}.lte={before:yyyy-MM-dd}";
+        }
+
+        // "Under 90 minutes" — TMDB supports with_runtime.lte on both movie and tv discover
+        // (tv reads it against episode run time).
+        if (maxRuntimeMinutes is { } maxRuntime)
+        {
+            query += $"&with_runtime.lte={maxRuntime}";
         }
 
         if (movies && region is { Length: 2 })

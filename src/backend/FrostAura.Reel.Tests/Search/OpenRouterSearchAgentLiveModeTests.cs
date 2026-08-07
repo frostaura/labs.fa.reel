@@ -179,6 +179,25 @@ public class OpenRouterSearchAgentLiveModeTests
         // The specific instruction whose absence produced 2026/1996/2012/1993 for "80s sci-fi".
         Assert.Contains("a decade means both bounds", system, StringComparison.Ordinal);
         Assert.Contains("EVERY rejected item", system, StringComparison.Ordinal);
+        // The Phase-8 fields: comparison anchors and the runtime ceiling. A field the parser reads
+        // but the prompt never asks for is simply always absent — the exact drift class this test exists for.
+        Assert.Contains("referenceTitles", system, StringComparison.Ordinal);
+        Assert.Contains("maxRuntimeMinutes", system, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reference_titles_and_runtime_bound_map_into_the_intent()
+    {
+        var payload = """
+            {"reply":"Emotional sci-fi coming up.","genres":["science-fiction"],"keywords":["melancholy"],
+             "referenceTitles":["Blade Runner"],"maxRuntimeMinutes":90,"freeText":"like blade runner"}
+            """;
+        var agent = Agent(new CannedHandler(Ok(payload)));
+
+        var reply = await agent.InterpretAsync([], "like Blade Runner but more emotional, under 90 minutes", "likes sci-fi", []);
+
+        Assert.Equal(["Blade Runner"], reply.Intent.ReferenceTitles);
+        Assert.Equal(90, reply.Intent.MaxRuntimeMinutes);
     }
 
     [Fact]

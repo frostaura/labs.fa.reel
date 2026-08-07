@@ -45,10 +45,18 @@ internal static class SearchIntentParser
         var freeText = root.TryGetProperty("freeText", out var f) && f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } s
             ? s : fallbackText;
         var people = ParsePeople(root);
+        var referenceTitles = ParseReferenceTitles(root);
+
+        // Sanity bounds: a runtime cap must be a plausible number of minutes. Anything outside
+        // (0, 1000] is a model misfire (seconds, or a year) and is safer dropped than applied.
+        int? maxRuntime = root.TryGetProperty("maxRuntimeMinutes", out var rt) && rt.ValueKind == JsonValueKind.Number
+            && rt.TryGetInt32(out var minutes) && minutes is > 0 and <= 1000
+            ? minutes : null;
 
         // A model that returned nothing usable still gets the heuristic's keywords so discovery
-        // never fires empty — but a named person IS the discovery signal, so it shortcuts that.
-        if (genres.Length == 0 && keywords.Length == 0 && people.Count == 0)
+        // never fires empty — but a named person IS the discovery signal, so it shortcuts that,
+        // and so does a reference title ("more like Blade Runner" carries no genre or keyword).
+        if (genres.Length == 0 && keywords.Length == 0 && people.Count == 0 && referenceTitles.Count == 0)
         {
             return heuristicFallback with
             {
@@ -56,13 +64,38 @@ internal static class SearchIntentParser
                 MinYear = minYear ?? heuristicFallback.MinYear,
                 MaxYear = maxYear ?? heuristicFallback.MaxYear,
                 // Negations survive a positive-signal fallback: "no ghosts" still means no ghosts
-                // even when the rest of the spec came from the heuristic.
+                // even when the rest of the spec came from the heuristic. The runtime cap is a
+                // constraint of the same kind and survives the same way.
                 ExcludeGenres = excludeGenres.Length > 0 ? excludeGenres : heuristicFallback.ExcludeGenres,
                 ExcludeKeywords = excludeKeywords.Length > 0 ? excludeKeywords : heuristicFallback.ExcludeKeywords,
+                MaxRuntimeMinutes = maxRuntime ?? heuristicFallback.MaxRuntimeMinutes,
             };
         }
 
-        return new SearchIntent(genres, keywords, media, freeText, minYear, maxYear, people, excludeGenres, excludeKeywords);
+        return new SearchIntent(
+            genres, keywords, media, freeText, minYear, maxYear, people, excludeGenres, excludeKeywords,
+            referenceTitles, maxRuntime);
+    }
+
+    /// <summary>
+    /// Parses "referenceTitles":["Blade Runner", …] — comparison titles, NOT search keywords.
+    /// Case is preserved (unlike <c>StrArray</c>): these names are resolved against the catalogue
+    /// and TMDB title search and echoed into the rerank prompt, where "blade runner" reads wrong.
+    /// </summary>
+    private static IReadOnlyList<string> ParseReferenceTitles(JsonElement root)
+    {
+        if (!root.TryGetProperty("referenceTitles", out var arr) || arr.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return arr.EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString()!.Trim())
+            .Where(t => t.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(3)
+            .ToArray();
     }
 
     /// <summary>Parses a "people":[{"name","role"}] array — role ∈ director|cast|any (default any).</summary>

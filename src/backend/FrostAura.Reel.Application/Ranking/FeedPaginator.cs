@@ -878,26 +878,10 @@ public sealed class FeedPaginator(
         FeatureVectorBuilder.TasteState taste, List<Scored> taken, AnchorInfo? anchor, CancellationToken ct)
     {
         var titleIds = taken.Select(s => s.Title.Id).ToList();
-        var credits = await db.TitleCredits
-            .Where(c => titleIds.Contains(c.TitleId))
-            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.PersonId, c.Role, p.Name })
-            .ToListAsync(ct);
         // Per-title, per-role best-affinity person among people the user has actually rated (count ≥ 2),
         // so the templater names the person matching each contribution's role and never invents a name.
-        var personsByTitle = credits
-            .Where(c => taste.PersonRatings.TryGetValue(c.PersonId, out var r) && r.Count >= 2)
-            .GroupBy(c => c.TitleId)
-            .ToDictionary(
-                g => g.Key,
-                g => (IReadOnlyDictionary<CreditRole, ExplanationTemplater.PersonAffinity>)g
-                    .GroupBy(c => c.Role)
-                    .ToDictionary(
-                        rg => rg.Key,
-                        rg => rg
-                            .Select(c => new ExplanationTemplater.PersonAffinity(
-                                c.Name, TasteMath.ShrunkenMean(taste.PersonRatings[c.PersonId], taste.UserMean)))
-                            .OrderByDescending(p => p.Affinity)
-                            .First()));
+        // Single-sourced in VerifiedPeople, shared with the feed builder and the title endpoint.
+        var personsByTitle = VerifiedPeople.BestByRole(await VerifiedPeople.ForTitlesAsync(db, taste, titleIds, ct));
 
         var toneByTitle = await db.TitleAttributes
             .Where(a => titleIds.Contains(a.TitleId) && a.Tone != null)

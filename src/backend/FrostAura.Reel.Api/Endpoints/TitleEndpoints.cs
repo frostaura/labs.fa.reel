@@ -70,7 +70,8 @@ public static class TitleEndpoints
             string mediaType, long tmdbId,
             IReelDbContext db, IAccountContext accountContext,
             ITmdbClient tmdb, CandidateGenerator candidateGenerator, TitleHydrator hydrator,
-            ICatalogWorkCoordinator coordinator, OnDemandScorer scorer, CancellationToken ct) =>
+            ICatalogWorkCoordinator coordinator, OnDemandScorer scorer, FeatureVectorBuilder featureBuilder,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -102,6 +103,14 @@ public static class TitleEndpoints
                 .ToListAsync(ct);
 
             var score = await ResolveScoreAsync(db, scorer, accountId, title.Id, ct);
+
+            // The tap-through behind the contribution bars — who/what is driving the person and
+            // era features, from the same verified-person data the why-sentences cite. Only built
+            // when a prediction exists: the bars it annotates render under the prediction block.
+            IReadOnlyList<ContributionDetails.Detail> contributionDetails = score is null
+                ? []
+                : await ContributionDetails.BuildAsync(
+                    db, await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct), title, ct);
 
             var watched = await db.WatchedTitles.FirstOrDefaultAsync(w => w.AccountId == accountId && w.TitleId == title.Id, ct);
             var rating = await db.UserRatings.FirstOrDefaultAsync(
@@ -145,6 +154,7 @@ public static class TitleEndpoints
                     contributions = JsonSerializer.Deserialize<JsonElement>(score.ContributionsJson),
                     scoredAt = score.ScoredAt,
                 },
+                contributionDetails,
                 userState = new
                 {
                     isFullyWatched = watched?.IsFullyWatched ?? false,
