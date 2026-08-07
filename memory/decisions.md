@@ -1,6 +1,6 @@
 ---
 name: fa-reel-decisions
-description: "Repo flipped PRIVATE 2026-08-07 (stealth exception reversed); Deploy (2026-07-24); gpt-5.4-mini extraction; collaborative filtering shipped; Stripe scaffolded flag-off; remote 1536d embeddings; pin-not-suppress vulnerable transitives"
+description: "Repo flipped PRIVATE 2026-08-07 (stealth exception reversed); expiring npm-audit waiver for react-router (review 2026-11-07); Deploy (2026-07-24); gpt-5.4-mini extraction; collaborative filtering shipped; Stripe scaffolded flag-off; remote 1536d embeddings; pin-not-suppress vulnerable transitives"
 type: decision
 last_verified: 2026-08-07
 ---
@@ -14,4 +14,5 @@ last_verified: 2026-08-07
 - **Collaborative filtering shipped** 2026-06-18 (item-based via TMDB recommendations, in `CandidateGenerator.cs`). The old "deferred to ~200+ tenants" framing is dead.
 - **Stripe is scaffolded and deploy-ready**, flag-gated off with blank keys.
 - **Embeddings are remote, not local** — `EMBEDDINGS_PROVIDER=openai`, `text-embedding-3-small`, **1536 dims** via OpenRouter. Local ONNX MiniLM at 384d is no longer the default.
+- **The npm audit gate now allows narrow, EXPIRING waivers — and one is active (2026-08-07).** `npm audit --audit-level=high` was replaced by `src/frontend/scripts/audit-gate.mjs` (`npm run audit:gate`), which is identical except that a named advisory can be waived with a reason and a review date, and the gate **fails** once that date passes. This exists because react-router has no clean version: the open-redirect advisory (GHSA-wrjc-x8rr-h8h6) covers 6.0.0–7.17.0 while GHSA-qwww-vcr4-c8h2 covers 7.12.0–8.2.0, and no 8.x is published — every version carries one or the other. Reel is a client-only SPA with no RSC entry point, so the RSC-mode CSRF path is unreachable while the open redirect is not; **7.18.2 is the better posture, not the more convenient one**, and GHSA-qwww-vcr4-c8h2 is waived until **2026-11-07**. Verified the gate still fails on an un-waived high and on an expired waiver, so it is not vacuous. **Waiving an advisory is a cybersecurity decision, which root `CLAUDE.md` places at parent level — this one needs founder review at the expiry, not a silent renewal.**
 - **Vulnerable transitives get an explicit pin, not a suppression.** Two now: `Microsoft.OpenApi` 2.7.5 (GHSA-v5pm-xwqc-g5wc via AspNetCore.OpenApi 10.0.9) and `System.Security.Cryptography.Xml` 10.0.10 (GHSA-8q5v-6pqq-x66h et al. via DataProtection.EntityFrameworkCore 10.0.9). Both carry a comment saying to remove them once upstream ships a patched transitive. The `security` CI job fails the build otherwise.
