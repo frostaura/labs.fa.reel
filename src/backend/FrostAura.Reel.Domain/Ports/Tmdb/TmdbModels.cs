@@ -27,7 +27,21 @@ public record TmdbTitleDetails(
     /// ISO-639-1 codes from TMDB <c>languages</c>. TV only — the movie details endpoint does not
     /// return this field. Used as the fallback corroborator when spoken_languages is absent.
     /// </summary>
-    string[]? Languages = null);
+    string[]? Languages = null,
+    /// <summary>
+    /// The display title (<c>title</c> for movies, <c>name</c> for TV). Nullable because hydration
+    /// of an already-known row never needed it; the on-demand detail path does — it synthesizes a
+    /// <see cref="TmdbListItem"/> for a title Reel has never seen, and a candidate row without a
+    /// name is unrenderable.
+    /// </summary>
+    string? Name = null,
+    /// <summary>Release date (<c>release_date</c> for movies, <c>first_air_date</c> for TV).</summary>
+    DateTime? ReleasedAt = null,
+    /// <summary>
+    /// Genre ids from the details payload's <c>genres[].id</c> — same id space as a list row's
+    /// <c>genre_ids</c>, so <see cref="TmdbGenres.MapToSlugs"/> applies unchanged.
+    /// </summary>
+    int[]? GenreIds = null);
 
 /// <summary>
 /// Resolves the language Reel stores for a title, because TMDB's <c>original_language</c> is not

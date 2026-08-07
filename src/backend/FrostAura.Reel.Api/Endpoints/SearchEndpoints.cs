@@ -24,12 +24,18 @@ public static class SearchEndpoints
         // the best-for-you matches float up rather than the merely-popular ones.
         group.MapGet("/typeahead", async (
             string q, IReelDbContext db, IAccountContext accountContext,
-            EligibilityQueryBuilder eligibility, OnDemandScorer scorer, CancellationToken ct) =>
+            EligibilityQueryBuilder eligibility, OnDemandScorer scorer, ITmdbClient tmdb,
+            CancellationToken ct, string? global = null) =>
         {
             var accountId = accountContext.AccountId!.Value;
             if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
             {
-                return Results.Ok(new { titles = Array.Empty<object>(), people = Array.Empty<object>() });
+                return Results.Ok(new
+                {
+                    titles = Array.Empty<object>(),
+                    people = Array.Empty<object>(),
+                    global = Array.Empty<GlobalTypeaheadRow>(),
+                });
             }
 
             var term = q.Trim();
@@ -111,7 +117,23 @@ public static class SearchEndpoints
                 .Select(p => new { personId = p.Id, name = p.Name, knownFor = p.KnownForDepartment, profilePath = p.ProfilePath })
                 .ToListAsync(ct);
 
-            return Results.Ok(new { titles, people });
+            // The global leg — LOOKUP beyond the ingested catalogue, opt-in via ?global=1. "1"
+            // rather than bool binding because the frontend sends &global=1 and minimal-API bool
+            // parsing rejects it. Runs AFTER the local shortlist so its (isMovie, tmdbId) pairs can
+            // be deduped away, and deliberately applies NO eligibility/footprint filtering: this is
+            // the same precedent that lets typeahead show watched titles — a lookup answers "does
+            // this exist", not "should you watch it".
+            IReadOnlyList<GlobalTypeaheadRow> globalRows = global is "1" or "true"
+                ? await GlobalLookupAsync(
+                    tmdb,
+                    term,
+                    candidates.Where(t => t.TmdbId is not null)
+                        .Select(t => (IsMovie: t.MediaType == MediaType.Movie, TmdbId: t.TmdbId!.Value))
+                        .ToHashSet(),
+                    ct)
+                : [];
+
+            return Results.Ok(new { titles, people, global = globalRows });
         });
 
         // Live "Ask Reel": pulls matching titles from TMDB on the fly, embeds + personally scores
@@ -256,6 +278,61 @@ public static class SearchEndpoints
         });
     }
 
+
+    /// <summary>
+    /// The typeahead's global TMDB lookup — one movie-search and one show-search page, unioned,
+    /// minus anything the local shortlist already shows, poster-less rows dropped (a bare text row
+    /// in a poster list reads as broken), popularity-ordered, capped at six. Failure shape is part
+    /// of the contract: TMDB being down degrades to an empty global list, never to a failed
+    /// typeahead — the local results always survive.
+    /// </summary>
+    internal static async Task<IReadOnlyList<GlobalTypeaheadRow>> GlobalLookupAsync(
+        ITmdbClient tmdb, string term, IReadOnlySet<(bool IsMovie, long TmdbId)> localKeys, CancellationToken ct)
+    {
+        try
+        {
+            var batches = await Task.WhenAll(
+                tmdb.SearchTitlesAsync(true, term, 1, ct),
+                tmdb.SearchTitlesAsync(false, term, 1, ct));
+            return batches
+                .SelectMany(b => b)
+                .GroupBy(i => (i.IsMovie, i.Id))
+                .Select(g => g.First())
+                .Where(i => !localKeys.Contains((i.IsMovie, i.Id)))
+                .Where(i => !string.IsNullOrEmpty(i.PosterPath))
+                .OrderByDescending(i => i.Popularity)
+                .Take(6)
+                .Select(i => new GlobalTypeaheadRow(
+                    Source: "tmdb",
+                    MediaType: i.IsMovie ? "movie" : "show",
+                    TmdbId: i.Id,
+                    Name: i.Name,
+                    Year: i.ReleasedAt?.Year,
+                    PosterPath: i.PosterPath,
+                    CrowdRating: i.VoteAverage == 0m ? null : i.VoteAverage,
+                    PredictedRating: null))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Lookup beyond the catalogue is a bonus, never a dependency — swallow and degrade.
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// One "beyond your catalogue" typeahead row. A record rather than an anonymous type so tests
+    /// can assert on it; serializes camelCase like every other minimal-API payload here.
+    /// </summary>
+    internal sealed record GlobalTypeaheadRow(
+        string Source,
+        string MediaType,
+        long TmdbId,
+        string Name,
+        int? Year,
+        string? PosterPath,
+        decimal? CrowdRating,
+        decimal? PredictedRating);
 
     /// <summary>
     /// Trigram similarity between a title and a search term, mirroring how pg_trgm computes it:

@@ -484,7 +484,10 @@ public class TmdbClient(
             keywords,
             dto.OriginalLanguage,
             (dto.SpokenLanguages ?? []).Select(l => l.Iso6391).Where(c => c is not null).Select(c => c!).ToArray(),
-            dto.Languages ?? []);
+            dto.Languages ?? [],
+            dto.Title ?? dto.Name,
+            ParseDate(dto.ReleaseDate ?? dto.FirstAirDate),
+            (dto.Genres ?? []).Select(g => g.Id).ToArray());
     }
 
     private sealed record DetailsDto(
@@ -507,7 +510,17 @@ public class TmdbClient(
         CreditsDto? Credits,
         [property: JsonPropertyName("aggregate_credits")] AggregateCreditsDto? AggregateCredits,
         VideosDto? Videos,
-        KeywordsDto? Keywords);
+        KeywordsDto? Keywords,
+        // On-demand detail hydration needs the fields a list row would have carried: display title
+        // (movies: title, TV: name), release date, and full genre objects (details payloads have no
+        // genre_ids array — they inline genres[].id in the same id space).
+        string? Title = null,
+        string? Name = null,
+        [property: JsonPropertyName("release_date")] string? ReleaseDate = null,
+        [property: JsonPropertyName("first_air_date")] string? FirstAirDate = null,
+        GenreDto[]? Genres = null);
+
+    private sealed record GenreDto(int Id, string? Name);
 
     private sealed record SpokenLanguageDto([property: JsonPropertyName("iso_639_1")] string? Iso6391);
 
