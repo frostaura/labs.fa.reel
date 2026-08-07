@@ -15,6 +15,12 @@ namespace FrostAura.Reel.Application.Ml;
 /// <c>hasRuntime</c> / <c>hasTraktRating</c> / <c>hasPopularity</c> presence flags and neutral
 /// imputation for the three fields behind them. The flags are APPENDED (never interleaved next to
 /// the fields they describe) so every pre-existing scalar index is untouched by the bump.</item>
+/// <item><b>3</b> — dislike reasons became learnable. Added <c>simNotInterestedCentroid</c>
+/// (cosine of the title's plot embedding to the recency-weighted centroid of the user's live
+/// not-interested titles, as-of aware) and <c>dislikedGenreOverlap</c> (the recency-weighted
+/// disliked-genre weight matched by this title's genres — reason=Genre reactions only; math
+/// shared with the serving-time <c>DislikeSignal</c> demotion). Both APPENDED, per the same
+/// rule as v2; neutral value 0 when the account has no dislikes or the title no embedding.</item>
 /// </list>
 /// A version bump makes every stored artifact unreadable by construction — the vector width and
 /// column meanings move. <c>ModelArtifact.FeatureSchemaJson</c> records the version an artifact was
@@ -23,7 +29,7 @@ namespace FrostAura.Reel.Application.Ml;
 /// </remarks>
 public static class FeatureSchema
 {
-    public const int Version = 2;
+    public const int Version = 3;
 
     /// <summary>
     /// Neutral fill-ins for crowd data the catalogue simply does not have. Half the catalogue has no
@@ -109,6 +115,9 @@ public static class FeatureSchema
         "hasRuntime",             // 0 when runtimeMinutes is the neutral fill-in
         "hasTraktRating",         // 0 when traktRating is the neutral fill-in
         "hasPopularity",          // 0 when tmdbPopularityLog is the neutral fill-in
+        // Dislike signals (schema v3). Appended, never interleaved — same rule as v2.
+        "simNotInterestedCentroid", // cosine to the recency-weighted not-interested centroid
+        "dislikedGenreOverlap",     // recency-weighted disliked-genre weight matched by this title
     ];
 
     public static int VectorLength => Scalars.Length + Genres.Length + SubgenreBuckets;

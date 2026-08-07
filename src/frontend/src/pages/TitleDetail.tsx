@@ -90,10 +90,22 @@ function featureLabel(feature: string): string {
     simTopLovedMax: "very close to a favourite",
     simTopLovedMean: "feels like your favourites",
     hasEmbedding: "story similarity",
+    // synthetic serving-time entries (not model features)
+    dislikedSimilarity: "similar to titles you passed on",
   };
   if (map[feature]) return map[feature];
   // camelCase → spaced words, lower-cased (e.g. "simTopLovedMax" → "sim top loved max").
   return feature.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+}
+
+/**
+ * The top-5 breakdown bars, plus the dislike-demotion row whenever the server sent one — that row
+ * is the explanation for a visibly lowered score, so it must never be crowded out by the slice.
+ */
+function visibleContributions(all: { feature: string; value: number }[]) {
+  const top = all.slice(0, 5);
+  const disliked = all.find((c) => c.feature === "dislikedSimilarity");
+  return disliked && !top.includes(disliked) ? [...top, disliked] : top;
 }
 
 /**
@@ -348,7 +360,7 @@ export default function TitleDetail() {
                     <section className="space-y-2">
                       <h2 className="fa-overline text-fa-frost-dim">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
                       <div className="space-y-1.5 max-w-xl">
-                        {title.prediction.contributions.slice(0, 5).map((contribution) => {
+                        {visibleContributions(title.prediction.contributions).map((contribution) => {
                           const max = Math.max(...title.prediction!.contributions.map((c) => Math.abs(c.value))) || 1;
                           const positive = contribution.value >= 0;
                           const detail = detailFor(contribution.feature, title.contributionDetails);

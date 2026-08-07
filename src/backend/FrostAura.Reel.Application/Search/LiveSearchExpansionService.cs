@@ -37,6 +37,7 @@ public sealed class LiveSearchExpansionService(
     TitleHydrator hydrator,
     FeatureVectorBuilder featureBuilder,
     OnDemandScorer scorer,
+    DislikeSignal dislikes,
     LexicalSearchService lexical,
     ICatalogWorkCoordinator coordinator,
     IMemoryCache cache,
@@ -124,6 +125,16 @@ public sealed class LiveSearchExpansionService(
             var now = DateTime.UtcNow;
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
             var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+
+            // Recently-declined titles ride BOTH agent prompts (interpret + rerank) through the
+            // taste summary, so conversational picks verbally respect dislikes too. The scored
+            // component already respects them numerically — OnDemandScorer subtracts the
+            // DislikeSignal demotion, and its output feeds this surface's final blend below.
+            var dislikeProfile = await dislikes.GetProfileAsync(accountId, ct);
+            if (DislikeSignal.DeclinedLine(dislikeProfile) is { } declined)
+            {
+                tasteSummary = $"{tasteSummary}. {declined}";
+            }
 
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
             var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);

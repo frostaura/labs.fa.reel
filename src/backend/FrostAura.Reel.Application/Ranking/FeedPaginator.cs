@@ -62,6 +62,7 @@ public sealed class FeedPaginator(
     CandidateRetriever candidateRetriever,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    DislikeSignal dislikes,
     CandidateGenerator candidateGenerator,
     ITmdbClient tmdb,
     ISearchAgent agent,
@@ -636,10 +637,19 @@ public sealed class FeedPaginator(
             artifact.Id, artifact.ArtifactBytes,
             scorable.Select(t => vectors[t.Id]).ToArray(), FeatureSchema.AllNames());
 
+        // Same dislike demotion as the snapshot build and OnDemandScorer — a paged-in card must
+        // not ignore a dislike the rest of the feed honours. Profile is ~10-min cached, so the
+        // per-window cost is three id-batched lookups.
+        var profile = await dislikes.GetProfileAsync(artifact.AccountId, ct);
+        var demotions = await dislikes.DemotionsForAsync(
+            profile, scorable.Select(t => t.Id).ToList(), ct);
+
         return scorable.Zip(rows, (title, row) =>
             {
                 var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[title.Id]);
-                return new Scored(title, row, Math.Clamp((decimal)adjusted, 0m, 10m));
+                var predicted = DislikeSignal.ApplyDemotion(
+                    Math.Clamp((decimal)adjusted, 0m, 10m), demotions.GetValueOrDefault(title.Id));
+                return new Scored(title, row, predicted);
             })
             .ToList();
     }

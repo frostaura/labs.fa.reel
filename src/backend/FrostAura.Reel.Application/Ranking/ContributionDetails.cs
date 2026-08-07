@@ -17,6 +17,20 @@ public static class ContributionDetails
     /// <summary>How many people a single feature's tap-through lists, best average first.</summary>
     private const int MaxPeoplePerFeature = 5;
 
+    /// <summary>
+    /// The synthetic feature name for the serving-time dislike demotion. Not a model feature —
+    /// the demotion is subtracted after base + residual — but the title page renders it as a
+    /// negative bar so a visibly lowered score explains itself.
+    /// </summary>
+    public const string DislikedSimilarityFeature = "dislikedSimilarity";
+
+    /// <summary>Demotions below this stay silent — a barely-there penalty isn't worth a bar.</summary>
+    public const double DislikeNoteThreshold = 0.3;
+
+    /// <summary>The synthetic entry appended when the demotion clears the threshold.</summary>
+    public static Detail DislikedSimilarity() =>
+        new(DislikedSimilarityFeature, People: [], Note: "you passed on similar titles recently");
+
     /// <summary>One verified person behind a person-affinity bar. Averages are 1dp at the response edge.</summary>
     public sealed record PersonDetail(Guid PersonId, string Name, decimal YourAverage, int TitleCount);
 

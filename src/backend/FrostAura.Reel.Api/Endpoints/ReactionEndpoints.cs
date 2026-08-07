@@ -42,7 +42,7 @@ public static class ReactionEndpoints
         group.MapPost("/reactions/not_interested", async (
             string mediaType, long tmdbId, ReactionRequest request,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
-            OnlineResidualModel residual, CancellationToken ct) =>
+            OnlineResidualModel residual, DislikeSignal dislikes, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -65,8 +65,13 @@ public static class ReactionEndpoints
                     Reason = ParseReason(request.Reason),
                     CreatedAt = DateTime.UtcNow,
                 });
-                // A rejection is a soft-negative label — nudge the residual down (target 2, softer weight).
-                await residual.ObserveAsync(accountId, title.Id, 2.0, 0.8, ct);
+                // A rejection is a soft-negative label — nudge the residual down. Softened from the
+                // original (2, 0.8) to (3, 0.4) in Phase 8b: the reason-weighted DislikeSignal
+                // demotion now carries the per-similarity penalty, so the residual only needs to
+                // learn the general direction, not shoulder the whole correction.
+                await residual.ObserveAsync(accountId, title.Id, 3.0, 0.4, ct);
+                // Evict the cached dislike profile so the demotion sees this reaction immediately.
+                dislikes.Invalidate(accountId);
                 // Rebuild so the rejected title is replaced by the next-best pick, not just left as a gap.
                 await feedRefresh.RequestRebuildAsync(accountId, "not interested", ct);
                 await db.SaveChangesAsync(ct);
@@ -79,7 +84,7 @@ public static class ReactionEndpoints
         group.MapPost("/reactions/dropped", async (
             string mediaType, long tmdbId,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
-            CancellationToken ct) =>
+            OnlineResidualModel residual, DislikeSignal dislikes, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -93,9 +98,11 @@ public static class ReactionEndpoints
                     && r.Kind == ReactionKind.Dropped && r.RevokedAt == null, ct);
             if (existing is null)
             {
-                // Exclude-only: no rating, no managed-list, no Trakt outbox (Trakt has no dropped),
-                // and deliberately no residual observation — "I stopped watching this" is a
-                // scheduling decision, not a rating, so it must not train the model.
+                // No rating, no managed-list, no Trakt outbox (Trakt has no dropped concept). It
+                // DOES teach the model since Phase 8b — founder decision: "the dislikes I give must
+                // be taken into account". A drop is milder than not-interested (the user gave it a
+                // shot), so the pseudo-label is a lukewarm 4 at a light 0.3 weight, and the dislike
+                // profile folds it into the genre map when a reason is ever attached.
                 db.UserTitleReactions.Add(new UserTitleReaction
                 {
                     Id = Guid.NewGuid(),
@@ -104,6 +111,8 @@ public static class ReactionEndpoints
                     Kind = ReactionKind.Dropped,
                     CreatedAt = DateTime.UtcNow,
                 });
+                await residual.ObserveAsync(accountId, title.Id, 4.0, 0.3, ct);
+                dislikes.Invalidate(accountId);
                 // Dropped now excludes from discovery too, so rebuild to backfill the slot it vacates
                 // with the next-best pick — same treatment as not-interested / saved-for-later. GET
                 // /api/feed also prunes it from the live snapshot immediately, so the picks list is
@@ -170,7 +179,8 @@ public static class ReactionEndpoints
 
         group.MapDelete("/reactions/{kind}", async (
             string mediaType, long tmdbId, string kind,
-            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
+            DislikeSignal dislikes, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -216,6 +226,15 @@ public static class ReactionEndpoints
                 // Revoking any of the three exclusions makes the title a suggestion candidate again —
                 // rebuild so it can re-earn a slot live. Dropped is in this list because it now
                 // excludes from discovery, so un-dropping must restore eligibility symmetrically.
+                // The dislike profile drops the revoked reaction on the next read; the residual
+                // observe made on create is deliberately NOT reversed — a single soft-weighted
+                // pseudo-label inside a clamped online head is noise-level, and the head auto-resets
+                // on every retrain anyway.
+                if (reactionKind is ReactionKind.NotInterested or ReactionKind.Dropped)
+                {
+                    dislikes.Invalidate(accountId);
+                }
+
                 await feedRefresh.RequestRebuildAsync(accountId, "reaction revoked", ct);
 
                 await db.SaveChangesAsync(ct);

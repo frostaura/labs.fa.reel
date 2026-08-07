@@ -13,7 +13,9 @@ public enum ReactionKind
     /// suggestions, Ask Reel. It was Continue-Watching-only until 2026-08-07, which meant a dropped
     /// title with no watch footprint stayed eligible and was re-picked on every feed build.
     /// Revocable via <see cref="UserTitleReaction.RevokedAt"/>, which restores eligibility.
-    /// Exclude-only: no rating, no model penalty, no Trakt write-back (Trakt has no dropped concept).
+    /// No rating, no Trakt write-back (Trakt has no dropped concept). Since Phase 8b (2026-08-07)
+    /// it is no longer model-silent: a drop feeds the online residual head as a mild soft-negative
+    /// and joins the dislike profile that demotes similar titles at serving time.
     /// </summary>
     Dropped,
 }

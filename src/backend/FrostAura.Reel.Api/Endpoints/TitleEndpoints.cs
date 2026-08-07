@@ -71,7 +71,7 @@ public static class TitleEndpoints
             IReelDbContext db, IAccountContext accountContext,
             ITmdbClient tmdb, CandidateGenerator candidateGenerator, TitleHydrator hydrator,
             ICatalogWorkCoordinator coordinator, OnDemandScorer scorer, FeatureVectorBuilder featureBuilder,
-            CancellationToken ct) =>
+            DislikeSignal dislikes, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -112,6 +112,26 @@ public static class TitleEndpoints
                 : await ContributionDetails.BuildAsync(
                     db, await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct), title, ct);
 
+            // The serving-time dislike demotion behind this score (the PredictedRating already
+            // reflects it — OnDemandScorer subtracted it). When it is big enough to notice, the
+            // breakdown gets an honest synthetic negative bar + note so the lowered number
+            // explains itself instead of silently disagreeing with the crowd rating.
+            List<ContributionEntry> contributions = score is null
+                ? []
+                : JsonSerializer.Deserialize<List<ContributionEntry>>(score.ContributionsJson) ?? [];
+            if (score is not null)
+            {
+                var profile = await dislikes.GetProfileAsync(accountId, ct);
+                var demotion = (await dislikes.DemotionsForAsync(profile, [title.Id], ct))
+                    .GetValueOrDefault(title.Id);
+                if (demotion >= ContributionDetails.DislikeNoteThreshold)
+                {
+                    contributions.Add(new ContributionEntry(
+                        ContributionDetails.DislikedSimilarityFeature, -Math.Round((decimal)demotion, 1)));
+                    contributionDetails = [.. contributionDetails, ContributionDetails.DislikedSimilarity()];
+                }
+            }
+
             var watched = await db.WatchedTitles.FirstOrDefaultAsync(w => w.AccountId == accountId && w.TitleId == title.Id, ct);
             var rating = await db.UserRatings.FirstOrDefaultAsync(
                 r => r.AccountId == accountId && r.TitleId == title.Id
@@ -151,7 +171,7 @@ public static class TitleEndpoints
                 {
                     // Served ratings are uniformly 1dp at the response edge (stored precision is 2dp).
                     predictedRating = Math.Round(score.PredictedRating, 1),
-                    contributions = JsonSerializer.Deserialize<JsonElement>(score.ContributionsJson),
+                    contributions,
                     scoredAt = score.ScoredAt,
                 },
                 contributionDetails,
@@ -282,6 +302,10 @@ public static class TitleEndpoints
         await scorer.ScoreAsync(accountId, [titleId], DateTime.UtcNow, ct);
         return await ActiveScoreAsync(db, accountId, titleId, ct);
     }
+
+    /// <summary>One stored contribution row — matches the shape BuildFeed persists in ContributionsJson
+    /// (lowercase property names, so serialize/deserialize round-trips without options).</summary>
+    private sealed record ContributionEntry(string feature, decimal value);
 
     private static Task<TitleScore?> ActiveScoreAsync(IReelDbContext db, Guid accountId, Guid titleId, CancellationToken ct) =>
         db.TitleScores

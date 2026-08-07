@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using Microsoft.EntityFrameworkCore;
@@ -107,7 +108,9 @@ public class FeatureVectorBuilder(IReelDbContext db)
         float[]? RecentCentroid,
         IReadOnlyDictionary<Guid, float[]> LovedEmbeddings,
         SelfExclusion Self,
-        IReadOnlyList<Guid> LovedAnchorPool);
+        IReadOnlyList<Guid> LovedAnchorPool,
+        IReadOnlyDictionary<string, double> DislikedGenreWeights,
+        float[]? NotInterestedCentroid);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -255,6 +258,89 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Where(lovedEmbeddings.ContainsKey)
             .ToDictionary(id => id, id => lovedEmbeddings[id]);
 
+        // ── Dislike signals (schema v3) — as-of aware like every other label source ─────────
+        // A reaction created after asOf does not exist yet; one revoked after asOf was still live
+        // at asOf. Reactions are not labels, so no leave-one-out is needed: a scored candidate is
+        // by definition unreacted-to, and a training row's own reaction cannot exist (a rating
+        // implies "seen", a dislike implies "won't watch" — the interaction-footprint rule keeps
+        // them disjoint). Math shared with DislikeSignal so the served demotion and the trained
+        // feature agree by construction.
+        var dislikeReactions = await db.UserTitleReactions
+            .Where(r => r.AccountId == accountId
+                && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.Dropped)
+                && r.CreatedAt <= asOf && r.CreatedAt >= asOf.AddDays(-DislikeSignal.WindowDays)
+                && (r.RevokedAt == null || r.RevokedAt > asOf))
+            .Select(r => new { r.TitleId, r.Kind, r.Reason, r.CreatedAt })
+            .ToListAsync(ct);
+
+        var dislikedGenreWeights = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        float[]? notInterestedCentroid = null;
+        if (dislikeReactions.Count > 0)
+        {
+            var newestPerDislikedTitle = dislikeReactions
+                .GroupBy(r => r.TitleId)
+                .Select(g => g.OrderByDescending(r => r.CreatedAt).First())
+                .ToList();
+
+            var dislikedIds = newestPerDislikedTitle.Select(r => r.TitleId).ToList();
+            var dislikedGenres = await db.Titles
+                .Where(t => dislikedIds.Contains(t.Id))
+                .Select(t => new { t.Id, t.Genres })
+                .ToDictionaryAsync(t => t.Id, t => t.Genres, ct);
+
+            foreach (var reaction in newestPerDislikedTitle.Where(r => r.Reason == ReactionReason.Genre))
+            {
+                if (!dislikedGenres.TryGetValue(reaction.TitleId, out var genres))
+                {
+                    continue;
+                }
+
+                var weight = DislikeSignal.RecencyWeight(reaction.CreatedAt, asOf);
+                foreach (var genre in genres)
+                {
+                    dislikedGenreWeights[genre] = dislikedGenreWeights.GetValueOrDefault(genre) + weight;
+                }
+            }
+
+            // Recency-weighted centroid over the NOT-INTERESTED titles' embeddings (Dropped is a
+            // scheduling signal, not a similarity one — it feeds the genre map above when reasoned,
+            // never the centroid).
+            var notInterested = newestPerDislikedTitle
+                .Where(r => r.Kind == ReactionKind.NotInterested)
+                .ToList();
+            var niEmbeddings = await LoadEmbeddingsAsync(notInterested.Select(r => r.TitleId).ToList(), ct);
+            double[]? centroidSum = null;
+            var centroidWeight = 0d;
+            foreach (var reaction in notInterested)
+            {
+                if (!niEmbeddings.TryGetValue(reaction.TitleId, out var embedding))
+                {
+                    continue;
+                }
+
+                var weight = DislikeSignal.RecencyWeight(reaction.CreatedAt, asOf);
+                centroidSum ??= new double[embedding.Length];
+                if (centroidSum.Length == embedding.Length)
+                {
+                    for (var i = 0; i < embedding.Length; i++)
+                    {
+                        centroidSum[i] += weight * embedding[i];
+                    }
+
+                    centroidWeight += weight;
+                }
+            }
+
+            if (centroidSum is not null && centroidWeight > 0d)
+            {
+                notInterestedCentroid = new float[centroidSum.Length];
+                for (var i = 0; i < centroidSum.Length; i++)
+                {
+                    notInterestedCentroid[i] = (float)(centroidSum[i] / centroidWeight);
+                }
+            }
+        }
+
         var self = new SelfExclusion(
             selfRatings,
             titleRatings.Sum(r => (decimal)r.Rating),
@@ -283,7 +369,9 @@ public class FeatureVectorBuilder(IReelDbContext db)
             recentCentroid,
             topLovedEmbeddings,
             self,
-            lovedAnchorPool);
+            lovedAnchorPool,
+            dislikedGenreWeights,
+            notInterestedCentroid);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
@@ -451,6 +539,15 @@ public class FeatureVectorBuilder(IReelDbContext db)
             vector[s++] = title.RuntimeMinutes is null ? 0f : 1f;
             vector[s++] = title.TraktRating is null ? 0f : 1f;
             vector[s++] = title.TmdbPopularity is null ? 0f : 1f;
+
+            // ── Dislike signals (schema v3) ────────────────────────────────────────────
+            // Neutral 0 when the account has no dislikes or the title no embedding. No leave-one-out
+            // (see BuildTasteStateAsync): a reacted-to title can never be a training row or a
+            // candidate, so there is no self-contribution to subtract.
+            vector[s++] = embeddings.TryGetValue(id, out var candidateEmbedding)
+                ? Cosine(candidateEmbedding, taste.NotInterestedCentroid)
+                : 0f;
+            vector[s++] = (float)DislikeSignal.GenreOverlap(title.Genres, taste.DislikedGenreWeights);
 
             // ── Genre multi-hot ────────────────────────────────────────────────────────
             var genreSet = title.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);

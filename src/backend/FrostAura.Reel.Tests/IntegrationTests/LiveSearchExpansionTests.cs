@@ -365,7 +365,10 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             featureBuilder,
-            new OnDemandScorer(db, featureBuilder, engine, residualModel),
+            new OnDemandScorer(
+                db, featureBuilder, engine, residualModel,
+                new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions()))),
+            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
             new LexicalSearchService(eligibility),
             new CatalogWorkCoordinator(),
             new MemoryCache(new MemoryCacheOptions()),

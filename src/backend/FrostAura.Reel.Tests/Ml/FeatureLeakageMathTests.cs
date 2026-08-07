@@ -81,16 +81,19 @@ public class FeatureLeakageMathTests
     }
 
     [Fact]
-    public void Schema_version_two_adds_the_crowd_presence_flags()
+    public void Schema_version_three_appends_the_dislike_signals()
     {
-        // Imputing missing crowd data as a real 0 changed the vector, so it is a version bump — and
-        // the v1 scalars keep their v1 positions (the flags are appended, never interleaved).
-        Assert.Equal(2, FeatureSchema.Version);
+        // v2 added the crowd-presence flags; v3 makes dislike reasons learnable. Each bump APPENDS
+        // — every pre-existing scalar keeps its position, so the version history stays honest and
+        // a stored artifact can only ever be wrong loudly (width mismatch), never silently.
+        Assert.Equal(3, FeatureSchema.Version);
 
         var names = FeatureSchema.Scalars;
-        Assert.Equal("hasRuntime", names[^3]);
-        Assert.Equal("hasTraktRating", names[^2]);
-        Assert.Equal("hasPopularity", names[^1]);
+        Assert.Equal("hasRuntime", names[^5]);
+        Assert.Equal("hasTraktRating", names[^4]);
+        Assert.Equal("hasPopularity", names[^3]);
+        Assert.Equal("simNotInterestedCentroid", names[^2]);
+        Assert.Equal("dislikedGenreOverlap", names[^1]);
         Assert.Equal(0, Array.IndexOf(names, "releaseAgeLog"));
         Assert.Equal(1, Array.IndexOf(names, "runtimeMinutes"));
         Assert.Equal(3, Array.IndexOf(names, "traktRating"));

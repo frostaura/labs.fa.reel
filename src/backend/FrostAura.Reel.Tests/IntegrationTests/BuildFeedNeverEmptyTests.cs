@@ -298,6 +298,93 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         Assert.All(itemsAfter, i => Assert.StartsWith("Shares the slow-burn dread you love", i.WhyThisSentence));
     }
 
+    [Fact]
+    public async Task A_seen_enough_dislike_keeps_similar_titles_out_of_the_hero()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Phase 8b: the founder's "dislikes must be taken into account", pinned on the feed build.
+        // Eight otherwise-equivalent candidates; the victim's plot embedding duplicates a declined
+        // (seen-enough) title's, the rest are mutually orthogonal. Whatever base score the model
+        // hands the victim, the dislike demotion (~1.2 for an identical plot) must keep it out of
+        // the hero while its seven clean twins fill the slots.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+
+        Guid victimId;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var disliked = NewTitle("declined saturation", popularity: 1.5m);
+            db.Add(disliked);
+            db.TitleEmbeddings.Add(NewEmbedding(disliked.Id, axis: 0));
+            db.UserTitleReactions.Add(new UserTitleReaction
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = disliked.Id,
+                Kind = ReactionKind.NotInterested,
+                Reason = ReactionReason.SeenEnough,
+                CreatedAt = DateTime.UtcNow,
+            });
+
+            var victim = NewTitle("victim candidate", popularity: 2.5m);
+            victimId = victim.Id;
+            db.Add(victim);
+            db.TitleEmbeddings.Add(NewEmbedding(victim.Id, axis: 0)); // cosine 1 to the disliked plot
+
+            for (var i = 1; i <= 7; i++)
+            {
+                var clean = NewTitle($"clean candidate {i}", popularity: 2m + (i * 0.001m));
+                db.Add(clean);
+                db.TitleEmbeddings.Add(NewEmbedding(clean.Id, axis: i)); // orthogonal to everything
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await SeedActiveArtifactAsync(accountId);
+        await RunBuildAsync(accountId);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(verify, accountId);
+        var items = await verify.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+        var heroIds = items.Where(i => i.Row == FeedRowKind.Hero).Select(i => i.TitleId).ToList();
+
+        Assert.NotEmpty(heroIds);
+        Assert.DoesNotContain(victimId, heroIds);
+
+        // And the demotion is visible in the persisted scores: the victim sits clearly below every
+        // hero pick, not coincidentally just past the cut line.
+        var victimScore = await verify.TitleScores
+            .Where(s => s.AccountId == accountId && s.TitleId == victimId)
+            .Select(s => s.PredictedRating)
+            .FirstAsync();
+        var heroFloor = await verify.TitleScores
+            .Where(s => s.AccountId == accountId && heroIds.Contains(s.TitleId))
+            .MinAsync(s => s.PredictedRating);
+        Assert.True(
+            heroFloor - victimScore >= 0.5m,
+            $"victim ({victimScore}) should sit well below the weakest hero pick ({heroFloor})");
+    }
+
+    /// <summary>A unit plot embedding along one axis — identical (cos 1) or orthogonal (cos 0) pairs.</summary>
+    private static TitleEmbedding NewEmbedding(Guid titleId, int axis)
+    {
+        var vector = new float[1536];
+        vector[axis] = 1f;
+        return new TitleEmbedding
+        {
+            TitleId = titleId,
+            Embedding = new Pgvector.Vector(vector),
+            EmbeddingModel = "test",
+            SourceTextHash = $"hash-{titleId:N}",
+            CreatedAt = DateTime.UtcNow,
+        };
+    }
+
     /// <summary>Counts rerank calls and answers a distinct, guard-passing second-person line per title.</summary>
     private sealed class CannedWhyAgent : ISearchAgent
     {
@@ -339,6 +426,10 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
                 NullLogger<OnlineResidualModel>.Instance),
+            new DislikeSignal(
+                db,
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             agent ?? new UnavailableSearchAgent(),
             new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),

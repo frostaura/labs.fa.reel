@@ -39,6 +39,7 @@ public class BuildFeedJobHandler(
     TitleHydrator hydrator,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    DislikeSignal dislikes,
     ISearchAgent agent,
     IMemoryCache cache,
     IPipelineEventHub events,
@@ -155,10 +156,19 @@ public class BuildFeedJobHandler(
 
         // The residual is a scalar correction on the numeric score used for ranking + PredictedRating;
         // the contribution list stays the base model's (a scalar can't be split into per-feature parts).
+        // The dislike demotion is subtracted here — on the shortlist scores, BEFORE hero and row
+        // selection — so a title similar to what the user declined cannot ride a high base score
+        // into the hero or a rail. Profile cached ~10 min; reaction endpoints both evict it and
+        // request this very rebuild, so a fresh dislike reshapes the next feed immediately.
+        var dislikeProfile = await dislikes.GetProfileAsync(accountId, ct);
+        var demotions = await dislikes.DemotionsForAsync(
+            dislikeProfile, ordered.Select(t => t.Id).ToList(), ct);
         var candidates = ordered.Zip(scored, (title, row) =>
         {
             var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, finalVectors[title.Id]);
-            return new Candidate(title, row, Math.Clamp((decimal)adjusted, 0m, 10m));
+            var predicted = DislikeSignal.ApplyDemotion(
+                Math.Clamp((decimal)adjusted, 0m, 10m), demotions.GetValueOrDefault(title.Id));
+            return new Candidate(title, row, predicted);
         }).ToList();
         await PersistScoresAsync(accountId, artifact.Id, candidates, now, ct);
 

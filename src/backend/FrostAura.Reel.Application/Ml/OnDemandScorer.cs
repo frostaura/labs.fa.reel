@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using Microsoft.EntityFrameworkCore;
@@ -11,9 +12,16 @@ namespace FrostAura.Reel.Application.Ml;
 /// Loads the account's Active artifact, scores through the engine's per-model cache (so the model
 /// is deserialized once per artifact, not once per request), builds taste state once, vectorises,
 /// and upserts <see cref="TitleScore"/>. Serving uses <c>asOf = now</c>; leakage-clean because
-/// TitleScore is write-only and never read by training/eval.
+/// TitleScore is write-only and never read by training/eval. The final score is base + online
+/// residual − the <see cref="DislikeSignal"/> demotion, so declined reasons steer every surface
+/// that scores through here (title page, search badges, Ask Reel's blend) without a retrain.
 /// </summary>
-public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featureBuilder, IModelEngine engine, OnlineResidualModel residualModel)
+public sealed class OnDemandScorer(
+    IReelDbContext db,
+    FeatureVectorBuilder featureBuilder,
+    IModelEngine engine,
+    OnlineResidualModel residualModel,
+    DislikeSignal dislikes)
 {
     /// <summary>
     /// Predicts the user's rating for each title and persists it. Returns titleId → predicted
@@ -61,6 +69,11 @@ public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featu
         // Zero head ⇒ no change, so this is a strict no-op until the account has logged events.
         var residual = await residualModel.LoadAsync(accountId, artifact.Id, ct);
 
+        // The reason-weighted dislike demotion, from the ~10-min-cached profile (reaction
+        // endpoints evict it on create/revoke, so a fresh dislike bites immediately).
+        var profile = await dislikes.GetProfileAsync(accountId, ct);
+        var demotions = await dislikes.DemotionsForAsync(profile, orderedIds, ct);
+
         var existing = await db.TitleScores
             .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifact.Id && orderedIds.Contains(s.TitleId))
             .ToDictionaryAsync(s => s.TitleId, ct);
@@ -71,6 +84,8 @@ public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featu
             var titleId = orderedIds[i];
             var adjusted = scores[i] + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[titleId]);
             var predicted = Math.Round(Math.Clamp((decimal)adjusted, 0m, 10m), 2);
+            predicted = Math.Round(
+                DislikeSignal.ApplyDemotion(predicted, demotions.GetValueOrDefault(titleId)), 2);
             result[titleId] = predicted;
 
             if (!existing.TryGetValue(titleId, out var row))
