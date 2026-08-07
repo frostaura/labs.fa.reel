@@ -79,6 +79,13 @@ public sealed class FeedPaginator(
     /// already has. Deepening is an optimisation; the user waiting for the row is not.
     /// </summary>
     private static readonly TimeSpan DeepenBudget = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// How long a page request may spend on LLM curation before it serves the model's own order.
+    /// Generous enough for a warm provider to answer, short enough that a cold cache after a deploy
+    /// does not make the app feel broken.
+    /// </summary>
+    private static readonly TimeSpan CurationBudget = TimeSpan.FromSeconds(4);
     private const int MaxDeepenPage = 25;
     private const int CurationBuffer = 8; // model-rank this many extra so the LLM has room to re-order
     private const int RerankBatch = 9;
@@ -237,17 +244,63 @@ public sealed class FeedPaginator(
 
         if (uncached.Count > 0)
         {
+            // Time-boxed for the same reason deepening is: this is an LLM round-trip on the critical
+            // path of a row the user is waiting for, and the fit cache is an in-process IMemoryCache
+            // that every deploy empties. Measured after a restart, a cold lane took 13.4s; the same
+            // lane once warm takes 46ms. Three cold lanes in flight exhaust the browser's
+            // connections to the origin and stall unrelated requests — a title detail that answers
+            // in 20ms took 4.9s behind them.
+            //
+            // Curation only SHARPENS an order the model has already personalised, so a page that
+            // ships without it is a slightly worse order, not a wrong one — which is exactly how
+            // the existing agent-unavailable and rerank-failed paths already behave. Whatever
+            // batches completed inside the budget are still applied and cached, so the next page
+            // over the same titles is warm.
+            using var curationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            curationCts.CancelAfter(CurationBudget);
+            var curationCt = curationCts.Token;
+            var timedOut = false;
+
             var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
-            await CurationGate.WaitAsync(ct);
+            var holdsGate = false;
             try
             {
-                for (var i = 0; i < uncached.Count; i += RerankBatch)
+                await CurationGate.WaitAsync(curationCt);
+                holdsGate = true;
+            }
+            catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                // Every slot is busy and the budget expired before one freed. Fall through rather
+                // than returning early: whatever fits were already cached still apply, and the
+                // blend/ordering below is the single place that decides final order.
+                logger.LogInformation(
+                    "Feed curation for {Row} gave up waiting for a slot within {Budget}s; serving model order.",
+                    rowKey, CurationBudget.TotalSeconds);
+                timedOut = true;
+            }
+
+            try
+            {
+                if (!holdsGate)
+                {
+                    uncached.Clear();
+                }
+
+                for (var i = 0; i < uncached.Count && !timedOut; i += RerankBatch)
                 {
                     var batch = uncached.Skip(i).Take(RerankBatch).ToList();
                     IReadOnlyList<RerankResult> results;
                     try
                     {
-                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, ct);
+                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, curationCt);
+                    }
+                    catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
+                    {
+                        logger.LogInformation(
+                            "Feed curation for {Row} exceeded {Budget}s after {Done} of {Total} titles; serving model order for the rest.",
+                            rowKey, CurationBudget.TotalSeconds, fitById.Count, pool.Count);
+                        timedOut = true;
+                        break;
                     }
                     catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
                     {
@@ -264,7 +317,13 @@ public sealed class FeedPaginator(
             }
             finally
             {
-                CurationGate.Release();
+                // Only if we actually acquired it — a budget expiry while WAITING means we never
+                // entered, and releasing then would permanently inflate the semaphore's count and
+                // uncap concurrency for the life of the process.
+                if (holdsGate)
+                {
+                    CurationGate.Release();
+                }
             }
         }
 
