@@ -4,10 +4,9 @@ import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Mic, RotateCcw, Send, Sparkles } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
-import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
-import CrowdRatingBadge from "../components/rec/CrowdRatingBadge";
+import ScoreBadges from "../components/rec/ScoreBadges";
+import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
-import { hasPredictedRating } from "../lib/predictedRating";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, useAskReelChat } from "../lib/useAskReelChat";
@@ -366,21 +365,28 @@ function ResultCard({ card }: { card: AskCard }) {
     >
       <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
         <PosterImage path={card.posterPath} alt={card.name} size="w185" />
-        {/* Prediction and crowd score, stacked so the grid's narrowest cell (two columns
-            on a phone) still reads both. `hasPredictedRating` covers NaN as well as null,
-            and a title with no community score simply shows one badge — never a dash. */}
-        {(hasPredictedRating(card.predictedRating) || hasPredictedRating(card.crowdRating)) && (
-          <div className="absolute top-2 right-2 flex flex-col items-end gap-1 reel-rise">
-            {hasPredictedRating(card.predictedRating) && <PredictedRatingBadge rating={card.predictedRating} />}
-            {hasPredictedRating(card.crowdRating) && (
-              <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} />
-            )}
-          </div>
-        )}
-        {card.seen && (
+        {/* The shared stack: prediction over crowd, no-overlap, scrimmed — and it owns the
+            null/NaN guards, so a title with no community score shows one badge, never a dash. */}
+        <ScoreBadges
+          predictedRating={card.predictedRating}
+          crowdRating={card.crowdRating}
+          crowdVotes={card.crowdVotes}
+        />
+        {/* Quick actions and the Seen pill share the top-left corner; a seen title gets the pill
+            (dismissing or queueing something already watched is meaningless), everything else gets
+            the one-tap actions. ResultCard deliberately does NOT converge onto RecCard — the Ask
+            payload has `why`/`seen` and lacks runtime/providers, so only the overlay is shared. */}
+        {card.seen ? (
           <span className="absolute top-2 left-2 rounded-full bg-fa-ink/80 px-2 py-0.5 fa-caption text-fa-frost-dim ring-1 ring-fa-edge">
             Seen
           </span>
+        ) : (
+          <CardQuickActions
+            titleId={card.titleId}
+            mediaType={card.mediaType}
+            tmdbId={card.tmdbId}
+            name={card.name}
+          />
         )}
       </div>
       <p className="mt-2 fa-body text-fa-frost-bright truncate" title={card.name}>{card.name}</p>

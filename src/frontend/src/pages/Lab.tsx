@@ -29,10 +29,33 @@ export default function Lab() {
             Leakage-clean time-split evaluation against the popularity baseline — the edge-proof gate.
           </p>
         </div>
-        <button onClick={() => train()} disabled={starting || trainActive} className="fa-button-primary">
-          <Play className="h-4 w-4" />
-          {trainActive ? "Training…" : "Train + evaluate"}
-        </button>
+        <div className="flex items-center gap-4">
+          {/* Live feedback while the job runs — the button alone flipped to "Training…" and then
+              nothing moved for minutes. The active job's own progress feed (polled + SSE-updated
+              by RealtimeSync) narrates it instead. */}
+          {trainActive && sync?.activeJob && (
+            <div className="w-56" data-testid="train-progress">
+              <p className="fa-caption text-fa-frost-dim truncate text-right">
+                {sync.activeJob.progressMessage ?? "Working…"}
+                {sync.activeJob.progressPct != null ? ` · ${Math.round(sync.activeJob.progressPct)}%` : ""}
+              </p>
+              <div className="relative mt-1 h-1 overflow-hidden rounded-full bg-fa-glass">
+                {sync.activeJob.progressPct != null ? (
+                  <div
+                    className="absolute inset-y-0 left-0 rounded-full bg-fa-frost/60 transition-[width] duration-500"
+                    style={{ width: `${Math.min(100, Math.max(0, sync.activeJob.progressPct))}%` }}
+                  />
+                ) : (
+                  <div className="absolute inset-y-0 rounded-full bg-fa-frost/60 fa-progress-slide" />
+                )}
+              </div>
+            </div>
+          )}
+          <button onClick={() => train()} disabled={starting || trainActive} className="fa-button-primary">
+            <Play className="h-4 w-4" />
+            {trainActive ? "Training…" : "Train + evaluate"}
+          </button>
+        </div>
       </div>
 
       {/* Gate badge */}

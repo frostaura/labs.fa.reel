@@ -140,6 +140,14 @@ body {
   .reel-scrim {
     background-image: linear-gradient(180deg, transparent 30%, rgba(6, 18, 31, 0.55) 62%, rgba(6, 18, 31, 0.92) 100%);
   }
+  /* On phones the hero title sits higher up the artwork and the poster fills more of the
+     viewport, so the same gradient left light art washing out the text — start the ink sooner
+     and land denser. */
+  @media (max-width: 640px) {
+    .reel-scrim {
+      background-image: linear-gradient(180deg, transparent 18%, rgba(6, 18, 31, 0.65) 55%, rgba(6, 18, 31, 0.95) 100%);
+    }
+  }
   /* 2:3 poster base with skeleton background while the image loads. */
   .reel-poster {
     @apply aspect-[2/3] rounded-lg overflow-hidden bg-fa-ink-3;

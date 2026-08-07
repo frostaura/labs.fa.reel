@@ -26,6 +26,10 @@ export default function RealtimeSync() {
   // Tracks whether the authoritative active job is a primary pipeline job, so the SSE handler
   // can drop background-poll events that would otherwise clobber its progress.
   const primaryActiveRef = useRef(false);
+  // The last active model-lab job (Train/Evaluate), so its completion can refresh the Lab
+  // ledger. Those two handlers publish no `job-completed` SSE frame (the others do), so the
+  // only completion signal that exists today is the polled status flipping to idle.
+  const labJobActiveRef = useRef(false);
 
   useEffect(() => {
     if (!status) return;
@@ -33,9 +37,16 @@ export default function RealtimeSync() {
     if (job && (job.status === "Running" || job.status === "Pending")) {
       const kind = jobKindToSseKind(job.kind);
       primaryActiveRef.current = !isBackgroundKind(kind);
+      labJobActiveRef.current = job.kind === "Train" || job.kind === "Evaluate";
       dispatch(syncProgress({ label: job.progressMessage ?? "Syncing", pct: job.progressPct, kind }));
     } else {
       primaryActiveRef.current = false;
+      if (labJobActiveRef.current) {
+        // A train/evaluate run just finished: pull the fresh iteration into the Lab ledger
+        // without waiting for its 10s metric poll (or a reload).
+        labJobActiveRef.current = false;
+        dispatch(api.util.invalidateTags(["Lab"]));
+      }
       dispatch(syncIdle());
     }
   }, [status, dispatch]);
@@ -64,10 +75,21 @@ export default function RealtimeSync() {
       }
     });
 
-    source.addEventListener("job-completed", () => {
+    source.addEventListener("job-completed", (ev) => {
       // The status refetch (Sync tag) decides whether the pill clears or hands over to
       // the next active job.
       dispatch(api.util.invalidateTags(["Sync", "Feed", "TasteDna"]));
+      // A finished train/evaluate run also stales the model-lab ledger. Today those handlers
+      // publish no job-completed frame (the poll-transition above covers them); this listens
+      // anyway so a backend that starts emitting them gets the instant refresh for free.
+      try {
+        const kind = JSON.parse((ev as MessageEvent).data)?.kind;
+        if (kind === "train" || kind === "evaluate") {
+          dispatch(api.util.invalidateTags(["Lab"]));
+        }
+      } catch {
+        // ignore malformed frame
+      }
     });
 
     // The authoritative "your feed just changed" frame: a reactive rebuild (fired the instant new
