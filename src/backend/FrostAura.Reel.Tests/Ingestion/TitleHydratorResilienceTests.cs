@@ -119,7 +119,7 @@ public class TitleHydratorResilienceTests
         Assert.Null(titles[0].LastMetadataRefreshAt);
     }
 
-    private static TitleHydrator Hydrator(ITmdbClient tmdb) =>
+    internal static TitleHydrator Hydrator(ITmdbClient tmdb) =>
         new(new UnusedDbContext(), tmdb, NullLogger<TitleHydrator>.Instance);
 
     private static List<Title> Batch(int count) =>
@@ -137,7 +137,9 @@ public class TitleHydratorResilienceTests
     /// Returns credit-free details (so hydration never needs the database), 404s or throws for the
     /// nominated TMDB id.
     /// </summary>
-    private sealed class StubTmdb(long? failFor, Exception failure, bool failEverything = false, long? notFoundFor = null) : ITmdbClient
+    internal sealed class StubTmdb(
+        long? failFor, Exception failure, bool failEverything = false, long? notFoundFor = null,
+        Func<long, TmdbTitleDetails>? details = null) : ITmdbClient
     {
         public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default)
         {
@@ -151,7 +153,7 @@ public class TitleHydratorResilienceTests
                 return Task.FromResult<TmdbTitleDetails?>(null); // TMDB 404 — confirmed missing.
             }
 
-            return Task.FromResult<TmdbTitleDetails?>(new TmdbTitleDetails(
+            return Task.FromResult<TmdbTitleDetails?>(details?.Invoke(tmdbId) ?? new TmdbTitleDetails(
                 tmdbId, "/poster.jpg", "/backdrop.jpg", 12.5m, 7.1m, 900, 101,
                 "An overview.", "A tagline.", null, [], [], "yt-key", ["heist"], "en"));
         }
@@ -193,7 +195,7 @@ public class TitleHydratorResilienceTests
     /// Deliberately inert persistence port: these titles carry no credits, so a correct hydrator
     /// never touches the database at all. Any member access here is a test failure with a name.
     /// </summary>
-    private sealed class UnusedDbContext : IReelDbContext
+    internal sealed class UnusedDbContext : IReelDbContext
     {
         public DbSet<Account> Accounts => throw Unexpected();
         public DbSet<TraktConnection> TraktConnections => throw Unexpected();

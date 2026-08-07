@@ -16,7 +16,12 @@ namespace FrostAura.Reel.Application.Search;
 /// continue-watching surface only — no rating (rated implies seen, including titles rated
 /// without a logged play), not actively NotInterested, not already saved for later (founder
 /// addition 2026-06-19: a title you've put on your watchlist is a decision already made — it
-/// lives on Saved, not back in the picks), and inside the account's content-preference rules.
+/// lives on Saved, not back in the picks), not Dropped (founder report 2026-08-07: "I tried to
+/// drop the show, and it says dropped, but it's still on my tonight's pick list" — Dropped was
+/// scoped to Continue Watching, so a dropped title with no watch footprint stayed eligible and was
+/// re-selected on every build, for ever; "I stopped watching this" now excludes it from every
+/// suggestion surface, and it is reversible via the undrop DELETE), and inside the account's
+/// content-preference rules.
 /// Maturity ceilings compare certification ordinals in memory (certification systems don't order
 /// in SQL) via <see cref="PassesMaturity"/>.
 ///
@@ -49,8 +54,45 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
             && !db.UserTitleReactions.Any(r =>
                 r.AccountId == accountId && r.TitleId == t.Id
-                && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.SaveForLater)
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
                 && r.RevokedAt == null));
+    }
+
+    /// <summary>
+    /// The subset of <paramref name="candidateTitleIds"/> that now carries an interaction footprint —
+    /// the SAME rule <see cref="EligibleTitles"/> applies, expressed as a set lookup for surfaces
+    /// holding titles that were already materialised (the feed snapshot) instead of a query to filter.
+    ///
+    /// It exists because the two used to be independent copies, and they drifted: the snapshot pruner
+    /// unioned SaveForLater + NotInterested + watched + rated while <see cref="EligibleTitles"/> had
+    /// its own list, so when Dropped joined the exclusions on 2026-08-07 only one of them learned
+    /// about it. Anything that prunes a materialised feed calls this — do not write a second copy.
+    /// </summary>
+    public async Task<HashSet<Guid>> InteractedTitleIdsAsync(
+        Guid accountId, IReadOnlyCollection<Guid> candidateTitleIds, CancellationToken ct = default)
+    {
+        if (candidateTitleIds.Count == 0)
+        {
+            return [];
+        }
+
+        var interacted = new HashSet<Guid>();
+        interacted.UnionWith(await db.UserTitleReactions
+            .Where(r => r.AccountId == accountId && r.RevokedAt == null
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
+                && candidateTitleIds.Contains(r.TitleId))
+            .Select(r => r.TitleId).ToListAsync(ct));
+        interacted.UnionWith(await db.WatchedTitles
+            .Where(w => w.AccountId == accountId && candidateTitleIds.Contains(w.TitleId))
+            .Select(w => w.TitleId).ToListAsync(ct));
+        interacted.UnionWith(await db.UserRatings
+            .Where(r => r.AccountId == accountId && candidateTitleIds.Contains(r.TitleId))
+            .Select(r => r.TitleId).ToListAsync(ct));
+        return interacted;
     }
 
     /// <summary>

@@ -101,11 +101,16 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHyd
         title.TmdbPopularity = details.Popularity;
         title.TmdbVoteAverage = details.VoteAverage;
         title.TmdbVoteCount = details.VoteCount;
-        // TMDB original_language — the only language signal for discovery titles (Trakt sets it for
-        // library titles via IngestMapper). Powers the language allow-list / English-only default.
-        if (!string.IsNullOrWhiteSpace(details.OriginalLanguage))
+        // Language — the only signal for discovery titles (Trakt sets it for library titles via
+        // IngestMapper). Powers the language allow-list / English-only default, so a wrong value is
+        // directly visible to the user: TMDB claims original_language "en" for the Spanish telenovela
+        // "El final del paraíso" (tv/95439) and it walked straight into an English-only feed.
+        // TmdbLanguage.Resolve corroborates original_language against the spoken-language list rather
+        // than trusting one field.
+        var language = TmdbLanguage.Resolve(details.OriginalLanguage, details.SpokenLanguages, details.Languages);
+        if (language is not null)
         {
-            title.Language = details.OriginalLanguage.ToLowerInvariant();
+            title.Language = language;
         }
         title.RuntimeMinutes ??= details.Runtime;
         title.Overview ??= details.Overview;

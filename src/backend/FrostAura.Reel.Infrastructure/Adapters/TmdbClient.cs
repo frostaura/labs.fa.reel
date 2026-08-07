@@ -482,12 +482,18 @@ public class TmdbClient(
             crew,
             trailer?.Key,
             keywords,
-            dto.OriginalLanguage);
+            dto.OriginalLanguage,
+            (dto.SpokenLanguages ?? []).Select(l => l.Iso6391).Where(c => c is not null).Select(c => c!).ToArray(),
+            dto.Languages ?? []);
     }
 
     private sealed record DetailsDto(
         long Id,
         [property: JsonPropertyName("original_language")] string? OriginalLanguage,
+        // Corroborators for the unreliable original_language — see TmdbLanguage.Resolve. Movies expose
+        // spoken_languages only; TV exposes both (verified live against /3/movie and /3/tv).
+        [property: JsonPropertyName("spoken_languages")] SpokenLanguageDto[]? SpokenLanguages,
+        [property: JsonPropertyName("languages")] string[]? Languages,
         [property: JsonPropertyName("poster_path")] string? PosterPath,
         [property: JsonPropertyName("backdrop_path")] string? BackdropPath,
         decimal Popularity,
@@ -502,6 +508,8 @@ public class TmdbClient(
         [property: JsonPropertyName("aggregate_credits")] AggregateCreditsDto? AggregateCredits,
         VideosDto? Videos,
         KeywordsDto? Keywords);
+
+    private sealed record SpokenLanguageDto([property: JsonPropertyName("iso_639_1")] string? Iso6391);
 
     private sealed record CreditsDto(CastDto[]? Cast, CrewDto[]? Crew);
 

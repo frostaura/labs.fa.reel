@@ -63,21 +63,12 @@ public static class FeedEndpoints
             // The snapshot is materialized, so an interaction made since the build can leave a title
             // in the feed that no longer belongs there. Drop anything that has since picked up an
             // interaction footprint — marked seen (watched or rated), saved for later (a decision
-            // already made; it lives on Saved), or not-interested — without waiting for a rebuild.
-            // Mirrors EligibilityQueryBuilder's rule so a built feed stays honest between builds.
+            // already made; it lives on Saved), not-interested, or dropped — without waiting for a
+            // rebuild. The rule is READ FROM EligibilityQueryBuilder rather than restated here: this
+            // used to be a hand-copied union that omitted Dropped, which is precisely why a dropped
+            // title kept its slot on tonight's picks (founder, 2026-08-07).
             var snapshotTitleIds = items.Select(x => x.Title.Id).ToList();
-            var excludedTitleIds = new HashSet<Guid>();
-            excludedTitleIds.UnionWith(await db.UserTitleReactions
-                .Where(r => r.AccountId == account.Id && r.RevokedAt == null
-                    && (r.Kind == ReactionKind.SaveForLater || r.Kind == ReactionKind.NotInterested)
-                    && snapshotTitleIds.Contains(r.TitleId))
-                .Select(r => r.TitleId).ToListAsync(ct));
-            excludedTitleIds.UnionWith(await db.WatchedTitles
-                .Where(w => w.AccountId == account.Id && snapshotTitleIds.Contains(w.TitleId))
-                .Select(w => w.TitleId).ToListAsync(ct));
-            excludedTitleIds.UnionWith(await db.UserRatings
-                .Where(r => r.AccountId == account.Id && snapshotTitleIds.Contains(r.TitleId))
-                .Select(r => r.TitleId).ToListAsync(ct));
+            var excludedTitleIds = await eligibility.InteractedTitleIdsAsync(account.Id, snapshotTitleIds, ct);
             if (excludedTitleIds.Count > 0)
             {
                 // Rows shrink when a since-interacted title is dropped, leaving gaps until the next

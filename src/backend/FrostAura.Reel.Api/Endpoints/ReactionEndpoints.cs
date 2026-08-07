@@ -179,10 +179,11 @@ public static class ReactionEndpoints
             return Results.Ok(new { notInterested = true });
         });
 
-        // ── Drop an in-progress show (manual) — hides it from Continue Watching only ─────
+        // ── Drop a show (manual) — leaves Continue Watching AND every suggestion surface ──
         group.MapPost("/reactions/dropped", async (
             string mediaType, long tmdbId,
-            IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -196,7 +197,9 @@ public static class ReactionEndpoints
                     && r.Kind == ReactionKind.Dropped && r.RevokedAt == null, ct);
             if (existing is null)
             {
-                // Exclude-only: no rating, no managed-list, no Trakt outbox (Trakt has no dropped).
+                // Exclude-only: no rating, no managed-list, no Trakt outbox (Trakt has no dropped),
+                // and deliberately no residual observation — "I stopped watching this" is a
+                // scheduling decision, not a rating, so it must not train the model.
                 db.UserTitleReactions.Add(new UserTitleReaction
                 {
                     Id = Guid.NewGuid(),
@@ -205,6 +208,11 @@ public static class ReactionEndpoints
                     Kind = ReactionKind.Dropped,
                     CreatedAt = DateTime.UtcNow,
                 });
+                // Dropped now excludes from discovery too, so rebuild to backfill the slot it vacates
+                // with the next-best pick — same treatment as not-interested / saved-for-later. GET
+                // /api/feed also prunes it from the live snapshot immediately, so the picks list is
+                // correct before this rebuild lands.
+                await feedRefresh.RequestRebuildAsync(accountId, "dropped", ct);
                 await db.SaveChangesAsync(ct);
             }
 
@@ -309,12 +317,10 @@ public static class ReactionEndpoints
                     Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
                 }
 
-                // Revoking not-interested / save makes the title a suggestion candidate again —
-                // rebuild so it can re-earn a slot live. (Dropped is continue-watching only.)
-                if (reactionKind is ReactionKind.NotInterested or ReactionKind.SaveForLater)
-                {
-                    await feedRefresh.RequestRebuildAsync(accountId, "reaction revoked", ct);
-                }
+                // Revoking any of the three exclusions makes the title a suggestion candidate again —
+                // rebuild so it can re-earn a slot live. Dropped is in this list because it now
+                // excludes from discovery, so un-dropping must restore eligibility symmetrically.
+                await feedRefresh.RequestRebuildAsync(accountId, "reaction revoked", ct);
 
                 await db.SaveChangesAsync(ct);
             }
