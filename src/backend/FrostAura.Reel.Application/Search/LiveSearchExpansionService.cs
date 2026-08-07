@@ -182,6 +182,7 @@ public sealed class LiveSearchExpansionService(
                     .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
                     .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
                     .Where(t => MatchesMedia(t, intent.MediaTypes))
+                    .Where(t => MatchesYear(t, pass))
                     .ToList();
 
                 if (eligible.Count >= MinResults || isPersonQuery)
@@ -203,6 +204,9 @@ public sealed class LiveSearchExpansionService(
                         .ToListAsync(ct))
                     .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
                     .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
+                    // Deliberately NOT year-filtered: this is the last resort that exists so the
+                    // screen is never empty, and every narrower constraint has already failed to
+                    // fill it. Media type stays because the user set it explicitly in the UI.
                     .Where(t => MatchesMedia(t, intent.MediaTypes))
                     .ToList();
                 relaxation = MaxRelaxations;
@@ -517,6 +521,32 @@ public sealed class LiveSearchExpansionService(
     /// <summary>True when the title matches the requested media types (empty list = no constraint).</summary>
     private static bool MatchesMedia(Title title, IReadOnlyList<MediaType> mediaTypes) =>
         mediaTypes.Count == 0 || mediaTypes.Contains(title.MediaType);
+
+    /// <summary>
+    /// True when the title falls inside the requested release-year window (null bounds = no
+    /// constraint). Applied to the ELIGIBLE pool, not just to TMDB discovery, because discovery is
+    /// only one of two arms: the semantic kNN arm ranks the account's own embedded catalogue by
+    /// cosine and knows nothing about years, so "80s sci-fi" still surfaced 2026 titles underneath
+    /// five genuinely-80s ones. A title with no known date is kept rather than dropped — absence of
+    /// a date is not evidence of the wrong date, and the relaxation ladder drops these bounds
+    /// anyway if the window turns out to be too narrow to fill a screen.
+    /// </summary>
+    private static bool MatchesYear(Title title, SearchIntent intent)
+    {
+        if (intent.MinYear is null && intent.MaxYear is null)
+        {
+            return true;
+        }
+
+        var year = title.Year ?? (title.ReleasedAt ?? title.FirstAiredAt)?.Year;
+        if (year is null)
+        {
+            return true;
+        }
+
+        return (intent.MinYear is not { } lo || year >= lo)
+            && (intent.MaxYear is not { } hi || year <= hi);
+    }
 
     /// <summary>
     /// How much a title contradicts what the user ruled out. Each matched negated genre or keyword

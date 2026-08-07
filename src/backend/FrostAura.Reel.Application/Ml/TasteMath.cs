@@ -23,9 +23,26 @@ public static class TasteMath
             return priorMean;
         }
 
-        var sum = ratings.Sum(r => (decimal)r);
-        return (sum + (k * priorMean)) / (ratings.Count + k);
+        return ShrunkenMean(ratings.Sum(r => (decimal)r), ratings.Count, priorMean, k);
     }
+
+    /// <summary>
+    /// Aggregate form of <see cref="ShrunkenMean(IReadOnlyCollection{short},decimal,decimal)"/>, over a
+    /// running (sum, count) instead of a list. This is the form the feature builder uses: it lets a
+    /// title's OWN rating be subtracted out of the pool before the pool is used to describe it
+    /// (leave-one-out), without rebuilding the pool per title.
+    /// </summary>
+    public static decimal ShrunkenMean(decimal sum, int count, decimal priorMean, decimal k = ShrinkageK) =>
+        count <= 0 ? priorMean : (sum + (k * priorMean)) / (count + k);
+
+    /// <summary>
+    /// Shrunken mean over WEIGHTED observations: (Σw·r + k·prior) / (Σw + k). Same empirical-Bayes
+    /// prior as <see cref="ShrunkenMean(decimal,int,decimal,decimal)"/>, so a recency-weighted
+    /// estimate and an all-time estimate of the same pool are directly comparable — differencing
+    /// them measures drift over TIME rather than the gap between two different formulas.
+    /// </summary>
+    public static decimal ShrunkenWeightedMean(decimal weightedSum, decimal weightTotal, decimal priorMean, decimal k = ShrinkageK) =>
+        weightTotal <= 0m ? priorMean : (weightedSum + (k * priorMean)) / (weightTotal + k);
 
     /// <summary>Exponential recency weight with a configurable half-life (days).</summary>
     public static double RecencyWeight(DateTime ratedAt, DateTime asOf, double halfLifeDays = 365d)
@@ -35,15 +52,18 @@ public static class TasteMath
     }
 
     /// <summary>
-    /// Recency-weighted mean rating — the "current taste" estimate that drift features
-    /// compare against the all-time mean.
+    /// Recency-weighted mean rating — the "current taste" estimate that drift features compare
+    /// against the all-time mean. SHRUNKEN toward <paramref name="prior"/> with the same k as
+    /// <see cref="ShrunkenMean(decimal,int,decimal,decimal)"/>: without it, a genre with a single
+    /// rating produced an unshrunken recent value against a shrunken all-time value, and the
+    /// difference between the two — pure formula mismatch — was being sold to the model as drift.
     /// </summary>
     public static decimal RecencyWeightedMean(
-        IReadOnlyCollection<(short Rating, DateTime RatedAt)> ratings, DateTime asOf, decimal fallback, double halfLifeDays = 365d)
+        IReadOnlyCollection<(short Rating, DateTime RatedAt)> ratings, DateTime asOf, decimal prior, double halfLifeDays = 365d)
     {
         if (ratings.Count == 0)
         {
-            return fallback;
+            return prior;
         }
 
         double weightedSum = 0, weightTotal = 0;
@@ -54,7 +74,7 @@ public static class TasteMath
             weightTotal += w;
         }
 
-        return weightTotal <= 0 ? fallback : (decimal)(weightedSum / weightTotal);
+        return ShrunkenWeightedMean((decimal)weightedSum, (decimal)weightTotal, prior);
     }
 
     /// <summary>

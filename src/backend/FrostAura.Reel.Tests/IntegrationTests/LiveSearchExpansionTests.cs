@@ -245,7 +245,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             new StubEmbeddingProvider(),
             eligibility,
             new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
-            new TitleHydrator(db, tmdb),
+            new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             featureBuilder,
             new OnDemandScorer(db, featureBuilder, engine, residualModel),
             new LexicalSearchService(eligibility),

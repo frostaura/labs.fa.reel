@@ -3,22 +3,51 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Ingestion;
+
+/// <summary>
+/// Outcome of one hydration batch. <paramref name="Failed"/> carries the titles whose TMDB fetch
+/// (or credit upsert) threw — they are left un-stamped so a caller can retry or retire them, while
+/// everything else in the batch is already mutated and ready to save.
+/// </summary>
+/// <param name="Hydrated">Titles successfully hydrated (or confirmed missing at TMDB).</param>
+/// <param name="Failed">Titles that threw and were skipped.</param>
+public sealed record HydrationBatchResult(int Hydrated, IReadOnlyList<Title> Failed);
 
 /// <summary>
 /// Shared TMDB hydration core — artwork, popularity, trailer, credits — used by the catalog
 /// hydration job (whole library) and the feed builder (top candidates need credits for
 /// affinity features before final scoring). One hydration per title, ever, for every tenant.
 /// </summary>
-public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb)
+public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHydrator> logger)
 {
     private readonly Dictionary<long, Person> _personCache = [];
 
-    /// <summary>Hydrates the given titles in place (caller saves); marks them refreshed either way.</summary>
-    public async Task<int> HydrateBatchAsync(IReadOnlyList<Title> titles, CancellationToken ct)
+    /// <summary>
+    /// Hydrates the given titles in place (caller saves); marks them refreshed either way.
+    /// A title that throws is isolated and reported, never allowed to abort its batch.
+    /// </summary>
+    public async Task<int> HydrateBatchAsync(IReadOnlyList<Title> titles, CancellationToken ct) =>
+        (await HydrateBatchResilientAsync(titles, ct)).Hydrated;
+
+    /// <summary>
+    /// As <see cref="HydrateBatchAsync"/>, but reports which titles failed so a caller that owns a
+    /// cursor can count attempts and retire a permanently-broken title.
+    ///
+    /// Per-title isolation is the whole point: hydration used to run without a try/catch, so a
+    /// single 429 / 5xx / malformed payload threw out of the loop before the caller's
+    /// SaveChangesAsync, discarding the work already done for every healthy title in the batch.
+    /// The retry then landed on the identical batch and hit the identical title — which is how
+    /// ~28% of the catalogue ended up with LastMetadataRefreshAt still null (and, because
+    /// EnrichCatalog scopes to hydrated titles, no embedding and no LLM attributes either).
+    /// </summary>
+    public async Task<HydrationBatchResult> HydrateBatchResilientAsync(IReadOnlyList<Title> titles, CancellationToken ct)
     {
-        var processed = 0;
+        var hydrated = 0;
+        List<Title>? failed = null;
+
         foreach (var title in titles)
         {
             if (title.TmdbId is null)
@@ -26,21 +55,43 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb)
                 continue;
             }
 
-            var details = title.MediaType == MediaType.Movie
-                ? await tmdb.GetMovieAsync(title.TmdbId.Value, ct)
-                : await tmdb.GetTvAsync(title.TmdbId.Value, ct);
+            ct.ThrowIfCancellationRequested();
 
-            if (details is not null)
+            try
             {
-                Apply(title, details);
-                await UpsertCreditsAsync(title, details, ct);
-            }
+                var details = title.MediaType == MediaType.Movie
+                    ? await tmdb.GetMovieAsync(title.TmdbId.Value, ct)
+                    : await tmdb.GetTvAsync(title.TmdbId.Value, ct);
 
-            title.LastMetadataRefreshAt = DateTime.UtcNow; // hydrated OR confirmed-missing: never retry forever
-            processed++;
+                if (details is not null)
+                {
+                    Apply(title, details);
+                    await UpsertCreditsAsync(title, details, ct);
+                }
+
+                title.LastMetadataRefreshAt = DateTime.UtcNow; // hydrated OR confirmed-missing: never retry forever
+                hydrated++;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // A real shutdown/cancel is not a title defect — let it unwind.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Deliberately broad: an HTTP timeout surfaces as TaskCanceledException with the
+                // token un-cancelled, and a malformed payload as JsonException. Neither may be
+                // allowed to cost the rest of the batch its already-completed work.
+                (failed ??= []).Add(title);
+                logger.LogWarning(
+                    ex,
+                    "TMDB hydration failed for title {TitleId} (tmdb {TmdbId}); skipping it and continuing the batch.",
+                    title.Id,
+                    title.TmdbId);
+            }
         }
 
-        return processed;
+        return new HydrationBatchResult(hydrated, (IReadOnlyList<Title>?)failed ?? []);
     }
 
     private static void Apply(Title title, TmdbTitleDetails details)
@@ -72,6 +123,11 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb)
 
     private async Task UpsertCreditsAsync(Title title, TmdbTitleDetails details, CancellationToken ct)
     {
+        if (details.Cast.Length == 0 && details.Crew.Length == 0)
+        {
+            return;
+        }
+
         var creditKeys = (await db.TitleCredits
                 .Where(c => c.TitleId == title.Id)
                 .Select(c => new { c.PersonId, c.Role })
@@ -79,34 +135,56 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb)
             .Select(c => (c.PersonId, c.Role))
             .ToHashSet();
 
+        await PrimePersonCacheAsync(details, ct);
+
         foreach (var member in details.Cast)
         {
-            var person = await GetOrAddPersonAsync(member.Id, member.Name, member.KnownForDepartment, member.ProfilePath, ct);
+            var person = GetOrAddPerson(member.Id, member.Name, member.KnownForDepartment, member.ProfilePath);
             AddCredit(title, person, CreditRole.Actor, member.Order, member.Character, creditKeys);
         }
 
         foreach (var member in details.Crew)
         {
             var role = member.Job == "Director" ? CreditRole.Director : CreditRole.Writer;
-            var person = await GetOrAddPersonAsync(member.Id, member.Name, member.Department, member.ProfilePath, ct);
+            var person = GetOrAddPerson(member.Id, member.Name, member.Department, member.ProfilePath);
             AddCredit(title, person, role, null, null, creditKeys);
         }
     }
 
-    private async Task<Person> GetOrAddPersonAsync(long tmdbId, string name, string? department, string? profilePath, CancellationToken ct)
+    /// <summary>
+    /// Resolves every not-yet-cached person of this title in ONE round-trip. It used to be a
+    /// FirstOrDefaultAsync per unique person — up to two dozen single-row queries per title, on
+    /// every title in the library.
+    /// </summary>
+    private async Task PrimePersonCacheAsync(TmdbTitleDetails details, CancellationToken ct)
+    {
+        var wanted = details.Cast.Select(c => c.Id)
+            .Concat(details.Crew.Select(c => c.Id))
+            .Distinct()
+            .Where(id => !_personCache.ContainsKey(id))
+            .ToArray();
+        if (wanted.Length == 0)
+        {
+            return;
+        }
+
+        var known = await db.Persons.Where(p => wanted.Contains(p.TmdbId)).ToListAsync(ct);
+        foreach (var person in known)
+        {
+            _personCache[person.TmdbId] = person;
+        }
+    }
+
+    /// <summary>Cache hit, or a brand-new person — <see cref="PrimePersonCacheAsync"/> already asked the database.</summary>
+    private Person GetOrAddPerson(long tmdbId, string name, string? department, string? profilePath)
     {
         if (_personCache.TryGetValue(tmdbId, out var cached))
         {
             return cached;
         }
 
-        var person = await db.Persons.FirstOrDefaultAsync(p => p.TmdbId == tmdbId, ct);
-        if (person is null)
-        {
-            person = new Person { Id = Guid.NewGuid(), TmdbId = tmdbId, Name = name, KnownForDepartment = department, ProfilePath = profilePath };
-            db.Persons.Add(person);
-        }
-
+        var person = new Person { Id = Guid.NewGuid(), TmdbId = tmdbId, Name = name, KnownForDepartment = department, ProfilePath = profilePath };
+        db.Persons.Add(person);
         _personCache[tmdbId] = person;
         return person;
     }

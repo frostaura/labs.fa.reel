@@ -14,13 +14,23 @@ public interface ITraktClient
 
     Task<TraktUserSettings> GetUserSettingsAsync(string accessToken, CancellationToken ct = default);
 
-    /// <summary>All watched movies with extended=full metadata (not paginated by Trakt).</summary>
+    /// <summary>
+    /// Every watched movie. Trakt paginates this endpoint (enforced after 2026-06-30) and an
+    /// unpaginated request returns only the first page with a 200 OK, so the adapter walks every
+    /// page via X-Pagination-Page-Count. Item metadata comes from TMDB, not from here.
+    /// </summary>
     Task<IReadOnlyList<TraktWatchedMovie>> GetWatchedMoviesAsync(string accessToken, RatePriority priority, CancellationToken ct = default);
 
-    /// <summary>All watched shows incl. per-episode plays (?extended=full).</summary>
+    /// <summary>
+    /// Every watched show incl. season/episode progress. Requested with ?extended=progress —
+    /// extended=full is now ignored and progress is no longer a default — and walked page by page.
+    /// </summary>
     Task<IReadOnlyList<TraktWatchedShow>> GetWatchedShowsAsync(string accessToken, RatePriority priority, CancellationToken ct = default);
 
-    /// <summary>Every rating across movies/shows/seasons/episodes with extended=full subjects.</summary>
+    /// <summary>
+    /// Every rating across movies/shows/seasons/episodes with extended=full subjects, walked page
+    /// by page — this collection is paginated exactly like the watched endpoints.
+    /// </summary>
     Task<IReadOnlyList<TraktRatingItem>> GetRatingsAsync(string accessToken, RatePriority priority, CancellationToken ct = default);
 
     /// <summary>Watched progress for one show — aired/completed counts + the next episode.</summary>
@@ -35,7 +45,7 @@ public interface ITraktClient
     /// <summary>Posts a batched /sync/* payload (ratings, history, watchlist — add or remove endpoints).</summary>
     Task PostSyncBatchAsync(string accessToken, string endpoint, object payload, RatePriority priority, CancellationToken ct = default);
 
-    /// <summary>Finds or creates the named personal list and returns its Trakt id.</summary>
+    /// <summary>Finds or creates the named personal list and returns its Trakt id (existing lists are paged through).</summary>
     Task<long> EnsureListAsync(string accessToken, string name, string description, RatePriority priority, CancellationToken ct = default);
 
     /// <summary>Adds or removes items on a personal list.</summary>

@@ -145,7 +145,11 @@ public class OnlineResidualModelTests(PostgresFixture fixture)
             Version = 1,
             Algo = "FastTree",
             ArtifactBytes = trained.ArtifactBytes,
-            FeatureSchemaJson = "[]",
+            // Stamped with the running schema version — an artifact recorded against any other
+            // version is deliberately unreadable as Active (ReelDbContext), so "[]" would make
+            // this fixture invisible to the very code under test.
+            FeatureSchemaJson = System.Text.Json.JsonSerializer.Serialize(
+                new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
             TrainingRunId = Guid.NewGuid(),
             Status = ArtifactStatus.Active,
             TrainedAt = DateTime.UtcNow,

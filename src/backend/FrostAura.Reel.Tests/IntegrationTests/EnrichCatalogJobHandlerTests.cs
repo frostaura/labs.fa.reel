@@ -110,6 +110,38 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         }
     }
 
+    [Fact]
+    public async Task An_unextractable_title_is_never_marked_Done_and_stops_billing_after_the_attempt_budget()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(2);
+        var extractor = new AlwaysFailingExtractor("openai/gpt-5.4-mini");
+
+        // Three runs, but only two may ever reach the model: the eligibility query counts attempts
+        // made by the CURRENT ExtractorModel, so the failure path has to stamp the model or the
+        // retry cap can never engage and the title bills for ever.
+        for (var run = 0; run < 3; run++)
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor);
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+        Assert.Equal(2, rows.Count);
+
+        // No fabricated judgement is ever recorded for a title the model did not answer for.
+        Assert.All(rows, a => Assert.NotEqual(AttributeExtractionStatus.Done, a.Status));
+        Assert.All(rows, a => Assert.Null(a.ExtractedAt));
+        Assert.All(rows, a => Assert.Equal(0m, a.Darkness));
+        Assert.All(rows, a => Assert.Equal("openai/gpt-5.4-mini", a.ExtractorModel));
+        Assert.All(rows, a => Assert.Equal(2, a.AttemptCount));
+        Assert.Equal(4, extractor.TitlesSeen); // 2 titles × 2 attempts, not × 3
+    }
+
     private async Task RunEnrichAsync(Guid accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor)
     {
         var scoped = new AccountContext();
@@ -239,6 +271,28 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
                 .Select(_ => (ExtractedTitleAttributes?)new ExtractedTitleAttributes(
                     0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, "neutral", "contemporary", ["t"], "{}"))
                 .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    /// <summary>
+    /// An available extractor that can never answer — the shape a title takes when the model
+    /// keeps omitting or mistyping a required scalar. The adapter returns null rather than
+    /// substituting neutral values, and the handler must honour that.
+    /// </summary>
+    private sealed class AlwaysFailingExtractor(string modelId) : ITitleAttributeExtractor
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => modelId;
+
+        public int TitlesSeen { get; private set; }
+
+        public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
+        {
+            TitlesSeen += inputs.Count;
+            IReadOnlyList<ExtractedTitleAttributes?> result = inputs.Select(_ => (ExtractedTitleAttributes?)null).ToList();
             return Task.FromResult(result);
         }
     }

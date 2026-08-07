@@ -804,6 +804,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
+                    b.Property<int?>("FeatureSchemaVersion")
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("integer")
+                        .HasComputedColumnSql("((\"FeatureSchemaJson\" ->> 'version'))::integer", true);
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)

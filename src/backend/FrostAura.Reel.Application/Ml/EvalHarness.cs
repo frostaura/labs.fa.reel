@@ -25,6 +25,20 @@ public class EvalHarness(
     IPipelineEventHub events,
     ILogger<EvalHarness> logger)
 {
+    /// <summary>
+    /// The caveat persisted with every evaluation. It used to claim the present-day-popularity
+    /// problem hit "model features and baseline symmetrically", which is false by construction:
+    /// popularity is 100% of the baseline's ranking signal and roughly 1/86th of the model's, so
+    /// post-split popularity flatters the BASELINE and the measured lift is conservative. Saying it
+    /// was symmetric made the harness sound more self-critical than it was while actually
+    /// understating how hostile the comparison is to the model.
+    /// </summary>
+    public const string PopularityCaveat =
+        "popularity baseline uses present-day TMDB popularity (no historical snapshots exist). "
+        + "This is NOT symmetric: present-day popularity is 100% of the baseline's ranking signal, "
+        + "while for the model it is one of ~86 features. Post-split popularity therefore flatters "
+        + "the baseline, so the measured lift understates the model rather than overstating it.";
+
     private const decimal GateThreshold = 0.20m;
     private const int PrecisionDepth = 10;
     private const int MinHoldoutPositives = 10;
@@ -113,6 +127,12 @@ public class EvalHarness(
         var modelPrecision = PrecisionAtK(ranked.Select(r => r.Rating), threshold, PrecisionDepth);
 
         // ── Popularity baseline on the identical pool ───────────────────────────────────
+        // Present-day TMDB popularity is the only ranking signal here (votes break ties), because no
+        // historical snapshot exists. That is a leak in the BASELINE's favour, not a shared one: a
+        // title that became popular after splitAt looks popular to this ranker today, and popularity
+        // is 100% of what it knows. The model sees the same field as one of ~86 features, so the
+        // measured lift is conservative rather than flattering. Do not "correct" for this by
+        // weakening the baseline — the asymmetry runs against the model, and the gate stays at 20%.
         var popularity = await db.Titles
             .Where(t => scoreable.Select(h => h.TitleId).Contains(t.Id))
             .Select(t => new { t.Id, t.TmdbPopularity, t.TraktVotes })
@@ -161,7 +181,7 @@ public class EvalHarness(
         {
             topRanked = ranked.Take(PrecisionDepth).Select(r => new { r.TitleId, r.Rating, predicted = Math.Round(r.Predicted, 2), hit = r.Rating >= threshold }),
             featureImportance = model.FeatureImportance.OrderByDescending(kv => Math.Abs(kv.Value)).Take(15).ToDictionary(kv => kv.Key, kv => Math.Round(kv.Value, 2)),
-            caveats = new[] { "popularity baseline uses present-day TMDB popularity (no historical snapshots exist); affects model features and baseline symmetrically" },
+            caveats = new[] { PopularityCaveat },
         };
 
         var result = new EvaluationResult
