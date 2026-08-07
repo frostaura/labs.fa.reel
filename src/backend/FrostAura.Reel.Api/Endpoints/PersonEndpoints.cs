@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Api.Endpoints;
@@ -115,10 +116,13 @@ public static class PersonEndpoints
                             && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
                         .Select(r => (short?)r.Rating)
                         .FirstOrDefault(),
+                    // Active-artifact scores only (mirrors TitleEndpoints.ActiveScoreAsync) — the
+                    // newest ScoredAt row can belong to a superseded model and disagree with every
+                    // other surface for the same title.
                     predictedRating = db.TitleScores
                         .Where(s => s.AccountId == accountId && s.TitleId == t.Id)
-                        .OrderByDescending(s => s.ScoredAt)
-                        .Select(s => (decimal?)s.PredictedRating)
+                        .Join(db.ModelArtifacts.Where(a => a.Status == ArtifactStatus.Active),
+                            s => s.ModelArtifactId, a => a.Id, (s, a) => (decimal?)s.PredictedRating)
                         .FirstOrDefault(),
                 })
                 .ToListAsync(ct);
@@ -135,7 +139,8 @@ public static class PersonEndpoints
                 crowdRating = CrowdRating.For(x.Title),
                 crowdVotes = CrowdRating.VotesFor(x.Title),
                 x.userRating,
-                x.predictedRating,
+                // 1dp at the response edge, matching the feed and title detail.
+                predictedRating = x.predictedRating is { } predicted ? Math.Round(predicted, 1) : (decimal?)null,
             }).ToList();
 
             // Derived affinity = shrunken mean of the user's ratings of this person's titles.

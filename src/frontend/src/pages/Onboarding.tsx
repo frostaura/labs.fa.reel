@@ -139,9 +139,10 @@ export default function Onboarding() {
 
         {onboarding.stage === "reveal" && !melting && (
           <div className="text-center space-y-4 reel-rise" data-testid="reveal">
+            {/* No headline here — the stage copy above already announces "Your taste DNA is
+                ready.", and this card sits directly beneath it. */}
             <div className="fa-card px-8 py-6 space-y-3 border-fa-frost/30">
               <Sparkles className="h-6 w-6 text-fa-frost mx-auto" />
-              <p className="fa-section-title text-base">Your taste DNA is ready</p>
               <p className="fa-caption text-fa-frost-dim">
                 Model trained on your ratings — every pick comes with the reason and a predicted rating.
               </p>

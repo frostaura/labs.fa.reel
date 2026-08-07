@@ -72,6 +72,29 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
+    public async Task A_third_person_why_is_replaced_with_the_stub_sentence_keeping_the_fit()
+    {
+        // Two leaking sentences ("their", "the user's") and one clean second-person line.
+        var payload = $$"""
+            {"results":[
+              {"titleId":"{{TitleA}}","fit":0.91,"why":"Matches their taste for slow-burn thrillers"},
+              {"titleId":"{{TitleB}}","fit":0.42,"why":"The user's favourite kind of drama"},
+              {"titleId":"{{TitleC}}","fit":0.77,"why":"A tense pick that fits your taste"}
+            ]}
+            """;
+        var agent = Agent(new CannedHandler(Ok(payload)));
+
+        var results = await agent.RerankBatchAsync(Titles(), "something tense", "likes thrillers");
+
+        // The model's fit survives; only the leaking sentence is swapped for the stub's line.
+        Assert.Equal(0.91d, results[0].Fit, 3);
+        Assert.Equal("A thriller pick aligned with your taste.", results[0].Why);
+        Assert.Equal(0.42d, results[1].Fit, 3);
+        Assert.Equal("A drama pick aligned with your taste.", results[1].Why);
+        Assert.Equal("A tense pick that fits your taste", results[2].Why);
+    }
+
+    [Fact]
     public async Task A_results_entry_that_is_not_an_object_is_skipped_without_taking_the_batch()
     {
         var payload = $$"""

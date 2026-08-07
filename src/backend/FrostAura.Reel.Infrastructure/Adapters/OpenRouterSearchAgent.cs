@@ -133,7 +133,18 @@ public class OpenRouterSearchAgent(
             }
 
             // Row-aligned: any title the model skipped falls back to its deterministic stub fit.
-            return titles.Select(t => byId.TryGetValue(t.TitleId, out var res) ? res : StubRerank(t)).ToList();
+            return titles.Select(t =>
+            {
+                if (!byId.TryGetValue(t.TitleId, out var res))
+                {
+                    return StubRerank(t);
+                }
+
+                // Voice guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's")
+                // instead of TO them is discarded for the deterministic second-person sentence.
+                // The model's fit score is kept — only the leaking sentence is replaced.
+                return SecondPersonVoice.LeaksThirdPerson(res.Why) ? res with { Why = StubRerank(t).Why } : res;
+            }).ToList();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -234,7 +245,7 @@ public class OpenRouterSearchAgent(
     private static string BuildInterpretPrompt(IReadOnlyList<ChatTurn> history, string message, string taste, IReadOnlyList<string> shown)
     {
         var sb = new StringBuilder();
-        sb.Append("User's taste: ").Append(taste).Append('\n');
+        sb.Append("Your taste: ").Append(taste).Append('\n');
         if (history.Count > 0)
         {
             sb.Append("Conversation so far:\n");
@@ -257,9 +268,9 @@ public class OpenRouterSearchAgent(
     private static string BuildRerankPrompt(IReadOnlyList<RerankInput> titles, string query, string taste)
     {
         var sb = new StringBuilder();
-        sb.Append("User's taste: ").Append(taste).Append('\n');
-        sb.Append("Their request: ").Append(query).Append('\n');
-        sb.Append("Score each title 0.0-1.0 for how well it fits THIS user and request, with a one-line reason:\n");
+        sb.Append("Your taste: ").Append(taste).Append('\n');
+        sb.Append("Your request: ").Append(query).Append('\n');
+        sb.Append("Score each title 0.0-1.0 for how well it fits YOU and your request, with a one-line reason addressed to you:\n");
         foreach (var t in titles)
         {
             sb.Append("- id=").Append(t.TitleId).Append(" | ").Append(t.Name);
@@ -320,10 +331,13 @@ public class OpenRouterSearchAgent(
         "Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
     private const string RerankSystemPrompt =
-        "You are Reel's taste engine. For each title, judge how well it fits THIS specific user and their request — " +
-        "factoring their taste, the request's mood/soft-constraints (e.g. \"nothing too gory\", \"feel-good\"), and the " +
-        "title itself. Return ONLY a JSON object {\"results\":[{\"titleId\":\"<id>\",\"fit\":0.0-1.0,\"why\":\"<one short line>\"}]} " +
-        "with one entry per title. titleId MUST be the id string quoted exactly as given, never a number. fit MUST be a " +
+        "You are Reel's taste engine, speaking directly to the viewer whose taste and request are given. For each " +
+        "title, judge how well it fits YOU — that viewer — factoring your taste, the request's mood/soft-constraints " +
+        "(e.g. \"nothing too gory\", \"feel-good\"), and the title itself. Return ONLY a JSON object " +
+        "{\"results\":[{\"titleId\":\"<id>\",\"fit\":0.0-1.0,\"why\":\"<one short line>\"}]} " +
+        "with one entry per title. The why sentence MUST address the reader as \"you\"/\"your\" (\"you rate…\", " +
+        "\"your love of…\") and MUST NEVER say \"they\", \"their\", \"them\" or \"the user\". " +
+        "titleId MUST be the id string quoted exactly as given, never a number. fit MUST be a " +
         "bare JSON number between 0.0 and 1.0 — never a 0-10 or 0-100 score and never a string. " +
         "Be discerning — spread the scores. Output strictly valid JSON.";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatEpisodeRef, formatRuntime, formatVotes } from "./format";
+import { formatEpisodeRef, formatRankedAt, formatRuntime, formatVotes } from "./format";
 
 /**
  * The crowd badge's footnote. A community score means nothing without the size of the community
@@ -55,5 +55,44 @@ describe("formatEpisodeRef", () => {
     expect(formatEpisodeRef(2, 5)).toBe("S2 E5");
     expect(formatEpisodeRef(2, null)).toBeNull();
     expect(formatEpisodeRef(null, 5)).toBeNull();
+  });
+});
+
+/**
+ * The feed's "ranked for you" stamp. It replaced a raw toLocaleString() dump — full date plus
+ * seconds under the page title — so the contract is friendliness: relative day words where they
+ * help, a clock with minutes, and never seconds.
+ */
+describe("formatRankedAt", () => {
+  // A fixed reference "now": Friday 2026-08-07 16:30 local time.
+  const now = new Date(2026, 7, 7, 16, 30);
+
+  it("uses 'today' with a 12-hour clock for same-day stamps", () => {
+    expect(formatRankedAt(new Date(2026, 7, 7, 16, 17).toISOString(), now)).toBe("today 4:17 PM");
+    expect(formatRankedAt(new Date(2026, 7, 7, 9, 3).toISOString(), now)).toBe("today 9:03 AM");
+  });
+
+  it("handles midnight and noon without a 0 o'clock", () => {
+    expect(formatRankedAt(new Date(2026, 7, 7, 0, 5).toISOString(), now)).toBe("today 12:05 AM");
+    expect(formatRankedAt(new Date(2026, 7, 7, 12, 0).toISOString(), now)).toBe("today 12:00 PM");
+  });
+
+  it("uses 'yesterday' across the day boundary, not across 24 hours", () => {
+    // 23:50 last night is only ~17h ago, but it is still "yesterday".
+    expect(formatRankedAt(new Date(2026, 7, 6, 23, 50).toISOString(), now)).toBe("yesterday 11:50 PM");
+    expect(formatRankedAt(new Date(2026, 7, 6, 9, 3).toISOString(), now)).toBe("yesterday 9:03 AM");
+  });
+
+  it("falls back to a short date beyond yesterday — year only when it differs", () => {
+    expect(formatRankedAt(new Date(2026, 6, 28, 10, 0).toISOString(), now)).toBe("28 Jul");
+    expect(formatRankedAt(new Date(2025, 11, 31, 10, 0).toISOString(), now)).toBe("31 Dec 2025");
+  });
+
+  it("never shows seconds", () => {
+    expect(formatRankedAt(new Date(2026, 7, 7, 16, 17, 42).toISOString(), now)).toBe("today 4:17 PM");
+  });
+
+  it("degrades to an empty string on garbage input", () => {
+    expect(formatRankedAt("not-a-date", now)).toBe("");
   });
 });

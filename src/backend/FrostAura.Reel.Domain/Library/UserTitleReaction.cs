@@ -23,6 +23,11 @@ public enum ReactionReason
     Genre,
     SeenEnough,
     Tone,
+
+    /// <summary>"Just not for me" — the catch-all the not-interested sheet offers alongside the
+    /// specific reasons. Persisted by name (string column), so ordering is not load-bearing;
+    /// appended last anyway for tidy history.</summary>
+    NotForMe,
 }
 
 /// <summary>

@@ -217,7 +217,11 @@ public sealed class FeedPaginator(
         return taken.Select(c => new ScoredFeedItem(
             c.Scored.Title, Math.Round(c.Scored.Predicted, 1),
             // The agent's line is the curated voice; fall back to the model's contribution sentence.
-            !string.IsNullOrWhiteSpace(c.Why) ? c.Why! : modelWhy.GetValueOrDefault(c.Scored.Title.Id, "Strong fit with your taste profile."),
+            // Voice guard: a cached/LLM line that talks ABOUT the viewer ("their tastes") instead of
+            // TO them is discarded for the deterministic second-person templater sentence.
+            !string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.LeaksThirdPerson(c.Why)
+                ? c.Why!
+                : modelWhy.GetValueOrDefault(c.Scored.Title.Id, "Strong fit with your taste profile."),
             IsReleased(c.Scored.Title, now))).ToList();
     }
 
@@ -388,13 +392,13 @@ public sealed class FeedPaginator(
 
     private static string QueryFor(MoreFeedRequest req) => req.Context switch
     {
-        FeedRowContext.Hero => "the best titles to watch tonight",
-        FeedRowContext.Genre => $"great {req.Genre?.Replace('-', ' ')} titles",
-        FeedRowContext.BecauseYouLoved => "titles in the same vein as ones they loved",
-        FeedRowContext.Similar => "titles a lot like the one they're looking at",
-        FeedRowContext.DeepCuts => "under-the-radar hidden gems they'd rate highly",
-        FeedRowContext.NewForYou => "recent releases worth their time",
-        _ => "titles personalised to their taste",
+        FeedRowContext.Hero => "the best titles for you to watch tonight",
+        FeedRowContext.Genre => $"great {req.Genre?.Replace('-', ' ')} titles for you",
+        FeedRowContext.BecauseYouLoved => "titles in the same vein as ones you loved",
+        FeedRowContext.Similar => "titles a lot like the one you're looking at",
+        FeedRowContext.DeepCuts => "under-the-radar hidden gems you'd rate highly",
+        FeedRowContext.NewForYou => "recent releases worth your time",
+        _ => "titles personalised to your taste",
     };
 
     private static string RowKey(MoreFeedRequest req) => req.Context switch

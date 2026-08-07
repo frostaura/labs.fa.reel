@@ -18,6 +18,7 @@ import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import PickConditionsButton, { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
+import { formatRankedAt } from "../lib/format";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -75,7 +76,7 @@ export default function Home() {
           <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
           {feed?.generatedAt && (
             <p className="fa-caption text-fa-frost-dim mt-1">
-              ranked for you · {new Date(feed.generatedAt).toLocaleString()}
+              ranked for you · {formatRankedAt(feed.generatedAt)}
             </p>
           )}
           {/* Everything actually in force, under the title: the saved conditions AND the browse

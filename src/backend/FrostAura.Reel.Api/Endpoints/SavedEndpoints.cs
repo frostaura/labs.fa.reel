@@ -47,7 +47,8 @@ public static class SavedEndpoints
                     name = x.Title.Name,
                     year = x.Title.Year,
                     posterPath = x.Title.PosterPath,
-                    predictedRating = scores.TryGetValue(x.Title.Id, out var rating) ? rating : (decimal?)null,
+                    // 1dp at the response edge, matching the feed and title detail.
+                    predictedRating = scores.TryGetValue(x.Title.Id, out var rating) ? Math.Round(rating, 1) : (decimal?)null,
                     crowdRating = CrowdRating.For(x.Title),
                     crowdVotes = CrowdRating.VotesFor(x.Title),
                     savedAt = x.Reaction.CreatedAt,

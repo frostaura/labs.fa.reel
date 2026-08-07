@@ -61,8 +61,16 @@ export default function ContinueWatchingRow({ entries }: { entries: ContinueEntr
                 <p className="fa-body font-medium text-fa-frost-bright truncate" title={entry.name}>
                   {entry.name}
                 </p>
+                {/* One slot, one style, two honest states: "Next: S2 E2" when the next episode is
+                    known, otherwise the watched/total count. The count only renders when totalAired
+                    is real — "180/0 episodes" (aired count not yet synced) fell back to a third
+                    format and made rows look inconsistent card-to-card. */}
                 <p className="fa-caption text-fa-frost-dim">
-                  {next ? `Next: ${next}` : `${entry.watchedEpisodes}/${entry.totalAired} episodes`}
+                  {next
+                    ? `Next: ${next}`
+                    : entry.totalAired > 0
+                      ? `${entry.watchedEpisodes}/${entry.totalAired} episodes`
+                      : `${pct}% watched`}
                 </p>
               </div>
             </Link>

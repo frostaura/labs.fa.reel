@@ -1,11 +1,16 @@
 import { Navigate } from "react-router-dom";
 import { Clapperboard } from "lucide-react";
 import { useGetSessionQuery, useStartTraktAuthMutation } from "../store/api";
+import { hasSessionFlag } from "../lib/sessionFlag";
 import { rememberOauthState } from "../lib/traktOauth";
 import Footer from "../components/Footer";
 
 export default function Landing() {
-  const { data: session, isLoading } = useGetSessionQuery();
+  // First-time visitors have never signed in here, so probing /auth/me only logs a guaranteed
+  // 401 to their console. Skip the probe until the browser has established a session at least
+  // once (flag set by the OAuth exchange / any successful probe, cleared on logout). Only this
+  // page skips — protected routes (RequireAuth) always probe, so a lost flag can't lock anyone out.
+  const { data: session, isLoading } = useGetSessionQuery(undefined, { skip: !hasSessionFlag() });
   const [startTraktAuth, { isLoading: isStarting, isError }] = useStartTraktAuthMutation();
 
   if (session) {

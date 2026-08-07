@@ -134,16 +134,6 @@ export default function Settings() {
       <PreferenceTags />
 
       <PreferencesSection />
-
-      <section className="fa-card p-5 space-y-2">
-        <h2 className="fa-section-title">Plan</h2>
-        <p className="fa-body text-fa-frost-bright">{session?.tier ?? "Free"}</p>
-        <p className="fa-caption text-fa-frost-dim">
-          {session?.tier === "Founder"
-            ? "Founder access — everything unlocked during the beta."
-            : "Free: taste DNA + daily shortlist. The full feed, natural-language search, filters and the managed Trakt list arrive with the paid tier."}
-        </p>
-      </section>
     </div>
   );
 }

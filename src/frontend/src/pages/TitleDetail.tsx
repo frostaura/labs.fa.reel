@@ -22,6 +22,7 @@ import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
 import type { CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
+import { youTubeVideoId } from "../lib/youtube";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import {
   DropdownMenu,
@@ -69,7 +70,7 @@ function featureLabel(feature: string): string {
     tmdbPopularityLog: "popularity",
     contrarianAdjustedRating: "your contrarian lens",
     // title scalars
-    releaseAgeLog: "release recency",
+    releaseAgeLog: "release-year fit",
     runtimeMinutes: "runtime",
     certificationOrdinal: "maturity rating",
     isShow: "series format",
@@ -121,7 +122,7 @@ export default function TitleDetail() {
 
   const close = () => navigate(-1);
 
-  const trailerKey = title?.trailerUrl?.match(/[?&]v=([\w-]+)/)?.[1];
+  const trailerKey = youTubeVideoId(title?.trailerUrl);
 
   return (
     /* This is spec §2's "Expanded (tap)" surface, so it is a real dialog, not a styled div: the
@@ -295,7 +296,7 @@ export default function TitleDetail() {
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId })}>Just not for me</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "not-for-me" })}>Just not for me</DropdownMenuItem>
                           <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
                           <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
                           <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>

@@ -58,12 +58,13 @@ services:
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_MAX_CONCURRENCY: ${OPENROUTER_MAX_CONCURRENCY:-4}
       # Embeddings — base URL is load-bearing: OpenRouter serves text-embedding-3-small, so the
-      # provider must point there (with OPENROUTER_API_KEY), not the api.openai.com default.
+      # provider must point there, not the api.openai.com default. The key falls back to
+      # OPENROUTER_API_KEY, since both go to the same gateway; set EMBEDDINGS_API_KEY only to split them.
       EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-openai}
       EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
       EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-1536}
       EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://openrouter.ai/api/v1}
-      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-$OPENROUTER_API_KEY}
       # Conversational search model (defaults to OPENROUTER_MODEL)
       REEL_SEARCH_MODEL: ${REEL_SEARCH_MODEL:-}
       # Sync cadence

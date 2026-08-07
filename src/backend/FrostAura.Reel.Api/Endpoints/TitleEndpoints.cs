@@ -43,7 +43,12 @@ public static class TitleEndpoints
             var accountId = accountContext.AccountId!.Value;
             var candidates = await db.Titles
                 .Where(t => t.TmdbId != null && t.PosterPath != null && t.TmdbVoteCount > 200
-                    && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id))
+                    && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
+                    // "Rate more" must not re-offer what the user already pushed away: a live
+                    // (unrevoked) NotInterested or Dropped reaction excludes the title here too.
+                    && !db.UserTitleReactions.Any(r => r.AccountId == accountId && r.TitleId == t.Id
+                        && r.RevokedAt == null
+                        && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.Dropped)))
                 .OrderByDescending(t => t.TmdbPopularity)
                 .Take(30)
                 .ToListAsync(ct);
@@ -135,7 +140,8 @@ public static class TitleEndpoints
                 writers = cast.Where(c => c.role == "Writer").Select(c => new { c.personId, c.name, c.profilePath, c.userRating }).Take(4),
                 prediction = score is null ? null : new
                 {
-                    predictedRating = score.PredictedRating,
+                    // Served ratings are uniformly 1dp at the response edge (stored precision is 2dp).
+                    predictedRating = Math.Round(score.PredictedRating, 1),
                     contributions = JsonSerializer.Deserialize<JsonElement>(score.ContributionsJson),
                     scoredAt = score.ScoredAt,
                 },

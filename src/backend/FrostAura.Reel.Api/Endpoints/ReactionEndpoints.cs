@@ -410,11 +410,14 @@ public static class ReactionEndpoints
         });
     }
 
-    private static ReactionReason? ParseReason(string? reason) => reason?.ToLowerInvariant() switch
+    // Internal for the mapping test — an unmapped wire value silently degrades to a reasonless
+    // reaction, which is exactly the regression the test pins.
+    internal static ReactionReason? ParseReason(string? reason) => reason?.ToLowerInvariant() switch
     {
         "genre" => ReactionReason.Genre,
         "seen-enough" or "seen_enough" => ReactionReason.SeenEnough,
         "tone" => ReactionReason.Tone,
+        "not-for-me" or "not_for_me" => ReactionReason.NotForMe,
         _ => null,
     };
 }

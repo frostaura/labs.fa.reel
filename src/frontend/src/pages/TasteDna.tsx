@@ -81,7 +81,7 @@ export default function TasteDna() {
         <div>
           <h1 className="text-2xl font-light text-fa-frost-bright">Your taste DNA</h1>
           <p className="fa-caption text-fa-frost-dim mt-1">
-            computed from {data.ratingsCount.toLocaleString()} ratings · always yours, always free
+            computed from {data.ratingsCount.toLocaleString()} ratings across {data.titlesWatched.toLocaleString()} titles · always yours, always free
           </p>
         </div>
         <button
