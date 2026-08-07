@@ -110,6 +110,13 @@ export default function TitleDetail() {
   const [trailerOpen, setTrailerOpen] = useState(false);
   const [ratePickerOpen, setRatePickerOpen] = useState(false);
 
+  // The card the user tapped, captured once on mount. Radix restores focus to its `DialogTrigger`,
+  // and this dialog has none — it is opened by routing, not by a trigger — so without this, closing
+  // drops focus on <body> and a keyboard user is returned to the top of the page instead of to the
+  // card they came from. Lazy initialiser rather than a ref assigned during render, which the
+  // React Compiler rules (correctly) reject.
+  const [opener] = useState<HTMLElement | null>(() => document.activeElement as HTMLElement | null);
+
   const close = () => navigate(-1);
 
   const trailerKey = title?.trailerUrl?.match(/[?&]v=([\w-]+)/)?.[1];
@@ -132,6 +139,12 @@ export default function TitleDetail() {
              the panel lands at the viewport's midpoint by its top-left corner. */
           className="fixed inset-x-0 top-6 z-50 mx-auto flex max-h-[calc(100vh-3rem)] w-[min(94vw,880px)] flex-col overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 shadow-2xl reel-rise"
           aria-describedby={undefined}
+          onCloseAutoFocus={(event) => {
+            // Take over the restore: Radix's own handler aims at a trigger that does not exist.
+            // `isConnected` guards the direct-URL case, where the background page never mounted.
+            event.preventDefault();
+            if (opener?.isConnected) opener.focus();
+          }}
           data-testid="title-detail"
         >
           <DialogClose
