@@ -73,6 +73,12 @@ public sealed class FeedPaginator(
     private const int WindowPopCount = 100;
     private const int WindowAnnCount = 90;
     private const int DeepenThreshold = 40; // usable window thinner than this → pull more from TMDB
+
+    /// <summary>
+    /// How long a page request may spend deepening from TMDB before it gives up and serves what it
+    /// already has. Deepening is an optimisation; the user waiting for the row is not.
+    /// </summary>
+    private static readonly TimeSpan DeepenBudget = TimeSpan.FromSeconds(3);
     private const int MaxDeepenPage = 25;
     private const int CurationBuffer = 8; // model-rank this many extra so the LLM has room to re-order
     private const int RerankBatch = 9;
@@ -130,7 +136,31 @@ public sealed class FeedPaginator(
         // lazily when opened) and re-fetch + re-score.
         if (scored.Count < DeepenThreshold)
         {
-            var grew = await DeepenAsync(req, taste, account.Region, exclude.Count, ct);
+            // Time-boxed, because deepening is an OPTIONAL improvement to this page and the caller
+            // is a user waiting on a row. It reaches out to TMDB through a shared rate gate, so when
+            // that gate is busy — a catalogue-wide re-hydration, a burst of searches — a single lane
+            // can hold its connection for ten to twenty seconds. Measured at 6.8-12.1s per lane
+            // during exactly that. The browser then runs out of connections to the origin and
+            // UNRELATED requests queue behind it: opening a title took 4.9s while three of these
+            // were in flight, which reads as "the app is slow" rather than "this row is still
+            // filling".
+            //
+            // On timeout we keep whatever the window already held. A slightly shorter row is a much
+            // smaller harm than a page that appears frozen, and the next page request retries.
+            using var deepenCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deepenCts.CancelAfter(DeepenBudget);
+            var grew = 0;
+            try
+            {
+                grew = await DeepenAsync(req, taste, account.Region, exclude.Count, deepenCts.Token);
+            }
+            catch (OperationCanceledException) when (deepenCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                logger.LogInformation(
+                    "Feed page deepening for {Row} exceeded {Budget}s; serving the {Count} candidates already scored.",
+                    RowKey(req), DeepenBudget.TotalSeconds, scored.Count);
+            }
+
             if (grew > 0)
             {
                 pool = await FetchWindowAsync(account, req, exclude, taste, ct);
