@@ -81,11 +81,20 @@ public sealed class FeedPaginator(
     private static readonly TimeSpan DeepenBudget = TimeSpan.FromSeconds(3);
 
     /// <summary>
-    /// How long a page request may spend on LLM curation before it serves the model's own order.
-    /// Generous enough for a warm provider to answer, short enough that a cold cache after a deploy
-    /// does not make the app feel broken.
+    /// Soft budget, checked BETWEEN curation batches. The first batch is always allowed to finish:
+    /// a budget that can cancel mid-batch caches nothing, so every later request pays the same
+    /// timeout again and the row never warms — measured, a 4s cap against a ~7s batch pinned every
+    /// request at 4s for ever, which is worse in steady state than one slow request followed by
+    /// 46ms. Letting a batch complete guarantees forward progress: each page view caches what it
+    /// curated, so a row converges to warm.
     /// </summary>
     private static readonly TimeSpan CurationBudget = TimeSpan.FromSeconds(4);
+
+    /// <summary>
+    /// Hard ceiling on the whole curation pass, so a hung provider cannot hold the connection
+    /// indefinitely. Deliberately well above one batch — this is the backstop, not the budget.
+    /// </summary>
+    private static readonly TimeSpan CurationCeiling = TimeSpan.FromSeconds(20);
     private const int MaxDeepenPage = 25;
     private const int CurationBuffer = 8; // model-rank this many extra so the LLM has room to re-order
     private const int RerankBatch = 9;
@@ -257,7 +266,8 @@ public sealed class FeedPaginator(
             // batches completed inside the budget are still applied and cached, so the next page
             // over the same titles is warm.
             using var curationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            curationCts.CancelAfter(CurationBudget);
+            curationCts.CancelAfter(CurationCeiling);
+            var started = System.Diagnostics.Stopwatch.StartNew();
             var curationCt = curationCts.Token;
             var timedOut = false;
 
@@ -288,6 +298,17 @@ public sealed class FeedPaginator(
 
                 for (var i = 0; i < uncached.Count && !timedOut; i += RerankBatch)
                 {
+                    // Checked BEFORE starting a batch, never during one. A batch that is cancelled
+                    // part-way returns nothing and caches nothing, so the work is simply lost and
+                    // the next request repeats it.
+                    if (i > 0 && started.Elapsed > CurationBudget)
+                    {
+                        logger.LogInformation(
+                            "Feed curation for {Row} stopped after {Elapsed:0.0}s with {Done} of {Total} titles curated; the rest keep model order and are curated on a later page.",
+                            rowKey, started.Elapsed.TotalSeconds, fitById.Count, pool.Count);
+                        break;
+                    }
+
                     var batch = uncached.Skip(i).Take(RerankBatch).ToList();
                     IReadOnlyList<RerankResult> results;
                     try
