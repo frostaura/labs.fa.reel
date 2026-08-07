@@ -10,6 +10,10 @@ export interface FeedCard {
   backdropPath: string | null;
   genres: string[];
   predictedRating: number;
+  /** The community score (0–10), for comparison against the personal prediction. null = unrated. */
+  crowdRating: number | null;
+  /** How many people that score is drawn from — 9.1 from 12 votes is not 9.1 from 40,000. */
+  crowdVotes: number | null;
   whyThis: string;
   isReleased: boolean;
   providers?: { name: string; logoPath: string | null }[];

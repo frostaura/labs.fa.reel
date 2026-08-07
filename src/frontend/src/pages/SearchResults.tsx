@@ -4,7 +4,9 @@ import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Mic, RotateCcw, Send, Sparkles } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
+import CrowdRatingBadge from "../components/rec/CrowdRatingBadge";
 import BrowseFilters from "../components/rec/BrowseFilters";
+import { hasPredictedRating } from "../lib/predictedRating";
 import { DEFAULT_BROWSE_FILTER, type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, useAskReelChat } from "../lib/useAskReelChat";
@@ -245,9 +247,15 @@ export default function SearchResults() {
             >
               <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
                 <PosterImage path={card.posterPath} alt={card.name} size="w185" />
-                {card.predictedRating != null && (
-                  <div className="absolute top-2 right-2 reel-rise">
-                    <PredictedRatingBadge rating={card.predictedRating} />
+                {/* Prediction and crowd score, stacked so the grid's narrowest cell (two columns
+                    on a phone) still reads both. `hasPredictedRating` covers NaN as well as null,
+                    and a title with no community score simply shows one badge — never a dash. */}
+                {(hasPredictedRating(card.predictedRating) || hasPredictedRating(card.crowdRating)) && (
+                  <div className="absolute top-2 right-2 flex flex-col items-end gap-1 reel-rise">
+                    {hasPredictedRating(card.predictedRating) && <PredictedRatingBadge rating={card.predictedRating} />}
+                    {hasPredictedRating(card.crowdRating) && (
+                      <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} />
+                    )}
                   </div>
                 )}
                 {card.seen && (

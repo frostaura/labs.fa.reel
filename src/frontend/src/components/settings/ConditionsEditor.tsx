@@ -1,0 +1,477 @@
+import { useState } from "react";
+import { Lock, Minus, Plus, X } from "lucide-react";
+import {
+  useGetFiltersQuery,
+  useGetSessionQuery,
+  useUpdateFiltersMutation,
+  useVerifyPinMutation,
+  type FiltersPayload,
+} from "../../store/api";
+import { storeUnlockedPin, useUnlockedPin } from "../../lib/settingsPin";
+import {
+  ALL_LANGUAGES,
+  cycleGenre,
+  genreState,
+  GENRES,
+  isInvertedYearRange,
+  LANGUAGES,
+  MATURITY_LEVELS,
+  normalizeFilters,
+  normalizeYearRange,
+  parseYearInput,
+  YEAR_FLOOR,
+  yearCeiling,
+  type GenreState,
+} from "../../lib/pickConditions";
+import ConditionSummary from "./ConditionSummary";
+
+interface Props {
+  /** Fired after a successful save — the feed surface uses it to adopt the regenerated picks. */
+  onSaved?: () => void;
+  saveLabel?: string;
+  /** Settings supplies the `fa-card` shell; the dialog already has one. */
+  bare?: boolean;
+  /**
+   * Test ids per state. The editor mounts twice in the app (Settings and the dialog on the feed),
+   * and the existing Settings suite addresses it by name — so the ids are supplied by the mount
+   * rather than hard-coded here, which is what keeps this a single implementation.
+   */
+  testIds?: { editor?: string; locked?: string; loading?: string };
+}
+
+const GENRE_TONE: Record<GenreState, string> = {
+  neutral: "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40",
+  include: "border-fa-success/50 bg-fa-success/15 text-fa-success",
+  exclude: "border-fa-danger/50 bg-fa-danger/15 text-fa-danger",
+};
+
+const GENRE_ARIA: Record<GenreState, string> = {
+  neutral: "not filtered",
+  include: "required",
+  exclude: "excluded",
+};
+
+/**
+ * The conditions behind tonight's picks — genres (three-state), the two rating floors, release
+ * years, languages, maturity and keyword exclusions — in one editor.
+ *
+ * There is exactly ONE of these. It renders inside Settings and inside the dialog on the feed;
+ * two copies of a filter form is how a "minimum rating" quietly comes to mean two different things
+ * depending on which screen you set it from. The pure rules it applies live in
+ * `lib/pickConditions.ts` and are unit-tested there.
+ */
+export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions", bare, testIds }: Props) {
+  const { data: session } = useGetSessionQuery();
+  const { data: saved } = useGetFiltersQuery();
+  const [updateFilters, { isLoading: saving }] = useUpdateFiltersMutation();
+  const [verifyPin] = useVerifyPinMutation();
+  const unlockedPin = useUnlockedPin();
+
+  const [draft, setDraft] = useState<FiltersPayload | null>(null);
+  const [years, setYears] = useState({ min: "", max: "" });
+  const [flash, setFlash] = useState<string | null>(null);
+  const [pinEntry, setPinEntry] = useState("");
+  const [pinError, setPinError] = useState(false);
+
+  // Adopted during render rather than in an effect (React's documented alternative to a syncing
+  // effect — it re-renders before commit instead of cascading). Seeding in an effect meant every
+  // visit committed one frame of this component's own defaults — nothing excluded, English only,
+  // rating floor off — and only then snapped to the account's real filters, which reads as the app
+  // forgetting your settings. Self-limiting: `draft` is non-null afterwards, so this runs once.
+  // `normalizeFilters` is what absorbs a server that has not shipped the crowd/year fields yet.
+  if (saved && draft === null) {
+    const initial = normalizeFilters(saved);
+    setDraft(initial);
+    setYears({ min: initial.minYear?.toString() ?? "", max: initial.maxYear?.toString() ?? "" });
+  }
+
+  const pinConfigured = session?.pinConfigured ?? false;
+  const locked = pinConfigured && unlockedPin === null;
+  const shell = bare ? "space-y-5" : "fa-card p-5 space-y-5";
+
+  const unlock = async () => {
+    const result = await verifyPin({ pin: pinEntry }).unwrap().catch(() => null);
+    if (result?.valid) {
+      storeUnlockedPin(pinEntry);
+      setPinEntry("");
+      setPinError(false);
+    } else {
+      setPinError(true);
+    }
+  };
+
+  if (locked) {
+    return (
+      <section className={bare ? "space-y-3" : "fa-card p-5 space-y-3"} data-testid={testIds?.locked ?? "conditions-locked"}>
+        <h2 className="fa-section-title flex items-center gap-2">
+          <Lock className="h-4 w-4" /> Content preferences
+        </h2>
+        <p className="fa-caption text-fa-frost-dim">Locked with your settings PIN.</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="password"
+            inputMode="numeric"
+            maxLength={8}
+            value={pinEntry}
+            onChange={(e) => setPinEntry(e.target.value.replace(/\D/g, ""))}
+            onKeyDown={(e) => e.key === "Enter" && unlock()}
+            placeholder="PIN"
+            className="fa-input w-28 tabular-nums"
+            data-testid="pin-input"
+          />
+          <button onClick={unlock} className="fa-button">
+            Unlock
+          </button>
+          {pinError && <span className="fa-caption text-fa-danger">Wrong PIN</span>}
+        </div>
+      </section>
+    );
+  }
+
+  // Until the saved filters land there is no honest value to draw: rendering the controls from this
+  // component's defaults is what produced the flash. A skeleton says "loading" instead of lying.
+  if (!draft) {
+    return (
+      <section className={bare ? "space-y-3" : "fa-card p-5 space-y-3"} data-testid={testIds?.loading ?? "conditions-loading"}>
+        <div className="h-5 w-48 rounded reel-shimmer" />
+        <div className="h-20 rounded reel-shimmer" />
+        <div className="h-20 rounded reel-shimmer" />
+      </section>
+    );
+  }
+
+  const ceiling = yearCeiling();
+  const inverted = isInvertedYearRange(draft);
+  const languages = draft.languages;
+  const allLanguages = languages.includes(ALL_LANGUAGES);
+
+  /** Clamps and un-inverts the year boxes, and writes the corrected text back so the user sees it. */
+  const commitYears = () => {
+    const range = normalizeYearRange(draft, { floor: YEAR_FLOOR, ceiling });
+    setDraft({ ...draft, ...range });
+    setYears({ min: range.minYear?.toString() ?? "", max: range.maxYear?.toString() ?? "" });
+  };
+
+  const toggleLanguage = (code: string) => {
+    // Picking a specific language while "all" is on narrows to just that language.
+    if (allLanguages) {
+      setDraft({ ...draft, languages: [code] });
+      return;
+    }
+    const next = languages.includes(code) ? languages.filter((l) => l !== code) : [...languages, code];
+    // English is the floor — clearing every language reverts to the English-only default rather
+    // than an empty (which would read as "no titles").
+    setDraft({ ...draft, languages: next.length > 0 ? next : ["en"] });
+  };
+
+  const save = async () => {
+    // Normalised on the way out, not only on blur: a save straight from a focused year box would
+    // otherwise ship whatever was half-typed in it.
+    const range = normalizeYearRange(draft, { floor: YEAR_FLOOR, ceiling });
+    const payload = normalizeFilters({ ...draft, ...range });
+    setDraft(payload);
+    setYears({ min: range.minYear?.toString() ?? "", max: range.maxYear?.toString() ?? "" });
+    await updateFilters({ filters: payload, pin: unlockedPin ?? undefined }).unwrap()
+      .then(() => {
+        setFlash("Saved — your picks are being re-cut.");
+        onSaved?.();
+      })
+      .catch(() => setFlash("Locked — verify the settings PIN first."));
+    window.setTimeout(() => setFlash(null), 2500);
+  };
+
+  return (
+    <section className={shell} data-testid={testIds?.editor ?? "conditions-editor"}>
+      {/* Suppressed in the dialog, which supplies its own DialogTitle — two identical headings
+          stacked on top of each other read as a rendering bug. */}
+      {!bare && (
+        <div>
+          <h2 className="fa-section-title">Conditions for tonight&apos;s picks</h2>
+          <p className="fa-caption text-fa-frost-dim mt-1">
+            These are airtight — they apply to the hero, every row, and all search.
+          </p>
+        </div>
+      )}
+
+      {/* What is on right now, before any of the controls. The whole point of the summary is that
+          "why does my feed look like this" is answerable without reading six sections. */}
+      <div className="space-y-1.5">
+        <p className="fa-overline text-fa-frost-dim">active now</p>
+        <ConditionSummary filters={draft} />
+      </div>
+
+      {/* ── Genres ──────────────────────────────────────────────────────────────────────────
+          Three states, not two. The list has always had an `includeGenres` half; it simply had no
+          UI, so "give me horror" was inexpressible and only "never horror" could be said. */}
+      <div className="space-y-2">
+        <p className="fa-overline text-fa-frost-dim">genres</p>
+        <p className="fa-caption text-fa-frost-dim">
+          Tap once to require, twice to exclude, a third time to clear.
+        </p>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 fa-caption">
+          <span className="inline-flex items-center gap-1.5 text-fa-success">
+            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-fa-success/50 bg-fa-success/15">
+              <Plus className="h-2.5 w-2.5" />
+            </span>
+            include — must have at least one
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-fa-danger">
+            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-fa-danger/50 bg-fa-danger/15">
+              <Minus className="h-2.5 w-2.5" />
+            </span>
+            exclude — must have none
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {GENRES.map((genre) => {
+            const state = genreState(draft, genre);
+            return (
+              <button
+                key={genre}
+                type="button"
+                onClick={() => setDraft(cycleGenre(draft, genre))}
+                aria-label={`${genre.replace("-", " ")} — ${GENRE_ARIA[state]}`}
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 fa-caption capitalize transition ${GENRE_TONE[state]}`}
+                data-testid={`genre-${genre}`}
+                data-state={state}
+              >
+                {state === "include" && <Plus className="h-3 w-3" />}
+                {state === "exclude" && <Minus className="h-3 w-3" />}
+                {genre.replace("-", " ")}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── The two ratings, adjacent and clearly labelled — they are different numbers. ────── */}
+      <div className="space-y-4">
+        <RatingFloor
+          testId="crowd-rating-slider"
+          label="minimum crowd rating"
+          hint="What everyone else thinks. Hide titles the community scores below this."
+          value={draft.minCrowdRating}
+          onChange={(minCrowdRating) => setDraft({ ...draft, minCrowdRating })}
+          accent="text-fa-warning"
+        />
+        <RatingFloor
+          testId="min-rating-slider"
+          label="minimum predicted rating (for you)"
+          hint="What the model thinks you'll give it. 0 = show everything."
+          value={draft.minPredictedRating}
+          onChange={(minPredictedRating) => setDraft({ ...draft, minPredictedRating })}
+          accent="text-fa-frost-bright"
+        />
+      </div>
+
+      {/* ── Release years ───────────────────────────────────────────────────────────────────── */}
+      <div className="space-y-2">
+        <p className="fa-overline text-fa-frost-dim">release year</p>
+        <p className="fa-caption text-fa-frost-dim">Leave a box empty for open-ended.</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            inputMode="numeric"
+            min={YEAR_FLOOR}
+            max={ceiling}
+            value={years.min}
+            onChange={(e) => {
+              setYears({ ...years, min: e.target.value });
+              setDraft({ ...draft, minYear: parseYearInput(e.target.value) });
+            }}
+            onBlur={commitYears}
+            placeholder="from"
+            aria-label="Earliest release year"
+            className="fa-input w-24 tabular-nums"
+            data-testid="min-year"
+          />
+          <span className="fa-caption text-fa-frost-dim">to</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={YEAR_FLOOR}
+            max={ceiling}
+            value={years.max}
+            onChange={(e) => {
+              setYears({ ...years, max: e.target.value });
+              setDraft({ ...draft, maxYear: parseYearInput(e.target.value) });
+            }}
+            onBlur={commitYears}
+            placeholder="to"
+            aria-label="Latest release year"
+            className="fa-input w-24 tabular-nums"
+            data-testid="max-year"
+          />
+          {(draft.minYear != null || draft.maxYear != null) && (
+            <button
+              type="button"
+              onClick={() => {
+                setDraft({ ...draft, minYear: null, maxYear: null });
+                setYears({ min: "", max: "" });
+              }}
+              className="fa-button-ghost fa-caption"
+            >
+              Any year
+            </button>
+          )}
+        </div>
+        {/* Said out loud rather than silently corrected mid-typing: an inverted range matches
+            nothing, so a blank feed would otherwise have no visible cause. It is swapped on blur. */}
+        {inverted && (
+          <p className="fa-caption text-fa-warning" data-testid="year-inverted">
+            That range runs backwards — it&apos;ll be read as {draft.maxYear}–{draft.minYear}.
+          </p>
+        )}
+      </div>
+
+      {/* ── Languages — an allow-list. English-only is the default. ─────────────────────────── */}
+      <div className="space-y-2">
+        <p className="fa-overline text-fa-frost-dim">languages</p>
+        <p className="fa-caption text-fa-frost-dim">
+          Only recommend titles in these languages. English only by default.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => setDraft({ ...draft, languages: allLanguages ? ["en"] : [ALL_LANGUAGES] })}
+            className={`rounded-full border px-2.5 py-1 fa-caption transition ${
+              allLanguages
+                ? "border-fa-frost/60 bg-fa-frost/15 text-fa-frost-bright"
+                : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
+            }`}
+            data-testid="lang-all"
+          >
+            All languages
+          </button>
+          {LANGUAGES.map(({ code, label }) => {
+            const on = !allLanguages && languages.includes(code);
+            return (
+              <button
+                key={code}
+                type="button"
+                onClick={() => toggleLanguage(code)}
+                className={`rounded-full border px-2.5 py-1 fa-caption transition ${
+                  on
+                    ? "border-fa-frost/60 bg-fa-frost/15 text-fa-frost-bright"
+                    : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40"
+                } ${allLanguages ? "opacity-50" : ""}`}
+                data-testid={`lang-${code}`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Maturity ────────────────────────────────────────────────────────────────────────── */}
+      <div className="space-y-2">
+        <p className="fa-overline text-fa-frost-dim">maturity ceiling</p>
+        <select
+          className="fa-input fa-select w-40"
+          value={draft.maturityCeiling ?? ""}
+          aria-label="Maturity ceiling"
+          onChange={(e) => setDraft({ ...draft, maturityCeiling: e.target.value || null })}
+        >
+          {MATURITY_LEVELS.map((level) => (
+            <option key={level} value={level} className="bg-fa-ink-2">
+              {level === "" ? "none" : level === "R" ? "R / TV-MA" : level}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* ── Keyword exclusions ──────────────────────────────────────────────────────────────── */}
+      <div className="space-y-2">
+        <p className="fa-overline text-fa-frost-dim">excluded keywords</p>
+        <KeywordEditor
+          keywords={draft.excludeKeywords}
+          onChange={(excludeKeywords) => setDraft({ ...draft, excludeKeywords })}
+        />
+      </div>
+
+      <div className="flex items-center gap-3 border-t border-fa-edge/50 pt-4">
+        <button onClick={save} disabled={saving} className="fa-button-primary" data-testid="save-prefs">
+          {saveLabel}
+        </button>
+        {flash && <span className="fa-caption text-fa-success">{flash}</span>}
+      </div>
+    </section>
+  );
+}
+
+/** One 0–9 floor slider. Two of these sit next to each other, so the label carries the difference. */
+function RatingFloor({
+  label,
+  hint,
+  value,
+  onChange,
+  testId,
+  accent,
+}: {
+  label: string;
+  hint: string;
+  value: number | null;
+  onChange: (next: number | null) => void;
+  testId: string;
+  accent: string;
+}) {
+  const current = value ?? 0;
+  return (
+    <div className="space-y-2">
+      <p className="fa-overline text-fa-frost-dim">{label}</p>
+      <p className="fa-caption text-fa-frost-dim">{hint}</p>
+      <div className="flex items-center gap-4 max-w-md">
+        <input
+          type="range"
+          min={0}
+          max={9}
+          step={0.5}
+          value={current}
+          aria-label={label}
+          onChange={(e) => onChange(Number(e.target.value) || null)}
+          className="fa-range flex-1"
+          style={{ "--fa-range-fill": `${((current / 9) * 100).toFixed(0)}%` } as React.CSSProperties}
+          data-testid={testId}
+        />
+        <span className={`fa-metric-sm w-14 text-right tabular-nums ${accent}`}>
+          {current > 0 ? current.toFixed(1) : "off"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function KeywordEditor({ keywords, onChange }: { keywords: string[]; onChange: (next: string[]) => void }) {
+  const [input, setInput] = useState("");
+
+  const add = () => {
+    const value = input.trim().toLowerCase();
+    if (value && !keywords.includes(value)) {
+      onChange([...keywords, value]);
+    }
+    setInput("");
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {keywords.map((keyword) => (
+        <span key={keyword} className="inline-flex items-center gap-1 rounded-full border border-fa-edge bg-fa-glass px-2.5 py-1 fa-caption text-fa-frost">
+          {keyword}
+          <button onClick={() => onChange(keywords.filter((k) => k !== keyword))} aria-label={`remove ${keyword}`}>
+            <X className="h-3 w-3 text-fa-frost-dim hover:text-fa-danger" />
+          </button>
+        </span>
+      ))}
+      <input
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && add()}
+        onBlur={add}
+        placeholder="add keyword…"
+        aria-label="Add an excluded keyword"
+        className="fa-input h-8 w-36 text-sm"
+      />
+    </div>
+  );
+}

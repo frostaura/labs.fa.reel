@@ -21,12 +21,18 @@ export interface TypeaheadPayload {
 
 export interface FiltersPayload {
   excludeGenres: string[];
+  /** "Must have at least one of these" — the positive half of the genre rule. */
   includeGenres: string[];
   excludeKeywords: string[];
   maturityCeiling: string | null;
   minPredictedRating: number | null;
   /** Allowed original languages (ISO-639-1). Defaults to ["en"]; ["*"] = every language. */
   languages: string[];
+  /** Minimum community score (0–10). null = off. */
+  minCrowdRating: number | null;
+  /** Release-year range; either bound may be null for open-ended. */
+  minYear: number | null;
+  maxYear: number | null;
 }
 
 export interface TasteDnaPayload {

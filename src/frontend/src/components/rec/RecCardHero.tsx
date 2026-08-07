@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import type { FeedCard } from "../../store/feedTypes";
 import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
 import PredictedRatingBadge from "./PredictedRatingBadge";
+import CrowdRatingBadge from "./CrowdRatingBadge";
 import { formatRuntime } from "../../lib/format";
 import { hasPredictedRating } from "../../lib/predictedRating";
 
@@ -61,9 +62,15 @@ export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
               <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 space-y-2">
                 <div className="flex items-center gap-3 flex-wrap">
                   <h2 className="text-xl sm:text-3xl font-light text-fa-frost-bright drop-shadow">{card.name}</h2>
-                  {/* Guarded like every other consumer — see lib/predictedRating.ts. */}
+                  {/* Guarded like every other consumer — see lib/predictedRating.ts. The crowd
+                      score sits directly beside the prediction (there is room at hero scale) so the
+                      two are read as a pair; it is simply absent when the title has no community
+                      score, never a placeholder. */}
                   {hasPredictedRating(card.predictedRating) && (
                     <PredictedRatingBadge rating={card.predictedRating} size="lg" />
+                  )}
+                  {hasPredictedRating(card.crowdRating) && (
+                    <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} size="lg" />
                   )}
                 </div>
                 <p className="fa-caption text-fa-frost-dim">

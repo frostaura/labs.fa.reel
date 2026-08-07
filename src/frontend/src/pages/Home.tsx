@@ -14,6 +14,7 @@ import GenreRow from "../components/rows/GenreRow";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
+import PickConditionsButton, { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import { DEFAULT_BROWSE_FILTER, matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 
@@ -46,7 +47,15 @@ export default function Home() {
     if (adoptOnNext) setAdoptOnNext(false);
   }
 
-  const resetKey = adoptedKey;
+  // Saving new conditions is the one change the "hold a fresher snapshot" rule above must NOT
+  // protect the user from: they just told the app what they want to see, so the answer has to
+  // arrive now rather than behind a "new picks ready" button. `updateFilters` invalidates the Feed
+  // tag, so the snapshot refetches on its own; this counter forces the rows to remount around it
+  // even when the server hands back the same `generatedAt` and the seed keys would not otherwise
+  // change. Bumped only on a successful save, so nothing resets while the dialog is merely open.
+  const [conditionsVersion, setConditionsVersion] = useState(0);
+
+  const resetKey = `${adoptedKey}#${conditionsVersion}`;
   const hasFresherPicks = latestKey !== "" && adoptedKey !== "" && latestKey !== adoptedKey;
 
   // Adopting re-seeds every row from the server (which already excludes removed titles), so the
@@ -68,9 +77,19 @@ export default function Home() {
               ranked for you · {new Date(feed.generatedAt).toLocaleString()}
             </p>
           )}
+          {/* The conditions actually in force, under the title. Without this the feed silently
+              obeys settings made on another screen — a standing "no documentary" is invisible
+              exactly where its effect is. */}
+          <PickConditionsSummary className="mt-2" />
         </div>
         {!building && (
           <div className="flex items-center gap-2">
+            <PickConditionsButton
+              onSaved={() => {
+                setAdoptOnNext(true);
+                setConditionsVersion((v) => v + 1);
+              }}
+            />
             {hasFresherPicks && (
               <button
                 type="button"

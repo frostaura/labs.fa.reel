@@ -14,6 +14,9 @@ export interface AskCard {
   genres: string[];
   similarity: number | null;
   predictedRating: number | null;
+  /** Community score (0–10) and its vote count; both absent on older servers. */
+  crowdRating?: number | null;
+  crowdVotes?: number | null;
   /** Phase B: hyper-personal LLM fit + reason; absent until reranked. */
   fit?: number | null;
   why?: string | null;
