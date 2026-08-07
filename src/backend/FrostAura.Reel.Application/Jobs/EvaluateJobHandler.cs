@@ -43,6 +43,9 @@ public class EvaluateJobHandler(
                     Kind = JobKind.BuildFeed,
                     Priority = 1,
                     EnqueuedAt = DateTime.UtcNow,
+                    // Provenance only — a freshly-trained artifact already forces a Fresh build via
+                    // FeedBuildPolicy's artifact-id check, whatever reason is recorded here.
+                    TriggerReason = "model-trained",
                 });
             }
         }

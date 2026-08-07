@@ -96,8 +96,13 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
         }
 
         // ── Popularity arm: the coverage slice ──────────────────────────────────────────────
+        // The id tie-break is load-bearing: without it, titles tied on popularity land in whatever
+        // row order Postgres feels like, so two back-to-back builds over identical data can retrieve
+        // DIFFERENT pools at the Take() cutoff — which defeats the feed's no-op suppression (an
+        // identical rebuild must assemble identically) and makes any build irreproducible.
         var popular = await Lane()
             .OrderByDescending(t => t.TmdbPopularity)
+            .ThenBy(t => t.Id)
             .Take(OverFetch(popCount))
             .ToListAsync(ct);
         AddArm(popular, popCount);
@@ -168,11 +173,13 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
         return ordered;
     }
 
-    /// <summary>Nearest eligible titles to <paramref name="centroid"/> by cosine distance (HNSW index).</summary>
+    /// <summary>Nearest eligible titles to <paramref name="centroid"/> by cosine distance (HNSW index).
+    /// Ties broken by id for the same reason as the popularity arm: identical inputs, identical pool.</summary>
     private Task<List<Title>> AnnPullAsync(IQueryable<Guid> laneIds, Vector centroid, int take, CancellationToken ct) =>
         db.TitleEmbeddings
             .Where(e => laneIds.Contains(e.TitleId))
             .OrderBy(e => e.Embedding.CosineDistance(centroid))
+            .ThenBy(e => e.TitleId)
             .Take(take)
             .Join(db.Titles, e => e.TitleId, t => t.Id, (e, t) => t)
             .ToListAsync(ct);

@@ -3,13 +3,17 @@ using FrostAura.Reel.Application.Ranking;
 namespace FrostAura.Reel.Tests.Ml;
 
 /// <summary>
-/// "Because you loved …" must not show the same three titles for ever.
+/// "Because you loved …" must not show the same three titles for ever — and must not churn either.
 ///
 /// Regression for the founder's 2026-08-07 report: with 3,605 ratings the strict rating-first
 /// top-10 is frozen, so the old selection (one drift slot + two fixed all-time slots) anchored on
-/// the same titles on every single build. These tests pin the two properties the fix has to hold at
-/// once — the anchors MOVE between builds, and they are a deterministic function of their inputs so
-/// a build stays reproducible and the tests stay assertable.
+/// the same titles on every single build. The first fix rotated per BUILD, which over-corrected —
+/// delta sync polls every 5 minutes and the rows changed 3×/hour. The standing contract is
+/// day-granular: <see cref="AnchorRotation.OffsetFor"/> is constant within a UTC day and moves
+/// across days, and the hold-back set the handler passes is the previous DAY's anchors (or the
+/// superseded snapshot's, on a user-forced refresh). These tests pin the properties the selection
+/// has to hold — anchors move when the hold-back says they must, and they are a deterministic
+/// function of their inputs so a build stays reproducible and the tests stay assertable.
 /// </summary>
 public class AnchorRotationTests
 {
@@ -18,7 +22,7 @@ public class AnchorRotationTests
         .ToArray();
 
     [Fact]
-    public void Two_consecutive_builds_over_identical_ratings_produce_different_anchors()
+    public void A_build_that_holds_back_its_predecessors_anchors_cannot_repeat_them()
     {
         var first = AnchorRotation.Select(
             driftPick: Pool[0],
@@ -28,8 +32,8 @@ public class AnchorRotationTests
             rotationOffset: 0,
             count: 3);
 
-        // The second build sees the first build's anchors as "previous" — exactly what the handler
-        // reads off the Active snapshot before superseding it.
+        // The second selection sees the first's anchors as held back — what the handler passes for
+        // day N+1 (yesterday's anchors) and for a manual refresh (the superseded snapshot's).
         var second = AnchorRotation.Select(
             driftPick: Pool[0],
             anchorPool: Pool,
@@ -122,12 +126,28 @@ public class AnchorRotationTests
     }
 
     [Fact]
-    public void Consecutive_build_timestamps_give_different_rotation_offsets()
+    public void Every_timestamp_inside_one_utc_day_shares_a_single_rotation_offset()
     {
-        // The offset is minute-grained: two builds a few minutes apart (the founder's actual cadence
-        // when tuning filters) must not land on the same starting point in the pool.
-        var first = new DateTime(2026, 8, 7, 10, 19, 26, DateTimeKind.Utc);
-        Assert.NotEqual(AnchorRotation.OffsetFor(first), AnchorRotation.OffsetFor(first.AddMinutes(5)));
-        Assert.True(AnchorRotation.OffsetFor(first) >= 0, "the offset must stay non-negative for the modulo.");
+        // The stability half of the contract: delta sync polls every 5 minutes, and every one of
+        // those rebuilds must read the loved pool from the SAME starting point, or the rows churn
+        // under the user all day (the exact 3×/hour QA failure the day granularity exists to stop).
+        var midnight = new DateTime(2026, 8, 7, 0, 0, 0, DateTimeKind.Utc);
+        var morning = new DateTime(2026, 8, 7, 10, 19, 26, DateTimeKind.Utc);
+        var lastTick = new DateTime(2026, 8, 7, 23, 59, 59, DateTimeKind.Utc);
+
+        Assert.Equal(AnchorRotation.OffsetFor(midnight), AnchorRotation.OffsetFor(morning));
+        Assert.Equal(AnchorRotation.OffsetFor(midnight), AnchorRotation.OffsetFor(morning.AddMinutes(5)));
+        Assert.Equal(AnchorRotation.OffsetFor(midnight), AnchorRotation.OffsetFor(lastTick));
+    }
+
+    [Fact]
+    public void Consecutive_utc_days_give_different_rotation_offsets()
+    {
+        // The freshness half: a new day must start reading the pool somewhere else, so tomorrow's
+        // first build cannot land on today's rows even before the hold-back set weighs in.
+        var today = new DateTime(2026, 8, 7, 10, 19, 26, DateTimeKind.Utc);
+        Assert.NotEqual(AnchorRotation.OffsetFor(today), AnchorRotation.OffsetFor(today.AddDays(1)));
+        Assert.NotEqual(AnchorRotation.OffsetFor(today.AddDays(1)), AnchorRotation.OffsetFor(today.AddDays(2)));
+        Assert.True(AnchorRotation.OffsetFor(today) >= 0, "the offset must stay non-negative for the modulo.");
     }
 }

@@ -298,6 +298,9 @@ public static class FeedEndpoints
                     Kind = JobKind.BuildFeed,
                     Priority = 0,
                     EnqueuedAt = DateTime.UtcNow,
+                    // The one reason that must rotate the page even though nothing about the
+                    // account's data changed — FeedBuildPolicy forces a Fresh build for it.
+                    TriggerReason = FeedBuildPolicy.ManualRefreshReason,
                 });
                 await db.SaveChangesAsync(ct);
             }

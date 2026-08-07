@@ -35,7 +35,13 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 ///
 /// <b>Frozen anchors.</b> "Because you loved The Great Wall / The Bone Collector" never changed,
 /// because the anchors were the strict top of a rating-first order that a large rating history
-/// freezes permanently. Two consecutive builds over identical ratings must now anchor differently.
+/// freezes permanently. A user-forced refresh over identical ratings must anchor differently.
+///
+/// <b>Churning anchors</b> — the over-correction of the fix for the previous defect. Rotating per
+/// build meant the 5-minute delta-sync poll re-dealt the page up to 3×/hour in QA. The stable
+/// "tonight" contract pinned here: a same-day background rebuild with unchanged inputs writes no
+/// new snapshot at all; a user reaction vacates exactly its own slot and keeps the rest; a manual
+/// refresh still visibly rotates.
 ///
 /// Skips when REEL_TEST_CONNECTION_STRING is unset (no DB in the run).
 /// </summary>
@@ -112,7 +118,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task Two_consecutive_builds_with_the_same_ratings_anchor_on_different_titles()
+    public async Task A_manual_refresh_supersedes_the_snapshot_and_anchors_on_different_titles()
     {
         if (!fixture.Available)
         {
@@ -125,16 +131,114 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         await SeedActiveArtifactAsync(accountId);
 
         await RunBuildAsync(accountId);
+        var firstSnapshotId = (await ActiveSnapshotIdAndCountAsync(accountId)).ActiveId;
         var first = await AnchorsOfActiveSnapshotAsync(accountId);
 
         // Nothing about the account changes between the two builds — same ratings, same catalogue.
-        // Under the old rating-first selection this returned an identical anchor set for ever.
-        await RunBuildAsync(accountId);
+        // Under the old rating-first selection this returned an identical anchor set for ever; under
+        // day-stability alone it would be suppressed. The refresh button must beat both: a new
+        // snapshot, rotated away from the one it replaces.
+        await RunBuildAsync(accountId, FeedBuildPolicy.ManualRefreshReason);
+        var (secondSnapshotId, _) = await ActiveSnapshotIdAndCountAsync(accountId);
         var second = await AnchorsOfActiveSnapshotAsync(accountId);
 
+        Assert.NotEqual(firstSnapshotId, secondSnapshotId);
         Assert.NotEmpty(first);
         Assert.NotEmpty(second);
         Assert.Empty(first.Intersect(second));
+    }
+
+    [Fact]
+    public async Task A_same_day_background_rebuild_with_unchanged_inputs_writes_no_new_snapshot()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+        var (firstActiveId, firstCount) = await ActiveSnapshotIdAndCountAsync(accountId);
+
+        // The founder's churn case: the 5-minute delta-sync poll found nothing new, rebuilt anyway,
+        // and re-dealt the page. Now the rebuild runs, re-scores, assembles the identical feed —
+        // and suppresses the write, so the page the user is reading does not even flicker.
+        await RunBuildAsync(accountId, "delta-sync");
+        var (secondActiveId, secondCount) = await ActiveSnapshotIdAndCountAsync(accountId);
+
+        Assert.Equal(firstActiveId, secondActiveId);
+        Assert.Equal(firstCount, secondCount);
+    }
+
+    [Fact]
+    public async Task Rating_a_hero_title_vacates_only_its_slot_and_keeps_the_rest_of_the_hero()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+        var heroBefore = await HeroOfActiveSnapshotAsync(accountId);
+        var anchorsBefore = await AnchorsOfActiveSnapshotAsync(accountId);
+        Assert.True(heroBefore.Count >= 2, "the seeded pool must fill more than one hero slot for this test to mean anything.");
+
+        // The user rates a hero pick from the card — "seen" by the eligibility rule, so it must
+        // leave the feed immediately. This is the reactive rebuild ReactionEndpoints enqueues.
+        var ratedTitleId = heroBefore[heroBefore.Count / 2];
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            db.UserRatings.Add(new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = ratedTitleId,
+                SubjectType = RatingSubjectType.Movie,
+                Rating = 9,
+                RatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await RunBuildAsync(accountId, "in-app rating");
+        var heroAfter = await HeroOfActiveSnapshotAsync(accountId);
+        var anchorsAfter = await AnchorsOfActiveSnapshotAsync(accountId);
+
+        // Exactly the rated slot vacated: the surviving picks keep their order at the front, the
+        // backfill lands behind them, and the rails the user was reading do not re-deal.
+        Assert.DoesNotContain(ratedTitleId, heroAfter);
+        var expectedKept = heroBefore.Where(id => id != ratedTitleId).ToList();
+        Assert.Equal(expectedKept, heroAfter.Take(expectedKept.Count));
+        Assert.Equal(heroBefore.Count, heroAfter.Count); // the vacated slot was backfilled
+        Assert.True(anchorsBefore.SetEquals(anchorsAfter), "a reaction on a hero pick must not re-deal the rails.");
+    }
+
+    private async Task<(Guid ActiveId, int Count)> ActiveSnapshotIdAndCountAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var activeId = (await ActiveSnapshotAsync(db, accountId)).Id;
+        return (activeId, await db.FeedSnapshots.CountAsync(s => s.AccountId == accountId));
+    }
+
+    /// <summary>The Active snapshot's hero title ids, in rank order.</summary>
+    private async Task<List<Guid>> HeroOfActiveSnapshotAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        return await db.FeedItems
+            .Where(i => i.FeedSnapshotId == snapshot.Id && i.Row == FeedRowKind.Hero)
+            .OrderBy(i => i.Rank)
+            .Select(i => i.TitleId)
+            .ToListAsync();
     }
 
     private async Task<HashSet<Guid>> AnchorsOfActiveSnapshotAsync(Guid accountId)
@@ -152,7 +256,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     private static async Task<FeedSnapshot> ActiveSnapshotAsync(ReelDbContext db, Guid accountId) =>
         await db.FeedSnapshots.FirstAsync(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active);
 
-    private async Task RunBuildAsync(Guid accountId)
+    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -175,7 +279,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             NullLogger<BuildFeedJobHandler>.Instance);
 
         await handler.ExecuteAsync(
-            new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.BuildFeed, EnqueuedAt = DateTime.UtcNow },
+            new SyncJob
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = JobKind.BuildFeed,
+                EnqueuedAt = DateTime.UtcNow,
+                TriggerReason = triggerReason,
+            },
             CancellationToken.None);
     }
 

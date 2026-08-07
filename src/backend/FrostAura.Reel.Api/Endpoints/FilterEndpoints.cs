@@ -137,7 +137,7 @@ public static class FilterEndpoints
             // window would linger until the next build. Enqueue a reactive rebuild (reuses the Active
             // model) so the feed re-filters immediately; it commits in the same SaveChanges as the
             // filter change. Kind-agnostic by construction — every filter, old and new, invalidates.
-            await feedRefresh.RequestRebuildAsync(accountId, "content filters changed", ct);
+            await feedRefresh.RequestRebuildAsync(accountId, FeedBuildPolicy.FiltersChangedReason, ct);
 
             await db.SaveChangesAsync(ct);
             // Echo what was actually STORED, not what was sent: a swapped year window and a clamped

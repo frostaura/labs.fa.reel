@@ -1274,6 +1274,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<string>("TriggerReason")
+                        .HasColumnType("text");
+
                     b.HasKey("Id");
 
                     b.HasIndex("AccountId", "Kind")

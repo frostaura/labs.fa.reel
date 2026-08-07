@@ -61,5 +61,13 @@ public class SyncJob
 
     public string? ProgressMessage { get; set; }
 
+    /// <summary>
+    /// Why this job was enqueued — "delta-sync", "manual-refresh", "in-app rating", … Null for jobs
+    /// that predate the column or have no interesting provenance. BuildFeed reads it to decide
+    /// between preserving tonight's picks and dealing fresh ones (see FeedBuildPolicy): a background
+    /// poll must not churn the page, while an explicit user action must visibly change it.
+    /// </summary>
+    public string? TriggerReason { get; set; }
+
     public string? Error { get; set; }
 }

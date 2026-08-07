@@ -14,15 +14,21 @@ namespace FrostAura.Reel.Application.Ranking;
 /// <item><b>Drift slot</b> — the loved title nearest the user's RECENT-taste centroid, so one row
 /// always reflects where taste is now. Unchanged in spirit from the original single drift pick.</item>
 /// <item><b>Rotating slots</b> — drawn from the wider, recency-weighted loved pool starting at an
-/// offset derived from the build's own timestamp, so consecutive builds walk to a different part of
+/// offset derived from the build's own timestamp, so successive days walk to a different part of
 /// the pool instead of re-reading the same head.</item>
 /// </list>
 ///
-/// Two properties matter and are both tested:
+/// The rotation guarantee is deliberately DAY-granular. The first cut of this fix rotated per
+/// build (minute-grained offset, previous build's anchors held back), which answered the founder's
+/// complaint by over-correcting: delta sync polls hot accounts every 5 minutes, every poll rebuilt
+/// the feed, and the rows the user was reading changed 3×/hour in QA. The standing contract is
+/// therefore <b>stable within a UTC day, guaranteed fresh across days</b> (FeedBuildPolicy owns the
+/// build-mode half; user actions still change things immediately). Properties, both tested:
 /// <list type="bullet">
-/// <item><b>Different between builds.</b> Anchors used by the PREVIOUS build are held back while any
-/// unused loved title remains, so two consecutive builds over identical ratings cannot produce the
-/// same anchor set. This is the guarantee; the timestamp offset only adds variety on top of it.</item>
+/// <item><b>Different across days.</b> <see cref="OffsetFor"/> is constant inside a UTC day and
+/// moves every day, and the caller holds back the PREVIOUS day's anchors (or, for a user-forced
+/// refresh, the superseded snapshot's), so a new day — or a manual refresh — cannot re-deal the
+/// rows it replaces while any unused loved title remains.</item>
 /// <item><b>Stable within a build.</b> Selection is a pure function of its inputs — no
 /// <c>Random</c>, no <c>DateTime.Now</c> read inside. The seed is passed in and is the snapshot's
 /// own persisted <c>GeneratedAt</c>, so any build can be replayed exactly from what it stored.</item>
@@ -32,11 +38,12 @@ public static class AnchorRotation
 {
     /// <summary>
     /// The rotation offset for a build, derived from the timestamp the snapshot will persist.
-    /// Minutes, not ticks: fine enough that ordinary rebuilds land on different offsets, coarse
-    /// enough to stay a legible, reproducible number when replaying a build from its GeneratedAt.
+    /// Days, not minutes or ticks: every build inside one UTC day reads the loved pool from the
+    /// same starting point (stability), consecutive days start somewhere else (freshness), and the
+    /// number stays legible and reproducible when replaying a build from its GeneratedAt.
     /// </summary>
     public static int OffsetFor(DateTime generatedAt) =>
-        (int)(generatedAt.Ticks / TimeSpan.TicksPerMinute & int.MaxValue);
+        (int)((ulong)(generatedAt.Ticks / TimeSpan.TicksPerDay) % int.MaxValue);
 
     /// <summary>
     /// Picks up to <paramref name="count"/> anchor ids.

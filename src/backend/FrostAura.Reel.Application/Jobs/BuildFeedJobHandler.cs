@@ -23,6 +23,11 @@ namespace FrostAura.Reel.Application.Jobs;
 /// with per-title contributions → assemble hero + because-you-loved rows with freshness and
 /// genre-diversity shaping → flip the Active snapshot and the account to FeedReady. The model
 /// is never in the request path — the feed endpoint reads the snapshot.
+///
+/// Assembly honours the stable-"tonight" contract (FeedBuildPolicy): a background rebuild inside
+/// the same UTC day PRESERVES the Active snapshot's hero, anchors and rail members — and writes
+/// nothing at all when the result is identical — while a new day, a new model, or an explicit user
+/// action deals fresh rows. The job's TriggerReason is what tells those cases apart.
 /// </summary>
 public class BuildFeedJobHandler(
     IReelDbContext db,
@@ -146,7 +151,21 @@ public class BuildFeedJobHandler(
 
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
         ReportProgress(job, accountId, 85, "Assembling tonight's picks");
-        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, now, ct);
+        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, ct);
+
+        if (snapshot is null)
+        {
+            // Preserve-mode no-op: the assembled feed is item-for-item what the Active snapshot
+            // already serves, so nothing is written and no feed-ready reseed is announced — the
+            // whole point of the stable "tonight" contract is that a background delta-sync poll
+            // cannot churn the page the user is reading. TitleScores were persisted above, so
+            // score freshness is not lost; the page itself stays put.
+            job.ProgressMessage = "feed unchanged — kept tonight's picks";
+            await db.SaveChangesAsync(ct);
+            events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
+            logger.LogInformation("Feed unchanged for {AccountId} — snapshot suppressed.", accountId);
+            return;
+        }
 
         account.PipelineStage = PipelineStage.FeedReady;
         account.PipelineStageChangedAt = now;
@@ -213,9 +232,14 @@ public class BuildFeedJobHandler(
         await db.SaveChangesAsync(ct);
     }
 
-    private async Task<FeedSnapshot> AssembleAsync(
+    /// <summary>
+    /// Builds the new feed and returns its snapshot — or returns null WITHOUT superseding anything
+    /// when the build ran in Preserve mode and assembled exactly what the Active snapshot already
+    /// shows (the no-op suppression half of the stable-"tonight" contract; see FeedBuildPolicy).
+    /// </summary>
+    private async Task<FeedSnapshot?> AssembleAsync(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Candidate> candidates, decimal minPredicted, DateTime now, CancellationToken ct)
+        IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now, CancellationToken ct)
     {
         // ── The floor is soft; the content rules are not ────────────────────────────────────
         // Content filters are the user's statement about CONTENT — they bind absolutely and are
@@ -290,17 +314,53 @@ public class BuildFeedJobHandler(
             .Where(t => anchorCandidateIds.Contains(t.Id))
             .ToDictionaryAsync(t => t.Id, ct);
 
-        // What the LAST build anchored on — held back so this build cannot repeat it while any other
-        // loved title is available. Read before the supersede below, which does not touch FeedItems.
-        var previousAnchors = (await db.FeedItems
-                .Where(i => i.AccountId == account.Id
+        // ── Continuity inputs: what is on the page NOW, and what yesterday looked like ──────
+        // All read BEFORE the supersede below. The Active snapshot is both the Preserve-mode
+        // template (its hero and anchors ARE tonight's contract) and the no-op baseline; the newest
+        // snapshot from any EARLIER UTC day supplies the hold-back set that makes a new day rotate
+        // for real instead of re-dealing yesterday's rows.
+        var previousSnapshot = await db.FeedSnapshots
+            .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
+            .OrderByDescending(s => s.GeneratedAt)
+            .FirstOrDefaultAsync(ct);
+        var previousItems = previousSnapshot is null
+            ? []
+            : await db.FeedItems
+                .Where(i => i.FeedSnapshotId == previousSnapshot.Id)
+                .OrderBy(i => i.Row).ThenBy(i => i.Rank)
+                .ToListAsync(ct);
+
+        // What the current Active snapshot anchors on — the Preserve keep-list, and the hold-back
+        // set for a user-forced Fresh build (a manual refresh must visibly rotate away from the
+        // page it replaces).
+        var previousAnchors = previousItems
+            .Where(i => i.Row == FeedRowKind.BecauseYouLoved && i.AnchorTitleId != null)
+            .Select(i => i.AnchorTitleId!.Value)
+            .Distinct()
+            .ToList();
+
+        // What YESTERDAY anchored on — held back by the daily rotation so day N+1 cannot repeat
+        // day N while any other loved title is available. Empty for a first-ever build; possibly
+        // empty for an account that rebuilt 7+ times today (pruning keeps only the last 7), which
+        // degrades to ordinary rotation rather than failing.
+        var previousDaySnapshotId = await db.FeedSnapshots
+            .Where(s => s.AccountId == account.Id && s.GeneratedAt < now.Date)
+            .OrderByDescending(s => s.GeneratedAt)
+            .Select(s => (Guid?)s.Id)
+            .FirstOrDefaultAsync(ct);
+        var previousDayAnchors = previousDaySnapshotId is null
+            ? []
+            : (await db.FeedItems
+                .Where(i => i.FeedSnapshotId == previousDaySnapshotId
                     && i.Row == FeedRowKind.BecauseYouLoved
-                    && i.AnchorTitleId != null
-                    && db.FeedSnapshots.Any(s => s.Id == i.FeedSnapshotId && s.Status == SnapshotStatus.Active))
+                    && i.AnchorTitleId != null)
                 .Select(i => i.AnchorTitleId!.Value)
                 .Distinct()
                 .ToListAsync(ct))
             .ToHashSet();
+
+        var mode = FeedBuildPolicy.Decide(
+            previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now);
 
         // The drift pick: the loved title whose plot embedding sits nearest the user's RECENT-taste
         // centroid, so one row always reflects where taste is NOW. Null when there is no recent
@@ -316,13 +376,39 @@ public class BuildFeedJobHandler(
                 .FirstOrDefault();
         }
 
-        var anchorIds = AnchorRotation.Select(
-            driftPick,
-            taste.LovedAnchorPool.Where(anchorTitles.ContainsKey).ToList(),
-            taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList(),
-            previousAnchors,
-            AnchorRotation.OffsetFor(now),
-            AnchorRowCount);
+        var anchorPool = taste.LovedAnchorPool.Where(anchorTitles.ContainsKey).ToList();
+        var allTimeOrder = taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList();
+        var rotationOffset = AnchorRotation.OffsetFor(now);
+
+        List<Guid> anchorIds;
+        if (mode == FeedBuildMode.Preserve)
+        {
+            // Tonight's contract: the anchors the user is already looking at survive the rebuild
+            // for as long as they stay anchor-eligible. A slot only vacates when its anchor left
+            // the loved pool, and only that slot is re-drawn — with today's offset, holding back
+            // both yesterday's rows and the anchors being kept, so the replacement is genuinely new.
+            anchorIds = previousAnchors.Where(anchorTitles.ContainsKey).Take(AnchorRowCount).ToList();
+            if (anchorIds.Count < AnchorRowCount)
+            {
+                var holdBack = new HashSet<Guid>(previousDayAnchors);
+                holdBack.UnionWith(anchorIds);
+                anchorIds.AddRange(AnchorRotation
+                    .Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount)
+                    .Where(id => !anchorIds.Contains(id))
+                    .Take(AnchorRowCount - anchorIds.Count));
+            }
+        }
+        else
+        {
+            // Fresh. A user-forced build (manual refresh / filters changed) must visibly rotate
+            // away from the page it replaces, so it holds back the superseded snapshot's anchors;
+            // the daily and new-model cases hold back yesterday's, which is what guarantees a new
+            // day cannot re-deal the old one.
+            var holdBack = FeedBuildPolicy.IsUserForced(triggerReason)
+                ? previousAnchors.ToHashSet()
+                : previousDayAnchors;
+            anchorIds = AnchorRotation.Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount);
+        }
 
         var anchors = anchorIds.Select(id => anchorTitles[id]).ToList();
 
@@ -376,12 +462,31 @@ public class BuildFeedJobHandler(
             .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
             .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
             .ToList();
+        var candidatesById = candidates.ToDictionary(c => c.Title.Id);
         var hero = new List<Candidate>();
+        if (mode == FeedBuildMode.Preserve)
+        {
+            // Hero continuity: last build's picks in their order, minus anything that left the
+            // candidate set — a rated or not-interested title falls out of eligibility upstream, so
+            // a reaction vacates exactly its own slot and the MMR loop below refills only the gap.
+            hero.AddRange(previousItems
+                .Where(i => i.Row == FeedRowKind.Hero)
+                .OrderBy(i => i.Rank)
+                .Where(i => candidatesById.ContainsKey(i.TitleId))
+                .Select(i => candidatesById[i.TitleId])
+                .Take(HeroSize));
+        }
+
         foreach (var candidate in heroPool)
         {
             if (hero.Count >= HeroSize)
             {
                 break;
+            }
+
+            if (hero.Contains(candidate))
+            {
+                continue; // already kept from the previous build
             }
 
             var maxSim = hero.Count == 0 ? 0d : hero.Max(h => Similarity(h.Title, candidate.Title));
@@ -409,43 +514,13 @@ public class BuildFeedJobHandler(
                 .Take(HeroSize - hero.Count));
         }
 
-        // Supersede previous snapshots, write the new one.
-        foreach (var stale in await db.FeedSnapshots
-                     .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
-                     .ToListAsync(ct))
-        {
-            stale.Status = SnapshotStatus.Superseded;
-        }
+        // Assembly writes into a buffer, not the DbContext: whether anything is persisted at all is
+        // decided AFTER the whole feed exists, by comparing it against the Active snapshot. Nothing
+        // is superseded until a genuinely different feed is in hand.
+        var planned = new List<PlannedItem>();
 
-        var snapshot = new FeedSnapshot
-        {
-            Id = Guid.NewGuid(),
-            AccountId = account.Id,
-            ModelArtifactId = artifact.Id,
-            GeneratedAt = now,
-            Status = SnapshotStatus.Active,
-            DegradedReason = degradedReason,
-        };
-        db.FeedSnapshots.Add(snapshot);
-
-        void AddItem(FeedRowKind row, Guid? anchorId, int rank, Candidate candidate, string whyThis)
-        {
-            db.FeedItems.Add(new FeedItem
-            {
-                Id = Guid.NewGuid(),
-                AccountId = account.Id,
-                FeedSnapshotId = snapshot.Id,
-                Row = row,
-                AnchorTitleId = anchorId,
-                Rank = rank,
-                TitleId = candidate.Title.Id,
-                PredictedRating = Math.Round(candidate.Predicted, 1),
-                FinalScore = Math.Round(candidate.Predicted * Freshness(candidate.Title), 3),
-                WhyThisSentence = whyThis,
-                ExplanationJson = JsonSerializer.Serialize(
-                    candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })),
-            });
-        }
+        void AddItem(FeedRowKind row, Guid? anchorId, int rank, Candidate candidate, string whyThis) =>
+            planned.Add(new PlannedItem(row, anchorId, rank, candidate, whyThis));
 
         for (var i = 0; i < hero.Count; i++)
         {
@@ -491,15 +566,53 @@ public class BuildFeedJobHandler(
             reserved.Add(id);
         }
 
+        // Rail continuity mirrors hero continuity. Members are keyed to their anchor from the
+        // PREVIOUS snapshot rather than re-dealt greedily, because the greedy fill consumes a shared
+        // candidate pool in anchor-iteration order — and that order is not recoverable from FeedItems
+        // (rails tie on (Row, Rank), so the read-back order is whatever the database felt like). A
+        // Preserve rebuild that re-dealt would shuffle members BETWEEN rails on identical inputs,
+        // which both churns the page and defeats the no-op suppression below. Kept members keep
+        // their seats; only vacated slots go back through the similarity fill.
+        var previousRailMembers = previousItems
+            .Where(i => i.Row == FeedRowKind.BecauseYouLoved && i.AnchorTitleId != null)
+            .GroupBy(i => i.AnchorTitleId!.Value)
+            .ToDictionary(g => g.Key, g => g.OrderBy(i => i.Rank).Select(i => i.TitleId).ToList());
+
         foreach (var anchor in anchors)
         {
-            var members = candidates
-                .Where(c => !used.Contains(c.Title.Id) && !reserved.Contains(c.Title.Id) && c.Predicted >= effectiveFloor)
-                .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
-                .Where(x => x.Sim > 0.15d)
-                .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
-                .Take(RowSize)
-                .ToList();
+            var members = new List<Candidate>();
+            if (mode == FeedBuildMode.Preserve && previousRailMembers.TryGetValue(anchor.Id, out var previousMemberIds))
+            {
+                foreach (var titleId in previousMemberIds)
+                {
+                    if (members.Count >= RowSize)
+                    {
+                        break;
+                    }
+
+                    // No similarity re-check for kept members — they earned this rail when it was
+                    // dealt, and their similarity to the anchor cannot have changed since.
+                    if (candidatesById.TryGetValue(titleId, out var keptMember)
+                        && !used.Contains(titleId)
+                        && keptMember.Predicted >= effectiveFloor)
+                    {
+                        members.Add(keptMember);
+                    }
+                }
+            }
+
+            if (members.Count < RowSize)
+            {
+                var keptIds = members.Select(m => m.Title.Id).ToHashSet();
+                members.AddRange(candidates
+                    .Where(c => !used.Contains(c.Title.Id) && !keptIds.Contains(c.Title.Id)
+                        && !reserved.Contains(c.Title.Id) && c.Predicted >= effectiveFloor)
+                    .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
+                    .Where(x => x.Sim > 0.15d)
+                    .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
+                    .Take(RowSize - members.Count)
+                    .Select(x => x.Candidate));
+            }
 
             if (members.Count < RowMinMembers)
             {
@@ -508,8 +621,8 @@ public class BuildFeedJobHandler(
 
             for (var i = 0; i < members.Count; i++)
             {
-                used.Add(members[i].Candidate.Title.Id);
-                AddItem(FeedRowKind.BecauseYouLoved, anchor.Id, i, members[i].Candidate, WhyThis(members[i].Candidate, anchor.Name));
+                used.Add(members[i].Title.Id);
+                AddItem(FeedRowKind.BecauseYouLoved, anchor.Id, i, members[i], WhyThis(members[i], anchor.Name));
             }
         }
 
@@ -544,6 +657,57 @@ public class BuildFeedJobHandler(
             }
         }
 
+        // ── No-op suppression (Preserve only) ───────────────────────────────────────────────
+        // A background rebuild that assembled exactly what is already Active writes nothing: no new
+        // snapshot, no supersede, no feed-ready event — the caller sees null and skips the reseed.
+        // DegradedReason participates in the comparison so a build that changed only the page's
+        // explanation banner still ships.
+        if (mode == FeedBuildMode.Preserve
+            && previousSnapshot is not null
+            && string.Equals(previousSnapshot.DegradedReason, degradedReason, StringComparison.Ordinal)
+            && SameFeed(previousItems, planned))
+        {
+            return null;
+        }
+
+        // Supersede previous snapshots, write the new one.
+        foreach (var stale in await db.FeedSnapshots
+                     .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
+                     .ToListAsync(ct))
+        {
+            stale.Status = SnapshotStatus.Superseded;
+        }
+
+        var snapshot = new FeedSnapshot
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            ModelArtifactId = artifact.Id,
+            GeneratedAt = now,
+            Status = SnapshotStatus.Active,
+            DegradedReason = degradedReason,
+        };
+        db.FeedSnapshots.Add(snapshot);
+
+        foreach (var item in planned)
+        {
+            db.FeedItems.Add(new FeedItem
+            {
+                Id = Guid.NewGuid(),
+                AccountId = account.Id,
+                FeedSnapshotId = snapshot.Id,
+                Row = item.Row,
+                AnchorTitleId = item.AnchorTitleId,
+                Rank = item.Rank,
+                TitleId = item.Candidate.Title.Id,
+                PredictedRating = Math.Round(item.Candidate.Predicted, 1),
+                FinalScore = Math.Round(item.Candidate.Predicted * Freshness(item.Candidate.Title), 3),
+                WhyThisSentence = item.WhyThis,
+                ExplanationJson = JsonSerializer.Serialize(
+                    item.Candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })),
+            });
+        }
+
         // Prune snapshot history beyond the last 7.
         var staleIds = await db.FeedSnapshots
             .Where(s => s.AccountId == account.Id)
@@ -558,6 +722,31 @@ public class BuildFeedJobHandler(
         }
 
         return snapshot;
+    }
+
+    /// <summary>One assembled-but-not-yet-persisted feed item; TitleId lives on the Candidate.</summary>
+    private sealed record PlannedItem(FeedRowKind Row, Guid? AnchorTitleId, int Rank, Candidate Candidate, string WhyThis);
+
+    /// <summary>
+    /// Item-for-item equality on what the page actually renders from: (Row, Anchor, Rank, Title).
+    /// Both sides are canonically ordered first, so a mere permutation of equally-ranked rails does
+    /// not count as change. Scores and why-sentences are deliberately excluded — they drift by
+    /// epsilon on every rebuild and would defeat the suppression that keeps tonight's page still.
+    /// </summary>
+    private static bool SameFeed(IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned)
+    {
+        if (previous.Count != planned.Count)
+        {
+            return false;
+        }
+
+        var before = previous
+            .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
+            .Select(i => (i.Row, i.AnchorTitleId, i.Rank, i.TitleId));
+        var after = planned
+            .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
+            .Select(i => (i.Row, i.AnchorTitleId, i.Rank, TitleId: i.Candidate.Title.Id));
+        return before.SequenceEqual(after);
     }
 
     /// <summary>The account's embedded preference-tag vectors — the source of the ranking boost.</summary>
