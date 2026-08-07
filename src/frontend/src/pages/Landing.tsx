@@ -13,9 +13,14 @@ export default function Landing() {
   }
 
   const handleSignIn = async () => {
-    const { authorizeUrl, state } = await startTraktAuth().unwrap();
-    rememberOauthState(state);
-    window.location.assign(authorizeUrl);
+    try {
+      const { authorizeUrl, state } = await startTraktAuth().unwrap();
+      rememberOauthState(state);
+      window.location.assign(authorizeUrl);
+    } catch {
+      // The mutation's own isError drives the message below. onClick never awaits
+      // this handler, so letting the rejection escape only yields an unhandled one.
+    }
   };
 
   return (
