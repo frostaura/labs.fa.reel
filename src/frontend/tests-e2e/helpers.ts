@@ -23,7 +23,7 @@ export const EMPTY_SYNC = {
   outboxDeadLetters: 0,
 };
 
-export async function mockJson(page: Page, url: string, body: unknown, status = 200): Promise<void> {
+export async function mockJson(page: Page, url: string | RegExp, body: unknown, status = 200): Promise<void> {
   await page.route(url, (route) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) })
   );
