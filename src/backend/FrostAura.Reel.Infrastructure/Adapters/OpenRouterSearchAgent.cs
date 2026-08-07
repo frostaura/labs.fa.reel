@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -270,7 +271,11 @@ public class OpenRouterSearchAgent(
             sb.Append(" | ").Append(t.MediaType).Append(" | ").Append(string.Join(", ", t.Genres));
             if (t.Predicted is { } p)
             {
-                sb.Append(" | predicted ").Append(p.ToString("0.0"));
+                // InvariantCulture, because this string goes into an LLM PROMPT. The dev machine
+                // runs en_ZA, where the default format renders 6.8 as "6,8" — a decimal comma in a
+                // list whose separator is already a comma, sent to a model asked to reason about
+                // the number. The host's locale has no business changing what the model reads.
+                sb.Append(" | predicted ").Append(p.ToString("0.0", CultureInfo.InvariantCulture));
             }
 
             if (!string.IsNullOrWhiteSpace(t.Overview))
