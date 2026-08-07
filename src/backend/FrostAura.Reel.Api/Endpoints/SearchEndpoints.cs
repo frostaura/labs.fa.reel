@@ -60,6 +60,22 @@ public static class SearchEndpoints
             var candidates = EligibilityQueryBuilder.WithinMaturity(matched, maturityCeiling).Take(8).ToList();
             var candidateIds = candidates.Select(t => t.Id).ToList();
 
+            // Relevance tier per candidate, recomputed here because the SQL ordering is lost the
+            // moment these are re-sorted by predicted rating below. 2 = the term appears verbatim,
+            // 1 = a close fuzzy match, 0 = a distant one.
+            //
+            // This exists because fuzzy matching widened the candidate set: before trigram search,
+            // every row was an exact substring match and sorting the survivors purely by predicted
+            // rating was harmless. Now a loosely-similar title can outrank the one the user
+            // actually typed — "spiderman" surfaced Superman above Spider-Man, because Superman
+            // simply scored better for this account. Relevance has to dominate for a LOOKUP;
+            // the personal lens is the tiebreak within a tier, not the primary key.
+            var tiers = candidates.ToDictionary(
+                t => t.Id,
+                t => t.Name.Contains(term, StringComparison.OrdinalIgnoreCase) ? 2
+                    : TitleSimilarity(t.Name, term) >= 0.5 ? 1
+                    : 0);
+
             // Live per-user scoring of the ≤8 survivors against the Active artifact (cheap: one model
             // load + one taste build). No model yet ⇒ empty map ⇒ order falls back to popularity.
             var predicted = await scorer.ScoreAsync(accountId, candidateIds, DateTime.UtcNow, ct);
@@ -69,7 +85,8 @@ public static class SearchEndpoints
                 .ToListAsync(ct)).ToHashSet();
 
             var titles = candidates
-                .OrderByDescending(t => predicted.TryGetValue(t.Id, out var p) ? p : decimal.MinValue)
+                .OrderByDescending(t => tiers[t.Id])
+                .ThenByDescending(t => predicted.TryGetValue(t.Id, out var p) ? p : decimal.MinValue)
                 .ThenByDescending(t => t.TmdbPopularity ?? 0)
                 .Select(t => new
                 {
@@ -237,6 +254,53 @@ public static class SearchEndpoints
         });
     }
 
+
+    /// <summary>
+    /// Trigram similarity between a title and a search term, mirroring how pg_trgm computes it:
+    /// lowercase, split on non-alphanumerics, pad each word with two leading spaces and one
+    /// trailing, then |shared trigrams| / |union|. Reimplemented in memory only because the SQL
+    /// ordering is lost once the shortlist is re-sorted by predicted rating — the database remains
+    /// the authority on which rows MATCH; this only re-establishes how well, for the tiebreak.
+    /// </summary>
+    public static double TitleSimilarity(string? candidate, string term)
+    {
+        var a = Trigrams(candidate);
+        var b = Trigrams(term);
+        if (a.Count == 0 || b.Count == 0)
+        {
+            return 0d;
+        }
+
+        var shared = a.Intersect(b).Count();
+        var union = a.Count + b.Count - shared;
+        return union == 0 ? 0d : (double)shared / union;
+    }
+
+    private static HashSet<string> Trigrams(string? value)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return result;
+        }
+
+        // Every non-alphanumeric is a SEPARATOR, not something to strip out of a word. That
+        // distinction is the whole behaviour: pg_trgm reads "Spider-Man" as two words, which is why
+        // the live database scores it 0.615 against "spiderman" rather than 1.0. Stripping the
+        // hyphen instead would make this helper disagree with the query that selected the rows.
+        foreach (var word in value.ToLowerInvariant().Split(
+                     value.Where(c => !char.IsLetterOrDigit(c)).Distinct().ToArray(),
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            var padded = "  " + word + " ";
+            for (var i = 0; i + 3 <= padded.Length; i++)
+            {
+                result.Add(padded.Substring(i, 3));
+            }
+        }
+
+        return result;
+    }
 
     public record AskRequest(
         string Query,
