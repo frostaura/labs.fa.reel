@@ -30,6 +30,26 @@ export interface PhaseData {
 export interface DoneData {
   results: AskCard[];
   reason: string | null;
+  /**
+   * Server-side failure marker. The expansion service currently reports a caught exception the
+   * same way it reports a genuinely empty answer — `done` with no results — so this is optional
+   * and `isFailedDone` falls back to the wording. Once the server sets it, the fallback stops
+   * mattering; until then it is the only signal there is.
+   */
+  failed?: boolean;
+}
+
+/** The phrase the server uses for a caught exception. See `LiveSearchExpansionService`. */
+const FAILURE_REASON = /snag/i;
+
+/**
+ * Was this `done` frame a failure rather than an honest "nothing matched"? The two look identical
+ * on the wire (empty results either way), and conflating them is what put "No matches for that one"
+ * and "search hit a snag" on screen together.
+ */
+export function isFailedDone(data: Pick<DoneData, "results" | "reason" | "failed">): boolean {
+  if (data.failed != null) return data.failed;
+  return data.results.length === 0 && data.reason != null && FAILURE_REASON.test(data.reason);
 }
 
 export type AskEvent =

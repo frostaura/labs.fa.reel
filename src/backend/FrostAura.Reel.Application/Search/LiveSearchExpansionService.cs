@@ -1,3 +1,4 @@
+using System.Globalization;
 using FrostAura.Reel.Application.Abstractions;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Ml;
@@ -5,6 +6,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
@@ -58,6 +60,9 @@ public sealed class LiveSearchExpansionService(
 
     /// <summary>How many progressively-wider discovery passes a turn may make before giving up.</summary>
     private const int MaxRelaxations = 3;
+
+    /// <summary>How many picks survive when the account's rating floor would otherwise return none.</summary>
+    private const int MinFloorRelaxedCount = 6;
 
     /// <summary>Penalty applied to the blend per matched negation ("less horror", "no ghosts").</summary>
     private const double NegationPenalty = 0.22;
@@ -167,8 +172,12 @@ public sealed class LiveSearchExpansionService(
                 discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
                 await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
 
+                // OrderBy(t.Id) is not cosmetic: without it Postgres may return these rows in any
+                // order, and every downstream sort is stable-on-an-unstable-input, so an identical
+                // re-ask could present a different list.
                 eligible = (await baseQuery
                         .Where(t => discovered.Contains(t.Id))
+                        .OrderBy(t => t.Id)
                         .ToListAsync(ct))
                     .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
                     .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
@@ -218,13 +227,39 @@ public sealed class LiveSearchExpansionService(
             await EnsureEmbeddedAsync(eligible, ct);
             var vectorsByTitle = await LoadVectorsAsync(eligible.Select(t => t.Id).ToList(), ct);
             var tagVectors = await LoadPreferenceTagVectorsAsync(accountId, ct);
-            var queryVec = (await embeddings.EmbedAsync([trimmed], ct))[0];
-            var ranked = eligible
+
+            // Embed the POSITIVE reading of the turn, not the raw sentence. Embedding "horror but
+            // no ghosts" verbatim pulls the query vector TOWARDS ghosts — the negation words are
+            // just more tokens about ghosts to an embedding model — so the rejected concept scored
+            // highest on the very similarity used to pick the top ReturnCount. Falls back to the
+            // raw text only when the intent carries no positive signal at all.
+            var seedText = RankingSeedText(agentReply, trimmed);
+            var queryVec = (await embeddings.EmbedAsync([seedText], ct))[0];
+
+            // Negation is applied BEFORE the cut, not after it. Titles that contradict what the
+            // user ruled out are held back as a reserve rather than dropped outright, so an
+            // over-eager exclusion can still never empty the screen — but as long as enough clean
+            // candidates exist, the rejected ones simply do not appear.
+            var scoredPool = eligible
                 .Where(t => vectorsByTitle.ContainsKey(t.Id))
                 .Select(t => (Title: t, Sim: Cosine(queryVec, vectorsByTitle[t.Id])))
+                // A stable tiebreak: the base query has no ORDER BY, so equal similarities would
+                // otherwise resolve in whatever order Postgres happened to return rows, and an
+                // identical re-ask could come back in a different order.
                 .OrderByDescending(x => x.Sim)
-                .Take(ReturnCount)
+                .ThenBy(x => x.Title.Id)
                 .ToList();
+
+            var contradicts = scoredPool.Where(x => NegationDemerit(x.Title, intent) > 0).ToList();
+            var clean = scoredPool.Where(x => NegationDemerit(x.Title, intent) == 0).ToList();
+            var ranked = clean.Take(ReturnCount).ToList();
+            if (ranked.Count < ReturnCount && contradicts.Count > 0)
+            {
+                ranked.AddRange(contradicts.Take(ReturnCount - ranked.Count));
+                logger.LogInformation(
+                    "Ask Reel '{Query}': only {Clean} candidates cleared the exclusions; topped up with {Topped} demoted ones.",
+                    trimmed, clean.Count, ranked.Count - clean.Count);
+            }
 
             foreach (var (title, sim) in ranked)
             {
@@ -249,7 +284,7 @@ public sealed class LiveSearchExpansionService(
             var fitById = await RerankStreamAsync(accountId, trimmed, tasteSummary, ranked, scores, emit, ct);
 
             // ── Final blend: relevance × personal score × hyper-personal fit ─────────────────
-            var final = ranked
+            var blended = ranked
                 .Select(x =>
                 {
                     var predicted = scores.TryGetValue(x.Title.Id, out var p) ? (decimal?)p : null;
@@ -262,6 +297,32 @@ public sealed class LiveSearchExpansionService(
                     return (x.Title, x.Sim, predicted, Fit: fit, Blend: blend);
                 })
                 .OrderByDescending(x => x.Blend)
+                .ThenBy(x => x.Title.Id)
+                .ToList();
+
+            // The account's minimum-predicted-rating filter is an explicit instruction and has to
+            // reach THIS surface too. It only ever lived in the (now removed) /semantic endpoint,
+            // so a user who set a rating floor had it silently ignored by every Ask Reel turn.
+            var floor = await MinPredictedFloorAsync(accountId, ct);
+            var floorRelaxed = false;
+            if (floor > 0m)
+            {
+                var abovefloor = blended.Where(x => x.predicted is null || x.predicted >= floor).ToList();
+                if (abovefloor.Count > 0)
+                {
+                    blended = abovefloor;
+                }
+                else
+                {
+                    // Honouring the floor strictly would empty the screen. Keep the best of what
+                    // there is and SAY the floor was relaxed, rather than silently ignoring the
+                    // setting (the old behaviour) or silently returning nothing.
+                    blended = blended.Take(MinFloorRelaxedCount).ToList();
+                    floorRelaxed = true;
+                }
+            }
+
+            var final = blended
                 .Select(x => Card(x.Title, x.Sim, x.predicted, x.Fit?.Fit, x.Fit?.Why))
                 .ToList();
 
@@ -274,7 +335,8 @@ public sealed class LiveSearchExpansionService(
                 reason = final.Count == 0
                     ? "no fresh matches — try another angle"
                     : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
-                        + (relaxation > 0 ? " (widened to find enough)" : "") + ".",
+                        + (relaxation > 0 ? " (widened to find enough)" : "")
+                        + (floorRelaxed ? $" (nothing cleared your {floor:0.#} rating floor, so it was relaxed)" : "") + ".",
             });
             // Logs `final` too: the count the user actually sees is the one worth alerting on, and
             // its absence is what let an empty result set look healthy in the logs.
@@ -285,7 +347,10 @@ public sealed class LiveSearchExpansionService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Ask Reel expansion failed for '{Query}'.", trimmed);
-            await emit("done", new { results = Array.Empty<object>(), reason = "search hit a snag — please try again" });
+            // `failed` is what lets the client tell a crash from an honest empty answer. Without it
+            // the only signal was the wording of `reason`, so the UI string-matched "snag" — and a
+            // genuine no-match and a server exception rendered two contradictory messages at once.
+            await emit("done", new { results = Array.Empty<object>(), reason = "search hit a snag — please try again", failed = true });
         }
     }
 
@@ -424,10 +489,30 @@ public sealed class LiveSearchExpansionService(
     {
         0 => intent,
         // Keywords are AND-ed by TMDB discovery, so they collapse recall fastest — halve them.
-        1 => intent with { Keywords = intent.Keywords.Take(Math.Max(1, intent.Keywords.Count / 2)).ToList() },
+        // With one keyword or none there is nothing to halve, so this rung would re-issue the
+        // identical query and burn a TMDB round-trip widening nothing; drop the upper year bound
+        // instead, which is the next-narrowest constraint after keywords.
+        1 => intent.Keywords.Count > 1
+            ? intent with { Keywords = intent.Keywords.Take(intent.Keywords.Count / 2).ToList() }
+            : intent with { MaxYear = null },
         // Genre-only: the broadest pull that still honours the vibe.
-        _ => intent with { Keywords = [], FreeText = string.Empty },
+        _ => intent with { Keywords = [], FreeText = string.Empty, MinYear = null, MaxYear = null },
     };
+
+    /// <summary>
+    /// The account's minimum-predicted-rating content filter, clamped to 0-10. Zero means "no
+    /// floor set", which is also what a malformed stored value degrades to.
+    /// </summary>
+    private async Task<decimal> MinPredictedFloorAsync(Guid accountId, CancellationToken ct)
+    {
+        var raw = await db.ContentFilters
+            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
+            .Select(f => f.Value)
+            .FirstOrDefaultAsync(ct);
+        return raw is not null && decimal.TryParse(raw, CultureInfo.InvariantCulture, out var value)
+            ? Math.Clamp(value, 0m, 10m)
+            : 0m;
+    }
 
     /// <summary>True when the title matches the requested media types (empty list = no constraint).</summary>
     private static bool MatchesMedia(Title title, IReadOnlyList<MediaType> mediaTypes) =>
@@ -453,6 +538,46 @@ public sealed class LiveSearchExpansionService(
         }
 
         return Math.Min(hits * NegationPenalty, 0.66);
+    }
+
+    /// <summary>
+    /// The text the ranking query vector is built from — the interpreted POSITIVE signal only
+    /// (free text, keywords, genres), never the raw sentence and never the agent's prose reply.
+    /// An embedding model has no notion of "not": "a thriller, no ghosts" and "a thriller with
+    /// ghosts" land close together in vector space, so ranking against the raw turn scores the
+    /// rejected concept HIGHEST on the similarity used to pick what to show. Falls back to the raw
+    /// text only when the intent carries no positive signal at all, because a bad seed still beats
+    /// an empty one.
+    /// </summary>
+    private static string RankingSeedText(AgentReply agentReply, string rawQuery)
+    {
+        var intent = agentReply.Intent;
+
+        // Keywords and genres are the only fields guaranteed to hold the positive reading: the
+        // interpreter strips rejected terms out of them by contract. FreeText is deliberately NOT
+        // used when they are available — it is spec'd as "a concise literal-title search string,
+        // usually echoing the request", and the heuristic path sets it to the raw query verbatim,
+        // so folding it in here would smuggle "no ghosts" straight back into the vector.
+        var parts = new List<string>();
+        if (intent.Keywords.Count > 0)
+        {
+            parts.Add(string.Join(", ", intent.Keywords));
+        }
+
+        if (intent.Genres.Count > 0)
+        {
+            parts.Add(string.Join(", ", intent.Genres));
+        }
+
+        if (parts.Count > 0)
+        {
+            return string.Join(". ", parts);
+        }
+
+        // Nothing structured survived. A turn that is purely a rejection ("no ghosts") has no
+        // positive signal to rank by at all, so fall back to free text / the raw turn — the
+        // exclusion still applies through discovery and the pre-cut partition.
+        return !string.IsNullOrWhiteSpace(intent.FreeText) ? intent.FreeText.Trim() : rawQuery;
     }
 
     private static string ConceptText(AgentReply agentReply)
@@ -556,30 +681,35 @@ public sealed class LiveSearchExpansionService(
         var tvGenreIds = intent.Genres.Where(TmdbGenres.SlugToIds.ContainsKey)
             .Select(g => TmdbGenres.SlugToIds[g].Tv).OfType<int>().ToList();
 
-        var keywordIds = new List<int>();
-        foreach (var phrase in intent.Keywords.Take(4))
-        {
-            var matches = await tmdb.SearchKeywordsAsync(phrase, ct);
-            if (matches.Count > 0)
-            {
-                keywordIds.Add(matches[0].Id);
-            }
-        }
+        // Rejected genres/keywords are resolved the same way the positive ones are and handed to
+        // TMDB as without_genres / without_keywords. This is the half of negation that was missing:
+        // exclusions used to exist only as a ranking demerit applied AFTER the pool had been cut to
+        // the top ReturnCount by cosine similarity, so "horror but no ghosts" filled the pool with
+        // ghost stories (they are the closest match to "horror") and the demerit could only shuffle
+        // them, never replace them with something the user would accept.
+        var excludeMovieGenreIds = (intent.ExcludeGenres ?? []).Where(TmdbGenres.SlugToIds.ContainsKey)
+            .Select(g => TmdbGenres.SlugToIds[g].Movie).OfType<int>().ToList();
+        var excludeTvGenreIds = (intent.ExcludeGenres ?? []).Where(TmdbGenres.SlugToIds.ContainsKey)
+            .Select(g => TmdbGenres.SlugToIds[g].Tv).OfType<int>().ToList();
+
+        var keywordIds = await ResolveKeywordIdsAsync(intent.Keywords, ct);
+        var excludeKeywordIds = await ResolveKeywordIdsAsync(intent.ExcludeKeywords ?? [], ct);
 
         var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
         var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
         DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
+        DateTime? before = intent.MaxYear is { } my ? new DateTime(my, 12, 31, 0, 0, 0, DateTimeKind.Utc) : null;
 
         var tasks = new List<Task<IReadOnlyList<TmdbListItem>>>();
         if (wantMovies)
         {
-            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, ct));
+            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, excludeMovieGenreIds, excludeKeywordIds, before, ct));
             tasks.Add(tmdb.SearchTitlesAsync(true, intent.FreeText, SearchPages, ct));
         }
 
         if (wantTv)
         {
-            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, ct));
+            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, excludeTvGenreIds, excludeKeywordIds, before, ct));
             tasks.Add(tmdb.SearchTitlesAsync(false, intent.FreeText, SearchPages, ct));
         }
 
@@ -593,12 +723,29 @@ public sealed class LiveSearchExpansionService(
             .ToList();
     }
 
+    /// <summary>Resolves up to four free-text phrases to TMDB keyword ids, dropping anything unmatched.</summary>
+    private async Task<List<int>> ResolveKeywordIdsAsync(IReadOnlyList<string> phrases, CancellationToken ct)
+    {
+        var ids = new List<int>();
+        foreach (var phrase in phrases.Take(4))
+        {
+            var matches = await tmdb.SearchKeywordsAsync(phrase, ct);
+            if (matches.Count > 0)
+            {
+                ids.Add(matches[0].Id);
+            }
+        }
+
+        return ids;
+    }
+
     /// <summary>Resolve each named person → their TMDB credits (role-sliced), unioned + deduped, newest first.</summary>
     private async Task<IReadOnlyList<TmdbListItem>> FetchPeopleCreditsAsync(IReadOnlyList<PersonQuery> people, SearchIntent intent, CancellationToken ct)
     {
         var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
         var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
         DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
+        DateTime? before = intent.MaxYear is { } my ? new DateTime(my, 12, 31, 23, 59, 59, DateTimeKind.Utc) : null;
 
         var all = new List<TmdbListItem>();
         foreach (var person in people.Take(2))
@@ -621,6 +768,7 @@ public sealed class LiveSearchExpansionService(
         return all
             .Where(i => i.IsMovie ? wantMovies : wantTv)
             .Where(i => after is null || i.ReleasedAt is null || i.ReleasedAt >= after)
+            .Where(i => before is null || i.ReleasedAt is null || i.ReleasedAt <= before)
             .GroupBy(i => (i.IsMovie, i.Id))
             .Select(g => g.First())
             .OrderByDescending(i => i.ReleasedAt ?? DateTime.MinValue)
@@ -652,7 +800,24 @@ public sealed class LiveSearchExpansionService(
         }
 
         var texts = missing.Select(EmbeddingText.Build).ToList();
-        var vectors = await embeddings.EmbedAsync(texts, ct);
+
+        // Embedding newly-discovered titles is an ENRICHMENT step, not the answer. It used to be
+        // unguarded, so a single transient provider failure propagated to the turn's catch-all and
+        // returned "search hit a snag" with zero results — discarding everything already
+        // discovered, hydrated and scored. Degrade to whatever is already embedded instead: those
+        // titles still rank, the un-embedded ones simply sit this turn out and get picked up next
+        // time. Worst case is a thinner result set, never an empty one.
+        float[][] vectors;
+        try
+        {
+            vectors = await embeddings.EmbedAsync(texts, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel: embedding {Count} new titles failed; ranking on the existing vectors only.", missing.Count);
+            return;
+        }
+
         for (var i = 0; i < missing.Count; i++)
         {
             db.TitleEmbeddings.Add(new TitleEmbedding

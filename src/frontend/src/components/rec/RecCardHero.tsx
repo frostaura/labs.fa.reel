@@ -4,6 +4,7 @@ import type { FeedCard } from "../../store/feedTypes";
 import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
 import PredictedRatingBadge from "./PredictedRatingBadge";
 import { formatRuntime } from "../../lib/format";
+import { hasPredictedRating } from "../../lib/predictedRating";
 
 interface HeroProps {
   cards: FeedCard[];
@@ -60,7 +61,10 @@ export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
               <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 space-y-2">
                 <div className="flex items-center gap-3 flex-wrap">
                   <h2 className="text-xl sm:text-3xl font-light text-fa-frost-bright drop-shadow">{card.name}</h2>
-                  <PredictedRatingBadge rating={card.predictedRating} size="lg" />
+                  {/* Guarded like every other consumer — see lib/predictedRating.ts. */}
+                  {hasPredictedRating(card.predictedRating) && (
+                    <PredictedRatingBadge rating={card.predictedRating} size="lg" />
+                  )}
                 </div>
                 <p className="fa-caption text-fa-frost-dim">
                   {[card.year, formatRuntime(card.runtimeMinutes), card.genres.slice(0, 3).join(" / ")]

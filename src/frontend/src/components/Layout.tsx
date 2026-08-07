@@ -39,7 +39,16 @@ export default function Layout() {
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
+  //
+  // Kept as an effect deliberately. The router location is an external system this panel follows,
+  // which is exactly what an effect is for; the panel's open state is not derivable from the route
+  // (the user opens it on any route, and reopening it on the same route must work). The linter's
+  // preferred shapes both cost more than the warning: deriving from the route makes the panel
+  // un-reopenable, and threading a close callback down through SearchBox and every result link
+  // spreads one concern across files that cannot see this panel. The cascading render it warns
+  // about is one extra pass during a route change that is already re-rendering the whole tree.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional sync to the router; see above
     setMobileSearchOpen(false);
   }, [location.pathname, location.search]);
 

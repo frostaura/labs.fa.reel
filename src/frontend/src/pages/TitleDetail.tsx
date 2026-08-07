@@ -28,6 +28,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../components/ui/dropdown-menu";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Dialog, DialogClose, DialogOverlay, DialogPortal, DialogTitle } from "../components/ui/dialog";
 
 /** A labelled row of person chips (Director / Writers / Cast) — each a clickable, rateable avatar. */
 function CreditRow({ label, people }: { label: string; people: CreditPerson[] }) {
@@ -113,218 +115,241 @@ export default function TitleDetail() {
   const trailerKey = title?.trailerUrl?.match(/[?&]v=([\w-]+)/)?.[1];
 
   return (
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto bg-fa-ink/75 backdrop-blur-sm"
-      onClick={close}
-      data-testid="title-detail"
-    >
-      <div
-        className="relative mx-auto my-6 w-[min(94vw,880px)] overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 shadow-2xl reel-rise"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button onClick={close} aria-label="Close" className="absolute right-3 top-3 z-20 fa-button-ghost rounded-full p-2 bg-fa-ink/60">
-          <X className="h-5 w-5" />
-        </button>
+    /* This is spec §2's "Expanded (tap)" surface, so it is a real dialog, not a styled div: the
+       hand-rolled fixed overlay it replaces had only a click-outside handler — no ESC, no focus
+       trap, no focus restored to the card you opened it from. Composed from the shipped Radix
+       primitives (ui/dialog.tsx), which carry all three. Only Content is taken raw: the shared
+       DialogContent is a max-w-lg box with its own small close button, and this surface needs an
+       880px panel with a close affordance legible over backdrop art. */
+    <Dialog open onOpenChange={(next) => !next && close()}>
+      <DialogPortal>
+        <DialogOverlay className="bg-fa-ink/75" />
+        <DialogPrimitive.Content
+          /* Content is the flex/clip frame; the inner div scrolls, so the close button stays put
+             instead of scrolling away with the synopsis. Centred with `mx-auto`, deliberately not
+             with `-translate-x-1/2`: `reel-rise` animates `transform` with fill-mode `both`, so a
+             translate-based centre is permanently overwritten by the animation's end keyframe and
+             the panel lands at the viewport's midpoint by its top-left corner. */
+          className="fixed inset-x-0 top-6 z-50 mx-auto flex max-h-[calc(100vh-3rem)] w-[min(94vw,880px)] flex-col overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 shadow-2xl reel-rise"
+          aria-describedby={undefined}
+          data-testid="title-detail"
+        >
+          <DialogClose
+            aria-label="Close"
+            className="absolute right-3 top-3 z-20 fa-button-ghost rounded-full p-2 bg-fa-ink/60"
+          >
+            <X className="h-5 w-5" />
+          </DialogClose>
 
-        {isLoading || !title ? (
-          <div className="aspect-[16/8] reel-shimmer" />
-        ) : (
-          <>
-            {/* Header art / trailer */}
-            <div className="relative aspect-[16/8] bg-fa-ink-3">
-              {trailerOpen && trailerKey ? (
-                <iframe
-                  src={`https://www.youtube-nocookie.com/embed/${trailerKey}?autoplay=1`}
-                  title={`${title.name} trailer`}
-                  allow="autoplay; encrypted-media"
-                  allowFullScreen
-                  className="absolute inset-0 h-full w-full"
-                />
-              ) : (
-                <>
-                  {backdropUrl(title.backdropPath, "w1280") && (
-                    <img src={backdropUrl(title.backdropPath, "w1280")!} alt="" className="absolute inset-0 h-full w-full object-cover" />
-                  )}
-                  <div className="absolute inset-0 reel-scrim" />
-                  {trailerKey && (
-                    <button
-                      onClick={() => setTrailerOpen(true)}
-                      className="absolute inset-0 m-auto h-16 w-16 rounded-full border border-fa-frost/50 bg-fa-ink/70 backdrop-blur flex items-center justify-center transition hover:scale-110"
-                      aria-label="Play trailer"
-                    >
-                      <Play className="h-7 w-7 text-fa-frost-bright translate-x-0.5" />
-                    </button>
-                  )}
-                  <div className="absolute bottom-0 inset-x-0 p-5 flex items-end gap-4">
-                    <div className="w-24 shrink-0 hidden sm:block drop-shadow-xl">
-                      <PosterImage path={title.posterPath} alt={title.name} size="w185" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-3 flex-wrap">
-                        <h1 className="text-2xl sm:text-3xl font-light text-fa-frost-bright">{title.name}</h1>
-                        {title.prediction && <PredictedRatingBadge rating={title.prediction.predictedRating} size="lg" />}
-                      </div>
-                      <p className="fa-caption text-fa-frost-dim">
-                        {[
-                          title.year,
-                          formatRuntime(title.runtimeMinutes),
-                          title.certification,
-                          title.network,
-                          title.genres.slice(0, 3).join(" / "),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </p>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="p-5 sm:p-6 space-y-6">
-              {/* Reactions */}
-              <div className="flex items-center gap-2 flex-wrap" data-testid="reaction-bar">
-                <Popover open={ratePickerOpen} onOpenChange={setRatePickerOpen}>
-                  <PopoverTrigger asChild>
-                    <button className={title.userState.userRating ? "fa-button-primary" : "fa-button"}>
-                      <Eye className="h-4 w-4" />
-                      {title.userState.userRating ? `Seen it — you rated ${title.userState.userRating}` : "Seen it + rate"}
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent align="start" className="w-auto">
-                    <p className="fa-overline text-fa-frost-dim mb-2">one tap — seen &amp; rated</p>
-                    <div className="flex gap-1">
-                      {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
-                        <button
-                          key={value}
-                          onClick={() => {
-                            rate({ ...args, titleId: title.titleId, rating: value });
-                            setRatePickerOpen(false);
-                          }}
-                          className={`h-9 w-8 rounded-md border text-sm tabular-nums transition ${
-                            title.userState.userRating === value
-                              ? "border-fa-frost bg-fa-frost/25 text-fa-frost-bright"
-                              : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/50 hover:bg-fa-frost/15"
-                          }`}
-                          data-testid={`rate-${value}`}
-                        >
-                          {value}
-                        </button>
-                      ))}
-                    </div>
-                  </PopoverContent>
-                </Popover>
-
-                <button
-                  onClick={() =>
-                    title.userState.savedForLater
-                      ? unsave({ ...args, titleId: title.titleId })
-                      : save({ ...args, titleId: title.titleId })
-                  }
-                  className={title.userState.savedForLater ? "fa-button-primary" : "fa-button"}
-                  data-testid="save-button"
-                >
-                  {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
-                  {title.userState.savedForLater ? "Saved — on your Up Next" : "Save for later"}
-                </button>
-
-                {title.userState.notInterested ? (
-                  <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button border-fa-danger/40 text-fa-danger">
-                    <Undo2 className="h-4 w-4" /> Not interested — undo
-                  </button>
-                ) : (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button className="fa-button-ghost" data-testid="not-interested">
-                        <EyeOff className="h-4 w-4" /> Not interested
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId })}>Just not for me</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )}
-
-                {/* Drop — shows only; hides from Continue Watching (manual, revocable) */}
-                {title.mediaType === "Show" && (
-                  title.userState.dropped ? (
-                    <button onClick={() => undrop(args)} className="fa-button border-fa-frost/40 text-fa-frost" data-testid="undrop">
-                      <Undo2 className="h-4 w-4" /> Dropped — undo
-                    </button>
+          <div className="overflow-y-auto">
+            {isLoading || !title ? (
+              <>
+                {/* The dialog needs an accessible name from its first frame, before the title lands. */}
+                <DialogTitle className="sr-only">Loading title…</DialogTitle>
+                <div className="aspect-[16/8] reel-shimmer" />
+              </>
+            ) : (
+              <>
+                {/* Screen-reader name for the dialog. The visible <h1> below stays a plain heading so
+                    its own type scale is not overridden by the DialogTitle styling. */}
+                <DialogTitle className="sr-only">{title.name}</DialogTitle>
+                {/* Header art / trailer */}
+                <div className="relative aspect-[16/8] bg-fa-ink-3">
+                  {trailerOpen && trailerKey ? (
+                    <iframe
+                      src={`https://www.youtube-nocookie.com/embed/${trailerKey}?autoplay=1`}
+                      title={`${title.name} trailer`}
+                      allow="autoplay; encrypted-media"
+                      allowFullScreen
+                      className="absolute inset-0 h-full w-full"
+                    />
                   ) : (
-                    <button onClick={() => markDropped(args)} className="fa-button-ghost" data-testid="drop-show">
-                      <X className="h-4 w-4" /> Drop show
-                    </button>
-                  )
-                )}
-              </div>
-
-              {/* Synopsis */}
-              {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}
-
-              {/* Prediction breakdown */}
-              {title.prediction && title.prediction.contributions.length > 0 && (
-                <section className="space-y-2">
-                  <h2 className="fa-overline text-fa-frost-dim">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
-                  <div className="space-y-1.5 max-w-xl">
-                    {title.prediction.contributions.slice(0, 5).map((contribution) => {
-                      const max = Math.max(...title.prediction!.contributions.map((c) => Math.abs(c.value))) || 1;
-                      const positive = contribution.value >= 0;
-                      return (
-                        <div key={contribution.feature} className="flex items-center gap-3">
-                          <span className="fa-caption text-fa-frost w-44 truncate">{featureLabel(contribution.feature)}</span>
-                          <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
-                            <div
-                              className={`h-full rounded-full ${positive ? "bg-fa-success/70" : "bg-fa-danger/60"}`}
-                              style={{ width: `${Math.max(5, (Math.abs(contribution.value) / max) * 100)}%` }}
-                            />
-                          </div>
-                          <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">
-                            {contribution.value >= 0 ? "+" : ""}
-                            {contribution.value.toFixed(1)}
-                          </span>
+                    <>
+                      {backdropUrl(title.backdropPath, "w1280") && (
+                        <img src={backdropUrl(title.backdropPath, "w1280")!} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                      )}
+                      <div className="absolute inset-0 reel-scrim" />
+                      {trailerKey && (
+                        <button
+                          onClick={() => setTrailerOpen(true)}
+                          className="absolute inset-0 m-auto h-16 w-16 rounded-full border border-fa-frost/50 bg-fa-ink/70 backdrop-blur flex items-center justify-center transition hover:scale-110"
+                          aria-label="Play trailer"
+                        >
+                          <Play className="h-7 w-7 text-fa-frost-bright translate-x-0.5" />
+                        </button>
+                      )}
+                      <div className="absolute bottom-0 inset-x-0 p-5 flex items-end gap-4">
+                        <div className="w-24 shrink-0 hidden sm:block drop-shadow-xl">
+                          <PosterImage path={title.posterPath} alt={title.name} size="w185" />
                         </div>
-                      );
-                    })}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <h1 className="text-2xl sm:text-3xl font-light text-fa-frost-bright">{title.name}</h1>
+                            {title.prediction && <PredictedRatingBadge rating={title.prediction.predictedRating} size="lg" />}
+                          </div>
+                          <p className="fa-caption text-fa-frost-dim">
+                            {[
+                              title.year,
+                              formatRuntime(title.runtimeMinutes),
+                              title.certification,
+                              title.network,
+                              title.genres.slice(0, 3).join(" / "),
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </p>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="p-5 sm:p-6 space-y-6">
+                  {/* Reactions */}
+                  <div className="flex items-center gap-2 flex-wrap" data-testid="reaction-bar">
+                    <Popover open={ratePickerOpen} onOpenChange={setRatePickerOpen}>
+                      <PopoverTrigger asChild>
+                        <button className={title.userState.userRating ? "fa-button-primary" : "fa-button"}>
+                          <Eye className="h-4 w-4" />
+                          {title.userState.userRating ? `Seen it — you rated ${title.userState.userRating}` : "Seen it + rate"}
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-auto">
+                        <p className="fa-overline text-fa-frost-dim mb-2">one tap — seen &amp; rated</p>
+                        <div className="flex gap-1">
+                          {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
+                            <button
+                              key={value}
+                              onClick={() => {
+                                rate({ ...args, titleId: title.titleId, rating: value });
+                                setRatePickerOpen(false);
+                              }}
+                              className={`h-9 w-8 rounded-md border text-sm tabular-nums transition ${
+                                title.userState.userRating === value
+                                  ? "border-fa-frost bg-fa-frost/25 text-fa-frost-bright"
+                                  : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/50 hover:bg-fa-frost/15"
+                              }`}
+                              data-testid={`rate-${value}`}
+                            >
+                              {value}
+                            </button>
+                          ))}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+
+                    <button
+                      onClick={() =>
+                        title.userState.savedForLater
+                          ? unsave({ ...args, titleId: title.titleId })
+                          : save({ ...args, titleId: title.titleId })
+                      }
+                      className={title.userState.savedForLater ? "fa-button-primary" : "fa-button"}
+                      data-testid="save-button"
+                    >
+                      {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                      {title.userState.savedForLater ? "Saved — on your Up Next" : "Save for later"}
+                    </button>
+
+                    {title.userState.notInterested ? (
+                      <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button border-fa-danger/40 text-fa-danger">
+                        <Undo2 className="h-4 w-4" /> Not interested — undo
+                      </button>
+                    ) : (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button className="fa-button-ghost" data-testid="not-interested">
+                            <EyeOff className="h-4 w-4" /> Not interested
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start">
+                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId })}>Just not for me</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
+
+                    {/* Drop — shows only; hides from Continue Watching (manual, revocable) */}
+                    {title.mediaType === "Show" && (
+                      title.userState.dropped ? (
+                        <button onClick={() => undrop(args)} className="fa-button border-fa-frost/40 text-fa-frost" data-testid="undrop">
+                          <Undo2 className="h-4 w-4" /> Dropped — undo
+                        </button>
+                      ) : (
+                        <button onClick={() => markDropped(args)} className="fa-button-ghost" data-testid="drop-show">
+                          <X className="h-4 w-4" /> Drop show
+                        </button>
+                      )
+                    )}
                   </div>
-                </section>
-              )}
 
-              {/* Credits — director, writers and cast as labelled, clickable, rateable photos */}
-              {(title.directors.length > 0 || title.writers.length > 0 || title.cast.length > 0) && (
-                <section className="space-y-4">
-                  <CreditRow label={title.directors.length === 1 ? "Director" : "Directors"} people={title.directors} />
-                  <CreditRow label="Writers" people={title.writers} />
-                  <CreditRow label="Cast" people={title.cast} />
-                </section>
-              )}
+                  {/* Synopsis */}
+                  {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}
 
-              {/* Where to watch */}
-              {title.tmdbId != null && (
-                <WhereToWatch mediaType={mediaType} tmdbId={title.tmdbId} />
-              )}
+                  {/* Prediction breakdown */}
+                  {title.prediction && title.prediction.contributions.length > 0 && (
+                    <section className="space-y-2">
+                      <h2 className="fa-overline text-fa-frost-dim">why {title.prediction.predictedRating.toFixed(1)} for you</h2>
+                      <div className="space-y-1.5 max-w-xl">
+                        {title.prediction.contributions.slice(0, 5).map((contribution) => {
+                          const max = Math.max(...title.prediction!.contributions.map((c) => Math.abs(c.value))) || 1;
+                          const positive = contribution.value >= 0;
+                          return (
+                            <div key={contribution.feature} className="flex items-center gap-3">
+                              <span className="fa-caption text-fa-frost w-44 truncate">{featureLabel(contribution.feature)}</span>
+                              <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${positive ? "bg-fa-success/70" : "bg-fa-danger/60"}`}
+                                  style={{ width: `${Math.max(5, (Math.abs(contribution.value) / max) * 100)}%` }}
+                                />
+                              </div>
+                              <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">
+                                {contribution.value >= 0 ? "+" : ""}
+                                {contribution.value.toFixed(1)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  )}
 
-              {/* More like this — semantic kNN to THIS title, re-ranked by your model; infinite.
-                  Empty seed → it self-loads its first page on mount (like the genre rails). Keyed on
-                  the title id so navigating between titles remounts a clean, correctly-anchored rail. */}
-              {title.titleId && (
-                <section className="space-y-2">
-                  <InfiniteRecRow
-                    key={`similar:${title.titleId}`}
-                    title={<span className="text-fa-frost-bright">More like this</span>}
-                    context={{ row: "similar", anchorTitleId: title.titleId, genre: null }}
-                    seed={[]}
-                    filter={DEFAULT_BROWSE_FILTER}
-                  />
-                </section>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>
+                  {/* Credits — director, writers and cast as labelled, clickable, rateable photos */}
+                  {(title.directors.length > 0 || title.writers.length > 0 || title.cast.length > 0) && (
+                    <section className="space-y-4">
+                      <CreditRow label={title.directors.length === 1 ? "Director" : "Directors"} people={title.directors} />
+                      <CreditRow label="Writers" people={title.writers} />
+                      <CreditRow label="Cast" people={title.cast} />
+                    </section>
+                  )}
+
+                  {/* Where to watch */}
+                  {title.tmdbId != null && (
+                    <WhereToWatch mediaType={mediaType} tmdbId={title.tmdbId} />
+                  )}
+
+                  {/* More like this — semantic kNN to THIS title, re-ranked by your model; infinite.
+                      Empty seed → it self-loads its first page on mount (like the genre rails). Keyed on
+                      the title id so navigating between titles remounts a clean, correctly-anchored rail. */}
+                  {title.titleId && (
+                    <section className="space-y-2">
+                      <InfiniteRecRow
+                        key={`similar:${title.titleId}`}
+                        title={<span className="text-fa-frost-bright">More like this</span>}
+                        context={{ row: "similar", anchorTitleId: title.titleId, genre: null }}
+                        seed={[]}
+                        filter={DEFAULT_BROWSE_FILTER}
+                      />
+                    </section>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </DialogPrimitive.Content>
+      </DialogPortal>
+    </Dialog>
   );
 }

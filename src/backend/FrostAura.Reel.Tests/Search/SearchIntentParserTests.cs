@@ -11,7 +11,7 @@ namespace FrostAura.Reel.Tests.Search;
 /// </summary>
 public class SearchIntentParserTests
 {
-    private static readonly SearchIntent EmptyFallback = new([], [], [], "fallback", null);
+    private static readonly SearchIntent EmptyFallback = new([], [], [], "fallback", null, null);
 
     private static SearchIntent Parse(string json) =>
         SearchIntentParser.FromJson(JsonDocument.Parse(json).RootElement, "the query", EmptyFallback);

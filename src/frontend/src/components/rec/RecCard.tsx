@@ -4,6 +4,7 @@ import PosterImage from "./PosterImage";
 import PredictedRatingBadge from "./PredictedRatingBadge";
 import { logoUrl } from "../../lib/tmdbImages";
 import { formatRuntime } from "../../lib/format";
+import { hasPredictedRating } from "../../lib/predictedRating";
 
 /** Collapsed recommendation card: poster · meta line · why-this · predicted rating. */
 export default function RecCard({ card }: { card: FeedCard }) {
@@ -18,9 +19,13 @@ export default function RecCard({ card }: { card: FeedCard }) {
     >
       <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-focus-visible:ring-2 group-focus-visible:ring-fa-frost/60">
         <PosterImage path={card.posterPath} alt={card.name} />
-        <div className="absolute top-2 right-2">
-          <PredictedRatingBadge rating={card.predictedRating} />
-        </div>
+        {/* Guarded like every other consumer: the badge formats with toFixed, and the feed DTO's
+            non-nullability is a backend promise rather than a type this file can rely on. */}
+        {hasPredictedRating(card.predictedRating) && (
+          <div className="absolute top-2 right-2">
+            <PredictedRatingBadge rating={card.predictedRating} />
+          </div>
+        )}
         {(card.providers?.length ?? 0) > 0 && (
           <div className="absolute bottom-2 left-2 flex gap-1" data-testid="card-providers">
             {card.providers!.slice(0, 3).map((p) =>

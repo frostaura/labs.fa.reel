@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Mic, Send, Sparkles } from "lucide-react";
+import { AlertTriangle, Mic, RotateCcw, Send, Sparkles } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { DEFAULT_BROWSE_FILTER, type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import { useAskReelChat } from "../lib/useAskReelChat";
+import { nextBootstrap, useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { PhaseData } from "../lib/askReelStream";
 
@@ -44,34 +44,50 @@ function narrate(phase: PhaseData | null): string {
 }
 
 export default function SearchResults() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const seed = params.get("q") ?? "";
   const location = useLocation();
   const [filter, setFilter] = useState(DEFAULT_BROWSE_FILTER);
   const [draft, setDraft] = useState("");
-  const { turns, status, phase, cards, reason, send, resume, loadMore, setMediaTypes, exhausted, appending } = useAskReelChat();
+  const {
+    turns, status, phase, cards, reason, send, resume, loadMore, reask, setMediaTypes,
+    exhausted, appending, canRetry,
+  } = useAskReelChat();
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const speech = useSpeech((text) => send(text, false));
 
   // A search from the header box (?q=) starts a fresh conversation; landing on /search with no
-  // query resumes the most recent conversation (durable across reloads). `send` aborts any
-  // in-flight stream and resets on fresh=true, so a dev StrictMode double-invoke restarts cleanly.
+  // query resumes the most recent one. The seed is CONSUMED — cleared from the URL the moment it
+  // is sent — because it used to sit there for the life of the thread, so a reload three
+  // refinements in re-fired it as a fresh turn and replaced the whole conversation with a
+  // single-turn answer to the original question. `nextBootstrap` holds the "already handled" rule
+  // (and is unit-tested); the ref is what survives a re-render without re-triggering anything.
+  const handledSeed = useRef<string | null>(null);
+  const seedStarted = useRef(false);
   useEffect(() => {
-    if (seed) {
+    const { action, handled } = nextBootstrap(seed, handledSeed.current);
+    handledSeed.current = handled;
+    if (action === "seed") {
+      seedStarted.current = true;
       send(seed, true);
+      setParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("q");
+        return next;
+      }, { replace: true });
       return;
     }
-    let cancelled = false;
+    if (action !== "resume") return;
     fetch("/api/search/conversations/latest", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (!cancelled && d?.id && d.turns?.length) resume(d.turns, d.id);
+        // Not cancelled on cleanup — a StrictMode remount would drop the only response, and the
+        // resume is what makes a reload durable. Guarded on `seedStarted` instead: once a search
+        // has begun, a late-arriving old conversation must never replace it.
+        if (!seedStarted.current && d?.id && d.turns?.length) resume(d.turns, d.id);
       })
       .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [seed, send, resume]);
+  }, [seed, send, resume, setParams]);
 
   // The media filter is NOT applied here any more. Hiding cards after the fact is what produced
   // "No matches" on a turn that had returned eight perfectly good shows: the server had never been
@@ -82,25 +98,29 @@ export default function SearchResults() {
   const streaming = status === "streaming";
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
-  // request, so it must land before the re-send.
+  // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
+  // question once: replaying it through `send` stamped another copy of their bubble into the
+  // transcript on every single toggle click.
   const changeFilter = (next: typeof filter) => {
     setFilter(next);
     setMediaTypes(mediaTypesFor(next));
-    const last = [...turns].reverse().find((t) => t.role === "user");
-    if (last) send(last.text, false);
+    reask();
   };
 
   // Infinite scroll: a sentinel below the grid asks for the next page of the same question.
   useEffect(() => {
     const el = sentinelRef.current;
-    if (!el || exhausted || streaming || cards.length === 0) return;
+    // `status === "error"` matters: a page that fails leaves the sentinel in view with nothing
+    // latched, so re-observing would hammer a failing server on a loop. The retry below is the
+    // way back in — deliberately a decision the user makes.
+    if (!el || exhausted || streaming || status === "error" || cards.length === 0) return;
     const io = new IntersectionObserver(
       (entries) => { if (entries.some((e) => e.isIntersecting)) loadMore(); },
       { rootMargin: "600px" },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [exhausted, streaming, cards.length, loadMore]);
+  }, [exhausted, streaming, status, cards.length, loadMore]);
 
   const submit = (text: string) => {
     if (!text.trim()) return;
@@ -108,11 +128,25 @@ export default function SearchResults() {
     send(text, false);
   };
 
+  // The settled outcome, announced once the stream stops. Kept separate from the streaming
+  // narration below so the two live regions never talk over each other.
+  const settled = streaming
+    ? ""
+    : status === "error"
+      ? "Search hit a snag."
+      : status === "done"
+        ? visible.length === 0 ? "No matches for that one." : `${visible.length} picks ready.`
+        : "";
+
   return (
     <div className="space-y-5 pb-32">
       <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
         <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
       </h1>
+
+      {/* Always mounted so it is a live region by the time it has something to say. Announces the
+          settled outcome only; the phase narration has its own live region inside the banner. */}
+      <p className="sr-only" role="status" aria-live="polite" data-testid="askreel-status">{settled}</p>
 
       {/* Transcript */}
       <div className="space-y-3">
@@ -139,7 +173,16 @@ export default function SearchResults() {
             <Sparkles className="h-4 w-4 text-fa-frost" />
           </span>
           <div className="flex-1 min-w-0">
-            <p data-testid="askreel-narration" className="fa-caption text-fa-frost-bright truncate">{narrate(phase)}</p>
+            {/* Live: the phase sentence changes several times per turn and is the only feedback a
+                screen-reader user gets while Reel is working. */}
+            <p
+              data-testid="askreel-narration"
+              aria-live="polite"
+              aria-atomic="true"
+              className="fa-caption text-fa-frost-bright truncate"
+            >
+              {narrate(phase)}
+            </p>
             <div className="mt-2 h-1 w-full overflow-hidden rounded bg-fa-frost/10">
               <div className="h-full w-1/3 rounded bg-fa-frost/60" style={{ animation: "fa-progress-slide 1.2s ease-in-out infinite" }} />
             </div>
@@ -172,17 +215,24 @@ export default function SearchResults() {
         </div>
       )}
 
+      {/* One message, never two. A caught server exception arrives as a `done` frame with no
+          results, which used to render the empty state AND the failure reason side by side —
+          "try a different angle" next to "search hit a snag". The hook now classifies that frame
+          as an error, so exactly one of these three branches is live, and the failure branch
+          finally offers the retry that Ask Reel has never had. */}
       {status === "error" && cards.length === 0 ? (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="semantic-error">
           <AlertTriangle className="h-6 w-6 text-fa-warning mx-auto" />
           <p className="fa-body text-fa-frost-bright">Search hit a snag</p>
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
       ) : status === "done" && visible.length === 0 ? (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="semantic-empty">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-body text-fa-frost-bright">No matches for that one</p>
           <p className="fa-caption text-fa-frost-dim">Try a different angle — a mood, a vibe, or “more like &lt;something&gt;”.</p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4" data-testid="semantic-results">
@@ -234,8 +284,26 @@ export default function SearchResults() {
         </>
       )}
 
-      {reason && status === "done" && !appending && (
+      {/* The provenance footnote ("12 picks ranked for you, from 50 pulled"). Only ever shown
+          alongside actual results — on an empty answer it was a second, contradictory message
+          under the empty state. */}
+      {reason && status === "done" && !appending && visible.length > 0 && (
         <p className="fa-caption text-fa-frost-dim text-center">{reason}</p>
+      )}
+
+      {/* A failure that arrives while cards are already on screen (a page that blew up) must not
+          wipe the reel — it gets a quiet inline retry instead of the full-bleed error card. */}
+      {status === "error" && cards.length > 0 && (
+        <div className="flex flex-col items-center gap-2" data-testid="askreel-page-error">
+          <p className="fa-caption text-fa-warning">That last request hit a snag.</p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
+        </div>
+      )}
+
+      {speech.error && (
+        <p className="fa-caption text-fa-warning text-center" role="alert" data-testid="askreel-mic-error">
+          {speech.error}
+        </p>
       )}
 
       {/* Composer */}
@@ -276,5 +344,24 @@ export default function SearchResults() {
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * The retry Ask Reel never had. Before this, a failed turn left the user with nothing but the
+ * option to retype their question — so it replays the last one in place, adding no second copy of
+ * their bubble to the transcript.
+ */
+function RetryButton({ onRetry, disabled, label = "Try again" }: { onRetry: () => void; disabled: boolean; label?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onRetry}
+      disabled={disabled}
+      data-testid="askreel-retry"
+      className="inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 fa-caption text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+    >
+      <RotateCcw className="h-3.5 w-3.5" /> {label}
+    </button>
   );
 }

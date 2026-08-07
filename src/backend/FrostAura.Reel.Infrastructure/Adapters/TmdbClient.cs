@@ -180,12 +180,15 @@ public class TmdbClient(
 
     public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
-        string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
+        string? region, DateTime? releasedAfter, int page,
+        IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
+        DateTime? releasedBefore = null, CancellationToken ct = default)
     {
         var path = movies ? "discover/movie" : "discover/tv";
         // vote_count.gte is lower than the feed's discover (50) — concept queries want recall over
         // the most niche unseen titles, not just the popular ones. Genres + keywords OR-joined.
         var query = $"?sort_by=popularity.desc&include_adult=false&page={page}&vote_count.gte=10";
+        var dateField = movies ? "primary_release_date" : "first_air_date";
         if (genreIds.Count > 0)
         {
             query += $"&with_genres={string.Join('|', genreIds)}";
@@ -196,10 +199,26 @@ public class TmdbClient(
             query += $"&with_keywords={string.Join('|', keywordIds)}";
         }
 
+        // TMDB AND-s the without_* filters, which is what we want: a title is dropped if it carries
+        // ANY rejected genre/keyword.
+        if (excludeGenreIds is { Count: > 0 })
+        {
+            query += $"&without_genres={string.Join(',', excludeGenreIds)}";
+        }
+
+        if (excludeKeywordIds is { Count: > 0 })
+        {
+            query += $"&without_keywords={string.Join(',', excludeKeywordIds)}";
+        }
+
         if (releasedAfter is { } after)
         {
-            var dateField = movies ? "primary_release_date" : "first_air_date";
             query += $"&{dateField}.gte={after:yyyy-MM-dd}";
+        }
+
+        if (releasedBefore is { } before)
+        {
+            query += $"&{dateField}.lte={before:yyyy-MM-dd}";
         }
 
         if (movies && region is { Length: 2 })

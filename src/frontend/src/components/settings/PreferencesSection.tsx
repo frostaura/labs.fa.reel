@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Lock, ShieldCheck, X } from "lucide-react";
 import {
   useGetFiltersQuery,
@@ -68,11 +68,14 @@ export default function PreferencesSection() {
   const [flash, setFlash] = useState<string | null>(null);
   const [newPin, setNewPin] = useState("");
 
-  useEffect(() => {
-    if (saved && draft === null) {
-      setDraft(saved);
-    }
-  }, [saved, draft]);
+  // Adopted during render rather than in an effect (React's documented alternative to a syncing
+  // effect — it re-renders before commit instead of cascading). Seeding in an effect meant every
+  // visit committed one frame of this component's own defaults — nothing excluded, English only,
+  // rating floor off — and only then snapped to the account's real filters, which reads as the app
+  // forgetting your settings. Self-limiting: `draft` is non-null afterwards, so this runs once.
+  if (saved && draft === null) {
+    setDraft(saved);
+  }
 
   const pinConfigured = session?.pinConfigured ?? false;
   const locked = pinConfigured && unlockedPin === null;
@@ -156,6 +159,18 @@ export default function PreferencesSection() {
     );
   }
 
+  // Until the saved filters land there is no honest value to draw: rendering the controls from this
+  // component's defaults is what produced the flash. A skeleton says "loading" instead of lying.
+  if (!draft) {
+    return (
+      <section className="fa-card p-5 space-y-3" data-testid="prefs-loading">
+        <div className="h-5 w-48 rounded reel-shimmer" />
+        <div className="h-20 rounded reel-shimmer" />
+        <div className="h-20 rounded reel-shimmer" />
+      </section>
+    );
+  }
+
   return (
     <section className="fa-card p-5 space-y-5" data-testid="prefs-section">
       <div>
@@ -208,7 +223,7 @@ export default function PreferencesSection() {
         <p className="fa-overline text-fa-frost-dim">excluded genres</p>
         <div className="flex flex-wrap gap-1.5">
           {GENRES.map((genre) => {
-            const excluded = draft?.excludeGenres.includes(genre) ?? false;
+            const excluded = draft.excludeGenres.includes(genre);
             return (
               <button
                 key={genre}
@@ -232,8 +247,8 @@ export default function PreferencesSection() {
       <div className="space-y-2">
         <p className="fa-overline text-fa-frost-dim">excluded keywords</p>
         <KeywordEditor
-          keywords={draft?.excludeKeywords ?? []}
-          onChange={(excludeKeywords) => draft && setDraft({ ...draft, excludeKeywords })}
+          keywords={draft.excludeKeywords}
+          onChange={(excludeKeywords) => setDraft({ ...draft, excludeKeywords })}
         />
       </div>
 
@@ -249,14 +264,14 @@ export default function PreferencesSection() {
             min={0}
             max={9}
             step={0.5}
-            value={draft?.minPredictedRating ?? 0}
-            onChange={(e) => draft && setDraft({ ...draft, minPredictedRating: Number(e.target.value) || null })}
+            value={draft.minPredictedRating ?? 0}
+            onChange={(e) => setDraft({ ...draft, minPredictedRating: Number(e.target.value) || null })}
             className="fa-range flex-1"
-            style={{ "--fa-range-fill": `${(((draft?.minPredictedRating ?? 0) / 9) * 100).toFixed(0)}%` } as React.CSSProperties}
+            style={{ "--fa-range-fill": `${(((draft.minPredictedRating ?? 0) / 9) * 100).toFixed(0)}%` } as React.CSSProperties}
             data-testid="min-rating-slider"
           />
           <span className="fa-metric-sm text-fa-frost-bright w-14 text-right tabular-nums">
-            {(draft?.minPredictedRating ?? 0) > 0 ? (draft!.minPredictedRating!).toFixed(1) : "off"}
+            {(draft.minPredictedRating ?? 0) > 0 ? draft.minPredictedRating!.toFixed(1) : "off"}
           </span>
         </div>
       </div>
@@ -266,8 +281,8 @@ export default function PreferencesSection() {
         <p className="fa-overline text-fa-frost-dim">maturity ceiling</p>
         <select
           className="fa-input fa-select w-40"
-          value={draft?.maturityCeiling ?? ""}
-          onChange={(e) => draft && setDraft({ ...draft, maturityCeiling: e.target.value || null })}
+          value={draft.maturityCeiling ?? ""}
+          onChange={(e) => setDraft({ ...draft, maturityCeiling: e.target.value || null })}
         >
           {MATURITY.map((level) => (
             <option key={level} value={level} className="bg-fa-ink-2">
@@ -278,7 +293,7 @@ export default function PreferencesSection() {
       </div>
 
       <div className="flex items-center gap-3 border-t border-fa-edge/50 pt-4">
-        <button onClick={save} disabled={saving || !draft} className="fa-button-primary" data-testid="save-prefs">
+        <button onClick={save} disabled={saving} className="fa-button-primary" data-testid="save-prefs">
           Save preferences
         </button>
         {flash && <span className="fa-caption text-fa-success">{flash}</span>}

@@ -18,6 +18,13 @@ export default function TraktCallback() {
   const [message, setMessage] = useState<string | null>(null);
   const started = useRef(false);
 
+  // Kept as an effect deliberately. This is a one-shot side effect, not derived state: the
+  // authorization code is single-use and `consumeOauthState()` destroys the stored nonce, so the
+  // validation cannot be re-run during render — the second render would see no nonce and fail a
+  // sign-in that had already succeeded. The `started` ref makes it fire exactly once under
+  // StrictMode, and each setState below is terminal (the component renders the error and stops),
+  // so nothing cascades.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot OAuth exchange; see above */
   useEffect(() => {
     if (started.current) return; // StrictMode double-invoke guard — the code is single-use
     started.current = true;
@@ -51,6 +58,7 @@ export default function TraktCallback() {
         setMessage("Could not complete sign-in with Trakt. Please try again.");
       });
   }, [location.search, exchange, navigate]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return (
     <div className="min-h-screen flex items-center justify-center px-6">

@@ -148,7 +148,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
             Task.FromResult(new AgentReply(
                 "Fantastically futuristic, tense, high-energy science fiction.",
-                new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null)));
+                new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null, null)));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default) =>
@@ -208,7 +208,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
             Task.FromResult(new AgentReply(
                 $"Here are films {person.Role} {person.Name}.",
-                new SearchIntent([], [], [], message, null, [person])));
+                new SearchIntent([], [], [], message, null, null, [person])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default) =>
@@ -324,11 +324,28 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(3070, "shark")]);
 
+        /// <summary>The exclusion + year arguments of the LAST concept call, so tests can assert
+        /// that a negation actually reached discovery rather than only the ranking demerit.</summary>
+        public IReadOnlyList<int>? LastExcludeGenreIds;
+        public IReadOnlyList<int>? LastExcludeKeywordIds;
+        public DateTime? LastReleasedAfter;
+        public DateTime? LastReleasedBefore;
+
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
-            string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
+            string? region, DateTime? releasedAfter, int page,
+            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
+            DateTime? releasedBefore = null, CancellationToken ct = default)
         {
             Interlocked.Increment(ref ConceptFetches);
+            if (movies)
+            {
+                LastExcludeGenreIds = excludeGenreIds;
+                LastExcludeKeywordIds = excludeKeywordIds;
+                LastReleasedAfter = releasedAfter;
+                LastReleasedBefore = releasedBefore;
+            }
+
             return Task.FromResult<IReadOnlyList<TmdbListItem>>(EmptyDiscovery || !movies ? [] : Movies);
         }
 

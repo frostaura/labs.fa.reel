@@ -25,6 +25,11 @@ public sealed record SearchIntent(
     IReadOnlyList<MediaType> MediaTypes,
     string FreeText,
     int? MinYear,
+    // Upper release-year bound, inclusive of the whole year. Without it a decade query cannot be
+    // expressed at all: "80s sci-fi" resolves to MinYear=1980 and then returns 1980-to-today
+    // sorted by popularity, so modern blockbusters dominate a request explicitly asking for old
+    // films. Nullable and positioned after MinYear so a bound is always optional.
+    int? MaxYear,
     // A person/filmography query ("all movies Christopher Nolan directs") — resolved to TMDB
     // person credits instead of keyword/title search, which can't represent a name. Optional so
     // every existing construction site stays valid.

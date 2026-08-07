@@ -33,6 +33,15 @@ internal static class SearchIntentParser
             .Where(m => m is not null).Select(m => m!.Value).Distinct().ToArray();
         int? minYear = root.TryGetProperty("minYear", out var y) && y.ValueKind == JsonValueKind.Number && y.TryGetInt32(out var yr) && yr > 1870
             ? yr : null;
+        int? maxYear = root.TryGetProperty("maxYear", out var my) && my.ValueKind == JsonValueKind.Number && my.TryGetInt32(out var myr) && myr > 1870
+            ? myr : null;
+
+        // A model that inverts the bounds ("80s" → min 1989, max 1980) would otherwise produce a
+        // window that can never match. Swapping is strictly better than dropping the constraint.
+        if (minYear is { } lo && maxYear is { } hi && lo > hi)
+        {
+            (minYear, maxYear) = (hi, lo);
+        }
         var freeText = root.TryGetProperty("freeText", out var f) && f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } s
             ? s : fallbackText;
         var people = ParsePeople(root);
@@ -45,6 +54,7 @@ internal static class SearchIntentParser
             {
                 MediaTypes = media.Length > 0 ? media : heuristicFallback.MediaTypes,
                 MinYear = minYear ?? heuristicFallback.MinYear,
+                MaxYear = maxYear ?? heuristicFallback.MaxYear,
                 // Negations survive a positive-signal fallback: "no ghosts" still means no ghosts
                 // even when the rest of the spec came from the heuristic.
                 ExcludeGenres = excludeGenres.Length > 0 ? excludeGenres : heuristicFallback.ExcludeGenres,
@@ -52,7 +62,7 @@ internal static class SearchIntentParser
             };
         }
 
-        return new SearchIntent(genres, keywords, media, freeText, minYear, people, excludeGenres, excludeKeywords);
+        return new SearchIntent(genres, keywords, media, freeText, minYear, maxYear, people, excludeGenres, excludeKeywords);
     }
 
     /// <summary>Parses a "people":[{"name","role"}] array — role ∈ director|cast|any (default any).</summary>
