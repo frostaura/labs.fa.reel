@@ -17,10 +17,16 @@ public static class FeedEndpoints
 {
     public record CardProvider(string Name, string? LogoPath);
 
+    /// <summary>
+    /// The card contract. <c>PredictedRating</c> is "for you"; <c>CrowdRating</c> / <c>CrowdVotes</c>
+    /// are the community number it is compared against, resolved once in
+    /// <see cref="Domain.Catalog.CrowdRating"/> (TMDB, then Trakt, then null) so every surface agrees.
+    /// </summary>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
-        decimal PredictedRating, string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers);
+        decimal PredictedRating, decimal? CrowdRating, int? CrowdVotes,
+        string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
@@ -153,10 +159,11 @@ public static class FeedEndpoints
             {
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
+                var (crowd, crowdVotes) = Domain.Catalog.CrowdRating.Resolve(title);
                 return new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
-                    item.PredictedRating, item.WhyThisSentence, isReleased,
+                    item.PredictedRating, crowd, crowdVotes, item.WhyThisSentence, isReleased,
                     providersByTitle.GetValueOrDefault(title.Id, []));
             }
 
@@ -233,12 +240,7 @@ public static class FeedEndpoints
                 .Take(15)
                 .Join(db.Titles, p => p.TitleId, t => t.Id, (p, t) => new
                 {
-                    titleId = t.Id,
-                    mediaType = t.MediaType.ToString(),
-                    tmdbId = t.TmdbId,
-                    name = t.Name,
-                    posterPath = t.PosterPath,
-                    backdropPath = t.BackdropPath,
+                    Title = t,
                     nextEpisodeSeason = p.NextEpisodeSeason,
                     nextEpisodeNumber = p.NextEpisodeNumber,
                     watchedEpisodes = p.WatchedEpisodeCount,
@@ -247,7 +249,24 @@ public static class FeedEndpoints
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(entries);
+            // Projected in memory rather than in SQL so the crowd rating comes from the ONE resolver
+            // every other card surface uses, instead of a second, drifting copy of the fallback rule.
+            return Results.Ok(entries.Select(x => new
+            {
+                titleId = x.Title.Id,
+                mediaType = x.Title.MediaType.ToString(),
+                tmdbId = x.Title.TmdbId,
+                name = x.Title.Name,
+                posterPath = x.Title.PosterPath,
+                backdropPath = x.Title.BackdropPath,
+                crowdRating = Domain.Catalog.CrowdRating.For(x.Title),
+                crowdVotes = Domain.Catalog.CrowdRating.VotesFor(x.Title),
+                x.nextEpisodeSeason,
+                x.nextEpisodeNumber,
+                x.watchedEpisodes,
+                x.totalAired,
+                x.completionPct,
+            }));
         });
 
         group.MapPost("/rebuild", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
@@ -316,7 +335,8 @@ public static class FeedEndpoints
             var cards = items.Select(i => new FeedCard(
                 i.Title.Id, i.Title.MediaType.ToString(), i.Title.TmdbId, i.Title.Name, i.Title.Year, i.Title.RuntimeMinutes,
                 i.Title.PosterPath, i.Title.BackdropPath, i.Title.Genres,
-                i.Predicted, i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []))).ToList();
+                i.Predicted, Domain.Catalog.CrowdRating.For(i.Title), Domain.Catalog.CrowdRating.VotesFor(i.Title),
+                i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []))).ToList();
 
             // The paginator already tried to deepen this lane straight from TMDB before returning, so an
             // empty page here means the lane is genuinely dry — an explicit exhaustion signal the client
@@ -340,13 +360,24 @@ public static class FeedEndpoints
                 return Results.Ok(new { genres = Array.Empty<object>() });
             }
 
+            // The rails themselves IGNORE the genre filters once opened (a rail's genre is the user's
+            // explicit request in that moment — see FeedPaginator.IgnoresGenreFilters). What is
+            // OFFERED here is a different question, and the answer is the standing preference: we do
+            // not put a "Documentary" rail in front of someone who filtered documentaries out, and an
+            // include-list narrows the offer to the genres on it. Navigating to such a rail directly
+            // still works; we simply never suggest it.
             var excluded = await db.ContentFilters
                 .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.ExcludeGenre)
+                .Select(f => f.Value).ToListAsync(ct);
+            var included = await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.IncludeGenre)
                 .Select(f => f.Value).ToListAsync(ct);
 
             var taste = await featureBuilder.BuildTasteStateAsync(account.Id, DateTime.UtcNow, ct);
             var genres = taste.GenreRatings
-                .Where(kv => !excluded.Contains(kv.Key) && kv.Value.Count >= 3)
+                .Where(kv => !excluded.Contains(kv.Key)
+                    && (included.Count == 0 || included.Contains(kv.Key))
+                    && kv.Value.Count >= 3)
                 .Select(kv => new
                 {
                     slug = kv.Key,

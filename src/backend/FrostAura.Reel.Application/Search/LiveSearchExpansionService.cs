@@ -995,6 +995,10 @@ public sealed class LiveSearchExpansionService(
         genres = t.Genres,
         similarity,
         predictedRating = predicted,
+        // The community number the personal prediction is read against — same resolver as the feed
+        // cards, so a title's badge cannot say 7.4 here and 6.9 on the home page.
+        crowdRating = CrowdRating.For(t),
+        crowdVotes = CrowdRating.VotesFor(t),
         fit,
         why,
         seen,

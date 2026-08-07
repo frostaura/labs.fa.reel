@@ -342,8 +342,20 @@ public sealed class FeedPaginator(
             popCount: WindowPopCount,
             annCount: WindowAnnCount,
             maturityCeiling: account.Settings.MaturityCeiling,
-            ct);
+            ct,
+            ignoreGenreFilters: IgnoresGenreFilters(req));
     }
+
+    /// <summary>
+    /// True for a genre rail, and only for a genre rail. Founder, 2026-08-07: "the filters should
+    /// cascade onto the genre specific suggestions too. (of course in those cases the genre filters
+    /// would be ignored)". Every other condition — crowd rating, predicted rating, year window,
+    /// language, maturity, keywords — still binds; only ExcludeGenre/IncludeGenre step aside,
+    /// because the rail's genre IS the user's request in that moment and a standing genre preference
+    /// would otherwise make the rail permanently empty rather than merely filtered.
+    /// </summary>
+    public static bool IgnoresGenreFilters(MoreFeedRequest req) =>
+        req.Context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(req.Genre);
 
     /// <summary>
     /// The "more like this" window: the eligible catalog semantically nearest to the VIEWED title's

@@ -98,6 +98,8 @@ public static class SearchEndpoints
                     posterPath = t.PosterPath,
                     isFullyWatched = watchedFull.Contains(t.Id),
                     predictedRating = predicted.TryGetValue(t.Id, out var p) ? (decimal?)p : null,
+                    crowdRating = CrowdRating.For(t),
+                    crowdVotes = CrowdRating.VotesFor(t),
                 })
                 .ToList();
 

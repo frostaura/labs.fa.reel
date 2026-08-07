@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using Microsoft.EntityFrameworkCore;
@@ -47,6 +48,8 @@ public static class SavedEndpoints
                     year = x.Title.Year,
                     posterPath = x.Title.PosterPath,
                     predictedRating = scores.TryGetValue(x.Title.Id, out var rating) ? rating : (decimal?)null,
+                    crowdRating = CrowdRating.For(x.Title),
+                    crowdVotes = CrowdRating.VotesFor(x.Title),
                     savedAt = x.Reaction.CreatedAt,
                     onManagedList = onList.Contains(x.Title.Id),
                 }),

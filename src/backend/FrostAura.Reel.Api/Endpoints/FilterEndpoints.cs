@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Filters;
 using Microsoft.EntityFrameworkCore;
@@ -13,7 +14,10 @@ namespace FrostAura.Reel.Api.Endpoints;
 /// </summary>
 public static class FilterEndpoints
 {
-    public record FiltersPayload(string[] ExcludeGenres, string[] IncludeGenres, string[] ExcludeKeywords, string? MaturityCeiling, decimal? MinPredictedRating, string[] Languages);
+    public record FiltersPayload(
+        string[] ExcludeGenres, string[] IncludeGenres, string[] ExcludeKeywords, string? MaturityCeiling,
+        decimal? MinPredictedRating, string[] Languages,
+        decimal? MinCrowdRating = null, int? MinYear = null, int? MaxYear = null);
 
     public record PinRequest(string Pin, string? CurrentPin);
 
@@ -34,10 +38,13 @@ public static class FilterEndpoints
                 filters.Where(f => f.Kind == FilterKind.IncludeGenre).Select(f => f.Value).ToArray(),
                 filters.Where(f => f.Kind == FilterKind.ExcludeKeyword).Select(f => f.Value).ToArray(),
                 account?.Settings.MaturityCeiling,
-                minRaw is not null && decimal.TryParse(minRaw, System.Globalization.CultureInfo.InvariantCulture, out var minValue) ? minValue : null,
+                ContentFilterRules.ParseRating(minRaw),
                 // No rows ⇒ the account is on the English-only default; surface that to the UI so the
                 // English chip reads as selected rather than blank.
-                languages.Length > 0 ? languages : ["en"]));
+                languages.Length > 0 ? languages : ["en"],
+                ContentFilterRules.ParseRating(filters.FirstOrDefault(f => f.Kind == FilterKind.MinCrowdRating)?.Value),
+                ContentFilterRules.ParseYear(filters.FirstOrDefault(f => f.Kind == FilterKind.MinYear)?.Value),
+                ContentFilterRules.ParseYear(filters.FirstOrDefault(f => f.Kind == FilterKind.MaxYear)?.Value)));
         });
 
         group.MapPut("/filters", async (
@@ -54,6 +61,15 @@ public static class FilterEndpoints
             {
                 return Results.StatusCode(StatusCodes.Status423Locked);
             }
+
+            // Validate BEFORE the destructive ExecuteDelete below — a rejected payload must leave the
+            // account's existing filters exactly as they were, not wipe them and then 400.
+            if (!ContentFilterRules.TryNormalizeYears(payload.MinYear, payload.MaxYear, out var years, out var yearError))
+            {
+                return Results.BadRequest(new { error = yearError });
+            }
+
+            var crowdFloor = ContentFilterRules.NormalizeCrowdFloor(payload.MinCrowdRating);
 
             var accountId = accountContext.AccountId!.Value;
             await db.ContentFilters.Where(f => f.AccountId == accountId).ExecuteDeleteAsync(ct);
@@ -80,28 +96,59 @@ public static class FilterEndpoints
             AddAll(payload.Languages, FilterKind.Language);
             // Umbrella terms ("lgbtq") expand to their TMDB keyword family; each member
             // round-trips to the UI as its own removable chip.
-            AddAll(Application.Search.KeywordFilterExpansion.Expand(payload.ExcludeKeywords), FilterKind.ExcludeKeyword);
-            if (payload.MinPredictedRating is { } min && min > 0)
+            AddAll(KeywordFilterExpansion.Expand(payload.ExcludeKeywords), FilterKind.ExcludeKeyword);
+
+            void AddSingle(FilterKind kind, string value) => db.ContentFilters.Add(new ContentFilter
             {
-                db.ContentFilters.Add(new ContentFilter
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    Kind = FilterKind.MinPredictedRating,
-                    Value = Math.Clamp(min, 0m, 10m).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture),
-                    CreatedAt = DateTime.UtcNow,
-                });
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = kind,
+                Value = value,
+                CreatedAt = DateTime.UtcNow,
+            });
+
+            if (ContentFilterRules.NormalizeCrowdFloor(payload.MinPredictedRating) is { } min)
+            {
+                AddSingle(FilterKind.MinPredictedRating, ContentFilterRules.FormatRating(min));
             }
+
+            // The crowd-rating floor and the year window are single-valued, and the values are cast to
+            // a number inside SQL by the eligibility builder — so they are written only through
+            // ContentFilterRules, never hand-formatted.
+            if (crowdFloor is { } crowd)
+            {
+                AddSingle(FilterKind.MinCrowdRating, ContentFilterRules.FormatRating(crowd));
+            }
+
+            if (years.MinYear is { } minYear)
+            {
+                AddSingle(FilterKind.MinYear, ContentFilterRules.FormatYear(minYear));
+            }
+
+            if (years.MaxYear is { } maxYear)
+            {
+                AddSingle(FilterKind.MaxYear, ContentFilterRules.FormatYear(maxYear));
+            }
+
             account.Settings.MaturityCeiling = string.IsNullOrWhiteSpace(payload.MaturityCeiling) ? null : payload.MaturityCeiling;
 
             // Content rules just changed — the Active feed was built against the OLD filters, so a
-            // newly-excluded genre / tightened maturity ceiling would linger until the next build.
-            // Enqueue a reactive rebuild (reuses the Active model) so the feed re-filters immediately;
-            // it commits in the same SaveChanges as the filter change.
+            // newly-excluded genre / tightened maturity ceiling / raised crowd floor / narrowed year
+            // window would linger until the next build. Enqueue a reactive rebuild (reuses the Active
+            // model) so the feed re-filters immediately; it commits in the same SaveChanges as the
+            // filter change. Kind-agnostic by construction — every filter, old and new, invalidates.
             await feedRefresh.RequestRebuildAsync(accountId, "content filters changed", ct);
 
             await db.SaveChangesAsync(ct);
-            return Results.Ok(payload);
+            // Echo what was actually STORED, not what was sent: a swapped year window and a clamped
+            // crowd floor must round-trip to the UI, or the editor keeps showing the rejected shape.
+            return Results.Ok(payload with
+            {
+                MinPredictedRating = ContentFilterRules.NormalizeCrowdFloor(payload.MinPredictedRating),
+                MinCrowdRating = crowdFloor,
+                MinYear = years.MinYear,
+                MaxYear = years.MaxYear,
+            });
         });
 
         group.MapPost("/pin", async (PinRequest request, IReelDbContext db, HttpContext http, CancellationToken ct) =>

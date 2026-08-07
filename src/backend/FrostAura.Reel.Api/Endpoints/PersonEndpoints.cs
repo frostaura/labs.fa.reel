@@ -102,17 +102,14 @@ public static class PersonEndpoints
                 .Distinct()
                 .ToListAsync(ct);
 
-            var filmography = await db.Titles
+            // The title entity comes back whole and the card shape is built in memory, so the crowd
+            // rating is resolved by the one shared resolver rather than a second copy of its fallback
+            // rule inlined into SQL.
+            var credited = await db.Titles
                 .Where(t => creditedTitleIds.Contains(t.Id))
                 .Select(t => new
                 {
-                    titleId = t.Id,
-                    mediaType = t.MediaType.ToString(),
-                    tmdbId = t.TmdbId,
-                    name = t.Name,
-                    year = t.Year,
-                    posterPath = t.PosterPath,
-                    tmdbPopularity = t.TmdbPopularity,
+                    Title = t,
                     userRating = db.UserRatings
                         .Where(r => r.AccountId == accountId && r.TitleId == t.Id
                             && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
@@ -125,6 +122,21 @@ public static class PersonEndpoints
                         .FirstOrDefault(),
                 })
                 .ToListAsync(ct);
+
+            var filmography = credited.Select(x => new
+            {
+                titleId = x.Title.Id,
+                mediaType = x.Title.MediaType.ToString(),
+                tmdbId = x.Title.TmdbId,
+                name = x.Title.Name,
+                year = x.Title.Year,
+                posterPath = x.Title.PosterPath,
+                tmdbPopularity = x.Title.TmdbPopularity,
+                crowdRating = CrowdRating.For(x.Title),
+                crowdVotes = CrowdRating.VotesFor(x.Title),
+                x.userRating,
+                x.predictedRating,
+            }).ToList();
 
             // Derived affinity = shrunken mean of the user's ratings of this person's titles.
             var userMean = await db.UserRatings

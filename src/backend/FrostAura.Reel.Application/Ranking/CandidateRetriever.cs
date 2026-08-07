@@ -48,6 +48,10 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
     /// <param name="popCount">Target popularity-arm survivors after maturity filtering.</param>
     /// <param name="annCount">Target ANN-arm survivors (loved + drift combined) after maturity filtering.</param>
     /// <param name="maturityCeiling">The account's certification ceiling, or null for no ceiling.</param>
+    /// <param name="ignoreGenreFilters">
+    /// Genre rails only — drops the account's ExcludeGenre/IncludeGenre rules while every other
+    /// content rule still binds. See <see cref="EligibilityQueryBuilder.EligibleTitles"/>.
+    /// </param>
     public async Task<IReadOnlyList<Title>> RetrieveAsync(
         Guid accountId,
         FeatureVectorBuilder.TasteState taste,
@@ -55,11 +59,12 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
         int popCount,
         int annCount,
         string? maturityCeiling,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool ignoreGenreFilters = false)
     {
         IQueryable<Title> Lane()
         {
-            var q = eligibility.EligibleTitles(accountId);
+            var q = eligibility.EligibleTitles(accountId, ignoreGenreFilters);
             return lane is null ? q : lane(q);
         }
 
