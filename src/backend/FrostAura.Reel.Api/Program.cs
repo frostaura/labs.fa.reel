@@ -1,6 +1,7 @@
 using FrostAura.Reel.Api;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Middleware;
+using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Infrastructure;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -10,6 +11,7 @@ DotEnv.Load();
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddReelInfrastructure(builder.Configuration);
+builder.Services.AddSingleton<SettingsUnlockTokenService>();
 builder.Services.AddOpenApi();
 
 var corsOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? "http://localhost:5173")

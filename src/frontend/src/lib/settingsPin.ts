@@ -9,14 +9,26 @@ import { useSyncExternalStore } from "react";
  * independent `useState(readUnlock)` copies would disagree the moment any one of them changed:
  * setting a PIN while unlocked would have re-locked the editor sitting next to the button.
  *
- * So it is one external store. The unlock lives in sessionStorage — it dies with the tab — and
- * expires on its own after {@link UNLOCK_TTL_MS}, via a timer rather than a check-on-read, so a
- * mounted editor actually re-locks instead of waiting for someone to remount it.
+ * So it is one external store. What it holds is a server-issued unlock TOKEN — an opaque,
+ * account-bound, time-limited DataProtection payload from `/api/settings/pin/verify` — never the
+ * raw PIN. An earlier version cached the PIN itself in sessionStorage, which meant anyone opening
+ * devtools on a shared screen could read the secret that the lock exists to protect; the legacy
+ * `{pin: ...}` shape is scrubbed on sight in {@link hydrate}. The unlock lives in sessionStorage —
+ * it dies with the tab — and expires at the server-stamped `until`, via a timer rather than a
+ * check-on-read, so a mounted editor actually re-locks instead of waiting for a remount.
  */
 const UNLOCK_KEY = "reel.pinUnlock";
-export const UNLOCK_TTL_MS = 5 * 60 * 1000;
 
-let cached: string | null = null;
+/** Fallback lifetime if the server's expiresAt is unparsable — mirrors the backend's 15-minute TTL. */
+const FALLBACK_TTL_MS = 15 * 60 * 1000;
+
+/** A live unlock: the opaque token to send as `X-Settings-Unlock`, and its expiry (epoch ms). */
+export interface SettingsUnlock {
+  token: string;
+  until: number;
+}
+
+let cached: SettingsUnlock | null = null;
 let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 const listeners = new Set<() => void>();
 
@@ -28,33 +40,45 @@ function scheduleExpiry(until: number): void {
   if (expiryTimer !== null) clearTimeout(expiryTimer);
   expiryTimer = setTimeout(() => {
     expiryTimer = null;
-    clearUnlockedPin();
+    clearUnlockToken();
   }, Math.max(0, until - Date.now()));
 }
 
-/** Rehydrates from sessionStorage once at module load — a reload inside the TTL stays unlocked. */
+/**
+ * Rehydrates from sessionStorage once at module load — a reload inside the TTL stays unlocked.
+ * Anything that is not a live `{token, until}` — including the legacy raw-PIN `{pin, until}`
+ * shape from before the token existed — is DISCARDED and deleted, so a deploy over an old tab
+ * scrubs the cached secret on first load.
+ */
 function hydrate(): void {
   try {
     const raw = sessionStorage.getItem(UNLOCK_KEY);
     if (!raw) return;
-    const { pin, until } = JSON.parse(raw) as { pin?: string; until?: number };
-    if (typeof pin !== "string" || typeof until !== "number" || Date.now() >= until) {
+    const parsed = JSON.parse(raw) as { token?: unknown; until?: unknown; pin?: unknown };
+    if (
+      typeof parsed.token !== "string" ||
+      typeof parsed.until !== "number" ||
+      parsed.pin !== undefined ||
+      Date.now() >= parsed.until
+    ) {
       sessionStorage.removeItem(UNLOCK_KEY);
       return;
     }
-    cached = pin;
-    scheduleExpiry(until);
+    cached = { token: parsed.token, until: parsed.until };
+    scheduleExpiry(parsed.until);
   } catch {
     // A disabled or full sessionStorage must not take the settings screen down with it.
   }
 }
 hydrate();
 
-export function storeUnlockedPin(pin: string): void {
-  const until = Date.now() + UNLOCK_TTL_MS;
-  cached = pin;
+/** Adopts a fresh unlock from `/pin/verify`. `expiresAt` is the server's ISO-8601 stamp. */
+export function storeUnlockToken(token: string, expiresAt: string): void {
+  const parsed = Date.parse(expiresAt);
+  const until = Number.isNaN(parsed) ? Date.now() + FALLBACK_TTL_MS : parsed;
+  cached = { token, until };
   try {
-    sessionStorage.setItem(UNLOCK_KEY, JSON.stringify({ pin, until }));
+    sessionStorage.setItem(UNLOCK_KEY, JSON.stringify({ token, until }));
   } catch {
     // Unlock still holds in memory for this page; it just will not survive a reload.
   }
@@ -62,7 +86,7 @@ export function storeUnlockedPin(pin: string): void {
   emit();
 }
 
-export function clearUnlockedPin(): void {
+export function clearUnlockToken(): void {
   cached = null;
   try {
     sessionStorage.removeItem(UNLOCK_KEY);
@@ -77,7 +101,7 @@ export function clearUnlockedPin(): void {
 }
 
 /** The snapshot. Stable by identity between changes, as useSyncExternalStore requires. */
-function getUnlockedPin(): string | null {
+export function getUnlockToken(): SettingsUnlock | null {
   return cached;
 }
 
@@ -89,6 +113,6 @@ function subscribe(listener: () => void): () => void {
 }
 
 /** The current unlock, or null when the section is locked. Re-renders every consumer on change. */
-export function useUnlockedPin(): string | null {
-  return useSyncExternalStore(subscribe, getUnlockedPin, getUnlockedPin);
+export function useUnlockToken(): SettingsUnlock | null {
+  return useSyncExternalStore(subscribe, getUnlockToken, getUnlockToken);
 }

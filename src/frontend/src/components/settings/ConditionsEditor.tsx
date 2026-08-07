@@ -7,7 +7,7 @@ import {
   useVerifyPinMutation,
   type FiltersPayload,
 } from "../../store/api";
-import { storeUnlockedPin, useUnlockedPin } from "../../lib/settingsPin";
+import { clearUnlockToken, storeUnlockToken, useUnlockToken } from "../../lib/settingsPin";
 import {
   ALL_LANGUAGES,
   cycleGenre,
@@ -65,7 +65,7 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   const { data: saved } = useGetFiltersQuery();
   const [updateFilters, { isLoading: saving }] = useUpdateFiltersMutation();
   const [verifyPin] = useVerifyPinMutation();
-  const unlockedPin = useUnlockedPin();
+  const unlockToken = useUnlockToken();
 
   const [draft, setDraft] = useState<FiltersPayload | null>(null);
   const [years, setYears] = useState({ min: "", max: "" });
@@ -86,13 +86,14 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   }
 
   const pinConfigured = session?.pinConfigured ?? false;
-  const locked = pinConfigured && unlockedPin === null;
+  const locked = pinConfigured && unlockToken === null;
   const shell = bare ? "space-y-5" : "fa-card p-5 space-y-5";
 
   const unlock = async () => {
     const result = await verifyPin({ pin: pinEntry }).unwrap().catch(() => null);
-    if (result?.valid) {
-      storeUnlockedPin(pinEntry);
+    if (result?.valid && result.unlockToken) {
+      // What gets kept is the server-minted unlock token, never the PIN the user just typed.
+      storeUnlockToken(result.unlockToken, result.expiresAt);
       setPinEntry("");
       setPinError(false);
     } else {
@@ -171,12 +172,19 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
     const payload = normalizeFilters({ ...draft, ...range });
     setDraft(payload);
     setYears({ min: range.minYear?.toString() ?? "", max: range.maxYear?.toString() ?? "" });
-    await updateFilters({ filters: payload, pin: unlockedPin ?? undefined }).unwrap()
+    await updateFilters({ filters: payload, unlockToken: unlockToken?.token }).unwrap()
       .then(() => {
         setFlash("Saved — your picks are being re-cut.");
         onSaved?.();
       })
-      .catch(() => setFlash("Locked — verify the settings PIN first."));
+      .catch((error: unknown) => {
+        // A 423 means the unlock aged out server-side (or the token is from a rotated key ring):
+        // drop the stale token so the PIN gate re-shows instead of every save failing the same way.
+        if ((error as { status?: number } | null)?.status === 423) {
+          clearUnlockToken();
+        }
+        setFlash("Locked — verify the settings PIN first.");
+      });
     window.setTimeout(() => setFlash(null), 2500);
   };
 

@@ -483,12 +483,14 @@ export const api = createApi({
       query: () => "settings/filters",
       providesTags: ["Prefs"],
     }),
-    updateFilters: b.mutation<FiltersPayload, { filters: FiltersPayload; pin?: string }>({
-      query: ({ filters, pin }) => ({
+    // Saves ride the short-lived unlock token from /pin/verify (X-Settings-Unlock) — the raw PIN
+    // is never cached client-side, so it is never replayed per call.
+    updateFilters: b.mutation<FiltersPayload, { filters: FiltersPayload; unlockToken?: string }>({
+      query: ({ filters, unlockToken }) => ({
         url: "settings/filters",
         method: "PUT",
         body: filters,
-        headers: pin ? { "X-Settings-Pin": pin } : undefined,
+        headers: unlockToken ? { "X-Settings-Unlock": unlockToken } : undefined,
       }),
       invalidatesTags: ["Prefs", "Feed"],
     }),
@@ -496,9 +498,11 @@ export const api = createApi({
       query: (body) => ({ url: "settings/pin", method: "POST", body }),
       invalidatesTags: ["Session"],
     }),
-    verifyPin: b.mutation<{ valid: boolean }, { pin: string }>({
+    verifyPin: b.mutation<{ valid: boolean; unlockToken: string; expiresAt: string }, { pin: string }>({
       query: (body) => ({ url: "settings/pin/verify", method: "POST", body }),
     }),
+    // PIN removal is destructive, so it deliberately takes the freshly re-entered raw PIN — the
+    // backend refuses unlock tokens on this endpoint and callers must prompt, not read a cache.
     removePin: b.mutation<{ pinConfigured: boolean }, { pin: string }>({
       query: ({ pin }) => ({ url: "settings/pin", method: "DELETE", headers: { "X-Settings-Pin": pin } }),
       invalidatesTags: ["Session"],
