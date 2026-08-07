@@ -1,0 +1,290 @@
+using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
+using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.EntityFrameworkCore;
+
+namespace FrostAura.Reel.Tests.IntegrationTests;
+
+/// <summary>
+/// The conditions editor's new filters, exercised on real Postgres — the only place they can be
+/// trusted, because each one is a SQL predicate that casts a text column to a number. A translation
+/// or cast fault here is invisible to an in-memory test and fatal in production.
+///
+/// Every assertion is scoped to the ids this test seeded, so a shared catalogue left behind by other
+/// integration tests can neither satisfy nor break it. Skips when REEL_TEST_CONNECTION_STRING is
+/// unset (no DB in the run).
+/// </summary>
+[Collection("postgres")]
+public class ContentFilterEligibilityTests(PostgresFixture fixture)
+{
+    [Fact]
+    public async Task Crowd_floor_keeps_well_rated_titles_falls_back_to_trakt_and_drops_the_unrated()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+
+        var highTmdb = await SeedTitleAsync(t => { t.TmdbVoteAverage = 8.1m; t.TmdbVoteCount = 900; });
+        var lowTmdb = await SeedTitleAsync(t => { t.TmdbVoteAverage = 5.2m; t.TmdbVoteCount = 900; });
+        // No TMDB rating at all ⇒ the Trakt fallback decides, exactly as the badge does.
+        var highTraktOnly = await SeedTitleAsync(t => { t.TraktRating = 9.0m; t.TraktVotes = 40; });
+        var lowTraktOnly = await SeedTitleAsync(t => { t.TraktRating = 4.0m; t.TraktVotes = 40; });
+        // A TMDB zero is "never rated", not a rating of zero — it must fall through to Trakt too.
+        var zeroTmdbHighTrakt = await SeedTitleAsync(t =>
+        {
+            t.TmdbVoteAverage = 0m;
+            t.TraktRating = 8.8m;
+            t.TraktVotes = 15;
+        });
+        var unrated = await SeedTitleAsync(_ => { });
+
+        var mine = new[] { highTmdb, lowTmdb, highTraktOnly, lowTraktOnly, zeroTmdbHighTrakt, unrated };
+
+        // No floor configured ⇒ every one of them is eligible, including the unrated title.
+        Assert.Equal(mine.ToHashSet(), (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, ContentFilterRules.FormatRating(7.0m));
+
+        var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.Contains(highTmdb, survivors);
+        Assert.Contains(highTraktOnly, survivors);
+        Assert.Contains(zeroTmdbHighTrakt, survivors);
+        Assert.DoesNotContain(lowTmdb, survivors);
+        Assert.DoesNotContain(lowTraktOnly, survivors);
+        // Documented call, mirroring PassesMaturity's treatment of an unrated certification: a title
+        // the catalogue has no crowd rating for FAILS a crowd floor rather than sliding under it.
+        Assert.DoesNotContain(unrated, survivors);
+    }
+
+    [Fact]
+    public async Task Year_window_is_inclusive_falls_back_to_air_dates_and_keeps_undated_titles()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+
+        var tooOld = await SeedTitleAsync(t => t.Year = 1979);
+        var lowerEdge = await SeedTitleAsync(t => t.Year = 1990);
+        var inside = await SeedTitleAsync(t => t.Year = 1999);
+        var upperEdge = await SeedTitleAsync(t => t.Year = 2010);
+        var tooNew = await SeedTitleAsync(t => t.Year = 2024);
+        // Year unset ⇒ the release / first-aired date carries the comparison.
+        var datedOnly = await SeedTitleAsync(t => t.ReleasedAt = new DateTime(1995, 6, 1, 0, 0, 0, DateTimeKind.Utc));
+        var airedOnly = await SeedTitleAsync(t => t.FirstAiredAt = new DateTime(2020, 6, 1, 0, 0, 0, DateTimeKind.Utc));
+        var undated = await SeedTitleAsync(_ => { });
+
+        var mine = new[] { tooOld, lowerEdge, inside, upperEdge, tooNew, datedOnly, airedOnly, undated };
+
+        await SeedFilterAsync(accountId, FilterKind.MinYear, ContentFilterRules.FormatYear(1990));
+        await SeedFilterAsync(accountId, FilterKind.MaxYear, ContentFilterRules.FormatYear(2010));
+
+        var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.Contains(lowerEdge, survivors);   // bounds are inclusive on both ends
+        Assert.Contains(upperEdge, survivors);
+        Assert.Contains(inside, survivors);
+        Assert.Contains(datedOnly, survivors);
+        Assert.DoesNotContain(tooOld, survivors);
+        Assert.DoesNotContain(tooNew, survivors);
+        Assert.DoesNotContain(airedOnly, survivors);
+        // Documented call: absence of a date is not evidence of the wrong date, matching how the
+        // Ask Reel year window already treats undated titles.
+        Assert.Contains(undated, survivors);
+    }
+
+    [Fact]
+    public async Task An_open_ended_year_bound_only_constrains_its_own_end()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var old = await SeedTitleAsync(t => t.Year = 1975);
+        var recent = await SeedTitleAsync(t => t.Year = 2020);
+        var mine = new[] { old, recent };
+
+        await SeedFilterAsync(accountId, FilterKind.MinYear, ContentFilterRules.FormatYear(2000));
+
+        var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.Contains(recent, survivors);
+        Assert.DoesNotContain(old, survivors);
+    }
+
+    [Fact]
+    public async Task Include_genres_narrow_the_pool_to_titles_carrying_a_listed_genre()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var horror = await SeedTitleAsync(t => t.Genres = ["horror"]);
+        var horrorPlus = await SeedTitleAsync(t => t.Genres = ["comedy", "horror"]);
+        var comedy = await SeedTitleAsync(t => t.Genres = ["comedy"]);
+        var genreless = await SeedTitleAsync(t => t.Genres = []);
+        var mine = new[] { horror, horrorPlus, comedy, genreless };
+
+        // With no include rows the allow-list is inert — all four are eligible.
+        Assert.Equal(mine.ToHashSet(), (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        await SeedFilterAsync(accountId, FilterKind.IncludeGenre, "horror");
+
+        var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.Contains(horror, survivors);
+        Assert.Contains(horrorPlus, survivors);   // one listed genre is enough
+        Assert.DoesNotContain(comedy, survivors);
+        Assert.DoesNotContain(genreless, survivors);
+    }
+
+    [Fact]
+    public async Task A_genre_rail_ignores_the_genre_filters_but_still_honours_every_other_condition()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+
+        // A documentary the user would otherwise never be shown, because they excluded the genre.
+        var doc = await SeedTitleAsync(t =>
+        {
+            t.Genres = ["documentary"];
+            t.Year = 2001;
+            t.TmdbVoteAverage = 8.4m;
+            t.TmdbVoteCount = 500;
+        });
+        // Same genre, but it trips the crowd floor — the rail must NOT waive that one.
+        var weakDoc = await SeedTitleAsync(t =>
+        {
+            t.Genres = ["documentary"];
+            t.Year = 2001;
+            t.TmdbVoteAverage = 4.1m;
+            t.TmdbVoteCount = 500;
+        });
+        // Same genre, outside the year window — also still excluded.
+        var oldDoc = await SeedTitleAsync(t =>
+        {
+            t.Genres = ["documentary"];
+            t.Year = 1965;
+            t.TmdbVoteAverage = 8.9m;
+            t.TmdbVoteCount = 500;
+        });
+        var mine = new[] { doc, weakDoc, oldDoc };
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "documentary");
+        await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, ContentFilterRules.FormatRating(7.0m));
+        await SeedFilterAsync(accountId, FilterKind.MinYear, ContentFilterRules.FormatYear(1990));
+
+        // Tonight's picks: the excluded genre is gone entirely.
+        Assert.Empty(await EligibleAsync(accountId, mine));
+
+        // The genre rail: the rail's own genre is the user's explicit request, so the genre filter
+        // steps aside — but the crowd floor and the year window do not.
+        var rail = await RailAsync(accountId, mine);
+        Assert.Contains(doc, rail);
+        Assert.DoesNotContain(weakDoc, rail);
+        Assert.DoesNotContain(oldDoc, rail);
+    }
+
+    /// <summary>Eligible ids among <paramref name="mine"/> — the discovery path (Tonight's picks).</summary>
+    private async Task<IReadOnlyList<Guid>> EligibleAsync(Guid accountId, IReadOnlyCollection<Guid> mine)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        return await new EligibilityQueryBuilder(db)
+            .EligibleTitles(accountId)
+            .Where(t => mine.Contains(t.Id))
+            .Select(t => t.Id)
+            .ToListAsync();
+    }
+
+    /// <summary>
+    /// Eligible ids among <paramref name="mine"/> through the genre-rail path — the retriever call
+    /// FeedPaginator makes for <c>FeedRowContext.Genre</c>. The lane is pinned to the seeded ids so a
+    /// shared catalogue cannot crowd them out of the popularity window.
+    /// </summary>
+    private async Task<IReadOnlyList<Guid>> RailAsync(Guid accountId, IReadOnlyCollection<Guid> mine)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var retriever = new CandidateRetriever(db, new EligibilityQueryBuilder(db));
+        var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, DateTime.UtcNow, CancellationToken.None);
+        var hits = await retriever.RetrieveAsync(
+            accountId,
+            taste,
+            lane: q => q.Where(t => mine.Contains(t.Id) && t.Genres.Contains("documentary")),
+            popCount: 50,
+            annCount: 0,
+            maturityCeiling: null,
+            CancellationToken.None,
+            ignoreGenreFilters: true);
+        return hits.Select(t => t.Id).ToList();
+    }
+
+    private async Task<Guid> SeedAccountAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"filters-{Guid.NewGuid():N}",
+            Tier = AccountTier.Paid,
+            CreatedAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            PipelineStageChangedAt = DateTime.UtcNow,
+        };
+        db.Add(account);
+        await db.SaveChangesAsync();
+        return account.Id;
+    }
+
+    private async Task<Guid> SeedTitleAsync(Action<Title> shape)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+            TraktSlug = string.Empty,
+            Name = $"filter-fixture {Guid.NewGuid():N}",
+            // Eligibility defaults to English-only when no language filter is configured.
+            Language = "en",
+            PosterPath = "/p.jpg",
+            Genres = ["drama"],
+            // Deliberately at the very bottom of the popularity order: these fixtures must never
+            // displace another integration test's top-N assertions on the shared catalogue.
+            TmdbPopularity = 0m,
+            CreatedAt = DateTime.UtcNow,
+        };
+        shape(title);
+        db.Add(title);
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    private async Task SeedFilterAsync(Guid accountId, FilterKind kind, string value)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            Value = value,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+}

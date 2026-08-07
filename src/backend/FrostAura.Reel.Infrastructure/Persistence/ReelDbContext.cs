@@ -1,4 +1,5 @@
 using System.Reflection;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Auth;
@@ -24,6 +25,13 @@ namespace FrostAura.Reel.Infrastructure.Persistence;
 public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountContext accountContext)
     : DbContext(options), IDataProtectionKeyContext, IReelDbContext
 {
+    /// <summary>
+    /// Shadow property on <see cref="ModelArtifact"/>: the feature-schema version the artifact was
+    /// trained against, computed by Postgres from <c>FeatureSchemaJson</c>. Named here so the
+    /// reconcile sweep can query it.
+    /// </summary>
+    public const string FeatureSchemaVersionProperty = "FeatureSchemaVersion";
+
     private readonly IAccountContext _accountContext = accountContext;
 
     // Tenancy & auth
@@ -63,6 +71,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<ModelArtifact> ModelArtifacts => Set<ModelArtifact>();
     public DbSet<EvaluationResult> EvaluationResults => Set<EvaluationResult>();
     public DbSet<TitleScore> TitleScores => Set<TitleScore>();
+    public DbSet<OnlineModelState> OnlineModelStates => Set<OnlineModelState>();
 
     // Feed
     public DbSet<FeedSnapshot> FeedSnapshots => Set<FeedSnapshot>();
@@ -225,8 +234,30 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         modelBuilder.Entity<ModelArtifact>(e =>
         {
             e.HasIndex(a => new { a.AccountId, a.Version }).IsUnique();
+            // At most one Active artifact per account — enforced by the database, not by the
+            // check-then-insert in TrainJobHandler, so a raced retrain fails loudly instead of
+            // leaving two Active artifacts for an unordered FirstOrDefault to pick between.
             e.HasIndex(a => a.AccountId).IsUnique().HasFilter("\"Status\" = 'Active'");
             e.Property(a => a.FeatureSchemaJson).HasColumnType("jsonb");
+            // The feature-schema version the artifact was trained against, projected out of the jsonb
+            // by Postgres itself so the column can never disagree with the document it came from.
+            // Shadow rather than a domain property: it is a persistence-level projection, not state
+            // the domain owns.
+            e.Property<int?>(FeatureSchemaVersionProperty)
+                .HasComputedColumnSql("((\"FeatureSchemaJson\" ->> 'version'))::integer", stored: true);
+
+            // Tenancy AND schema compatibility, in ONE filter (this entity is deliberately excluded
+            // from the generic tenancy loop below so the two predicates compose instead of one
+            // replacing the other). An artifact whose recorded schema version is not the running
+            // FeatureSchema.Version cannot be read back as Active: the vector's width and column
+            // meanings moved under it, and Score()/ScoreCached() validate width only — the exact
+            // silent failure FeatureSchema's own doc-comment warns about. Every consumer already
+            // treats "no Active artifact" as "no model yet", which is the correct degradation;
+            // NightlyReconcileService logs the mismatch loudly and forces a retrain.
+            e.HasQueryFilter(a =>
+                (_accountContext.AccountId == null || a.AccountId == _accountContext.AccountId)
+                && (a.Status != ArtifactStatus.Active
+                    || EF.Property<int?>(a, FeatureSchemaVersionProperty) == FeatureSchema.Version));
         });
 
         modelBuilder.Entity<EvaluationResult>(e =>
@@ -241,6 +272,10 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(s => new { s.AccountId, s.ModelArtifactId, s.PredictedRating }).IsDescending(false, false, true);
             e.Property(s => s.ContributionsJson).HasColumnType("jsonb");
         });
+
+        // One residual head per account (upserted on every event); unique so the online update
+        // has a single row to load-modify-write against.
+        modelBuilder.Entity<OnlineModelState>(e => e.HasIndex(s => s.AccountId).IsUnique());
 
         // ── Feed ───────────────────────────────────────────────────────────────────────────
         modelBuilder.Entity<FeedSnapshot>(e =>
@@ -282,8 +317,11 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         });
 
         // ── Row-level tenancy, enforced once ───────────────────────────────────────────────
+        // ModelArtifact is the one exception: it declares its own filter above, which carries this
+        // same tenancy predicate plus the feature-schema compatibility check.
         foreach (var entityType in modelBuilder.Model.GetEntityTypes()
-                     .Where(t => typeof(IAccountScoped).IsAssignableFrom(t.ClrType) && !t.IsOwned()))
+                     .Where(t => typeof(IAccountScoped).IsAssignableFrom(t.ClrType) && !t.IsOwned())
+                     .Where(t => t.ClrType != typeof(ModelArtifact)))
         {
             typeof(ReelDbContext)
                 .GetMethod(nameof(ApplyAccountFilter), BindingFlags.NonPublic | BindingFlags.Instance)!

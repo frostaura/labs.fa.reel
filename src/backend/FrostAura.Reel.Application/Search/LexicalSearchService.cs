@@ -108,6 +108,11 @@ public class LexicalSearchService(EligibilityQueryBuilder eligibility)
             return [];
         }
 
+        // Maturity is a safety gate, not a preference: the same in-memory certification ceiling the
+        // feed and Ask Reel apply must bite here too, or an R / TV-MA title leaks to a restricted
+        // profile through lexical search. Fetched once; applied as candidates are collected.
+        var maturityCeiling = await eligibility.MaturityCeilingAsync(accountId, ct);
+
         // Candidate pull: all groups' genres (popular first) ∪ per-term text matches.
         var candidates = new Dictionary<Guid, Title>();
         var allGenres = groups.SelectMany(g => g.Genres).Distinct().ToList();
@@ -119,7 +124,7 @@ public class LexicalSearchService(EligibilityQueryBuilder eligibility)
                 .OrderByDescending(t => t.TmdbPopularity)
                 .Take(400)
                 .ToListAsync(ct);
-            foreach (var title in byGenre)
+            foreach (var title in EligibilityQueryBuilder.WithinMaturity(byGenre, maturityCeiling))
             {
                 candidates[title.Id] = title;
             }
@@ -134,7 +139,7 @@ public class LexicalSearchService(EligibilityQueryBuilder eligibility)
                 .OrderByDescending(t => t.TmdbPopularity)
                 .Take(120)
                 .ToListAsync(ct);
-            foreach (var title in byTerm)
+            foreach (var title in EligibilityQueryBuilder.WithinMaturity(byTerm, maturityCeiling))
             {
                 candidates[title.Id] = title;
             }

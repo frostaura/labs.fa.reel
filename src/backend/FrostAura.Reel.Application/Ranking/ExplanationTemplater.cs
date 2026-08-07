@@ -10,12 +10,25 @@ namespace FrostAura.Reel.Application.Ranking;
 /// </summary>
 public static class ExplanationTemplater
 {
+    /// <summary>A person the user has actually rated (count ≥ 2), with their shrunken affinity.</summary>
+    public record PersonAffinity(string Name, decimal Affinity);
+
+    /// <summary>Shared empty person map — a title with no user-rated cast/crew grounds no name clause.</summary>
+    public static readonly IReadOnlyDictionary<CreditRole, PersonAffinity> NoPersons =
+        new Dictionary<CreditRole, PersonAffinity>();
+
+    /// <summary>
+    /// Everything the sentence is allowed to cite, pre-verified by the caller so the templater can
+    /// never fabricate a taste fact. <paramref name="VerifiedPersonByRole"/> holds only people the
+    /// user has genuinely rated, keyed by their actual credit role (so a director clause never prints
+    /// an actor's name); <paramref name="RatedGenres"/> holds only genres present in the user's
+    /// GenreRatings (so a genre clause never names a genre the user never rated).
+    /// </summary>
     public record Context(
         Title Title,
         IReadOnlyList<(string Feature, float Contribution)> Contributions,
-        string? BestPersonName,
-        decimal BestPersonAffinity,
-        string? TopGenre,
+        IReadOnlyDictionary<CreditRole, PersonAffinity> VerifiedPersonByRole,
+        IReadOnlySet<string> RatedGenres,
         string? AnchorName);
 
     public static string BuildSentence(Context context)
@@ -58,16 +71,23 @@ public static class ExplanationTemplater
 
         return feature switch
         {
-            "castAffinity" or "lovedCastCount" or "directorAffinity" or "writerAffinity"
-                when context.BestPersonName is { Length: > 0 } =>
-                    string.Create(CultureInfo.InvariantCulture, $"you rate {context.BestPersonName} {context.BestPersonAffinity:0.0} on average"),
+            // Named person clauses fire ONLY when the contribution's role has a verified, user-rated
+            // person — so a directorAffinity contribution can never print an actor's name, and no
+            // clause ever names someone the user hasn't actually rated. Otherwise fall to the generic
+            // (still contribution-backed) line, which asserts affinity without inventing a name.
+            "castAffinity" or "lovedCastCount" when Verified(context, CreditRole.Actor) is { } actor =>
+                string.Create(CultureInfo.InvariantCulture, $"you rate {actor.Name} {actor.Affinity:0.0} on average"),
+            "directorAffinity" when Verified(context, CreditRole.Director) is { } director =>
+                string.Create(CultureInfo.InvariantCulture, $"you rate {director.Name} {director.Affinity:0.0} on average"),
+            "writerAffinity" when Verified(context, CreditRole.Writer) is { } writer =>
+                string.Create(CultureInfo.InvariantCulture, $"you rate {writer.Name} {writer.Affinity:0.0} on average"),
             "castAffinity" or "lovedCastCount" => "the cast overlaps your favourites",
             "directorAffinity" => "the director is in your top tier",
             "writerAffinity" => "written by people you rate highly",
-            "userGenreAffinity" when context.TopGenre is { Length: > 0 } =>
-                $"right in your {Pretty(context.TopGenre)} wheelhouse",
-            "genreDrift" when context.TopGenre is { Length: > 0 } =>
-                $"matches the {Pretty(context.TopGenre)} streak you've been on",
+            "userGenreAffinity" when TopRatedGenre(context) is { } genre =>
+                $"right in your {Pretty(genre)} wheelhouse",
+            "genreDrift" when TopRatedGenre(context) is { } genre =>
+                $"matches the {Pretty(genre)} streak you've been on",
             "decadeAffinity" when context.Title.Year is { } year =>
                 $"peak {(year / 10) * 10}s — your era",
             "traktRating" when context.Title.TraktRating is { } rating =>
@@ -78,10 +98,20 @@ public static class ExplanationTemplater
             "contrarianAdjustedRating" => "scores well even by your contrarian standards",
             "simLovedCentroid" or "simRecentCentroid" or "simTopLovedMax" or "simTopLovedMean" =>
                 "close in feel to the titles you love",
-            _ when feature.StartsWith("genre:") => $"squarely {Pretty(feature[6..])}",
+            // A per-genre indicator clause names a genre only when the user has actually rated it.
+            _ when feature.StartsWith("genre:") && context.RatedGenres.Contains(feature[6..]) =>
+                $"squarely {Pretty(feature[6..])}",
             _ => null,
         };
     }
+
+    /// <summary>The verified, user-rated person for a role (null when none — no name is invented).</summary>
+    private static PersonAffinity? Verified(Context context, CreditRole role) =>
+        context.VerifiedPersonByRole.GetValueOrDefault(role);
+
+    /// <summary>The title's first genre the user has actually rated (null when none is verifiable).</summary>
+    private static string? TopRatedGenre(Context context) =>
+        context.Title.Genres.FirstOrDefault(context.RatedGenres.Contains);
 
     private static bool IsFresh(Title title)
     {

@@ -1,8 +1,43 @@
+import { useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
 import { Star } from "lucide-react";
 import { useGetPersonQuery, useRatePersonMutation, useUnratePersonMutation } from "../store/api";
-import { profileUrl, posterUrl } from "../lib/tmdbImages";
+import { profileUrl } from "../lib/tmdbImages";
+import PosterImage from "../components/rec/PosterImage";
 import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
+
+/** Initials for the avatar fallback — first letters of the first two words of a name. */
+function initials(name: string): string {
+  return name.split(" ").map((w) => w[0]).slice(0, 2).join("");
+}
+
+/**
+ * Round profile photo with the same failure contract as PosterImage (which cannot be reused here —
+ * it is locked to the 2:3 poster box): a missing path *and* a URL that 404s both degrade to
+ * initials rather than the browser's broken-image glyph. TMDB profile paths go stale often enough
+ * that the `onError` half is not theoretical.
+ */
+function PersonAvatar({ name, profilePath }: { name: string; profilePath: string | null }) {
+  const [failed, setFailed] = useState(false);
+  const url = profileUrl(profilePath);
+
+  return (
+    <div className="h-24 w-24 rounded-full overflow-hidden bg-fa-ink-3 shrink-0">
+      {url && !failed ? (
+        <img
+          src={url}
+          alt={name}
+          onError={() => setFailed(true)}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <div className="h-full w-full flex items-center justify-center bg-gradient-to-br from-fa-ink-2 to-fa-ink-3 text-fa-frost-dim select-none">
+          {initials(name)}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Actor/person page: who they are, your explicit rating, the derived affinity, filmography. */
 export default function Person() {
@@ -19,15 +54,7 @@ export default function Person() {
   return (
     <div className="space-y-6">
       <header className="flex items-start gap-4">
-        <div className="h-24 w-24 rounded-full overflow-hidden bg-fa-ink-3 shrink-0">
-          {profileUrl(person.profilePath) ? (
-            <img src={profileUrl(person.profilePath)!} alt={person.name} className="h-full w-full object-cover" />
-          ) : (
-            <div className="h-full w-full flex items-center justify-center text-fa-frost-dim">
-              {person.name.split(" ").map((w) => w[0]).slice(0, 2).join("")}
-            </div>
-          )}
-        </div>
+        <PersonAvatar name={person.name} profilePath={person.profilePath} />
         <div className="space-y-2">
           <h1 className="text-2xl font-light text-fa-frost-bright">{person.name}</h1>
           {person.department && <p className="fa-caption text-fa-frost-dim">{person.department}</p>}
@@ -82,11 +109,10 @@ export default function Person() {
                 className="group block focus:outline-none"
               >
                 <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
-                  <div className="reel-poster">
-                    {posterUrl(t.posterPath, "w185") && (
-                      <img src={posterUrl(t.posterPath, "w185")!} alt={t.name} loading="lazy" className="h-full w-full object-cover" />
-                    )}
-                  </div>
+                  {/* The shared poster component, not hand-rolled markup: it carries the shimmer,
+                      the gradient-initials fallback for a null path, and the onError that keeps a
+                      stale TMDB URL from rendering the browser's broken-image glyph. */}
+                  <PosterImage path={t.posterPath} alt={t.name} size="w185" />
                   {t.userRating != null ? (
                     <span className="absolute top-2 right-2 rounded-full bg-fa-ink/80 text-fa-frost-bright fa-caption px-1.5 py-0.5 flex items-center gap-0.5">
                       <Star className="h-2.5 w-2.5 fill-current" /> {t.userRating}

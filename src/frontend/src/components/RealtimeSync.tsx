@@ -55,6 +55,8 @@ export default function RealtimeSync() {
             label: String(data.message ?? data.kind ?? "Syncing"),
             pct: typeof data.pct === "number" ? data.pct : null,
             kind,
+            current: typeof data.current === "number" ? data.current : null,
+            total: typeof data.total === "number" ? data.total : null,
           })
         );
       } catch {
@@ -66,6 +68,20 @@ export default function RealtimeSync() {
       // The status refetch (Sync tag) decides whether the pill clears or hands over to
       // the next active job.
       dispatch(api.util.invalidateTags(["Sync", "Feed", "TasteDna"]));
+    });
+
+    // The authoritative "your feed just changed" frame: a reactive rebuild (fired the instant new
+    // watches/ratings sync in, or an in-app rating lands) mints a fresh snapshot with a new
+    // generatedAt. Invalidating Feed refetches it; the generatedAt-keyed rows in Home then remount
+    // and reseed with the new, still-eligible picks — so fresh recommendations lazy-load in live.
+    source.addEventListener("feed-ready", () => {
+      dispatch(api.util.invalidateTags(["Feed", "TasteDna"]));
+    });
+
+    // Floor against a feed-ready frame missed while the stream was down: the hub keeps no replay
+    // buffer, so on every (re)connect refetch the feed to reconcile whatever changed in the gap.
+    source.addEventListener("open", () => {
+      dispatch(api.util.invalidateTags(["Feed", "Sync"]));
     });
 
     return () => source.close();

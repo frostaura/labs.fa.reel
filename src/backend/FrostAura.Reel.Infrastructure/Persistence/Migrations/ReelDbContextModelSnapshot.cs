@@ -804,6 +804,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
+                    b.Property<int?>("FeatureSchemaVersion")
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("integer")
+                        .HasComputedColumnSql("((\"FeatureSchemaJson\" ->> 'version'))::integer", true);
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -828,6 +833,39 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("ModelArtifacts");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.Ml.OnlineModelState", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BaseArtifactId")
+                        .HasColumnType("uuid");
+
+                    b.Property<double>("Bias")
+                        .HasColumnType("double precision");
+
+                    b.Property<long>("UpdateCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("Weights")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId")
+                        .IsUnique();
+
+                    b.ToTable("OnlineModelStates");
                 });
 
             modelBuilder.Entity("FrostAura.Reel.Domain.Ml.PersonAffinity", b =>

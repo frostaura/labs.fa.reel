@@ -1,0 +1,282 @@
+using System.Text.Json;
+using FrostAura.Reel.Application.Jobs;
+using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Ml;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace FrostAura.Reel.Tests.IntegrationTests;
+
+/// <summary>
+/// The three model-artifact invariants that were being asserted in comments rather than in code:
+/// a stored feature-schema version is actually VALIDATED before an artifact can be scored with, the
+/// database (not a check-then-insert) is what guarantees one Active artifact per account, and an
+/// account with too few ratings parks instead of wedging the pipeline behind a failing trainer.
+/// Skips when REEL_TEST_CONNECTION_STRING is unset.
+/// </summary>
+[Collection("postgres")]
+public class ModelArtifactLifecycleTests(PostgresFixture fixture)
+{
+    [Fact]
+    public async Task An_artifact_from_an_older_feature_schema_is_not_readable_as_active()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // FeatureSchema.Version is written on every artifact but was never read back, and the engine
+        // validates vector WIDTH only — never column ORDER. An artifact from a superseded schema must
+        // therefore be unusable, not silently misread.
+        var accountId = await SeedAccountAsync();
+        await SeedArtifactAsync(accountId, version: 1, schemaVersion: FeatureSchema.Version - 1);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var visible = await db.ModelArtifacts
+            .FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+        Assert.Null(visible);
+
+        // Still on disk — the sweep has to be able to find and supersede it.
+        Assert.Equal(1, await db.ModelArtifacts.IgnoreQueryFilters().CountAsync(a => a.AccountId == accountId));
+    }
+
+    [Fact]
+    public async Task An_artifact_from_the_current_feature_schema_is_readable()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var artifactId = await SeedArtifactAsync(accountId, version: 1, schemaVersion: FeatureSchema.Version);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var visible = await db.ModelArtifacts
+            .FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+
+        Assert.NotNull(visible);
+        Assert.Equal(artifactId, visible!.Id);
+    }
+
+    [Fact]
+    public async Task The_database_refuses_a_second_active_artifact_for_one_account()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Two Active artifacts would let OnDemandScorer and FeedPaginator — both of which pick the
+        // Active row with an UNORDERED FirstOrDefault — disagree request to request. The partial
+        // unique index is what makes that unrepresentable.
+        var accountId = await SeedAccountAsync();
+        await SeedArtifactAsync(accountId, version: 1, schemaVersion: FeatureSchema.Version);
+
+        var error = await Assert.ThrowsAsync<DbUpdateException>(
+            () => SeedArtifactAsync(accountId, version: 2, schemaVersion: FeatureSchema.Version));
+
+        Assert.True(TrainJobHandler.IsUniqueViolation(error), $"expected a unique violation, got {error.InnerException?.Message}");
+    }
+
+    [Fact]
+    public async Task Training_an_account_with_no_ratings_parks_it_instead_of_throwing()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // ML.NET FastTree throws "All instances skipped due to missing features" on an empty matrix.
+        // The old code had already moved the account to Training before that throw, so it sat behind
+        // a permanent spinner while the job burned its retries and every later sync re-enqueued
+        // another certain failure. Real Trakt users who watch without rating land here.
+        var accountId = await SeedAccountAsync();
+        var job = new SyncJob
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = JobKind.Train,
+            EnqueuedAt = DateTime.UtcNow,
+        };
+
+        await RunTrainAsync(accountId, job);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = await db.Accounts.FirstAsync(a => a.Id == accountId);
+
+        Assert.NotEqual(PipelineStage.Training, account.PipelineStage);
+        Assert.Equal(PipelineStage.Degraded, account.PipelineStage);
+        Assert.False(await db.ModelArtifacts.IgnoreQueryFilters().AnyAsync(a => a.AccountId == accountId));
+        Assert.False(await db.SyncJobs.AnyAsync(j => j.AccountId == accountId && j.Kind == JobKind.Evaluate));
+        Assert.NotNull(job.ProgressMessage);
+        Assert.Contains("Not enough ratings", job.ProgressMessage!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Training_below_the_row_floor_parks_rather_than_fitting_a_degenerate_model()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        for (var i = 0; i < TrainJobHandler.MinTrainingRows - 1; i++)
+        {
+            var titleId = await SeedTitleAsync($"Sparse {i}");
+            await SeedRatingAsync(accountId, titleId, (short)(6 + (i % 4)));
+        }
+
+        var job = new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow };
+        await RunTrainAsync(accountId, job);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.False(await db.ModelArtifacts.IgnoreQueryFilters().AnyAsync(a => a.AccountId == accountId));
+        Assert.Equal(PipelineStage.Degraded, (await db.Accounts.FirstAsync(a => a.Id == accountId)).PipelineStage);
+    }
+
+    [Fact]
+    public async Task Training_at_or_above_the_floor_produces_exactly_one_active_artifact()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        for (var i = 0; i < TrainJobHandler.MinTrainingRows + 4; i++)
+        {
+            var titleId = await SeedTitleAsync($"Trainable {i}");
+            await SeedRatingAsync(accountId, titleId, (short)(4 + (i % 7)));
+        }
+
+        // Twice in a row: the second run must supersede the first, not collide with the unique index.
+        await RunTrainAsync(accountId, new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow });
+        await RunTrainAsync(accountId, new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow });
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var artifacts = await db.ModelArtifacts.IgnoreQueryFilters()
+            .Where(a => a.AccountId == accountId)
+            .ToListAsync();
+
+        Assert.Equal(2, artifacts.Count);
+        Assert.Equal(1, artifacts.Count(a => a.Status == ArtifactStatus.Active));
+        Assert.Equal([1, 2], artifacts.OrderBy(a => a.Version).Select(a => a.Version));
+
+        // And the artifact it left behind is readable — i.e. stamped with the running schema version.
+        Assert.NotNull(await db.ModelArtifacts.FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active));
+    }
+
+    private async Task RunTrainAsync(Guid accountId, SyncJob job)
+    {
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var db = fixture.CreateContext(scoped);
+        var handler = new TrainJobHandler(
+            db,
+            new FeatureVectorBuilder(db),
+            new FastTreeModelEngine(),
+            new NoopEventHub(),
+            NullLogger<TrainJobHandler>.Instance);
+        await handler.ExecuteAsync(job, CancellationToken.None);
+    }
+
+    private async Task<Guid> SeedAccountAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"artifact-{Guid.NewGuid():N}",
+            CreatedAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            PipelineStage = PipelineStage.Extracting,
+            PipelineStageChangedAt = DateTime.UtcNow,
+        };
+        db.Add(account);
+        await db.SaveChangesAsync();
+        return account.Id;
+    }
+
+    private async Task<Guid> SeedTitleAsync(string name)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+            TraktSlug = string.Empty,
+            Name = name,
+            Language = "en",
+            // No poster: keeps these fixtures out of every discovery lane (PosterPath != null) and
+            // therefore out of the other tests sharing this database.
+            PosterPath = null,
+            Genres = ["drama"],
+            Year = 2005,
+            RuntimeMinutes = 100,
+            TraktRating = 7m,
+            TmdbPopularity = 10m,
+            CreatedAt = DateTime.UtcNow,
+        };
+        db.Add(title);
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    private async Task SeedRatingAsync(Guid accountId, Guid titleId, short rating)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.UserRatings.Add(new UserRating
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            TitleId = titleId,
+            SubjectType = RatingSubjectType.Movie,
+            Rating = rating,
+            RatedAt = DateTime.UtcNow.AddDays(-30),
+            SyncedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedArtifactAsync(Guid accountId, int version, int schemaVersion)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var artifact = new ModelArtifact
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Version = version,
+            Algo = "FastTree",
+            ArtifactBytes = [1, 2, 3],
+            FeatureSchemaJson = JsonSerializer.Serialize(new { version = schemaVersion, names = FeatureSchema.AllNames() }),
+            TrainingRunId = Guid.Empty,
+            Status = ArtifactStatus.Active,
+            TrainedAt = DateTime.UtcNow,
+        };
+        db.ModelArtifacts.Add(artifact);
+        await db.SaveChangesAsync();
+        return artifact.Id;
+    }
+
+    private sealed class NoopEventHub : IPipelineEventHub
+    {
+        public void Publish(Guid accountId, string type, IReadOnlyDictionary<string, object?> data) { }
+
+        public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(
+            Guid accountId, long? lastEventId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+}

@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
-import type { ContinueEntry, FeedPayload } from "./feedTypes";
+import type { ContinueEntry, FeedCard, FeedPayload, GenreRail, MoreFeedRequest, MoreFeedResponse } from "./feedTypes";
+import { titleRemoved, titleRestored } from "./removedTitlesSlice";
 import type { PersonPayload, ProvidersPayload, SavedEntry, TitleDetailPayload } from "./titleTypes";
 
 export interface TypeaheadTitle {
@@ -18,32 +19,20 @@ export interface TypeaheadPayload {
   people: { personId: string; name: string; knownFor: string | null; profilePath: string | null }[];
 }
 
-export interface SemanticResult {
-  titleId: string;
-  mediaType: "Movie" | "Show";
-  tmdbId: number | null;
-  name: string;
-  year: number | null;
-  posterPath: string | null;
-  genres: string[];
-  similarity: number;
-  matchedOn?: string[];
-  predictedRating: number | null;
-}
-
-export interface SemanticPayload {
-  available: boolean;
-  mode?: "semantic" | "lexical";
-  reason: string | null;
-  results: SemanticResult[];
-}
-
 export interface FiltersPayload {
   excludeGenres: string[];
+  /** "Must have at least one of these" — the positive half of the genre rule. */
   includeGenres: string[];
   excludeKeywords: string[];
   maturityCeiling: string | null;
   minPredictedRating: number | null;
+  /** Allowed original languages (ISO-639-1). Defaults to ["en"]; ["*"] = every language. */
+  languages: string[];
+  /** Minimum community score (0–10). null = off. */
+  minCrowdRating: number | null;
+  /** Release-year range; either bound may be null for open-ended. */
+  minYear: number | null;
+  maxYear: number | null;
 }
 
 export interface TasteDnaPayload {
@@ -108,6 +97,10 @@ export interface SyncStatus {
   recentJobs: SyncJobSummary[];
   outboxPending: number;
   outboxDeadLetters: number;
+  /** When Trakt last accepted a list/write-back (max SentAt across the outbox). */
+  lastListSyncAt: string | null;
+  /** Most recent write-back error text, for the indicator's hover detail. */
+  outboxLastError: string | null;
 }
 
 export interface AccountSettings {
@@ -195,7 +188,10 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
 export const api = createApi({
   reducerPath: "reelApi",
   baseQuery: baseQueryWithReauth,
-  tagTypes: ["Session", "Sync", "Feed", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
+  // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
+  // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
+  // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -230,11 +226,24 @@ export const api = createApi({
     }),
     getContinueWatching: b.query<ContinueEntry[], void>({
       query: () => "feed/continue-watching",
-      providesTags: ["Feed"],
+      providesTags: ["ContinueWatching", "Feed"],
     }),
     rebuildFeed: b.mutation<void, void>({
       query: () => ({ url: "feed/rebuild", method: "POST" }),
       invalidatesTags: ["Sync"],
+    }),
+    getFeedGenres: b.query<GenreRail[], void>({
+      query: () => "feed/genres",
+      transformResponse: (r: { genres: GenreRail[] }) => r.genres,
+      providesTags: ["Feed"],
+    }),
+    // Infinite-scroll page fetch. A mutation (not a query) because pagination is driven
+    // imperatively — the caller accumulates pages and passes the ids already shown to exclude.
+    // Returns the page plus the server's `exhausted` flag so the row can latch on true dryness
+    // (never on a transient error). A missing flag defaults to exhausted for safety.
+    loadMoreFeed: b.mutation<MoreFeedResponse, MoreFeedRequest>({
+      query: (body) => ({ url: "feed/more", method: "POST", body }),
+      transformResponse: (r: { items: FeedCard[]; exhausted?: boolean }) => ({ items: r.items, exhausted: r.exhausted ?? true }),
     }),
     getTitle: b.query<TitleDetailPayload, { mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => `titles/${mediaType}/${tmdbId}`,
@@ -281,9 +290,10 @@ export const api = createApi({
         }
       },
     }),
-    rateTitle: b.mutation<{ userRating: number }, { mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }>({
-      query: ({ mediaType, tmdbId, ...body }) => ({ url: `titles/${mediaType}/${tmdbId}/rating`, method: "POST", body }),
-      async onQueryStarted({ mediaType, tmdbId, rating }, { dispatch, queryFulfilled }) {
+    rateTitle: b.mutation<{ userRating: number }, { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }>({
+      // titleId rides along only to key the local removal set; it must not leak into the POST body.
+      query: ({ mediaType, tmdbId, titleId: _titleId, ...body }) => ({ url: `titles/${mediaType}/${tmdbId}/rating`, method: "POST", body }),
+      async onQueryStarted({ titleId, mediaType, tmdbId, rating }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.userRating = rating;
@@ -292,19 +302,22 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
+          // Deliberately does NOT invalidate Feed — see `markNotInterested`.
+          dispatch(titleRemoved({ titleId }));
           dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
         } catch {
           patch.undo();
         }
       },
     }),
-    markNotInterested: b.mutation<void, { mediaType: string; tmdbId: number; reason?: string }>({
+    markNotInterested: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number; reason?: string }>({
       query: ({ mediaType, tmdbId, reason }) => ({
         url: `titles/${mediaType}/${tmdbId}/reactions/not_interested`,
         method: "POST",
         body: { reason },
       }),
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.notInterested = true;
@@ -312,14 +325,21 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // "Not interested" leaves the feed immediately via the local removal set — and ONLY via
+          // that. Invalidating Feed here refetches the snapshot, which mints a new generatedAt,
+          // which re-keys every row in Home, which throws away the pages the user has scrolled and
+          // scrolls them back to the start. Acting on one card must never reset the list around it;
+          // the server rebuild that this reaction triggers is adopted at a deliberate boundary
+          // instead (Home's "new picks ready" control, or the next mount).
+          dispatch(titleRemoved({ titleId }));
         } catch {
           patch.undo();
         }
       },
     }),
-    undoNotInterested: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    undoNotInterested: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/not_interested`, method: "DELETE" }),
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.notInterested = false;
@@ -327,6 +347,9 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // Re-eligible — restoring the key un-hides the card that is still in the row's local
+          // state, so no refetch is needed (and a refetch would reset the row).
+          dispatch(titleRestored({ titleId }));
         } catch {
           patch.undo();
         }
@@ -334,23 +357,37 @@ export const api = createApi({
     }),
     markDropped: b.mutation<void, { mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "POST" }),
-      invalidatesTags: ["Feed"], // continue-watching is tagged Feed
+      invalidatesTags: ["ContinueWatching"], // that rail only — not the picks snapshot
       async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
-        const patch = dispatch(
-          api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
-            draft.userState.dropped = true;
-          })
-        );
+        // Two patches, because the drop button exists on two surfaces. The detail page reads
+        // getTitle; the Continue Watching shelf reads getContinueWatching, and it used to have no
+        // optimistic patch at all — the card sat there through a POST *and* the invalidation
+        // refetch before vanishing. On a fast local stack that is ~50ms and invisible, but there is
+        // no spinner and no disabled state, so on a slow or flaky connection the button reads as
+        // dead and invites a second click. Removing the entry up front makes the shelf respond to
+        // the click itself rather than to the network.
+        const patches = [
+          dispatch(
+            api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
+              draft.userState.dropped = true;
+            })
+          ),
+          dispatch(
+            api.util.updateQueryData("getContinueWatching", undefined, (draft) =>
+              draft.filter((entry) => entry.tmdbId !== tmdbId)
+            )
+          ),
+        ];
         try {
           await queryFulfilled;
         } catch {
-          patch.undo();
+          patches.forEach((p) => p.undo());
         }
       },
     }),
     undrop: b.mutation<void, { mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "DELETE" }),
-      invalidatesTags: ["Feed"],
+      invalidatesTags: ["ContinueWatching"],
       async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -364,9 +401,9 @@ export const api = createApi({
         }
       },
     }),
-    saveForLater: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    saveForLater: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/save_for_later`, method: "POST" }),
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.savedForLater = true;
@@ -374,15 +411,18 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // A saved title drops out of the live rows now. Saved list refreshes; the picks snapshot
+          // deliberately does not — see `markNotInterested`.
+          dispatch(titleRemoved({ titleId }));
           dispatch(api.util.invalidateTags(["Saved"]));
         } catch {
           patch.undo();
         }
       },
     }),
-    unsaveForLater: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    unsaveForLater: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/save_for_later`, method: "DELETE" }),
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.savedForLater = false;
@@ -390,6 +430,8 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // Unsaving makes it eligible again — restore it to the live rows and refresh Saved.
+          dispatch(titleRestored({ titleId }));
           dispatch(api.util.invalidateTags(["Saved"]));
         } catch {
           patch.undo();
@@ -431,9 +473,6 @@ export const api = createApi({
     searchTypeahead: b.query<TypeaheadPayload, string>({
       query: (q) => `search/typeahead?q=${encodeURIComponent(q)}`,
       keepUnusedDataFor: 30,
-    }),
-    searchSemantic: b.query<SemanticPayload, string>({
-      query: (query) => ({ url: "search/semantic", method: "POST", body: { query } }),
     }),
     getModelMetrics: b.query<ModelMetrics, void>({
       query: () => "metrics/model",
@@ -484,6 +523,8 @@ export const {
   useGetFeedQuery,
   useGetContinueWatchingQuery,
   useRebuildFeedMutation,
+  useGetFeedGenresQuery,
+  useLoadMoreFeedMutation,
   useGetTitleQuery,
   useGetProvidersQuery,
   useGetPersonQuery,
@@ -499,7 +540,6 @@ export const {
   useGetSavedQuery,
   useGetTasteDnaQuery,
   useSearchTypeaheadQuery,
-  useSearchSemanticQuery,
   useGetFiltersQuery,
   useUpdateFiltersMutation,
   useGetPreferenceTagsQuery,

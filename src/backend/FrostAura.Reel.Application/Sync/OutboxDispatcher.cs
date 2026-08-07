@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FrostAura.Reel.Application.Persistence;
@@ -85,8 +86,31 @@ public class OutboxDispatcher(
 
             foreach (var kindGroup in accountGroup.GroupBy(o => o.Kind))
             {
-                await DispatchKindAsync(connection, token, kindGroup.Key, kindGroup.ToList(), ct);
-                sent += kindGroup.Count(e => e.Status == OutboxStatus.Sent);
+                var entries = kindGroup.ToList();
+                try
+                {
+                    await DispatchKindAsync(connection, token, kindGroup.Key, entries, allowRefresh: true, ct);
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    // The access token died before its tracked expiry (dev/link fabricates a long
+                    // one; tokens can also be revoked server-side). Refresh reactively and retry
+                    // once with the fresh token before giving up.
+                    try
+                    {
+                        token = await tokenStore.ForceRefreshAsync(connection, token, ct);
+                        await DispatchKindAsync(connection, token, kindGroup.Key, entries, allowRefresh: false, ct);
+                    }
+                    catch (Exception retryEx) when (retryEx is not OperationCanceledException)
+                    {
+                        foreach (var entry in entries.Where(e => e.Status != OutboxStatus.Sent))
+                        {
+                            Fail(entry, retryEx.Message);
+                        }
+                    }
+                }
+
+                sent += entries.Count(e => e.Status == OutboxStatus.Sent);
             }
         }
 
@@ -94,7 +118,7 @@ public class OutboxDispatcher(
         return sent;
     }
 
-    private async Task DispatchKindAsync(TraktConnection connection, string token, OutboxKind kind, List<TraktOutboxEntry> entries, CancellationToken ct)
+    private async Task DispatchKindAsync(TraktConnection connection, string token, OutboxKind kind, List<TraktOutboxEntry> entries, bool allowRefresh, CancellationToken ct)
     {
         try
         {
@@ -168,6 +192,11 @@ public class OutboxDispatcher(
                 entry.SentAt = now;
                 entry.Error = null;
             }
+        }
+        catch (HttpRequestException ex) when (allowRefresh && ex.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            // Let RunOnceAsync force a token refresh and retry once — don't burn an attempt here.
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

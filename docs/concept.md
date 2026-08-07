@@ -35,7 +35,7 @@ Tenant-per-account, row-level isolation in PostgreSQL from day 1. Mandated stack
 1. Trakt commercial terms / rate limits (existential for SaaS framing) — engage early, before public launch.
 2. Deep links gated behind JustWatch (UX ceiling until partnered).
 3. Recommender fails to beat popularity baseline (kill criterion).
-4. Scope overlap with `fa.whatsnext` — share the recommendation-core capability, keep products separate.
+4. Scope overlap with `fa.whatsnext` — share the recommendation-core capability, keep products separate. (`fa.whatsnext` has since been retired and has no directory; this overlap no longer constrains anything.)
 
 ## Milestones
 M1 app skeleton (OAuth + sync into Postgres) → M2 in-app ML pipeline + edge proof vs baseline → M3 MVP surface per `product-spec.md` → M4 multi-tenant + 5 external users → M5 commercial gate (Trakt terms, JustWatch decision).

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
-import { LogOut, Settings as SettingsIcon, FlaskConical } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
 import { useDispatch } from "react-redux";
 import type { AppDispatch } from "../store";
@@ -9,6 +9,7 @@ import SearchBox from "./search/SearchBox";
 import MobileTabBar from "./MobileTabBar";
 import Footer from "./Footer";
 import RealtimeSync from "./RealtimeSync";
+import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,9 +19,16 @@ import {
 } from "./ui/dropdown-menu";
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `px-3 py-1.5 rounded-md text-sm transition ${
+  `inline-flex items-center justify-center px-2.5 py-2 rounded-md transition ${
     isActive ? "text-fa-frost-bright bg-fa-glass-strong" : "text-fa-frost/80 hover:text-fa-frost-bright hover:bg-fa-glass"
   }`;
+
+/** Desktop header tabs — icon-only, mirroring the mobile bottom bar's icon set. */
+const NAV_TABS = [
+  { to: "/home", label: "Home", Icon: Home },
+  { to: "/saved", label: "Saved", Icon: Bookmark },
+  { to: "/dna", label: "Taste DNA", Icon: Fingerprint },
+] as const;
 
 export default function Layout() {
   const { data: session } = useGetSessionQuery();
@@ -33,6 +41,12 @@ export default function Layout() {
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
   // Adjusted during render rather than in an effect: an effect would paint the panel open on
   // the new route first and then close it, a visible flash plus a cascading render.
+  //
+  // This replaces an effect that carried a `react-hooks/set-state-in-effect` suppression. That
+  // suppression's stated objection was that deriving the panel's state from the route would make
+  // it un-reopenable — true of a pure derivation, but this is not one. The `lastNavKey` sentinel
+  // closes the panel on a route *change* only; opening it again on the same route leaves
+  // `navKey === lastNavKey`, so nothing reopens or re-closes it. Same behaviour, no suppression.
   const navKey = `${location.pathname}${location.search}`;
   const [lastNavKey, setLastNavKey] = useState(navKey);
   if (navKey !== lastNavKey) {
@@ -51,20 +65,18 @@ export default function Layout() {
       <RealtimeSync />
       <header className="sticky top-0 z-40 border-b border-fa-edge/50 bg-fa-ink/80 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 h-14 flex items-center gap-4">
-          <Link to="/home" className="text-lg font-light tracking-wide text-fa-frost-bright">
-            Reel
+          <Link to="/home" aria-label="Reel home" className="flex items-center gap-2 shrink-0 hover:opacity-80 transition">
+            <img src={reelMark} alt="" aria-hidden className="h-7 w-7 shrink-0" />
+            <span className="text-lg font-light tracking-wide text-fa-frost-bright">Reel</span>
           </Link>
-          {/* Inline nav lives on desktop; mobile uses the bottom tab bar. */}
+          {/* Inline nav lives on desktop; mobile uses the bottom tab bar. Icon-only — the label
+              rides aria-label + native title tooltip so it stays accessible. */}
           <nav className="hidden md:flex items-center gap-1">
-            <NavLink to="/home" className={navLinkClass}>
-              Home
-            </NavLink>
-            <NavLink to="/saved" className={navLinkClass}>
-              Saved
-            </NavLink>
-            <NavLink to="/dna" className={navLinkClass}>
-              Taste DNA
-            </NavLink>
+            {NAV_TABS.map(({ to, label, Icon }) => (
+              <NavLink key={to} to={to} className={navLinkClass} aria-label={label} title={label}>
+                <Icon className="h-5 w-5" />
+              </NavLink>
+            ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 flex-1 justify-end">
             <div className="hidden md:block flex-1 max-w-md">

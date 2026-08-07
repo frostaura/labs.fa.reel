@@ -11,10 +11,76 @@ namespace FrostAura.Reel.Application.Ml;
 /// <c>asOf = SplitAt</c>, serving passes now — affinity/taste cache tables are never read.
 /// Account-level taste state is computed once per call and reused across every title.
 /// </summary>
+/// <remarks>
+/// <b>Leave-one-out is the second half of that guarantee.</b> <c>asOf</c> filtering stops the FUTURE
+/// leaking in; it does nothing about a title's OWN label leaking sideways. Every user-side statistic
+/// here — genre and decade affinity, cast/director/writer affinity, the contrarian offset, the loved
+/// centroids and the top-loved similarities — is a pool built from rated titles, and a training row
+/// IS one of those rated titles. Without subtraction, <c>simTopLovedMax</c> for a title in the user's
+/// own loved set is <c>Cosine(a, a) = 1.0</c> exactly: a perfect proxy for the label. At serving time
+/// that is structurally impossible (a scored candidate is by definition unrated), so it is pure
+/// train/serve skew. Every feature below therefore subtracts the title's own contribution from the
+/// pool that describes it. For an unrated candidate there is nothing to subtract and the code path is
+/// identical — one path, no divergence between train and serve.
+/// </remarks>
 public class FeatureVectorBuilder(IReelDbContext db)
 {
     private const decimal LovedThreshold = 8m;
     private const int TopLovedCount = 10;
+
+    /// <summary>Prior used when leave-one-out leaves no observations at all (matches the cold-start mean).</summary>
+    private const decimal NeutralUserMean = 7m;
+
+    /// <summary>The user's own label on a title, plus the crowd rating it was paired against.</summary>
+    public readonly record struct SelfRating(short Rating, DateTime RatedAt, decimal? GlobalRating);
+
+    /// <summary>
+    /// The aggregates needed to subtract a title's own label back out of the taste state before that
+    /// taste state is used to describe it. Sums and counts rather than lists, so the subtraction is
+    /// O(1) per title and the whole taste state is still built exactly once per batch.
+    /// </summary>
+    public sealed record SelfExclusion(
+        IReadOnlyDictionary<Guid, SelfRating> Ratings,
+        decimal RatingSum,
+        int RatingCount,
+        IReadOnlySet<Guid> LovedTitleIds,
+        IReadOnlySet<Guid> RecentLovedTitleIds,
+        int LovedEmbeddingCount,
+        int RecentEmbeddingCount,
+        IReadOnlySet<Guid> ExplicitPersonIds,
+        int ContrarianCount,
+        decimal ContrarianSum,
+        IReadOnlyDictionary<string, (int Count, decimal Sum)> GenreContrarian)
+    {
+        /// <summary>An account with no history — nothing to exclude.</summary>
+        public static SelfExclusion Empty { get; } = new(
+            new Dictionary<Guid, SelfRating>(),
+            0m,
+            0,
+            new HashSet<Guid>(),
+            new HashSet<Guid>(),
+            0,
+            0,
+            new HashSet<Guid>(),
+            0,
+            0m,
+            new Dictionary<string, (int, decimal)>());
+
+        /// <summary>
+        /// The user's overall mean rating with <paramref name="self"/>'s own rating removed — the prior
+        /// every shrunken affinity below is pulled toward. Leaving the label in the prior is a small
+        /// leak (1/N) but it is still a leak, and it costs one subtraction to remove.
+        /// </summary>
+        public decimal MeanExcluding(SelfRating? self, decimal fallback)
+        {
+            if (self is not { } own)
+            {
+                return RatingCount > 0 ? RatingSum / RatingCount : fallback;
+            }
+
+            return RatingCount > 1 ? (RatingSum - own.Rating) / (RatingCount - 1) : fallback;
+        }
+    }
 
     /// <summary>Everything user-side the features need, derived strictly from events ≤ asOf.</summary>
     public sealed record TasteState(
@@ -28,7 +94,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
         IReadOnlyList<Guid> TopLovedTitleIds,
         float[]? LovedCentroid,
         float[]? RecentCentroid,
-        IReadOnlyDictionary<Guid, float[]> LovedEmbeddings);
+        IReadOnlyDictionary<Guid, float[]> LovedEmbeddings,
+        SelfExclusion Self);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -46,7 +113,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Select(t => new { t.Id, t.Genres, t.Year, t.TraktRating })
             .ToDictionaryAsync(t => t.Id, ct);
 
-        var userMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : 7m;
+        var userMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
 
         // Genre & decade affinities + contrarian pairs.
         var genreRatings = new Dictionary<string, List<(short, DateTime)>>();
@@ -54,11 +121,21 @@ public class FeatureVectorBuilder(IReelDbContext db)
         var contrarianPairs = new List<(short User, decimal Global)>();
         var genrePairs = new Dictionary<string, List<(short User, decimal Global)>>();
 
+        // Per-title self contribution, so any single title can be taken back out of the pools above.
+        // The (AccountId, SubjectType, TitleId, Season, Episode) unique index means at most one
+        // movie/show-level rating row per title, but keep the highest defensively.
+        var selfRatings = new Dictionary<Guid, SelfRating>();
+
         foreach (var rating in titleRatings)
         {
             if (!ratedTitles.TryGetValue(rating.TitleId, out var title))
             {
                 continue;
+            }
+
+            if (!selfRatings.TryGetValue(rating.TitleId, out var seen) || rating.Rating > seen.Rating)
+            {
+                selfRatings[rating.TitleId] = new SelfRating(rating.Rating, rating.RatedAt, title.TraktRating);
             }
 
             foreach (var genre in title.Genres)
@@ -115,6 +192,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
             personRatings[pr.PersonId] = Enumerable.Repeat(pr.Rating, TasteMath.ShrinkageK).ToList();
         }
 
+        // These persons' pools are the explicit rating, NOT a sum of title ratings — so there is no
+        // per-title contribution to subtract and leave-one-out must skip them.
+        var explicitPersonIds = explicitPersonRatings.Select(pr => pr.PersonId).ToHashSet();
+
         // Show engagement: episode/season ratings averaged per parent show.
         var showEngagement = (await db.UserRatings
                 .Where(r => r.AccountId == accountId && r.RatedAt <= asOf
@@ -147,6 +228,21 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Where(lovedEmbeddings.ContainsKey)
             .ToDictionary(id => id, id => lovedEmbeddings[id]);
 
+        var self = new SelfExclusion(
+            selfRatings,
+            titleRatings.Sum(r => (decimal)r.Rating),
+            titleRatings.Count,
+            lovedIds.ToHashSet(),
+            recentLovedIds.ToHashSet(),
+            // Only members that actually HAD an embedding moved the centroid, so only they can be
+            // subtracted back out of it.
+            lovedIds.Count(lovedEmbeddings.ContainsKey),
+            recentLovedIds.Count(lovedEmbeddings.ContainsKey),
+            explicitPersonIds,
+            contrarianPairs.Count,
+            contrarianPairs.Sum(p => p.User - p.Global),
+            genrePairs.ToDictionary(kv => kv.Key, kv => (kv.Value.Count, kv.Value.Sum(p => p.User - p.Global))));
+
         return new TasteState(
             userMean,
             TasteMath.ContrarianOffset(contrarianPairs),
@@ -158,7 +254,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
             topLoved,
             lovedCentroid,
             recentCentroid,
-            topLovedEmbeddings);
+            topLovedEmbeddings,
+            self);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
@@ -178,6 +275,29 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .GroupBy(c => c.TitleId)
             .ToDictionary(g => g.Key, g => g.ToList());
 
+        // ── Leave-one-out aggregates ───────────────────────────────────────────────────────
+        // Rolled up ONCE per batch, not once per title: subtracting a title's own contribution is
+        // then arithmetic on (count, sum) rather than a rebuild of the whole taste state.
+        var genreStats = new Dictionary<string, GenreStat>(taste.GenreRatings.Count);
+        foreach (var (genre, ratings) in taste.GenreRatings)
+        {
+            decimal sum = 0m, weightTotal = 0m, weightedSum = 0m;
+            foreach (var (rating, ratedAt) in ratings)
+            {
+                var weight = (decimal)TasteMath.RecencyWeight(ratedAt, asOf);
+                sum += rating;
+                weightTotal += weight;
+                weightedSum += weight * rating;
+            }
+
+            genreStats[genre] = new GenreStat(ratings.Count, sum, weightTotal, weightedSum);
+        }
+
+        var decadeStats = taste.DecadeRatings.ToDictionary(
+            kv => kv.Key, kv => new Stat(kv.Value.Count, kv.Value.Sum(r => (decimal)r)));
+        var personStats = taste.PersonRatings.ToDictionary(
+            kv => kv.Key, kv => new Stat(kv.Value.Count, kv.Value.Sum(r => (decimal)r)));
+
         var result = new Dictionary<Guid, float[]>(ids.Count);
         foreach (var id in ids)
         {
@@ -189,27 +309,35 @@ public class FeatureVectorBuilder(IReelDbContext db)
             var vector = new float[FeatureSchema.VectorLength];
             var s = 0;
 
+            // This title's own label, if the user has already rated it (training rows always have
+            // one; scored candidates never do). Everything below subtracts it back out.
+            SelfRating? self = taste.Self.Ratings.TryGetValue(id, out var own) ? own : null;
+            var prior = taste.Self.MeanExcluding(self, NeutralUserMean);
+            var selfWeight = self is { } weighted ? (decimal)TasteMath.RecencyWeight(weighted.RatedAt, asOf) : 0m;
+
             // ── Title scalars ──────────────────────────────────────────────────────────
             var released = title.ReleasedAt ?? title.FirstAiredAt;
             var ageYears = released is { } rel ? Math.Max(0d, (asOf - rel).TotalDays / 365.25) : 0d;
             vector[s++] = (float)Math.Log(1d + ageYears);
-            vector[s++] = title.RuntimeMinutes ?? 0;
+            // Missing crowd data is imputed NEUTRAL and flagged (hasRuntime / hasTraktRating /
+            // hasPopularity, appended below). A literal 0 here told the trainer "0-minute film,
+            // crowd score 0/10, zero popularity" for half the catalogue.
+            vector[s++] = title.RuntimeMinutes is { } runtime ? runtime : FeatureSchema.NeutralRuntimeMinutes(title.MediaType);
             vector[s++] = title.MediaType == MediaType.Show ? 1f : 0f;
-            vector[s++] = (float)(title.TraktRating ?? 0m);
+            vector[s++] = (float)(title.TraktRating ?? prior);
             vector[s++] = TasteMath.Log1p(title.TraktVotes);
-            vector[s++] = TasteMath.Log1p(title.TmdbPopularity ?? 0m);
+            vector[s++] = TasteMath.Log1p(title.TmdbPopularity ?? FeatureSchema.NeutralPopularity(title.MediaType));
             vector[s++] = TasteMath.CertificationOrdinal(title.Certification);
 
             // ── User-genre interaction ─────────────────────────────────────────────────
-            var genreAllTime = GenreAffinity(taste, title.Genres, asOf, recencyWeighted: false);
-            var genreRecent = GenreAffinity(taste, title.Genres, asOf, recencyWeighted: true);
+            var (genreAllTime, genreRecent) = GenreAffinities(genreStats, title.Genres, prior, self, selfWeight);
             vector[s++] = (float)genreAllTime;
             vector[s++] = (float)(genreRecent - genreAllTime);
-            vector[s++] = (float)DecadeAffinity(taste, title.Year);
+            vector[s++] = (float)DecadeAffinity(decadeStats, title.Year, prior, self);
 
             // ── Cast & crew affinities ─────────────────────────────────────────────────
             var credits = creditsByTitle.GetValueOrDefault(id);
-            var (director, cast, writer, lovedCast, hasCredits) = CreditAffinities(taste, credits);
+            var (director, cast, writer, lovedCast, hasCredits) = CreditAffinities(taste, personStats, credits, prior, self);
             vector[s++] = (float)director;
             vector[s++] = (float)cast;
             vector[s++] = (float)writer;
@@ -217,13 +345,21 @@ public class FeatureVectorBuilder(IReelDbContext db)
             vector[s++] = hasCredits;
 
             // ── Contrarian calibration ─────────────────────────────────────────────────
-            var genreOffset = title.Genres.Length > 0
-                ? title.Genres.Select(g => taste.GenreContrarianOffset.GetValueOrDefault(g, taste.OverallContrarianOffset)).Average()
-                : taste.OverallContrarianOffset;
-            vector[s++] = (float)((title.TraktRating ?? taste.UserMean) + genreOffset);
+            vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, self));
 
             // ── Show engagement ────────────────────────────────────────────────────────
-            vector[s++] = (float)taste.ShowEngagement.GetValueOrDefault(id, 0m);
+            // showEngagement is the mean of the user's own episode/season ratings for THIS show, so
+            // it is non-zero only for a show they have already watched — and the founder-locked
+            // zero-interaction-footprint rule guarantees a scored candidate never has. It is
+            // therefore always 0 at serving time and only ever non-zero during training: the same
+            // train/serve skew as the embedding and affinity leaks, just quieter, because a
+            // train-only signal teaches the model to lean on something that can never fire in
+            // production.
+            //
+            // Held at 0 on both paths rather than deleted, so v2 feature indices stay put — the
+            // slot is dead weight FastTree will simply never split on, and removing it is a
+            // schema-version decision to take deliberately, not a side effect of this fix.
+            vector[s++] = 0f;
 
             // ── LLM attributes ─────────────────────────────────────────────────────────
             if (attributes.TryGetValue(id, out var attrs))
@@ -245,17 +381,48 @@ public class FeatureVectorBuilder(IReelDbContext db)
             // ── Embedding similarities ─────────────────────────────────────────────────
             if (embeddings.TryGetValue(id, out var embedding))
             {
-                vector[s++] = Cosine(embedding, taste.LovedCentroid);
-                vector[s++] = Cosine(embedding, taste.RecentCentroid);
-                var sims = taste.LovedEmbeddings.Values.Select(loved => Cosine(embedding, loved)).ToList();
-                vector[s++] = sims.Count > 0 ? sims.Max() : 0f;
-                vector[s++] = sims.Count > 0 ? sims.Average() : 0f;
+                // The title's own vector is pulled out of both centroids and skipped in the
+                // top-loved scan. Without this, a loved title scores Cosine(a, a) = 1.0 against
+                // itself and simTopLovedMax becomes a perfect label proxy that serving can
+                // never reproduce.
+                var lovedCentroid = taste.Self.LovedTitleIds.Contains(id)
+                    ? CentroidExcluding(taste.LovedCentroid, taste.Self.LovedEmbeddingCount, embedding)
+                    : taste.LovedCentroid;
+                var recentCentroid = taste.Self.RecentLovedTitleIds.Contains(id)
+                    ? CentroidExcluding(taste.RecentCentroid, taste.Self.RecentEmbeddingCount, embedding)
+                    : taste.RecentCentroid;
+
+                vector[s++] = Cosine(embedding, lovedCentroid);
+                vector[s++] = Cosine(embedding, recentCentroid);
+
+                float max = 0f, simSum = 0f;
+                var simCount = 0;
+                foreach (var (lovedId, lovedVector) in taste.LovedEmbeddings)
+                {
+                    if (lovedId == id)
+                    {
+                        continue;
+                    }
+
+                    var similarity = Cosine(embedding, lovedVector);
+                    max = simCount == 0 ? similarity : Math.Max(max, similarity);
+                    simSum += similarity;
+                    simCount++;
+                }
+
+                vector[s++] = simCount > 0 ? max : 0f;
+                vector[s++] = simCount > 0 ? simSum / simCount : 0f;
                 vector[s++] = 1f;
             }
             else
             {
                 s += 5; // zeros + hasEmbedding = 0
             }
+
+            // ── Crowd-data presence (schema v2) ────────────────────────────────────────
+            vector[s++] = title.RuntimeMinutes is null ? 0f : 1f;
+            vector[s++] = title.TraktRating is null ? 0f : 1f;
+            vector[s++] = title.TmdbPopularity is null ? 0f : 1f;
 
             // ── Genre multi-hot ────────────────────────────────────────────────────────
             var genreSet = title.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -286,61 +453,134 @@ public class FeatureVectorBuilder(IReelDbContext db)
         return result;
     }
 
-    private static decimal GenreAffinity(TasteState taste, string[] genres, DateTime asOf, bool recencyWeighted)
+    /// <summary>Rolled-up ratings for one pool: enough to shrink, and enough to un-count one member.</summary>
+    private readonly record struct Stat(int Count, decimal Sum);
+
+    /// <summary>As <see cref="Stat"/>, plus the recency-weighted totals the drift feature needs.</summary>
+    private readonly record struct GenreStat(int Count, decimal Sum, decimal WeightTotal, decimal WeightedSum);
+
+    /// <summary>
+    /// All-time and recency-weighted genre affinity over the title's genres, with the title's own
+    /// rating removed from each. BOTH sides are shrunken with the same k against the same prior, so
+    /// their difference measures change over time — previously the all-time side was shrunken and the
+    /// recent side was not, and a genre with a single rating reported a large "drift" that was
+    /// nothing but the gap between two formulas.
+    /// </summary>
+    private static (decimal AllTime, decimal Recent) GenreAffinities(
+        IReadOnlyDictionary<string, GenreStat> genreStats,
+        string[] genres,
+        decimal prior,
+        SelfRating? self,
+        decimal selfWeight)
     {
         if (genres.Length == 0)
         {
-            return taste.UserMean;
+            return (prior, prior);
         }
 
-        var values = new List<decimal>(genres.Length);
+        decimal allTimeTotal = 0m, recentTotal = 0m;
         foreach (var genre in genres)
         {
-            if (!taste.GenreRatings.TryGetValue(genre, out var ratings) || ratings.Count == 0)
+            if (!genreStats.TryGetValue(genre, out var stat))
             {
-                values.Add(taste.UserMean);
+                allTimeTotal += prior;
+                recentTotal += prior;
                 continue;
             }
 
-            values.Add(recencyWeighted
-                ? TasteMath.RecencyWeightedMean(ratings, asOf, taste.UserMean)
-                : TasteMath.ShrunkenMean(ratings.Select(r => r.Item1).ToList(), taste.UserMean));
+            var count = stat.Count;
+            var sum = stat.Sum;
+            var weightTotal = stat.WeightTotal;
+            var weightedSum = stat.WeightedSum;
+            if (self is { } own)
+            {
+                // A rated title contributed its rating to every one of its OWN genres, exactly once.
+                count -= 1;
+                sum -= own.Rating;
+                weightTotal -= selfWeight;
+                weightedSum -= selfWeight * own.Rating;
+            }
+
+            allTimeTotal += TasteMath.ShrunkenMean(sum, count, prior);
+            recentTotal += TasteMath.ShrunkenWeightedMean(weightedSum, weightTotal, prior);
         }
 
-        return values.Average();
+        return (allTimeTotal / genres.Length, recentTotal / genres.Length);
     }
 
-    private static decimal DecadeAffinity(TasteState taste, int? year)
+    private static decimal DecadeAffinity(
+        IReadOnlyDictionary<int, Stat> decadeStats, int? year, decimal prior, SelfRating? self)
     {
         if (year is null)
         {
-            return taste.UserMean;
+            return prior;
         }
 
         var decade = (year.Value / 10) * 10;
-        return taste.DecadeRatings.TryGetValue(decade, out var ratings)
-            ? TasteMath.ShrunkenMean(ratings, taste.UserMean)
-            : taste.UserMean;
+        if (!decadeStats.TryGetValue(decade, out var stat))
+        {
+            return prior;
+        }
+
+        var count = stat.Count;
+        var sum = stat.Sum;
+        if (self is { } own)
+        {
+            count -= 1;
+            sum -= own.Rating;
+        }
+
+        return TasteMath.ShrunkenMean(sum, count, prior);
     }
 
     private sealed record CreditRow(Guid TitleId, Guid PersonId, CreditRole Role, int? CastOrder);
 
     private static (decimal Director, decimal Cast, decimal Writer, float LovedCast, float HasCredits) CreditAffinities(
-        TasteState taste, IReadOnlyList<CreditRow>? credits)
+        TasteState taste,
+        IReadOnlyDictionary<Guid, Stat> personStats,
+        IReadOnlyList<CreditRow>? credits,
+        decimal prior,
+        SelfRating? self)
     {
         if (credits is null || credits.Count == 0)
         {
-            return (taste.UserMean, taste.UserMean, taste.UserMean, 0f, 0f);
+            return (prior, prior, prior, 0f, 0f);
         }
 
-        var director = new List<short>();
+        // A person credited on this title in two roles was handed this title's rating twice, so the
+        // subtraction removes one copy per CREDIT ROW, not one per person.
+        var selfCredits = new Dictionary<Guid, int>();
+        if (self is not null)
+        {
+            foreach (var credit in credits)
+            {
+                selfCredits[credit.PersonId] = selfCredits.GetValueOrDefault(credit.PersonId) + 1;
+            }
+        }
+
+        decimal directorSum = 0m, writerSum = 0m;
+        int directorCount = 0, writerCount = 0, lovedCast = 0;
         var cast = new List<decimal>();
-        var writer = new List<short>();
-        var lovedCast = 0;
 
         foreach (var credit in credits)
         {
-            if (!taste.PersonRatings.TryGetValue(credit.PersonId, out var ratings) || ratings.Count == 0)
+            if (!personStats.TryGetValue(credit.PersonId, out var stat))
+            {
+                continue;
+            }
+
+            var count = stat.Count;
+            var sum = stat.Sum;
+            // An EXPLICIT person rating replaced the derived pool with k pseudo-observations, so this
+            // title never contributed to it and there is nothing to take out.
+            if (self is { } own && !taste.Self.ExplicitPersonIds.Contains(credit.PersonId))
+            {
+                var copies = selfCredits.GetValueOrDefault(credit.PersonId);
+                count -= copies;
+                sum -= copies * own.Rating;
+            }
+
+            if (count <= 0)
             {
                 continue;
             }
@@ -348,18 +588,20 @@ public class FeatureVectorBuilder(IReelDbContext db)
             switch (credit.Role)
             {
                 case CreditRole.Director:
-                    director.AddRange(ratings);
+                    directorCount += count;
+                    directorSum += sum;
                     break;
                 case CreditRole.Writer:
-                    writer.AddRange(ratings);
+                    writerCount += count;
+                    writerSum += sum;
                     break;
                 default:
                     if (credit.CastOrder is null or < 5)
                     {
-                        cast.Add(TasteMath.ShrunkenMean(ratings, taste.UserMean));
+                        cast.Add(TasteMath.ShrunkenMean(sum, count, prior));
                     }
 
-                    if (ratings.Average(r => (double)r) >= 8d)
+                    if (sum / count >= LovedThreshold)
                     {
                         lovedCast++;
                     }
@@ -369,11 +611,48 @@ public class FeatureVectorBuilder(IReelDbContext db)
         }
 
         return (
-            TasteMath.ShrunkenMean(director, taste.UserMean),
-            cast.Count > 0 ? cast.Average() : taste.UserMean,
-            TasteMath.ShrunkenMean(writer, taste.UserMean),
+            TasteMath.ShrunkenMean(directorSum, directorCount, prior),
+            cast.Count > 0 ? cast.Average() : prior,
+            TasteMath.ShrunkenMean(writerSum, writerCount, prior),
             lovedCast,
             1f);
+    }
+
+    /// <summary>
+    /// The user's genre-level contrarian offset for this title, with the title's own (user, crowd)
+    /// pair removed — otherwise <c>contrarianAdjustedRating</c> for a once-rated genre is a rearranged
+    /// copy of the label.
+    /// </summary>
+    private static decimal ContrarianOffset(TasteState taste, string[] genres, SelfRating? self)
+    {
+        decimal? selfPair = self is { GlobalRating: { } global } own ? own.Rating - global : null;
+
+        var overallCount = taste.Self.ContrarianCount - (selfPair is null ? 0 : 1);
+        var overallSum = taste.Self.ContrarianSum - (selfPair ?? 0m);
+        var overall = overallCount > 0 ? overallSum / overallCount : 0m;
+
+        if (genres.Length == 0)
+        {
+            return overall;
+        }
+
+        var total = 0m;
+        foreach (var genre in genres)
+        {
+            if (taste.Self.GenreContrarian.TryGetValue(genre, out var stat))
+            {
+                var count = stat.Count - (selfPair is null ? 0 : 1);
+                if (count > 0)
+                {
+                    total += (stat.Sum - (selfPair ?? 0m)) / count;
+                    continue;
+                }
+            }
+
+            total += overall;
+        }
+
+        return total / genres.Length;
     }
 
     private async Task<Dictionary<Guid, float[]>> LoadEmbeddingsAsync(IReadOnlyCollection<Guid> titleIds, CancellationToken ct)
@@ -422,6 +701,27 @@ public class FeatureVectorBuilder(IReelDbContext db)
         }
 
         return sum;
+    }
+
+    /// <summary>
+    /// The centroid with one member taken back out: (mean·n − own) / (n − 1). Null when the member
+    /// WAS the centroid (n = 1) — a one-title centroid minus that title is not a taste signal, and
+    /// <see cref="Cosine"/> treats null as "no similarity known" (0).
+    /// </summary>
+    private static float[]? CentroidExcluding(float[]? centroid, int count, float[] own)
+    {
+        if (centroid is null || count <= 1 || centroid.Length != own.Length)
+        {
+            return null;
+        }
+
+        var result = new float[centroid.Length];
+        for (var i = 0; i < result.Length; i++)
+        {
+            result[i] = ((centroid[i] * count) - own[i]) / (count - 1);
+        }
+
+        return result;
     }
 
     private static float Cosine(float[] a, float[]? b)

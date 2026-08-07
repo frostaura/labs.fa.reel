@@ -6,6 +6,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="FrostAura.Reel.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The Microsoft 10.0.x set is held at 10.0.10 across every project. 10.0.9 pulled a
+      vulnerable System.Security.Cryptography.Xml transitively (GHSA-8q5v-6pqq-x66h, high),
+      which needed a direct pin to override; 10.0.10 carries the patched transitive itself,
+      so the pin is gone rather than left behind as dead weight.
+    -->
     <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.10" />

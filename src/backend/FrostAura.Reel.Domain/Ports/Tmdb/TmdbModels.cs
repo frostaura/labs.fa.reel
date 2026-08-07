@@ -15,7 +15,9 @@ public record TmdbTitleDetails(
     TmdbCastMember[] Cast,
     TmdbCrewMember[] Crew,
     string? TrailerYouTubeKey,
-    string[] Keywords);
+    string[] Keywords,
+    /// <summary>TMDB original_language (ISO-639-1, e.g. "en"). Powers the language allow-list.</summary>
+    string? OriginalLanguage = null);
 
 public record TmdbCastMember(long Id, string Name, string? Character, int Order, string? ProfilePath, string? KnownForDepartment);
 

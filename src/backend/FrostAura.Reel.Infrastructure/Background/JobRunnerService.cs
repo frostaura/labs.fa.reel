@@ -23,9 +23,12 @@ public sealed class JobRunnerService(
     ILogger<JobRunnerService> logger) : BackgroundService
 {
     private const int MaxConcurrentJobs = 4;
+    private const int MaxAttempts = 3;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
+    // Comfortably longer than the slowest single external call (a multi-minute watched/shows pull),
+    // so a slow-but-alive ingest is never mistaken for a crash and duplicated.
+    private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(12);
 
     private readonly SemaphoreSlim _slots = new(MaxConcurrentJobs, MaxConcurrentJobs);
 
@@ -71,11 +74,30 @@ public sealed class JobRunnerService(
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         var cutoff = DateTime.UtcNow - StaleAfter;
+
+        // A stale Running job (crashed or wedged) whose attempts are spent is FAILED, not revived —
+        // reviving unconditionally is what let a genuinely-stuck job respawn forever and spiral into
+        // concurrent duplicates. Surfacing it as Failed also lets the UI show the problem instead of
+        // an eternally-spinning pill.
+        var failed = await db.Database.ExecuteSqlAsync(
+            $"""
+             UPDATE "SyncJobs"
+             SET "Status" = 'Failed',
+                 "CompletedAt" = {DateTime.UtcNow},
+                 "Error" = COALESCE("Error", 'Stalled with no heartbeat after {MaxAttempts} attempts.')
+             WHERE "Status" = 'Running' AND "HeartbeatAt" < {cutoff} AND "AttemptCount" >= {MaxAttempts}
+             """, ct);
+
         var reclaimed = await db.Database.ExecuteSqlAsync(
             $"""
              UPDATE "SyncJobs" SET "Status" = 'Pending'
-             WHERE "Status" = 'Running' AND "HeartbeatAt" < {cutoff}
+             WHERE "Status" = 'Running' AND "HeartbeatAt" < {cutoff} AND "AttemptCount" < {MaxAttempts}
              """, ct);
+
+        if (failed > 0)
+        {
+            logger.LogWarning("Failed {Count} stalled job(s) past the {Max}-attempt cap.", failed, MaxAttempts);
+        }
         if (reclaimed > 0)
         {
             logger.LogWarning("Reclaimed {Count} stale Running job(s); they resume from their cursors.", reclaimed);
@@ -144,8 +166,8 @@ public sealed class JobRunnerService(
             logger.LogError(ex, "Job {JobId} ({Kind}) failed on attempt {Attempt}.", job.Id, job.Kind, job.AttemptCount);
             try
             {
-                // Up to 3 attempts; the claim path bumps AttemptCount, the cursor preserves progress.
-                job.Status = job.AttemptCount >= 3 ? JobStatus.Failed : JobStatus.Pending;
+                // Up to MaxAttempts; the claim path bumps AttemptCount, the cursor preserves progress.
+                job.Status = job.AttemptCount >= MaxAttempts ? JobStatus.Failed : JobStatus.Pending;
                 job.Error = ex.Message;
                 await db.SaveChangesAsync(CancellationToken.None);
 

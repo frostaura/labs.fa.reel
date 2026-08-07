@@ -54,19 +54,33 @@ export default defineConfig({
         // SSE must never be answered by the service worker.
         navigateFallbackDenylist: [/^\/sse\//, /^\/api\//],
         runtimeCaching: [
-          // All GET /api/* is mutable, per-user data (feed, session, sync status). NetworkFirst
-          // keeps RTK Query's post-mutation refetches honest; the cache is only an offline
-          // fallback. SSE (/sse/*) is excluded entirely.
+          // All GET /api/* is mutable, per-user data (feed, sync status). NetworkFirst keeps RTK
+          // Query's post-mutation refetches honest; the cache is only an offline fallback. SSE
+          // (/sse/*) is excluded entirely.
+          //
+          // TWO exclusions are load-bearing, both learned the hard way:
+          //
+          // /api/auth/* is NEVER cached. A cached session response makes a signed-out user look
+          // signed in until the entry expires, and the app cannot tell the difference — which is
+          // the same class of bug as the cached app shell rendering perfectly over a completely
+          // dead backend and reporting it as "couldn't reach the sign-in service".
+          //
+          // maxAgeSeconds is ONE HOUR, not the seven days this used to hold. Seven days of
+          // fallback for "mutable, per-user data" means a network blip can serve a week-old feed,
+          // watch state or entitlement with no visual difference from live data. An offline
+          // fallback should be recent enough to be recognisably yours and short enough that
+          // anything genuinely stale simply fails and surfaces as an error the UI can report.
           {
             urlPattern: ({ url, request }) =>
               request.method === "GET" &&
               url.pathname.startsWith("/api/") &&
+              !url.pathname.startsWith("/api/auth/") &&
               !url.pathname.includes("/stream"),
             handler: "NetworkFirst",
             options: {
               cacheName: "reel-api",
               networkTimeoutSeconds: 8,
-              expiration: { maxEntries: 300, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              expiration: { maxEntries: 300, maxAgeSeconds: 60 * 60 },
               cacheableResponse: { statuses: [0, 200] }
             }
           },

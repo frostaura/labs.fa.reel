@@ -1,5 +1,13 @@
 import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  matchPath,
+  useLocation,
+  type Location,
+} from "react-router";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
 import Landing from "./pages/Landing";
@@ -28,11 +36,27 @@ function RouteFallback() {
   );
 }
 
-export default function App() {
+/**
+ * Title detail is a fixed-overlay modal that cards open with `state.backgroundLocation`. When that
+ * marker is present we pin the main <Routes> to the background location so the page underneath
+ * (Home and its carousels, Saved, search results…) stays MOUNTED while the modal is on top —
+ * closing it then reveals the same DOM with scroll positions intact, instead of remounting the
+ * page and snapping every carousel back to the start. Scoped to /title only: Person is a full-page
+ * view, so it (and any other route) always navigates normally even if a link supplied a background.
+ */
+function AppRoutes() {
+  const location = useLocation();
+  const background = (location.state as { backgroundLocation?: Location } | null)?.backgroundLocation;
+  const isTitleOverlay = !!background && matchPath("/title/:mediaType/:tmdbId", location.pathname) != null;
+  const mainLocation = isTitleOverlay ? background! : location;
+
   return (
-    <BrowserRouter>
+    <>
+      {/* Each <Routes> gets its own boundary. A single shared one would defeat the overlay:
+          the modal's chunk suspending would swap the whole tree for the fallback and unmount
+          the very background page this arrangement exists to keep alive. */}
       <Suspense fallback={<RouteFallback />}>
-        <Routes>
+        <Routes location={mainLocation}>
           <Route path="/" element={<Landing />} />
           <Route path="/auth/trakt/callback" element={<TraktCallback />} />
           <Route
@@ -63,6 +87,30 @@ export default function App() {
           <Route path="*" element={<Navigate to="/home" replace />} />
         </Routes>
       </Suspense>
+
+      {/* Title overlay rendered on top of the kept-mounted background page. */}
+      {isTitleOverlay && (
+        <Suspense fallback={null}>
+          <Routes>
+            <Route
+              path="/title/:mediaType/:tmdbId"
+              element={
+                <RequireAuth>
+                  <TitleDetail />
+                </RequireAuth>
+              }
+            />
+          </Routes>
+        </Suspense>
+      )}
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppRoutes />
     </BrowserRouter>
   );
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -32,7 +33,11 @@ public class OpenRouterSearchAgent(
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
-    public bool IsAvailable => true;
+    // Honest availability: a real key, or an explicit test stub. A keyless production install used to
+    // report available and present the deterministic stub's order as "LLM curation" — now the
+    // curation pass is correctly skipped and callers fall back to pure model order. Mirrors
+    // OpenRouterAttributeExtractor so every OpenRouter-backed capability gates identically.
+    public bool IsAvailable => ApiKey is not null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
@@ -99,17 +104,32 @@ public class OpenRouterSearchAgent(
 
             using var doc = JsonDocument.Parse(content);
             var byId = new Dictionary<Guid, RerankResult>();
+            var rejected = 0;
             if (doc.RootElement.TryGetProperty("results", out var arr) && arr.ValueKind == JsonValueKind.Array)
             {
                 foreach (var el in arr.EnumerateArray())
                 {
-                    if (el.TryGetProperty("titleId", out var idEl) && Guid.TryParse(idEl.GetString(), out var id))
+                    // Per-ENTRY defence, deliberately. Every accessor below is kind-checked and the
+                    // whole entry is wrapped, because the catch further down is batch-wide: one
+                    // entry returning titleId as a JSON number used to throw
+                    // InvalidOperationException out of GetString(), and every OTHER title in the
+                    // batch then silently lost its model fit score to the deterministic stub. One
+                    // bad entry costs exactly one entry.
+                    if (!TryReadEntry(el, out var result))
                     {
-                        var fit = el.TryGetProperty("fit", out var f) && f.ValueKind == JsonValueKind.Number ? Math.Clamp(f.GetDouble(), 0d, 1d) : 0.5d;
-                        var why = el.TryGetProperty("why", out var w) && w.ValueKind == JsonValueKind.String ? (w.GetString() ?? string.Empty) : string.Empty;
-                        byId[id] = new RerankResult(id, fit, why);
+                        rejected++;
+                        continue;
                     }
+
+                    byId[result.TitleId] = result;
                 }
+            }
+
+            if (rejected > 0)
+            {
+                logger.LogWarning(
+                    "Agent rerank discarded {Rejected} malformed result entr(ies) of {Count}; those titles fall back to the deterministic fit.",
+                    rejected, titles.Count);
             }
 
             // Row-aligned: any title the model skipped falls back to its deterministic stub fit.
@@ -119,6 +139,55 @@ public class OpenRouterSearchAgent(
         {
             logger.LogWarning(ex, "Agent rerank failed ({Count} titles); using fallback fit.", titles.Count);
             return titles.Select(StubRerank).ToList();
+        }
+    }
+
+    /// <summary>
+    /// Reads one re-rank entry, or rejects it. Nothing in here may throw on hostile JSON: the
+    /// caller iterates a whole batch and a throw would cost every title, not this one.
+    ///
+    /// A rejected entry is left OUT of the map on purpose. The caller then falls back to that
+    /// title's deterministic stub fit, which is anchored on its personal prediction — strictly
+    /// more informative than the flat 0.5 this used to invent for a missing or malformed score.
+    /// </summary>
+    private static bool TryReadEntry(JsonElement el, out RerankResult result)
+    {
+        result = default!;
+        try
+        {
+            if (el.ValueKind != JsonValueKind.Object
+                || !el.TryGetProperty("titleId", out var idEl)
+                || idEl.ValueKind != JsonValueKind.String
+                || !Guid.TryParse(idEl.GetString(), out var id))
+            {
+                return false;
+            }
+
+            if (!el.TryGetProperty("fit", out var f)
+                || f.ValueKind != JsonValueKind.Number
+                || !f.TryGetDouble(out var raw)
+                || double.IsNaN(raw))
+            {
+                return false;
+            }
+
+            // A fit well outside 0-1 means the model scored on another scale entirely (0-10,
+            // 0-100). Clamping would pin every such title to 1.0 and flatten the ranking it was
+            // asked to produce, so the entry is rejected instead.
+            if (raw < -0.01d || raw > 1.01d)
+            {
+                return false;
+            }
+
+            var why = el.TryGetProperty("why", out var w) && w.ValueKind == JsonValueKind.String
+                ? w.GetString() ?? string.Empty
+                : string.Empty;
+            result = new RerankResult(id, Math.Clamp(raw, 0d, 1d), why);
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
+        {
+            return false;
         }
     }
 
@@ -202,7 +271,11 @@ public class OpenRouterSearchAgent(
             sb.Append(" | ").Append(t.MediaType).Append(" | ").Append(string.Join(", ", t.Genres));
             if (t.Predicted is { } p)
             {
-                sb.Append(" | predicted ").Append(p.ToString("0.0"));
+                // InvariantCulture, because this string goes into an LLM PROMPT. The dev machine
+                // runs en_ZA, where the default format renders 6.8 as "6,8" — a decimal comma in a
+                // list whose separator is already a comma, sent to a model asked to reason about
+                // the number. The host's locale has no business changing what the model reads.
+                sb.Append(" | predicted ").Append(p.ToString("0.0", CultureInfo.InvariantCulture));
             }
 
             if (!string.IsNullOrWhiteSpace(t.Overview))
@@ -216,19 +289,43 @@ public class OpenRouterSearchAgent(
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Ask Reel routes through THIS prompt, not <c>OpenRouterSearchInterpreter.SystemPrompt</c> —
+    /// the two must be kept in step field-for-field, because both are parsed by the same
+    /// <see cref="SearchIntentParser"/>. A field the parser reads but this prompt never asks for
+    /// is simply always absent: "80s sci-fi movies" returned 2026/1996/2012/1993 titles for
+    /// exactly that reason, since only minYear was requested and the upper bound never existed.
+    /// </summary>
     private const string InterpretSystemPrompt =
         "You are Reel, a sharp, warm film & TV recommendation companion. Reply conversationally in ONE short sentence, " +
         "then resolve the request into a discovery spec. Return ONLY a JSON object: reply (string), genres (array of " +
         "slugs from EXACTLY: action, adventure, animation, comedy, crime, documentary, drama, family, fantasy, history, " +
         "horror, music, mystery, romance, science-fiction, thriller, war, western), keywords (array of up to 5 concept " +
-        "phrases), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (int or null), freeText (literal-title " +
-        "search string). Use the conversation + shown list to resolve references. Output strictly valid JSON.";
+        "phrases), people (array of {name, role} where role is \"director\", \"cast\", or \"any\" — extract any named " +
+        "filmmaker or actor; e.g. \"movies Christopher Nolan directs\" → people:[{\"name\":\"Christopher Nolan\",\"role\":\"director\"}], " +
+        "\"films with Tom Hardy\" → people:[{\"name\":\"Tom Hardy\",\"role\":\"cast\"}]; do NOT put a person's name in keywords " +
+        "or freeText), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (integer or null), maxYear (integer or " +
+        "null), freeText (literal-title search string), excludeGenres (array of the same genre slugs) and excludeKeywords " +
+        "(array of concept phrases). " +
+        "NEGATION IS CRITICAL: anything the user rejects or wants less of — \"less horror\", \"no ghosts\", \"not a musical\", " +
+        "\"I don't want X\" — belongs ONLY in excludeGenres/excludeKeywords and MUST NOT appear in genres/keywords, because " +
+        "those are used to FETCH titles and would hand them exactly what they just rejected. e.g. \"more thriller and less " +
+        "horror, I don't want ghosts I want serial killers\" → genres:[\"thriller\",\"crime\"], keywords:[\"serial killer\"], " +
+        "excludeGenres:[\"horror\"], excludeKeywords:[\"ghost\",\"supernatural\"]. Rejection lists can be long: put EVERY " +
+        "rejected item in the exclude arrays, not just the first few. Carry negations forward across turns unless " +
+        "the user retracts them. " +
+        "YEAR RANGES: a decade means both bounds — \"80s\" is minYear 1980 and maxYear 1989, \"from the 90s\" is 1990-1999. " +
+        "\"before 2000\" sets only maxYear; \"after 2015\" sets only minYear. Do not infer a year from a title that merely " +
+        "looks like one (\"1917\", \"300\", \"2001\"). " +
+        "Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
     private const string RerankSystemPrompt =
         "You are Reel's taste engine. For each title, judge how well it fits THIS specific user and their request — " +
         "factoring their taste, the request's mood/soft-constraints (e.g. \"nothing too gory\", \"feel-good\"), and the " +
         "title itself. Return ONLY a JSON object {\"results\":[{\"titleId\":\"<id>\",\"fit\":0.0-1.0,\"why\":\"<one short line>\"}]} " +
-        "with one entry per title. Be discerning — spread the scores. Output strictly valid JSON.";
+        "with one entry per title. titleId MUST be the id string quoted exactly as given, never a number. fit MUST be a " +
+        "bare JSON number between 0.0 and 1.0 — never a 0-10 or 0-100 score and never a string. " +
+        "Be discerning — spread the scores. Output strictly valid JSON.";
 
     private sealed record ChatResponse(ChatChoice[]? Choices);
 

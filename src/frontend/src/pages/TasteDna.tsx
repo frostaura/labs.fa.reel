@@ -16,6 +16,7 @@ import { Share2 } from "lucide-react";
 import { toPng } from "html-to-image";
 import { useGetTasteDnaQuery } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";
+import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -121,21 +122,41 @@ export default function TasteDna() {
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Genre fingerprint */}
         <section className="fa-card p-5">
-          <h2 className="fa-section-title mb-3">Genre fingerprint</h2>
+          <h2 className="fa-section-title mb-1">Genre fingerprint</h2>
+          {/* The track is a literal 0–10 axis and the bar is the affinity itself; the tick is the
+              user's own mean, so above/below reads against their bar rather than the scale's
+              midpoint. Why a fill rather than a mean-diverging span: lib/tasteDna.ts. */}
+          <p className="fa-caption text-fa-frost-dim mb-3">
+            0–10, against your own {data.userMean.toFixed(1)} average — the tick
+          </p>
           <div className="space-y-2.5">
-            {data.topGenres.map((g) => (
-              <div key={g.genre} className="flex items-center gap-3">
-                <span className="fa-body text-fa-frost w-36 truncate capitalize">{g.genre.replace("-", " ")}</span>
-                <div className="flex-1 h-2.5 rounded-full bg-fa-glass overflow-hidden">
+            {data.topGenres.map((g) => {
+              const bar = genreBarGeometry(g.affinity, data.userMean);
+              return (
+                <div key={g.genre} className="flex items-center gap-3">
+                  <span className="fa-body text-fa-frost w-36 truncate capitalize">{g.genre.replace("-", " ")}</span>
                   <div
-                    className="h-full rounded-full bg-fa-frost/70"
-                    style={{ width: `${Math.max(6, ((g.affinity - 5) / 5) * 100)}%` }}
-                  />
+                    className="relative flex-1 h-2.5 rounded-full bg-fa-glass overflow-hidden"
+                    role="img"
+                    aria-label={`${g.genre.replace("-", " ")}: ${g.affinity.toFixed(1)} out of 10, ${
+                      bar.aboveMean ? "at or above" : "below"
+                    } your ${data.userMean.toFixed(1)} average`}
+                  >
+                    <div
+                      className={`absolute inset-y-0 left-0 rounded-full ${bar.aboveMean ? "bg-fa-frost/80" : "bg-fa-frost-dim/70"}`}
+                      style={{ width: `${bar.fillPct}%` }}
+                    />
+                    {/* The mean tick — the reference every bar is read against. */}
+                    <div
+                      className="absolute inset-y-0 w-px bg-fa-frost-bright/70"
+                      style={{ left: `${meanMarkerPct(data.userMean)}%` }}
+                    />
+                  </div>
+                  <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{g.affinity.toFixed(1)}</span>
+                  <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">{g.count}×</span>
                 </div>
-                <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{g.affinity.toFixed(1)}</span>
-                <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">{g.count}×</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 

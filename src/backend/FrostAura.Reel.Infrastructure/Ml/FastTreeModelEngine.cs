@@ -19,8 +19,59 @@ public class FastTreeModelEngine : IModelEngine
     // Request-path model cache: loaded transformers keyed by artifact id. ITransformer.Transform is
     // safe for concurrent reads (unlike PredictionEngine), so one load serves every request.
     private readonly ConcurrentDictionary<Guid, ITransformer> _modelCache = new();
+    // Last-access ordering for the size-bounded LRU. A monotonic counter (not wall-clock) gives a
+    // strict total order with no ties, so eviction always has a single unambiguous victim.
+    private readonly ConcurrentDictionary<Guid, long> _lastAccess = new();
+    private long _accessCounter;
+    private readonly object _evictionLock = new();
     private readonly MLContext _cacheMl = new(seed: 7);
     private const int MaxCachedModels = 32;
+
+    /// <summary>
+    /// Load-or-reuse a tenant's transformer with a size-bounded LRU. When the cache grows past
+    /// <see cref="MaxCachedModels"/> we evict ONLY the single least-recently-used entry — never the
+    /// whole dictionary. The old <c>Clear()</c> wiped every tenant's warm model at once, so the 33rd
+    /// concurrent user triggered a reload stampede across all of them; single-entry LRU eviction
+    /// keeps the hot set warm and bounds memory the same way.
+    /// </summary>
+    private ITransformer GetOrLoadModel(Guid modelKey, byte[] artifactBytes)
+    {
+        var model = _modelCache.GetOrAdd(modelKey, _ =>
+        {
+            using var stream = new MemoryStream(artifactBytes);
+            return _cacheMl.Model.Load(stream, out DataViewSchema _);
+        });
+
+        // Mark most-recently-used AFTER the load so the entry we're about to score can never be the
+        // eviction victim below.
+        _lastAccess[modelKey] = Interlocked.Increment(ref _accessCounter);
+
+        while (_modelCache.Count > MaxCachedModels)
+        {
+            lock (_evictionLock)
+            {
+                if (_modelCache.Count <= MaxCachedModels)
+                {
+                    break;
+                }
+
+                var victim = _lastAccess
+                    .Where(kv => kv.Key != modelKey)
+                    .OrderBy(kv => kv.Value)
+                    .Select(kv => (Guid?)kv.Key)
+                    .FirstOrDefault();
+                if (victim is not { } evictKey)
+                {
+                    break;
+                }
+
+                _modelCache.TryRemove(evictKey, out _);
+                _lastAccess.TryRemove(evictKey, out _);
+            }
+        }
+
+        return model;
+    }
 
     private sealed class Row
     {
@@ -112,16 +163,7 @@ public class FastTreeModelEngine : IModelEngine
             return [];
         }
 
-        if (_modelCache.Count > MaxCachedModels)
-        {
-            _modelCache.Clear(); // coarse bound — a handful of active artifacts in practice
-        }
-
-        var model = _modelCache.GetOrAdd(modelKey, _ =>
-        {
-            using var stream = new MemoryStream(artifactBytes);
-            return _cacheMl.Model.Load(stream, out DataViewSchema _);
-        });
+        var model = GetOrLoadModel(modelKey, artifactBytes);
 
         var width = features[0].Length;
         var data = _cacheMl.Data.LoadFromEnumerable(
@@ -162,6 +204,42 @@ public class FastTreeModelEngine : IModelEngine
             .Transform(predictor.Transform(data));
 
         return ml.Data.CreateEnumerable<ContributionPrediction>(withContributions, reuseRowObject: false)
+            .Select(p => new ScoredRow(
+                p.Score,
+                p.FeatureContributions
+                    .Select((value, index) => (Feature: index < featureNames.Length ? featureNames[index] : $"f{index}", Contribution: value))
+                    .Where(c => Math.Abs(c.Contribution) > 1e-6)
+                    .OrderByDescending(c => Math.Abs(c.Contribution))
+                    .Take(topK)
+                    .ToList()))
+            .ToArray();
+    }
+
+    public ScoredRow[] ScoreWithContributionsCached(Guid modelKey, byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5)
+    {
+        if (features.Length == 0)
+        {
+            return [];
+        }
+
+        var model = GetOrLoadModel(modelKey, artifactBytes);
+
+        if (model is not ISingleFeaturePredictionTransformer<ICalculateFeatureContribution> predictor)
+        {
+            throw new InvalidOperationException($"Artifact is not a contribution-capable transformer ({model.GetType().Name}).");
+        }
+
+        var width = features[0].Length;
+        var data = _cacheMl.Data.LoadFromEnumerable(
+            features.Select(f => new Row { Features = f }),
+            SchemaDefinitionFor(width));
+
+        var withContributions = _cacheMl.Transforms
+            .CalculateFeatureContribution(predictor, numberOfPositiveContributions: width, numberOfNegativeContributions: width)
+            .Fit(data)
+            .Transform(predictor.Transform(data));
+
+        return _cacheMl.Data.CreateEnumerable<ContributionPrediction>(withContributions, reuseRowObject: false)
             .Select(p => new ScoredRow(
                 p.Score,
                 p.FeatureContributions

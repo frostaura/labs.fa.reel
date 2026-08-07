@@ -27,6 +27,12 @@ public class TraktClient(
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>Backoff attempts on HTTP 429 before the throttle is surfaced to the caller.</summary>
+    private const int MaxThrottleRetries = 3;
+
+    /// <summary>Ceiling on a single backoff — a hostile Retry-After must not park a background job for an hour.</summary>
+    private static readonly TimeSpan MaxThrottleDelay = TimeSpan.FromSeconds(30);
+
     private string ClientId => configuration["TRAKT_CLIENT_ID"]
         ?? throw new InvalidOperationException("TRAKT_CLIENT_ID is required.");
 
@@ -64,12 +70,7 @@ public class TraktClient(
 
     public async Task<TraktUserSettings> GetUserSettingsAsync(string accessToken, CancellationToken ct = default)
     {
-        await rateGate.AcquireAsync(RatePriority.Interactive, ct);
-        usageRecorder.Record(ApiProvider.Trakt);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, "users/settings");
-        ApplyApiHeaders(request, accessToken);
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendGetAsync("users/settings", accessToken, RatePriority.Interactive, ct);
         response.EnsureSuccessStatusCode();
 
         var settings = await response.Content.ReadFromJsonAsync<UserSettingsDto>(JsonOptions, ct)
@@ -84,39 +85,84 @@ public class TraktClient(
             user.Images?.Avatar?.Full);
     }
 
+    // Trakt paginated the watched endpoints and changed the extended defaults, enforced after
+    // 2026-06-30 (trakt/trakt-api discussion 775). Two consequences this code must respect:
+    //   * An unpaginated request silently returns only the FIRST 100 items — no error, just a
+    //     truncated library. Every page must be walked via X-Pagination-Page-Count.
+    //   * extended=full is now ignored, and season progress is no longer included by default.
+    //     Season/episode progress requires extended=progress, which Trakt caps at 100 per page.
+    // Item metadata (overview, genres, runtime) is deliberately not sourced from here — TMDB
+    // enrichment owns it, which is why dropping the dead extended=full costs nothing.
+    private const int WatchedPageLimit = 250;
+    private const int ProgressPageLimit = 100;
+
     public async Task<IReadOnlyList<TraktWatchedMovie>> GetWatchedMoviesAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
-        await GetApiAsync<List<TraktWatchedMovie>>("sync/watched/movies?extended=full", accessToken, priority, ct) ?? [];
+        await GetAllPagesAsync<TraktWatchedMovie>("sync/watched/movies", WatchedPageLimit, accessToken, priority, ct);
 
     public async Task<IReadOnlyList<TraktWatchedShow>> GetWatchedShowsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
-        await GetApiAsync<List<TraktWatchedShow>>("sync/watched/shows?extended=full", accessToken, priority, ct) ?? [];
+        await GetAllPagesAsync<TraktWatchedShow>("sync/watched/shows?extended=progress", ProgressPageLimit, accessToken, priority, ct);
 
+    // /sync/ratings is a paginated collection too, and it carried the same single-shot bug that
+    // capped the watched ingest at 100 items: 200 OK, no error, only the first page. A heavy
+    // account's ratings are the single most valuable training signal there is — truncating them
+    // silently trains the model on a fraction of the user's taste.
     public async Task<IReadOnlyList<TraktRatingItem>> GetRatingsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
-        await GetApiAsync<List<TraktRatingItem>>("sync/ratings?extended=full", accessToken, priority, ct) ?? [];
+        await GetAllPagesAsync<TraktRatingItem>("sync/ratings?extended=full", WatchedPageLimit, accessToken, priority, ct);
 
     public async Task<TraktShowProgress?> GetShowProgressAsync(string accessToken, long showTraktId, RatePriority priority, CancellationToken ct = default) =>
         await GetApiAsync<TraktShowProgress>($"shows/{showTraktId}/progress/watched?hidden=false&specials=false", accessToken, priority, ct);
 
     public async Task<string> GetLastActivitiesRawAsync(string accessToken, RatePriority priority, CancellationToken ct = default)
     {
-        await rateGate.AcquireAsync(priority, ct);
-        usageRecorder.Record(ApiProvider.Trakt);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, "sync/last_activities");
-        ApplyApiHeaders(request, accessToken);
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendGetAsync("sync/last_activities", accessToken, priority, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync(ct);
+    }
+
+    /// <summary>
+    /// Walks every page of a paginated Trakt collection. The page count comes from Trakt's
+    /// X-Pagination-Page-Count header rather than from the requested limit, because Trakt caps
+    /// limits server-side and documents that the applied values — not the requested ones — are
+    /// authoritative. A missing header means an unpaginated response: take it and stop.
+    /// </summary>
+    private async Task<IReadOnlyList<T>> GetAllPagesAsync<T>(
+        string path, int limit, string accessToken, RatePriority priority, CancellationToken ct)
+    {
+        var separator = path.Contains('?') ? '&' : '?';
+        var results = new List<T>();
+
+        for (var page = 1; ; page++)
+        {
+            using var response = await SendGetAsync($"{path}{separator}page={page}&limit={limit}", accessToken, priority, ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                break;
+            }
+
+            response.EnsureSuccessStatusCode();
+            var batch = await response.Content.ReadFromJsonAsync<List<T>>(JsonOptions, ct) ?? [];
+            results.AddRange(batch);
+
+            if (!TryReadPaginationHeader(response, "X-Pagination-Page-Count", out var pageCount) || page >= pageCount)
+            {
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    private static bool TryReadPaginationHeader(HttpResponseMessage response, string name, out int value)
+    {
+        value = 0;
+        return response.Headers.TryGetValues(name, out var values)
+            && int.TryParse(values.FirstOrDefault(), out value);
     }
 
     private async Task<T?> GetApiAsync<T>(string path, string accessToken, RatePriority priority, CancellationToken ct)
         where T : class
     {
-        await rateGate.AcquireAsync(priority, ct);
-        usageRecorder.Record(ApiProvider.Trakt);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, path);
-        ApplyApiHeaders(request, accessToken);
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendGetAsync(path, accessToken, priority, ct);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             return null;
@@ -124,6 +170,57 @@ public class TraktClient(
 
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
+    }
+
+    /// <summary>
+    /// Sends an authenticated GET, retrying HTTP 429 with bounded exponential backoff and honouring
+    /// Trakt's Retry-After. 5xx / 408 / socket failures are already covered by the typed client's
+    /// standard resilience handler (see Infrastructure DependencyInjection); 429 is *not* in that
+    /// handler's transient predicate, so a rate-limited sync fell straight through to
+    /// EnsureSuccessStatusCode and failed the job. GETs only — /sync/* and list POSTs are not
+    /// idempotent and are never replayed here. The caller owns the response.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendGetAsync(string path, string? accessToken, RatePriority priority, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            // Re-acquired per attempt: a retry is a fresh call against both the rate gate and the
+            // daily Fair-Use ledger.
+            await rateGate.AcquireAsync(priority, ct);
+            usageRecorder.Record(ApiProvider.Trakt);
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, path);
+            ApplyApiHeaders(request, accessToken);
+            var response = await httpClient.SendAsync(request, ct);
+            if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt >= MaxThrottleRetries)
+            {
+                return response;
+            }
+
+            var delay = ThrottleDelay(response, attempt);
+            response.Dispose();
+            await Task.Delay(delay, ct);
+        }
+    }
+
+    /// <summary>Retry-After when present, else 0.4s · 2^attempt, capped so a hostile header cannot park a sync.</summary>
+    private static TimeSpan ThrottleDelay(HttpResponseMessage response, int attempt)
+    {
+        TimeSpan? hinted = null;
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Delta is { } delta)
+        {
+            hinted = delta;
+        }
+        else if (retryAfter?.Date is { } date)
+        {
+            hinted = date - DateTimeOffset.UtcNow;
+        }
+
+        var delay = hinted is { } value && value > TimeSpan.Zero
+            ? value
+            : TimeSpan.FromMilliseconds(400 * (1 << attempt));
+        return delay > MaxThrottleDelay ? MaxThrottleDelay : delay;
     }
 
     public async Task<long?> ResolveTraktIdByTmdbAsync(string accessToken, long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default)
@@ -150,7 +247,9 @@ public class TraktClient(
 
     public async Task<long> EnsureListAsync(string accessToken, string name, string description, RatePriority priority, CancellationToken ct = default)
     {
-        var lists = await GetApiAsync<List<ListDtoTrakt>>("users/me/lists", accessToken, priority, ct) ?? [];
+        // Paginated for the same reason as the collections above: on an account with many lists,
+        // a single-shot fetch can miss the managed list and silently create a duplicate of it.
+        var lists = await GetAllPagesAsync<ListDtoTrakt>("users/me/lists", WatchedPageLimit, accessToken, priority, ct);
         var existing = lists.FirstOrDefault(l => string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
         if (existing?.Ids?.Trakt is { } id)
         {

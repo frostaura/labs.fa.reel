@@ -74,4 +74,42 @@ public class FastTreeModelEngineTests
         Assert.Equal("signal", row.TopContributions[0].Feature);
         Assert.True(row.TopContributions[0].Contribution > 0);
     }
+
+    [Fact]
+    public void Cached_contribution_scoring_matches_the_uncached_path()
+    {
+        // The infinite-scroll feed pages go through ScoreWithContributionsCached (model loaded once
+        // per artifact). It must produce the same score + contributions as the batch path.
+        var rng = new Random(11);
+        var rows = new List<float[]>();
+        var labels = new List<float>();
+        for (var i = 0; i < 300; i++)
+        {
+            var a = (float)rng.NextDouble();
+            rows.Add([a, (float)rng.NextDouble()]);
+            labels.Add(Math.Clamp(3f + (6f * a), 1f, 10f));
+        }
+
+        var engine = new FastTreeModelEngine();
+        var trained = engine.Train(
+            new TrainingMatrix(rows.ToArray(), labels.ToArray(), ["signal", "noise"]),
+            """{"Trees":80,"Leaves":12,"MinExamplesPerLeaf":5,"LearningRate":0.2}""");
+
+        float[][] inputs = [[0.9f, 0.5f], [0.1f, 0.5f]];
+        var key = Guid.NewGuid();
+        var uncached = engine.ScoreWithContributions(trained.ArtifactBytes, inputs, ["signal", "noise"], topK: 2);
+        var cachedFirst = engine.ScoreWithContributionsCached(key, trained.ArtifactBytes, inputs, ["signal", "noise"], topK: 2);
+        // Second call reuses the cached transformer — must still match.
+        var cachedSecond = engine.ScoreWithContributionsCached(key, trained.ArtifactBytes, inputs, ["signal", "noise"], topK: 2);
+
+        Assert.Equal(uncached.Length, cachedFirst.Length);
+        for (var i = 0; i < uncached.Length; i++)
+        {
+            Assert.Equal(uncached[i].Score, cachedFirst[i].Score, 3);
+            Assert.Equal(cachedFirst[i].Score, cachedSecond[i].Score, 3);
+            Assert.Equal(uncached[i].TopContributions[0].Feature, cachedFirst[i].TopContributions[0].Feature);
+        }
+
+        Assert.Empty(engine.ScoreWithContributionsCached(key, trained.ArtifactBytes, [], ["signal", "noise"]));
+    }
 }

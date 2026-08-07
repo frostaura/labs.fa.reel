@@ -27,7 +27,7 @@ export default function RatePicker() {
 
   const rate = async (t: Suggestion, value: number) => {
     setRated((r) => ({ ...r, [t.titleId]: value }));
-    await rateTitle({ mediaType: t.mediaType, tmdbId: t.tmdbId, rating: value, markWatched: true }).unwrap().catch(() => undefined);
+    await rateTitle({ titleId: t.titleId, mediaType: t.mediaType, tmdbId: t.tmdbId, rating: value, markWatched: true }).unwrap().catch(() => undefined);
   };
 
   return (

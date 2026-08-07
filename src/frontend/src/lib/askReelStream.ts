@@ -14,9 +14,14 @@ export interface AskCard {
   genres: string[];
   similarity: number | null;
   predictedRating: number | null;
+  /** Community score (0–10) and its vote count; both absent on older servers. */
+  crowdRating?: number | null;
+  crowdVotes?: number | null;
   /** Phase B: hyper-personal LLM fit + reason; absent until reranked. */
   fit?: number | null;
   why?: string | null;
+  /** Person/filmography queries surface already-watched titles, badged. */
+  seen?: boolean;
 }
 
 export interface PhaseData {
@@ -28,6 +33,26 @@ export interface PhaseData {
 export interface DoneData {
   results: AskCard[];
   reason: string | null;
+  /**
+   * Server-side failure marker. The expansion service currently reports a caught exception the
+   * same way it reports a genuinely empty answer — `done` with no results — so this is optional
+   * and `isFailedDone` falls back to the wording. Once the server sets it, the fallback stops
+   * mattering; until then it is the only signal there is.
+   */
+  failed?: boolean;
+}
+
+/** The phrase the server uses for a caught exception. See `LiveSearchExpansionService`. */
+const FAILURE_REASON = /snag/i;
+
+/**
+ * Was this `done` frame a failure rather than an honest "nothing matched"? The two look identical
+ * on the wire (empty results either way), and conflating them is what put "No matches for that one"
+ * and "search hit a snag" on screen together.
+ */
+export function isFailedDone(data: Pick<DoneData, "results" | "reason" | "failed">): boolean {
+  if (data.failed != null) return data.failed;
+  return data.results.length === 0 && data.reason != null && FAILURE_REASON.test(data.reason);
 }
 
 export type AskEvent =
@@ -44,6 +69,19 @@ export interface AskReelRequest {
   history?: { role: string; text: string }[];
   shownTmdbIds?: number[];
   conversationId?: string | null;
+  /**
+   * The movie/TV toggle, as "movie" / "tv". Sent so the SERVER narrows discovery rather than the
+   * client hiding cards after the fact — filtering locally meant a turn that returned only shows
+   * rendered an empty screen under "Movies".
+   */
+  mediaTypes?: string[];
+  /**
+   * True when this replays a question already in the transcript — an infinite-scroll page or a
+   * re-ask from the media toggle. The server writes a user+assistant SearchTurn pair per request,
+   * so without this every scroll page and every filter click permanently duplicated the question
+   * in the stored conversation, even though the client hides the repeat on screen.
+   */
+  continuation?: boolean;
 }
 
 /** Streams /api/search/ask, invoking onEvent per parsed SSE frame. Resolves when the stream ends. */

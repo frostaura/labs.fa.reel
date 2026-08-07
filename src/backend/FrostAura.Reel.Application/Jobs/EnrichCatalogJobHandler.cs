@@ -34,7 +34,21 @@ public class EnrichCatalogJobHandler(
 
     private const int EmbedBatch = 64;
     private const int AttributeBatch = 24; // the extractor parallelizes within a batch (bounded by OPENROUTER_MAX_CONCURRENCY)
-    private const int MaxAttributeAttempts = 3;
+
+    /// <summary>
+    /// How many enrich RUNS may spend money on one title before it is left alone.
+    ///
+    /// Deliberately 2, not 3. Nothing here varies between runs — same title, same prompt,
+    /// temperature 0 — so a third identical request buys no incremental chance of success, only
+    /// a third bill. The variation that does help now lives where it can actually be targeted:
+    /// the extractor detects WHY a response was unusable and, for structural failures only,
+    /// re-asks once within the same attempt with a materially different prompt (named offending
+    /// fields, or a compacted input plus a wider token budget for a truncation). What survives
+    /// that is not a prompt problem. The remaining budget here exists solely for genuinely
+    /// transient transport failures — a 429, a provider outage — where the useful variable is
+    /// elapsed time, and one later run is enough to catch it.
+    /// </summary>
+    private const int MaxAttributeAttempts = 2;
 
     private enum Phase { Embeddings, Attributes }
 
@@ -218,10 +232,28 @@ public class EnrichCatalogJobHandler(
                 }
 
                 row.AttemptCount++;
+
+                // Stamp the model BEFORE the outcome check. The eligibility query above only counts
+                // attempts made by the current ExtractorModel, so a failed row that never recorded
+                // one was re-picked on every single run for ever — the retry cap could not engage
+                // and a permanently unextractable title billed indefinitely.
+                row.ExtractorModel = modelId;
+                row.ExtractorVersion = 1;
+
                 var result = extracted[i];
                 if (result is null)
                 {
+                    // The extractor returns null only when it could not get a usable answer — a
+                    // transport failure, or a response missing / mistyping a required scalar. It
+                    // never substitutes a neutral value, so there is nothing to write here and the
+                    // row must NOT be marked Done: a Done row is read as settled judgement for
+                    // ever by every tenant's feature vector.
                     row.Status = AttributeExtractionStatus.Failed;
+                    logger.LogWarning(
+                        "Attribute extraction produced no usable result for {TitleId} ({Name}) on attempt {Attempt}/{Max} "
+                        + "with {Model}; row left {Status} rather than filled with defaults.",
+                        batch[i].Id, batch[i].Name, row.AttemptCount, MaxAttributeAttempts, modelId,
+                        AttributeExtractionStatus.Failed);
                     continue;
                 }
 
@@ -236,8 +268,6 @@ public class EnrichCatalogJobHandler(
                 row.Era = result.Era;
                 row.Themes = result.Themes.ToArray();
                 row.RawJson = result.RawJson;
-                row.ExtractorModel = extractor.ModelId;
-                row.ExtractorVersion = 1;
                 row.Status = AttributeExtractionStatus.Done;
                 row.ExtractedAt = DateTime.UtcNow;
             }
@@ -273,7 +303,22 @@ public class EnrichCatalogJobHandler(
                 Priority = 1,
                 EnqueuedAt = DateTime.UtcNow,
             });
-            await db.SaveChangesAsync(ct);
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex) when (TrainJobHandler.IsUniqueViolation(ex))
+            {
+                // Check-then-insert, and this is the loser of the race: a concurrent enqueue (the
+                // manual /model/train endpoint, or the nightly reconcile) already queued a Train
+                // job, and the partial unique index on SyncJobs(AccountId, Kind) WHERE Status IN
+                // ('Pending','Running') correctly refused the duplicate. Losing that race means the
+                // work is already scheduled, which is exactly the desired end state — so it is not
+                // an error to propagate and fail the enrich job over.
+                db.SyncJobs.Local.Clear();
+                logger.LogDebug("Train already queued for {AccountId} by a concurrent enqueue.", accountId);
+            }
         }
     }
 

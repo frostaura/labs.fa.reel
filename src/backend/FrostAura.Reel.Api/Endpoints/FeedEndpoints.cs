@@ -1,7 +1,11 @@
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
@@ -13,16 +17,22 @@ public static class FeedEndpoints
 {
     public record CardProvider(string Name, string? LogoPath);
 
+    /// <summary>
+    /// The card contract. <c>PredictedRating</c> is "for you"; <c>CrowdRating</c> / <c>CrowdVotes</c>
+    /// are the community number it is compared against, resolved once in
+    /// <see cref="Domain.Catalog.CrowdRating"/> (TMDB, then Trakt, then null) so every surface agrees.
+    /// </summary>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
-        decimal PredictedRating, string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers);
+        decimal PredictedRating, decimal? CrowdRating, int? CrowdVotes,
+        string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -43,6 +53,90 @@ public static class FeedEndpoints
                 .Join(db.Titles, i => i.TitleId, t => t.Id, (i, t) => new { Item = i, Title = t })
                 .OrderBy(x => x.Item.Row).ThenBy(x => x.Item.Rank)
                 .ToListAsync(ct);
+
+            // The snapshot is materialized, so an interaction made since the build can leave a title
+            // in the feed that no longer belongs there. Drop anything that has since picked up an
+            // interaction footprint — marked seen (watched or rated), saved for later (a decision
+            // already made; it lives on Saved), or not-interested — without waiting for a rebuild.
+            // Mirrors EligibilityQueryBuilder's rule so a built feed stays honest between builds.
+            var snapshotTitleIds = items.Select(x => x.Title.Id).ToList();
+            var excludedTitleIds = new HashSet<Guid>();
+            excludedTitleIds.UnionWith(await db.UserTitleReactions
+                .Where(r => r.AccountId == account.Id && r.RevokedAt == null
+                    && (r.Kind == ReactionKind.SaveForLater || r.Kind == ReactionKind.NotInterested)
+                    && snapshotTitleIds.Contains(r.TitleId))
+                .Select(r => r.TitleId).ToListAsync(ct));
+            excludedTitleIds.UnionWith(await db.WatchedTitles
+                .Where(w => w.AccountId == account.Id && snapshotTitleIds.Contains(w.TitleId))
+                .Select(w => w.TitleId).ToListAsync(ct));
+            excludedTitleIds.UnionWith(await db.UserRatings
+                .Where(r => r.AccountId == account.Id && snapshotTitleIds.Contains(r.TitleId))
+                .Select(r => r.TitleId).ToListAsync(ct));
+            if (excludedTitleIds.Count > 0)
+            {
+                // Rows shrink when a since-interacted title is dropped, leaving gaps until the next
+                // rebuild. Refill each row in-kind from the next-best titles this snapshot's model
+                // already scored (persisted TitleScores for account + active artifact) that are still
+                // eligible and not already on the feed — so the hero/rows keep their built length
+                // between rebuilds. Read-only + cheap: one indexed TitleScore read, capped at the
+                // number of slots actually lost.
+                var removedByRow = items
+                    .Where(x => excludedTitleIds.Contains(x.Title.Id))
+                    .GroupBy(x => (x.Item.Row, x.Item.AnchorTitleId))
+                    .ToDictionary(g => g.Key, g => g.Count());
+                items = items.Where(x => !excludedTitleIds.Contains(x.Title.Id)).ToList();
+
+                var needed = removedByRow.Values.Sum();
+                if (needed > 0)
+                {
+                    // Everything still on the feed or just dropped is off-limits for the refill.
+                    var onFeed = items.Select(x => x.Title.Id).Concat(excludedTitleIds).ToHashSet();
+                    var eligibleIds = eligibility.EligibleTitles(account.Id).Select(t => t.Id);
+                    // Over-fetch (2× + headroom) so the in-memory maturity gate can drop over-ceiling
+                    // titles and still leave enough survivors to fill every lost slot. Renderable-card
+                    // gate (poster + tmdbId) mirrors the paginator so a backfill never floats a blank.
+                    var candidates = await (
+                        from s in db.TitleScores
+                        join t in db.Titles on s.TitleId equals t.Id
+                        where s.AccountId == account.Id && s.ModelArtifactId == snapshot.ModelArtifactId
+                            && t.TmdbId != null && t.PosterPath != null
+                            && !onFeed.Contains(s.TitleId) && eligibleIds.Contains(s.TitleId)
+                        orderby s.PredictedRating descending
+                        select new { s.PredictedRating, Title = t })
+                        .Take((needed * 2) + 5)
+                        .ToListAsync(ct);
+
+                    var pool = candidates
+                        .Where(c => EligibilityQueryBuilder.PassesMaturity(c.Title, account.Settings.MaturityCeiling))
+                        .ToList();
+                    var cursor = 0;
+                    foreach (var ((row, anchorId), lost) in removedByRow)
+                    {
+                        var nextRank = items
+                            .Where(x => x.Item.Row == row && x.Item.AnchorTitleId == anchorId)
+                            .Select(x => x.Item.Rank).DefaultIfEmpty(-1).Max() + 1;
+                        for (var k = 0; k < lost && cursor < pool.Count; k++)
+                        {
+                            var c = pool[cursor++];
+                            items.Add(new
+                            {
+                                Item = new FeedItem
+                                {
+                                    Row = row,
+                                    AnchorTitleId = anchorId,
+                                    Rank = nextRank++,
+                                    TitleId = c.Title.Id,
+                                    PredictedRating = c.PredictedRating,
+                                    WhyThisSentence = "Strong fit with your taste profile.",
+                                },
+                                Title = c.Title,
+                            });
+                        }
+                    }
+
+                    items = items.OrderBy(x => x.Item.Row).ThenBy(x => x.Item.Rank).ToList();
+                }
+            }
 
             var nowUtc = DateTime.UtcNow;
 
@@ -65,10 +159,11 @@ public static class FeedEndpoints
             {
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
+                var (crowd, crowdVotes) = Domain.Catalog.CrowdRating.Resolve(title);
                 return new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
-                    item.PredictedRating, item.WhyThisSentence, isReleased,
+                    item.PredictedRating, crowd, crowdVotes, item.WhyThisSentence, isReleased,
                     providersByTitle.GetValueOrDefault(title.Id, []));
             }
 
@@ -81,13 +176,18 @@ public static class FeedEndpoints
             var isPaid = account.Tier is AccountTier.Paid or AccountTier.Founder;
             if (!isPaid)
             {
+                // Count every locked row, not just the because-you-loved anchors: the deep-cuts and
+                // new-for-you rails are gated too, so undercounting them understated the upsell.
+                var lockedRowCount = items.Where(x => x.Item.Row == FeedRowKind.BecauseYouLoved)
+                        .Select(x => x.Item.AnchorTitleId).Distinct().Count()
+                    + (items.Any(x => x.Item.Row == FeedRowKind.DeepCuts) ? 1 : 0)
+                    + (items.Any(x => x.Item.Row == FeedRowKind.NewForYou) ? 1 : 0);
                 return Results.Ok(new
                 {
                     generatedAt = (DateTime?)snapshot.GeneratedAt,
                     hero = hero.Take(3),
                     rows = Array.Empty<object>(),
-                    lockedRowCount = items.Where(x => x.Item.Row == FeedRowKind.BecauseYouLoved)
-                        .Select(x => x.Item.AnchorTitleId).Distinct().Count(),
+                    lockedRowCount,
                 });
             }
 
@@ -133,16 +233,14 @@ public static class FeedEndpoints
                     // Manually dropped shows leave Continue Watching (exclude-only, revocable).
                     && !db.UserTitleReactions.Any(r => r.AccountId == accountId && r.TitleId == p.TitleId
                         && r.Kind == ReactionKind.Dropped && r.RevokedAt == null))
+                // ResumeLikelihood leads; ties (common — many shows compute the same likelihood) break
+                // on recency so the show you touched most recently sits higher than a stale one.
                 .OrderByDescending(p => p.ResumeLikelihood)
+                .ThenByDescending(p => p.LastWatchedAt)
                 .Take(15)
                 .Join(db.Titles, p => p.TitleId, t => t.Id, (p, t) => new
                 {
-                    titleId = t.Id,
-                    mediaType = t.MediaType.ToString(),
-                    tmdbId = t.TmdbId,
-                    name = t.Name,
-                    posterPath = t.PosterPath,
-                    backdropPath = t.BackdropPath,
+                    Title = t,
                     nextEpisodeSeason = p.NextEpisodeSeason,
                     nextEpisodeNumber = p.NextEpisodeNumber,
                     watchedEpisodes = p.WatchedEpisodeCount,
@@ -151,13 +249,32 @@ public static class FeedEndpoints
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(entries);
+            // Projected in memory rather than in SQL so the crowd rating comes from the ONE resolver
+            // every other card surface uses, instead of a second, drifting copy of the fallback rule.
+            return Results.Ok(entries.Select(x => new
+            {
+                titleId = x.Title.Id,
+                mediaType = x.Title.MediaType.ToString(),
+                tmdbId = x.Title.TmdbId,
+                name = x.Title.Name,
+                posterPath = x.Title.PosterPath,
+                backdropPath = x.Title.BackdropPath,
+                crowdRating = Domain.Catalog.CrowdRating.For(x.Title),
+                crowdVotes = Domain.Catalog.CrowdRating.VotesFor(x.Title),
+                x.nextEpisodeSeason,
+                x.nextEpisodeNumber,
+                x.watchedEpisodes,
+                x.totalAired,
+                x.completionPct,
+            }));
         });
 
         group.MapPost("/rebuild", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
+            // Manual refresh is a paid-surface capability, not a founder-only one — every paying tier
+            // can force a regeneration (reactive rebuilds cover the rest automatically).
+            if (account is null || account.Tier is not (AccountTier.Paid or AccountTier.Founder))
             {
                 return Results.Forbid();
             }
@@ -180,5 +297,137 @@ public static class FeedEndpoints
 
             return Results.Accepted();
         });
+
+        // The infinite-scroll lane. Every row (and the hero) extends through this: the client sends
+        // the row context + the title ids it has already shown, and gets the next best, never-seen
+        // slice — scored live, deepened from TMDB when a lane runs thin. Rows are the paid surface,
+        // so the free tier (3-pick hero shortlist) gets nothing here.
+        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            if (account.Tier is not (AccountTier.Paid or AccountTier.Founder))
+            {
+                // Free tier has no paginated rows — signal true exhaustion so the client stops paging
+                // rather than treating the empty page as a transient blip and retrying forever.
+                return Results.Ok(new { items = Array.Empty<FeedCard>(), exhausted = true });
+            }
+
+            if (SlugToContext(body.Row) is not { } context)
+            {
+                return Results.BadRequest(new { error = $"unknown row '{body.Row}'" });
+            }
+
+            var excludeIds = (body.ExcludeTitleIds ?? [])
+                .Select(s => Guid.TryParse(s, out var g) ? g : (Guid?)null)
+                .Where(g => g is not null).Select(g => g!.Value).ToList();
+            Guid? anchor = Guid.TryParse(body.AnchorTitleId, out var anchorId) ? anchorId : null;
+            var limit = Math.Clamp(body.Limit ?? 12, 1, 30);
+
+            var items = await paginator.MoreAsync(account, new MoreFeedRequest(context, anchor, body.Genre, excludeIds, limit, body.MediaType), ct);
+
+            var nowUtc = DateTime.UtcNow;
+            var providers = await ProvidersForAsync(db, account.Region, items.Select(i => i.Title.Id).ToList(), nowUtc, ct);
+            var cards = items.Select(i => new FeedCard(
+                i.Title.Id, i.Title.MediaType.ToString(), i.Title.TmdbId, i.Title.Name, i.Title.Year, i.Title.RuntimeMinutes,
+                i.Title.PosterPath, i.Title.BackdropPath, i.Title.Genres,
+                i.Predicted, Domain.Catalog.CrowdRating.For(i.Title), Domain.Catalog.CrowdRating.VotesFor(i.Title),
+                i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []))).ToList();
+
+            // The paginator already tried to deepen this lane straight from TMDB before returning, so an
+            // empty page here means the lane is genuinely dry — an explicit exhaustion signal the client
+            // can trust (vs a caught 500/429/offline, which it must NOT latch on). A full page implies more.
+            return Results.Ok(new { items = cards, exhausted = cards.Count == 0 });
+        });
+
+        // The genre rails the home page renders beneath the personalised rows: the user's top
+        // genres by affinity × volume, minus anything they've content-filtered out. The rails
+        // themselves fill via /more?row=genre, so this only names them.
+        group.MapGet("/genres", async (FeatureVectorBuilder featureBuilder, IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            if (account.Tier is not (AccountTier.Paid or AccountTier.Founder))
+            {
+                return Results.Ok(new { genres = Array.Empty<object>() });
+            }
+
+            // The rails themselves IGNORE the genre filters once opened (a rail's genre is the user's
+            // explicit request in that moment — see FeedPaginator.IgnoresGenreFilters). What is
+            // OFFERED here is a different question, and the answer is the standing preference: we do
+            // not put a "Documentary" rail in front of someone who filtered documentaries out, and an
+            // include-list narrows the offer to the genres on it. Navigating to such a rail directly
+            // still works; we simply never suggest it.
+            var excluded = await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.ExcludeGenre)
+                .Select(f => f.Value).ToListAsync(ct);
+            var included = await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.IncludeGenre)
+                .Select(f => f.Value).ToListAsync(ct);
+
+            var taste = await featureBuilder.BuildTasteStateAsync(account.Id, DateTime.UtcNow, ct);
+            var genres = taste.GenreRatings
+                .Where(kv => !excluded.Contains(kv.Key)
+                    && (included.Count == 0 || included.Contains(kv.Key))
+                    && kv.Value.Count >= 3)
+                .Select(kv => new
+                {
+                    slug = kv.Key,
+                    label = Prettify(kv.Key),
+                    score = (double)TasteMath.ShrunkenMean(kv.Value.Select(r => r.Rating).ToList(), taste.UserMean) * Math.Log(1 + kv.Value.Count),
+                })
+                .OrderByDescending(g => g.score)
+                .Take(8)
+                .Select(g => new { g.slug, g.label })
+                .ToList();
+
+            return Results.Ok(new { genres });
+        });
+    }
+
+    public record MoreRequestDto(string Row, string? AnchorTitleId, string? Genre, string[]? ExcludeTitleIds, int? Limit, string? MediaType = null);
+
+    private static FeedRowContext? SlugToContext(string? slug) => slug switch
+    {
+        "hero" or "tonights-picks" => FeedRowContext.Hero,
+        "because-you-loved" => FeedRowContext.BecauseYouLoved,
+        "deep-cuts" => FeedRowContext.DeepCuts,
+        "new-for-you" => FeedRowContext.NewForYou,
+        "genre" => FeedRowContext.Genre,
+        "similar" => FeedRowContext.Similar,
+        _ => null,
+    };
+
+    private static string Prettify(string slug) =>
+        string.Join(' ', slug.Split('-', StringSplitOptions.RemoveEmptyEntries)
+            .Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    private static async Task<Dictionary<Guid, IReadOnlyList<CardProvider>>> ProvidersForAsync(
+        IReelDbContext db, string region, IReadOnlyList<Guid> titleIds, DateTime nowUtc, CancellationToken ct)
+    {
+        if (titleIds.Count == 0)
+        {
+            return new Dictionary<Guid, IReadOnlyList<CardProvider>>();
+        }
+
+        var cutoff = nowUtc.AddDays(-7);
+        return (await db.TitleAvailabilities
+                .Where(a => titleIds.Contains(a.TitleId) && a.Region == region
+                    && a.Kind == Domain.Providers.AvailabilityKind.Flatrate && a.FetchedAt > cutoff)
+                .Join(db.StreamingProviders, a => a.ProviderId, p => p.Id, (a, p) => new { a.TitleId, p.Name, p.LogoPath, p.DisplayPriority })
+                .ToListAsync(ct))
+            .GroupBy(x => x.TitleId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<CardProvider>)g.DistinctBy(x => x.Name).OrderBy(x => x.DisplayPriority)
+                    .Take(3).Select(x => new CardProvider(x.Name, x.LogoPath)).ToList());
     }
 }

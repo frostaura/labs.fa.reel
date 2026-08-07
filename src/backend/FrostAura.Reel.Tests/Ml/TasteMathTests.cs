@@ -40,7 +40,7 @@ public class TasteMathTests
             (9, asOf.AddDays(-1100)), (9, asOf.AddDays(-1050)),
             (6, asOf.AddDays(-20)), (6, asOf.AddDays(-10)),
         };
-        var weighted = TasteMath.RecencyWeightedMean(ratings, asOf, fallback: 7m);
+        var weighted = TasteMath.RecencyWeightedMean(ratings, asOf, prior: 7m);
         var flat = ratings.Average(r => (decimal)r.Item1); // 7.5
         Assert.True(weighted < flat, $"weighted {weighted} should sit below flat {flat}");
         Assert.True(weighted < 6.8m);

@@ -8,12 +8,40 @@ namespace FrostAura.Reel.Domain.Ports;
 /// slugs aligned with the ingest vocabulary (<c>TmdbGenres.SlugToIds</c>); keywords are free
 /// phrases resolved to TMDB keyword ids; FreeText is the residual for literal title search.
 /// </summary>
+/// <summary>The role a named person plays in a query — "movies Nolan DIRECTS" vs "movies WITH Tom Hardy".</summary>
+public enum PersonRole
+{
+    Director,
+    Cast,
+    Any,
+}
+
+/// <summary>A named person constraint extracted from the query, with the role the user meant.</summary>
+public sealed record PersonQuery(string Name, PersonRole Role);
+
 public sealed record SearchIntent(
     IReadOnlyList<string> Genres,
     IReadOnlyList<string> Keywords,
     IReadOnlyList<MediaType> MediaTypes,
     string FreeText,
-    int? MinYear);
+    int? MinYear,
+    // Upper release-year bound, inclusive of the whole year. Without it a decade query cannot be
+    // expressed at all: "80s sci-fi" resolves to MinYear=1980 and then returns 1980-to-today
+    // sorted by popularity, so modern blockbusters dominate a request explicitly asking for old
+    // films. Nullable and positioned after MinYear so a bound is always optional.
+    int? MaxYear,
+    // A person/filmography query ("all movies Christopher Nolan directs") — resolved to TMDB
+    // person credits instead of keyword/title search, which can't represent a name. Optional so
+    // every existing construction site stays valid.
+    IReadOnlyList<PersonQuery>? People = null,
+    // What the user said they do NOT want — "less horror", "no ghosts", "not a musical".
+    // These MUST stay out of Genres/Keywords: those lists are pull signals, so a negated term
+    // landing there makes discovery actively chase the thing the user just rejected (the original
+    // defect — "I don't want ghosts" fetched ghost stories). Applied instead as a discovery
+    // exclusion plus a ranking penalty — never as a hard cull, so a negation can narrow the
+    // ordering but can never empty the result set.
+    IReadOnlyList<string>? ExcludeGenres = null,
+    IReadOnlyList<string>? ExcludeKeywords = null);
 
 public interface ISearchQueryInterpreter
 {

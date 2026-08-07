@@ -29,6 +29,17 @@ public static class SyncEndpoints
             var outboxPending = await db.TraktOutbox.CountAsync(o => o.Status == OutboxStatus.Pending || o.Status == OutboxStatus.Failed, ct);
             var outboxDead = await db.TraktOutbox.CountAsync(o => o.Status == OutboxStatus.DeadLetter, ct);
 
+            // List/write-back health for the header indicator: when Trakt last accepted a write, and
+            // the most recent failure text (so a stuck list surfaces the actual reason on hover).
+            var lastListSyncAt = await db.TraktOutbox
+                .Where(o => o.Status == OutboxStatus.Sent && o.SentAt != null)
+                .MaxAsync(o => (DateTime?)o.SentAt, ct);
+            var outboxLastError = await db.TraktOutbox
+                .Where(o => (o.Status == OutboxStatus.Failed || o.Status == OutboxStatus.DeadLetter) && o.Error != null)
+                .OrderByDescending(o => o.NextAttemptAt)
+                .Select(o => o.Error)
+                .FirstOrDefaultAsync(ct);
+
             static object ToJobSummary(SyncJob job) => new
             {
                 kind = job.Kind.ToString(),
@@ -65,6 +76,8 @@ public static class SyncEndpoints
                 recentJobs = jobs.Select(ToJobSummary),
                 outboxPending,
                 outboxDeadLetters = outboxDead,
+                lastListSyncAt,
+                outboxLastError,
             });
         });
 
@@ -85,6 +98,11 @@ public static class SyncEndpoints
                     Kind = JobKind.DeltaSync,
                     Priority = 0, // user asked — interactive priority
                     EnqueuedAt = DateTime.UtcNow,
+                    // Force a full refetch, not an activity-diffed delta. A user hitting "sync now"
+                    // wants the authoritative state — and Trakt does not bump last_activities
+                    // watched_at when history is *removed*, so a diffed delta would silently skip a
+                    // removal and the change would never land. Mirrors the nightly reconcile.
+                    CursorJson = """{"Force":true}""",
                 });
                 await db.SaveChangesAsync(ct);
             }

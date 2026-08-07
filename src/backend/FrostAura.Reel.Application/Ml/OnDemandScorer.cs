@@ -13,7 +13,7 @@ namespace FrostAura.Reel.Application.Ml;
 /// and upserts <see cref="TitleScore"/>. Serving uses <c>asOf = now</c>; leakage-clean because
 /// TitleScore is write-only and never read by training/eval.
 /// </summary>
-public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featureBuilder, IModelEngine engine)
+public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featureBuilder, IModelEngine engine, OnlineResidualModel residualModel)
 {
     /// <summary>
     /// Predicts the user's rating for each title and persists it. Returns titleId → predicted
@@ -35,7 +35,13 @@ public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featu
         }
 
         var artifact = await db.ModelArtifacts
-            .FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active, ct);
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            // Newest-first rather than an unordered FirstOrDefault: a filtered unique
+            // index makes two Active artifacts unrepresentable today, but an unordered
+            // read would silently start flipping predictions between models the moment
+            // that index changed. Deterministic by construction costs nothing here.
+            .OrderByDescending(a => a.Version)
+            .FirstOrDefaultAsync(ct);
         if (artifact is null)
         {
             return new Dictionary<Guid, decimal>();
@@ -51,6 +57,10 @@ public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featu
 
         var scores = engine.ScoreCached(artifact.Id, artifact.ArtifactBytes, orderedIds.Select(id => vectors[id]).ToArray());
 
+        // Fold in the online residual head (loaded once): base + learned correction, then clamp.
+        // Zero head ⇒ no change, so this is a strict no-op until the account has logged events.
+        var residual = await residualModel.LoadAsync(accountId, artifact.Id, ct);
+
         var existing = await db.TitleScores
             .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifact.Id && orderedIds.Contains(s.TitleId))
             .ToDictionaryAsync(s => s.TitleId, ct);
@@ -59,7 +69,8 @@ public sealed class OnDemandScorer(IReelDbContext db, FeatureVectorBuilder featu
         for (var i = 0; i < orderedIds.Count; i++)
         {
             var titleId = orderedIds[i];
-            var predicted = Math.Round(Math.Clamp((decimal)scores[i], 0m, 10m), 2);
+            var adjusted = scores[i] + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[titleId]);
+            var predicted = Math.Round(Math.Clamp((decimal)adjusted, 0m, 10m), 2);
             result[titleId] = predicted;
 
             if (!existing.TryGetValue(titleId, out var row))

@@ -3,13 +3,24 @@ import { Link, useLocation } from "react-router";
 import type { FeedCard } from "../../store/feedTypes";
 import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
 import PredictedRatingBadge from "./PredictedRatingBadge";
+import CrowdRatingBadge from "./CrowdRatingBadge";
 import { formatRuntime } from "../../lib/format";
+import { hasPredictedRating } from "../../lib/predictedRating";
+
+interface HeroProps {
+  cards: FeedCard[];
+  /** Infinite scroll — tonight's picks never run out; fired as the carousel nears its end. */
+  loadMore?: () => void;
+  loading?: boolean;
+}
+
+const NEAR_END_PX = 1200;
 
 /**
- * Tonight's-picks hero: 3–5 big confident picks in a snap carousel. Backdrop art with the
- * frost scrim carrying an oversized why-this — the answer to "what should I watch tonight".
+ * Tonight's-picks hero: big confident picks in a snap carousel that scrolls forever — backdrop art
+ * with the frost scrim carrying an oversized why-this, the answer to "what should I watch tonight".
  */
-export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
+export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
   const [active, setActive] = useState(0);
   const location = useLocation();
 
@@ -23,6 +34,9 @@ export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
         onScroll={(e) => {
           const el = e.currentTarget;
           setActive(Math.round((el.scrollLeft / Math.max(1, el.scrollWidth - el.clientWidth)) * (cards.length - 1)));
+          if (loadMore && el.scrollLeft + el.clientWidth >= el.scrollWidth - NEAR_END_PX) {
+            loadMore();
+          }
         }}
       >
         {cards.map((card, index) => {
@@ -48,7 +62,16 @@ export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
               <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 space-y-2">
                 <div className="flex items-center gap-3 flex-wrap">
                   <h2 className="text-xl sm:text-3xl font-light text-fa-frost-bright drop-shadow">{card.name}</h2>
-                  <PredictedRatingBadge rating={card.predictedRating} size="lg" />
+                  {/* Guarded like every other consumer — see lib/predictedRating.ts. The crowd
+                      score sits directly beside the prediction (there is room at hero scale) so the
+                      two are read as a pair; it is simply absent when the title has no community
+                      score, never a placeholder. */}
+                  {hasPredictedRating(card.predictedRating) && (
+                    <PredictedRatingBadge rating={card.predictedRating} size="lg" />
+                  )}
+                  {hasPredictedRating(card.crowdRating) && (
+                    <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} size="lg" />
+                  )}
                 </div>
                 <p className="fa-caption text-fa-frost-dim">
                   {[card.year, formatRuntime(card.runtimeMinutes), card.genres.slice(0, 3).join(" / ")]
@@ -60,8 +83,14 @@ export default function RecCardHero({ cards }: { cards: FeedCard[] }) {
             </Link>
           );
         })}
+        {loading && (
+          <div
+            className="relative w-[min(92%,860px)] shrink-0 snap-center overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 aspect-[16/8.5] reel-shimmer"
+            aria-hidden
+          />
+        )}
       </div>
-      {cards.length > 1 && (
+      {cards.length > 1 && cards.length <= 8 && (
         <div className="flex justify-center gap-1.5" aria-hidden>
           {cards.map((card, index) => (
             <span

@@ -28,6 +28,12 @@ public class TmdbClient(
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
     };
 
+    /// <summary>Backoff attempts on HTTP 429 before the throttle is surfaced to the caller.</summary>
+    private const int MaxThrottleRetries = 3;
+
+    /// <summary>Ceiling on a single backoff — a hostile Retry-After must not park a background job for an hour.</summary>
+    private static readonly TimeSpan MaxThrottleDelay = TimeSpan.FromSeconds(30);
+
     public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
         GetDetailsAsync($"movie/{tmdbId}?append_to_response=credits,videos,keywords", ct);
 
@@ -73,11 +79,7 @@ public class TmdbClient(
             return [];
         }
 
-        await rateGate.AcquireAsync(RatePriority.Interactive, ct);
-        usageRecorder.Record(ApiProvider.Tmdb);
-
-        using var request = AuthGet($"search/keyword?query={Uri.EscapeDataString(query)}");
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendAsync($"search/keyword?query={Uri.EscapeDataString(query)}", RatePriority.Interactive, ct);
         if (!response.IsSuccessStatusCode)
         {
             return [];
@@ -102,14 +104,85 @@ public class TmdbClient(
         return GetListAsync(path + q, movies, RatePriority.Interactive, ct);
     }
 
+    public async Task<TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        using var response = await SendAsync($"search/person?query={Uri.EscapeDataString(name)}&include_adult=false", RatePriority.Interactive, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<PersonSearchDto>(JsonOptions, ct);
+        // TMDB ranks /search/person by relevance+popularity, so the first valid result is the match.
+        var best = (dto?.Results ?? []).FirstOrDefault(p => p.Id > 0 && !string.IsNullOrWhiteSpace(p.Name));
+        return best is null ? null : new TmdbPerson(best.Id, best.Name!, best.KnownForDepartment);
+    }
+
+    public async Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default)
+    {
+        using var response = await SendAsync($"person/{personId}/combined_credits", RatePriority.Interactive, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            return [];
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<CombinedCreditsDto>(JsonOptions, ct);
+        if (dto is null)
+        {
+            return [];
+        }
+
+        var picked = new List<PersonCreditDto>();
+        if (role is PersonCreditRole.Cast or PersonCreditRole.Any)
+        {
+            picked.AddRange(dto.Cast ?? []);
+        }
+
+        if (role is PersonCreditRole.Director)
+        {
+            picked.AddRange((dto.Crew ?? []).Where(c => string.Equals(c.Job, "Director", StringComparison.OrdinalIgnoreCase)));
+        }
+        else if (role is PersonCreditRole.Any)
+        {
+            picked.AddRange(dto.Crew ?? []);
+        }
+
+        return picked
+            // A person can hold several roles on one title (writer+director, etc.) — collapse to one.
+            .Where(c => c.Id > 0 && (c.Title ?? c.Name) is not null && c.MediaType is "movie" or "tv")
+            .GroupBy(c => (c.MediaType, c.Id))
+            .Select(g => g.First())
+            .Select(c => new TmdbListItem(
+                c.Id,
+                c.MediaType == "movie",
+                (c.Title ?? c.Name)!,
+                c.PosterPath,
+                c.BackdropPath,
+                c.Overview,
+                c.Popularity,
+                c.VoteAverage,
+                c.VoteCount,
+                ParseDate(c.ReleaseDate ?? c.FirstAirDate),
+                c.GenreIds ?? []))
+            .ToList();
+    }
+
     public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
-        string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
+        string? region, DateTime? releasedAfter, int page,
+        IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
+        DateTime? releasedBefore = null, CancellationToken ct = default)
     {
         var path = movies ? "discover/movie" : "discover/tv";
         // vote_count.gte is lower than the feed's discover (50) — concept queries want recall over
         // the most niche unseen titles, not just the popular ones. Genres + keywords OR-joined.
         var query = $"?sort_by=popularity.desc&include_adult=false&page={page}&vote_count.gte=10";
+        var dateField = movies ? "primary_release_date" : "first_air_date";
         if (genreIds.Count > 0)
         {
             query += $"&with_genres={string.Join('|', genreIds)}";
@@ -120,10 +193,26 @@ public class TmdbClient(
             query += $"&with_keywords={string.Join('|', keywordIds)}";
         }
 
+        // TMDB AND-s the without_* filters, which is what we want: a title is dropped if it carries
+        // ANY rejected genre/keyword.
+        if (excludeGenreIds is { Count: > 0 })
+        {
+            query += $"&without_genres={string.Join(',', excludeGenreIds)}";
+        }
+
+        if (excludeKeywordIds is { Count: > 0 })
+        {
+            query += $"&without_keywords={string.Join(',', excludeKeywordIds)}";
+        }
+
         if (releasedAfter is { } after)
         {
-            var dateField = movies ? "primary_release_date" : "first_air_date";
             query += $"&{dateField}.gte={after:yyyy-MM-dd}";
+        }
+
+        if (releasedBefore is { } before)
+        {
+            query += $"&{dateField}.lte={before:yyyy-MM-dd}";
         }
 
         if (movies && region is { Length: 2 })
@@ -136,15 +225,7 @@ public class TmdbClient(
 
     public async Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default)
     {
-        await rateGate.AcquireAsync(RatePriority.Interactive, ct);
-        usageRecorder.Record(ApiProvider.Tmdb);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"{(movie ? "movie" : "tv")}/{tmdbId}/watch/providers");
-        var token = configuration["TMDB_READ_ACCESS_TOKEN"]
-            ?? throw new InvalidOperationException("TMDB_READ_ACCESS_TOKEN is required.");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendAsync($"{(movie ? "movie" : "tv")}/{tmdbId}/watch/providers", RatePriority.Interactive, ct);
         if (!response.IsSuccessStatusCode)
         {
             return [];
@@ -190,11 +271,7 @@ public class TmdbClient(
 
     private async Task<IReadOnlyList<TmdbListItem>> GetListAsync(string path, bool movies, RatePriority priority, CancellationToken ct)
     {
-        await rateGate.AcquireAsync(priority, ct);
-        usageRecorder.Record(ApiProvider.Tmdb);
-
-        using var request = AuthGet(path);
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendAsync(path, priority, ct);
         response.EnsureSuccessStatusCode();
         var dto = await response.Content.ReadFromJsonAsync<ListDto>(JsonOptions, ct);
 
@@ -211,8 +288,59 @@ public class TmdbClient(
                 r.VoteAverage,
                 r.VoteCount,
                 ParseDate(r.ReleaseDate ?? r.FirstAirDate),
-                r.GenreIds ?? []))
+                r.GenreIds ?? [],
+                r.OriginalLanguage))
             .ToList();
+    }
+
+    /// <summary>
+    /// Sends an authenticated GET, retrying HTTP 429 with bounded exponential backoff and honouring
+    /// Retry-After when TMDB sends it. 5xx / 408 / socket failures are already retried by the typed
+    /// client's standard resilience handler (see Infrastructure DependencyInjection); 429 is *not*
+    /// in that handler's transient predicate, so a throttled response used to fall straight through
+    /// to EnsureSuccessStatusCode and surface as a hard job failure. The caller owns the response.
+    /// GETs only — no non-idempotent request is ever replayed.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendAsync(string path, RatePriority priority, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            // Re-acquired per attempt: a retry is a fresh call against both the rate gate and the
+            // daily Fair-Use ledger.
+            await rateGate.AcquireAsync(priority, ct);
+            usageRecorder.Record(ApiProvider.Tmdb);
+
+            using var request = AuthGet(path);
+            var response = await httpClient.SendAsync(request, ct);
+            if (response.StatusCode != HttpStatusCode.TooManyRequests || attempt >= MaxThrottleRetries)
+            {
+                return response;
+            }
+
+            var delay = ThrottleDelay(response, attempt);
+            response.Dispose();
+            await Task.Delay(delay, ct);
+        }
+    }
+
+    /// <summary>Retry-After when present (Trakt/TMDB both send it on 429), else 0.4s · 2^attempt, capped.</summary>
+    private static TimeSpan ThrottleDelay(HttpResponseMessage response, int attempt)
+    {
+        TimeSpan? hinted = null;
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Delta is { } delta)
+        {
+            hinted = delta;
+        }
+        else if (retryAfter?.Date is { } date)
+        {
+            hinted = date - DateTimeOffset.UtcNow;
+        }
+
+        var delay = hinted is { } value && value > TimeSpan.Zero
+            ? value
+            : TimeSpan.FromMilliseconds(400 * (1 << attempt));
+        return delay > MaxThrottleDelay ? MaxThrottleDelay : delay;
     }
 
     private HttpRequestMessage AuthGet(string path)
@@ -231,6 +359,31 @@ public class TmdbClient(
 
     private sealed record KeywordResultDto(int Id, string? Name);
 
+    private sealed record PersonSearchDto(PersonResultDto[]? Results);
+
+    private sealed record PersonResultDto(
+        long Id,
+        string? Name,
+        [property: JsonPropertyName("known_for_department")] string? KnownForDepartment);
+
+    private sealed record CombinedCreditsDto(PersonCreditDto[]? Cast, PersonCreditDto[]? Crew);
+
+    private sealed record PersonCreditDto(
+        long Id,
+        string? Title,
+        string? Name,
+        [property: JsonPropertyName("media_type")] string? MediaType,
+        [property: JsonPropertyName("poster_path")] string? PosterPath,
+        [property: JsonPropertyName("backdrop_path")] string? BackdropPath,
+        string? Overview,
+        decimal Popularity,
+        [property: JsonPropertyName("vote_average")] decimal VoteAverage,
+        [property: JsonPropertyName("vote_count")] int VoteCount,
+        [property: JsonPropertyName("release_date")] string? ReleaseDate,
+        [property: JsonPropertyName("first_air_date")] string? FirstAirDate,
+        [property: JsonPropertyName("genre_ids")] int[]? GenreIds,
+        string? Job);
+
     private sealed record ListDto(ListResultDto[]? Results);
 
     private sealed record ListResultDto(
@@ -245,19 +398,12 @@ public class TmdbClient(
         [property: JsonPropertyName("vote_count")] int VoteCount,
         [property: JsonPropertyName("release_date")] string? ReleaseDate,
         [property: JsonPropertyName("first_air_date")] string? FirstAirDate,
-        [property: JsonPropertyName("genre_ids")] int[]? GenreIds);
+        [property: JsonPropertyName("genre_ids")] int[]? GenreIds,
+        [property: JsonPropertyName("original_language")] string? OriginalLanguage = null);
 
     private async Task<TmdbTitleDetails?> GetDetailsAsync(string path, CancellationToken ct)
     {
-        await rateGate.AcquireAsync(RatePriority.Backfill, ct);
-        usageRecorder.Record(ApiProvider.Tmdb);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, path);
-        var token = configuration["TMDB_READ_ACCESS_TOKEN"]
-            ?? throw new InvalidOperationException("TMDB_READ_ACCESS_TOKEN is required.");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        using var response = await httpClient.SendAsync(request, ct);
+        using var response = await SendAsync(path, RatePriority.Backfill, ct);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
             return null;
@@ -335,11 +481,13 @@ public class TmdbClient(
             cast,
             crew,
             trailer?.Key,
-            keywords);
+            keywords,
+            dto.OriginalLanguage);
     }
 
     private sealed record DetailsDto(
         long Id,
+        [property: JsonPropertyName("original_language")] string? OriginalLanguage,
         [property: JsonPropertyName("poster_path")] string? PosterPath,
         [property: JsonPropertyName("backdrop_path")] string? BackdropPath,
         decimal Popularity,
