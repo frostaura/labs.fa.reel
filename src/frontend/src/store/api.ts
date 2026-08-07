@@ -353,15 +353,29 @@ export const api = createApi({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "POST" }),
       invalidatesTags: ["ContinueWatching"], // that rail only — not the picks snapshot
       async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
-        const patch = dispatch(
-          api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
-            draft.userState.dropped = true;
-          })
-        );
+        // Two patches, because the drop button exists on two surfaces. The detail page reads
+        // getTitle; the Continue Watching shelf reads getContinueWatching, and it used to have no
+        // optimistic patch at all — the card sat there through a POST *and* the invalidation
+        // refetch before vanishing. On a fast local stack that is ~50ms and invisible, but there is
+        // no spinner and no disabled state, so on a slow or flaky connection the button reads as
+        // dead and invites a second click. Removing the entry up front makes the shelf respond to
+        // the click itself rather than to the network.
+        const patches = [
+          dispatch(
+            api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
+              draft.userState.dropped = true;
+            })
+          ),
+          dispatch(
+            api.util.updateQueryData("getContinueWatching", undefined, (draft) =>
+              draft.filter((entry) => entry.tmdbId !== tmdbId)
+            )
+          ),
+        ];
         try {
           await queryFulfilled;
         } catch {
-          patch.undo();
+          patches.forEach((p) => p.undo());
         }
       },
     }),
