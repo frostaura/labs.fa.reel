@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useDispatch } from "react-redux";
-import { Lock } from "lucide-react";
+import { Lock, Sparkles } from "lucide-react";
 import {
   useGetContinueWatchingQuery,
   useGetFeedGenresQuery,
@@ -15,6 +15,7 @@ import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import { DEFAULT_BROWSE_FILTER, matchesMedia } from "../lib/browseFilter";
+import { resolveSeedKey } from "../lib/feedSeed";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -25,13 +26,34 @@ export default function Home() {
   const dispatch = useDispatch();
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;
-  const resetKey = feed?.generatedAt ?? "";
 
-  // A rebuild re-seeds every row from the server (which already excludes removed titles), so the
+  // Every row is keyed on `resetKey`, so changing it remounts them and discards the pages the user
+  // has scrolled. The snapshot's own generatedAt is therefore NOT the key: acting on a card queues
+  // a server rebuild, and keying on it directly meant a rating reset the list out from under the
+  // user mid-triage. Instead the first snapshot is adopted, later ones are held, and the user
+  // adopts them at a moment of their choosing.
+  const latestKey = feed?.generatedAt ?? "";
+  const [adoptedKey, setAdoptedKey] = useState("");
+  const [adoptOnNext, setAdoptOnNext] = useState(false);
+
+  // Adjusted during render rather than in an effect (React's documented alternative to a syncing
+  // effect — it re-renders before commit instead of cascading). `resolveSeedKey` returns null in
+  // the common case, which is what protects an in-progress scroll; it is self-clearing, so this
+  // settles in one extra render pass.
+  const nextSeed = resolveSeedKey({ latest: latestKey, adopted: adoptedKey, adoptOnNext });
+  if (nextSeed !== null) {
+    setAdoptedKey(nextSeed);
+    if (adoptOnNext) setAdoptOnNext(false);
+  }
+
+  const resetKey = adoptedKey;
+  const hasFresherPicks = latestKey !== "" && adoptedKey !== "" && latestKey !== adoptedKey;
+
+  // Adopting re-seeds every row from the server (which already excludes removed titles), so the
   // session's removal set is now redundant — clear it to avoid masking re-eligible titles.
   useEffect(() => {
-    if (resetKey) dispatch(removalsCleared());
-  }, [resetKey, dispatch]);
+    if (adoptedKey) dispatch(removalsCleared());
+  }, [adoptedKey, dispatch]);
 
   const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
   const continueFiltered = (continueWatching ?? []).filter((e) => matchesMedia(e.mediaType, filter));
@@ -49,8 +71,20 @@ export default function Home() {
         </div>
         {!building && (
           <div className="flex items-center gap-2">
+            {hasFresherPicks && (
+              <button
+                type="button"
+                onClick={() => setAdoptedKey(latestKey)}
+                data-testid="adopt-fresh-picks"
+                title="Load the newly generated picks — this resets the rows below"
+                className="fa-overline inline-flex items-center gap-1.5 rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                New picks ready
+              </button>
+            )}
             {(feed?.hero.length ?? 0) > 0 && <BrowseFilters value={filter} onChange={setFilter} />}
-            <RefreshPicksButton />
+            <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
           </div>
         )}
       </div>

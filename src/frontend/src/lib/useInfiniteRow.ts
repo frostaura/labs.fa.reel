@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import { useLoadMoreFeedMutation } from "../store/api";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
@@ -15,6 +15,14 @@ export interface RowContext {
 }
 
 const PAGE_SIZE = 12;
+
+/**
+ * Visible-card floor before the row pulls another page. Acting on a card (rate / save / not
+ * interested) hides it locally, so a user queueing several titles from one row drains it. Topping
+ * up at half a page keeps the row full as they work, which is what makes "act, and the next one
+ * slides in" true rather than "act, and the row quietly empties".
+ */
+const TOPUP_THRESHOLD = 6;
 
 /**
  * Drives one row's infinite scroll: seeds from the snapshot's first page, then appends
@@ -74,8 +82,18 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[]) {
     }
   }, [row, anchorTitleId, genre, mediaType, exhausted, loadMoreFeed]);
 
-  const removedSet = new Set(removed);
-  const visible = items.filter((c) => !removedSet.has(c.titleId));
+  const removedSet = useMemo(() => new Set(removed), [removed]);
+  const visible = useMemo(() => items.filter((c) => !removedSet.has(c.titleId)), [items, removedSet]);
+
+  // Backfill after removals. `loadMore` is idempotent (in-flight guard) and `exhausted` latches on
+  // a genuinely dry lane, so this settles rather than looping: each pass either grows `visible` or
+  // ends the row. Pagination excludes by `seenRef`, not by what is on screen, so a topped-up page
+  // never re-serves the card the user just acted on.
+  useEffect(() => {
+    if (!exhausted && visible.length < TOPUP_THRESHOLD) {
+      void loadMore();
+    }
+  }, [visible.length, exhausted, loadMore]);
 
   return { items: visible, loadMore, loading: isLoading, exhausted };
 }

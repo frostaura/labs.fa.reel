@@ -202,7 +202,10 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
 export const api = createApi({
   reducerPath: "reelApi",
   baseQuery: baseQueryWithReauth,
-  tagTypes: ["Session", "Sync", "Feed", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
+  // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
+  // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
+  // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -237,7 +240,7 @@ export const api = createApi({
     }),
     getContinueWatching: b.query<ContinueEntry[], void>({
       query: () => "feed/continue-watching",
-      providesTags: ["Feed"],
+      providesTags: ["ContinueWatching", "Feed"],
     }),
     rebuildFeed: b.mutation<void, void>({
       query: () => ({ url: "feed/rebuild", method: "POST" }),
@@ -313,11 +316,10 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          // Seen+rated → the title has an interaction footprint now; drop it from the picks
-          // (server filters it at read time) alongside the taste/saved refresh. The infinite rows
-          // render from local state, so also prune it from view immediately.
+          // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
+          // Deliberately does NOT invalidate Feed — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "Feed"]));
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
         } catch {
           patch.undo();
         }
@@ -337,9 +339,13 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          // "Not interested" should leave the feed immediately — prune from the live rows + refetch.
+          // "Not interested" leaves the feed immediately via the local removal set — and ONLY via
+          // that. Invalidating Feed here refetches the snapshot, which mints a new generatedAt,
+          // which re-keys every row in Home, which throws away the pages the user has scrolled and
+          // scrolls them back to the start. Acting on one card must never reset the list around it;
+          // the server rebuild that this reaction triggers is adopted at a deliberate boundary
+          // instead (Home's "new picks ready" control, or the next mount).
           dispatch(titleRemoved({ titleId }));
-          dispatch(api.util.invalidateTags(["Feed"]));
         } catch {
           patch.undo();
         }
@@ -355,9 +361,9 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          // Re-eligible — bring it back into the live rows and let the feed pick it back up.
+          // Re-eligible — restoring the key un-hides the card that is still in the row's local
+          // state, so no refetch is needed (and a refetch would reset the row).
           dispatch(titleRestored({ titleId }));
-          dispatch(api.util.invalidateTags(["Feed"]));
         } catch {
           patch.undo();
         }
@@ -365,7 +371,7 @@ export const api = createApi({
     }),
     markDropped: b.mutation<void, { mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "POST" }),
-      invalidatesTags: ["Feed"], // continue-watching is tagged Feed
+      invalidatesTags: ["ContinueWatching"], // that rail only — not the picks snapshot
       async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -381,7 +387,7 @@ export const api = createApi({
     }),
     undrop: b.mutation<void, { mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "DELETE" }),
-      invalidatesTags: ["Feed"],
+      invalidatesTags: ["ContinueWatching"],
       async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -405,10 +411,10 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          // Feed: a saved title drops out of the picks (server filters it at read time) and out
-          // of the live rows now.
+          // A saved title drops out of the live rows now. Saved list refreshes; the picks snapshot
+          // deliberately does not — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
-          dispatch(api.util.invalidateTags(["Saved", "Feed"]));
+          dispatch(api.util.invalidateTags(["Saved"]));
         } catch {
           patch.undo();
         }
@@ -424,9 +430,9 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
-          // Unsaving makes it eligible again — restore it to the live rows, refresh Saved + feed.
+          // Unsaving makes it eligible again — restore it to the live rows and refresh Saved.
           dispatch(titleRestored({ titleId }));
-          dispatch(api.util.invalidateTags(["Saved", "Feed"]));
+          dispatch(api.util.invalidateTags(["Saved"]));
         } catch {
           patch.undo();
         }

@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Mic, Send, Sparkles } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import BrowseFilters from "../components/rec/BrowseFilters";
-import { DEFAULT_BROWSE_FILTER, matchesMedia } from "../lib/browseFilter";
+import { DEFAULT_BROWSE_FILTER, type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
@@ -18,6 +18,13 @@ import type { PhaseData } from "../lib/askReelStream";
  * "less intense", "more like the first one") — never repeating a title.
  */
 const REFINE_CHIPS = ["Only movies", "Only TV", "Something lighter", "More intense", "More like the first one"];
+
+/** Maps the browse toggle to the wire values the server understands ([] = no constraint). */
+function mediaTypesFor(filter: BrowseFilter): string[] {
+  if (filter.media === "movie") return ["movie"];
+  if (filter.media === "show") return ["tv"];
+  return [];
+}
 
 function narrate(phase: PhaseData | null): string {
   switch (phase?.stage) {
@@ -42,7 +49,8 @@ export default function SearchResults() {
   const location = useLocation();
   const [filter, setFilter] = useState(DEFAULT_BROWSE_FILTER);
   const [draft, setDraft] = useState("");
-  const { turns, status, phase, cards, reason, send, resume } = useAskReelChat();
+  const { turns, status, phase, cards, reason, send, resume, loadMore, setMediaTypes, exhausted, appending } = useAskReelChat();
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const speech = useSpeech((text) => send(text, false));
 
   // A search from the header box (?q=) starts a fresh conversation; landing on /search with no
@@ -65,11 +73,34 @@ export default function SearchResults() {
     };
   }, [seed, send, resume]);
 
+  // The media filter is NOT applied here any more. Hiding cards after the fact is what produced
+  // "No matches" on a turn that had returned eight perfectly good shows: the server had never been
+  // told the user wanted movies, so it had no chance to go and find any. It is now sent upstream
+  // and the server narrows discovery, so what arrives already matches.
   const removedSet = new Set(useSelector(selectRemovedKeys));
-  const visible = cards
-    .filter((c) => matchesMedia(c.mediaType, filter))
-    .filter((c) => !removedSet.has(c.titleId));
+  const visible = cards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
+
+  // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
+  // request, so it must land before the re-send.
+  const changeFilter = (next: typeof filter) => {
+    setFilter(next);
+    setMediaTypes(mediaTypesFor(next));
+    const last = [...turns].reverse().find((t) => t.role === "user");
+    if (last) send(last.text, false);
+  };
+
+  // Infinite scroll: a sentinel below the grid asks for the next page of the same question.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || exhausted || streaming || cards.length === 0) return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) loadMore(); },
+      { rootMargin: "600px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [exhausted, streaming, cards.length, loadMore]);
 
   const submit = (text: string) => {
     if (!text.trim()) return;
@@ -136,7 +167,7 @@ export default function SearchResults() {
             </button>
           ))}
           <div className="ml-auto">
-            <BrowseFilters value={filter} onChange={setFilter} showAvailability={false} />
+            <BrowseFilters value={filter} onChange={changeFilter} showAvailability={false} />
           </div>
         </div>
       )}
@@ -185,7 +216,27 @@ export default function SearchResults() {
         </div>
       )}
 
-      {reason && status === "done" && <p className="fa-caption text-fa-frost-dim text-center">{reason}</p>}
+      {/* Infinite scroll: the sentinel sits below the grid and pulls the next page of the same
+          question as it comes into view. */}
+      {visible.length > 0 && (
+        <>
+          <div ref={sentinelRef} aria-hidden className="h-1" />
+          {appending && (
+            <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-more">
+              Finding more like these…
+            </p>
+          )}
+          {exhausted && (
+            <p className="fa-caption text-fa-frost-dim text-center">
+              That&apos;s everything on this thread — refine it above for a different angle.
+            </p>
+          )}
+        </>
+      )}
+
+      {reason && status === "done" && !appending && (
+        <p className="fa-caption text-fa-frost-dim text-center">{reason}</p>
+      )}
 
       {/* Composer */}
       <form

@@ -28,7 +28,15 @@ public sealed record SearchIntent(
     // A person/filmography query ("all movies Christopher Nolan directs") — resolved to TMDB
     // person credits instead of keyword/title search, which can't represent a name. Optional so
     // every existing construction site stays valid.
-    IReadOnlyList<PersonQuery>? People = null);
+    IReadOnlyList<PersonQuery>? People = null,
+    // What the user said they do NOT want — "less horror", "no ghosts", "not a musical".
+    // These MUST stay out of Genres/Keywords: those lists are pull signals, so a negated term
+    // landing there makes discovery actively chase the thing the user just rejected (the original
+    // defect — "I don't want ghosts" fetched ghost stories). Applied instead as a discovery
+    // exclusion plus a ranking penalty — never as a hard cull, so a negation can narrow the
+    // ordering but can never empty the result set.
+    IReadOnlyList<string>? ExcludeGenres = null,
+    IReadOnlyList<string>? ExcludeKeywords = null);
 
 public interface ISearchQueryInterpreter
 {

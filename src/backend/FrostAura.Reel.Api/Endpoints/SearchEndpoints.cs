@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
@@ -267,7 +268,15 @@ public static class SearchEndpoints
 
             try
             {
-                await expansion.StreamAsync(message, history, shown, region, emit, ct);
+                var mediaFilter = (request.MediaTypes ?? [])
+                    .Select(m => m?.Trim().ToLowerInvariant())
+                    .Select(m => m is "movie" or "movies" or "film" ? MediaType.Movie
+                        : m is "tv" or "show" or "series" ? MediaType.Show : (MediaType?)null)
+                    .Where(m => m is not null)
+                    .Select(m => m!.Value)
+                    .Distinct()
+                    .ToList();
+                await expansion.StreamAsync(message, history, shown, region, mediaFilter, emit, ct);
             }
             catch (OperationCanceledException)
             {
@@ -317,7 +326,18 @@ public static class SearchEndpoints
 
     public record AskTurn(string? Role, string? Text);
 
-    public record AskRequest(string Query, List<AskTurn>? History, List<long>? ShownTmdbIds, Guid? ConversationId);
+    /// <summary>
+    /// <paramref name="MediaTypes"/> carries the UI's movie/TV toggle. It has to reach the server:
+    /// filtering the returned cards client-side meant a turn that surfaced only shows rendered
+    /// nothing under "Movies", with the footer still cheerfully reporting the unfiltered count.
+    /// Values are "movie"/"tv"; empty or absent means no constraint.
+    /// </summary>
+    public record AskRequest(
+        string Query,
+        List<AskTurn>? History,
+        List<long>? ShownTmdbIds,
+        Guid? ConversationId,
+        List<string>? MediaTypes);
 
     /// <summary>The account's MinPredictedRating floor (0 = off) — recommendation surfaces only.</summary>
     public static async Task<decimal> MinPredictedFloorAsync(IReelDbContext db, Guid accountId, CancellationToken ct)

@@ -18,7 +18,7 @@ import { useRebuildFeedMutation, useTriggerSyncMutation } from "../../store/api"
  * still lands. `busy` covers both the in-flight enqueue calls and any active pipeline job (so a
  * background sync started elsewhere also disables the button), and drives the spinner.
  */
-export default function RefreshPicksButton() {
+export default function RefreshPicksButton({ onRequested }: { onRequested?: () => void }) {
   const [triggerSync, { isLoading: syncing }] = useTriggerSyncMutation();
   const [rebuildFeed, { isLoading: rebuilding }] = useRebuildFeedMutation();
   const jobActive = useSelector((s: RootState) => s.syncUi.active);
@@ -26,6 +26,11 @@ export default function RefreshPicksButton() {
 
   const refresh = async () => {
     if (busy) return;
+    // Asking for fresh picks is an explicit request to be reset — tell the owner to adopt the
+    // snapshot this produces, rather than holding it behind the "new picks ready" affordance that
+    // protects an in-progress scroll. Fires up front: the enqueue returns long before the rebuild
+    // lands, so the owner waits for the new generatedAt itself.
+    onRequested?.();
     // Sync first (earlier EnqueuedAt → runs first), then regenerate on the fresh data.
     await triggerSync().unwrap().catch(() => undefined);
     await rebuildFeed().unwrap().catch(() => undefined);

@@ -17,10 +17,17 @@ interface State {
   reason: string | null;
   shown: number[]; // tmdbIds surfaced across the whole conversation (no-repeat)
   conversationId: string | null;
+  /** True while a "load more" turn is in flight — its results append instead of replacing. */
+  appending: boolean;
+  /** The message to replay when paging. Keeps "more" on the same intent as the last real turn. */
+  lastQuery: string;
+  /** Latches when a page adds nothing new, so the scroll sentinel stops asking. */
+  exhausted: boolean;
 }
 
 type Action =
   | { type: "userTurn"; message: string; fresh: boolean }
+  | { type: "moreTurn" }
   | { type: "phase"; data: PhaseData }
   | { type: "conversation"; data: { id: string } }
   | { type: "resume"; turns: ChatTurn[]; conversationId: string }
@@ -31,16 +38,25 @@ type Action =
   | { type: "done"; data: { results: AskCard[]; reason: string | null } }
   | { type: "error" };
 
-const initial: State = { turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [], conversationId: null };
+const initial: State = {
+  turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
+  conversationId: null, appending: false, lastQuery: "", exhausted: false,
+};
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "userTurn": {
       const turn: ChatTurn = { role: "user", text: action.message };
       return action.fresh
-        ? { ...initial, turns: [turn], status: "streaming" }
-        : { ...state, turns: [...state.turns, turn], status: "streaming", phase: null, byId: {}, order: [], reason: null };
+        ? { ...initial, turns: [turn], status: "streaming", lastQuery: action.message }
+        : {
+            ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
+            byId: {}, order: [], reason: null, appending: false, lastQuery: action.message, exhausted: false,
+          };
     }
+    case "moreTurn":
+      // A page, not a turn: no transcript entry, and the existing cards stay put.
+      return { ...state, status: "streaming", phase: null, appending: true };
     case "phase":
       return { ...state, status: "streaming", phase: action.data };
     case "conversation":
@@ -48,7 +64,11 @@ function reducer(state: State, action: Action): State {
     case "resume":
       return { ...initial, turns: action.turns, conversationId: action.conversationId, status: "done" };
     case "assistant":
-      return { ...state, turns: [...state.turns, { role: "assistant", text: action.data.text }] };
+      // Paging replays the last message, so the model replies again — suppress it rather than
+      // stuttering the same answer into the transcript on every scroll.
+      return state.appending
+        ? state
+        : { ...state, turns: [...state.turns, { role: "assistant", text: action.data.text }] };
     case "candidate": {
       const c = action.data;
       if (state.byId[c.titleId]) return state;
@@ -72,7 +92,18 @@ function reducer(state: State, action: Action): State {
         if (c.tmdbId != null) newTmdb.push(c.tmdbId);
       }
       const shown = Array.from(new Set([...state.shown, ...newTmdb]));
-      return { ...state, byId, order: action.data.results.map((c) => c.titleId), reason: action.data.reason, status: "done", shown };
+      const incoming = action.data.results.map((c) => c.titleId);
+      // Appending keeps what is on screen and adds only genuinely new ids; a page that adds
+      // nothing latches `exhausted` so the scroll sentinel stops asking for more.
+      const order = state.appending
+        ? [...state.order, ...incoming.filter((id) => !state.order.includes(id))]
+        : incoming;
+      const gained = order.length - state.order.length;
+      return {
+        ...state, byId, order, status: "done", shown, appending: false,
+        reason: state.appending && gained === 0 ? state.reason : action.data.reason,
+        exhausted: state.appending ? gained === 0 : false,
+      };
     }
     case "error":
       return { ...state, status: "error" };
@@ -94,9 +125,14 @@ export function useAskReelChat() {
   stateRef.current = state;
   const abortRef = useRef<AbortController | null>(null);
 
-  const send = useCallback((message: string, fresh = false) => {
-    const msg = message.trim();
-    if (!msg) return;
+  // The active media filter, kept in a ref so `send`/`loadMore` stay referentially stable while
+  // still reading the current value — a filter change re-sends rather than hiding cards locally.
+  const mediaRef = useRef<string[]>([]);
+  const setMediaTypes = useCallback((types: string[]) => {
+    mediaRef.current = types;
+  }, []);
+
+  const run = useCallback((msg: string, fresh: boolean, more: boolean) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -104,9 +140,9 @@ export function useAskReelChat() {
     const history = fresh ? [] : stateRef.current.turns.map((t) => ({ role: t.role, text: t.text }));
     const shownTmdbIds = fresh ? [] : [...stateRef.current.shown];
     const conversationId = fresh ? null : stateRef.current.conversationId;
-    dispatch({ type: "userTurn", message: msg, fresh });
+    dispatch(more ? { type: "moreTurn" } : { type: "userTurn", message: msg, fresh });
 
-    streamAskReel({ query: msg, history, shownTmdbIds, conversationId }, (ev) => {
+    streamAskReel({ query: msg, history, shownTmdbIds, conversationId, mediaTypes: mediaRef.current }, (ev) => {
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data }); break;
         case "conversation": dispatch({ type: "conversation", data: ev.data }); break;
@@ -123,6 +159,22 @@ export function useAskReelChat() {
     });
   }, []);
 
+  const send = useCallback((message: string, fresh = false) => {
+    const msg = message.trim();
+    if (!msg) return;
+    run(msg, fresh, false);
+  }, [run]);
+
+  /**
+   * Next page of the SAME question. Replays the last message with every tmdbId already shown
+   * excluded, so the server returns fresh picks that append to the reel. No transcript entry.
+   */
+  const loadMore = useCallback(() => {
+    const s = stateRef.current;
+    if (s.status === "streaming" || s.exhausted || !s.lastQuery || s.order.length === 0) return;
+    run(s.lastQuery, false, true);
+  }, [run]);
+
   const resume = useCallback((turns: ChatTurn[], conversationId: string) => {
     if (turns.length > 0) dispatch({ type: "resume", turns, conversationId });
   }, []);
@@ -130,5 +182,8 @@ export function useAskReelChat() {
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const cards = state.order.map((id) => state.byId[id]).filter(Boolean).sort((a, b) => blend(b) - blend(a));
-  return { turns: state.turns, status: state.status, phase: state.phase, cards, reason: state.reason, send, resume };
+  return {
+    turns: state.turns, status: state.status, phase: state.phase, cards, reason: state.reason,
+    send, resume, loadMore, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+  };
 }

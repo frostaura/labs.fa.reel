@@ -47,6 +47,20 @@ public sealed class LiveSearchExpansionService(
     private const int SemanticNeighbourCount = 40; // semantic kNN pull size — mirrors the TMDB arm's ceiling
     private const int RerankBatch = 6;
     private const int SearchPages = 1;
+
+    /// <summary>
+    /// The floor that makes "no results" a bug rather than an outcome. If a turn's eligible pool
+    /// comes in under this, discovery re-runs at a wider relaxation level rather than reporting
+    /// nothing — a request is always relative to *something*, so an empty answer is a failure to
+    /// look hard enough, not an honest verdict.
+    /// </summary>
+    private const int MinResults = 12;
+
+    /// <summary>How many progressively-wider discovery passes a turn may make before giving up.</summary>
+    private const int MaxRelaxations = 3;
+
+    /// <summary>Penalty applied to the blend per matched negation ("less horror", "no ghosts").</summary>
+    private const double NegationPenalty = 0.22;
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -57,12 +71,23 @@ public sealed class LiveSearchExpansionService(
     public Task StreamAsync(string message, string? region, Emit emit, CancellationToken ct) =>
         StreamAsync(message, [], [], region, emit, ct);
 
+    /// <summary>Overload without an explicit media filter — the intent's own inference applies.</summary>
+    public Task StreamAsync(
+        string message, IReadOnlyList<ChatTurn> history, IReadOnlyList<long> shownTmdbIds, string? region, Emit emit, CancellationToken ct) =>
+        StreamAsync(message, history, shownTmdbIds, region, [], emit, ct);
+
     /// <summary>
     /// Runs a conversational turn end-to-end, emitting the SSE event stream. Never throws for an
     /// ordinary failure — emits a graceful done with a reason instead.
     /// </summary>
     public async Task StreamAsync(
-        string message, IReadOnlyList<ChatTurn> history, IReadOnlyList<long> shownTmdbIds, string? region, Emit emit, CancellationToken ct)
+        string message,
+        IReadOnlyList<ChatTurn> history,
+        IReadOnlyList<long> shownTmdbIds,
+        string? region,
+        IReadOnlyList<MediaType> mediaFilter,
+        Emit emit,
+        CancellationToken ct)
     {
         var accountId = accountContext.AccountId
             ?? throw new InvalidOperationException("Live search requires an account.");
@@ -111,24 +136,69 @@ public sealed class LiveSearchExpansionService(
             //     on — and whose few hits a heavy watcher has already seen — still surfaces the
             //     nearest-by-meaning unseen titles we already hold. Both flow through the SAME
             //     eligible → embed → cosine-prerank → score → rerank pipeline below.
-            var candidateIds = await DiscoverCandidateIdsAsync(agentReply.Intent, region, ct);
-            var semanticIds = isPersonQuery
-                ? new List<Guid>()
-                : await SemanticNeighbourIdsAsync(accountId, agentReply, ct);
-            var discovered = candidateIds.Concat(semanticIds).Distinct().ToList();
-            await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
+            // An explicit media filter from the UI is a direct instruction and outranks whatever the
+            // model inferred from the prose. Threading it here (rather than filtering the rendered
+            // cards client-side, as this used to) is what stops "Movies" turning a turn that found
+            // eight shows into an empty screen: discovery now goes looking for movies instead.
+            var intent = mediaFilter.Count > 0
+                ? agentReply.Intent with { MediaTypes = mediaFilter.Distinct().ToList() }
+                : agentReply.Intent;
+            agentReply = agentReply with { Intent = intent };
 
-            // ── Filter to candidates + maturity + not-already-shown-this-conversation ─────────
             var shownSet = shownTmdbIds.ToHashSet();
             var baseQuery = isPersonQuery
                 ? eligibility.ContentFilteredTitles(accountId)
                 : eligibility.EligibleTitles(accountId);
-            var eligible = (await baseQuery
-                    .Where(t => discovered.Contains(t.Id))
-                    .ToListAsync(ct))
-                .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
-                .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
-                .ToList();
+
+            // ── Discover, widening until there is enough to rank ─────────────────────────────
+            // Each pass relaxes one more constraint. An under-filled pool is treated as "we did not
+            // look hard enough yet", never as "there is nothing" — the ladder bottoms out at a pull
+            // that cannot come back empty for an account with any eligible catalogue at all.
+            var discovered = new List<Guid>();
+            var eligible = new List<Title>();
+            var relaxation = 0;
+            for (; relaxation < MaxRelaxations; relaxation++)
+            {
+                var pass = Relax(intent, relaxation);
+                var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
+                var semanticIds = isPersonQuery
+                    ? new List<Guid>()
+                    : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, ct);
+                discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
+                await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
+
+                eligible = (await baseQuery
+                        .Where(t => discovered.Contains(t.Id))
+                        .ToListAsync(ct))
+                    .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
+                    .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
+                    .Where(t => MatchesMedia(t, intent.MediaTypes))
+                    .ToList();
+
+                if (eligible.Count >= MinResults || isPersonQuery)
+                {
+                    break;
+                }
+            }
+
+            // Last resort: the user's own eligible catalogue, nearest-by-taste. Reaching here means
+            // discovery genuinely failed, and showing loosely-related titles the user has not seen
+            // beats an empty screen — the request is relative, so something is always closer than
+            // nothing. Only a truly empty eligible catalogue can still come back with zero.
+            if (eligible.Count == 0)
+            {
+                eligible = (await baseQuery
+                        .Where(t => t.TmdbPopularity != null)
+                        .OrderByDescending(t => t.TmdbPopularity)
+                        .Take(MaxCandidates * 2)
+                        .ToListAsync(ct))
+                    .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
+                    .Where(t => t.TmdbId == null || !shownSet.Contains(t.TmdbId.Value))
+                    .Where(t => MatchesMedia(t, intent.MediaTypes))
+                    .ToList();
+                relaxation = MaxRelaxations;
+            }
+
             if (eligible.Count == 0)
             {
                 await emit("done", new { results = Array.Empty<object>(), reason = "no fresh matches — try another angle" });
@@ -185,21 +255,32 @@ public sealed class LiveSearchExpansionService(
                     var predicted = scores.TryGetValue(x.Title.Id, out var p) ? (decimal?)p : null;
                     var fit = fitById.TryGetValue(x.Title.Id, out var fr) ? fr : null;
                     var tagBoost = vectorsByTitle.TryGetValue(x.Title.Id, out var vec) ? TagAffinity(vec, tagVectors) : 0d;
-                    var blend = (x.Sim * 0.32) + ((double)(predicted ?? 6m) / 10d * 0.23) + ((fit?.Fit ?? 0.5d) * 0.35) + (tagBoost * 0.10);
+                    // Negations demote, they never cull — a rejected trait should push a title down
+                    // the list, not risk emptying it.
+                    var penalty = NegationDemerit(x.Title, intent);
+                    var blend = (x.Sim * 0.32) + ((double)(predicted ?? 6m) / 10d * 0.23) + ((fit?.Fit ?? 0.5d) * 0.35) + (tagBoost * 0.10) - penalty;
                     return (x.Title, x.Sim, predicted, Fit: fit, Blend: blend);
                 })
                 .OrderByDescending(x => x.Blend)
                 .Select(x => Card(x.Title, x.Sim, x.predicted, x.Fit?.Fit, x.Fit?.Why))
                 .ToList();
 
+            // Report what was RETURNED, not what was pulled. The old wording was derived purely
+            // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —
+            // the numbers described a result set the user could not see.
             await emit("done", new
             {
                 results = final,
-                reason = $"Pulled {discovered.Count} from the wider catalogue; {eligible.Count} unseen, ranked for you.",
+                reason = final.Count == 0
+                    ? "no fresh matches — try another angle"
+                    : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
+                        + (relaxation > 0 ? " (widened to find enough)" : "") + ".",
             });
+            // Logs `final` too: the count the user actually sees is the one worth alerting on, and
+            // its absence is what let an empty result set look healthy in the logs.
             logger.LogInformation(
-                "Ask Reel '{Query}': {Discovered} discovered ({Tmdb} TMDB + {Semantic} semantic), {Eligible} eligible, {Scored} scored, {Reranked} reranked.",
-                trimmed, discovered.Count, candidateIds.Count, semanticIds.Count, eligible.Count, sliceIds.Count, fitById.Count);
+                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible, {Scored} scored, {Reranked} reranked, {Returned} returned.",
+                trimmed, discovered.Count, relaxation, eligible.Count, sliceIds.Count, fitById.Count, final.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -333,6 +414,47 @@ public sealed class LiveSearchExpansionService(
     /// high-energy" phrasing the query embedding is built from; it embeds in the SAME vector space
     /// as the title embeddings (one <see cref="IEmbeddingProvider"/> by construction).
     /// </summary>
+    /// <summary>
+    /// One rung of the widening ladder. Level 0 is the intent as asked; each level after drops the
+    /// narrowest surviving constraint, because an over-specified turn ("dark thriller serial killer
+    /// that gets caught at the end") pulls almost nothing through TMDB's keyword AND-ing.
+    /// Media type is never relaxed — it is the one constraint the user set explicitly.
+    /// </summary>
+    private static SearchIntent Relax(SearchIntent intent, int level) => level switch
+    {
+        0 => intent,
+        // Keywords are AND-ed by TMDB discovery, so they collapse recall fastest — halve them.
+        1 => intent with { Keywords = intent.Keywords.Take(Math.Max(1, intent.Keywords.Count / 2)).ToList() },
+        // Genre-only: the broadest pull that still honours the vibe.
+        _ => intent with { Keywords = [], FreeText = string.Empty },
+    };
+
+    /// <summary>True when the title matches the requested media types (empty list = no constraint).</summary>
+    private static bool MatchesMedia(Title title, IReadOnlyList<MediaType> mediaTypes) =>
+        mediaTypes.Count == 0 || mediaTypes.Contains(title.MediaType);
+
+    /// <summary>
+    /// How much a title contradicts what the user ruled out. Each matched negated genre or keyword
+    /// costs one <see cref="NegationPenalty"/>; capped so even a title that trips every negation
+    /// stays rankable rather than being effectively removed.
+    /// </summary>
+    private static double NegationDemerit(Title title, SearchIntent intent)
+    {
+        var hits = 0;
+        if (intent.ExcludeGenres is { Count: > 0 } badGenres && title.Genres is { Length: > 0 })
+        {
+            hits += title.Genres.Count(g => badGenres.Contains(g, StringComparer.OrdinalIgnoreCase));
+        }
+
+        if (intent.ExcludeKeywords is { Count: > 0 } badWords)
+        {
+            var haystack = $"{title.Name} {title.Overview}";
+            hits += badWords.Count(w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return Math.Min(hits * NegationPenalty, 0.66);
+    }
+
     private static string ConceptText(AgentReply agentReply)
     {
         var intent = agentReply.Intent;

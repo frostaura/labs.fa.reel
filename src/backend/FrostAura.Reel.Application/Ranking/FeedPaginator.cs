@@ -560,15 +560,15 @@ public sealed class FeedPaginator(
                 return await RankByAnchorSimilarityAsync(viewedAnchorId, scored, boosts, ct);
 
             case FeedRowContext.DeepCuts:
-            {
-                var ordered = scored.OrderBy(s => s.Title.TmdbPopularity ?? 0m).ToList();
-                var threshold = ordered.Count > 0
-                    ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
-                return scored
-                    .Where(s => s.Predicted >= 6m && (s.Title.TmdbPopularity ?? 0m) <= threshold)
-                    .OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id))
-                    .ToList();
-            }
+                {
+                    var ordered = scored.OrderBy(s => s.Title.TmdbPopularity ?? 0m).ToList();
+                    var threshold = ordered.Count > 0
+                        ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
+                    return scored
+                        .Where(s => s.Predicted >= 6m && (s.Title.TmdbPopularity ?? 0m) <= threshold)
+                        .OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id))
+                        .ToList();
+                }
 
             case FeedRowContext.Hero:
             case FeedRowContext.NewForYou:

@@ -229,7 +229,13 @@ public class OpenRouterSearchAgent(
         "filmmaker or actor; e.g. \"movies Christopher Nolan directs\" → people:[{\"name\":\"Christopher Nolan\",\"role\":\"director\"}], " +
         "\"films with Tom Hardy\" → people:[{\"name\":\"Tom Hardy\",\"role\":\"cast\"}]; do NOT put a person's name in keywords " +
         "or freeText), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (int or null), freeText (literal-title " +
-        "search string). Use the conversation + shown list to resolve references. Output strictly valid JSON.";
+        "search string), excludeGenres (array of the same genre slugs) and excludeKeywords (array of concept phrases). " +
+        "NEGATION IS CRITICAL: anything the user rejects or wants less of — \"less horror\", \"no ghosts\", \"not a musical\", " +
+        "\"I don't want X\" — belongs ONLY in excludeGenres/excludeKeywords and MUST NOT appear in genres/keywords, because " +
+        "those are used to FETCH titles and would hand them exactly what they just rejected. e.g. \"more thriller and less " +
+        "horror, I don't want ghosts I want serial killers\" → genres:[\"thriller\",\"crime\"], keywords:[\"serial killer\"], " +
+        "excludeGenres:[\"horror\"], excludeKeywords:[\"ghost\",\"supernatural\"]. Carry negations forward across turns unless " +
+        "the user retracts them. Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
     private const string RerankSystemPrompt =
         "You are Reel's taste engine. For each title, judge how well it fits THIS specific user and their request — " +

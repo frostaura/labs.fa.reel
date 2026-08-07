@@ -20,8 +20,14 @@ internal static class SearchIntentParser
                     .Select(e => e.GetString()!.Trim().ToLowerInvariant()).Where(s => s.Length > 0).Distinct().Take(8).ToArray()
                 : [];
 
-        var genres = StrArray("genres").Where(TmdbGenres.SlugToIds.ContainsKey).ToArray();
-        var keywords = StrArray("keywords");
+        var excludeGenres = StrArray("excludeGenres").Where(TmdbGenres.SlugToIds.ContainsKey).ToArray();
+        var excludeKeywords = StrArray("excludeKeywords");
+
+        // A term the model listed on both sides is a negation it half-applied ("less horror" →
+        // genres:[horror], excludeGenres:[horror]). Negation wins: acting on the positive would
+        // fetch exactly what the user rejected, which is the louder failure.
+        var genres = StrArray("genres").Where(TmdbGenres.SlugToIds.ContainsKey).Except(excludeGenres).ToArray();
+        var keywords = StrArray("keywords").Except(excludeKeywords).ToArray();
         var media = StrArray("mediaTypes")
             .Select(m => m.StartsWith("movie") ? MediaType.Movie : m is "tv" or "show" or "series" ? MediaType.Show : (MediaType?)null)
             .Where(m => m is not null).Select(m => m!.Value).Distinct().ToArray();
@@ -39,10 +45,14 @@ internal static class SearchIntentParser
             {
                 MediaTypes = media.Length > 0 ? media : heuristicFallback.MediaTypes,
                 MinYear = minYear ?? heuristicFallback.MinYear,
+                // Negations survive a positive-signal fallback: "no ghosts" still means no ghosts
+                // even when the rest of the spec came from the heuristic.
+                ExcludeGenres = excludeGenres.Length > 0 ? excludeGenres : heuristicFallback.ExcludeGenres,
+                ExcludeKeywords = excludeKeywords.Length > 0 ? excludeKeywords : heuristicFallback.ExcludeKeywords,
             };
         }
 
-        return new SearchIntent(genres, keywords, media, freeText, minYear, people);
+        return new SearchIntent(genres, keywords, media, freeText, minYear, people, excludeGenres, excludeKeywords);
     }
 
     /// <summary>Parses a "people":[{"name","role"}] array — role ∈ director|cast|any (default any).</summary>

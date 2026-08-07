@@ -46,6 +46,12 @@ export interface AskReelRequest {
   history?: { role: string; text: string }[];
   shownTmdbIds?: number[];
   conversationId?: string | null;
+  /**
+   * The movie/TV toggle, as "movie" / "tv". Sent so the SERVER narrows discovery rather than the
+   * client hiding cards after the fact — filtering locally meant a turn that returned only shows
+   * rendered an empty screen under "Movies".
+   */
+  mediaTypes?: string[];
 }
 
 /** Streams /api/search/ask, invoking onEvent per parsed SSE frame. Resolves when the stream ends. */

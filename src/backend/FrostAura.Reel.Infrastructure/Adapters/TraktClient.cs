@@ -84,11 +84,22 @@ public class TraktClient(
             user.Images?.Avatar?.Full);
     }
 
+    // Trakt paginated the watched endpoints and changed the extended defaults, enforced after
+    // 2026-06-30 (trakt/trakt-api discussion 775). Two consequences this code must respect:
+    //   * An unpaginated request silently returns only the FIRST 100 items — no error, just a
+    //     truncated library. Every page must be walked via X-Pagination-Page-Count.
+    //   * extended=full is now ignored, and season progress is no longer included by default.
+    //     Season/episode progress requires extended=progress, which Trakt caps at 100 per page.
+    // Item metadata (overview, genres, runtime) is deliberately not sourced from here — TMDB
+    // enrichment owns it, which is why dropping the dead extended=full costs nothing.
+    private const int WatchedPageLimit = 250;
+    private const int ProgressPageLimit = 100;
+
     public async Task<IReadOnlyList<TraktWatchedMovie>> GetWatchedMoviesAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
-        await GetApiAsync<List<TraktWatchedMovie>>("sync/watched/movies?extended=full", accessToken, priority, ct) ?? [];
+        await GetAllPagesAsync<TraktWatchedMovie>("sync/watched/movies", WatchedPageLimit, accessToken, priority, ct);
 
     public async Task<IReadOnlyList<TraktWatchedShow>> GetWatchedShowsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
-        await GetApiAsync<List<TraktWatchedShow>>("sync/watched/shows?extended=full", accessToken, priority, ct) ?? [];
+        await GetAllPagesAsync<TraktWatchedShow>("sync/watched/shows?extended=progress", ProgressPageLimit, accessToken, priority, ct);
 
     public async Task<IReadOnlyList<TraktRatingItem>> GetRatingsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
         await GetApiAsync<List<TraktRatingItem>>("sync/ratings?extended=full", accessToken, priority, ct) ?? [];
@@ -106,6 +117,51 @@ public class TraktClient(
         using var response = await httpClient.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync(ct);
+    }
+
+    /// <summary>
+    /// Walks every page of a paginated Trakt collection. The page count comes from Trakt's
+    /// X-Pagination-Page-Count header rather than from the requested limit, because Trakt caps
+    /// limits server-side and documents that the applied values — not the requested ones — are
+    /// authoritative. A missing header means an unpaginated response: take it and stop.
+    /// </summary>
+    private async Task<IReadOnlyList<T>> GetAllPagesAsync<T>(
+        string path, int limit, string accessToken, RatePriority priority, CancellationToken ct)
+    {
+        var separator = path.Contains('?') ? '&' : '?';
+        var results = new List<T>();
+
+        for (var page = 1; ; page++)
+        {
+            await rateGate.AcquireAsync(priority, ct);
+            usageRecorder.Record(ApiProvider.Trakt);
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{path}{separator}page={page}&limit={limit}");
+            ApplyApiHeaders(request, accessToken);
+            using var response = await httpClient.SendAsync(request, ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                break;
+            }
+
+            response.EnsureSuccessStatusCode();
+            var batch = await response.Content.ReadFromJsonAsync<List<T>>(JsonOptions, ct) ?? [];
+            results.AddRange(batch);
+
+            if (!TryReadPaginationHeader(response, "X-Pagination-Page-Count", out var pageCount) || page >= pageCount)
+            {
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    private static bool TryReadPaginationHeader(HttpResponseMessage response, string name, out int value)
+    {
+        value = 0;
+        return response.Headers.TryGetValues(name, out var values)
+            && int.TryParse(values.FirstOrDefault(), out value);
     }
 
     private async Task<T?> GetApiAsync<T>(string path, string accessToken, RatePriority priority, CancellationToken ct)

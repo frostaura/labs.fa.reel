@@ -11,6 +11,11 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.9" />
+    <!-- Override the vulnerable System.Security.Cryptography.Xml 10.0.9 that
+         DataProtection.EntityFrameworkCore 10.0.9 pulls transitively (GHSA-8q5v-6pqq-x66h et al.,
+         high severity) with the first patched release so the audited Silver build restores clean.
+         Remove once DataProtection ships a patched transitive. -->
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.9" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />

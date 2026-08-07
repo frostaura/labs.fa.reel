@@ -113,46 +113,117 @@ public class OpenRouterSearchInterpreter(
         var genres = new List<string>();
         var keywords = new List<string>();
         var media = new List<MediaType>();
+        var excludeGenres = new List<string>();
+        var excludeKeywords = new List<string>();
+
+        // Negation scope. "less horror", "no ghosts", "I don't want ghosts" — without this every
+        // rejected term became a positive pull signal and discovery fetched exactly what the user
+        // had just ruled out. A negator flips the next few tokens; the scope closes at the next
+        // positive pivot ("but", "i want", "more") or after NegationScope tokens, because natural
+        // phrasing rarely negates further than that ("less horror, I want serial killers").
+        var negateFor = 0;
+        var negatedContentSeen = false;
 
         foreach (var raw in tokens)
         {
+            if (Negators.Contains(raw))
+            {
+                negateFor = NegationScope;
+                negatedContentSeen = false;
+                continue;
+            }
+
+            // Media words are only ever a media constraint, and "tv" is short enough to be caught
+            // by the noise filter below — so resolve them before anything else.
+            if (raw is "movie" or "movies" or "film" or "films")
+            {
+                if (!media.Contains(MediaType.Movie)) media.Add(MediaType.Movie);
+                continue;
+            }
+
+            if (raw is "tv" or "show" or "shows" or "series")
+            {
+                if (!media.Contains(MediaType.Show)) media.Add(MediaType.Show);
+                continue;
+            }
+
+            // Filler between a negator and the thing being rejected ("don't WANT ghosts") is
+            // transparent: it neither closes the scope nor spends it. Without this, "want" read as
+            // a pivot and "I don't want ghosts" came out as a request FOR ghosts.
+            // Only transparent BEFORE the negation lands on something. Once it has, the same word
+            // is a pivot back to what the user does want — "don't want ghosts I WANT serial
+            // killers" negates the ghosts and then stops.
+            if (negateFor > 0 && !negatedContentSeen && NegationFiller.Contains(raw))
+            {
+                continue;
+            }
+
+            // A pivot only closes a negation that has actually landed on something — otherwise the
+            // "want" in "don't want" would close the scope it belongs to.
+            if (PositivePivots.Contains(raw))
+            {
+                if (negateFor == 0 || negatedContentSeen)
+                {
+                    negateFor = 0;
+                }
+
+                continue;
+            }
+
+            // Sub-3-character tokens are punctuation debris ("t" from "don't", a bare "i"), never
+            // content — and must not consume the negation budget.
+            if (raw.Length <= 2)
+            {
+                continue;
+            }
+
+            var negated = negateFor > 0;
+            if (negated)
+            {
+                negateFor--;
+                negatedContentSeen = true;
+            }
             // Crude singularise: "horrors" → "horror", "mysteries" → "mystery", "comedies" → "comedy".
             var token = raw.EndsWith("ies", StringComparison.Ordinal) && raw.Length > 4
                 ? string.Concat(raw.AsSpan(0, raw.Length - 3), "y")
                 : raw.TrimEnd('s');
-            if (raw is "movie" or "movies" or "film" or "films")
+            if (GenreAliases.TryGetValue(raw, out var aliasSlug))
             {
-                if (!media.Contains(MediaType.Movie)) media.Add(MediaType.Movie);
-            }
-            else if (raw is "tv" or "show" or "shows" or "series")
-            {
-                if (!media.Contains(MediaType.Show)) media.Add(MediaType.Show);
-            }
-            else if (GenreAliases.TryGetValue(raw, out var aliasSlug))
-            {
-                if (!genres.Contains(aliasSlug)) genres.Add(aliasSlug);
+                Add(negated ? excludeGenres : genres, aliasSlug);
             }
             else if (TmdbGenres.SlugToIds.ContainsKey(raw))
             {
-                if (!genres.Contains(raw)) genres.Add(raw);
+                Add(negated ? excludeGenres : genres, raw);
             }
             else if (TmdbGenres.SlugToIds.ContainsKey(token))
             {
-                if (!genres.Contains(token)) genres.Add(token);
+                Add(negated ? excludeGenres : genres, token);
             }
             else if (raw.Length > 2 && !StopWords.Contains(raw))
             {
-                if (!keywords.Contains(raw)) keywords.Add(raw);
+                Add(negated ? excludeKeywords : keywords, token.Length > 2 ? token : raw);
             }
         }
 
-        // No concept words at all → treat the whole phrase as one keyword so discovery still fires.
-        if (genres.Count == 0 && keywords.Count == 0)
+        // A term on both sides is a negation that also read as positive earlier in the sentence
+        // ("more thriller and less horror" once horror has been seen twice). Negation wins.
+        genres.RemoveAll(excludeGenres.Contains);
+        keywords.RemoveAll(excludeKeywords.Contains);
+
+        // No positive concept words at all → treat the whole phrase as one keyword so discovery
+        // still fires. Guarded on the negations too: a turn that is purely a rejection ("no ghosts")
+        // must not turn that rejection into the search string.
+        if (genres.Count == 0 && keywords.Count == 0 && excludeGenres.Count == 0 && excludeKeywords.Count == 0)
         {
             keywords.Add(lower);
         }
 
-        return new SearchIntent(genres, keywords, media, query, null);
+        return new SearchIntent(genres, keywords, media, query, null, null, excludeGenres, excludeKeywords);
+
+        static void Add(List<string> target, string value)
+        {
+            if (!target.Contains(value)) target.Add(value);
+        }
     }
 
     private static readonly IReadOnlyDictionary<string, string> GenreAliases = new Dictionary<string, string>
@@ -176,6 +247,39 @@ public class OpenRouterSearchInterpreter(
         "the", "a", "an", "and", "or", "of", "with", "for", "about", "like", "some", "any",
         "good", "best", "great", "really", "very", "more", "most", "kind", "stuff", "things",
         "something", "show", "me", "find", "want", "watch",
+        // Negation machinery — these steer the parse, they are never content themselves.
+        "less", "fewer", "not", "no", "don", "dont", "doesn", "without", "except", "avoid", "hate",
+        "but", "instead", "rather",
+    };
+
+    /// <summary>How many tokens a negator governs before the scope lapses.</summary>
+    private const int NegationScope = 3;
+
+    /// <summary>
+    /// Words that sit between a negator and its target without ending the negation —
+    /// "don't WANT ghosts", "no MORE ghosts". They neither close the scope nor consume it.
+    /// </summary>
+    private static readonly HashSet<string> NegationFiller = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "want", "wanted", "like", "liked", "see", "seen", "watch", "watching", "have", "any",
+        "more", "much", "really", "into", "for", "the", "a", "an", "some", "too",
+    };
+
+    /// <summary>Words that open a negation ("less horror", "no ghosts", "I don't want ghosts").</summary>
+    private static readonly HashSet<string> Negators = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // "don" and "doesn" are what the tokenizer leaves of "don't"/"doesn't" — it splits on the
+        // apostrophe, so the negator never survives as a whole word.
+        "less", "fewer", "not", "no", "without", "except", "avoid", "hate", "don", "dont", "doesn",
+    };
+
+    /// <summary>
+    /// Words that close a negation scope because the sentence has pivoted back to what the user
+    /// DOES want — "no ghosts I want serial killers" must not negate "serial killers".
+    /// </summary>
+    private static readonly HashSet<string> PositivePivots = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "but", "instead", "rather", "want", "prefer", "more", "just", "only", "give",
     };
 
     private const string SystemPrompt =
