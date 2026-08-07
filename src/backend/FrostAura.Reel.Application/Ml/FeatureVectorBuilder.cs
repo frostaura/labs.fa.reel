@@ -28,6 +28,17 @@ public class FeatureVectorBuilder(IReelDbContext db)
     private const decimal LovedThreshold = 8m;
     private const int TopLovedCount = 10;
 
+    /// <summary>
+    /// How many loved titles the "because you loved" ANCHOR rotation may draw from.
+    ///
+    /// Deliberately a SEPARATE, wider pool from <see cref="TopLovedCount"/>. That constant sizes
+    /// <see cref="TasteState.TopLovedTitleIds"/> / <see cref="TasteState.LovedEmbeddings"/>, which
+    /// feed the <c>simTopLovedMax</c> / <c>simTopLovedMean</c> FEATURES — widening it would silently
+    /// change every vector the model has ever been trained on. Anchor choice is presentation, not
+    /// features, so it gets its own pool and leaves the schema alone.
+    /// </summary>
+    private const int LovedAnchorPoolCount = 40;
+
     /// <summary>Prior used when leave-one-out leaves no observations at all (matches the cold-start mean).</summary>
     private const decimal NeutralUserMean = 7m;
 
@@ -95,7 +106,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
         float[]? LovedCentroid,
         float[]? RecentCentroid,
         IReadOnlyDictionary<Guid, float[]> LovedEmbeddings,
-        SelfExclusion Self);
+        SelfExclusion Self,
+        IReadOnlyList<Guid> LovedAnchorPool);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -215,6 +227,21 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Take(TopLovedCount)
             .ToList();
 
+        // The anchor pool: the same loved set, but ordered by rating WEIGHTED BY RECENCY rather than
+        // rating alone. A user with thousands of ratings has a strict top-10 that is frozen for ever
+        // — which is exactly why "Because you loved X" showed the same three titles every build. This
+        // ordering lets a recently-loved 8 outrank a decade-old 10, and it is deterministic (a pure
+        // function of the ratings and asOf), so a build is reproducible from its own timestamp.
+        var lovedAnchorPool = titleRatings
+            .Where(r => r.Rating >= LovedThreshold)
+            .GroupBy(r => r.TitleId)
+            .Select(g => g.OrderByDescending(r => r.Rating).ThenByDescending(r => r.RatedAt).First())
+            .OrderByDescending(r => r.Rating * TasteMath.RecencyWeight(r.RatedAt, asOf))
+            .ThenByDescending(r => r.RatedAt)
+            .Select(r => r.TitleId)
+            .Take(LovedAnchorPoolCount)
+            .ToList();
+
         var lovedIds = titleRatings.Where(r => r.Rating >= LovedThreshold).Select(r => r.TitleId).Distinct().ToList();
         var recentCutoff = asOf.AddDays(-365);
         var recentLovedIds = titleRatings
@@ -255,7 +282,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
             lovedCentroid,
             recentCentroid,
             topLovedEmbeddings,
-            self);
+            self,
+            lovedAnchorPool);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>

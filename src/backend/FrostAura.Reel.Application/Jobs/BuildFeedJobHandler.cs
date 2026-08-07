@@ -29,6 +29,7 @@ public class BuildFeedJobHandler(
     FeatureVectorBuilder featureBuilder,
     CandidateGenerator candidateGenerator,
     CandidateRetriever candidateRetriever,
+    FeedStarvationDiagnostic starvation,
     TitleHydrator hydrator,
     IModelEngine engine,
     OnlineResidualModel residualModel,
@@ -216,6 +217,47 @@ public class BuildFeedJobHandler(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
         IReadOnlyList<Candidate> candidates, decimal minPredicted, DateTime now, CancellationToken ct)
     {
+        // ── The floor is soft; the content rules are not ────────────────────────────────────
+        // Content filters are the user's statement about CONTENT — they bind absolutely and are
+        // already applied in retrieval. MinPredictedRating is a statement about the MODEL's opinion,
+        // and the model's output scale is not something the user can see or calibrate against. When
+        // nothing at all clears it, honouring it strictly renders a blank page; relaxing it and SAYING
+        // SO shows honest, lower-confidence rankings instead. Same call Ask Reel already makes
+        // (LiveSearchExpansionService's MinFloorRelaxedCount arm) — the feed build was the one
+        // suggestion surface still treating "empty" as a verdict rather than a failure to look harder.
+        var effectiveFloor = minPredicted;
+        string? degradedReason = null;
+        if (minPredicted > 0m && !candidates.Any(c => c.Predicted >= minPredicted))
+        {
+            effectiveFloor = 0m;
+
+            // Invariant culture, deliberately: these numbers are ratings on the same 0–10 scale the
+            // settings screen shows and ContentFilterRules stores, and a server whose locale renders
+            // "9,9" would quote the user a threshold they never typed.
+            degradedReason = candidates.Count > 0
+                ? string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "Nothing scored at or above your {0:0.#} “for you” minimum, so it was relaxed for this build — "
+                        + "the best of {1} matching titles is {2:0.0}.",
+                    minPredicted,
+                    candidates.Count,
+                    candidates.Max(c => c.Predicted))
+                : null;
+        }
+
+        // An empty candidate pool is a different failure with a different answer: retrieval, not
+        // ranking, came back with nothing, so the feed must name the content condition responsible.
+        if (candidates.Count == 0)
+        {
+            degradedReason = await starvation.ExplainEmptyPoolAsync(account.Id, ct)
+                ?? "No candidates survived this build. Try relaxing a filter.";
+        }
+
+        if (degradedReason is not null)
+        {
+            logger.LogWarning("Feed build degraded for {AccountId}: {Reason}", account.Id, degradedReason);
+        }
+
         // Per-title, per-role best-affinity person, restricted to people the user has actually rated
         // (count ≥ 2). Keying by role lets the why-sentence cite the person matching the contribution
         // (a directorAffinity clause names a director, never an actor); restricting to rated people
@@ -240,44 +282,47 @@ public class BuildFeedJobHandler(
                             .OrderByDescending(p => p.Affinity)
                             .First()));
 
-        // Anchors: the user's top loved titles by name.
+        // Anchors: candidate loved titles by name. Drawn from the WIDE recency-weighted anchor pool
+        // as well as the strict all-time top, because the strict top of a 3,600-rating history never
+        // changes and was the whole reason the same three rows kept coming back.
+        var anchorCandidateIds = taste.LovedAnchorPool.Concat(taste.TopLovedTitleIds).Distinct().ToList();
         var anchorTitles = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id))
+            .Where(t => anchorCandidateIds.Contains(t.Id))
             .ToDictionaryAsync(t => t.Id, ct);
 
-        // Drift-aware anchor selection. TopLovedTitleIds is rating-first (all-time favourites), so the
-        // rows drift stale as taste moves. Reserve ONE anchor slot for the loved title whose plot
-        // embedding sits nearest the user's RECENT-taste centroid — so "Because you loved" reflects
-        // where taste is now — then fill the rest from the all-time order. Falls back to the plain
-        // top-loved order when there's no recent-centroid signal or the loved set isn't embedded.
-        var lovedInOrder = taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList();
-        var anchorIds = new List<Guid>();
+        // What the LAST build anchored on — held back so this build cannot repeat it while any other
+        // loved title is available. Read before the supersede below, which does not touch FeedItems.
+        var previousAnchors = (await db.FeedItems
+                .Where(i => i.AccountId == account.Id
+                    && i.Row == FeedRowKind.BecauseYouLoved
+                    && i.AnchorTitleId != null
+                    && db.FeedSnapshots.Any(s => s.Id == i.FeedSnapshotId && s.Status == SnapshotStatus.Active))
+                .Select(i => i.AnchorTitleId!.Value)
+                .Distinct()
+                .ToListAsync(ct))
+            .ToHashSet();
+
+        // The drift pick: the loved title whose plot embedding sits nearest the user's RECENT-taste
+        // centroid, so one row always reflects where taste is NOW. Null when there is no recent
+        // signal or the loved set carries no embeddings.
+        Guid? driftPick = null;
         if (taste.RecentCentroid is { } recentCentroid)
         {
-            var driftPick = taste.LovedEmbeddings
+            driftPick = taste.LovedEmbeddings
                 .Where(kv => anchorTitles.ContainsKey(kv.Key))
                 .Select(kv => (Id: kv.Key, Sim: Cosine(kv.Value, recentCentroid)))
                 .OrderByDescending(x => x.Sim)
                 .Select(x => (Guid?)x.Id)
                 .FirstOrDefault();
-            if (driftPick is { } pick)
-            {
-                anchorIds.Add(pick);
-            }
         }
 
-        foreach (var id in lovedInOrder)
-        {
-            if (anchorIds.Count >= AnchorRowCount)
-            {
-                break;
-            }
-
-            if (!anchorIds.Contains(id))
-            {
-                anchorIds.Add(id);
-            }
-        }
+        var anchorIds = AnchorRotation.Select(
+            driftPick,
+            taste.LovedAnchorPool.Where(anchorTitles.ContainsKey).ToList(),
+            taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList(),
+            previousAnchors,
+            AnchorRotation.OffsetFor(now),
+            AnchorRowCount);
 
         var anchors = anchorIds.Select(id => anchorTitles[id]).ToList();
 
@@ -328,7 +373,7 @@ public class BuildFeedJobHandler(
 
         // Hero: greedy pick with genre-diversity shaping (MMR with Jaccard until embeddings land).
         var heroPool = candidates
-            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, minPredicted) && c.Title.PosterPath != null)
+            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
             .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
             .ToList();
         var hero = new List<Candidate>();
@@ -359,7 +404,7 @@ public class BuildFeedJobHandler(
         {
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
-                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= minPredicted)
+                .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
                 .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
                 .Take(HeroSize - hero.Count));
         }
@@ -379,6 +424,7 @@ public class BuildFeedJobHandler(
             ModelArtifactId = artifact.Id,
             GeneratedAt = now,
             Status = SnapshotStatus.Active,
+            DegradedReason = degradedReason,
         };
         db.FeedSnapshots.Add(snapshot);
 
@@ -421,9 +467,9 @@ public class BuildFeedJobHandler(
         // reserve each later row's top-few candidates BEFORE the anchor fill so they survive. The
         // shared `used` set still guarantees no title repeats across the feed — reserved titles are
         // only WITHHELD from the greedy loved fill here, never pre-added, and remain free to place.
-        bool IsDeepCut(Candidate c) => c.Predicted >= Math.Max(6m, minPredicted)
+        bool IsDeepCut(Candidate c) => c.Predicted >= Math.Max(6m, effectiveFloor)
             && (c.Title.TmdbPopularity ?? 0m) < popThreshold;
-        bool IsNewForYou(Candidate c) => c.Predicted >= minPredicted
+        bool IsNewForYou(Candidate c) => c.Predicted >= effectiveFloor
             && (c.Title.ReleasedAt ?? c.Title.FirstAiredAt) is { } r && (now - r).TotalDays <= 900;
 
         var reserved = new HashSet<Guid>();
@@ -448,7 +494,7 @@ public class BuildFeedJobHandler(
         foreach (var anchor in anchors)
         {
             var members = candidates
-                .Where(c => !used.Contains(c.Title.Id) && !reserved.Contains(c.Title.Id) && c.Predicted >= minPredicted)
+                .Where(c => !used.Contains(c.Title.Id) && !reserved.Contains(c.Title.Id) && c.Predicted >= effectiveFloor)
                 .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
                 .Where(x => x.Sim > 0.15d)
                 .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))

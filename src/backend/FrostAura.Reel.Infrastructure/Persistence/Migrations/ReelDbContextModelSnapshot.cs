@@ -447,6 +447,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("DegradedReason")
+                        .HasColumnType("text");
+
                     b.Property<DateTime>("GeneratedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -843,6 +846,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
+
+                    b.Property<int>("AlgorithmVersion")
+                        .HasColumnType("integer");
 
                     b.Property<Guid>("BaseArtifactId")
                         .HasColumnType("uuid");

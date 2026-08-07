@@ -23,4 +23,12 @@ public class FeedSnapshot : IAccountScoped
     public DateTime GeneratedAt { get; set; }
 
     public SnapshotStatus Status { get; set; } = SnapshotStatus.Active;
+
+    /// <summary>
+    /// Why this build is not what the account's settings literally asked for — null when it is.
+    /// Set when the predicted-rating floor had to be relaxed to avoid a blank page, and when the
+    /// candidate pool came back empty so the feed can say WHICH condition emptied it. A blank feed
+    /// with no reason is the failure mode this column exists to make impossible.
+    /// </summary>
+    public string? DegradedReason { get; set; }
 }

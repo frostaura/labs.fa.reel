@@ -45,7 +45,13 @@ public static class FeedEndpoints
                 .FirstOrDefaultAsync(ct);
             if (snapshot is null)
             {
-                return Results.Ok(new { generatedAt = (DateTime?)null, hero = Array.Empty<object>(), rows = Array.Empty<object>() });
+                return Results.Ok(new
+                {
+                    generatedAt = (DateTime?)null,
+                    hero = Array.Empty<object>(),
+                    rows = Array.Empty<object>(),
+                    degradedReason = (string?)null,
+                });
             }
 
             var items = await db.FeedItems
@@ -188,6 +194,9 @@ public static class FeedEndpoints
                     hero = hero.Take(3),
                     rows = Array.Empty<object>(),
                     lockedRowCount,
+                    // Why this build is not literally what the settings asked for (null when it is).
+                    // A blank feed must always arrive with the reason attached.
+                    snapshot.DegradedReason,
                 });
             }
 
@@ -222,7 +231,14 @@ public static class FeedEndpoints
             AddKindRow(FeedRowKind.DeepCuts, "deep-cuts", "Deep cuts — under-the-radar, high for you");
             AddKindRow(FeedRowKind.NewForYou, "new-for-you", "New & for you");
 
-            return Results.Ok(new { generatedAt = (DateTime?)snapshot.GeneratedAt, hero, rows, lockedRowCount = 0 });
+            return Results.Ok(new
+            {
+                generatedAt = (DateTime?)snapshot.GeneratedAt,
+                hero,
+                rows,
+                lockedRowCount = 0,
+                snapshot.DegradedReason,
+            });
         });
 
         group.MapGet("/continue-watching", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>

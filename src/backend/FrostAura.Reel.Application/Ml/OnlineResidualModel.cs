@@ -34,22 +34,55 @@ public sealed class OnlineResidualModel(
     private const double BiasClamp = 3.0;
     private const double ResidualClamp = 3.0;
 
+    /// <summary>
+    /// Guards against a division by a near-zero ‖x‖² for an all-but-empty vector, which would turn
+    /// the normalised step below back into an unbounded one.
+    /// </summary>
+    private const double NormEpsilon = 1.0;
+
+    /// <summary>
+    /// The online update rule this class implements, persisted on every head it writes.
+    /// <list type="bullet">
+    /// <item><b>0</b> — raw SGD: <c>w += lr·sw·err·x</c>. UNSAFE, and the reason this constant exists.
+    /// The features are raw, not standardised: <c>runtimeMinutes</c> is ~105, the affinity scalars are
+    /// ~7, <c>tmdbPopularityLog</c> and <c>traktVotesLog</c> are ~2–10. A single event with a typical
+    /// error (a not-interested on a title the base scored 7 gives err ≈ −5) moves w₁ by
+    /// 0.03·0.8·(−5)·105 ≈ −12.6, which lands on the ±2 clamp immediately. Once a handful of scalars
+    /// are pinned there, <c>dot(w, x)</c> is in the hundreds and <see cref="Residual"/> returns the
+    /// ±<see cref="ResidualClamp"/> rail for EVERY title — the head stops being a per-title correction
+    /// and becomes a constant offset on the whole distribution.</item>
+    /// <item><b>1</b> — normalised (NLMS) step: <c>w += lr·sw·err·x / (ε + ‖x‖²)</c>. The change this
+    /// makes to the head's own prediction for the observed vector is <c>lr·sw·err</c> regardless of
+    /// feature scale, so no feature's units can drive its weight to the clamp and the output rail is
+    /// reached only by a genuinely persistent, consistent error — which is what it was always for.</item>
+    /// </list>
+    /// </summary>
+    public const int CurrentAlgorithmVersion = 1;
+
     /// <summary>The loaded residual head: dense weights (feature-aligned) + intercept.</summary>
     public readonly record struct ResidualState(float[] Weights, double Bias);
 
     /// <summary>
-    /// Loads the persisted head IFF it still corrects the given Active artifact; otherwise returns a
-    /// fresh zero state. The <see cref="OnlineModelState.BaseArtifactId"/> == <paramref name="activeArtifactId"/>
-    /// check IS the auto-reset — a new Active artifact from a retrain makes the old residual dormant
-    /// with no write, so serving never applies a residual trained against a superseded base.
+    /// Loads the persisted head IFF it still corrects the given Active artifact AND was produced by
+    /// the current update rule; otherwise returns a fresh zero state. Two auto-reset keys, same
+    /// mechanism and no write on either: <see cref="OnlineModelState.BaseArtifactId"/> retires a head
+    /// whose base was retrained away, and <see cref="OnlineModelState.AlgorithmVersion"/> retires one
+    /// whose weights mean something the current <see cref="Residual"/> would misread — including every
+    /// head saturated by the pre-v1 unnormalised rule (see <see cref="CurrentAlgorithmVersion"/>).
     /// </summary>
     public async Task<ResidualState> LoadAsync(Guid accountId, Guid activeArtifactId, CancellationToken ct)
     {
         var state = await db.OnlineModelStates.FirstOrDefaultAsync(s => s.AccountId == accountId, ct);
-        return state is null || state.BaseArtifactId != activeArtifactId
+        return IsStale(state, activeArtifactId)
             ? new ResidualState(new float[FeatureSchema.VectorLength], 0d)
-            : new ResidualState(DeserializeWeights(state.Weights), state.Bias);
+            : new ResidualState(DeserializeWeights(state!.Weights), state.Bias);
     }
+
+    /// <summary>Both auto-reset keys in one place, so load and observe can never disagree about them.</summary>
+    private static bool IsStale(OnlineModelState? state, Guid activeArtifactId) =>
+        state is null
+        || state.BaseArtifactId != activeArtifactId
+        || state.AlgorithmVersion != CurrentAlgorithmVersion;
 
     /// <summary>
     /// The residual correction for one feature vector: dot(weights, features) + bias, CLAMPED to
@@ -66,6 +99,44 @@ public sealed class OnlineResidualModel(
         }
 
         return Math.Clamp(dot + bias, -ResidualClamp, ResidualClamp);
+    }
+
+    /// <summary>
+    /// One NORMALISED (NLMS) gradient step: <c>w += lr·sw·err·x / (ε + ‖x‖²)</c>, with L2 decay and
+    /// the per-weight / bias clamps. Dividing by ‖x‖² makes the step's effect on this vector's own
+    /// prediction <c>lr·sw·err</c> whatever the features' units are — which is what stops
+    /// <c>runtimeMinutes</c> (~105) from slamming its weight onto the ±<see cref="WeightClamp"/> rail
+    /// on the very first event and turning the whole head into a constant ±<see cref="ResidualClamp"/>
+    /// offset on every title. See <see cref="CurrentAlgorithmVersion"/> for the full history.
+    ///
+    /// Public and static so the rule itself is directly testable: the property that matters (a single
+    /// event must not saturate the head) is arithmetic, and asserting it through a database and a
+    /// trained artifact would prove less while costing more.
+    /// </summary>
+    /// <param name="error">target − (base score + current residual).</param>
+    public static (float[] Weights, double Bias) Step(
+        float[] weights, double bias, float[] features, double error, double sampleWeight)
+    {
+        var normSquared = NormEpsilon;
+        foreach (var x in features)
+        {
+            normSquared += (double)x * x;
+        }
+
+        var step = LearningRate * sampleWeight * error / normSquared;
+        var updated = new float[weights.Length];
+        for (var i = 0; i < weights.Length; i++)
+        {
+            var w = weights[i] * (1 - (LearningRate * L2Lambda));
+            if (i < features.Length)
+            {
+                w += step * features[i];
+            }
+
+            updated[i] = (float)Math.Clamp(w, -WeightClamp, WeightClamp);
+        }
+
+        return (updated, Math.Clamp(bias + (LearningRate * sampleWeight * error), -BiasClamp, BiasClamp));
     }
 
     /// <summary>
@@ -102,9 +173,10 @@ public sealed class OnlineResidualModel(
                 return; // title isn't vectorisable (e.g. not in catalog) — skip.
             }
 
-            // Load the head, resetting to zero when it belongs to a superseded base (auto-reset).
+            // Load the head, resetting to zero when it belongs to a superseded base or an older
+            // update rule (auto-reset).
             var state = await db.OnlineModelStates.FirstOrDefaultAsync(s => s.AccountId == accountId, ct);
-            var reset = state is null || state.BaseArtifactId != artifact.Id;
+            var reset = IsStale(state, artifact.Id);
             var weights = reset ? new float[FeatureSchema.VectorLength] : DeserializeWeights(state!.Weights);
             var bias = reset ? 0d : state!.Bias;
 
@@ -113,13 +185,7 @@ public sealed class OnlineResidualModel(
             var prediction = baseScore + Residual(weights, bias, vector);
             var err = target - prediction;
 
-            for (var i = 0; i < weights.Length && i < vector.Length; i++)
-            {
-                var updated = (weights[i] * (1 - (LearningRate * L2Lambda))) + (LearningRate * sampleWeight * err * vector[i]);
-                weights[i] = (float)Math.Clamp(updated, -WeightClamp, WeightClamp);
-            }
-
-            bias = Math.Clamp(bias + (LearningRate * sampleWeight * err), -BiasClamp, BiasClamp);
+            (weights, bias) = Step(weights, bias, vector, err, sampleWeight);
 
             if (state is null)
             {
@@ -128,6 +194,7 @@ public sealed class OnlineResidualModel(
             }
 
             state.BaseArtifactId = artifact.Id;
+            state.AlgorithmVersion = CurrentAlgorithmVersion;
             state.Weights = SerializeWeights(weights);
             state.Bias = bias;
             state.UpdateCount = (reset ? 0 : state.UpdateCount) + 1;

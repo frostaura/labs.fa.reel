@@ -34,9 +34,17 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// onto the genre specific suggestions too — of course in those cases the genre filters would be
     /// ignored"). Never set it on a general discovery surface.
     /// </param>
-    public IQueryable<Title> EligibleTitles(Guid accountId, bool ignoreGenreFilters = false)
+    /// <param name="suppressed">
+    /// Content rules to leave OUT of the query, on top of <paramref name="ignoreGenreFilters"/>. This
+    /// exists for the empty-feed diagnostic (<see cref="Ranking.FeedStarvationDiagnostic"/>), which
+    /// answers "which single condition emptied the pool?" by re-counting with one rule dropped at a
+    /// time. It must never be used to SERVE titles — a surface that suppresses a rule is showing the
+    /// user content they told it not to. Discovery surfaces pass nothing here.
+    /// </param>
+    public IQueryable<Title> EligibleTitles(
+        Guid accountId, bool ignoreGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
     {
-        return ContentFilteredTitles(accountId, ignoreGenreFilters).Where(t =>
+        return ContentFilteredTitles(accountId, ignoreGenreFilters, suppressed).Where(t =>
             !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
             && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
             && !db.UserTitleReactions.Any(r =>
@@ -51,15 +59,27 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// exclusion. Discovery surfaces use <see cref="EligibleTitles"/>, which composes this.
     /// </summary>
     /// <param name="ignoreGenreFilters">See <see cref="EligibleTitles"/> — genre rails only.</param>
-    public IQueryable<Title> ContentFilteredTitles(Guid accountId, bool ignoreGenreFilters = false)
+    /// <param name="suppressed">See <see cref="EligibleTitles"/> — the empty-feed diagnostic only.</param>
+    public IQueryable<Title> ContentFilteredTitles(
+        Guid accountId, bool ignoreGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
     {
+        // Captured as locals so each arm's predicate is a constant EF can fold away, rather than a
+        // set lookup it would have to translate.
+        var skipExcludeGenre = ignoreGenreFilters || suppressed?.Contains(FilterKind.ExcludeGenre) == true;
+        var skipIncludeGenre = ignoreGenreFilters || suppressed?.Contains(FilterKind.IncludeGenre) == true;
+        var skipKeyword = suppressed?.Contains(FilterKind.ExcludeKeyword) == true;
+        var skipLanguage = suppressed?.Contains(FilterKind.Language) == true;
+        var skipCrowd = suppressed?.Contains(FilterKind.MinCrowdRating) == true;
+        var skipYears = suppressed?.Contains(FilterKind.MinYear) == true || suppressed?.Contains(FilterKind.MaxYear) == true;
+
         var query = db.Titles.Where(t =>
-            ignoreGenreFilters
+            skipExcludeGenre
             || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && t.Genres.Contains(f.Value)));
 
         query = query.Where(t =>
-            !db.ContentFilters.Any(f =>
+            skipKeyword
+            || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeKeyword
                 && (t.Name.ToLower().Contains(f.Value.ToLower())
                     || (t.Overview != null && t.Overview.ToLower().Contains(f.Value.ToLower()))
@@ -76,7 +96,7 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // translated fine. It is now written as ContentFilters.Any over t.Genres.Contains purely so it
         // is the mirror image of the ExcludeGenre arm above and reads as one rule with two signs.
         query = query.Where(t =>
-            ignoreGenreFilters
+            skipIncludeGenre
             || !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre)
             || db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre && t.Genres.Contains(f.Value)));
@@ -86,7 +106,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // an unknown (null) language reads as not-English and is excluded unless "*" is set — the
         // founder asked for English, not "English plus anything we failed to tag".
         query = query.Where(t =>
-            db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value == "*")
+            skipLanguage
+            || db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value == "*")
             || (t.Language != null
                 && db.ContentFilters.Any(f =>
                     f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value != "*" && f.Value == t.Language.ToLower()))
@@ -107,7 +128,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // only ever casts rows that already matched Kind = MinCrowdRating. Language rows ("en") and
         // keyword rows are never fed to the numeric cast.
         query = query.Where(t =>
-            !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.MinCrowdRating)
+            skipCrowd
+            || !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.MinCrowdRating)
             || (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
                     ? t.TmdbVoteAverage
                     : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
@@ -122,7 +144,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // above: a missing year is a metadata gap on an otherwise well-rated title, whereas a missing
         // rating is the very thing the floor is asserting about.
         query = query.Where(t =>
-            !db.ContentFilters.Any(f =>
+            skipYears
+            || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && (f.Kind == FilterKind.MinYear || f.Kind == FilterKind.MaxYear))
             || (t.Year == null && t.ReleasedAt == null && t.FirstAiredAt == null)
             || ((t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year))

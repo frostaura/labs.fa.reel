@@ -136,6 +136,7 @@ public static class DependencyInjection
         services.AddScoped<Application.Search.LiveSearchExpansionService>();
         services.AddScoped<Application.Ranking.CandidateGenerator>();
         services.AddScoped<Application.Ranking.CandidateRetriever>();
+        services.AddScoped<Application.Ranking.FeedStarvationDiagnostic>();
         services.AddScoped<Application.Ranking.FeedPaginator>();
         services.AddScoped<Application.Ranking.FeedRefreshCoordinator>();
         services.AddScoped<Application.Ingestion.TitleHydrator>();

@@ -119,7 +119,8 @@ public sealed class FeedPaginator(
         var residual = await residualModel.LoadAsync(account.Id, artifact.Id, ct);
 
         var pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-        var scored = await ScoreWindowAsync(artifact, taste, pool, minPredicted, residual, now, ct);
+        var all = await ScoreWindowAsync(artifact, taste, pool, residual, now, ct);
+        var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
         // count. A high predicted-rating floor can gut a window that looked full: the old gate saw a
@@ -133,8 +134,21 @@ public sealed class FeedPaginator(
             if (grew > 0)
             {
                 pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-                scored = await ScoreWindowAsync(artifact, taste, pool, minPredicted, residual, now, ct);
+                all = await ScoreWindowAsync(artifact, taste, pool, residual, now, ct);
+                scored = all.Where(s => s.Predicted >= minPredicted).ToList();
             }
+        }
+
+        // The floor is soft, exactly as in the feed build and in Ask Reel: when the window holds
+        // real candidates but none clear the account's MinPredictedRating, serving nothing tells the
+        // user the reel ended when it has not. Fall back to the best of what this lane actually has
+        // rather than reporting a false exhaustion.
+        if (scored.Count == 0 && all.Count > 0)
+        {
+            logger.LogInformation(
+                "Feed page relaxed the {Floor} predicted-rating floor for {Row}: none of {Count} candidates cleared it.",
+                minPredicted, RowKey(req), all.Count);
+            scored = all;
         }
 
         if (scored.Count == 0)
@@ -427,13 +441,15 @@ public sealed class FeedPaginator(
     }
 
     /// <summary>
-    /// Builds vectors for the window, scores them through the request-path model cache, and keeps
-    /// only titles clearing the account's MinPredictedRating floor. Extracted so the deepen decision
-    /// can gate on the USABLE post-floor count and re-run identically after growing the catalog.
+    /// Builds vectors for the window and scores them through the request-path model cache. Returns
+    /// EVERY scored title — the caller applies the MinPredictedRating floor, so it can tell "this
+    /// lane is empty" apart from "this lane is full but nothing cleared the floor" and relax rather
+    /// than report a false exhaustion. Extracted so the deepen decision can gate on the usable
+    /// post-floor count and re-run identically after growing the catalog.
     /// </summary>
     private async Task<List<Scored>> ScoreWindowAsync(
         ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Title> pool, decimal minPredicted, OnlineResidualModel.ResidualState residual, DateTime now, CancellationToken ct)
+        IReadOnlyList<Title> pool, OnlineResidualModel.ResidualState residual, DateTime now, CancellationToken ct)
     {
         if (pool.Count == 0)
         {
@@ -456,7 +472,6 @@ public sealed class FeedPaginator(
                 var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[title.Id]);
                 return new Scored(title, row, Math.Clamp((decimal)adjusted, 0m, 10m));
             })
-            .Where(s => s.Predicted >= minPredicted)
             .ToList();
     }
 
