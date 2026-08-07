@@ -189,9 +189,12 @@ jobs:
         working-directory: ./src/frontend
         run: npm ci
 
-      - name: npm audit (high severity)
+      # Equivalent to `npm audit --audit-level=high`, except that an advisory with no fixed
+      # version can be waived individually, with a reason and a review date it cannot outlive.
+      # See src/frontend/scripts/audit-gate.mjs for why that beats deleting the gate.
+      - name: npm audit (high severity, expiring allowlist)
         working-directory: ./src/frontend
-        run: npm audit --audit-level=high
+        run: npm run audit:gate
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
