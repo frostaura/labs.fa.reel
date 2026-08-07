@@ -287,11 +287,11 @@ export default function TitleDetail() {
                     {/* Drop — shows only; hides from Continue Watching (manual, revocable) */}
                     {title.mediaType === "Show" && (
                       title.userState.dropped ? (
-                        <button onClick={() => undrop(args)} className="fa-button border-fa-frost/40 text-fa-frost" data-testid="undrop">
+                        <button onClick={() => undrop({ ...args, titleId: title.titleId })} className="fa-button border-fa-frost/40 text-fa-frost" data-testid="undrop">
                           <Undo2 className="h-4 w-4" /> Dropped — undo
                         </button>
                       ) : (
-                        <button onClick={() => markDropped(args)} className="fa-button-ghost" data-testid="drop-show">
+                        <button onClick={() => markDropped({ ...args, titleId: title.titleId })} className="fa-button-ghost" data-testid="drop-show">
                           <X className="h-4 w-4" /> Drop show
                         </button>
                       )

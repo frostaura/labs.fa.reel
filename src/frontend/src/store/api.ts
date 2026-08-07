@@ -355,10 +355,12 @@ export const api = createApi({
         }
       },
     }),
-    markDropped: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    // `titleId` rides along only to key the local removal set — the URL is built from
+    // mediaType/tmdbId and there is no body, so it never reaches the wire.
+    markDropped: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "POST" }),
       invalidatesTags: ["ContinueWatching"], // that rail only — not the picks snapshot
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         // Two patches, because the drop button exists on two surfaces. The detail page reads
         // getTitle; the Continue Watching shelf reads getContinueWatching, and it used to have no
         // optimistic patch at all — the card sat there through a POST *and* the invalidation
@@ -380,15 +382,21 @@ export const api = createApi({
         ];
         try {
           await queryFulfilled;
+          // Dropping is an interaction footprint like any other, so the title must leave the picks
+          // rows too — not just the Continue Watching rail. It previously did not, and a dropped
+          // show sat in Tonight's picks reading as if the drop had not registered. Via the local
+          // removal set and ONLY that: invalidating Feed here would remount every infinite row and
+          // discard the pages the user has scrolled — see `markNotInterested`.
+          dispatch(titleRemoved({ titleId }));
         } catch {
           patches.forEach((p) => p.undo());
         }
       },
     }),
-    undrop: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    undrop: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "DELETE" }),
       invalidatesTags: ["ContinueWatching"],
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.dropped = false;
@@ -396,6 +404,10 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // Symmetric with the drop: restore the key so the card comes back to the live rows
+          // without a refetch, exactly as `undoNotInterested` does. Without this an undrop leaves
+          // the card hidden until a reload.
+          dispatch(titleRestored({ titleId }));
         } catch {
           patch.undo();
         }

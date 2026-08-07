@@ -78,10 +78,12 @@ export default function Home() {
               ranked for you · {new Date(feed.generatedAt).toLocaleString()}
             </p>
           )}
-          {/* The conditions actually in force, under the title. Without this the feed silently
-              obeys settings made on another screen — a standing "no documentary" is invisible
-              exactly where its effect is. */}
-          <PickConditionsSummary className="mt-2" />
+          {/* Everything actually in force, under the title: the saved conditions AND the browse
+              toggles. Without this the feed silently obeys settings made on another screen — a
+              standing "no documentary" is invisible exactly where its effect is — and the browse
+              toggles were doubly invisible, since the summary used to omit them entirely while they
+              were halving the feed. */}
+          <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={setFilter} />
         </div>
         {!building && (
           <div className="flex items-center gap-2">

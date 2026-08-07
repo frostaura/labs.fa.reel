@@ -40,7 +40,13 @@ export default function ContinueWatchingRow({ entries }: { entries: ContinueEntr
                   onClick={(e) => {
                     e.preventDefault();
                     if (entry.tmdbId != null) {
-                      markDropped({ mediaType: entry.mediaType.toLowerCase(), tmdbId: entry.tmdbId });
+                      // `titleId` keys the local removal set, so the drop also prunes the card
+                      // from Tonight's picks rather than only from this rail.
+                      markDropped({
+                        titleId: entry.titleId,
+                        mediaType: entry.mediaType.toLowerCase(),
+                        tmdbId: entry.tmdbId,
+                      });
                     }
                   }}
                   aria-label={`Drop ${entry.name}`}
