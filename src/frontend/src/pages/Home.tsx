@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useDispatch } from "react-redux";
 import { Lock, Sparkles } from "lucide-react";
 import {
@@ -15,7 +16,7 @@ import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import PickConditionsButton, { PickConditionsSummary } from "../components/rec/PickConditionsButton";
-import { DEFAULT_BROWSE_FILTER, matchesMedia } from "../lib/browseFilter";
+import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
@@ -23,7 +24,7 @@ export default function Home() {
   const { data: session } = useGetSessionQuery();
   const { data: feed, isLoading } = useGetFeedQuery();
   const { data: continueWatching } = useGetContinueWatchingQuery();
-  const [filter, setFilter] = useState(DEFAULT_BROWSE_FILTER);
+  const [filter, setFilter] = useBrowseFilter("home");
   const dispatch = useDispatch();
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;

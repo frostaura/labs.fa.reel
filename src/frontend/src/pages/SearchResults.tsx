@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Mic, RotateCcw, Send, Sparkles } from "lucide-react";
@@ -7,7 +8,7 @@ import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import CrowdRatingBadge from "../components/rec/CrowdRatingBadge";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { hasPredictedRating } from "../lib/predictedRating";
-import { DEFAULT_BROWSE_FILTER, type BrowseFilter } from "../lib/browseFilter";
+import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
@@ -49,7 +50,7 @@ export default function SearchResults() {
   const [params, setParams] = useSearchParams();
   const seed = params.get("q") ?? "";
   const location = useLocation();
-  const [filter, setFilter] = useState(DEFAULT_BROWSE_FILTER);
+  const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
   const {
     turns, status, phase, cards, reason, send, resume, loadMore, reask, setMediaTypes,
