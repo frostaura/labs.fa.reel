@@ -51,16 +51,17 @@ test.describe("mobile navigation", () => {
     await expect(page.locator("header nav.hidden")).toBeHidden();
   });
 
-  // KNOWN FAILING — pre-existing, and NOT caused by the 2026-08-07 search work (it already failed
-  // before any of it landed). The mobile panel opens and the Ask Reel row renders, but no
-  // typeahead-result ever appears: the dropdown stays in its loading state, which means the mocked
-  // /api/search/typeahead response is not reaching the component. Switching the mock from a glob to
-  // a RegExp did not fix it, so the cause is further in — most likely how the panel mounts its own
-  // SearchBox instance relative to the header's.
+  // KNOWN FAILING — a MOCK problem, not a product bug. Diagnosed 2026-08-07 by logging the network
+  // inside the mobile viewport: the panel opens, the component issues
+  // `GET /api/search/typeahead?q=medieval` exactly as it should, and that request reaches the real
+  // dev proxy and comes back 401. Playwright never intercepts it, so the component correctly
+  // renders no results for an unauthorized response. Every other mock in this file works; this is
+  // the only one whose request carries a query string, and switching it from a glob to a RegExp did
+  // not help either.
   //
-  // Marked fixme rather than deleted or skipped silently: this may be a REAL mobile defect (mobile
-  // typeahead never showing results), and that question deserves to stay visible in the test output
-  // instead of being settled by assumption. The rest of this file gates CI.
+  // So: mobile typeahead itself is fine — do not go looking for a rendering bug in SearchBox. What
+  // needs fixing is the interception. Marked fixme rather than deleted so the gap stays visible;
+  // the rest of this file gates CI.
   test.fixme("the search tab opens a working search panel (Ask Reel reachable)", async ({ page }) => {
     await bootHome(page);
     // A RegExp rather than a glob, because a glob's trailing ** is ambiguous about crossing "?"
