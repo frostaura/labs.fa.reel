@@ -50,26 +50,13 @@ public class OpenRouterAttributeExtractor(
     ];
 
     /// <summary>
-    /// Closed tone vocabulary. Free-text here would let the model mint a new label per title,
-    /// so the column stops being a taxonomy and becomes noise. The deterministic stub's three
-    /// values ("brooding", "playful", "balanced") are members, so both modes share one vocabulary.
+    /// The closed tone/era vocabularies now live in <see cref="Domain.Catalog.AttributeVocabulary"/>
+    /// so the why-line templater can verify a stored Tone against the same list this extractor
+    /// enforces on the provider. These aliases keep the extractor reading as before.
     /// </summary>
-    private static readonly string[] ToneVocabulary =
-    [
-        "bleak", "brooding", "melancholic", "tense", "gritty", "earnest", "contemplative",
-        "dreamlike", "balanced", "wry", "satirical", "playful", "whimsical", "warm",
-        "uplifting", "exhilarating",
-    ];
+    private static readonly string[] ToneVocabulary = Domain.Catalog.AttributeVocabulary.Tones;
 
-    /// <summary>
-    /// Closed era vocabulary, likewise a superset of the stub's ("period", "modern",
-    /// "contemporary", "unknown").
-    /// </summary>
-    private static readonly string[] EraVocabulary =
-    [
-        "prehistoric", "ancient", "medieval", "period", "19th-century", "early-20th-century",
-        "mid-20th-century", "modern", "contemporary", "near-future", "far-future", "timeless", "unknown",
-    ];
+    private static readonly string[] EraVocabulary = Domain.Catalog.AttributeVocabulary.Eras;
 
     /// <summary>A scalar may overshoot the bounds by this much (float formatting) before it reads as a scale error.</summary>
     private const decimal RangeTolerance = 0.005m;

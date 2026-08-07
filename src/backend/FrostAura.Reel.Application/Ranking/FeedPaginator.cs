@@ -205,24 +205,52 @@ public sealed class FeedPaginator(
         var boosts = await LoadPreferenceBoostsAsync(account.Id, scored, ct);
         var ranked = await RankAsync(req, taste, scored, boosts, now, ct);
 
+        // The rail's anchor (name + genres), loaded once: the curation prompt names it so the LLM
+        // can state the concrete link, and the templater fallback cites a genuinely shared genre.
+        AnchorInfo? anchor = null;
+        if (req.Context is FeedRowContext.BecauseYouLoved or FeedRowContext.Similar && req.AnchorTitleId is { } anchorTitleId)
+        {
+            anchor = await db.Titles
+                .Where(t => t.Id == anchorTitleId)
+                .Select(t => new AnchorInfo(t.Name, t.Genres))
+                .FirstOrDefaultAsync(ct);
+        }
+
         // LLM curation pass over the top slice: the model gives the personalised rating, the agent
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
-        var curated = await CurateAsync(account, req, taste, curationPool, ct);
+        var curated = await CurateAsync(account, req, taste, curationPool, anchor?.Name, ct);
         var taken = curated.Take(req.Limit).ToList();
 
-        var modelWhy = await BuildWhyAsync(req, taste, taken.Select(c => c.Scored).ToList(), ct);
+        var whyContexts = await BuildWhyContextsAsync(taste, taken.Select(c => c.Scored).ToList(), anchor, ct);
         await PersistScoresAsync(account.Id, artifact.Id, taken.Select(c => c.Scored).ToList(), now, ct);
 
-        return taken.Select(c => new ScoredFeedItem(
-            c.Scored.Title, Math.Round(c.Scored.Predicted, 1),
-            // The agent's line is the curated voice; fall back to the model's contribution sentence.
-            // Voice guard: a cached/LLM line that talks ABOUT the viewer ("their tastes") instead of
-            // TO them is discarded for the deterministic second-person templater sentence.
-            !string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.LeaksThirdPerson(c.Why)
-                ? c.Why!
-                : modelWhy.GetValueOrDefault(c.Scored.Title.Id, "Strong fit with your taste profile."),
-            IsReleased(c.Scored.Title, now))).ToList();
+        // Output guard + no-repeat: a cached/LLM line that leaks third person, opens with the
+        // banned "Because you loved", or exactly repeats an earlier card on this page is discarded
+        // for the deterministic templater sentence — which itself re-seeds until distinct.
+        var takenWhys = new HashSet<string>(StringComparer.Ordinal);
+        var items = new List<ScoredFeedItem>(taken.Count);
+        foreach (var c in taken)
+        {
+            string why;
+            if (!string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.Rejects(c.Why) && takenWhys.Add(c.Why!))
+            {
+                why = c.Why!;
+            }
+            else if (whyContexts.TryGetValue(c.Scored.Title.Id, out var whyContext))
+            {
+                why = ExplanationTemplater.BuildDistinctSentence(whyContext, takenWhys);
+            }
+            else
+            {
+                why = "Strong fit with your taste profile.";
+            }
+
+            items.Add(new ScoredFeedItem(
+                c.Scored.Title, Math.Round(c.Scored.Predicted, 1), why, IsReleased(c.Scored.Title, now)));
+        }
+
+        return items;
     }
 
     /// <summary>
@@ -232,7 +260,8 @@ public sealed class FeedPaginator(
     /// is batched and concurrency-bounded. Degrades to the pure model order if the agent is
     /// unavailable or errors — the cards are already personalised, curation only sharpens them.
     /// </summary>
-    private async Task<List<Curated>> CurateAsync(Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool, CancellationToken ct)
+    private async Task<List<Curated>> CurateAsync(
+        Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool, string? anchorName, CancellationToken ct)
     {
         if (!agent.IsAvailable || pool.Count == 0)
         {
@@ -317,7 +346,7 @@ public sealed class FeedPaginator(
                     IReadOnlyList<RerankResult> results;
                     try
                     {
-                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, curationCt);
+                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, anchorName, curationCt);
                     }
                     catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
                     {
@@ -409,7 +438,33 @@ public sealed class FeedPaginator(
         _ => req.Context.ToString().ToLowerInvariant(),
     };
 
-    private static string FitKey(Guid accountId, Guid titleId, string rowKey) => $"feedfit:{accountId}:{titleId}:{rowKey}";
+    /// <summary>
+    /// Row keys for the SNAPSHOT rows, kept format-identical to <see cref="RowKey"/> (and therefore
+    /// to <see cref="FitKey"/>) on purpose: the feed build's why pass and this paginator's curation
+    /// pass share one 6h fit cache, so a rail warmed at build time serves its later pages without
+    /// re-spending, and vice versa. Stable per (rowKind, anchor) across rebuilds.
+    /// </summary>
+    internal static string RowKeyFor(Domain.Feed.FeedRowKind row, Guid? anchorTitleId) => row switch
+    {
+        Domain.Feed.FeedRowKind.BecauseYouLoved => $"loved:{anchorTitleId}",
+        Domain.Feed.FeedRowKind.Hero => "hero",
+        Domain.Feed.FeedRowKind.DeepCuts => "deepcuts",
+        Domain.Feed.FeedRowKind.NewForYou => "newforyou",
+        _ => row.ToString().ToLowerInvariant(),
+    };
+
+    /// <summary>The row-intent phrasing for a snapshot row — mirrors <see cref="QueryFor"/> so the
+    /// build-time why pass asks the agent the same stable question the paginated path asks.</summary>
+    internal static string QueryForRow(Domain.Feed.FeedRowKind row) => row switch
+    {
+        Domain.Feed.FeedRowKind.Hero => "the best titles for you to watch tonight",
+        Domain.Feed.FeedRowKind.BecauseYouLoved => "titles in the same vein as ones you loved",
+        Domain.Feed.FeedRowKind.DeepCuts => "under-the-radar hidden gems you'd rate highly",
+        Domain.Feed.FeedRowKind.NewForYou => "recent releases worth your time",
+        _ => "titles personalised to your taste",
+    };
+
+    internal static string FitKey(Guid accountId, Guid titleId, string rowKey) => $"feedfit:{accountId}:{titleId}:{rowKey}";
 
     /// <summary>The active browse-filter medium as an enum, or null for "all". Anything unrecognised
     /// (including "all") maps to null so the window and deepen stay both-media.</summary>
@@ -812,7 +867,15 @@ public sealed class FeedPaginator(
         return best;
     }
 
-    private async Task<Dictionary<Guid, string>> BuildWhyAsync(MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> taken, CancellationToken ct)
+    /// <summary>
+    /// Builds each taken title's fully-verified templater context: role-matched user-rated people,
+    /// rated genres, the rail's anchor with a genuinely shared genre, and the title's LLM-derived
+    /// tone (used by the templater only when it passes the closed vocabulary — rows extracted
+    /// before vocabulary enforcement carry polluted labels). Returned as contexts, not sentences,
+    /// so the caller's no-repeat guard can re-seed a collision.
+    /// </summary>
+    private async Task<Dictionary<Guid, ExplanationTemplater.Context>> BuildWhyContextsAsync(
+        FeatureVectorBuilder.TasteState taste, List<Scored> taken, AnchorInfo? anchor, CancellationToken ct)
     {
         var titleIds = taken.Select(s => s.Title.Id).ToList();
         var credits = await db.TitleCredits
@@ -836,19 +899,20 @@ public sealed class FeedPaginator(
                             .OrderByDescending(p => p.Affinity)
                             .First()));
 
-        string? anchorName = null;
-        if (req.Context is FeedRowContext.BecauseYouLoved or FeedRowContext.Similar && req.AnchorTitleId is { } anchorId)
-        {
-            anchorName = await db.Titles.Where(t => t.Id == anchorId).Select(t => t.Name).FirstOrDefaultAsync(ct);
-        }
+        var toneByTitle = await db.TitleAttributes
+            .Where(a => titleIds.Contains(a.TitleId) && a.Tone != null)
+            .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct);
 
-        var result = new Dictionary<Guid, string>(taken.Count);
+        var anchorGenres = anchor?.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<Guid, ExplanationTemplater.Context>(taken.Count);
         foreach (var s in taken)
         {
             var persons = personsByTitle.GetValueOrDefault(s.Title.Id) ?? ExplanationTemplater.NoPersons;
             var ratedGenres = s.Title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet();
-            result[s.Title.Id] = ExplanationTemplater.BuildSentence(new ExplanationTemplater.Context(
-                s.Title, s.Row.TopContributions, persons, ratedGenres, anchorName));
+            var sharedGenre = anchorGenres is null ? null : s.Title.Genres.FirstOrDefault(anchorGenres.Contains);
+            result[s.Title.Id] = new ExplanationTemplater.Context(
+                s.Title, s.Row.TopContributions, persons, ratedGenres, anchor?.Name,
+                sharedGenre, toneByTitle.GetValueOrDefault(s.Title.Id));
         }
 
         return result;
@@ -950,6 +1014,9 @@ public sealed class FeedPaginator(
         var union = setA.Count + b.Genres.Length - intersection;
         return union == 0 ? 0d : (double)intersection / union;
     }
+
+    /// <summary>The rail's anchor as the why-lines need it: its name and its genres.</summary>
+    private sealed record AnchorInfo(string Name, string[] Genres);
 
     private sealed record Scored(Title Title, ScoredRow Row, decimal Predicted);
 

@@ -95,6 +95,63 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
+    public void The_rerank_prompt_carries_the_anchor_name_and_the_concrete_link_instruction()
+    {
+        var prompt = OpenRouterSearchAgent.BuildRerankPrompt(
+            Titles(), "titles in the same vein as ones you loved", "likes thrillers", anchorName: "Hokum");
+
+        Assert.Contains("Anchor title: Hokum", prompt, StringComparison.Ordinal);
+        Assert.Contains("CONCRETE link to Hokum", prompt, StringComparison.Ordinal);
+        // No anchor → no anchor block; Ask Reel's behaviour is unchanged.
+        Assert.DoesNotContain("Anchor title:",
+            OpenRouterSearchAgent.BuildRerankPrompt(Titles(), "q", "taste"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_rerank_prompt_carries_the_overview_truncated_at_three_hundred_chars()
+    {
+        var longOverview = new string('x', 320);
+        var prompt = OpenRouterSearchAgent.BuildRerankPrompt(
+            [new(TitleA, "Alpha", 1984, "movie", ["thriller"], longOverview, 9.0m)], "q", "taste");
+
+        Assert.Contains(new string('x', 300), prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('x', 301), prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_rerank_system_prompt_demands_specific_second_person_whys()
+    {
+        var handler = new CannedHandler(Ok("""{"results":[]}"""));
+
+        await Agent(handler).RerankBatchAsync(Titles(), "q", "taste", anchorName: "Hokum");
+
+        var system = SystemMessageOf(handler.Bodies[0]);
+        Assert.Contains("at most 160 characters", system, StringComparison.Ordinal);
+        Assert.Contains("NEVER start a why with \"Because you loved\"", system, StringComparison.Ordinal);
+        Assert.Contains("cite something SPECIFIC", system, StringComparison.Ordinal);
+        Assert.Contains("Vary the sentence openers", system, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_because_you_loved_opener_is_replaced_with_the_stub_sentence_keeping_the_fit()
+    {
+        // The exact vague template the founder rejected — the model must not smuggle it back in.
+        var payload = $$"""
+            {"results":[
+              {"titleId":"{{TitleA}}","fit":0.91,"why":"Because you loved Hokum, and peak 2000s — your era"},
+              {"titleId":"{{TitleC}}","fit":0.77,"why":"Shares Hokum's slow-burn small-town dread"}
+            ]}
+            """;
+        var agent = Agent(new CannedHandler(Ok(payload)));
+
+        var results = await agent.RerankBatchAsync(Titles(), "q", "taste", anchorName: "Hokum");
+
+        Assert.Equal(0.91d, results[0].Fit, 3); // fit survives; only the sentence is discarded
+        Assert.Equal("A thriller pick aligned with your taste.", results[0].Why);
+        Assert.Equal("Shares Hokum's slow-burn small-town dread", results[2].Why);
+    }
+
+    [Fact]
     public async Task A_results_entry_that_is_not_an_object_is_skipped_without_taking_the_batch()
     {
         var payload = $$"""

@@ -80,7 +80,7 @@ public class OpenRouterSearchAgent(
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-        IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default)
+        IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
     {
         if (titles.Count == 0)
         {
@@ -95,7 +95,7 @@ public class OpenRouterSearchAgent(
         try
         {
             usageRecorder.Record(ApiProvider.OpenRouter);
-            var user = BuildRerankPrompt(titles, query, tasteSummary);
+            var user = BuildRerankPrompt(titles, query, tasteSummary, anchorName);
             var content = await ChatAsync(RerankSystemPrompt, user, ct);
             if (string.IsNullOrWhiteSpace(content))
             {
@@ -140,10 +140,11 @@ public class OpenRouterSearchAgent(
                     return StubRerank(t);
                 }
 
-                // Voice guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's")
-                // instead of TO them is discarded for the deterministic second-person sentence.
-                // The model's fit score is kept — only the leaking sentence is replaced.
-                return SecondPersonVoice.LeaksThirdPerson(res.Why) ? res with { Why = StubRerank(t).Why } : res;
+                // Output guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's"),
+                // opens with the banned "Because you loved" template, or blows the length contract
+                // is discarded for the deterministic second-person sentence. The model's fit score
+                // is kept — only the offending sentence is replaced.
+                return SecondPersonVoice.Rejects(res.Why) ? res with { Why = StubRerank(t).Why } : res;
             }).ToList();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -265,11 +266,24 @@ public class OpenRouterSearchAgent(
         return sb.ToString();
     }
 
-    private static string BuildRerankPrompt(IReadOnlyList<RerankInput> titles, string query, string taste)
+    /// <summary>
+    /// Internal (not private) so the payload contract is pinned by tests: the anchor's NAME and
+    /// each candidate's overview must actually reach the model, or the "name the concrete
+    /// connection" instruction has nothing to work with and the whys collapse back to generic.
+    /// </summary>
+    internal static string BuildRerankPrompt(IReadOnlyList<RerankInput> titles, string query, string taste, string? anchorName = null)
     {
         var sb = new StringBuilder();
         sb.Append("Your taste: ").Append(taste).Append('\n');
         sb.Append("Your request: ").Append(query).Append('\n');
+        if (!string.IsNullOrWhiteSpace(anchorName))
+        {
+            sb.Append("Anchor title: ").Append(anchorName)
+                .Append(" — each candidate sits on a rail anchored to this title you loved. In each why, name the CONCRETE link to ")
+                .Append(anchorName)
+                .Append(" (shared tone, premise, craft, or people), never just that you loved it.\n");
+        }
+
         sb.Append("Score each title 0.0-1.0 for how well it fits YOU and your request, with a one-line reason addressed to you:\n");
         foreach (var t in titles)
         {
@@ -291,7 +305,9 @@ public class OpenRouterSearchAgent(
 
             if (!string.IsNullOrWhiteSpace(t.Overview))
             {
-                sb.Append(" | ").Append(t.Overview!.Length > 160 ? t.Overview[..160] : t.Overview);
+                // ~300 chars of overview: enough plot premise for the why to cite something
+                // specific (a setting, a hook, a character) instead of re-summarising the genres.
+                sb.Append(" | ").Append(t.Overview!.Length > 300 ? t.Overview[..300] : t.Overview);
             }
 
             sb.Append('\n');
@@ -337,6 +353,12 @@ public class OpenRouterSearchAgent(
         "{\"results\":[{\"titleId\":\"<id>\",\"fit\":0.0-1.0,\"why\":\"<one short line>\"}]} " +
         "with one entry per title. The why sentence MUST address the reader as \"you\"/\"your\" (\"you rate…\", " +
         "\"your love of…\") and MUST NEVER say \"they\", \"their\", \"them\" or \"the user\". " +
+        "Each why MUST be at most 160 characters and MUST cite something SPECIFIC about THAT title — its plot " +
+        "premise, tone, era, craft, or a person by name from its overview. Generic filler (\"matches your taste\", " +
+        "\"fits your profile\", \"a great pick for you\") is FORBIDDEN. When an anchor title is given, say what " +
+        "actually links the candidate to it — a shared premise, mood, or craft (e.g. \"shares the anchor's " +
+        "slow-burn small-town dread\") — NEVER just that you loved the anchor. NEVER start a why with \"Because " +
+        "you loved\". Vary the sentence openers across the batch — no two whys may start with the same words. " +
         "titleId MUST be the id string quoted exactly as given, never a number. fit MUST be a " +
         "bare JSON number between 0.0 and 1.0 — never a 0-10 or 0-100 score and never a string. " +
         "Be discerning — spread the scores. Output strictly valid JSON.";

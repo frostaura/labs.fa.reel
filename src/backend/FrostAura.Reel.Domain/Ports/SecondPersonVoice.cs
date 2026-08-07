@@ -18,4 +18,22 @@ public static partial class SecondPersonVoice
     /// <summary>True when the sentence refers to the viewer in the third person.</summary>
     public static bool LeaksThirdPerson(string? why) =>
         !string.IsNullOrWhiteSpace(why) && ThirdPersonRegex().IsMatch(why);
+
+    /// <summary>
+    /// True when the line opens with the banned "Because you loved …" template — the exact vague
+    /// sentence shape the founder called out repeating verbatim down a rail. An anchored why must
+    /// name what actually links the two titles, not merely restate the anchor.
+    /// </summary>
+    public static bool OpensWithBecauseYouLoved(string? why) =>
+        !string.IsNullOrWhiteSpace(why)
+        && why.TrimStart().StartsWith("Because you loved", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The full output guard for an LLM why-line: third-person voice leak, the banned
+    /// "Because you loved" opener, or a runaway length (the prompt asks for ≤160 characters; a
+    /// line past 220 has ignored the contract and would overflow the card). Callers discard a
+    /// rejected line for their deterministic second-person fallback.
+    /// </summary>
+    public static bool Rejects(string? why) =>
+        LeaksThirdPerson(why) || OpensWithBecauseYouLoved(why) || (why is { Length: > 220 });
 }

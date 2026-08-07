@@ -78,10 +78,94 @@ public class ExplanationTemplaterTests
         Assert.True(sentences.Count >= 2, $"expected multiple phrasings, got only: {sentences[0]}");
     }
 
+    [Fact]
+    public void An_anchored_sentence_never_opens_with_because_you_loved()
+    {
+        var context = Context([("simLovedCentroid", 0.9f)], anchorName: "Hokum");
+
+        for (var seed = 0; seed <= 3; seed++)
+        {
+            var sentence = ExplanationTemplater.BuildSentence(context, seed);
+            Assert.False(
+                sentence.StartsWith("Because you loved", StringComparison.OrdinalIgnoreCase),
+                $"seed {seed} produced the banned opener: {sentence}");
+            Assert.Contains("Hokum", sentence);
+        }
+    }
+
+    [Fact]
+    public void An_anchor_clause_cites_the_genuinely_shared_genre()
+    {
+        var context = Context([("simLovedCentroid", 0.9f)], anchorName: "Hokum", sharedGenre: "science-fiction");
+
+        var sentence = ExplanationTemplater.BuildSentence(context);
+
+        Assert.Contains("science fiction", sentence);
+        Assert.Contains("Hokum", sentence);
+    }
+
+    [Fact]
+    public void An_anchor_clause_prints_a_tone_only_from_the_closed_vocabulary()
+    {
+        // A closed-vocab tone is citable…
+        var clean = ExplanationTemplater.BuildSentence(
+            Context([("simLovedCentroid", 0.9f)], anchorName: "Hokum", tone: "brooding"));
+        Assert.Contains("brooding", clean);
+
+        // …a polluted pre-enforcement label (the 2026-08-07 vocabulary incident) is never rendered.
+        var polluted = ExplanationTemplater.BuildSentence(
+            Context([("simLovedCentroid", 0.9f)], anchorName: "Hokum", tone: "peak-2000s-nostalgia"));
+        Assert.DoesNotContain("peak-2000s-nostalgia", polluted);
+        Assert.Contains("Hokum", polluted); // the anchor clause still fires, just without the tone
+    }
+
+    [Fact]
+    public void A_director_clause_carries_the_users_average_for_that_person()
+    {
+        var persons = new Dictionary<CreditRole, ExplanationTemplater.PersonAffinity>
+        {
+            [CreditRole.Director] = new("Tony Gilroy", 7.8m),
+        };
+        var context = Context([("directorAffinity", 1.5f)], persons: persons);
+
+        var sentence = ExplanationTemplater.BuildSentence(context);
+
+        Assert.Contains("Tony Gilroy", sentence);
+        Assert.Contains("7.8", sentence);
+    }
+
+    [Fact]
+    public void Variant_seeds_produce_distinct_sentences()
+    {
+        var context = Context([("simLovedCentroid", 0.9f)], anchorName: "Hokum", sharedGenre: "drama", tone: "tense");
+
+        var canonical = ExplanationTemplater.BuildSentence(context);
+        var bumped = ExplanationTemplater.BuildSentence(context, 1);
+
+        Assert.NotEqual(canonical, bumped);
+    }
+
+    [Fact]
+    public void Two_same_anchor_cards_with_identical_inputs_get_distinct_whys()
+    {
+        // The founder's complaint verbatim: five straight cards, one identical sentence. Two cards
+        // with the SAME anchor and the same verifiable facts must still not render identical text.
+        var context = Context([("simLovedCentroid", 0.9f)], anchorName: "Hokum", sharedGenre: "drama");
+        var taken = new HashSet<string>(StringComparer.Ordinal);
+
+        var first = ExplanationTemplater.BuildDistinctSentence(context, taken);
+        var second = ExplanationTemplater.BuildDistinctSentence(context, taken);
+
+        Assert.NotEqual(first, second);
+    }
+
     private static ExplanationTemplater.Context Context(
         (string Feature, float Contribution)[] contributions,
         IReadOnlyDictionary<CreditRole, ExplanationTemplater.PersonAffinity>? persons = null,
-        Guid? titleId = null)
+        Guid? titleId = null,
+        string? anchorName = null,
+        string? sharedGenre = null,
+        string? tone = null)
     {
         var title = new Title
         {
@@ -95,6 +179,8 @@ public class ExplanationTemplaterTests
             contributions,
             persons ?? ExplanationTemplater.NoPersons,
             new HashSet<string> { "drama" },
-            AnchorName: null);
+            anchorName,
+            sharedGenre,
+            tone);
     }
 }

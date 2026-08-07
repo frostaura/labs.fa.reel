@@ -29,7 +29,13 @@ public interface ISearchAgent
     Task<AgentReply> InterpretAsync(
         IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default);
 
-    /// <summary>Score each candidate's fit for this user + query (batched). Row-aligned to the input.</summary>
+    /// <summary>
+    /// Score each candidate's fit for this user + query (batched). Row-aligned to the input.
+    /// <paramref name="anchorName"/> is the rail's anchor title when the row has one (a
+    /// "because you loved" / "more like this" rail) — the agent is then asked to name the concrete
+    /// connection between each candidate and that anchor. Null for un-anchored rows and Ask Reel,
+    /// whose anchor is the user's request itself.
+    /// </summary>
     Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-        IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default);
+        IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default);
 }

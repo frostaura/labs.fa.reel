@@ -13,6 +13,7 @@ using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Jobs;
@@ -38,6 +39,8 @@ public class BuildFeedJobHandler(
     TitleHydrator hydrator,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    ISearchAgent agent,
+    IMemoryCache cache,
     IPipelineEventHub events,
     ILogger<BuildFeedJobHandler> logger) : IJobHandler
 {
@@ -56,6 +59,16 @@ public class BuildFeedJobHandler(
     // tag ("things I'm into") gets at most a +10% lift on top of the model's rating — enough to
     // sharpen ordering toward stated taste, never enough to float a weak prediction over a strong one.
     private const double PreferenceTagWeight = 0.10;
+
+    // ── LLM why pass (mirrors FeedPaginator's curation budget mechanics) ────────────────────
+    // Soft budget checked BETWEEN batches — the first batch always finishes so every build makes
+    // forward progress into the shared 6h fit cache — plus a hard ceiling backstop against a hung
+    // provider. More generous than the paginator's 4s/20s because this runs inside a background
+    // job, not a request a user is staring at; the cache means successive builds converge to warm.
+    private static readonly TimeSpan WhyPassBudget = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan WhyPassCeiling = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
+    private const int RerankBatch = 9;
 
     public JobKind Kind => JobKind.BuildFeed;
 
@@ -306,6 +319,13 @@ public class BuildFeedJobHandler(
                             .OrderByDescending(p => p.Affinity)
                             .First()));
 
+        // LLM-derived tone per candidate, for the templater's anchor-link clause. The templater
+        // prints a tone ONLY when it passes the closed vocabulary — rows extracted before
+        // vocabulary enforcement carry polluted free-text labels, so the column is never trusted raw.
+        var toneByTitle = await db.TitleAttributes
+            .Where(a => shortIds.Contains(a.TitleId) && a.Tone != null)
+            .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct);
+
         // Anchors: candidate loved titles by name. Drawn from the WIDE recency-weighted anchor pool
         // as well as the strict all-time top, because the strict top of a 3,600-rating history never
         // changes and was the whole reason the same three rows kept coming back.
@@ -433,16 +453,21 @@ public class BuildFeedJobHandler(
                 ? 1d + (PreferenceTagWeight * TagAffinity(vec, tagVectors))
                 : 1d;
 
-        string WhyThis(Candidate candidate, string? anchorName)
+        ExplanationTemplater.Context WhyContext(Candidate candidate, Title? anchor)
         {
             var persons = personsByTitle.GetValueOrDefault(candidate.Title.Id) ?? ExplanationTemplater.NoPersons;
             var ratedGenres = candidate.Title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet();
-            return ExplanationTemplater.BuildSentence(new ExplanationTemplater.Context(
+            var sharedGenre = anchor is null
+                ? null
+                : candidate.Title.Genres.FirstOrDefault(g => anchor.Genres.Contains(g, StringComparer.OrdinalIgnoreCase));
+            return new ExplanationTemplater.Context(
                 candidate.Title,
                 candidate.Row.TopContributions,
                 persons,
                 ratedGenres,
-                anchorName));
+                anchor?.Name,
+                sharedGenre,
+                toneByTitle.GetValueOrDefault(candidate.Title.Id));
         }
 
         decimal Freshness(Title title)
@@ -519,12 +544,12 @@ public class BuildFeedJobHandler(
         // is superseded until a genuinely different feed is in hand.
         var planned = new List<PlannedItem>();
 
-        void AddItem(FeedRowKind row, Guid? anchorId, int rank, Candidate candidate, string whyThis) =>
-            planned.Add(new PlannedItem(row, anchorId, rank, candidate, whyThis));
+        void AddItem(FeedRowKind row, Title? anchor, int rank, Candidate candidate) =>
+            planned.Add(new PlannedItem(row, anchor?.Id, rank, candidate, WhyContext(candidate, anchor)));
 
         for (var i = 0; i < hero.Count; i++)
         {
-            AddItem(FeedRowKind.Hero, null, i, hero[i], WhyThis(hero[i], null));
+            AddItem(FeedRowKind.Hero, null, i, hero[i]);
         }
 
         var used = hero.Select(h => h.Title.Id).ToHashSet();
@@ -622,7 +647,7 @@ public class BuildFeedJobHandler(
             for (var i = 0; i < members.Count; i++)
             {
                 used.Add(members[i].Title.Id);
-                AddItem(FeedRowKind.BecauseYouLoved, anchor.Id, i, members[i], WhyThis(members[i], anchor.Name));
+                AddItem(FeedRowKind.BecauseYouLoved, anchor, i, members[i]);
             }
         }
 
@@ -639,7 +664,7 @@ public class BuildFeedJobHandler(
             for (var i = 0; i < deepCuts.Count; i++)
             {
                 used.Add(deepCuts[i].Title.Id);
-                AddItem(FeedRowKind.DeepCuts, null, i, deepCuts[i], WhyThis(deepCuts[i], null));
+                AddItem(FeedRowKind.DeepCuts, null, i, deepCuts[i]);
             }
         }
 
@@ -653,7 +678,7 @@ public class BuildFeedJobHandler(
             for (var i = 0; i < newForYou.Count; i++)
             {
                 used.Add(newForYou[i].Title.Id);
-                AddItem(FeedRowKind.NewForYou, null, i, newForYou[i], WhyThis(newForYou[i], null));
+                AddItem(FeedRowKind.NewForYou, null, i, newForYou[i]);
             }
         }
 
@@ -669,6 +694,14 @@ public class BuildFeedJobHandler(
         {
             return null;
         }
+
+        // ── LLM why pass ────────────────────────────────────────────────────────────────────
+        // AFTER the no-op decision, so a suppressed rebuild never spends a call: kept cards reuse
+        // their persisted whys (Preserve), the rest go through the agent within a time-boxed budget
+        // into the same 6h fit cache the paginator uses, and every rail ends repeat-free.
+        await ApplyCuratedWhysAsync(
+            account.Id, taste, planned, previousItems, mode,
+            anchors.ToDictionary(a => a.Id, a => a.Name), ct);
 
         // Supersede previous snapshots, write the new one.
         foreach (var stale in await db.FeedSnapshots
@@ -724,8 +757,200 @@ public class BuildFeedJobHandler(
         return snapshot;
     }
 
-    /// <summary>One assembled-but-not-yet-persisted feed item; TitleId lives on the Candidate.</summary>
-    private sealed record PlannedItem(FeedRowKind Row, Guid? AnchorTitleId, int Rank, Candidate Candidate, string WhyThis);
+    /// <summary>
+    /// One assembled-but-not-yet-persisted feed item; TitleId lives on the Candidate. Carries the
+    /// verified templater context rather than a finished sentence, so the why pass can upgrade the
+    /// card to an LLM line, reuse a kept one, or re-seed a phrasing collision — and WhyThis is the
+    /// deterministic templater sentence until it does.
+    /// </summary>
+    private sealed class PlannedItem(
+        FeedRowKind row, Guid? anchorTitleId, int rank, Candidate candidate, ExplanationTemplater.Context whyContext)
+    {
+        public FeedRowKind Row { get; } = row;
+
+        public Guid? AnchorTitleId { get; } = anchorTitleId;
+
+        public int Rank { get; } = rank;
+
+        public Candidate Candidate { get; } = candidate;
+
+        public ExplanationTemplater.Context WhyContext { get; } = whyContext;
+
+        public string WhyThis { get; set; } = ExplanationTemplater.BuildSentence(whyContext);
+    }
+
+    /// <summary>
+    /// Fills every planned card's final why-line. Order of preference: the previous snapshot's
+    /// persisted why for a kept card (Preserve mode — the stable-"tonight" contract, and zero
+    /// spend), a cached agent verdict from the shared 6h fit cache, a fresh agent line within the
+    /// time-boxed budget, then the deterministic templater sentence the item already carries.
+    /// Every reused or generated line passes <see cref="SecondPersonVoice.Rejects"/> — which is
+    /// also the upgrade path for old persisted "Because you loved …" sentences — and every rail
+    /// ends with the no-repeat guard. Never throws: a failed agent leaves templater sentences.
+    /// </summary>
+    private async Task ApplyCuratedWhysAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> planned,
+        IReadOnlyList<FeedItem> previousItems, FeedBuildMode mode, IReadOnlyDictionary<Guid, string> anchorNames, CancellationToken ct)
+    {
+        // Preserve: a kept card keeps its persisted sentence and is never re-spent on.
+        var previousWhys = new Dictionary<(FeedRowKind Row, Guid? AnchorTitleId, Guid TitleId), string>();
+        if (mode == FeedBuildMode.Preserve)
+        {
+            foreach (var item in previousItems)
+            {
+                previousWhys[(item.Row, item.AnchorTitleId, item.TitleId)] = item.WhyThisSentence;
+            }
+        }
+        var pending = new List<PlannedItem>(planned.Count);
+        foreach (var item in planned)
+        {
+            if (previousWhys.TryGetValue((item.Row, item.AnchorTitleId, item.Candidate.Title.Id), out var kept)
+                && !string.IsNullOrWhiteSpace(kept)
+                && !SecondPersonVoice.Rejects(kept))
+            {
+                item.WhyThis = kept;
+            }
+            else
+            {
+                pending.Add(item);
+            }
+        }
+
+        // Shared fit cache next — a rail the paginator (or a previous build) already curated is free.
+        var uncached = new List<PlannedItem>();
+        foreach (var item in pending)
+        {
+            var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
+            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(accountId, item.Candidate.Title.Id, rowKey), out var hit)
+                && hit is not null && !string.IsNullOrWhiteSpace(hit.Why) && !SecondPersonVoice.Rejects(hit.Why))
+            {
+                item.WhyThis = hit.Why;
+            }
+            else
+            {
+                uncached.Add(item);
+            }
+        }
+
+        if (uncached.Count > 0 && agent.IsAvailable)
+        {
+            await CurateWhysAsync(accountId, taste, uncached, anchorNames, ct);
+        }
+
+        // No-repeat guard, per rail: two cards rendering IDENTICAL text is exactly the founder's
+        // complaint, so the later card re-seeds its templater variant until distinct (bounded).
+        foreach (var rail in planned.GroupBy(i => (i.Row, i.AnchorTitleId)))
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in rail.OrderBy(i => i.Rank))
+            {
+                if (!seen.Add(item.WhyThis))
+                {
+                    item.WhyThis = ExplanationTemplater.BuildDistinctSentence(item.WhyContext, seen);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The agent leg of the why pass: rail by rail (so the anchor name rides the prompt and the
+    /// cache key stays per-rail), batched, first batch always allowed to finish, soft budget
+    /// checked BETWEEN batches, hard ceiling backstop — the same mechanics as the paginator's
+    /// curation pass. Accepted lines are cached for both this build and the serve path.
+    /// </summary>
+    private async Task CurateWhysAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> uncached,
+        IReadOnlyDictionary<Guid, string> anchorNames, CancellationToken ct)
+    {
+        var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+        using var whyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        whyCts.CancelAfter(WhyPassCeiling);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var batchesDone = 0;
+        var curated = 0;
+
+        foreach (var rail in uncached.GroupBy(i => (i.Row, i.AnchorTitleId)))
+        {
+            var rowKey = FeedPaginator.RowKeyFor(rail.Key.Row, rail.Key.AnchorTitleId);
+            var anchorName = rail.Key.AnchorTitleId is { } anchorId ? anchorNames.GetValueOrDefault(anchorId) : null;
+            var items = rail.OrderBy(i => i.Rank).ToList();
+            var byTitleId = items.ToDictionary(i => i.Candidate.Title.Id);
+
+            for (var i = 0; i < items.Count; i += RerankBatch)
+            {
+                // Checked BEFORE starting a batch, never during one — a cancelled batch caches
+                // nothing, so the work would simply be lost and the next build would repeat it.
+                if (batchesDone > 0 && started.Elapsed > WhyPassBudget)
+                {
+                    logger.LogInformation(
+                        "Feed why pass stopped after {Elapsed:0.0}s with {Done} of {Total} cards curated; the rest keep templater sentences.",
+                        started.Elapsed.TotalSeconds, curated, uncached.Count);
+                    return;
+                }
+
+                var batch = items.Skip(i).Take(RerankBatch)
+                    .Select(p => new RerankInput(
+                        p.Candidate.Title.Id, p.Candidate.Title.Name, p.Candidate.Title.Year,
+                        p.Candidate.Title.MediaType.ToString(), p.Candidate.Title.Genres,
+                        p.Candidate.Title.Overview, p.Candidate.Predicted))
+                    .ToList();
+
+                IReadOnlyList<RerankResult> results;
+                try
+                {
+                    results = await agent.RerankBatchAsync(
+                        batch, FeedPaginator.QueryForRow(rail.Key.Row), tasteSummary, anchorName, whyCts.Token);
+                }
+                catch (OperationCanceledException) when (whyCts.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    logger.LogInformation(
+                        "Feed why pass exceeded its {Ceiling}s ceiling after {Done} of {Total} cards; the rest keep templater sentences.",
+                        WhyPassCeiling.TotalSeconds, curated, uncached.Count);
+                    return;
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+                {
+                    logger.LogWarning(ex, "Feed why pass rerank failed; remaining cards keep templater sentences.");
+                    return;
+                }
+
+                batchesDone++;
+                foreach (var result in results)
+                {
+                    cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
+                    if (!string.IsNullOrWhiteSpace(result.Why)
+                        && !SecondPersonVoice.Rejects(result.Why)
+                        && byTitleId.TryGetValue(result.TitleId, out var item))
+                    {
+                        item.WhyThis = result.Why;
+                        curated++;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>The compact taste summary the rerank prompt rides on — mirrors the paginator's.</summary>
+    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
+    {
+        var topGenres = taste.GenreRatings
+            .OrderByDescending(kv => kv.Value.Count).Take(4).Select(kv => kv.Key).ToList();
+        var loved = await db.Titles
+            .Where(t => taste.TopLovedTitleIds.Contains(t.Id)).Select(t => t.Name).Take(4).ToListAsync(ct);
+
+        var parts = new List<string>();
+        if (topGenres.Count > 0)
+        {
+            parts.Add("favours " + string.Join(", ", topGenres));
+        }
+
+        if (loved.Count > 0)
+        {
+            parts.Add("loves " + string.Join(", ", loved));
+        }
+
+        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
+    }
 
     /// <summary>
     /// Item-for-item equality on what the page actually renders from: (Row, Anchor, Rank, Title).

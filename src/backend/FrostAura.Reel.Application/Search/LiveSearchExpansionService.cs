@@ -426,7 +426,9 @@ public sealed class LiveSearchExpansionService(
 
             if (uncached.Count > 0)
             {
-                var results = await agent.RerankBatchAsync(uncached, query, tasteSummary, ct);
+                // No anchor title here: Ask Reel's "anchor" is the user's request itself, which
+                // already rides the query — behaviour deliberately unchanged.
+                var results = await agent.RerankBatchAsync(uncached, query, tasteSummary, anchorName: null, ct);
                 foreach (var res in results)
                 {
                     fitById[res.TitleId] = res;

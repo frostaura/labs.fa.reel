@@ -256,7 +256,71 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     private static async Task<FeedSnapshot> ActiveSnapshotAsync(ReelDbContext db, Guid accountId) =>
         await db.FeedSnapshots.FirstAsync(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active);
 
-    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null)
+    [Fact]
+    public async Task Llm_whys_are_persisted_at_build_time_and_a_preserve_rebuild_never_recalls_the_agent()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        // ── Fresh build: the agent's canned per-title lines land on the persisted FeedItems ────
+        var agent = new CannedWhyAgent();
+        await RunBuildAsync(accountId, agent: agent);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+
+        Assert.NotEmpty(items);
+        Assert.True(agent.RerankCalls > 0, "the Fresh build should have curated whys through the agent");
+        Assert.All(items, i => Assert.StartsWith("Shares the slow-burn dread you love", i.WhyThisSentence));
+
+        // And no rail repeats a sentence — the founder's verbatim complaint.
+        foreach (var rail in items.GroupBy(i => (i.Row, i.AnchorTitleId)))
+        {
+            Assert.Equal(rail.Count(), rail.Select(i => i.WhyThisSentence).Distinct().Count());
+        }
+
+        // ── Same-day background rebuild (Preserve): kept cards keep their whys, zero new spend ─
+        var callsAfterFresh = agent.RerankCalls;
+        await RunBuildAsync(accountId, agent: agent);
+
+        var snapshotAfter = await ActiveSnapshotAsync(db, accountId);
+        var itemsAfter = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshotAfter.Id).ToListAsync();
+
+        Assert.Equal(callsAfterFresh, agent.RerankCalls);
+        Assert.All(itemsAfter, i => Assert.StartsWith("Shares the slow-burn dread you love", i.WhyThisSentence));
+    }
+
+    /// <summary>Counts rerank calls and answers a distinct, guard-passing second-person line per title.</summary>
+    private sealed class CannedWhyAgent : ISearchAgent
+    {
+        public int RerankCalls;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "canned-why-agent";
+
+        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref RerankCalls);
+            return Task.FromResult<IReadOnlyList<RerankResult>>(titles
+                .Select(t => new RerankResult(t.TitleId, 0.8d, $"Shares the slow-burn dread you love — {t.TitleId:N}"))
+                .ToList());
+        }
+    }
+
+    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null, ISearchAgent? agent = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -275,6 +339,9 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
                 NullLogger<OnlineResidualModel>.Instance),
+            agent ?? new UnavailableSearchAgent(),
+            new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             new NoopEventHub(),
             NullLogger<BuildFeedJobHandler>.Instance);
 
@@ -457,6 +524,21 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
+    }
+
+    /// <summary>Never available, so every why stays the deterministic templater sentence — these
+    /// tests pin feed structure, not curated copy.</summary>
+    private sealed class UnavailableSearchAgent : ISearchAgent
+    {
+        public bool IsAvailable => false;
+
+        public string ModelId => "stub";
+
+        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 
     private sealed class NoopEventHub : IPipelineEventHub
