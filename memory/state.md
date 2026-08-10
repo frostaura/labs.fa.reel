@@ -1,36 +1,27 @@
 ---
 name: fa-reel-state
-description: "M2 edge proof RE-RUN clean 2026-08-07: model does NOT beat the popularity baseline (0.30 vs 0.30) after FOUR iterations — kill-criterion territory, founder call; leaks fixed; fully pushed to a now-private repo"
+description: "2026-08-10: FULL QA remediation shipped — 14 unpushed commits on main (4095762..7232884) fixing all 2026-08-07 QA findings + Dean's why-line/dislike additions; live-verified against the running stack; push is a clean fast-forward awaiting founder; M2 still NOT beating baseline (iter 7: 0% lift)"
 type: state
-last_verified: 2026-08-07
+last_verified: 2026-08-10
 ---
 
 # Current state
 
-_Git facts below re-verified 2026-08-07 by direct inspection (`git rev-parse`, `git rev-list --left-right --count`, `git status --porcelain`). Everything else last verified 2026-07-24 by the Labs tree-audit pass (`ci.yml`, `deploy/portainer-stack.yml`, test counts and package manifests inspected directly)._
+_Git facts and live-stack behavior below verified 2026-08-10 by direct inspection (`git rev-list --left-right --count @{u}...HEAD` → `0 14`, clean tree, no lock debris, zero deletions in the unpushed range) and by a live Playwright/API replay against the rebuilt stack._
 
-**Technically UNPROVEN, commercially unproven — but, as of 2026-08-07, no longer only on one machine.** Branch `main` at `f0f3184`, **fully pushed** to `origin/main` with a clean working tree (`git rev-list --left-right --count` → `0 0`). The repo was flipped **private** immediately before that push. The ~2-month single-machine durability gap described by the 2026-07-24 audit is **closed**.
+**A full QA remediation landed 2026-08-08→10: 14 commits on `main` (`4095762`..`7232884`), NOT yet pushed — push is a verified clean fast-forward (0 behind / 14 ahead), founder's call.** Every finding from the 2026-08-07 user-perspective QA plus Dean's two mid-run additions (rich why-lines, dislike steering) is implemented and live-verified:
 
-**The M2 edge proof was re-run on clean code and the model does NOT beat the popularity baseline.** Measured 2026-08-07 on the founder's real account, after the two training-time label leaks were removed:
+- **Trakt writeback is movie-only and reversible** (show rating created ~801 fake episode plays before; verified live: show rating → zero watch trace, movie un-rate → `RemoveFromHistory` dispatched and Trakt confirmed clean). The QA's own residue (801 Simpsons + 1 Family Stone plays) was surgically removed via the new Founder `POST /api/sync/history-cleanup` endpoint on 2026-08-07 and re-verified.
+- **Stable-tonight contract**: feed is day-stable (Preserve mode + no-op suppression — verified: two background sync cycles produced byte-identical hero and unchanged `generatedAt`), fresh across days / on manual refresh / filter changes / retrain.
+- **Negations are hard**: contradicting titles are dropped or quarantined under a labeled "Outside your request" channel with deterministic captions; TV-horror taxonomy gap (TMDB TV has no horror genre) closed via Subgenres/Keywords matching (`06016fc`). Live-verified: zero horror/ghost leakage in main results by API cross-check.
+- **PIN**: DataProtection unlock tokens; raw PIN never cached client-side; destructive ops re-prompt. Live matrix verified (423/200/token/legacy).
+- **New features live**: global TMDB typeahead + on-demand title hydration (Jeanne Dielman test passes, 705ms hydrate with prediction), weekly digest + Web Push (VAPID, injectManifest SW), Blend (two-person joint picks; self-preview verified, unknown code 404s), reference-title anchoring, runtime/mood intents, expandable why-not contribution details, card quick actions, rebuilt branded share card (full-height, console-clean, self-hosted Figtree), dislike-reason demotion across all scoring surfaces (schema v3 — forces per-account retrain on deploy).
+- **Why-lines**: build-time LLM whys persisted on FeedItems, anchored and title-specific, anti-recommendation guard + hero fit-floor swap, sentence-cased templater fallback, generic sentence max once per response (`7232884`).
 
-| | iteration 3 (leaky) | iteration 4 (fixed) |
-| --- | --- | --- |
-| model precision@10 | 0.30 | 0.30 |
-| popularity baseline | 0.40 | 0.30 |
-| relative lift | −25% | **0%** |
-| RMSE | 2.0007 | 1.9539 |
-| Spearman ρ | 0.1609 | 0.1714 |
+**M2 remains unproven**: iteration 7 (2026-08-07, post-remediation ratings) = 30% vs 30%, 0% lift; iterations 5–6 were −33%. The kill-criterion question (3 iterations named, 7 run) is still the open founder call. The remediation improved the *product surface*, not the model's edge.
 
-The 2026-06-12 record of "70% vs 50%, a 40% relative lift on a leakage-clean time split" does not reproduce. The split was clean; **the featurizer was not**. `FeatureVectorBuilder` compared a loved title's embedding against a set containing that title (`Cosine(a,a)` = exactly 1.0, a perfect label proxy) and fed a title's own rating into the genre/decade/cast/director statistics used to predict it. Neither can happen at serving time, because a scored candidate is by definition unrated.
+**Dean actively used the app during 2026-08-08→10** (conditions now: 8 excluded genres, min ratings 6/6, min year 2000 — his own settings, not QA residue; feed-build burst on 08-10 pre-deploy). Weekend usage ran on the P1-fixed image, so no show-rating history corruption occurred.
 
-**The fix is confirmed by feature importance, not just by the metric.** Before: `lovedCastCount` 1.00 (top feature), `castAffinity` 0.71, `simTopLovedMax` present. After: `simTopLovedMax` and `castAffinity` are gone from the top 15 entirely and `lovedCastCount` collapsed 1.00 → 0.05. The features that were quietly re-reading the label lost essentially all their gain, and the serialized artifact shrank (156,360 → 155,205 bytes) despite a *wider* feature vector. Removing the leak did not deflate the headline number — it made the model honest.
+Backend tests: 397 passing + 6 known-flaky local integration failures (CandidateRetriever ×2, old LiveSearchExpansion ×2, LexicalSearch, EnrichCatalog — pre-existing, identical on old HEADs, CI's pgvector service is authoritative). Frontend: 181 unit + 19 e2e green. All 4 new migrations applied on the running stack.
 
-**This is a founder decision point, and it should not be softened.** The program's own kill criterion is "the model cannot beat the popularity baseline by a meaningful margin after **3** modelling iterations". Four have now run and none has passed the ≥20% gate. Two things are worth weighing before concluding: n is still 1 (the founder's account, ~10–30 holdout titles, so 0.30 vs 0.30 is 3 hits versus 3), and the holdout only partially proxies real serving quality — the leak corrupted *training*, so the gain from fixing it should show up in what users actually see rather than in this metric. Neither point rescues the number as it stands.
-
-The committed set as of the last audit: hybrid retrieval, the online residual model, feed pagination + refresh coordinator, search intent parsing, the managed-list reconciler, the `Microsoft.OpenApi` security override, `deploy/portainer-stack.yml` and the QA screenshots (now under `docs/screenshots/`, previously loose at repo root).
-
-**No `.git/*.lock` debris was present on 2026-08-07** — the stale-lock gotcha did not reproduce this session.
-
-M4 (multi-tenant) is code-complete with **zero external users**.
-
-CI is real and among the strongest in the portfolio: `dotnet format` gate, **187 backend tests** with a 10% coverage ratchet, frontend lint/build/tests with a 6% ratchet, a Playwright e2e job now running **all 8 specs** (was 1), an **expiring-allowlist npm audit gate** (`npm run audit:gate`) plus a `dotnet list package --vulnerable` gate, an integration job against a real `pgvector/pgvector:pg16` service, native `ubuntu-24.04-arm` image builds and a multi-arch manifest merge. The Portainer redeploy job exists and is skipped (not failed) while the repo variable `DEPLOY_ENABLED` is unset.
+M4 multi-tenant remains code-complete with **zero external users**; the ≥5-external-users kill clock (~2026-08-11/18) is now due.
