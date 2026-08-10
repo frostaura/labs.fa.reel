@@ -32,6 +32,12 @@ public class Account
 
     public DateTime PipelineStageChangedAt { get; set; }
 
+    /// <summary>
+    /// Shareable 8-char Crockford-base32 Blend code (unique where set). Regenerating replaces
+    /// it, which deliberately invalidates any previously shared code.
+    /// </summary>
+    public string? BlendCode { get; set; }
+
     public AccountSettings Settings { get; set; } = new();
 
     public DateTime CreatedAt { get; set; }

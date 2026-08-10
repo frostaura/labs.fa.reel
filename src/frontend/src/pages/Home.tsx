@@ -4,6 +4,7 @@ import { useDispatch } from "react-redux";
 import { Lock, Sparkles } from "lucide-react";
 import {
   useGetContinueWatchingQuery,
+  useGetDigestQuery,
   useGetFeedGenresQuery,
   useGetFeedQuery,
   useGetSessionQuery,
@@ -11,6 +12,7 @@ import {
 import { removalsCleared } from "../store/removedTitlesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
+import RecRow from "../components/rows/RecRow";
 import GenreRow from "../components/rows/GenreRow";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
@@ -67,7 +69,10 @@ export default function Home() {
   }, [adoptedKey, dispatch]);
 
   const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
+  const { data: digest } = useGetDigestQuery(undefined, { skip: building });
   const continueFiltered = (continueWatching ?? []).filter((e) => matchesMedia(e.mediaType, filter));
+  // The weekly digest rail hides itself entirely until Friday's build lands something.
+  const digestFiltered = (digest?.items ?? []).filter((c) => matchesMedia(c.mediaType, filter));
 
   return (
     <div className="space-y-8">
@@ -149,6 +154,13 @@ export default function Home() {
               filter={filter}
             />
           ))}
+
+          {digestFiltered.length > 0 && (
+            <RecRow
+              title={<span className="text-fa-frost-bright">New &amp; high for you this week</span>}
+              items={digestFiltered}
+            />
+          )}
 
           {(genres ?? []).map((g) => (
             <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />

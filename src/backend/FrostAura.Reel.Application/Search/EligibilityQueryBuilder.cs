@@ -61,6 +61,23 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     }
 
     /// <summary>
+    /// The eligible title-id set for <paramref name="accountId"/> computed WITHOUT the row-level
+    /// tenancy filters, so a session pinned to one account can evaluate another account's
+    /// eligibility (Blend needs both participants' sets). This is an EXCLUSION primitive only:
+    /// it returns opaque title ids used to narrow a joint pool, and callers must never surface
+    /// another tenant's interaction rows, ratings, or filters through it. Same rule as
+    /// <see cref="EligibleTitles"/> — one builder, one predicate, two tenancy modes.
+    /// </summary>
+    public async Task<HashSet<Guid>> EligibleTitleIdsUnscopedAsync(Guid accountId, CancellationToken ct = default)
+    {
+        var ids = await EligibleTitles(accountId)
+            .IgnoreQueryFilters()
+            .Select(t => t.Id)
+            .ToListAsync(ct);
+        return [.. ids];
+    }
+
+    /// <summary>
     /// The subset of <paramref name="candidateTitleIds"/> that now carries an interaction footprint —
     /// the SAME rule <see cref="EligibleTitles"/> applies, expressed as a set lookup for surfaces
     /// holding titles that were already materialised (the feed snapshot) instead of a query to filter.

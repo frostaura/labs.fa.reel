@@ -156,6 +156,7 @@ public static class DependencyInjection
         services.AddScoped<IJobHandler, EvaluateJobHandler>();
         services.AddScoped<IJobHandler, BuildFeedJobHandler>();
         services.AddScoped<IJobHandler, RefreshAvailabilityJobHandler>();
+        services.AddScoped<IJobHandler, BuildDigestJobHandler>();
         services.AddHostedService<JobRunnerService>();
         services.AddHostedService<TraktDeltaPollService>();
         services.AddHostedService<NightlyReconcileService>();
@@ -163,6 +164,14 @@ public static class DependencyInjection
         services.AddHostedService<TitleLanguageBackfillService>();
         services.AddHostedService<TokenRefreshService>();
         services.AddHostedService<TraktOutboxDispatcherService>();
+        services.AddHostedService<WeeklyDigestService>();
+
+        // ── Web push + blend ─────────────────────────────────────────────────────────────
+        // Singleton: the VAPID pair must be provisioned once and shared; it scopes its own
+        // DbContext for the one-time load.
+        services.AddSingleton<Notifications.VapidKeyProvider>();
+        services.AddSingleton<Domain.Ports.IWebPushSender, Notifications.WebPushSender>();
+        services.AddScoped<Application.Blend.BlendService>();
 
         return services;
     }

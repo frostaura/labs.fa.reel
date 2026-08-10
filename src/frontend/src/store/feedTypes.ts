@@ -75,3 +75,41 @@ export interface ContinueEntry {
   totalAired: number;
   completionPct: number;
 }
+
+/** The current ISO week's digest — feed-shaped cards; empty items until the Friday build runs. */
+export interface DigestPayload {
+  weekStart: string | null;
+  generatedAt: string | null;
+  items: FeedCard[];
+}
+
+/** A Blend joint pick: the shared card fields plus both personal predictions (1dp). */
+export interface BlendCard {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number | null;
+  name: string;
+  year: number | null;
+  runtimeMinutes: number | null;
+  posterPath: string | null;
+  backdropPath: string | null;
+  genres: string[];
+  crowdRating: number | null;
+  crowdVotes: number | null;
+  isReleased: boolean;
+  providers?: { name: string; logoPath: string | null }[];
+  forYou: number;
+  forThem: number;
+  /** min(forYou, forThem) — the ordering key. */
+  joint: number;
+}
+
+export interface BlendPreview {
+  ownerName: string;
+  eligibleBothCount: number;
+}
+
+export interface BlendPicksPayload {
+  ownerName: string;
+  items: BlendCard[];
+}

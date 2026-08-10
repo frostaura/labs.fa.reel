@@ -391,6 +391,33 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("TitleEmbeddings");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.Feed.AccountDigest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("GeneratedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ItemsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateOnly>("WeekStart")
+                        .HasColumnType("date");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "WeekStart")
+                        .IsUnique();
+
+                    b.ToTable("AccountDigests");
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Feed.FeedItem", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1000,6 +1027,59 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("TrainingRuns");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.Notifications.AppSecret", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ValueProtected")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("AppSecrets");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.Notifications.PushSubscription", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Auth")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("FailCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("LastSuccessAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("P256dh")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "Endpoint")
+                        .IsUnique();
+
+                    b.ToTable("PushSubscriptions");
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Providers.ProviderLinkPattern", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1397,6 +1477,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("AvatarUrl")
                         .HasColumnType("text");
 
+                    b.Property<string>("BlendCode")
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1439,6 +1523,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("BlendCode")
+                        .IsUnique()
+                        .HasFilter("\"BlendCode\" IS NOT NULL");
 
                     b.HasIndex("TraktUserSlug")
                         .IsUnique();

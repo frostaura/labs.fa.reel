@@ -13,6 +13,7 @@ public enum JobKind
     Evaluate,
     BuildFeed,
     RefreshAvailability,
+    BuildDigest,
 }
 
 public enum JobStatus

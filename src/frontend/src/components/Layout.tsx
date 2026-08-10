@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
 import { useDispatch } from "react-redux";
 import type { AppDispatch } from "../store";
@@ -93,6 +93,9 @@ export default function Layout() {
                 <span className="fa-caption text-fa-frost hidden sm:inline">{session?.displayName}</span>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => navigate("/blend")}>
+                  <Users className="h-4 w-4 mr-2" /> Blend
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => navigate("/settings")}>
                   <SettingsIcon className="h-4 w-4 mr-2" /> Settings
                 </DropdownMenuItem>

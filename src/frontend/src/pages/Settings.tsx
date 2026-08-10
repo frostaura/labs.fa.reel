@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import PreferencesSection from "../components/settings/PreferencesSection";
 import PreferenceTags from "../components/settings/PreferenceTags";
 import BillingCard from "../components/settings/BillingCard";
+import PushOptIn from "../components/settings/PushOptIn";
 import {
   useGetSessionQuery,
   useGetSyncStatusQuery,
@@ -134,6 +135,8 @@ export default function Settings() {
       </Link>
 
       <BillingCard />
+
+      <PushOptIn />
 
       <EmailCapture onSave={(email) => updateSettings({ email })} />
 

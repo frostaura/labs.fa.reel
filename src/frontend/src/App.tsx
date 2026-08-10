@@ -13,6 +13,7 @@ import Saved from "./pages/Saved";
 import TasteDna from "./pages/TasteDna";
 import SearchResults from "./pages/SearchResults";
 import RatePicker from "./pages/RatePicker";
+import Blend from "./pages/Blend";
 
 /**
  * Title detail is a fixed-overlay modal that cards open with `state.backgroundLocation`. When that
@@ -55,6 +56,7 @@ function AppRoutes() {
           <Route path="/dna" element={<TasteDna />} />
           <Route path="/search" element={<SearchResults />} />
           <Route path="/rate" element={<RatePicker />} />
+          <Route path="/blend" element={<Blend />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/lab" element={<Lab />} />
         </Route>

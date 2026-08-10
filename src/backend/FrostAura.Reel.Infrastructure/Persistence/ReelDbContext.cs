@@ -76,6 +76,11 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     // Feed
     public DbSet<FeedSnapshot> FeedSnapshots => Set<FeedSnapshot>();
     public DbSet<FeedItem> FeedItems => Set<FeedItem>();
+    public DbSet<AccountDigest> AccountDigests => Set<AccountDigest>();
+
+    // Notifications
+    public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => Set<Domain.Notifications.PushSubscription>();
+    public DbSet<Domain.Notifications.AppSecret> AppSecrets => Set<Domain.Notifications.AppSecret>();
 
     // Sync
     public DbSet<SyncJob> SyncJobs => Set<SyncJob>();
@@ -108,6 +113,10 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         modelBuilder.Entity<Account>(e =>
         {
             e.HasIndex(a => a.TraktUserSlug).IsUnique();
+            // Blend codes are shareable lookups — unique only where set, so accounts without
+            // one don't collide on NULL and regeneration frees the old code atomically.
+            e.HasIndex(a => a.BlendCode).IsUnique().HasFilter("\"BlendCode\" IS NOT NULL");
+            e.Property(a => a.BlendCode).HasMaxLength(8);
             e.OwnsOne(a => a.Settings, s => s.ToJson());
         });
 
@@ -287,6 +296,26 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         {
             e.HasIndex(i => new { i.FeedSnapshotId, i.Row, i.Rank });
             e.Property(i => i.ExplanationJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<AccountDigest>(e =>
+        {
+            // One digest per account per ISO week — the BuildDigest job upserts against this.
+            e.HasIndex(d => new { d.AccountId, d.WeekStart }).IsUnique();
+            e.Property(d => d.ItemsJson).HasColumnType("jsonb");
+        });
+
+        // ── Notifications ──────────────────────────────────────────────────────────────────
+        modelBuilder.Entity<Domain.Notifications.PushSubscription>(e =>
+        {
+            // One row per (account, browser endpoint); re-subscribing the same browser upserts.
+            e.HasIndex(s => new { s.AccountId, s.Endpoint }).IsUnique();
+        });
+
+        modelBuilder.Entity<Domain.Notifications.AppSecret>(e =>
+        {
+            e.HasKey(s => s.Key);
+            e.Property(s => s.Key).HasMaxLength(64);
         });
 
         // ── Sync ───────────────────────────────────────────────────────────────────────────

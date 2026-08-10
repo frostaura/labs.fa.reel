@@ -1,6 +1,16 @@
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
 import { clearHasSession, markHasSession } from "../lib/sessionFlag";
-import type { ContinueEntry, FeedCard, FeedPayload, GenreRail, MoreFeedRequest, MoreFeedResponse } from "./feedTypes";
+import type {
+  BlendPicksPayload,
+  BlendPreview,
+  ContinueEntry,
+  DigestPayload,
+  FeedCard,
+  FeedPayload,
+  GenreRail,
+  MoreFeedRequest,
+  MoreFeedResponse,
+} from "./feedTypes";
 import { titleRemoved, titleRestored } from "./removedTitlesSlice";
 import type { PersonPayload, ProvidersPayload, SavedEntry, TitleDetailPayload } from "./titleTypes";
 
@@ -592,6 +602,30 @@ export const api = createApi({
     createCheckout: b.mutation<{ url?: string; error?: string }, void>({
       query: () => ({ url: "billing/checkout", method: "POST" }),
     }),
+    // Weekly digest — read-only snapshot of this week's "new & high for you" picks.
+    getDigest: b.query<DigestPayload, void>({
+      query: () => "digest/current",
+    }),
+    // Web push. The VAPID key is fetched lazily at opt-in time, not on page load.
+    getVapidPublicKey: b.query<{ key: string }, void>({
+      query: () => "push/vapid-public-key",
+    }),
+    subscribePush: b.mutation<{ ok: boolean }, { endpoint: string; keys: { p256dh: string; auth: string } }>({
+      query: (body) => ({ url: "push/subscribe", method: "POST", body }),
+    }),
+    unsubscribePush: b.mutation<{ ok: boolean }, { endpoint: string }>({
+      query: (body) => ({ url: "push/subscribe", method: "DELETE", body }),
+    }),
+    // Blend — two-person joint picks via a shareable code.
+    createBlendCode: b.mutation<{ code: string }, void>({
+      query: () => ({ url: "blend/code", method: "POST" }),
+    }),
+    getBlendPreview: b.query<BlendPreview, string>({
+      query: (code) => `blend/${encodeURIComponent(code)}/preview`,
+    }),
+    getBlendPicks: b.mutation<BlendPicksPayload, string>({
+      query: (code) => ({ url: `blend/${encodeURIComponent(code)}/picks`, method: "POST" }),
+    }),
   }),
 });
 
@@ -638,4 +672,11 @@ export const {
   useSetPinMutation,
   useVerifyPinMutation,
   useRemovePinMutation,
+  useGetDigestQuery,
+  useLazyGetVapidPublicKeyQuery,
+  useSubscribePushMutation,
+  useUnsubscribePushMutation,
+  useCreateBlendCodeMutation,
+  useLazyGetBlendPreviewQuery,
+  useGetBlendPicksMutation,
 } = api;

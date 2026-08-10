@@ -420,7 +420,12 @@ public static class FeedEndpoints
         string.Join(' ', slug.Split('-', StringSplitOptions.RemoveEmptyEntries)
             .Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
 
-    private static async Task<Dictionary<Guid, IReadOnlyList<CardProvider>>> ProvidersForAsync(
+    /// <summary>
+    /// Flatrate provider strip (top 3 by display priority, 7-day freshness) for a batch of
+    /// titles. Internal because the digest and blend surfaces reuse the exact same read —
+    /// a second copy of this query is how the read-side TTL and the write-side TTL drift.
+    /// </summary>
+    internal static async Task<Dictionary<Guid, IReadOnlyList<CardProvider>>> ProvidersForAsync(
         IReelDbContext db, string region, IReadOnlyList<Guid> titleIds, DateTime nowUtc, CancellationToken ct)
     {
         if (titleIds.Count == 0)
