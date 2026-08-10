@@ -12,6 +12,8 @@ const card = (n: number) => ({
   backdropPath: null,
   genres: ["drama"],
   predictedRating: 8.1,
+  crowdRating: 7.9,
+  crowdVotes: 40000,
   whyThis: "Strong fit with your taste profile.",
 });
 
@@ -66,5 +68,16 @@ test.describe("entitlement gating", () => {
     await expect(page.getByTestId("hero-card")).toHaveCount(5);
     await expect(page.getByText("Anchor Film")).toBeVisible();
     await expect(page.getByText(/more personalised rows/i)).toHaveCount(0);
+
+    // Remediation card anatomy, locked in on the row cards: every card carries the shared
+    // ScoreBadges stack (prediction over crowd — "8.1 for you" + "7.9") and the one-tap quick
+    // actions overlay (Not for me / Save), so acting on a pick costs no navigation.
+    await expect(page.getByTestId("rec-card")).toHaveCount(4);
+    const firstCard = page.getByTestId("rec-card").first();
+    await expect(firstCard.getByTestId("score-badges")).toContainText("8.1");
+    await expect(firstCard.getByTestId("score-badges")).toContainText("for you");
+    await expect(firstCard.getByTestId("score-badges")).toContainText("7.9");
+    await expect(firstCard.getByTestId("quick-not-interested")).toBeAttached();
+    await expect(firstCard.getByTestId("quick-save")).toBeAttached();
   });
 });
