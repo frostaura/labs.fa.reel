@@ -71,6 +71,12 @@ public class BuildFeedJobHandler(
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
     private const int RerankBatch = 9;
 
+    // Hero coherence floor: when the LLM's fit verdict for a hero card comes in at or below this,
+    // "tonight's pick" and "you'll probably dislike it" are on the same card. The why pass swaps
+    // such a hero for the next spare candidate (see SwapLowFitHeroesAsync) rather than captioning
+    // the headline slot with a reason to skip it.
+    private const double HeroFitFloor = 0.3;
+
     public JobKind Kind => JobKind.BuildFeed;
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
@@ -690,13 +696,27 @@ public class BuildFeedJobHandler(
             return null;
         }
 
+        // Spare hero candidates for the why pass's low-fit hero swap: the same orderings the hero
+        // picks themselves were drawn from — the confidence-floor pool's leftovers first (the MMR
+        // loop's remainder), then the never-open-blank backfill ordering — restricted to titles not
+        // placed anywhere on this feed, so a swap can never seat a card another rail already shows.
+        var heroSpares = heroPool
+            .Concat(candidates
+                .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title)))
+            .Where(c => !used.Contains(c.Title.Id))
+            .DistinctBy(c => c.Title.Id)
+            .Take(HeroSize)
+            .ToList();
+
         // ── LLM why pass ────────────────────────────────────────────────────────────────────
         // AFTER the no-op decision, so a suppressed rebuild never spends a call: kept cards reuse
         // their persisted whys (Preserve), the rest go through the agent within a time-boxed budget
         // into the same 6h fit cache the paginator uses, and every rail ends repeat-free.
         await ApplyCuratedWhysAsync(
             account.Id, taste, planned, previousItems, mode,
-            anchors.ToDictionary(a => a.Id, a => a.Name), ct);
+            anchors.ToDictionary(a => a.Id, a => a.Name),
+            heroSpares, candidate => WhyContext(candidate, null), ct);
 
         // Supersede previous snapshots, write the new one.
         foreach (var stale in await db.FeedSnapshots
@@ -767,25 +787,49 @@ public class BuildFeedJobHandler(
 
         public int Rank { get; } = rank;
 
-        public Candidate Candidate { get; } = candidate;
+        public Candidate Candidate { get; private set; } = candidate;
 
-        public ExplanationTemplater.Context WhyContext { get; } = whyContext;
+        public ExplanationTemplater.Context WhyContext { get; private set; } = whyContext;
 
         public string WhyThis { get; set; } = ExplanationTemplater.BuildSentence(whyContext);
+
+        /// <summary>
+        /// The low-fit hero swap: this slot now carries a different candidate. The why resets to
+        /// the replacement's deterministic templater sentence; the caller upgrades it to an agent
+        /// line when one is earned within budget.
+        /// </summary>
+        public void Replace(Candidate candidate, ExplanationTemplater.Context whyContext)
+        {
+            Candidate = candidate;
+            WhyContext = whyContext;
+            WhyThis = ExplanationTemplater.BuildSentence(whyContext);
+        }
     }
+
+    /// <summary>
+    /// True when an LLM why-line may be shown on a pick surface: the shared voice/shape guard
+    /// (<see cref="SecondPersonVoice.Rejects"/>) plus the anti-recommendation guard — a feed card
+    /// must never argue against its own pick, however honest the argument.
+    /// </summary>
+    private static bool AcceptsWhy(string? why) =>
+        !string.IsNullOrWhiteSpace(why)
+        && !SecondPersonVoice.Rejects(why)
+        && !SecondPersonVoice.SoundsAntiRecommendation(why);
 
     /// <summary>
     /// Fills every planned card's final why-line. Order of preference: the previous snapshot's
     /// persisted why for a kept card (Preserve mode — the stable-"tonight" contract, and zero
     /// spend), a cached agent verdict from the shared 6h fit cache, a fresh agent line within the
     /// time-boxed budget, then the deterministic templater sentence the item already carries.
-    /// Every reused or generated line passes <see cref="SecondPersonVoice.Rejects"/> — which is
-    /// also the upgrade path for old persisted "Because you loved …" sentences — and every rail
-    /// ends with the no-repeat guard. Never throws: a failed agent leaves templater sentences.
+    /// Every reused or generated line passes <see cref="AcceptsWhy"/> — which is also the upgrade
+    /// path for old persisted "Because you loved …" and anti-recommendation sentences — a hero the
+    /// agent scored at or below the fit floor is swapped for a spare, and every rail ends with the
+    /// no-repeat guard. Never throws: a failed agent leaves templater sentences.
     /// </summary>
     private async Task ApplyCuratedWhysAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> planned,
-        IReadOnlyList<FeedItem> previousItems, FeedBuildMode mode, IReadOnlyDictionary<Guid, string> anchorNames, CancellationToken ct)
+        IReadOnlyList<FeedItem> previousItems, FeedBuildMode mode, IReadOnlyDictionary<Guid, string> anchorNames,
+        IReadOnlyList<Candidate> heroSpares, Func<Candidate, ExplanationTemplater.Context> heroContext, CancellationToken ct)
     {
         // Preserve: a kept card keeps its persisted sentence and is never re-spent on.
         var previousWhys = new Dictionary<(FeedRowKind Row, Guid? AnchorTitleId, Guid TitleId), string>();
@@ -800,8 +844,7 @@ public class BuildFeedJobHandler(
         foreach (var item in planned)
         {
             if (previousWhys.TryGetValue((item.Row, item.AnchorTitleId, item.Candidate.Title.Id), out var kept)
-                && !string.IsNullOrWhiteSpace(kept)
-                && !SecondPersonVoice.Rejects(kept))
+                && AcceptsWhy(kept))
             {
                 item.WhyThis = kept;
             }
@@ -811,13 +854,24 @@ public class BuildFeedJobHandler(
             }
         }
 
+        // Every fit verdict observed for a hero card, cached or fresh — the input to the low-fit
+        // hero swap below. Kept Preserve cards never land here on purpose: tonight's contract
+        // outranks a retrospective fit opinion on a card the user is already looking at.
+        var heroFits = new Dictionary<Guid, double>();
+
         // Shared fit cache next — a rail the paginator (or a previous build) already curated is free.
         var uncached = new List<PlannedItem>();
         foreach (var item in pending)
         {
             var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
-            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(accountId, item.Candidate.Title.Id, rowKey), out var hit)
-                && hit is not null && !string.IsNullOrWhiteSpace(hit.Why) && !SecondPersonVoice.Rejects(hit.Why))
+            var cachedHit = cache.TryGetValue<RerankResult>(
+                FeedPaginator.FitKey(accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
+            if (cachedHit && item.Row == FeedRowKind.Hero)
+            {
+                heroFits[item.Candidate.Title.Id] = hit!.Fit;
+            }
+
+            if (cachedHit && AcceptsWhy(hit!.Why))
             {
                 item.WhyThis = hit.Why;
             }
@@ -827,9 +881,20 @@ public class BuildFeedJobHandler(
             }
         }
 
+        // Budget and ceiling are owned here so the hero swap pass below draws on the SAME clock —
+        // a swap is part of this why pass, never a second budget.
+        using var whyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        whyCts.CancelAfter(WhyPassCeiling);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
         if (uncached.Count > 0 && agent.IsAvailable)
         {
-            await CurateWhysAsync(accountId, taste, uncached, anchorNames, ct);
+            await CurateWhysAsync(accountId, taste, uncached, anchorNames, heroFits, started, whyCts, ct);
+        }
+
+        if (agent.IsAvailable && heroFits.Count > 0)
+        {
+            await SwapLowFitHeroesAsync(accountId, taste, planned, heroFits, heroSpares, heroContext, started, whyCts, ct);
         }
 
         // No-repeat guard, per rail: two cards rendering IDENTICAL text is exactly the founder's
@@ -848,19 +913,117 @@ public class BuildFeedJobHandler(
     }
 
     /// <summary>
+    /// The hero coherence floor. A hero card whose agent fit came in at or below
+    /// <see cref="HeroFitFloor"/> reads as "here's tonight's pick; you'll probably dislike it" —
+    /// so the slot is swapped for the next spare candidate (drawn from the hero orderings'
+    /// leftovers, never a title already on the feed), and the replacement earns its own agent why
+    /// inside the pass's remaining budget. With no spare left, or no budget to judge a
+    /// replacement, the original hero keeps its slot but drops the low-fit LLM caption for the
+    /// deterministic templater sentence — the card then argues FOR itself with verifiable facts.
+    /// Deterministic: low-fit heroes are handled in rank order, spares in their ranking order.
+    /// </summary>
+    private async Task SwapLowFitHeroesAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> planned,
+        IReadOnlyDictionary<Guid, double> heroFits, IReadOnlyList<Candidate> heroSpares,
+        Func<Candidate, ExplanationTemplater.Context> heroContext,
+        System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
+    {
+        var lowFit = planned
+            .Where(i => i.Row == FeedRowKind.Hero
+                && heroFits.TryGetValue(i.Candidate.Title.Id, out var fit) && fit <= HeroFitFloor)
+            .OrderBy(i => i.Rank)
+            .ToList();
+        if (lowFit.Count == 0)
+        {
+            return;
+        }
+
+        var spares = new Queue<Candidate>(heroSpares);
+        var swaps = new List<(PlannedItem Item, Candidate Replacement, double OldFit)>();
+        foreach (var item in lowFit)
+        {
+            if (spares.Count == 0 || started.Elapsed > WhyPassBudget)
+            {
+                // No spare, or no budget to earn the replacement a why: the pick stays, but its
+                // caption must not argue against it — fall back to the templater sentence.
+                item.WhyThis = ExplanationTemplater.BuildSentence(item.WhyContext);
+                continue;
+            }
+
+            swaps.Add((item, spares.Dequeue(), heroFits[item.Candidate.Title.Id]));
+        }
+
+        if (swaps.Count == 0)
+        {
+            return;
+        }
+
+        var batch = swaps
+            .Select(s => new RerankInput(
+                s.Replacement.Title.Id, s.Replacement.Title.Name, s.Replacement.Title.Year,
+                s.Replacement.Title.MediaType.ToString(), s.Replacement.Title.Genres,
+                s.Replacement.Title.Overview, s.Replacement.Predicted))
+            .ToList();
+
+        IReadOnlyList<RerankResult> results;
+        try
+        {
+            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+            results = await agent.RerankBatchAsync(
+                batch, FeedPaginator.QueryForRow(FeedRowKind.Hero), tasteSummary, anchorName: null, whyCts.Token);
+        }
+        catch (Exception ex) when (
+            (ex is OperationCanceledException && whyCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            || ex is HttpRequestException or TaskCanceledException)
+        {
+            // The replacement could not be judged, so nothing is swapped — but the low-fit LLM
+            // captions still go: each original hero keeps its slot with its templater sentence.
+            logger.LogInformation(ex,
+                "Hero swap pass could not judge replacements; {Count} low-fit heroes keep their slots with templater whys.",
+                swaps.Count);
+            foreach (var (item, _, _) in swaps)
+            {
+                item.WhyThis = ExplanationTemplater.BuildSentence(item.WhyContext);
+            }
+
+            return;
+        }
+
+        var resultByTitle = results.ToDictionary(r => r.TitleId);
+        var rowKey = FeedPaginator.RowKeyFor(FeedRowKind.Hero, null);
+        foreach (var (item, replacement, oldFit) in swaps)
+        {
+            var replacedName = item.Candidate.Title.Name;
+            item.Replace(replacement, heroContext(replacement));
+            if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
+            {
+                cache.Set(FeedPaginator.FitKey(accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
+                if (AcceptsWhy(verdict.Why))
+                {
+                    item.WhyThis = verdict.Why;
+                }
+            }
+
+            logger.LogInformation(
+                "Hero swap for {AccountId}: '{Replaced}' (fit {Fit:0.00} ≤ {Floor}) swapped for '{Replacement}'.",
+                accountId, replacedName, oldFit, HeroFitFloor, replacement.Title.Name);
+        }
+    }
+
+    /// <summary>
     /// The agent leg of the why pass: rail by rail (so the anchor name rides the prompt and the
     /// cache key stays per-rail), batched, first batch always allowed to finish, soft budget
     /// checked BETWEEN batches, hard ceiling backstop — the same mechanics as the paginator's
-    /// curation pass. Accepted lines are cached for both this build and the serve path.
+    /// curation pass. Accepted lines are cached for both this build and the serve path. The
+    /// stopwatch and ceiling are the caller's, shared with the hero swap pass; every hero fit
+    /// verdict is recorded into <paramref name="heroFits"/> whether or not its why was accepted.
     /// </summary>
     private async Task CurateWhysAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> uncached,
-        IReadOnlyDictionary<Guid, string> anchorNames, CancellationToken ct)
+        IReadOnlyDictionary<Guid, string> anchorNames, Dictionary<Guid, double> heroFits,
+        System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
     {
         var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
-        using var whyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        whyCts.CancelAfter(WhyPassCeiling);
-        var started = System.Diagnostics.Stopwatch.StartNew();
         var batchesDone = 0;
         var curated = 0;
 
@@ -913,9 +1076,12 @@ public class BuildFeedJobHandler(
                 foreach (var result in results)
                 {
                     cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
-                    if (!string.IsNullOrWhiteSpace(result.Why)
-                        && !SecondPersonVoice.Rejects(result.Why)
-                        && byTitleId.TryGetValue(result.TitleId, out var item))
+                    if (rail.Key.Row == FeedRowKind.Hero)
+                    {
+                        heroFits[result.TitleId] = result.Fit;
+                    }
+
+                    if (AcceptsWhy(result.Why) && byTitleId.TryGetValue(result.TitleId, out var item))
                     {
                         item.WhyThis = result.Why;
                         curated++;

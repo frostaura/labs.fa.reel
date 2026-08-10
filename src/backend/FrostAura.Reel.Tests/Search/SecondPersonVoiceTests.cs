@@ -29,4 +29,30 @@ public class SecondPersonVoiceTests
     [InlineData(null)]
     public void Second_person_and_lookalike_words_pass(string? why) =>
         Assert.False(SecondPersonVoice.LeaksThirdPerson(why));
+
+    // ── Anti-recommendation guard ────────────────────────────────────────────────────────────
+    // A pick surface must never caption its own recommendation with a reason to skip it. The
+    // first three positives are the captions observed verbatim on the live feed (2026-08-10).
+
+    [Theory]
+    [InlineData("You may bounce off the home-invasion gore that drives this one")]
+    [InlineData("Your night pick probably skips this Chucky horror-thriller")]
+    [InlineData("You likely avoid this sadistic backwoods horror")]
+    [InlineData("You'll probably dislike the mean streak here")]
+    [InlineData("Honestly not for you unless the mood shifts")]
+    [InlineData("Best to give this a miss on a school night")]
+    public void Anti_recommendation_captions_are_caught(string why) =>
+        Assert.True(SecondPersonVoice.SoundsAntiRecommendation(why));
+
+    [Theory]
+    [InlineData("You get a tense FBI cat-and-mouse in your strongest lane")]
+    [InlineData("Shares Hokum's slow-burn dread")]
+    [InlineData("Darker than most but squarely your lane")]
+    [InlineData("You rate Kate Siegel 7.9 on average")]
+    [InlineData("Skip the recap — this one earns your full attention")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void Positive_pick_captions_pass_the_anti_recommendation_guard(string? why) =>
+        Assert.False(SecondPersonVoice.SoundsAntiRecommendation(why));
 }

@@ -10,6 +10,13 @@ namespace FrostAura.Reel.Application.Ranking;
 /// </summary>
 public static class ExplanationTemplater
 {
+    /// <summary>
+    /// The ultimate fallback sentence, emitted when nothing verifiable can be cited. Single-sourced
+    /// so every surface that special-cases it (the once-per-response guard, the paginator's and the
+    /// feed endpoint's fallback paths) compares against the exact sentence this templater builds.
+    /// </summary>
+    public const string GenericFallback = "Strong fit with your taste profile.";
+
     /// <summary>A person the user has actually rated (count ≥ 2), with their shrunken affinity.</summary>
     public record PersonAffinity(string Name, decimal Affinity);
 
@@ -62,7 +69,7 @@ public static class ExplanationTemplater
 
         if (clauses.Count == 0)
         {
-            clauses.Add("Strong fit with your taste profile");
+            clauses.Add(GenericFallback.TrimEnd('.'));
         }
 
         if (context.AnchorName is { Length: > 0 } anchor)
@@ -73,7 +80,13 @@ public static class ExplanationTemplater
             clauses.Insert(0, AnchorClause(context, anchor, variantSeed));
         }
 
-        return string.Join(", and ", clauses.Take(2)).TrimEnd('.') + ".";
+        var sentence = string.Join(", and ", clauses.Take(2)).TrimEnd('.') + ".";
+
+        // Sentence integrity: clause templates are written as mid-sentence fragments so they can
+        // follow an anchor clause ("…, and you rate X 7.2 on average"). A fragment that ends up
+        // LEADING the sentence must be promoted to sentence case — "you rate X 7.2 on average."
+        // and "written by Stephen King, who you rate 6.8." shipped as whole whys (2026-08-10).
+        return char.IsUpper(sentence[0]) ? sentence : char.ToUpperInvariant(sentence[0]) + sentence[1..];
     }
 
     /// <summary>
@@ -93,6 +106,35 @@ public static class ExplanationTemplater
 
         takenWhys.Add(sentence);
         return sentence;
+    }
+
+    /// <summary>
+    /// The response-level guard on <see cref="GenericFallback"/>: the generic sentence may appear
+    /// at most once per served payload. The per-rail no-repeat guard cannot help here — the
+    /// fallback has a single phrasing, so every seed collides and the same boilerplate rendered
+    /// three times in one view (observed live, 2026-08-10). Later occurrences are blanked: an
+    /// empty caption reads better than repeated filler. Items must arrive in display order so the
+    /// first card shown is the one that keeps the sentence.
+    /// </summary>
+    public static void EnforceGenericOnce(IEnumerable<Domain.Feed.FeedItem> orderedItems)
+    {
+        var seen = false;
+        foreach (var item in orderedItems)
+        {
+            if (!string.Equals(item.WhyThisSentence, GenericFallback, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (seen)
+            {
+                item.WhyThisSentence = string.Empty;
+            }
+            else
+            {
+                seen = true;
+            }
+        }
     }
 
     /// <summary>

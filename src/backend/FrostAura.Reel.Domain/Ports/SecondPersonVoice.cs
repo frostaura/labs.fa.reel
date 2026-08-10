@@ -36,4 +36,27 @@ public static partial class SecondPersonVoice
     /// </summary>
     public static bool Rejects(string? why) =>
         LeaksThirdPerson(why) || OpensWithBecauseYouLoved(why) || (why is { Length: > 220 });
+
+    [GeneratedRegex(
+        @"\b(?:you (?:may|might|likely|probably|will)(?: well)? (?:bounce off|skip|avoid|dislike|hate|pass on)"
+        + @"|you'?ll (?:probably |likely )?(?:bounce off|dislike|avoid|skip|hate|pass on)"
+        + @"|(?:probably|likely|usually) (?:skips|avoids)"
+        + @"|not for you"
+        + @"|not your (?:lane|thing|speed|scene)"
+        + @"|steer clear"
+        + @"|give (?:this|it) a (?:miss|pass)"
+        + @"|sit this one out)\b",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex AntiRecommendationRegex();
+
+    /// <summary>
+    /// True when the line argues AGAINST its own card — "You may bounce off the gore", "probably
+    /// skips this", "you'll likely avoid it". The LLM why pass is asked for honest fit, and honesty
+    /// about a weak pick is valuable as a SELECTION signal — but a pick surface (feed hero, rails,
+    /// paginated rows) must never caption its own recommendation with a reason to skip it (observed
+    /// live 2026-08-10). Applied only where whys are accepted for pick surfaces; the Ask Reel
+    /// outside-request channel deliberately keeps its honest negatives.
+    /// </summary>
+    public static bool SoundsAntiRecommendation(string? why) =>
+        !string.IsNullOrWhiteSpace(why) && AntiRecommendationRegex().IsMatch(why);
 }

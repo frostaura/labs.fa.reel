@@ -299,6 +299,72 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task An_anti_recommendation_agent_line_is_discarded_for_the_templater_sentence()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Live regression 2026-08-10: the agent's honest negatives ("You may bounce off the
+        // home-invasion gore…") were accepted verbatim onto hero and rail cards. A pick surface
+        // must never argue against its own pick — the line is discarded for the templater fallback.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        var agent = new AntiRecommendationWhyAgent();
+        await RunBuildAsync(accountId, agent: agent);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+
+        Assert.NotEmpty(items);
+        Assert.True(agent.RerankCalls > 0, "the build should have consulted the agent");
+        Assert.All(items, i =>
+        {
+            Assert.DoesNotContain("bounce off", i.WhyThisSentence, StringComparison.OrdinalIgnoreCase);
+            Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence), "every card still carries a why");
+        });
+    }
+
+    [Fact]
+    public async Task A_low_fit_hero_is_swapped_for_the_next_spare_candidate()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The hero coherence floor: the agent judges every original hero pick a poor fit (≤ 0.3),
+        // so each slot must be re-dealt to a spare candidate — and the replacements carry their own
+        // accepted agent lines, not the condemned picks' captions.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        var agent = new LowFitFirstHeroBatchAgent();
+        await RunBuildAsync(accountId, agent: agent);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+        var hero = items.Where(i => i.Row == FeedRowKind.Hero).OrderBy(i => i.Rank).ToList();
+
+        Assert.NotEmpty(hero);
+        Assert.NotEmpty(agent.CondemnedTitleIds);
+        Assert.Empty(hero.Select(i => i.TitleId).Intersect(agent.CondemnedTitleIds));
+        Assert.All(hero, i => Assert.StartsWith("Better pick for tonight", i.WhyThisSentence));
+
+        // The swap re-seats the hero only — no condemned title may sneak onto another rail either,
+        // and no title appears twice across the feed.
+        Assert.Equal(items.Count, items.Select(i => i.TitleId).Distinct().Count());
+    }
+
+    [Fact]
     public async Task A_seen_enough_dislike_keeps_similar_titles_out_of_the_hero()
     {
         if (!fixture.Available)
@@ -403,6 +469,70 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             Interlocked.Increment(ref RerankCalls);
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
                 .Select(t => new RerankResult(t.TitleId, 0.8d, $"Shares the slow-burn dread you love — {t.TitleId:N}"))
+                .ToList());
+        }
+    }
+
+    /// <summary>Honest but anti-recommendation whys (distinct per title, second-person, high fit) —
+    /// exactly the live 2026-08-10 shape the acceptance guard must discard.</summary>
+    private sealed class AntiRecommendationWhyAgent : ISearchAgent
+    {
+        public int RerankCalls;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "anti-rec-why-agent";
+
+        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref RerankCalls);
+            return Task.FromResult<IReadOnlyList<RerankResult>>(titles
+                .Select(t => new RerankResult(t.TitleId, 0.8d, $"You may bounce off the home-invasion gore — {t.TitleId:N}"))
+                .ToList());
+        }
+    }
+
+    /// <summary>
+    /// Condemns the FIRST hero-query batch it sees (fit 0.1 — the original hero picks) and blesses
+    /// everything after (fit 0.9 with a distinct accepted line), so the build's swap pass must
+    /// re-deal every hero slot to a spare. Rail queries are always blessed.
+    /// </summary>
+    private sealed class LowFitFirstHeroBatchAgent : ISearchAgent
+    {
+        private const string HeroQuery = "the best titles for you to watch tonight";
+
+        public readonly HashSet<Guid> CondemnedTitleIds = [];
+
+        private int heroCalls;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "low-fit-hero-agent";
+
+        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+        {
+            if (query == HeroQuery && Interlocked.Increment(ref heroCalls) == 1)
+            {
+                foreach (var t in titles)
+                {
+                    CondemnedTitleIds.Add(t.TitleId);
+                }
+
+                return Task.FromResult<IReadOnlyList<RerankResult>>(titles
+                    .Select(t => new RerankResult(t.TitleId, 0.1d, $"A tepid match at best — {t.TitleId:N}"))
+                    .ToList());
+            }
+
+            return Task.FromResult<IReadOnlyList<RerankResult>>(titles
+                .Select(t => new RerankResult(t.TitleId, 0.9d, $"Better pick for tonight — {t.TitleId:N}"))
                 .ToList());
         }
     }

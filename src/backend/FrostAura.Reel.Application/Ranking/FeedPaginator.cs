@@ -227,14 +227,17 @@ public sealed class FeedPaginator(
         await PersistScoresAsync(account.Id, artifact.Id, taken.Select(c => c.Scored).ToList(), now, ct);
 
         // Output guard + no-repeat: a cached/LLM line that leaks third person, opens with the
-        // banned "Because you loved", or exactly repeats an earlier card on this page is discarded
-        // for the deterministic templater sentence — which itself re-seeds until distinct.
+        // banned "Because you loved", argues against its own pick, or exactly repeats an earlier
+        // card on this page is discarded for the deterministic templater sentence — which itself
+        // re-seeds until distinct.
         var takenWhys = new HashSet<string>(StringComparer.Ordinal);
+        var genericUsed = false;
         var items = new List<ScoredFeedItem>(taken.Count);
         foreach (var c in taken)
         {
             string why;
-            if (!string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.Rejects(c.Why) && takenWhys.Add(c.Why!))
+            if (!string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.Rejects(c.Why)
+                && !SecondPersonVoice.SoundsAntiRecommendation(c.Why) && takenWhys.Add(c.Why!))
             {
                 why = c.Why!;
             }
@@ -244,7 +247,15 @@ public sealed class FeedPaginator(
             }
             else
             {
-                why = "Strong fit with your taste profile.";
+                why = ExplanationTemplater.GenericFallback;
+            }
+
+            // The generic fallback may appear at most once per page: a later card with nothing
+            // verifiable to say ships an empty why rather than repeating boilerplate.
+            if (string.Equals(why, ExplanationTemplater.GenericFallback, StringComparison.Ordinal))
+            {
+                why = genericUsed ? string.Empty : why;
+                genericUsed = true;
             }
 
             items.Add(new ScoredFeedItem(

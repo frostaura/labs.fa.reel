@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
@@ -10,6 +11,7 @@ using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
@@ -32,7 +34,7 @@ public static class FeedEndpoints
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -99,13 +101,50 @@ public static class FeedEndpoints
                             && t.TmdbId != null && t.PosterPath != null
                             && !onFeed.Contains(s.TitleId) && eligibleIds.Contains(s.TitleId)
                         orderby s.PredictedRating descending
-                        select new { s.PredictedRating, Title = t })
+                        select new { s.PredictedRating, s.ContributionsJson, Title = t })
                         .Take((needed * 2) + 5)
                         .ToListAsync(ct);
 
                     var pool = candidates
                         .Where(c => EligibilityQueryBuilder.PassesMaturity(c.Title, account.Settings.MaturityCeiling))
                         .ToList();
+
+                    // A backfilled card's why goes through the SAME deterministic templater as
+                    // every built card — its persisted contributions plus the verified inputs the
+                    // paginator uses (role-matched rated people, rated genres, closed-vocab tone) —
+                    // never a hard-coded generic that repeats down the page.
+                    var backfillContexts = new Dictionary<Guid, ExplanationTemplater.Context>();
+                    if (pool.Count > 0)
+                    {
+                        // Same 2-minute cache entry the paginator's rails share, so this read
+                        // costs a taste-state build at most once per browsing burst.
+                        var taste = await cache.GetOrCreateAsync($"feedtaste:{account.Id}", async entry =>
+                        {
+                            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
+                            return await featureBuilder.BuildTasteStateAsync(account.Id, DateTime.UtcNow, ct);
+                        }) ?? await featureBuilder.BuildTasteStateAsync(account.Id, DateTime.UtcNow, ct);
+
+                        var poolIds = pool.Select(c => c.Title.Id).ToList();
+                        var personsByTitle = VerifiedPeople.BestByRole(
+                            await VerifiedPeople.ForTitlesAsync(db, taste, poolIds, ct));
+                        var toneByTitle = await db.TitleAttributes
+                            .Where(a => poolIds.Contains(a.TitleId) && a.Tone != null)
+                            .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct);
+                        foreach (var c in pool)
+                        {
+                            backfillContexts[c.Title.Id] = new ExplanationTemplater.Context(
+                                c.Title,
+                                ParseContributions(c.ContributionsJson),
+                                personsByTitle.GetValueOrDefault(c.Title.Id) ?? ExplanationTemplater.NoPersons,
+                                c.Title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet(),
+                                AnchorName: null,
+                                Tone: toneByTitle.GetValueOrDefault(c.Title.Id));
+                        }
+                    }
+
+                    var takenWhys = items
+                        .Select(x => x.Item.WhyThisSentence)
+                        .ToHashSet(StringComparer.Ordinal);
                     var cursor = 0;
                     foreach (var ((row, anchorId), lost) in removedByRow)
                     {
@@ -124,7 +163,8 @@ public static class FeedEndpoints
                                     Rank = nextRank++,
                                     TitleId = c.Title.Id,
                                     PredictedRating = c.PredictedRating,
-                                    WhyThisSentence = "Strong fit with your taste profile.",
+                                    WhyThisSentence = ExplanationTemplater.BuildDistinctSentence(
+                                        backfillContexts[c.Title.Id], takenWhys),
                                 },
                                 Title = c.Title,
                             });
@@ -134,6 +174,12 @@ public static class FeedEndpoints
                     items = items.OrderBy(x => x.Item.Row).ThenBy(x => x.Item.Rank).ToList();
                 }
             }
+
+            // The generic fallback may appear at most once per response payload: a second card with
+            // nothing verifiable to say shows no caption rather than parroting the same boilerplate
+            // (observed three times in one view, 2026-08-10). Runs over display order so the first
+            // card shown keeps the sentence. Read-only request — the mutation is never saved.
+            ExplanationTemplater.EnforceGenericOnce(items.Select(x => x.Item));
 
             var nowUtc = DateTime.UtcNow;
 
@@ -415,6 +461,35 @@ public static class FeedEndpoints
         "similar" => FeedRowContext.Similar,
         _ => null,
     };
+
+    /// <summary>
+    /// A TitleScore's persisted contributions in the shape the templater consumes. The json is
+    /// written by the scoring passes as <c>[{"feature":"…","value":…}]</c>; anything unreadable
+    /// degrades to "no contributions" (the templater then has only its generic floor to offer,
+    /// and the response-level dedupe keeps that floor from repeating).
+    /// </summary>
+    private static (string Feature, float Contribution)[] ParseContributions(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.EnumerateArray()
+                .Select(e => (
+                    Feature: e.GetProperty("feature").GetString() ?? string.Empty,
+                    Contribution: e.GetProperty("value").GetSingle()))
+                .Where(x => x.Feature.Length > 0)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            return [];
+        }
+    }
 
     private static string Prettify(string slug) =>
         string.Join(' ', slug.Split('-', StringSplitOptions.RemoveEmptyEntries)
