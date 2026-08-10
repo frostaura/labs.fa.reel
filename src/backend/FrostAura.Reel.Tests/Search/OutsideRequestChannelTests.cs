@@ -117,6 +117,36 @@ public class OutsideRequestChannelTests
         return pool;
     }
 
+    [Fact]
+    public void Tv_horror_with_no_horror_genre_is_still_caught_via_keywords_and_subgenres()
+    {
+        // 2026-08-10 live-replay regression: TMDB's TV taxonomy has no "Horror" genre, so American
+        // Horror Story (drama/mystery/sci-fi + keywords ["horror", "supernatural horror", ...])
+        // sailed into the MAIN list after "no horror please". Keywords/Subgenres now trip the
+        // exclusion too.
+        var ahs = Title("American Horror Story", ["drama", "mystery", "science-fiction"], "An anthology.");
+        ahs.MediaType = MediaType.Show;
+        ahs.Keywords = ["haunted house", "supernatural horror", "horror", "witchcraft"];
+        var clean = Enumerable.Range(0, 14)
+            .Select(i => (Title($"Clean {i}", ["thriller"], "A tense pursuit."), 0.9 - (i * 0.001)));
+        var pool = clean.Append((ahs, 0.95)).ToList();
+
+        var (ranked, outside) = LiveSearchExpansionService.PartitionByNegation(pool, NoHorror);
+
+        Assert.DoesNotContain(ranked, x => x.Title.Name == "American Horror Story");
+        Assert.Empty(outside); // 14 clean ≥ MinResults → contradicting TV horror dropped entirely
+        Assert.Contains("a horror title", LiveSearchExpansionService.NegationMatches(ahs, NoHorror));
+    }
+
+    [Fact]
+    public void Subgenre_containment_trips_the_exclusion_too()
+    {
+        var t = Title("Creepshow", ["comedy"], "Segments.");
+        t.Subgenres = ["anthology horror"];
+
+        Assert.Contains("a horror title", LiveSearchExpansionService.NegationMatches(t, NoHorror));
+    }
+
     private static Title Title(string name, string[] genres, string overview) => new()
     {
         Id = Guid.NewGuid(),

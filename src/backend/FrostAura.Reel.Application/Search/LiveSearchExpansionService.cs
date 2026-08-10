@@ -814,19 +814,36 @@ public sealed class LiveSearchExpansionService(
     private static double NegationDemerit(Title title, SearchIntent intent)
     {
         var hits = 0;
-        if (intent.ExcludeGenres is { Count: > 0 } badGenres && title.Genres is { Length: > 0 })
+        if (intent.ExcludeGenres is { Count: > 0 } badGenres)
         {
-            hits += title.Genres.Count(g => badGenres.Contains(g, StringComparer.OrdinalIgnoreCase));
+            hits += badGenres.Count(bad => TripsExcludedGenre(title, bad));
         }
 
         if (intent.ExcludeKeywords is { Count: > 0 } badWords)
         {
-            var haystack = $"{title.Name} {title.Overview}";
+            var haystack = KeywordHaystack(title);
             hits += badWords.Count(w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase));
         }
 
         return Math.Min(hits * NegationPenalty, 0.66);
     }
+
+    /// <summary>
+    /// Whether a title trips one excluded genre term. TMDB's TV taxonomy has no "Horror" genre at
+    /// all (American Horror Story arrives as drama/mystery/sci-fi), so an exclusion matched only
+    /// against <see cref="Title.Genres"/> is blind to TV horror — the exact gap the 2026-08-10
+    /// live replay caught. Subgenres and Keywords carry the truth ("anthology horror",
+    /// "supernatural horror", "horror"), so the excluded term also matches those by containment.
+    /// </summary>
+    private static bool TripsExcludedGenre(Title title, string excluded) =>
+        (title.Genres is { Length: > 0 } && title.Genres.Any(g => string.Equals(g, excluded, StringComparison.OrdinalIgnoreCase)))
+        || (title.Subgenres is { Length: > 0 } && title.Subgenres.Any(s => s.Contains(excluded, StringComparison.OrdinalIgnoreCase)))
+        || (title.Keywords is { Length: > 0 } && title.Keywords.Any(k => k.Contains(excluded, StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>Everything a negated keyword can legitimately match: display text plus the
+    /// TMDB keyword/subgenre labels, which name themes the overview often talks around.</summary>
+    private static string KeywordHaystack(Title title) =>
+        $"{title.Name} {title.Overview} {string.Join(' ', title.Keywords ?? [])} {string.Join(' ', title.Subgenres ?? [])}";
 
     /// <summary>
     /// Splits the similarity-ordered pool into the picks that honour every negation and the
@@ -857,16 +874,16 @@ public sealed class LiveSearchExpansionService(
     internal static IReadOnlyList<string> NegationMatches(Title title, SearchIntent intent)
     {
         var matches = new List<string>();
-        if (intent.ExcludeGenres is { Count: > 0 } badGenres && title.Genres is { Length: > 0 })
+        if (intent.ExcludeGenres is { Count: > 0 } badGenres)
         {
-            matches.AddRange(title.Genres
-                .Where(g => badGenres.Contains(g, StringComparer.OrdinalIgnoreCase))
-                .Select(g => $"a {g.ToLowerInvariant()} title"));
+            matches.AddRange(badGenres
+                .Where(bad => TripsExcludedGenre(title, bad))
+                .Select(bad => $"a {bad.ToLowerInvariant()} title"));
         }
 
         if (intent.ExcludeKeywords is { Count: > 0 } badWords)
         {
-            var haystack = $"{title.Name} {title.Overview}";
+            var haystack = KeywordHaystack(title);
             matches.AddRange(badWords
                 .Where(w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase))
                 .Select(w => $"one that matches ‘{w}’"));
