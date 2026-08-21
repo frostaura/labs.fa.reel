@@ -1,15 +1,15 @@
 ---
 name: fa-reel-state
-description: "2026-08-10: FULL QA remediation shipped — 14 unpushed commits on main (4095762..7232884) fixing all 2026-08-07 QA findings + Dean's why-line/dislike additions; live-verified against the running stack; push is a clean fast-forward awaiting founder; M2 still NOT beating baseline (iter 7: 0% lift)"
+description: "QA remediation shipped 2026-08-10; the whole remediation is unpushed on main (4095762..fe29c06), a clean ahead-only fast-forward, still awaiting founder; M2 still NOT beating baseline (iter 7: 0% lift); kill clock past due with zero external users"
 type: state
-last_verified: 2026-08-10
+last_verified: 2026-08-21
 ---
 
 # Current state
 
-_Git facts and live-stack behavior below verified 2026-08-10 by direct inspection (`git rev-list --left-right --count @{u}...HEAD` → `0 14`, clean tree, no lock debris, zero deletions in the unpushed range) and by a live Playwright/API replay against the rebuilt stack._
+_Git state re-inspected 2026-08-21: `main` at `fe29c06`, tree clean, `rev-list --left-right --count origin/main...HEAD` shows ahead-only, zero deletions in the unpushed range, no fetch performed. A stale `.git/index.lock` and `objects/maintenance.lock` are now present and will block a commit until cleared. Product behaviour below was verified 2026-08-10 by direct inspection and a live Playwright/API replay against the rebuilt stack; it was **not** re-run this pass._
 
-**A full QA remediation landed 2026-08-08→10: 14 commits on `main` (`4095762`..`7232884`), NOT yet pushed — push is a verified clean fast-forward (0 behind / 14 ahead), founder's call.** Every finding from the 2026-08-07 user-perspective QA plus Dean's two mid-run additions (rich why-lines, dislike steering) is implemented and live-verified:
+**A full QA remediation landed 2026-08-08→10: 14 product commits on `main` (`4095762`..`7232884`) plus the session-close context commit `fe29c06` — the whole range is NOT yet pushed. The push is a verified clean ahead-only fast-forward, founder's call, unchanged since 2026-08-10.** Every finding from the 2026-08-07 user-perspective QA plus Dean's two mid-run additions (rich why-lines, dislike steering) is implemented and live-verified:
 
 - **Trakt writeback is movie-only and reversible** (show rating created ~801 fake episode plays before; verified live: show rating → zero watch trace, movie un-rate → `RemoveFromHistory` dispatched and Trakt confirmed clean). The QA's own residue (801 Simpsons + 1 Family Stone plays) was surgically removed via the new Founder `POST /api/sync/history-cleanup` endpoint on 2026-08-07 and re-verified.
 - **Stable-tonight contract**: feed is day-stable (Preserve mode + no-op suppression — verified: two background sync cycles produced byte-identical hero and unchanged `generatedAt`), fresh across days / on manual refresh / filter changes / retrain.
@@ -24,4 +24,4 @@ _Git facts and live-stack behavior below verified 2026-08-10 by direct inspectio
 
 Backend tests: 397 passing + 6 known-flaky local integration failures (CandidateRetriever ×2, old LiveSearchExpansion ×2, LexicalSearch, EnrichCatalog — pre-existing, identical on old HEADs, CI's pgvector service is authoritative). Frontend: 181 unit + 19 e2e green. All 4 new migrations applied on the running stack.
 
-M4 multi-tenant remains code-complete with **zero external users**; the ≥5-external-users kill clock (~2026-08-11/18) is now due.
+M4 multi-tenant remains code-complete with **zero external users**, and the app is not deployed. The ≥5-external-users kill clock (~2026-08-11/18) has now **passed** on either anchor. The 2026-07-24 deploy decision was never executed, so the criterion has been neither met nor honestly evaluated — see `questions.md`.
