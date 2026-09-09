@@ -213,14 +213,19 @@ public sealed class RetroLoopQuery(IReelDbContext db, IAccountContext accountCon
     /// </summary>
     private async Task<IReadOnlyList<CounterfactualWindow>> CounterfactualAsync(DateTime now, CancellationToken ct)
     {
-        var rows = await db.UserRatings
-            .Where(r => r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)
-            .Select(r => new RatedTitleRow(
-                (double)r.Rating,
-                r.RatedAt,
-                db.ManagedListItems.Any(m => m.TitleId == r.TitleId)
-                    || db.FeedItems.Any(f => f.TitleId == r.TitleId)))
-            .ToListAsync(ct);
+        // The two Reel surfaces are read as id sets once rather than as a correlated EXISTS per
+        // rating: this endpoint is polled from /lab, and a per-row subquery over every rating the
+        // user has ever given is a needless quadratic on a page that refreshes every few seconds.
+        var viaReelTitleIds = (await db.ManagedListItems.Select(m => m.TitleId).Distinct().ToListAsync(ct))
+            .ToHashSet();
+        viaReelTitleIds.UnionWith(await db.FeedItems.Select(f => f.TitleId).Distinct().ToListAsync(ct));
+
+        var rows = (await db.UserRatings
+                .Where(r => r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)
+                .Select(r => new { r.TitleId, r.Rating, r.RatedAt })
+                .ToListAsync(ct))
+            .Select(r => new RatedTitleRow(r.Rating, r.RatedAt, viaReelTitleIds.Contains(r.TitleId)))
+            .ToList();
 
         var cutoff = now.AddDays(-RecentWindowDays);
 
