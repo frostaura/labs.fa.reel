@@ -326,6 +326,23 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(j => new { j.AccountId, j.Kind }).IsUnique().HasFilter("\"Status\" IN ('Pending', 'Running')");
             e.HasIndex(j => new { j.Status, j.Priority, j.EnqueuedAt });
             e.Property(j => j.CursorJson).HasColumnType("jsonb");
+
+            // SyncJob is the one account-bearing entity that is NOT IAccountScoped — its AccountId
+            // is nullable because a global job (catalog refresh) belongs to no tenant — so the
+            // reflective loop below cannot cover it and every reader hand-writes the predicate.
+            // One missed predicate is a cross-tenant leak that no structural test would catch, so
+            // the filter is declared explicitly here instead.
+            //
+            // It mirrors the generic filter's null-context behaviour (unpinned sees everything —
+            // JobRunnerService reads the job BEFORE pinning, and the background schedulers run in
+            // unscoped scopes) and additionally always admits global rows, which is the difference
+            // from the generic predicate and the reason SyncJob cannot simply implement the
+            // interface. The explicit AccountId filters in SyncEndpoints/MetricsEndpoints stay:
+            // they narrow further, to this account's own jobs, excluding global ones.
+            e.HasQueryFilter(j =>
+                _accountContext.AccountId == null
+                || j.AccountId == null
+                || j.AccountId == _accountContext.AccountId);
         });
 
         modelBuilder.Entity<TraktOutboxEntry>(e =>

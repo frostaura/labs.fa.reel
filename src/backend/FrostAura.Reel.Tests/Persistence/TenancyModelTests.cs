@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -54,6 +55,24 @@ public class TenancyModelTests
         {
             Assert.False(typeof(IAccountScoped).IsAssignableFrom(type), $"{type.Name} must not be account-scoped");
         }
+    }
+
+    [Fact]
+    public void SyncJob_carries_an_explicit_query_filter_that_admits_global_rows()
+    {
+        // SyncJob is the one account-bearing entity that cannot implement IAccountScoped: its
+        // AccountId is NULLABLE because a global job (catalog refresh) belongs to no tenant, and
+        // the interface declares a non-nullable Guid. So the reflective loop above cannot cover
+        // it, every reader hand-writes the predicate, and a single missed one is a cross-tenant
+        // leak that the test above would never see. The filter is therefore declared explicitly
+        // in ReelDbContext, and this test is what keeps it declared.
+        Assert.False(typeof(IAccountScoped).IsAssignableFrom(typeof(SyncJob)));
+
+        using var db = CreateContext();
+        var syncJob = db.Model.FindEntityType(typeof(SyncJob));
+
+        Assert.NotNull(syncJob);
+        Assert.NotEmpty(syncJob.GetDeclaredQueryFilters());
     }
 
     [Fact]
