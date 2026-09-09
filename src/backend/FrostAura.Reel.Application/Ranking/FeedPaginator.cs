@@ -438,8 +438,11 @@ public sealed class FeedPaginator(
     /// to <see cref="FitKey"/>) on purpose: the feed build's why pass and this paginator's curation
     /// pass share one 6h fit cache, so a rail warmed at build time serves its later pages without
     /// re-spending, and vice versa. Stable per (rowKind, anchor) across rebuilds.
+    /// <para>Public rather than internal because the exposure log records this exact string as a
+    /// card's <c>RowKey</c> from the API layer too. A second copy of the format in another assembly
+    /// is how a rail's cache key and its exposure key start disagreeing about which rail it was.</para>
     /// </summary>
-    internal static string RowKeyFor(Domain.Feed.FeedRowKind row, Guid? anchorTitleId) => row switch
+    public static string RowKeyFor(Domain.Feed.FeedRowKind row, Guid? anchorTitleId) => row switch
     {
         Domain.Feed.FeedRowKind.BecauseYouLoved => $"loved:{anchorTitleId}",
         Domain.Feed.FeedRowKind.Hero => "hero",

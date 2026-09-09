@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Sync;
@@ -172,7 +173,7 @@ public class RatingReversibilityTests(PostgresFixture fixture)
         await using var db = fixture.CreateContext(new AccountContext());
         await ReactionEndpoints.RateAsync(
             mediaType, tmdbId, new ReactionEndpoints.RateRequest(rating),
-            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), CancellationToken.None);
+            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), new RatingVerdictQuery(db), CancellationToken.None);
     }
 
     private async Task UnrateAsync(Guid accountId, string mediaType, long tmdbId)

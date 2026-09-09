@@ -2,11 +2,14 @@ using System.Globalization;
 using FrostAura.Reel.Application.Abstractions;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Filters;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
@@ -37,6 +40,7 @@ public sealed class LiveSearchExpansionService(
     TitleHydrator hydrator,
     FeatureVectorBuilder featureBuilder,
     OnDemandScorer scorer,
+    ExposureLog exposures,
     DislikeSignal dislikes,
     LexicalSearchService lexical,
     ICatalogWorkCoordinator coordinator,
@@ -435,6 +439,39 @@ public sealed class LiveSearchExpansionService(
                             + (relaxation > 0 ? " (widened to find enough)" : "")
                             + (floorRelaxed ? $" (nothing cleared your {floor:0.#} rating floor, so it was relaxed)" : "") + ".",
             });
+            // The turn's answer, recorded. Ranked by the SAME blend the user is looking at, clean
+            // picks first and outside ones trailing, so Rank is the position on screen. Written
+            // after `done` is emitted: the stream is what the user came for, and a logging failure
+            // must not sit between them and it.
+            //
+            // A card whose OnDemandScorer had nothing to say carries no prediction, and a card with
+            // no prediction is not an exposure worth scoring the model against — those are skipped
+            // rather than logged as a fabricated 6.0.
+            var artifactId = await db.ModelArtifacts
+                .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+                .OrderByDescending(a => a.Version)
+                .Select(a => (Guid?)a.Id)
+                .FirstOrDefaultAsync(ct);
+            if (artifactId is { } activeArtifactId)
+            {
+                var loggable = blended
+                    .Concat(blendedOutside)
+                    .Select((x, index) => (x, index))
+                    .Where(t => t.x.Predicted is not null)
+                    .Select(t => new ExposureCard(
+                        t.x.Title.Id,
+                        t.index,
+                        t.x.Predicted!.Value,
+                        LlmFit: t.x.Fit is { } f ? (decimal)f.Fit : null,
+                        WhySentence: t.x.Fit?.Why,
+                        WhySource: t.x.Fit?.Why is { Length: > 0 } ? ExposureWhySource.Llm : ExposureWhySource.Templater))
+                    .ToList();
+
+                await exposures.RecordAsync(
+                    accountId, ExposureSurface.AskReel, feedSnapshotId: null, activeArtifactId,
+                    DateTime.UtcNow, loggable, ct);
+            }
+
             // Logs `final` too: the count the user actually sees is the one worth alerting on, and
             // its absence is what let an empty result set look healthy in the logs.
             logger.LogInformation(

@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
@@ -776,6 +777,7 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
             new UnavailableSearchAgent(),
             new MemoryCache(new MemoryCacheOptions()),
             events ?? new RecordingEventHub(),
+            new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             NullLogger<BuildFeedJobHandler>.Instance);
 
         await handler.ExecuteAsync(

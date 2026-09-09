@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
@@ -45,6 +46,7 @@ public class BuildFeedJobHandler(
     ISearchAgent agent,
     IMemoryCache cache,
     IPipelineEventHub events,
+    ExposureLog exposures,
     ILogger<BuildFeedJobHandler> logger) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
@@ -938,8 +940,39 @@ public class BuildFeedJobHandler(
             });
         }
 
+        // ── Exposure log ────────────────────────────────────────────────────────────────────
+        // Staged on the SAME tracked context as the snapshot rows above, so the exposures and the
+        // cards they describe commit or roll back together — one round trip, no new transaction.
+        // Staged, never saved here: this method's contract is that AssembleAsync writes nothing to
+        // the database on its own, and the caller's SaveChanges is what makes any of it real.
+        //
+        // Collision is structurally impossible on this path: the snapshot id was minted eight lines
+        // ago, so no row can already carry it. The Preserve no-op path returns above without ever
+        // reaching here, which is correct — it renders nothing new, and the exposure that matters
+        // for a preserved page is the FeedRefill/serve row the endpoint writes when it is actually
+        // fetched.
+        await exposures.Stage(
+            account.Id,
+            ExposureSurface.FeedHero,
+            snapshot.Id,
+            artifact.Id,
+            now,
+            planned.Where(i => i.Row == FeedRowKind.Hero).Select(CardOf).ToList(),
+            ct);
+        await exposures.Stage(
+            account.Id,
+            ExposureSurface.FeedRow,
+            snapshot.Id,
+            artifact.Id,
+            now,
+            planned.Where(i => i.Row != FeedRowKind.Hero).Select(CardOf).ToList(),
+            ct);
+
         // Prune snapshot history beyond the last 7 (see FeedSnapshotRetention — same behaviour,
-        // extracted so the policy is testable without driving a whole feed build).
+        // extracted so the policy is testable without driving a whole feed build). This is now
+        // SAFE in a way it was not before: the durable record of what was served has moved out of
+        // FeedItem, so evicting a snapshot no longer destroys history — ExposureEvent carries no
+        // foreign key to it.
         await FeedSnapshotRetention.PruneAsync(db, account.Id, ct);
 
         return snapshot;
@@ -967,6 +1000,15 @@ public class BuildFeedJobHandler(
         public string WhyThis { get; set; } = ExplanationTemplater.BuildSentence(whyContext);
 
         /// <summary>
+        /// Where <see cref="WhyThis"/> came from, for the exposure log. Defaults to the templater
+        /// because that is what the constructor just wrote; every upgrade path re-stamps it.
+        /// </summary>
+        public string WhySource { get; set; } = ExposureWhySource.Templater;
+
+        /// <summary>The agent's fit verdict for this card where one was observed — otherwise discarded.</summary>
+        public decimal? LlmFit { get; set; }
+
+        /// <summary>
         /// The low-fit hero swap: this slot now carries a different candidate. The why resets to
         /// the replacement's deterministic templater sentence; the caller upgrades it to an agent
         /// line when one is earned within budget.
@@ -976,6 +1018,8 @@ public class BuildFeedJobHandler(
             Candidate = candidate;
             WhyContext = whyContext;
             WhyThis = ExplanationTemplater.BuildSentence(whyContext);
+            WhySource = ExposureWhySource.Templater;
+            LlmFit = null;
         }
     }
 
@@ -1020,6 +1064,7 @@ public class BuildFeedJobHandler(
                 && AcceptsWhy(kept))
             {
                 item.WhyThis = kept;
+                item.WhySource = ExposureWhySource.Preserved;
             }
             else
             {
@@ -1044,9 +1089,15 @@ public class BuildFeedJobHandler(
                 heroFits[item.Candidate.Title.Id] = hit!.Fit;
             }
 
+            if (cachedHit)
+            {
+                item.LlmFit = (decimal)hit!.Fit;
+            }
+
             if (cachedHit && AcceptsWhy(hit!.Why))
             {
                 item.WhyThis = hit.Why;
+                item.WhySource = ExposureWhySource.Cache;
             }
             else
             {
@@ -1080,6 +1131,7 @@ public class BuildFeedJobHandler(
                 if (!seen.Add(item.WhyThis))
                 {
                     item.WhyThis = ExplanationTemplater.BuildDistinctSentence(item.WhyContext, seen);
+                    item.WhySource = ExposureWhySource.Templater;
                 }
             }
         }
@@ -1171,9 +1223,11 @@ public class BuildFeedJobHandler(
             if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
             {
                 cache.Set(FeedPaginator.FitKey(accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
+                item.LlmFit = (decimal)verdict.Fit;
                 if (AcceptsWhy(verdict.Why))
                 {
                     item.WhyThis = verdict.Why;
+                    item.WhySource = ExposureWhySource.Llm;
                 }
             }
 
@@ -1254,9 +1308,15 @@ public class BuildFeedJobHandler(
                         heroFits[result.TitleId] = result.Fit;
                     }
 
+                    if (byTitleId.TryGetValue(result.TitleId, out var scored))
+                    {
+                        scored.LlmFit = (decimal)result.Fit;
+                    }
+
                     if (AcceptsWhy(result.Why) && byTitleId.TryGetValue(result.TitleId, out var item))
                     {
                         item.WhyThis = result.Why;
+                        item.WhySource = ExposureWhySource.Llm;
                         curated++;
                     }
                 }
@@ -1270,6 +1330,32 @@ public class BuildFeedJobHandler(
     /// not count as change. Scores and why-sentences are deliberately excluded — they drift by
     /// epsilon on every rebuild and would defeat the suppression that keeps tonight's page still.
     /// </summary>
+    /// <summary>
+    /// A planned card in the shape the exposure log takes. The residual and the demotion are
+    /// recovered by arithmetic rather than carried as extra fields on <c>Candidate</c>: the scoring
+    /// order is fixed and documented (base + residual → calibrator → demotion), so
+    /// <c>BaseScore − rawScore</c> is the residual and <c>(BaseScore + CalibrationDelta) − Predicted</c>
+    /// is the demotion, exactly. Widening the record for two derivable numbers would be a change to
+    /// the type every scoring surface passes around, for nothing.
+    ///
+    /// <para><c>PredictedRating</c> is the FULL-precision prediction, not <see cref="DisplayRating"/>'s
+    /// one decimal. The card renders one; the log keeps two, because a calibration join spanning
+    /// <c>FeedItem</c> (1 dp) and <c>TitleScore</c> (2 dp) otherwise inherits a 0.05 quantisation
+    /// floor. One resolution for every surface, chosen in <c>ExposureLog</c>.</para>
+    /// </summary>
+    private static ExposureCard CardOf(PlannedItem item) => new(
+        item.Candidate.Title.Id,
+        item.Rank,
+        item.Candidate.Predicted,
+        item.Candidate.BaseScore,
+        item.Candidate.CalibrationDelta,
+        item.Candidate.BaseScore - (decimal)item.Candidate.Row.Score,
+        item.Candidate.BaseScore + item.Candidate.CalibrationDelta - item.Candidate.Predicted,
+        item.LlmFit,
+        item.WhyThis,
+        item.WhySource,
+        FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId));
+
     /// <summary>What the card shows. Rounded here, once, so the write path and the drift path agree.</summary>
     private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 1);
 

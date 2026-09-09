@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
@@ -569,6 +570,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             new NoopEventHub(),
+            new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             NullLogger<BuildFeedJobHandler>.Instance);
 
         await handler.ExecuteAsync(
