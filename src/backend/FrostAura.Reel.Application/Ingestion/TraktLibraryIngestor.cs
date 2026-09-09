@@ -185,6 +185,11 @@ public class TraktLibraryIngestor(
                     SeasonNumber = season,
                     EpisodeNumber = episode,
                     Source = RatingSource.Trakt,
+                    // Set ONCE, here, on insert. The assignments below overwrite RatedAt on every
+                    // walk with whatever Trakt currently reports; FirstRatedAt is the immutable
+                    // copy the eval split and the retrain gate read, so it must never be touched
+                    // again for this row.
+                    FirstRatedAt = item.RatedAt,
                 };
                 existing[key] = rating;
                 db.UserRatings.Add(rating);

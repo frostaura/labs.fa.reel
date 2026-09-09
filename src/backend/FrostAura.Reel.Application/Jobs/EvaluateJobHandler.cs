@@ -9,7 +9,14 @@ using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Jobs;
 
-/// <summary>Runs the leakage-clean eval harness and advances the account to Evaluated.</summary>
+/// <summary>
+/// An EXPLICIT re-run of the leakage-clean eval harness. Nothing chains this any more:
+/// <see cref="TrainJobHandler"/> runs the harness inline, before it fits the serving model, so the
+/// artifact and the ledger row come from one job and one config. This handler survives for two
+/// cases — a deliberate re-measurement of the current artifact, and rows already queued when the
+/// ordering changed. Re-running it mints a fresh ledger row against the same ConfigHash, so the
+/// iteration counter does not move.
+/// </summary>
 public class EvaluateJobHandler(
     IReelDbContext db,
     EvalHarness harness,
@@ -71,7 +78,8 @@ public class EvaluateJobHandler(
         }
 
         job.ProgressMessage =
-            $"iteration {outcome.Run.Iteration}: lift {outcome.Result.RelativeImprovement:P0} — gate {(outcome.Result.PassedGate ? "passed" : "not met")}";
+            $"iteration {outcome.Run.Iteration}: NDCG@10 {outcome.Result.NdcgAt10Model:F3} vs {outcome.Result.NdcgAt10Baseline:F3} "
+            + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}";
 
         // Chain: a validated model feeds the feed.
         await EnsureFeedBuildAsync();

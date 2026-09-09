@@ -336,6 +336,10 @@ public static class ReactionEndpoints
                 AccountId = accountId,
                 TitleId = title.Id,
                 SubjectType = subjectType,
+                // Insert only — a re-rate below moves RatedAt and must never move this. It is the
+                // eval split axis and the retrain drift axis; a mutable one lets a row cross the
+                // train/holdout boundary after the fact.
+                FirstRatedAt = now,
             };
             db.UserRatings.Add(rating);
         }

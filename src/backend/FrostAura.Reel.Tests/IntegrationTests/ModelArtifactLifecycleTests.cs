@@ -2,6 +2,7 @@ using System.Text.Json;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -180,10 +181,19 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         await using var db = fixture.CreateContext(scoped);
+        var featureBuilder = new FeatureVectorBuilder(db);
+        var engine = new FastTreeModelEngine();
         var handler = new TrainJobHandler(
             db,
-            new FeatureVectorBuilder(db),
-            new FastTreeModelEngine(),
+            featureBuilder,
+            engine,
+            new EvalHarness(
+                db,
+                featureBuilder,
+                engine,
+                new EligibilityQueryBuilder(db),
+                new NoopEventHub(),
+                NullLogger<EvalHarness>.Instance),
             new NoopEventHub(),
             NullLogger<TrainJobHandler>.Instance);
         await handler.ExecuteAsync(job, CancellationToken.None);

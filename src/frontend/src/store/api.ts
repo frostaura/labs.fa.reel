@@ -140,16 +140,50 @@ export interface ModelEvalDetail {
   caveats?: string[];
 }
 
+/** One rolling split origin — the harness reports five (60/65/70/75/80% of the rating history). */
+export interface ModelEvalOrigin {
+  fraction: number;
+  splitAt: string;
+  trainRows: number;
+  unfilteredHoldout: number;
+  eligibleHoldout: number;
+  threshold: number;
+  lowSample: boolean;
+  ndcgModel: number;
+  ndcgBaseline: number;
+  ndcgRelativeLift: number;
+  precisionModel: number;
+  precisionBaseline: number;
+}
+
+/**
+ * Nullable everywhere the 2026-09 instrument repair added a column: ledger rows written before it
+ * genuinely have no NDCG, no CI and no calibration, and rendering a zero would claim a measurement
+ * that was never taken.
+ */
 export interface ModelEval {
+  /** Quantised to 0.1 by a ten-slot cut — display only; the gate reads NDCG. */
   modelPrecisionAt10: number;
   baselinePrecisionAt10: number;
+  /** The legacy precision lift, kept so the twelve historical rows stay comparable. */
   relativeImprovement: number;
   rmse: number;
   mae: number;
   spearmanRho: number;
+  spearmanSe: number | null;
+  ndcgAt10Model: number | null;
+  ndcgAt10Baseline: number | null;
+  ndcgLiftCiLow: number | null;
+  ndcgLiftCiHigh: number | null;
+  calibrationBias: number | null;
+  ece: number | null;
+  eligibleHoldoutCount: number | null;
+  unfilteredHoldoutCount: number | null;
   holdoutPositiveCount: number;
   lowSample: boolean;
   passedGate: boolean;
+  passedLegacyGate: boolean;
+  origins: ModelEvalOrigin[] | null;
   detail: ModelEvalDetail;
 }
 
@@ -221,9 +255,17 @@ export interface ModelEfficiency {
 
 export interface ModelMetrics {
   gate: {
+    /** The mean-relative-NDCG-lift clause of the gate (0.20). */
     threshold: number;
     passed: boolean;
     latestLift: number | null;
+    ndcgModel: number | null;
+    ndcgBaseline: number | null;
+    ndcgLiftCiLow: number | null;
+    ndcgLiftCiHigh: number | null;
+    ciExcludesZero: boolean;
+    legacyThreshold: number;
+    legacyPassed: boolean;
     iterationsUsed: number;
     killCriterionAt: number;
     criterionExceeded: boolean;
