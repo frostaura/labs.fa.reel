@@ -24,11 +24,21 @@ public static class FeedEndpoints
     /// are the community number it is compared against, resolved once in
     /// <see cref="Domain.Catalog.CrowdRating"/> (TMDB, then Trakt, then null) so every surface agrees.
     /// </summary>
+    /// <param name="Confidence">
+    /// Hero cards only (null everywhere else): <c>"confident"</c> when the pick cleared the hero bar
+    /// on its own merits, <c>"reaching"</c> when it is on the headline row only because nothing did.
+    /// Derived at serve time from the persisted prediction — the relaxation is a property of the
+    /// number, so it needs no column and no migration.
+    /// </param>
+    /// <param name="FloorUsed">The bar that card was measured against — <see cref="HeroConfidence.BarFor"/>.</param>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
         decimal PredictedRating, decimal? CrowdRating, int? CrowdVotes,
-        string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers);
+        string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers,
+        // Optional and trailing on purpose: every other producer of this record — the digest, the
+        // paginated lane — is serving a non-hero surface and has no bar to report.
+        string? Confidence = null, decimal? FloorUsed = null);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
@@ -198,7 +208,16 @@ public static class FeedEndpoints
                     g => (IReadOnlyList<CardProvider>)g.DistinctBy(x => x.Name).OrderBy(x => x.DisplayPriority)
                         .Take(3).Select(x => new CardProvider(x.Name, x.LogoPath)).ToList());
 
-            FeedCard ToCard(FeedItem item, Title title)
+            // The bar the build required of the hero, re-derived here from the same shared constant.
+            // The build relaxes it silently when nothing clears it — on live data that is the normal
+            // case, not an edge — so the card has to be able to say which side of it a pick sits on.
+            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
+                .Select(f => f.Value)
+                .FirstOrDefaultAsync(ct));
+            var heroBar = HeroConfidence.BarFor(minPredicted);
+
+            FeedCard ToCard(FeedItem item, Title title, bool hero = false)
             {
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
@@ -207,11 +226,15 @@ public static class FeedEndpoints
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
                     item.PredictedRating, crowd, crowdVotes, item.WhyThisSentence, isReleased,
-                    providersByTitle.GetValueOrDefault(title.Id, []));
+                    providersByTitle.GetValueOrDefault(title.Id, []),
+                    // Rows carry no label: they are selected against the account's own floor, not the
+                    // hero bar, so "reaching" would be measuring them against a rule they never had.
+                    hero ? HeroConfidence.For(item.PredictedRating, heroBar) : null,
+                    hero ? heroBar : null);
             }
 
             var hero = items.Where(x => x.Item.Row == FeedRowKind.Hero)
-                .Select(x => ToCard(x.Item, x.Title))
+                .Select(x => ToCard(x.Item, x.Title, hero: true))
                 .ToList();
 
             // Free tier: the 3-pick daily shortlist; rows are the paid surface (visible-locked

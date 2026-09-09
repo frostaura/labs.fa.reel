@@ -76,6 +76,39 @@ export interface FiltersPayload {
   maxYear: number | null;
 }
 
+/**
+ * What one content rule costs. `marginal` is the eligible count with that ONE rule relaxed minus the
+ * eligible count as drafted — "dropping comedy adds ~180". Marginals deliberately do NOT sum: two
+ * rules can be holding the same title out, so relaxing both returns less than the two numbers
+ * together, which is exactly why the meter reports per rule instead of one grand total.
+ */
+export interface FilterCostRule {
+  /** The server's FilterKind name — "ExcludeGenre", "Language", "MinCrowdRating", "MinYear"… */
+  kind: string;
+  /** The value the user would tap off: a genre slug, a threshold, or the joined language list. */
+  value: string;
+  marginal: number;
+}
+
+/** A rule worth offering as a one-tap relaxation, because relaxing it actually returns titles. */
+export interface FilterCostSuggestion {
+  kind: string;
+  value: string;
+  gain: number;
+}
+
+/**
+ * The cost of a draft rule set. `total` is the whole catalogue (the denominator in "421 of 5,319");
+ * `eligible` is what survives BOTH the rules and the locked zero-footprint rule — the real supply
+ * behind tonight's picks, not a filter-only count.
+ */
+export interface FilterCostReport {
+  total: number;
+  eligible: number;
+  byRule: FilterCostRule[];
+  suggestions: FilterCostSuggestion[];
+}
+
 export interface TasteDnaPayload {
   userMean: number;
   contrarianScore: number;
@@ -760,6 +793,14 @@ export const api = createApi({
       }),
       invalidatesTags: ["Prefs", "Feed"],
     }),
+    // What the DRAFT in the editor costs — a POST because it carries the unsaved rule set, but a
+    // query and not a mutation because it changes nothing: it needs the arg-keyed cache, since the
+    // editor re-costs on every debounced chip tap and slider drag. `keepUnusedDataFor` matches the
+    // server's own 60s window, so a user toggling a chip back and forth pays for it once.
+    filterCost: b.query<FilterCostReport, FiltersPayload>({
+      query: (filters) => ({ url: "settings/filters/cost", method: "POST", body: filters }),
+      keepUnusedDataFor: 60,
+    }),
     setPin: b.mutation<{ pinConfigured: boolean }, { pin: string; currentPin?: string }>({
       query: (body) => ({ url: "settings/pin", method: "POST", body }),
       invalidatesTags: ["Session"],
@@ -891,6 +932,7 @@ export const {
   useGetDislikesQuery,
   useGetRateSuggestionsQuery,
   useSetPinMutation,
+  useFilterCostQuery,
   useVerifyPinMutation,
   useRemovePinMutation,
   useGetDigestQuery,

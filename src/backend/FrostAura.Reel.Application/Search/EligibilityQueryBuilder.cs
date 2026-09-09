@@ -222,6 +222,98 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     }
 
     /// <summary>
+    /// The eligibility rule evaluated against an EXPLICIT rule set instead of the account's saved
+    /// <c>ContentFilters</c> rows — the draft the conditions editor is currently showing.
+    ///
+    /// The interaction footprint half is unchanged and still reads the account's real rows: a draft
+    /// changes what you are willing to be shown, never what you have already seen.
+    /// </summary>
+    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules)
+    {
+        return ContentFilteredTitles(rules).Where(t =>
+            !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
+            && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
+            && !db.UserTitleReactions.Any(r =>
+                r.AccountId == accountId && r.TitleId == t.Id
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
+                && r.RevokedAt == null));
+    }
+
+    /// <summary>
+    /// The content-preference rules from an explicit <see cref="FilterRuleSet"/> rather than from the
+    /// database. Same rules, same order, same edge calls as the persisted overload above — an unrated
+    /// title fails a crowd floor, an undated title passes a year window, no language rows means
+    /// English-only — expressed over in-memory values because the caller is costing conditions that
+    /// have not been saved and therefore cannot be read back out of <c>ContentFilters</c>.
+    ///
+    /// This is the ONE sanctioned second phrasing of the content predicate, and it is pinned to the
+    /// first by <c>FilterCostMeterTests.Draft_rules_match_the_persisted_rules_title_for_title</c>,
+    /// which seeds a catalogue, saves the rules, and asserts both paths return the identical id set.
+    /// If you change one arm here, change it there and let that test prove it. Anything that SERVES
+    /// titles keeps using the persisted overload — a draft is a question, not a permission.
+    /// </summary>
+    public IQueryable<Title> ContentFilteredTitles(FilterRuleSet rules)
+    {
+        var includeGenres = rules.IncludeGenres;
+        var languages = rules.EffectiveLanguages;
+        var allLanguages = rules.AllLanguagesAllowed;
+        var crowdFloor = rules.MinCrowdRating;
+        var minYear = rules.MinYear;
+        var maxYear = rules.MaxYear;
+
+        var query = db.Titles.AsQueryable();
+
+        // Excluded genres and keywords are an AND of NOTs, so each one is its own Where — which is
+        // exactly what "a title carrying ANY excluded value is out" means, and it keeps every arm a
+        // plain translatable predicate over one captured constant.
+        foreach (var genre in rules.ExcludeGenres)
+        {
+            var value = genre;
+            query = query.Where(t => !t.Genres.Contains(value));
+        }
+
+        foreach (var keyword in rules.ExcludeKeywords)
+        {
+            var value = keyword;
+            query = query.Where(t =>
+                !(t.Name.ToLower().Contains(value)
+                    || (t.Overview != null && t.Overview.ToLower().Contains(value))
+                    || t.Keywords.Any(k => k.Contains(value))));
+        }
+
+        // Include-genres are an allow-list when present: at least one must match.
+        query = query.Where(t => includeGenres.Count == 0 || t.Genres.Any(g => includeGenres.Contains(g)));
+
+        // Language allow-list, with the same two documented calls as the persisted arm: "*" opts every
+        // language back in, and an unknown (null) language reads as not-English.
+        query = query.Where(t =>
+            allLanguages
+            || (t.Language != null && languages.Contains(t.Language.ToLower())));
+
+        // Crowd floor, resolved TMDB-then-Trakt inline exactly as above — a title with no crowd
+        // rating from either source FAILS the floor.
+        query = query.Where(t =>
+            crowdFloor == null
+            || (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
+                    ? t.TmdbVoteAverage
+                    : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
+                >= crowdFloor);
+
+        // Inclusive year window; a title with no year, release date or first-aired date PASSES.
+        query = query.Where(t =>
+            (minYear == null && maxYear == null)
+            || (t.Year == null && t.ReleasedAt == null && t.FirstAiredAt == null)
+            || ((t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year))
+                    >= (minYear ?? int.MinValue)
+                && (t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year))
+                    <= (maxYear ?? int.MaxValue)));
+
+        return query;
+    }
+
+    /// <summary>
     /// The account's certification ceiling (null = unrestricted) — the one lookup every search
     /// surface shares before applying <see cref="PassesMaturity"/>. Kept here (not re-queried per
     /// endpoint) so typeahead, /semantic, lexical, and Ask Reel all read the ceiling the same way;

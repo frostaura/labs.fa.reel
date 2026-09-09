@@ -54,7 +54,9 @@ public class BuildFeedJobHandler(
     private const int FirstPassAnnPool = 500;
     private const int ShortlistSize = 220;
     private const int HeroSize = 5;
-    private const decimal HeroConfidenceFloor = 7.5m;
+    // Single-sourced with the serve path: FeedEndpoints derives each hero card's confidence label
+    // from this same bar, so a card can never be labelled against a threshold the build did not use.
+    private const decimal HeroConfidenceFloor = Domain.Feed.HeroConfidence.Floor;
     private const int AnchorRowCount = 3;
     private const int RowSize = 10;
     private const int RowMinMembers = 4; // a row below this reads worse than no row, so it's dropped

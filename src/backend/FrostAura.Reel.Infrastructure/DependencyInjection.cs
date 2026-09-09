@@ -138,6 +138,7 @@ public static class DependencyInjection
 
         // ── Serving pipeline ─────────────────────────────────────────────────────────────
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();
+        services.AddScoped<Application.Search.FilterCostMeter>();
         services.AddScoped<Application.Search.LexicalSearchService>();
         services.AddScoped<Application.Search.LiveSearchExpansionService>();
         services.AddScoped<Application.Ranking.CandidateGenerator>();
