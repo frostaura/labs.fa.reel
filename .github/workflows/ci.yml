@@ -277,6 +277,11 @@ jobs:
       - name: Run integration tests against Postgres
         env:
           REEL_TEST_CONNECTION_STRING: Host=localhost;Port=5432;Database=reel_test;Username=reel;Password=reel_test_pw
+          # Turn a missing/unreachable database into a hard failure. Without this the fixture
+          # skips and 21 integration files report green having executed nothing — including the
+          # real-Postgres tenancy audit. Note there is deliberately NO REEL_SKIP_LOCAL_FLAKY
+          # here: CI's pgvector service is authoritative and runs the quarantined tests too.
+          REEL_REQUIRE_INTEGRATION: "1"
         run: dotnet test FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
 
   # ============================================================================

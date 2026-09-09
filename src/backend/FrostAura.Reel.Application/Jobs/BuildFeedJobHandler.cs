@@ -756,18 +756,9 @@ public class BuildFeedJobHandler(
             });
         }
 
-        // Prune snapshot history beyond the last 7.
-        var staleIds = await db.FeedSnapshots
-            .Where(s => s.AccountId == account.Id)
-            .OrderByDescending(s => s.GeneratedAt)
-            .Skip(7)
-            .Select(s => s.Id)
-            .ToListAsync(ct);
-        if (staleIds.Count > 0)
-        {
-            await db.FeedItems.Where(i => staleIds.Contains(i.FeedSnapshotId)).ExecuteDeleteAsync(ct);
-            await db.FeedSnapshots.Where(s => staleIds.Contains(s.Id)).ExecuteDeleteAsync(ct);
-        }
+        // Prune snapshot history beyond the last 7 (see FeedSnapshotRetention — same behaviour,
+        // extracted so the policy is testable without driving a whole feed build).
+        await FeedSnapshotRetention.PruneAsync(db, account.Id, ct);
 
         return snapshot;
     }
