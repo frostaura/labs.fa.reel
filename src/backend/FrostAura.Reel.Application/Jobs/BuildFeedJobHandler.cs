@@ -35,6 +35,7 @@ public class BuildFeedJobHandler(
     FeatureVectorBuilder featureBuilder,
     CandidateGenerator candidateGenerator,
     CandidateRetriever candidateRetriever,
+    EligibilityQueryBuilder eligibility,
     FeedStarvationDiagnostic starvation,
     TitleHydrator hydrator,
     IModelEngine engine,
@@ -82,6 +83,11 @@ public class BuildFeedJobHandler(
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildFeed requires an account.");
+        // Build instrumentation (FeedBuildStat) is captured from here to the end of the method,
+        // including the no-op path — a build that changed nothing is exactly the observation worth
+        // keeping, and it was the one the old log line never made.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var capture = new BuildCapture();
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var artifact = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
@@ -114,7 +120,7 @@ public class BuildFeedJobHandler(
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         ReportProgress(job, accountId, 10, "Scouting fresh candidates");
-        await candidateGenerator.RefreshPoolAsync(taste, account.Region, ct);
+        var poolRefresh = await candidateGenerator.RefreshPoolAsync(taste, account.Region, ct);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
@@ -180,7 +186,32 @@ public class BuildFeedJobHandler(
 
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
         ReportProgress(job, accountId, 85, "Assembling tonight's picks");
-        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, ct);
+        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, capture, ct);
+
+        // Written on the tracked context before either exit below commits, so the no-op path records
+        // its no-op. The eligible-pool count is the supply ceiling: when retrieval asks for more
+        // slots than this, ranking is not the problem.
+        db.FeedBuildStats.Add(new FeedBuildStat
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = snapshot?.Id,
+            ModelArtifactId = artifact.Id,
+            BuiltAt = now,
+            Mode = snapshot is null
+                ? FeedBuildOutcome.NoOp
+                : capture.Mode == FeedBuildMode.Preserve ? FeedBuildOutcome.Preserve : FeedBuildOutcome.Fresh,
+            CandidateCount = poolRefresh.Discovered,
+            NewCandidatesUpserted = poolRefresh.NewlyUpserted,
+            EligiblePoolCount = await eligibility.EligibleTitles(accountId).CountAsync(ct),
+            ShortlistCount = candidates.Count,
+            HeroEligibleCount = capture.HeroEligibleCount,
+            ShortlistP50 = Percentile(candidates, 0.50d),
+            ShortlistP90 = Percentile(candidates, 0.90d),
+            RailsDropped = capture.RailsDropped,
+            DegradedReason = capture.DegradedReason,
+            DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        });
 
         if (snapshot is null)
         {
@@ -231,6 +262,38 @@ public class BuildFeedJobHandler(
 
     private sealed record Candidate(Title Title, ScoredRow Row, decimal Predicted);
 
+    /// <summary>
+    /// The counts assembly knows and the caller needs for <see cref="FeedBuildStat"/>. A mutable
+    /// bag rather than a wider return type, so instrumentation never changes what assembly RETURNS —
+    /// the null-means-no-op contract is load-bearing and stays exactly as it was.
+    /// </summary>
+    private sealed class BuildCapture
+    {
+        public FeedBuildMode Mode { get; set; }
+
+        public int HeroEligibleCount { get; set; }
+
+        public int RailsDropped { get; set; }
+
+        public string? DegradedReason { get; set; }
+    }
+
+    /// <summary>
+    /// Nearest-rank percentile over the shortlist's predicted ratings — no interpolation, so every
+    /// reported value is a number the model actually produced for a real title.
+    /// </summary>
+    private static decimal? Percentile(IReadOnlyList<Candidate> candidates, double quantile)
+    {
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        var sorted = candidates.Select(c => c.Predicted).OrderBy(p => p).ToList();
+        var index = Math.Clamp((int)Math.Ceiling(quantile * sorted.Count) - 1, 0, sorted.Count - 1);
+        return sorted[index];
+    }
+
     private async Task PersistScoresAsync(Guid accountId, Guid artifactId, IReadOnlyList<Candidate> candidates, DateTime now, CancellationToken ct)
     {
         var titleIds = candidates.Select(c => c.Title.Id).ToList();
@@ -268,7 +331,8 @@ public class BuildFeedJobHandler(
     /// </summary>
     private async Task<FeedSnapshot?> AssembleAsync(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now, CancellationToken ct)
+        IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now,
+        BuildCapture capture, CancellationToken ct)
     {
         // ── The floor is soft; the content rules are not ────────────────────────────────────
         // Content filters are the user's statement about CONTENT — they bind absolutely and are
@@ -306,6 +370,7 @@ public class BuildFeedJobHandler(
                 ?? "No candidates survived this build. Try relaxing a filter.";
         }
 
+        capture.DegradedReason = degradedReason;
         if (degradedReason is not null)
         {
             logger.LogWarning("Feed build degraded for {AccountId}: {Reason}", account.Id, degradedReason);
@@ -382,6 +447,7 @@ public class BuildFeedJobHandler(
 
         var mode = FeedBuildPolicy.Decide(
             previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now);
+        capture.Mode = mode;
 
         // The drift pick: the loved title whose plot embedding sits nearest the user's RECENT-taste
         // centroid, so one row always reflects where taste is NOW. Null when there is no recent
@@ -488,6 +554,9 @@ public class BuildFeedJobHandler(
             .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
             .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
             .ToList();
+        // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
+        // means the headline row is silently reaching, which is the founder's complaint in his words.
+        capture.HeroEligibleCount = heroPool.Count;
         var candidatesById = candidates.ToDictionary(c => c.Title.Id);
         var hero = new List<Candidate>();
         if (mode == FeedBuildMode.Preserve)
@@ -642,6 +711,7 @@ public class BuildFeedJobHandler(
 
             if (members.Count < RowMinMembers)
             {
+                capture.RailsDropped++;
                 continue; // a thin row reads worse than no row
             }
 
@@ -668,6 +738,10 @@ public class BuildFeedJobHandler(
                 AddItem(FeedRowKind.DeepCuts, null, i, deepCuts[i]);
             }
         }
+        else
+        {
+            capture.RailsDropped++;
+        }
 
         var newForYou = candidates
             .Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c))
@@ -681,6 +755,10 @@ public class BuildFeedJobHandler(
                 used.Add(newForYou[i].Title.Id);
                 AddItem(FeedRowKind.NewForYou, null, i, newForYou[i]);
             }
+        }
+        else
+        {
+            capture.RailsDropped++;
         }
 
         // ── No-op suppression (Preserve only) ───────────────────────────────────────────────

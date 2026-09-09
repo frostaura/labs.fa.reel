@@ -548,6 +548,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             featureBuilder,
             new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
             new CandidateRetriever(db, eligibility),
+            eligibility,
             new FeedStarvationDiagnostic(db, eligibility),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             new FastTreeModelEngine(),

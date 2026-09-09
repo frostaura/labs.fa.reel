@@ -160,7 +160,30 @@ public static class MetricsEndpoints
                 .Select(u => new { provider = u.Provider.ToString(), u.Day, u.CallCount })
                 .ToListAsync(ct);
 
-            return Results.Ok(new { jobs, outbox, apiUsage = usage });
+            // Build quality, per build. Every number here used to be computed and thrown into a log
+            // line; without them "the picks get weaker each round" is an argument rather than a chart.
+            var builds = await db.FeedBuildStats
+                .Where(s => s.AccountId == accountId)
+                .OrderByDescending(s => s.BuiltAt)
+                .Take(30)
+                .Select(s => new
+                {
+                    s.BuiltAt,
+                    mode = s.Mode.ToString(),
+                    s.CandidateCount,
+                    s.NewCandidatesUpserted,
+                    s.EligiblePoolCount,
+                    s.ShortlistCount,
+                    s.HeroEligibleCount,
+                    s.ShortlistP50,
+                    s.ShortlistP90,
+                    s.RailsDropped,
+                    s.DegradedReason,
+                    s.DurationMs,
+                })
+                .ToListAsync(ct);
+
+            return Results.Ok(new { jobs, outbox, apiUsage = usage, builds });
         });
     }
 

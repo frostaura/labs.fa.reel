@@ -227,6 +227,8 @@ public class TitleHydratorResilienceTests
         public DbSet<OnlineModelState> OnlineModelStates => throw Unexpected();
         public DbSet<FeedSnapshot> FeedSnapshots => throw Unexpected();
         public DbSet<FeedItem> FeedItems => throw Unexpected();
+
+        public DbSet<FeedBuildStat> FeedBuildStats => throw Unexpected();
         public DbSet<AccountDigest> AccountDigests => throw Unexpected();
         public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => throw Unexpected();
         public DbSet<Domain.Notifications.AppSecret> AppSecrets => throw Unexpected();

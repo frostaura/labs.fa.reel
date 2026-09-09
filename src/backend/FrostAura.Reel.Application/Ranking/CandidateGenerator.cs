@@ -22,7 +22,12 @@ public class CandidateGenerator(
     private const int TopGenreCount = 4;
     private const int RecommendationSeeds = 5;
 
-    public async Task<int> RefreshPoolAsync(FeatureVectorBuilder.TasteState taste, string region, CancellationToken ct)
+    /// <summary>
+    /// Widens the pool and reports what it found: how many TMDB items came back across all arms, and
+    /// how many of those the catalogue had never seen. The second number is the direct instrument for
+    /// "the picks get weaker every round" — it was computed on every build and only ever logged.
+    /// </summary>
+    public async Task<PoolRefreshResult> RefreshPoolAsync(FeatureVectorBuilder.TasteState taste, string region, CancellationToken ct)
     {
         var topGenres = taste.GenreRatings
             .Select(kv => new
@@ -81,8 +86,11 @@ public class CandidateGenerator(
         var upserted = await UpsertCandidatesAsync(items, ct);
         logger.LogInformation("Candidate pool refreshed: {Items} TMDB items ({Upserted} new) across genres [{Genres}].",
             items.Count, upserted, string.Join(", ", topGenres));
-        return items.Count;
+        return new PoolRefreshResult(items.Count, upserted);
     }
+
+    /// <summary>What one pool refresh produced: items seen, and titles genuinely new to the catalogue.</summary>
+    public readonly record struct PoolRefreshResult(int Discovered, int NewlyUpserted);
 
     /// <summary>
     /// Upserts TMDB list items as global, TMDB-only <see cref="Title"/> rows (dedup by

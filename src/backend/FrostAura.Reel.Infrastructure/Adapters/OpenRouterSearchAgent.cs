@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -24,7 +25,10 @@ public class OpenRouterSearchAgent(
     ISearchQueryInterpreter interpreter,
     ApiUsageRecorder usageRecorder,
     IConfiguration configuration,
-    ILogger<OpenRouterSearchAgent> logger)
+    ILogger<OpenRouterSearchAgent> logger,
+    // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
+    // every real code path, but the adapter must still be `new`-able in tests without a scope.
+    IAccountContext? accountContext = null)
     : ISearchAgent
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -57,9 +61,9 @@ public class OpenRouterSearchAgent(
 
         try
         {
-            usageRecorder.Record(ApiProvider.OpenRouter);
             var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles);
-            var content = await ChatAsync(InterpretSystemPrompt, user, ct);
+            var (content, usage) = await ChatAsync(InterpretSystemPrompt, user, ct);
+            RecordCall(ApiUsagePurpose.SearchAgent, usage);
             if (string.IsNullOrWhiteSpace(content))
             {
                 return new AgentReply(StubReply(message, intentFallback), intentFallback);
@@ -94,9 +98,9 @@ public class OpenRouterSearchAgent(
 
         try
         {
-            usageRecorder.Record(ApiProvider.OpenRouter);
             var user = BuildRerankPrompt(titles, query, tasteSummary, anchorName);
-            var content = await ChatAsync(RerankSystemPrompt, user, ct);
+            var (content, usage) = await ChatAsync(RerankSystemPrompt, user, ct);
+            RecordCall(ApiUsagePurpose.Rerank, usage);
             if (string.IsNullOrWhiteSpace(content))
             {
                 return titles.Select(StubRerank).ToList();
@@ -203,7 +207,22 @@ public class OpenRouterSearchAgent(
         }
     }
 
-    private async Task<string?> ChatAsync(string system, string user, CancellationToken ct)
+    /// <summary>
+    /// Records one billable call. Called AFTER the response so <c>usage.prompt_tokens</c> /
+    /// <c>usage.completion_tokens</c> are in hand — the old ordering recorded before the request and
+    /// could never see them. A call that throws before a response is not recorded here; the
+    /// exception path is already logged and its cost is unknowable from this side.
+    /// </summary>
+    private void RecordCall(string purpose, OpenRouterUsage? usage) =>
+        usageRecorder.Record(
+            ApiProvider.OpenRouter,
+            purpose,
+            ModelId,
+            accountContext?.AccountId,
+            usage?.PromptTokens,
+            usage?.CompletionTokens);
+
+    private async Task<(string? Content, OpenRouterUsage? Usage)> ChatAsync(string system, string user, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
         {
@@ -224,7 +243,7 @@ public class OpenRouterSearchAgent(
         using var response = await httpClient.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
-        return dto?.Choices?.FirstOrDefault()?.Message?.Content;
+        return (dto?.Choices?.FirstOrDefault()?.Message?.Content, dto?.Usage);
     }
 
     private static string StubReply(string message, SearchIntent intent)
@@ -367,7 +386,7 @@ public class OpenRouterSearchAgent(
         "bare JSON number between 0.0 and 1.0 — never a 0-10 or 0-100 score and never a string. " +
         "Be discerning — spread the scores. Output strictly valid JSON.";
 
-    private sealed record ChatResponse(ChatChoice[]? Choices);
+    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 
     private sealed record ChatChoice(ChatMessage? Message);
 
