@@ -322,6 +322,31 @@ public static class FeedEndpoints
             }));
         });
 
+        // The "your model just learned" band above the hero. Its own endpoint rather than a field on
+        // GET /api/feed: the feed payload is fetched constantly and this is a retrain-cadence number,
+        // so bolting it on would make every feed read pay for two artifact lookups and a snapshot
+        // diff. Returns 204 when there is nothing honest to say (no predecessor artifact, no
+        // evaluation, no new labels) so the client renders nothing at all rather than an empty band.
+        group.MapGet("/learned", async (ModelLearnedQuery learned, IAccountContext accountContext, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            if (await learned.GetAsync(accountId, ct) is not { } result)
+            {
+                return Results.NoContent();
+            }
+
+            return Results.Ok(new
+            {
+                trainedAt = result.TrainedAt,
+                newRatingsSinceLast = result.NewRatingsSinceLast,
+                calibrationBias = result.CalibrationBias,
+                calibrationMae = result.CalibrationMae,
+                maeImprovement = result.MaeImprovement,
+                spearman = result.Spearman,
+                picksChanged = result.PicksChanged,
+            });
+        });
+
         group.MapPost("/rebuild", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
