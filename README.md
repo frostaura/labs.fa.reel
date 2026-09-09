@@ -41,15 +41,16 @@ dotnet test src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj
 # Integration suite — needs a real pgvector Postgres. Point it at a THROWAWAY database:
 # the fixture drops and re-migrates it on every run.
 REEL_TEST_CONNECTION_STRING="Host=localhost;Port=5433;Database=reel_test;Username=reel;Password=…" \
-REEL_SKIP_LOCAL_FLAKY=1 \
   dotnet test src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj \
     --filter "FullyQualifiedName~IntegrationTests"
 ```
 
-`REEL_SKIP_LOCAL_FLAKY=1` skips six integration tests that are known local-only failures on the
-dev Mac (see `[LocalFlakyFact]` in `src/backend/FrostAura.Reel.Tests/IntegrationTests/`). **It is
-set nowhere in CI, and must never be** — CI's `pgvector/pgvector:pg16` service is authoritative
-for this suite and runs all six. Drop the variable to see them.
+`REEL_SKIP_LOCAL_FLAKY=1` skips whatever is marked `[LocalFlakyFact]` as a known local-only
+failure. **Nothing is marked today** — the quarantine emptied on 2026-09-10 and the whole suite
+is green on the dev Mac, so the variable is no longer part of the recommended command. Every row
+that ever sat in that quarantine turned out to be a real defect (a stale fixture, or an assertion
+left behind by a deliberate contract change), never a machine difference. **The variable is set
+nowhere in CI and must never be** — CI's `pgvector/pgvector:pg16` service is authoritative.
 
 Integration tests skip silently when `REEL_TEST_CONNECTION_STRING` is absent, so a plain local
 `dotnet test` stays green without a database. CI sets `REEL_REQUIRE_INTEGRATION=1`, which turns

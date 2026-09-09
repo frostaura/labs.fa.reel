@@ -10,8 +10,9 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// <summary>
 /// The keyless NL-search engine end-to-end on real Postgres: typo-tolerant concept queries
 /// return the right titles, ranked by intent coverage; and content filters stay airtight —
-/// a TMDB-keyword exclusion (the "remove lgbtq themes" case) removes a title from search
-/// even when nothing else about it matches the excluded word.
+/// a TMDB-keyword exclusion (the "remove lgbt themes" case) removes a title from search
+/// even when nothing else about it matches the excluded word, without over-reaching onto
+/// titles whose keyword merely prefixes the filter word.
 /// </summary>
 [Collection("postgres")]
 public class LexicalSearchIntegrationTests(PostgresFixture fixture)
@@ -37,13 +38,15 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
         Assert.DoesNotContain(results, r => r.Title.Name == "Unrelated Drama");
     }
 
-    // QUARANTINED (local-only): unlike the retriever/enrich pair this one fails even in
-    // isolation on the dev Mac (3/3 runs, 2026-09-09) — the ExcludeKeyword "lgbtq" does not
-    // remove "Filtered Romance", so both seeded titles come back. Root cause not established
-    // locally and deliberately not chased here; CI's pgvector service is authoritative and
-    // green. Do NOT read a red here as a regression without reproducing it on CI first.
-    [LocalFlakyFact]
-    [Trait("Flaky", "local")]
+    // Was quarantined as a "local-only flake" until 2026-09-10; it was neither local nor flaky.
+    // The old body seeded the TMDB keyword "lgbt" and the filter "lgbtq" and asserted the title
+    // was removed — i.e. the REVERSE arm (filter.StartsWith(keyword)). That arm was deliberately
+    // deleted from EligibilityQueryBuilder in 2767cf9 (2026-07-24) because it over-excluded: the
+    // filter "warehouse" swallowed the unrelated keyword "ware". The test was never updated, so
+    // it has been asserting a superseded contract ever since — red everywhere, CI included.
+    // It now asserts the surviving contract (forward containment over TMDB's real phrase shape),
+    // and the counterexample that killed the reverse arm is pinned below so it cannot come back.
+    [Fact]
     public async Task Keyword_exclusion_filter_removes_titles_by_tmdb_keyword()
     {
         if (!fixture.Available)
@@ -52,28 +55,54 @@ public class LexicalSearchIntegrationTests(PostgresFixture fixture)
         }
 
         var accountId = await SeedAccountAsync();
-        await SeedTitleAsync("Filtered Romance", ["romance"], ["lgbt", "love"]);
+        // TMDB stores keywords as lowercase phrases ("lgbt themes", not "lgbt") — see
+        // TmdbClient's keyword mapping, which trims and lowercases every entry.
+        await SeedTitleAsync("Filtered Romance", ["romance"], ["lgbt themes", "love"]);
         await SeedTitleAsync("Kept Romance", ["romance"], ["love"]);
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
-        {
-            // The user types the longer form; TMDB's canonical keyword is "lgbt" — the
-            // filter must still bite (forward containment fails, prefix direction catches it).
-            db.ContentFilters.Add(new ContentFilter
-            {
-                Id = Guid.NewGuid(),
-                AccountId = accountId,
-                Kind = FilterKind.ExcludeKeyword,
-                Value = "lgbtq",
-                CreatedAt = DateTime.UtcNow,
-            });
-            await db.SaveChangesAsync();
-        }
+        await AddKeywordFilterAsync(accountId, "lgbt");
 
         var results = await SearchAsync(accountId, "romantic");
 
         Assert.Contains(results, r => r.Title.Name == "Kept Romance");
         Assert.DoesNotContain(results, r => r.Title.Name == "Filtered Romance");
+    }
+
+    /// <summary>
+    /// The counterexample that retired the reverse (filter-contains-keyword) arm: a filter must
+    /// never exclude a title on a keyword that merely happens to be a PREFIX of the filter word.
+    /// Without this, "warehouse" removes everything tagged "ware". Pinned so the arm stays dead.
+    /// </summary>
+    [Fact]
+    public async Task Keyword_exclusion_never_bites_on_a_shorter_unrelated_keyword()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedTitleAsync("Ware Romance", ["romance"], ["ware", "love"]);
+
+        await AddKeywordFilterAsync(accountId, "warehouse");
+
+        var results = await SearchAsync(accountId, "romantic");
+
+        Assert.Contains(results, r => r.Title.Name == "Ware Romance");
+    }
+
+    private async Task AddKeywordFilterAsync(Guid accountId, string value)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = FilterKind.ExcludeKeyword,
+            Value = value,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
     }
 
     [Fact]

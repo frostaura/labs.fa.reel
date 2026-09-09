@@ -4,39 +4,52 @@ using FrostAura.Reel.Tests.IntegrationTests;
 namespace FrostAura.Reel.Tests.Harness;
 
 /// <summary>
-/// The quarantine is a claim about three named tests, so it is pinned like any other contract:
-/// the set may only change deliberately, and the marker may never skip by default. Offline —
-/// pure reflection, no database.
+/// The quarantine is a claim about a named set of tests, so it is pinned like any other
+/// contract: the set may only change deliberately, and the marker may never skip by default.
+/// Offline — pure reflection, no database.
 /// <para>
-/// It was six until 2026-09-09. <c>EnrichCatalogJobHandlerTests.An_unextractable_title_...</c> left
-/// on its own merits, not by relaxation: its local failure was a real defect in the assertion (a
-/// GLOBAL sweep counted as a total, so other classes' seeded titles inflated it) and both the
-/// handler's ordering and the assertion's grain were fixed. Removing a row is the goal; removing
-/// one without fixing what made it red is the thing this pin exists to prevent.
+/// <b>The set is now EMPTY.</b> Every row left on its merits, none by relaxing an assertion:
 /// </para>
+/// <list type="bullet">
+/// <item><description>
+/// 2026-09-09 — <c>EnrichCatalogJobHandlerTests.An_unextractable_title_…</c>: the assertion
+/// counted a GLOBAL sweep as a total, so other classes' seeded titles inflated it. Handler
+/// ordering and assertion grain both fixed.
+/// </description></item>
+/// <item><description>
+/// 2026-09-10 — both <c>CandidateRetrieverTests</c> rows: the catalogue is GLOBAL, so a sibling
+/// class's popular title displaced the popularity head and a sibling's embedding became a nearer
+/// ANN neighbour. Fixed at the cause — that class stamps a synthetic genre on every title it
+/// seeds and gives its account a matching IncludeGenre allowlist. Not one assertion changed.
+/// </description></item>
+/// <item><description>
+/// 2026-09-10 — both <c>LiveSearchExpansionTests</c> rows: never local and never flaky. Their
+/// fake TMDB client returned list rows with <c>OriginalLanguage = null</c>, so every discovered
+/// candidate was upserted with a null <c>Language</c> and then dropped by the English-only
+/// eligibility default introduced in e790bb2. The fake now carries "en", as TMDB's real rows do.
+/// </description></item>
+/// <item><description>
+/// 2026-09-10 — <c>LexicalSearchIntegrationTests.Keyword_exclusion_filter_removes_titles_by_tmdb_keyword</c>:
+/// also neither local nor flaky. It asserted the reverse (filter-contains-keyword) exclusion arm
+/// that was deliberately deleted in 2767cf9 for over-excluding ("warehouse" swallowed "ware").
+/// The test now asserts the surviving forward contract, and a new sibling test pins the
+/// counterexample so the retired arm cannot return unnoticed.
+/// </description></item>
+/// </list>
 /// <para>
-/// It was five until 2026-09-10, when both <c>CandidateRetrieverTests</c> rows left, again on
-/// their merits. Their cause was named right there in the quarantine comment — the catalogue is
-/// GLOBAL, so a sibling class's popular title displaced the popularity head and a sibling's
-/// embedding became a nearer ANN neighbour than the deep cut the test plants — and it is now
-/// fixed at the cause: that class stamps a synthetic genre on every title it seeds and gives its
-/// account a matching IncludeGenre allowlist, so the eligibility lane both arms compose contains
-/// its own rows and nothing else. Not one assertion changed. The three that remain are search
-/// surfaces whose pools are not scoped this way; the same fix is the obvious route out for them.
+/// The infrastructure stays. An empty set is the state to defend, not a reason to delete the
+/// mechanism: the next genuine local-only divergence should be recorded here rather than in a
+/// memory file, and the pin is what makes adding a row a decision instead of a shrug.
 /// </para>
 /// </summary>
 public class LocalFlakyQuarantineTests
 {
     /// <summary>
-    /// The exact quarantined set, as `Class.Method`. Adding a row here is a decision — it says
-    /// "CI is authoritative for this test and local red is expected". Removing one is the goal.
+    /// The exact quarantined set, as `Class.Method`. EMPTY, and meant to stay that way. Adding a
+    /// row is a decision — it says "CI is authoritative for this test and local red is expected",
+    /// which is a claim that has been wrong every time it was checked. Establish the cause first.
     /// </summary>
-    private static readonly string[] Quarantined =
-    [
-        "LexicalSearchIntegrationTests.Keyword_exclusion_filter_removes_titles_by_tmdb_keyword",
-        "LiveSearchExpansionTests.A_director_query_returns_the_filmography_including_watched_titles",
-        "LiveSearchExpansionTests.Streams_unseen_matches_excludes_seen_and_caches_the_fetch",
-    ];
+    private static readonly string[] Quarantined = [];
 
     [Fact]
     public void The_marker_never_skips_unless_the_opt_out_is_exactly_one()
@@ -50,7 +63,7 @@ public class LocalFlakyQuarantineTests
     }
 
     [Fact]
-    public void Exactly_the_three_known_local_failures_are_quarantined()
+    public void Nothing_is_quarantined()
     {
         var marked = typeof(PostgresFixture).Assembly.GetTypes()
             .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
