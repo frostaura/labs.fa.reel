@@ -21,11 +21,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
 /// <summary>
-/// BuildDigest on real Postgres: the trailing-7-day window, the ≥7.0 predicted floor, the
-/// zero-footprint eligibility rule, the new-on-provider suppression against last week's digest,
-/// the (AccountId, WeekStart) upsert, and the push-subscription lifecycle (success resets,
-/// gone deletes, fifth consecutive failure prunes). Skips when REEL_TEST_CONNECTION_STRING is
-/// unset. Every candidate is pre-scored under the Active artifact so the on-demand scorer
+/// BuildDigest on real Postgres: the trailing-7-day window, the 7.0 predicted floor and its
+/// relaxation, the zero-footprint eligibility rule, the new-on-provider suppression against last
+/// week's digest, the (AccountId, WeekStart) upsert, and the push-subscription lifecycle (success
+/// resets, gone deletes, fifth consecutive failure prunes). Skips when REEL_TEST_CONNECTION_STRING
+/// is unset. Every candidate is pre-scored under the Active artifact so the on-demand scorer
 /// stays un-invoked — these tests pin the digest's set logic, not the model.
 /// </summary>
 [Collection("postgres")]
@@ -42,15 +42,21 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         var now = DateTime.UtcNow;
         var accountId = await SeedAccountAsync();
 
-        // Six titles spanning every gate:
+        // Eight titles spanning every gate. Five clear 7.0, which is the ThinDigestCount, so the
+        // floor stays strict here and lowScore is genuinely excluded by it — the relaxed path has
+        // its own tests below.
         //   freshShow    — show, first aired 2 days ago, 9.0  → in, "new-release"
         //   freshMovie   — movie, released 3 days ago, 8.5  → in, "new-release"
+        //   freshMovie2  — movie, released 2 days ago, 8.2  → in, "new-release"
+        //   freshMovie3  — movie, released 4 days ago, 7.8  → in, "new-release"
         //   staleMovie   — released 30 days ago, 9.9        → out: outside the window
         //   lowScore     — released 2 days ago, 6.9         → out: under the 7.0 floor
         //   watched      — released 1 day ago, 9.9, watched → out: interaction footprint
         //   onProvider   — old title, fresh flatrate, 8.0   → in, "new-on-provider"
         var freshShow = await SeedTitleAsync(MediaType.Show, firstAiredAt: now.AddDays(-2));
         var freshMovie = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-3));
+        var freshMovie2 = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        var freshMovie3 = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-4));
         var staleMovie = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-30));
         var lowScore = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
         var watched = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-1));
@@ -62,6 +68,8 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         {
             [freshShow] = 9.0m,
             [freshMovie] = 8.5m,
+            [freshMovie2] = 8.2m,
+            [freshMovie3] = 7.8m,
             [staleMovie] = 9.9m,
             [lowScore] = 6.9m,
             [watched] = 9.9m,
@@ -71,11 +79,15 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         await RunDigestAsync(accountId, new FakePushSender());
         var items = await ReadDigestItemsAsync(accountId);
 
-        Assert.Equal(new[] { freshShow, freshMovie, onProvider }, items.Select(i => i.TitleId).ToArray());
+        Assert.Equal(
+            new[] { freshShow, freshMovie, freshMovie2, onProvider, freshMovie3 },
+            items.Select(i => i.TitleId).ToArray());
         Assert.Equal(DigestReasons.NewRelease, items[0].Reason);
         Assert.Equal(DigestReasons.NewRelease, items[1].Reason);
-        Assert.Equal(DigestReasons.NewOnProvider, items[2].Reason);
+        Assert.Equal(DigestReasons.NewOnProvider, items[3].Reason);
         Assert.Equal(9.0m, items[0].PredictedRating);
+        // An honest digest says nothing about degradation.
+        Assert.All(items, i => Assert.Null(i.DegradedReason));
 
         // A re-run inside the same ISO week refreshes the one row rather than adding a second.
         await RunDigestAsync(accountId, new FakePushSender());
@@ -137,6 +149,99 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         // Gone deletes immediately; the flaky one just crossed the 5-failure prune line.
         Assert.False(await db.PushSubscriptions.AnyAsync(s => s.Id == dead));
         Assert.False(await db.PushSubscriptions.AnyAsync(s => s.Id == flaky));
+    }
+
+    [Fact]
+    public async Task A_thin_week_relaxes_the_floor_and_records_why()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The live shape of the bug: a hard 7.0 sitting above the catalogue's p90 prediction. Two
+        // arrivals clear it, three sit in the 6s — which is a thin week, not an empty one.
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var strong = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        var alsoStrong = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-3));
+        var nearMiss = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-1));
+        var lower = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-4));
+        var tooLow = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-5));
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [strong] = 7.4m,
+            [alsoStrong] = 7.1m,
+            [nearMiss] = 6.9m,
+            [lower] = 6.2m,
+            [tooLow] = 5.4m, // below the RELAXED floor: relaxing is not abandoning the floor
+        });
+        await SeedSubscriptionAsync(accountId, "https://push.example/thin");
+
+        var sender = new FakePushSender();
+        await RunDigestAsync(accountId, sender);
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(new[] { strong, alsoStrong, nearMiss, lower }, items.Select(i => i.TitleId).ToArray());
+        Assert.All(items, i => Assert.NotNull(i.DegradedReason));
+        Assert.Contains("7", items[0].DegradedReason!, StringComparison.Ordinal);
+        Assert.Contains("6", items[0].DegradedReason!, StringComparison.Ordinal);
+        Assert.Single(sender.Sent);
+        Assert.Contains("4 new high-for-you", sender.Sent[0].PayloadJson);
+    }
+
+    [Fact]
+    public async Task Relaxing_the_floor_never_loosens_the_window_or_the_footprint_rule()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The floor is the model's opinion and is negotiable; the content rules are the user's
+        // statement and are not. A relaxed digest must not smuggle in an old or an already-seen
+        // title just because the bar came down.
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var fresh = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        var stale = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-40));
+        var seen = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-1));
+        await SeedWatchedAsync(accountId, seen);
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [fresh] = 6.5m,
+            [stale] = 9.9m,
+            [seen] = 9.9m,
+        });
+
+        await RunDigestAsync(accountId, new FakePushSender());
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(new[] { fresh }, items.Select(i => i.TitleId).ToArray());
+    }
+
+    [Fact]
+    public async Task A_week_with_nothing_above_the_relaxed_floor_sends_no_push_at_all()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // "0 new high-for-you titles" is what the hard floor delivered every week; it teaches the
+        // user to ignore the notification. An empty digest row is still written — the rail reads it
+        // and hides itself — but nothing is pushed.
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var weak = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        await SeedActiveArtifactAndScoresAsync(accountId, new() { [weak] = 5.2m });
+        await SeedSubscriptionAsync(accountId, "https://push.example/quiet");
+
+        var sender = new FakePushSender();
+        await RunDigestAsync(accountId, sender);
+
+        Assert.Empty(await ReadDigestItemsAsync(accountId));
+        Assert.Empty(sender.Sent);
     }
 
     // ── Harness ─────────────────────────────────────────────────────────────────────────────

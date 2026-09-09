@@ -23,11 +23,20 @@ public class AccountDigest : IAccountScoped
     public string ItemsJson { get; set; } = "[]";
 }
 
-/// <summary>One entry inside <see cref="AccountDigest.ItemsJson"/>.</summary>
+/// <summary>
+/// One entry inside <see cref="AccountDigest.ItemsJson"/>.
+/// <para>
+/// <paramref name="DegradedReason"/> is a DIGEST-level fact carried per item because
+/// <see cref="AccountDigest"/> has no column for it yet and this branch ships no migration. It is
+/// null on a digest that met the "high for you" bar honestly, and identical across every item of a
+/// relaxed one. Optional and last, so digests written before it deserialise unchanged.
+/// </para>
+/// </summary>
 public sealed record DigestItem(
     [property: System.Text.Json.Serialization.JsonPropertyName("titleId")] Guid TitleId,
     [property: System.Text.Json.Serialization.JsonPropertyName("predictedRating")] decimal PredictedRating,
-    [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string Reason);
+    [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string Reason,
+    [property: System.Text.Json.Serialization.JsonPropertyName("degradedReason")] string? DegradedReason = null);
 
 /// <summary>Digest item reasons — stable strings, persisted inside ItemsJson.</summary>
 public static class DigestReasons
