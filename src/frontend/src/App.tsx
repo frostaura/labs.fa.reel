@@ -11,6 +11,7 @@ import TitleDetail from "./pages/TitleDetail";
 import Person from "./pages/Person";
 import Saved from "./pages/Saved";
 import TasteDna from "./pages/TasteDna";
+import TrackRecord from "./pages/TrackRecord";
 import SearchResults from "./pages/SearchResults";
 import RatePicker from "./pages/RatePicker";
 import Blend from "./pages/Blend";
@@ -54,6 +55,7 @@ function AppRoutes() {
           <Route path="/person/:personId" element={<Person />} />
           <Route path="/saved" element={<Saved />} />
           <Route path="/dna" element={<TasteDna />} />
+          <Route path="/track-record" element={<TrackRecord />} />
           <Route path="/search" element={<SearchResults />} />
           <Route path="/rate" element={<RatePicker />} />
           <Route path="/blend" element={<Blend />} />

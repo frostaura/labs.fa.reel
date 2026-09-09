@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Sync;
@@ -43,8 +44,9 @@ public static class ReactionEndpoints
         group.MapPost("/rating", async (
             string mediaType, long tmdbId, RateRequest request,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
-            OnlineResidualModel residual, RatingCalibrationService calibrator, CancellationToken ct) =>
-            await RateAsync(mediaType, tmdbId, request, db, accountContext.AccountId!.Value, feedRefresh, residual, calibrator, ct));
+            OnlineResidualModel residual, RatingCalibrationService calibrator, RatingVerdictQuery verdicts,
+            CancellationToken ct) =>
+            await RateAsync(mediaType, tmdbId, request, db, accountContext.AccountId!.Value, feedRefresh, residual, calibrator, verdicts, ct));
 
         group.MapDelete("/rating", async (
             string mediaType, long tmdbId,
@@ -294,7 +296,8 @@ public static class ReactionEndpoints
     public static async Task<IResult> RateAsync(
         string mediaType, long tmdbId, RateRequest request,
         IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
-        OnlineResidualModel residual, RatingCalibrationService calibrator, CancellationToken ct)
+        OnlineResidualModel residual, RatingCalibrationService calibrator, RatingVerdictQuery verdicts,
+        CancellationToken ct)
     {
         if (request.Rating is < 1 or > 10)
         {
@@ -310,6 +313,11 @@ public static class ReactionEndpoints
         var now = DateTime.UtcNow;
         var subjectType = title.MediaType == MediaType.Movie ? RatingSubjectType.Movie : RatingSubjectType.Show;
 
+        // Resolved BEFORE anything is written. The rebuild this endpoint enqueues rescores the
+        // catalogue, so reading the verdict afterwards would eventually score the rating against a
+        // number the rating itself provoked. Read it while the past is still the past.
+        var verdict = await verdicts.ForAsync(accountId, title.Id, request.Rating, now, ct);
+
         var rating = await db.UserRatings.FirstOrDefaultAsync(
             r => r.AccountId == accountId && r.TitleId == title.Id && r.SubjectType == subjectType
                 && r.SeasonNumber == 0 && r.EpisodeNumber == 0, ct);
@@ -319,14 +327,22 @@ public static class ReactionEndpoints
         if (rating is not null && rating.Rating == request.Rating)
         {
             // Same value already stored — return current state and change NOTHING: no outbox
-            // rows, no play increments, no residual observation, no feed rebuild.
+            // rows, no play increments, no residual observation, no feed rebuild. No verdict
+            // either: re-submitting a rating you already gave is not a new verdict on the model,
+            // and firing the toast again would make a duplicate click look like a second data
+            // point. No rating-history row for the same reason.
             return Results.Ok(new
             {
                 userRating = rating.Rating,
                 isFullyWatched = watched?.IsFullyWatched ?? false,
                 watchedLogged = false,
+                verdict = (object?)null,
             });
         }
+
+        // Captured BEFORE the assignment below: it is the only thing separating "first opinion"
+        // from "changed their mind", and the ledger needs both.
+        var previousRating = rating is null ? (short?)null : rating.Rating;
 
         if (rating is null)
         {
@@ -348,6 +364,13 @@ public static class ReactionEndpoints
         rating.RatedAt = now;
         rating.SyncedAt = now;
         rating.Source = RatingSource.Reel;
+
+        // In-app ratings are ~2% of this product's labels, but they are the ones with a live
+        // exposure behind them — so the ledger row is written in the SAME transaction as the rating
+        // it describes. RatedAt and ObservedAt coincide here because Reel is the source.
+        RatingEventLog.Stage(
+            db, accountId, title.Id, subjectType, 0, 0,
+            request.Rating, previousRating, now, now, RatingSource.Reel);
 
         Enqueue(db, accountId, OutboxKind.AddRating, title, request.Rating, null);
 
@@ -405,6 +428,18 @@ public static class ReactionEndpoints
             userRating = rating.Rating,
             isFullyWatched = watched?.IsFullyWatched ?? false,
             watchedLogged,
+            // The after-rating moment. Null — not an empty object — when Reel never committed to a
+            // number for this title, so the client renders nothing at all rather than a toast with
+            // a hole in it. The copy itself is the client's: this endpoint reports the facts.
+            verdict = verdict is { } v
+                ? new
+                {
+                    predictedBefore = v.PredictedBefore,
+                    surface = v.Surface,
+                    shownAt = v.ShownAt,
+                    delta = v.Delta,
+                }
+                : null,
         });
     }
 
@@ -429,6 +464,12 @@ public static class ReactionEndpoints
                 && r.SeasonNumber == 0 && r.EpisodeNumber == 0, ct);
         if (rating is not null)
         {
+            // Staged BEFORE the delete, while the row still knows what it said. A retraction that
+            // does not record the retracted value is a hole in the history, not an entry in it.
+            RatingEventLog.StageRetraction(
+                db, accountId, title.Id, subjectType, 0, 0,
+                rating.Rating, rating.RatedAt, DateTime.UtcNow, rating.Source);
+
             db.UserRatings.Remove(rating);
             Enqueue(db, accountId, OutboxKind.RemoveRating, title, null, null);
 

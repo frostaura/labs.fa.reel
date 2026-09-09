@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users, Target } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
 import { useDispatch } from "react-redux";
 import type { AppDispatch } from "../store";
@@ -9,6 +9,7 @@ import SearchBox from "./search/SearchBox";
 import MobileTabBar from "./MobileTabBar";
 import Footer from "./Footer";
 import RealtimeSync from "./RealtimeSync";
+import VerdictToast from "./VerdictToast";
 import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
@@ -96,6 +97,12 @@ export default function Layout() {
                 <DropdownMenuItem onClick={() => navigate("/blend")}>
                   <Users className="h-4 w-4 mr-2" /> Blend
                 </DropdownMenuItem>
+                {/* Free for every tier, deliberately: a paid accuracy report reads as hiding the
+                    scorecard. Sits above Settings because it is a thing to read, not a thing to
+                    configure. */}
+                <DropdownMenuItem onClick={() => navigate("/track-record")}>
+                  <Target className="h-4 w-4 mr-2" /> Track record
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => navigate("/settings")}>
                   <SettingsIcon className="h-4 w-4 mr-2" /> Settings
                 </DropdownMenuItem>
@@ -123,6 +130,9 @@ export default function Layout() {
         <Outlet />
       </main>
       <Footer />
+      {/* Mounted once, driven by the store: every rating path raises the after-rating moment and
+          none of them has to know this component exists. */}
+      <VerdictToast />
       <MobileTabBar searchOpen={mobileSearchOpen} onToggleSearch={() => setMobileSearchOpen((v) => !v)} />
     </div>
   );

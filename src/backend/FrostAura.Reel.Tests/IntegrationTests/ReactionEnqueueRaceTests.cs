@@ -1,5 +1,6 @@
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
@@ -54,7 +55,7 @@ public class ReactionEnqueueRaceTests(PostgresFixture fixture)
         await LoseTheRaceAsync(db, accountId);
         var result = await ReactionEndpoints.RateAsync(
             "movie", tmdbId, new ReactionEndpoints.RateRequest(9),
-            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), CancellationToken.None);
+            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), new RatingVerdictQuery(db), CancellationToken.None);
 
         Assert.NotNull(result);
         await using var verify = fixture.CreateContext(new AccountContext());
@@ -78,7 +79,7 @@ public class ReactionEnqueueRaceTests(PostgresFixture fixture)
         {
             await ReactionEndpoints.RateAsync(
                 "movie", tmdbId, new ReactionEndpoints.RateRequest(8),
-                seed, accountId, FeedRefresh(seed), Residual(seed), Calibration(seed), CancellationToken.None);
+                seed, accountId, FeedRefresh(seed), Residual(seed), Calibration(seed), new RatingVerdictQuery(seed), CancellationToken.None);
         }
 
         await ClearInFlightBuildsAsync(accountId);

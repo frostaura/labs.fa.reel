@@ -65,8 +65,12 @@ async function bootTitle(page: Page, titleOverrides: Record<string, unknown> = {
   await expect(page.getByTestId("title-detail")).toBeVisible();
 }
 
-/** Captures every call to `pattern`, answering 200 {} so optimistic updates settle as successes. */
-async function captureCalls(page: Page, pattern: string): Promise<CapturedCall[]> {
+/**
+ * Captures every call to `pattern`, answering 200 with `response` so optimistic updates settle as
+ * successes. The body matters for the rating endpoint specifically: its response now carries the
+ * after-rating verdict, and a bare `{}` is the "Reel never said anything about this" case.
+ */
+async function captureCalls(page: Page, pattern: string, response: unknown = {}): Promise<CapturedCall[]> {
   const calls: CapturedCall[] = [];
   await page.route(pattern, (route) => {
     const request = route.request();
@@ -74,7 +78,7 @@ async function captureCalls(page: Page, pattern: string): Promise<CapturedCall[]
       method: request.method(),
       body: request.postData() ? request.postDataJSON() : undefined,
     });
-    return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
   });
   return calls;
 }
@@ -136,5 +140,88 @@ test.describe("title detail actions", () => {
   test("no why-line renders nothing rather than boilerplate", async ({ page }) => {
     await bootTitle(page, { whyThis: null });
     await expect(page.getByTestId("why-this")).toHaveCount(0);
+  });
+});
+
+/**
+ * The after-rating moment. This is the emotional payload of the whole closed-loop programme and
+ * also its biggest reputational risk: on the founder's live data most of these read "Reel said 9.8
+ * · you said 3". The point of shipping it anyway is that a product which shows a confident number
+ * on every card and never says how often that number was right is the version nobody should trust.
+ */
+test.describe("the after-rating verdict", () => {
+  test("an over-promise names both numbers, when it was shown, and what happens next", async ({ page }) => {
+    await bootTitle(page);
+    const shownAt = new Date(Date.now() - 12 * 86_400_000).toISOString();
+    await captureCalls(page, "**/api/titles/movie/1001/rating", {
+      userRating: 5,
+      watchedLogged: true,
+      verdict: { predictedBefore: 8.4, surface: "FeedHero", shownAt, delta: 3.4 },
+    });
+
+    await page.getByRole("button", { name: /seen it \+ rate/i }).click();
+    await page.getByTestId("rate-5").click();
+
+    const toast = page.getByTestId("verdict-toast");
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText("Reel said 8.4 · you said 5");
+    await expect(toast).toContainText("shown 12 days ago on tonight's picks");
+    await expect(toast).toContainText("that goes into tonight's retrain");
+    // It routes to the full scorecard rather than being the whole story.
+    await expect(toast.getByRole("link", { name: /see the track record/i })).toBeVisible();
+  });
+
+  test("a near hit says so and promises no retrain it is not going to do", async ({ page }) => {
+    await bootTitle(page);
+    await captureCalls(page, "**/api/titles/movie/1001/rating", {
+      userRating: 9,
+      watchedLogged: true,
+      verdict: { predictedBefore: 8.4, surface: null, shownAt: null, delta: -0.6 },
+    });
+
+    await page.getByRole("button", { name: /seen it \+ rate/i }).click();
+    await page.getByTestId("rate-9").click();
+
+    const toast = page.getByTestId("verdict-toast");
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText("Reel said 8.4 · you said 9");
+    await expect(toast).toContainText("close enough to count");
+    await expect(toast).not.toContainText("retrain");
+    // No exposure behind it → no claim about when or where it was seen.
+    await expect(toast).not.toContainText("shown");
+  });
+
+  test("no toast at all when Reel never committed to a number", async ({ page }) => {
+    // The alternative would be a toast reading "Reel said — · you said 7", which is worse than
+    // silence: it advertises that the product has no opinion at the exact moment it asked for one.
+    await bootTitle(page);
+    await captureCalls(page, "**/api/titles/movie/1001/rating", {
+      userRating: 7,
+      watchedLogged: true,
+      verdict: null,
+    });
+
+    await page.getByRole("button", { name: /seen it \+ rate/i }).click();
+    await page.getByTestId("rate-7").click();
+
+    await expect(page.getByRole("button", { name: /seen it — you rated 7/i })).toBeVisible();
+    await expect(page.getByTestId("verdict-toast")).toHaveCount(0);
+  });
+
+  test("the toast can be dismissed by hand", async ({ page }) => {
+    await bootTitle(page);
+    await captureCalls(page, "**/api/titles/movie/1001/rating", {
+      userRating: 4,
+      watchedLogged: true,
+      verdict: { predictedBefore: 9.1, surface: "Digest", shownAt: null, delta: 5.1 },
+    });
+
+    await page.getByRole("button", { name: /seen it \+ rate/i }).click();
+    await page.getByTestId("rate-4").click();
+
+    const toast = page.getByTestId("verdict-toast");
+    await expect(toast).toBeVisible();
+    await toast.getByRole("button", { name: /dismiss/i }).click();
+    await expect(toast).toHaveCount(0);
   });
 });

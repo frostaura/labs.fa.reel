@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
@@ -370,6 +371,7 @@ public class EnrichSchedulingTests(PostgresFixture fixture)
             new UnavailableSearchAgent(),
             new MemoryCache(new MemoryCacheOptions()),
             new NoopEventHub(),
+            new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             NullLogger<BuildFeedJobHandler>.Instance);
 
         await handler.ExecuteAsync(

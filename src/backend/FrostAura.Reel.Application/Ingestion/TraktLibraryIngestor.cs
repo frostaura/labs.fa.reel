@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Domain.Catalog;
@@ -227,6 +228,15 @@ public class TraktLibraryIngestor(
                 && rating.Rating != item.Rating)
             {
                 changed.Add(new IngestedRating(title.Id, item.Rating));
+
+                // The append-only ledger, written only for rows that ACTUALLY moved. A walk replays
+                // Trakt's whole snapshot — two thousand rows of which a handful changed — so
+                // emitting per row walked would produce a history that is almost entirely no-ops.
+                // ObservedAt is `now` because that is genuinely when Reel saw it; RatedAt is
+                // Trakt's own claim. Neither is the eval split axis.
+                RatingEventLog.Stage(
+                    db, accountId, title.Id, subjectType, season, episode,
+                    item.Rating, isNewRow ? null : rating.Rating, item.RatedAt, now, RatingSource.Trakt);
 
                 // A brand-new row is "12 new ratings"; a row whose value moved is a re-rate. Both
                 // teach the head, but only one of them is what the post-sync moment counts, so the

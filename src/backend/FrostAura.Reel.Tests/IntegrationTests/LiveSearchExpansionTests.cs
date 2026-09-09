@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
@@ -380,6 +381,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 db, featureBuilder, engine, residualModel,
                 new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
                 new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
+            new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
             new LexicalSearchService(eligibility),
             new CatalogWorkCoordinator(),

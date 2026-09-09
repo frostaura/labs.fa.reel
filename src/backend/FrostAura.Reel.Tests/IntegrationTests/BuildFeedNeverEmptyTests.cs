@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
@@ -92,6 +93,104 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         var shownIds = items.Select(i => i.TitleId).ToList();
         var shownGenres = await db.Titles.Where(t => shownIds.Contains(t.Id)).Select(t => t.Genres).ToListAsync();
         Assert.All(shownGenres, g => Assert.DoesNotContain(excludedGenre, g));
+    }
+
+    [Fact]
+    public async Task Every_card_the_build_plans_is_written_to_the_exposure_log_exactly_once()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The build is the primary write site, and it is the one where a duplicate is structurally
+        // impossible: the snapshot id is minted inside the same method. What this pins is the other
+        // half — that the exposure log is a FAITHFUL copy of what was planned, card for card, with
+        // the hero separated from the rails so "does the hero convert" stays answerable.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+        var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
+
+        Assert.NotEmpty(items);
+        Assert.Equal(items.Count, exposures.Count);
+        Assert.Equal(
+            items.Select(i => i.TitleId).OrderBy(id => id).ToList(),
+            exposures.Select(e => e.TitleId).OrderBy(id => id).ToList());
+
+        Assert.All(exposures, e =>
+        {
+            Assert.Equal(snapshot.Id, e.FeedSnapshotId);
+            Assert.Equal(snapshot.ModelArtifactId, e.ModelArtifactId);
+            Assert.NotEqual(0m, e.PredictedRating);
+            Assert.False(string.IsNullOrWhiteSpace(e.WhySource));
+        });
+
+        var heroTitleIds = items.Where(i => i.Row == FeedRowKind.Hero).Select(i => i.TitleId).ToHashSet();
+        Assert.NotEmpty(heroTitleIds);
+        Assert.All(
+            exposures.Where(e => heroTitleIds.Contains(e.TitleId)),
+            e => Assert.Equal(ExposureSurface.FeedHero, e.Surface));
+        Assert.All(
+            exposures.Where(e => !heroTitleIds.Contains(e.TitleId)),
+            e => Assert.Equal(ExposureSurface.FeedRow, e.Surface));
+
+        // The number in the log is the model's claim at two decimals, not the card's one-decimal
+        // rendering: a calibration join spanning both resolutions inherits a 0.05 quantisation
+        // floor, so one resolution is chosen and it is this one.
+        var sample = exposures.First(e => heroTitleIds.Contains(e.TitleId));
+        var card = items.Single(i => i.TitleId == sample.TitleId);
+        Assert.True(Math.Abs(sample.PredictedRating - card.PredictedRating) <= 0.05m);
+    }
+
+    [Fact]
+    public async Task A_suppressed_no_op_rebuild_logs_nothing_and_the_prune_leaves_the_log_alone()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Two founder complaints meet here. Eight rebuilds fired in nine minutes of queueing, and
+        // the ones that changed nothing rendered nothing — so counting them as exposures would
+        // inflate every denominator on the track record eightfold. And the 7-snapshot prune that
+        // evicted the whole of that session's history must no longer be able to touch the durable
+        // record, which is the condition on keeping the prune at 7 at all.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+
+        Guid firstSnapshotId;
+        int afterFirstBuild;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            firstSnapshotId = (await ActiveSnapshotAsync(db, accountId)).Id;
+            afterFirstBuild = await db.ExposureEvents.CountAsync(e => e.AccountId == accountId);
+        }
+
+        // A background rebuild over unchanged inputs: FeedBuildPolicy returns Preserve, SameFeed
+        // matches, and AssembleAsync returns before it ever reaches the snapshot write.
+        await RunBuildAsync(accountId);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        Assert.Equal(firstSnapshotId, (await ActiveSnapshotAsync(verify, accountId)).Id);
+        Assert.Equal(afterFirstBuild, await verify.ExposureEvents.CountAsync(e => e.AccountId == accountId));
+
+        // And the exposures still point at a snapshot id even after it could be pruned — the
+        // reference is soft by design, so nothing cascades.
+        Assert.All(
+            await verify.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync(),
+            e => Assert.Equal(firstSnapshotId, e.FeedSnapshotId));
     }
 
     [Fact]
@@ -569,6 +668,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             new NoopEventHub(),
+            new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             NullLogger<BuildFeedJobHandler>.Instance);
 
         await handler.ExecuteAsync(

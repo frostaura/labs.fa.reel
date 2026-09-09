@@ -12,6 +12,8 @@ import type {
   MoreFeedResponse,
 } from "./feedTypes";
 import { titleRemoved, titleRestored } from "./removedTitlesSlice";
+import { verdictShown } from "./verdictSlice";
+import type { RatingVerdict } from "../lib/verdictCopy";
 import type { PersonPayload, ProvidersPayload, TitleDetailPayload } from "./titleTypes";
 import type { RecentlyWatchedResponse, SavedQueueResponse } from "./savedTypes";
 
@@ -393,6 +395,77 @@ export interface ModelMetrics {
   runs: ModelRun[];
 }
 
+/** One predicted band on the calibration chart. Null means the band is empty, not that it is zero. */
+export interface CalibrationBucket {
+  bucket: number;
+  low: number;
+  high: number;
+  n: number;
+  meanPredicted: number | null;
+  meanActual: number | null;
+}
+
+/** One specific thing Reel got right or wrong, with enough identity to render its poster. */
+export interface AccuracyMoment {
+  titleId: string;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  mediaType: string;
+  tmdbId: number | null;
+  predicted: number;
+  actual: number;
+  /** Null on the retro fallback — a stored score is not proof the card was ever on screen. */
+  surface: string | null;
+  shownAt: string | null;
+  ratedAt: string;
+  daysToOutcome: number | null;
+}
+
+/**
+ * The track record. `source` is part of the payload rather than an implementation detail: the page
+ * says out loud whether a number came from the exposure log ("we know this was on your screen") or
+ * from the retro join ("a score existed before you rated it"), because the two are different
+ * strengths of evidence and smoothing over the difference is the one thing this surface must not do.
+ */
+export interface AccuracyPayload {
+  window: string;
+  from: string | null;
+  to: string;
+  source: "exposures" | "retro" | "none";
+  headline: {
+    withinOnePoint: number;
+    n: number;
+    meanAbsoluteError: number;
+    bias: number;
+    correlation: number | null;
+    meanPredicted: number;
+    meanActual: number;
+  };
+  calibration: CalibrationBucket[];
+  moments: AccuracyMoment[];
+  conversion: {
+    shown: number;
+    saved: number;
+    watched: number;
+    rated: number;
+    shownToSaved: number | null;
+    savedToWatched: number | null;
+    shownToRated: number | null;
+    medianDaysToWatch: number | null;
+  };
+  counterfactual: CounterfactualWindow[];
+  learnedThisWeek: {
+    trainedAt: string;
+    newRatings: number;
+    calibrationBias: number | null;
+    calibrationMae: number | null;
+    maeImprovement: number | null;
+    spearman: number | null;
+    picksChanged: number;
+  } | null;
+}
+
 /**
  * Auth rides in HttpOnly cookies (reel_at / reel_rt) — no headers to prepare; every request
  * just needs credentials included. The access cookie lives 15 minutes: on a 401 the base
@@ -431,7 +504,7 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes"],
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -574,7 +647,7 @@ export const api = createApi({
       },
     }),
     rateTitle: b.mutation<
-      { userRating: number; watchedLogged?: boolean },
+      { userRating: number; watchedLogged?: boolean; verdict?: RatingVerdict | null },
       { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }
     >({
       // titleId rides along only to key the local removal set; it must not leak into the POST body.
@@ -587,13 +660,20 @@ export const api = createApi({
           })
         );
         try {
-          await queryFulfilled;
+          const { data } = await queryFulfilled;
           // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
           // Deliberately does NOT invalidate Feed — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
           // A rating is exactly the answer the loop-closing prompt was asking for, so the strip
           // retires that title on the next read rather than continuing to ask a settled question.
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "RecentlyWatched"]));
+          // Accuracy moves with every rating, so the track record is stale the moment one lands.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "RecentlyWatched", "Accuracy"]));
+          // The after-rating moment, raised here rather than at the three call sites that can rate:
+          // one dispatch means the title modal, the rate picker, the post-watch strip and whatever
+          // rating surface ships next all get it, and none of them can forget to.
+          if (data?.verdict) {
+            dispatch(verdictShown({ verdict: data.verdict, actual: rating }));
+          }
         } catch {
           patch.undo();
         }
@@ -610,8 +690,9 @@ export const api = createApi({
         try {
           await queryFulfilled;
           // Un-rating changes taste and (for a Reel-logged movie) reverses the play — same
-          // downstream surfaces as rateTitle.
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+          // downstream surfaces as rateTitle, the track record included: a retracted rating is one
+          // fewer verdict against the model.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "Accuracy"]));
         } catch {
           patch.undo();
         }
@@ -824,6 +905,14 @@ export const api = createApi({
       query: (q) => `search/typeahead?q=${encodeURIComponent(q)}&global=1`,
       keepUnusedDataFor: 30,
     }),
+    /**
+     * The track record. Free for every tier — a paid accuracy report reads as hiding the scorecard.
+     * Polled by nothing: it changes when a rating lands, and the rating mutation invalidates it.
+     */
+    getAccuracy: b.query<AccuracyPayload, { window?: string } | void>({
+      query: (args) => `accuracy?window=${args && args.window ? args.window : "90d"}`,
+      providesTags: ["Accuracy"],
+    }),
     getModelMetrics: b.query<ModelMetrics, void>({
       query: () => "metrics/model",
       providesTags: ["Lab"],
@@ -903,6 +992,7 @@ export const {
   useRebuildFeedMutation,
   useGetFeedGenresQuery,
   useGetModelLearnedQuery,
+  useGetAccuracyQuery,
   useLoadMoreFeedMutation,
   useGetTitleQuery,
   useGetProvidersQuery,

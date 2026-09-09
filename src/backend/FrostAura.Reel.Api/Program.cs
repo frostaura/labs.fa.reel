@@ -45,6 +45,7 @@ app.MapDigestEndpoints();
 app.MapPushEndpoints();
 app.MapBlendEndpoints();
 app.MapMetricsEndpoints();
+app.MapAccuracyEndpoints();
 app.MapSseEndpoints();
 app.MapDevEndpoints();
 
