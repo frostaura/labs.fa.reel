@@ -124,7 +124,7 @@ public sealed class LiveSearchExpansionService(
             var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
             var now = DateTime.UtcNow;
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
-            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+            var tasteSummary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
 
             // Recently-declined titles ride BOTH agent prompts (interpret + rerank) through the
             // taste summary, so conversational picks verbally respect dislikes too. The scored
@@ -1255,35 +1255,6 @@ public sealed class LiveSearchExpansionService(
         }
 
         return best;
-    }
-
-    /// <summary>A compact taste line for the agent prompts — top genres + a few loved titles.</summary>
-    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
-    {
-        var topGenres = taste.GenreRatings
-            .Select(kv => new { kv.Key, Score = kv.Value.Count })
-            .OrderByDescending(g => g.Score)
-            .Take(4)
-            .Select(g => g.Key)
-            .ToList();
-        var loved = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id))
-            .Select(t => t.Name)
-            .Take(4)
-            .ToListAsync(ct);
-
-        var parts = new List<string>();
-        if (topGenres.Count > 0)
-        {
-            parts.Add("favours " + string.Join(", ", topGenres));
-        }
-
-        if (loved.Count > 0)
-        {
-            parts.Add("loves " + string.Join(", ", loved));
-        }
-
-        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
     }
 
     private async Task<IReadOnlyList<string>> ShownTitleNamesAsync(IReadOnlyList<long> shownTmdbIds, CancellationToken ct)
