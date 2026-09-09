@@ -126,6 +126,36 @@ export interface SyncStatus {
   lastListSyncAt: string | null;
   /** Most recent write-back error text, for the indicator's hover detail. */
   outboxLastError: string | null;
+  /**
+   * Progress toward the next drift retrain, so a screen that asks for ratings can say what they
+   * buy. `newRatingsSinceTrain` counts UserRatings whose immutable `FirstRatedAt` is newer than the
+   * Active artifact's `TrainedAt` — the same two inputs the nightly reconcile's gate reads. Absent
+   * on a response from a backend that predates the field.
+   */
+  retrain?: {
+    minNewRatings: number;
+    newRatingsSinceTrain: number;
+    /** False before the first model exists: the next train is the FIRST, not a drift retrain. */
+    hasActiveModel: boolean;
+    lastTrainedAt: string | null;
+  };
+}
+
+/**
+ * One card on the rate grid. `source` says which half it came from: "watched" is a title the user
+ * has seen and never scored — a memory, the highest-information label the product can ask for —
+ * and "popular" is the cold-start fallback pool behind it.
+ */
+export interface RateSuggestion {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  crowdRating: number | null;
+  crowdVotes: number | null;
+  source: "watched" | "popular";
 }
 
 export interface AccountSettings {
@@ -690,10 +720,7 @@ export const api = createApi({
       query: () => "billing/status",
       providesTags: ["Session"],
     }),
-    getRateSuggestions: b.query<
-      { titleId: string; mediaType: "Movie" | "Show"; tmdbId: number; name: string; year: number | null; posterPath: string | null }[],
-      void
-    >({
+    getRateSuggestions: b.query<RateSuggestion[], void>({
       query: () => "titles/rate-suggestions",
     }),
     createCheckout: b.mutation<{ url?: string; error?: string }, void>({

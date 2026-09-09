@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
@@ -17,7 +18,9 @@ public static class SyncEndpoints
     {
         var group = app.MapGroup("/api/sync").RequireAccount();
 
-        group.MapGet("/status", async (IReelDbContext db, IAccountContext accountContext, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/status", async (
+            IReelDbContext db, IAccountContext accountContext, IConfiguration configuration,
+            HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -72,9 +75,32 @@ public static class SyncEndpoints
                     .ThenByDescending(j => j.EnqueuedAt)
                     .FirstOrDefault();
 
+            // Progress toward the next retrain, so a screen that asks for ratings can say what they
+            // BUY: "7 more ratings and Reel retrains tonight". Same two inputs the nightly
+            // reconcile's gate uses, read the same way — FirstRatedAt, never Trakt's mutable
+            // RatedAt, because the question is what Reel has learned since the artifact trained.
+            var retrainThreshold = configuration.GetValue("RETRAIN_MIN_NEW_RATINGS", 10);
+            var trainedAt = await db.ModelArtifacts
+                .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
+                .Select(a => (DateTime?)a.TrainedAt)
+                .FirstOrDefaultAsync(ct);
+            var newRatingsSinceTrain = trainedAt is { } since
+                ? await db.UserRatings.CountAsync(r => r.AccountId == account.Id && r.FirstRatedAt > since, ct)
+                : 0;
+
             return Results.Ok(new
             {
                 pipelineStage = account.PipelineStage.ToString(),
+                retrain = new
+                {
+                    minNewRatings = retrainThreshold,
+                    newRatingsSinceTrain,
+                    // No Active artifact yet ⇒ the next train is the FIRST one, not a drift
+                    // retrain, and no count is meaningful. The UI says so rather than implying a
+                    // threshold that is not what will actually fire.
+                    hasActiveModel = trainedAt is not null,
+                    lastTrainedAt = trainedAt,
+                },
                 connectionStatus = connection?.Status.ToString() ?? "Revoked",
                 lastDeltaSyncAt = connection?.LastDeltaSyncAt,
                 lastFullReconcileAt = connection?.LastFullReconcileAt,
