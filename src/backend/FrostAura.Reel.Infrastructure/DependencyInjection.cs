@@ -128,6 +128,8 @@ public static class DependencyInjection
         services.AddScoped<Application.Ml.FeatureVectorBuilder>();
         services.AddScoped<Application.Ml.OnlineResidualModel>();
         services.AddScoped<Application.Ml.RatingCalibrationService>();
+        services.AddScoped<Application.Ml.RetrainGate>();
+        services.AddScoped<Application.Ml.ModelLearnedQuery>();
         services.AddScoped<Application.Ml.ResidualReplay>();
         services.AddScoped<Application.Ranking.DislikeSignal>();
         services.AddScoped<Application.Ml.OnDemandScorer>();

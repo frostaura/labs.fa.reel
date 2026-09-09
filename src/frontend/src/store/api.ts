@@ -14,6 +14,21 @@ import type {
 import { titleRemoved, titleRestored } from "./removedTitlesSlice";
 import type { PersonPayload, ProvidersPayload, SavedEntry, TitleDetailPayload } from "./titleTypes";
 
+/**
+ * The "your model just learned" band's payload. Every field is either already in the evaluation
+ * ledger or is a diff of two rows that already exist — nothing here was added to the schema.
+ */
+export interface ModelLearned {
+  trainedAt: string;
+  newRatingsSinceLast: number;
+  calibrationBias: number | null;
+  calibrationMae: number | null;
+  /** Previous MAE minus current: positive means the model runs closer to the user's own scores. */
+  maeImprovement: number | null;
+  spearman: number | null;
+  picksChanged: number;
+}
+
 export interface TypeaheadTitle {
   titleId: string;
   mediaType: "Movie" | "Show";
@@ -381,6 +396,22 @@ export const api = createApi({
       query: () => ({ url: "feed/rebuild", method: "POST" }),
       invalidatesTags: ["Sync"],
     }),
+    /**
+     * What the latest retrain bought the user. Its own endpoint rather than a field on `getFeed`:
+     * the feed payload is fetched constantly and this is a retrain-cadence number. The server
+     * answers 204 whenever the band would be a claim the data cannot support, which arrives here as
+     * an empty body — hence the null.
+     *
+     * Tagged "Lab" alongside the ledger: both go stale on exactly the same event (a train/evaluate
+     * run completing), and RealtimeSync already invalidates that tag when one does.
+     */
+    getModelLearned: b.query<ModelLearned | null, void>({
+      query: () => ({
+        url: "feed/learned",
+        responseHandler: async (response) => (response.status === 204 ? null : await response.json()),
+      }),
+      providesTags: ["Lab"],
+    }),
     getFeedGenres: b.query<GenreRail[], void>({
       query: () => "feed/genres",
       transformResponse: (r: { genres: GenreRail[] }) => r.genres,
@@ -740,6 +771,7 @@ export const {
   useGetContinueWatchingQuery,
   useRebuildFeedMutation,
   useGetFeedGenresQuery,
+  useGetModelLearnedQuery,
   useLoadMoreFeedMutation,
   useGetTitleQuery,
   useGetProvidersQuery,

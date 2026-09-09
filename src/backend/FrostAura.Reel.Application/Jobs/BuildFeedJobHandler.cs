@@ -241,18 +241,44 @@ public class BuildFeedJobHandler(
 
         if (snapshot is null)
         {
-            // Preserve-mode no-op: the assembled feed is item-for-item what the Active snapshot
-            // already serves, so nothing is written and no feed-ready reseed is announced — the
-            // whole point of the stable "tonight" contract is that a background delta-sync poll
-            // cannot churn the page the user is reading. TitleScores were persisted above, so
-            // score freshness is not lost; the page itself stays put.
-            job.ProgressMessage = "feed unchanged — kept tonight's picks";
+            // Preserve-mode: the assembled feed is item-for-item what the Active snapshot already
+            // serves, so no new snapshot is minted and no feed-ready reseed is announced — the whole
+            // point of the stable "tonight" contract is that a background delta-sync poll cannot
+            // churn the page the user is reading.
+            //
+            // The scores are a separate question. AssembleAsync has already written any moved
+            // ratings onto the EXISTING rows (see ApplyScoreDrift); all that is left here is to say
+            // so, on a frame that carries the snapshot's unchanged GeneratedAt precisely so the
+            // client can patch in place instead of remounting. When nothing moved, this is the true
+            // no-op it always was.
+            var scoreUpdates = capture.ScoreUpdates;
+            job.ProgressMessage = scoreUpdates.Count > 0
+                ? $"kept tonight's picks — {scoreUpdates.Count} score{(scoreUpdates.Count == 1 ? "" : "s")} recalibrated"
+                : "feed unchanged — kept tonight's picks";
             // Absorbing, not plain: the enqueues above are check-then-insert against the partial
             // unique index, and losing that race means the work is already scheduled. The build's
-            // own writes — the stat row, the scores — must not roll back over a coalesced job.
+            // own writes — the stat row, the scores, the in-place rating updates — must not roll
+            // back over a coalesced job.
             await db.SaveAbsorbingRebuildRaceAsync(ct);
-            events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
-            logger.LogInformation("Feed unchanged for {AccountId} — snapshot suppressed.", accountId);
+            if (scoreUpdates.Count > 0 && capture.PreservedGeneratedAt is { } preservedAt)
+            {
+                events.Publish(
+                    accountId,
+                    PipelineEventTypes.FeedScoresUpdated,
+                    FeedScoreDrift.Payload(preservedAt, scoreUpdates));
+            }
+
+            events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
+            {
+                ["kind"] = "feed",
+                // Items did not move, so nothing changed pick-wise — stated rather than omitted, so
+                // the post-sync copy can say "0 picks changed" instead of waiting for a number that
+                // is never coming.
+                ["picksChanged"] = 0,
+            });
+            logger.LogInformation(
+                "Feed unchanged for {AccountId} — snapshot suppressed ({Recalibrated} score(s) updated in place).",
+                accountId, scoreUpdates.Count);
             return;
         }
 
@@ -284,8 +310,18 @@ public class BuildFeedJobHandler(
         {
             ["snapshotId"] = snapshot.Id,
             ["generatedAt"] = snapshot.GeneratedAt,
+            // The delta sync that triggered this rebuild finished minutes ago and could not know
+            // this number — the coordinator enqueues the build asynchronously and must never block
+            // on it. So the sync reports what it ingested, and the follow-up frame reports what that
+            // did to the page. The client joins the two.
+            ["picksChanged"] = capture.PicksChanged,
+            ["triggerReason"] = job.TriggerReason,
         });
-        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
+        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
+        {
+            ["kind"] = "feed",
+            ["picksChanged"] = capture.PicksChanged,
+        });
         logger.LogInformation("Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored).",
             snapshot.Id, accountId, candidates.Count);
     }
@@ -314,6 +350,23 @@ public class BuildFeedJobHandler(
         public int RailsDropped { get; set; }
 
         public string? DegradedReason { get; set; }
+
+        /// <summary>
+        /// How many of this feed's cards are titles the previous Active snapshot did not show. The
+        /// post-sync moment's "3 picks changed" — computed here because assembly is the only place
+        /// that holds both feeds at once, and reported over SSE rather than persisted, so the whole
+        /// visible-recalibration change stays migration-free.
+        /// </summary>
+        public int PicksChanged { get; set; }
+
+        /// <summary>
+        /// Set on the score-only Preserve path: the UNCHANGED GeneratedAt of the snapshot whose rows
+        /// were updated in place. Null on every other path, including a true no-op.
+        /// </summary>
+        public DateTime? PreservedGeneratedAt { get; set; }
+
+        /// <summary>Cards whose displayed rating moved on the score-only Preserve path.</summary>
+        public IReadOnlyList<FeedScoreUpdate> ScoreUpdates { get; set; } = [];
     }
 
     /// <summary>
@@ -800,15 +853,23 @@ public class BuildFeedJobHandler(
         }
 
         // ── No-op suppression (Preserve only) ───────────────────────────────────────────────
-        // A background rebuild that assembled exactly what is already Active writes nothing: no new
-        // snapshot, no supersede, no feed-ready event — the caller sees null and skips the reseed.
+        // A background rebuild that assembled exactly what is already Active mints no new snapshot:
+        // no supersede, no feed-ready event — the caller sees null and skips the reseed.
         // DegradedReason participates in the comparison so a build that changed only the page's
         // explanation banner still ships.
+        //
+        // "No new snapshot" is NOT the same as "write nothing", and conflating the two is what made
+        // recalibration invisible. If the model's opinion of a kept card has genuinely moved, the
+        // EXISTING snapshot's rows are updated in place — same snapshot id, same GeneratedAt — and
+        // the caller announces it on its own SSE frame. See FeedScoreDrift for why the two decisions
+        // are separate. When nothing moved, this stays the true no-op it has always been.
         if (mode == FeedBuildMode.Preserve
             && previousSnapshot is not null
             && string.Equals(previousSnapshot.DegradedReason, degradedReason, StringComparison.Ordinal)
             && SameFeed(previousItems, planned))
         {
+            capture.PreservedGeneratedAt = previousSnapshot.GeneratedAt;
+            capture.ScoreUpdates = ApplyScoreDrift(previousItems, planned, Freshness);
             return null;
         }
 
@@ -853,6 +914,12 @@ public class BuildFeedJobHandler(
         };
         db.FeedSnapshots.Add(snapshot);
 
+        // How much of the page is genuinely different from what it replaces — the "3 picks changed"
+        // the post-sync moment reports. Counted before the write so it reads the OLD snapshot's
+        // titles, and by title rather than by slot: a card that merely moved rank is the same pick.
+        var previousTitleIds = previousItems.Select(i => i.TitleId).ToHashSet();
+        capture.PicksChanged = planned.Count(i => !previousTitleIds.Contains(i.Candidate.Title.Id));
+
         foreach (var item in planned)
         {
             db.FeedItems.Add(new FeedItem
@@ -864,11 +931,10 @@ public class BuildFeedJobHandler(
                 AnchorTitleId = item.AnchorTitleId,
                 Rank = item.Rank,
                 TitleId = item.Candidate.Title.Id,
-                PredictedRating = Math.Round(item.Candidate.Predicted, 1),
-                FinalScore = Math.Round(item.Candidate.Predicted * Freshness(item.Candidate.Title), 3),
+                PredictedRating = DisplayRating(item.Candidate),
+                FinalScore = FinalScoreOf(item.Candidate, Freshness),
                 WhyThisSentence = item.WhyThis,
-                ExplanationJson = JsonSerializer.Serialize(
-                    item.Candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })),
+                ExplanationJson = ExplanationOf(item.Candidate),
             });
         }
 
@@ -1204,6 +1270,68 @@ public class BuildFeedJobHandler(
     /// not count as change. Scores and why-sentences are deliberately excluded — they drift by
     /// epsilon on every rebuild and would defeat the suppression that keeps tonight's page still.
     /// </summary>
+    /// <summary>What the card shows. Rounded here, once, so the write path and the drift path agree.</summary>
+    private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 1);
+
+    /// <inheritdoc cref="DisplayRating"/>
+    private static decimal FinalScoreOf(Candidate candidate, Func<Title, decimal> freshness) =>
+        Math.Round(candidate.Predicted * freshness(candidate.Title), 3);
+
+    /// <inheritdoc cref="DisplayRating"/>
+    private static string ExplanationOf(Candidate candidate) =>
+        JsonSerializer.Serialize(
+            candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) }));
+
+    /// <summary>
+    /// The score-only Preserve write. Called ONLY once <see cref="SameFeed"/> has proved the two
+    /// feeds are item-for-item identical, so previous and planned align exactly under the same
+    /// ordering key — which is what lets this pair them up without a second identity check.
+    ///
+    /// <para>Updates <c>PredictedRating</c>, <c>FinalScore</c> and <c>ExplanationJson</c> on the
+    /// EXISTING rows (tracked entities of the Active snapshot — no new snapshot, no new
+    /// <c>GeneratedAt</c>, no supersede). <c>WhyThisSentence</c> is deliberately untouched: the why
+    /// pass runs after the no-op decision and never fires on this path, so there is no regenerated
+    /// sentence to write, and overwriting a kept card's persisted why would break the stable-tonight
+    /// contract for no gain.</para>
+    ///
+    /// <para>Returns only the cards whose displayed RATING moved — a contributions-only change is
+    /// persisted but has no number on screen to patch, so it is not broadcast.</para>
+    /// </summary>
+    private static IReadOnlyList<FeedScoreUpdate> ApplyScoreDrift(
+        IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned, Func<Title, decimal> freshness)
+    {
+        var before = previous
+            .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
+            .ToList();
+        var after = planned
+            .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
+            .ToList();
+
+        var moved = new List<FeedScoreUpdate>();
+        for (var i = 0; i < before.Count; i++)
+        {
+            var row = before[i];
+            var candidate = after[i].Candidate;
+            var rating = DisplayRating(candidate);
+            var explanation = ExplanationOf(candidate);
+            if (!FeedScoreDrift.Changed(row.PredictedRating, rating, row.ExplanationJson, explanation))
+            {
+                continue;
+            }
+
+            if (FeedScoreDrift.RatingMoved(row.PredictedRating, rating))
+            {
+                moved.Add(new FeedScoreUpdate(row.TitleId, rating));
+            }
+
+            row.PredictedRating = rating;
+            row.FinalScore = FinalScoreOf(candidate, freshness);
+            row.ExplanationJson = explanation;
+        }
+
+        return moved;
+    }
+
     private static bool SameFeed(IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned)
     {
         if (previous.Count != planned.Count)

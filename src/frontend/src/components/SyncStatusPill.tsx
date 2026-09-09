@@ -1,7 +1,7 @@
 import { useSelector } from "react-redux";
 import type { RootState } from "../store";
 import { relTime } from "../lib/format";
-import { syncExplainer } from "../lib/syncCopy";
+import { syncExplainer, syncSummaryCopy } from "../lib/syncCopy";
 import { useGetSyncStatusQuery } from "../store/api";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 
@@ -70,6 +70,11 @@ export default function SyncStatusPill() {
   // ── Idle: persistent health chip ─────────────────────────────────────────────────────────
   if (!status) return null;
 
+  // What the last sync actually did, if it said. Outlives the spinner on purpose: the founder's
+  // complaint was that the sync "happens instantly and nothing changes", and a chip that reverts to
+  // "Synced 2m ago" the moment the job ends is exactly that experience.
+  const summary = syncSummaryCopy(sync.summary);
+
   const connectionBad = status.connectionStatus !== "Active";
   const deadLetters = status.outboxDeadLetters > 0;
   const queued = status.outboxPending > 0;
@@ -85,7 +90,7 @@ export default function SyncStatusPill() {
         : "List sync failed"
       : health === "warn"
         ? "List syncing…"
-        : `Synced ${relTime(status.lastDeltaSyncAt)}`;
+        : (summary ?? `Synced ${relTime(status.lastDeltaSyncAt)}`);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -98,7 +103,12 @@ export default function SyncStatusPill() {
             className="inline-flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-3 py-1 fa-caption text-fa-frost-dim cursor-default focus:outline-none focus:border-fa-frost/40"
           >
             <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${dot}`} aria-hidden />
-            <span className="hidden sm:inline truncate max-w-[10rem]">{label}</span>
+            <span
+              data-testid="sync-health-label"
+              className={`hidden sm:inline truncate ${summary && health === "ok" ? "max-w-[22rem] text-fa-frost" : "max-w-[10rem]"}`}
+            >
+              {label}
+            </span>
           </span>
         </TooltipTrigger>
         <TooltipContent side="bottom" align="end" className="max-w-72 px-3 py-2.5">

@@ -27,6 +27,16 @@ public static class FeatureFlags
     /// </summary>
     public const string CalibratorMode = "CALIBRATOR_MODE";
 
+    /// <summary>New labels since the artifact trained before a retrain is owed (see RetrainPolicy).</summary>
+    public const string RetrainMinNewRatings = "RETRAIN_MIN_NEW_RATINGS";
+
+    /// <summary>Reads a whole-number switch, falling back when it is absent, blank or unparseable.</summary>
+    public static int ReadInt(IConfiguration? configuration, string key, int fallback) =>
+        configuration?[key] is { } raw && int.TryParse(raw, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : fallback;
+
     /// <summary>Reads a boolean switch, falling back to <paramref name="fallback"/> when it is absent or unparseable.</summary>
     public static bool IsEnabled(IConfiguration? configuration, string key, bool fallback) =>
         configuration?[key] is { } raw && bool.TryParse(raw, out var parsed) ? parsed : fallback;

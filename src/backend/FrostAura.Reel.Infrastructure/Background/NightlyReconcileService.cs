@@ -16,9 +16,11 @@ namespace FrostAura.Reel.Infrastructure.Background;
 
 /// <summary>
 /// 03:00 UTC drift repair: per active account, enqueues a forced DeltaSync ({"force":true} →
-/// every category refetched regardless of last_activities) AND a Train when the model has drifted
-/// (≥ RETRAIN_MIN_NEW_RATINGS new ratings since it last trained, or >14 days old — Train chains
-/// Evaluate → BuildFeed). Gate: Background:NightlyReconcile.
+/// every category refetched regardless of last_activities) AND a Train when
+/// <see cref="RetrainGate"/> says one is owed — ≥ RETRAIN_MIN_NEW_RATINGS new ratings since it last
+/// trained, an artifact older than 14 days, or a CALIBRATION BREACH on the account's own closed loop
+/// (a fresh, well-fed model can still be badly mis-levelled, and the staleness rules cannot see it).
+/// Train chains Evaluate → BuildFeed. Gate: Background:NightlyReconcile.
 /// <para>
 /// It also runs the FEATURE-SCHEMA SWEEP, once at startup and again on every nightly pass. That one
 /// is NOT gated: an artifact trained against a superseded <see cref="FeatureSchema"/> version is
@@ -63,6 +65,9 @@ public sealed class NightlyReconcileService(
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
                 var managedList = scope.ServiceProvider.GetRequiredService<ManagedListReconciler>();
+                // The gate is shared with DeltaSyncJobHandler's post-sync message on purpose: the
+                // pill promises "retraining tonight" from exactly the rules that decide it here.
+                var retrainGate = scope.ServiceProvider.GetRequiredService<RetrainGate>();
                 var now = DateTime.UtcNow;
 
                 var accountIds = await db.TraktConnections
@@ -70,7 +75,6 @@ public sealed class NightlyReconcileService(
                     .Select(c => c.AccountId)
                     .ToListAsync(stoppingToken);
 
-                var retrainThreshold = configuration.GetValue("RETRAIN_MIN_NEW_RATINGS", 10);
                 var enqueued = 0;
                 var retrains = 0;
                 var listRemovals = 0;
@@ -100,41 +104,33 @@ public sealed class NightlyReconcileService(
                         enqueued++;
                     }
 
-                    // Retrain when the model has drifted: ≥N ratings since it last trained, or it's
-                    // older than two weeks. Train chains Evaluate → BuildFeed, so the feed refreshes.
+                    // Retrain when the model has drifted — ≥N ratings since it last trained, or it's
+                    // older than two weeks — OR when the account's own closed loop says it is
+                    // measurably WRONG (|bias| > 0.75 or MAE > 2.0 on ≥30 pairs the current artifact
+                    // itself produced), which the staleness rules cannot see at all: a model can be
+                    // fresh, well-fed and badly mis-levelled. The breach trigger carries a one-day
+                    // floor because it reads the same pairs the last train was fitted against, so
+                    // without one a genuinely hard account would retrain every night on numbers that
+                    // have not moved. The nightly cadence itself is unchanged. Train chains
+                    // Evaluate → BuildFeed, so the feed refreshes.
                     var trainInFlight = await db.SyncJobs.AnyAsync(
                         j => j.AccountId == accountId && (j.Kind == JobKind.Train || j.Kind == JobKind.Evaluate)
                             && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running),
                         stoppingToken);
-                    if (!trainInFlight)
+                    if (!trainInFlight
+                        && await retrainGate.EvaluateAsync(accountId, now, stoppingToken) is { } trigger)
                     {
-                        var trainedAt = await db.ModelArtifacts
-                            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
-                            .Select(a => (DateTime?)a.TrainedAt)
-                            .FirstOrDefaultAsync(stoppingToken);
-                        if (trainedAt is { } since)
+                        db.SyncJobs.Add(new SyncJob
                         {
-                            // FirstRatedAt, not RatedAt: the gate asks "how much has REEL learned
-                            // since it last trained", and RatedAt is Trakt's own timestamp, freely
-                            // rewritten on every ratings walk. A back-dated import used to look
-                            // like nothing new, and a re-rate of an ancient title used to look like
-                            // a fresh one. FirstRatedAt is set on insert and never moves, so this
-                            // counts exactly the rows the artifact could not have seen.
-                            var newRatings = await db.UserRatings
-                                .CountAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, stoppingToken);
-                            if (newRatings >= retrainThreshold || (now - since).TotalDays > 14)
-                            {
-                                db.SyncJobs.Add(new SyncJob
-                                {
-                                    Id = Guid.NewGuid(),
-                                    AccountId = accountId,
-                                    Kind = JobKind.Train,
-                                    Priority = 3,
-                                    EnqueuedAt = now,
-                                });
-                                retrains++;
-                            }
-                        }
+                            Id = Guid.NewGuid(),
+                            AccountId = accountId,
+                            Kind = JobKind.Train,
+                            Priority = 3,
+                            EnqueuedAt = now,
+                        });
+                        retrains++;
+                        logger.LogInformation(
+                            "Nightly reconcile queued a retrain for {AccountId} ({Trigger}).", accountId, trigger);
                     }
                 }
 
@@ -321,10 +317,11 @@ public sealed class NightlyReconcileService(
         }
     }
 
-    internal static TimeSpan DelayUntilNextRun(DateTime utcNow)
-    {
-        var todayRun = utcNow.Date.AddHours(3);
-        var nextRun = utcNow < todayRun ? todayRun : todayRun.AddDays(1);
-        return nextRun - utcNow;
-    }
+    /// <summary>
+    /// Time until the next 03:00 UTC pass. Delegates to <see cref="RetrainPolicy.NextNightlyRunUtc"/>
+    /// so the schedule and the "retraining tonight at 03:00 UTC" the post-sync pill promises cannot
+    /// drift apart — the hour is stated once, in the policy.
+    /// </summary>
+    internal static TimeSpan DelayUntilNextRun(DateTime utcNow) =>
+        RetrainPolicy.NextNightlyRunUtc(utcNow) - utcNow;
 }

@@ -45,15 +45,15 @@ public class FullIngestJobHandler(
 
         if (phase == "movies")
         {
-            var count = await ingestor.IngestMoviesAsync(accountId, token, RatePriority.Interactive, ct);
-            await SaveWithCursorAsync(job, new Cursor("shows"), 25, $"{count} movies", ct);
+            var movies = await ingestor.IngestMoviesAsync(accountId, token, RatePriority.Interactive, ct);
+            await SaveWithCursorAsync(job, new Cursor("shows"), 25, $"{movies.Count} movies", ct);
             phase = "shows";
         }
 
         if (phase == "shows")
         {
-            var (shows, episodes) = await ingestor.IngestShowsAsync(accountId, token, RatePriority.Interactive, ct);
-            await SaveWithCursorAsync(job, new Cursor("ratings"), 55, $"{shows} shows · {episodes} episodes", ct);
+            var shows = await ingestor.IngestShowsAsync(accountId, token, RatePriority.Interactive, ct);
+            await SaveWithCursorAsync(job, new Cursor("ratings"), 55, $"{shows.Shows} shows · {shows.Episodes} episodes", ct);
             phase = "ratings";
         }
 

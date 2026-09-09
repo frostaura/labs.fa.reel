@@ -10,7 +10,9 @@ import {
   useGetSessionQuery,
 } from "../store/api";
 import { removalsCleared } from "../store/removedTitlesSlice";
+import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
+import ModelLearnedBand from "../components/rec/ModelLearnedBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import RecRow from "../components/rows/RecRow";
 import GenreRow from "../components/rows/GenreRow";
@@ -62,10 +64,14 @@ export default function Home() {
   const resetKey = `${adoptedKey}#${conditionsVersion}`;
   const hasFresherPicks = latestKey !== "" && adoptedKey !== "" && latestKey !== adoptedKey;
 
-  // Adopting re-seeds every row from the server (which already excludes removed titles), so the
-  // session's removal set is now redundant — clear it to avoid masking re-eligible titles.
+  // Adopting re-seeds every row from the server (which already excludes removed titles, and whose
+  // numbers are current by construction), so the session's removal set AND its recalibration
+  // overrides are now redundant — clear both, or an override could mask a fresher server value.
   useEffect(() => {
-    if (adoptedKey) dispatch(removalsCleared());
+    if (adoptedKey) {
+      dispatch(removalsCleared());
+      dispatch(scoreOverridesCleared());
+    }
   }, [adoptedKey, dispatch]);
 
   const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
@@ -133,6 +139,10 @@ export default function Home() {
         </div>
       ) : (
         <>
+          {/* Above the hero, and outside its re-key: the band is news about the MODEL, not about
+              this snapshot, so a row remount must not take it with it. */}
+          <ModelLearnedBand />
+
           <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} />
 
           <ContinueWatchingRow entries={continueFiltered} />
