@@ -16,6 +16,20 @@ namespace FrostAura.Reel.Infrastructure.Background;
 /// candidate pool — and, once enriched, semantic search — a broad, fresh universe beyond what any
 /// one user's library or per-build discovery surfaces. Catalog rows are tenant-shared, so this
 /// runs once for everyone. Gate: Background:CatalogGrowth.
+///
+/// <para>
+/// Deliberately UNFILTERED, unlike the per-account pool refresh. The rows it writes belong to every
+/// tenant, so shaping the sweep by one account's language, year window or banned genres would let
+/// that account's preferences decide what the catalogue contains for everybody. The account rules
+/// belong in <see cref="CandidateGenerator"/>, which is per-account by construction.
+/// </para>
+///
+/// <para>
+/// What it did need was a moving read head. Every pass asked for page 1 of the same
+/// popularity-ordered lists, so a weekly sweep spent most of its calls re-fetching the titles it
+/// already held. The page now rotates deterministically by day: replayable from the timestamp, and
+/// across a rotation span the sweep walks the whole head of every genre instead of standing on it.
+/// </para>
 /// </summary>
 public sealed class CatalogGrowthService(
     IServiceScopeFactory scopeFactory,
@@ -24,6 +38,13 @@ public sealed class CatalogGrowthService(
 {
     private static readonly TimeSpan Interval = TimeSpan.FromDays(7);
     private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Pages the day-rotation walks before wrapping. Five deep on a popularity-ordered discover is
+    /// ~100 titles per genre per medium — past that TMDB's tail is thin enough that the vote-count
+    /// floor rejects most of it anyway.
+    /// </summary>
+    private const int PageSpan = 5;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -51,6 +72,9 @@ public sealed class CatalogGrowthService(
                 var generator = scope.ServiceProvider.GetRequiredService<CandidateGenerator>();
                 var region = configuration["GEOIP_DEFAULT_REGION"] ?? "US";
 
+                // One page for the whole pass, not one per genre: a sweep whose genres sit on
+                // different pages is not reproducible from its own timestamp.
+                var page = DiscoveryPaging.RotatedPage(AnchorRotation.OffsetFor(DateTime.UtcNow), PageSpan);
                 var batches = new List<IReadOnlyList<TmdbListItem>>();
                 foreach (var (_, ids) in TmdbGenres.SlugToIds)
                 {
@@ -61,25 +85,25 @@ public sealed class CatalogGrowthService(
 
                     if (ids.Movie is { } movieGenre)
                     {
-                        batches.Add(await tmdb.DiscoverAsync(true, movieGenre, region, null, 1, stoppingToken));
+                        batches.Add(await tmdb.DiscoverAsync(true, movieGenre, region, null, page, stoppingToken));
                     }
 
                     if (ids.Tv is { } tvGenre)
                     {
-                        batches.Add(await tmdb.DiscoverAsync(false, tvGenre, null, null, 1, stoppingToken));
+                        batches.Add(await tmdb.DiscoverAsync(false, tvGenre, null, null, page, stoppingToken));
                     }
                 }
 
                 batches.Add(await tmdb.GetTrendingAsync(true, stoppingToken));
                 batches.Add(await tmdb.GetTrendingAsync(false, stoppingToken));
-                batches.Add(await tmdb.DiscoverAsync(true, null, region, DateTime.UtcNow.AddDays(-90), 1, stoppingToken));
+                batches.Add(await tmdb.DiscoverAsync(true, null, region, DateTime.UtcNow.AddDays(-90), page, stoppingToken));
 
                 var items = batches.SelectMany(b => b)
                     .GroupBy(i => (i.IsMovie, i.Id))
                     .Select(g => g.First())
                     .ToList();
                 var added = await generator.UpsertCandidatesAsync(items, stoppingToken);
-                logger.LogInformation("Catalog growth: {Items} items swept, {Added} new title(s).", items.Count, added);
+                logger.LogInformation("Catalog growth: {Items} items swept from page {Page}, {Added} new title(s).", items.Count, page, added);
 
                 if (added > 0)
                 {
