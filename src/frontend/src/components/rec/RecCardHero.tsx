@@ -6,6 +6,7 @@ import PredictedRatingBadge from "./PredictedRatingBadge";
 import CrowdRatingBadge from "./CrowdRatingBadge";
 import { formatRuntime } from "../../lib/format";
 import { hasPredictedRating } from "../../lib/predictedRating";
+import CardQuickActions from "./CardQuickActions";
 import { heroReachingNote, reachingLabel } from "../../lib/heroConfidence";
 
 interface HeroProps {
@@ -74,6 +75,18 @@ export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
                 />
               )}
               <div className="absolute inset-0 reel-scrim" />
+              {/* The same three actions the rail cards carry, at hero scale. The headline pick was
+                  the ONE card you could not act on without navigating into the modal and back —
+                  which is a strange thing to say about the card the whole screen is built around.
+                  Every button calls preventDefault, so the whole-card link still works everywhere
+                  the buttons are not. */}
+              <CardQuickActions
+                titleId={card.titleId}
+                mediaType={card.mediaType}
+                tmdbId={card.tmdbId}
+                name={card.name}
+                size="lg"
+              />
               <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 space-y-2">
                 <div className="flex items-center gap-3 flex-wrap">
                   <h2 className="text-xl sm:text-3xl font-light text-fa-frost-bright drop-shadow">{card.name}</h2>

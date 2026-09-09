@@ -11,6 +11,10 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
  * contract these specs pin: a plain tap still posts the default INSTANTLY (the fast path is the
  * point of the overlay), and a secondary gesture — hold, or right-click — opens the same four
  * reasons the modal offers and posts whichever one the user chose.
+ *
+ * Plus the 1–10 rating popover the overlay now carries — the same component the hero mounts, so
+ * scoring a pick no longer costs a navigation either. Only 2% of ratings are made in the app today;
+ * the rest arrive from Trakt hours later, which is why the loop never closes at the moment it is felt.
  */
 
 const card = (n: number) => ({
@@ -130,6 +134,33 @@ test.describe("card quick actions", () => {
     await expect(page).toHaveURL(/\/home/);
     await expect(target).toHaveCount(0);
     expect(reactionCalls).toEqual([{ reason: "genre" }]);
+  });
+
+  test("the rating popover posts the score in place and retires the card", async ({ page }) => {
+    await bootHome(page);
+
+    const ratings: unknown[] = [];
+    await page.route("**/api/titles/movie/1009/rating", (route) => {
+      ratings.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 200, contentType: "application/json", body: JSON.stringify({ userRating: 9 }),
+      });
+    });
+
+    const target = page.getByTestId("rec-card").filter({ hasText: "Pick 9" });
+    await target.hover();
+    await target.getByTestId("quick-rate").click();
+
+    const picker = page.getByTestId("quick-rate-picker");
+    await expect(picker).toBeVisible();
+    await picker.getByTestId("quick-rate-9").click();
+
+    // Rated from a suggestion surface means "I have seen this", so the play is logged — the same
+    // call the /rate grid makes, and the opposite of the post-watch strip, where it already exists.
+    await expect(page).toHaveURL(/\/home/);
+    expect(ratings).toEqual([{ rating: 9, markWatched: true }]);
+    await expect(target).toHaveCount(0);
+    await expect(page.getByTestId("rec-card")).toHaveCount(3);
   });
 
   test("press-and-hold opens the picker instead of dismissing, and the hold's own click never fires the default", async ({ page }) => {
