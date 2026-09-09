@@ -12,7 +12,8 @@ import type {
   MoreFeedResponse,
 } from "./feedTypes";
 import { titleRemoved, titleRestored } from "./removedTitlesSlice";
-import type { PersonPayload, ProvidersPayload, SavedEntry, TitleDetailPayload } from "./titleTypes";
+import type { PersonPayload, ProvidersPayload, TitleDetailPayload } from "./titleTypes";
+import type { RecentlyWatchedResponse, SavedQueueResponse } from "./savedTypes";
 
 /**
  * The "your model just learned" band's payload. Every field is either already in the evaluation
@@ -147,6 +148,8 @@ export interface AccountSettings {
   region: string;
   onboarded: boolean;
   email?: string | null;
+  /** Served RESOLVED (never null): how long an evening is, for the Saved shelf's pinned pick. */
+  eveningBudgetMinutes?: number;
 }
 
 export interface ModelEvalDetail {
@@ -328,7 +331,7 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -488,7 +491,9 @@ export const api = createApi({
           // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
           // Deliberately does NOT invalidate Feed — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+          // A rating is exactly the answer the loop-closing prompt was asking for, so the strip
+          // retires that title on the next read rather than continuing to ask a settled question.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "RecentlyWatched"]));
         } catch {
           patch.undo();
         }
@@ -651,9 +656,19 @@ export const api = createApi({
         }
       },
     }),
-    getSaved: b.query<{ managedListUrl: string | null; items: SavedEntry[] }, void>({
-      query: () => "saved",
+    // The queue, in the order the user asked for. `sort` is part of the cache key, so switching
+    // orders is a fresh request rather than a client-side re-sort — the server owns the comparator
+    // (and the pinned pick), and two implementations of it would drift within a release.
+    getSaved: b.query<SavedQueueResponse, { sort?: string } | void>({
+      query: (args) => (args && args.sort ? `saved?sort=${encodeURIComponent(args.sort)}` : "saved"),
       providesTags: ["Saved"],
+    }),
+    // Watched-via-Reel titles that are still unrated. Kept under its own tag: rating one of these
+    // must retire that prompt without refetching the whole shelf, and saving a title must not
+    // disturb the strip the user is halfway through answering.
+    getRecentlyWatched: b.query<RecentlyWatchedResponse, void>({
+      query: () => "saved/recently-watched",
+      providesTags: ["RecentlyWatched"],
     }),
     getTasteDna: b.query<TasteDnaPayload, void>({
       query: () => "taste",
@@ -787,6 +802,7 @@ export const {
   useSaveForLaterMutation,
   useUnsaveForLaterMutation,
   useGetSavedQuery,
+  useGetRecentlyWatchedQuery,
   useGetTasteDnaQuery,
   useSearchTypeaheadQuery,
   useSearchTypeaheadGlobalQuery,
