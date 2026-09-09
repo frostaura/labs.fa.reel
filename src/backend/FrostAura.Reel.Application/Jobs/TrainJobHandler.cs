@@ -216,7 +216,11 @@ public class TrainJobHandler(
         }
     }
 
-    /// <summary>Postgres 23505 = unique_violation, surfaced through EF as a DbUpdateException.</summary>
+    /// <summary>
+    /// Postgres 23505 = unique_violation, surfaced through EF as a DbUpdateException. The single
+    /// definition now lives on <see cref="UniqueRaceSave"/> so the reaction endpoints' absorber and
+    /// this handler cannot drift apart; kept here as a forwarder because callers already name it.
+    /// </summary>
     public static bool IsUniqueViolation(DbUpdateException exception) =>
-        exception.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+        UniqueRaceSave.IsUniqueViolation(exception);
 }
