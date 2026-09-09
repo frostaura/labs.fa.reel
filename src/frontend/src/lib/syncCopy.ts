@@ -108,3 +108,45 @@ const BACKGROUND_KINDS = new Set(["delta", "reconcile"]);
 export function isBackgroundKind(sseKind: string | null | undefined): boolean {
   return sseKind != null && BACKGROUND_KINDS.has(sseKind);
 }
+
+/**
+ * What the pipeline is doing for you, in words, per `Account.PipelineStage`.
+ *
+ * The stage used to be interpolated RAW into the waiting copy on Home — "Your picks are being
+ * assembled (Extracting)" — which is an internal state-machine token leaking onto the founder's
+ * home screen. Each phrase is a verb clause in the second person, so it reads as the tail of a
+ * sentence rather than a label.
+ *
+ * `Degraded` is the hard-failure parking state (revoked token, dead-lettered writes) and is the
+ * one stage with a REASON worth quoting: pass the persisted one (`outboxLastError` on
+ * `/api/sync/status`) and it is shown verbatim instead of the generic line. Callers that do not
+ * hold it get honest generic copy — never a blank, and never the enum.
+ *
+ * An unknown stage falls back to the generic clause, so a new backend stage ships safely ahead of
+ * the frontend that names it.
+ */
+const PIPELINE_STAGE_COPY: Record<string, string> = {
+  Linked: "linking your Trakt",
+  Ingesting: "pulling your history",
+  Extracting: "reading every title",
+  Training: "teaching your model",
+  Evaluated: "checking itself",
+  FeedReady: "putting tonight's picks together",
+};
+
+/** The generic clause for an unknown stage, and for Degraded with no persisted reason. */
+export const PIPELINE_STAGE_FALLBACK = "getting your library ready";
+
+/** What Degraded says when nothing was persisted to explain it. */
+export const PIPELINE_DEGRADED_FALLBACK = "your Trakt link needs attention";
+
+export function pipelineStageCopy(
+  stage: string | null | undefined,
+  degradedReason?: string | null
+): string {
+  if (stage === "Degraded") {
+    return degradedReason?.trim() || PIPELINE_DEGRADED_FALLBACK;
+  }
+
+  return (stage && PIPELINE_STAGE_COPY[stage]) || PIPELINE_STAGE_FALLBACK;
+}
