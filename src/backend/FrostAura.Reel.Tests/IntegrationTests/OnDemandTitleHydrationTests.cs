@@ -119,7 +119,8 @@ public class OnDemandTitleHydrationTests(PostgresFixture fixture)
         var scorer = new OnDemandScorer(
             db, featureBuilder, engine,
             new OnlineResidualModel(db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance),
-            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())));
+            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+            new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())));
 
         // No persisted score exists yet — the endpoint path must score on demand and re-read.
         var score = await TitleEndpoints.ResolveScoreAsync(db, scorer, accountId, title!.Id, CancellationToken.None);

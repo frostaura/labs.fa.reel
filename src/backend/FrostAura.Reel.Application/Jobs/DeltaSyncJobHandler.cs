@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
@@ -10,6 +11,7 @@ using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Jobs;
@@ -29,8 +31,18 @@ public class DeltaSyncJobHandler(
     ManagedListReconciler managedList,
     OnlineResidualModel residual,
     IPipelineEventHub events,
+    IConfiguration configuration,
     ILogger<DeltaSyncJobHandler> logger) : IJobHandler
 {
+    /// <summary>Hard cap on how many passive watches one delta may teach the head, however many landed.</summary>
+    private const int PassiveWatchBudget = 20;
+
+    /// <summary>A watch is weak "I chose this" signal, not a score — soft positive target, low weight.</summary>
+    private const double PassiveWatchTarget = 6.8;
+
+    /// <inheritdoc cref="PassiveWatchTarget"/>
+    private const double PassiveWatchWeight = 0.2;
+
     public JobKind Kind => JobKind.DeltaSync;
 
     private record Cursor(bool Force);
@@ -100,13 +112,18 @@ public class DeltaSyncJobHandler(
                     $"Finding your next episodes · {done:N0}/{total:N0}", done, total));
         }
 
+        IReadOnlyList<TraktLibraryIngestor.IngestedRating> ratings = [];
         if (changes.Ratings)
         {
             await ReportAsync(82, "Pulling your ratings…");
-            var ratings = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.DeltaPoll, ct);
-            await ReportAsync(94, $"Ratings · {ratings:N0}", ratings, ratings);
+            var result = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.DeltaPoll, ct);
+            ratings = result.Changed;
+            await ReportAsync(94, $"Ratings · {result.Count:N0}", result.Count, result.Count);
         }
 
+        // The cursor BEFORE this sync moved it — everything the passive-watch observe below is
+        // allowed to consider must be newer than this instant.
+        var previousDeltaSyncAt = connection.LastDeltaSyncAt;
         connection.LastActivitiesJson = activitiesRaw;
         connection.LastDeltaSyncAt = DateTime.UtcNow;
         if (force)
@@ -137,24 +154,50 @@ public class DeltaSyncJobHandler(
         }
 
         // Passive watches nudge the residual head too — but ONLY on a normal delta, never on a force/
-        // full reconcile (that replays the whole library and would drown the head in one pass). Bounded
-        // to the 20 most-recently-first-synced watched titles the user hasn't rated (rated titles teach
-        // the head via the rating path), with a soft positive pseudo-label — a watch is weak "I chose
-        // this" signal, not an explicit score. The Take(20) cap keeps a normal delta cheap.
-        if (!force && (changes.Movies || changes.Shows))
+        // full reconcile (that replays the whole library and would drown the head in one pass), and
+        // only for rows FIRST SEEN SINCE THE PREVIOUS DELTA. The old bound was "the 20 most recently
+        // first-synced unrated watches", full stop: with a delta poll running every few minutes and a
+        // library that changes far more slowly, that re-taught the head the SAME 20 rows over and over
+        // — 224 updates on Dean's account, dominated by repeats of a handful of titles, which is a
+        // large part of how its bias ran away. A null cursor means this is the first delta after the
+        // full ingest, where every row was "first synced" by that ingest: there is no new information
+        // in the backlog, so nothing is observed.
+        if (!force && (changes.Movies || changes.Shows) && previousDeltaSyncAt is { } since)
         {
-            var recentUnratedWatched = await db.WatchedTitles
+            var newlyWatched = await db.WatchedTitles
                 .Where(w => w.AccountId == accountId
+                    && w.FirstSyncedAt > since
                     && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == w.TitleId
                         && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)))
                 .OrderByDescending(w => w.FirstSyncedAt)
-                .Take(20)
+                .Take(PassiveWatchBudget)
                 .Select(w => w.TitleId)
                 .ToListAsync(ct);
-            foreach (var titleId in recentUnratedWatched)
+            if (newlyWatched.Count > 0)
             {
-                await residual.ObserveAsync(accountId, titleId, 6.8, 0.2, ct);
+                await residual.ObserveBatchAsync(
+                    accountId,
+                    newlyWatched
+                        .Select(id => new OnlineResidualModel.ObservedEvent(id, PassiveWatchTarget, PassiveWatchWeight))
+                        .ToList(),
+                    ct);
             }
+        }
+
+        // Trakt-synced ratings are ~98% of the founder's ratings and have never reached the head —
+        // only the 2% made in-app ever did. Feeding them is the obvious fix and is deliberately OFF
+        // by default: the head was saturated by exactly this kind of bulk teaching once already, and
+        // the plan requires an offline replay dry run (see the /api/dev/residual-replay tool) before
+        // anyone turns it on. Target = the rating itself, weight 1.0 — the same contract as an in-app
+        // rating, because it IS the same event, observed later.
+        if (!force && ratings.Count > 0 && FeatureFlags.IsEnabled(configuration, FeatureFlags.ResidualObserveTraktRatings, fallback: false))
+        {
+            await residual.ObserveBatchAsync(
+                accountId,
+                ratings
+                    .Select(r => new OnlineResidualModel.ObservedEvent(r.TitleId, r.Rating, 1.0))
+                    .ToList(),
+                ct);
         }
 
         // New library data landed → regenerate the feed now, reusing the Active model (the seconds-long

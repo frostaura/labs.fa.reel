@@ -166,7 +166,8 @@ public class DislikeSteeringTests(PostgresFixture fixture)
         var residualModel = new OnlineResidualModel(
             db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance);
         var dislikes = new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions()));
-        return (new OnDemandScorer(db, featureBuilder, engine, residualModel, dislikes), dislikes, db);
+        var calibration = new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()));
+        return (new OnDemandScorer(db, featureBuilder, engine, residualModel, dislikes, calibration), dislikes, db);
     }
 
     private async Task<Guid> SeedAccountAsync()

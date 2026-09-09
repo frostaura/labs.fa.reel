@@ -59,8 +59,8 @@ public class FullIngestJobHandler(
 
         if (phase == "ratings")
         {
-            var count = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.Interactive, ct);
-            await SaveWithCursorAsync(job, new Cursor("progress"), 80, $"{count} ratings", ct);
+            var ratings = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.Interactive, ct);
+            await SaveWithCursorAsync(job, new Cursor("progress"), 80, $"{ratings.Count} ratings", ct);
             phase = "progress";
         }
 

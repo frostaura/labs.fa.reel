@@ -62,6 +62,7 @@ public sealed class FeedPaginator(
     CandidateRetriever candidateRetriever,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    RatingCalibrationService calibration,
     DislikeSignal dislikes,
     CandidateGenerator candidateGenerator,
     ITmdbClient tmdb,
@@ -139,10 +140,13 @@ public sealed class FeedPaginator(
         var minPredicted = await MinPredictedAsync(account.Id, ct);
         var exclude = req.ExcludeTitleIds.ToList();
         // Online residual head for this artifact, loaded once and added to every window score below.
-        var residual = await residualModel.LoadAsync(account.Id, artifact.Id, ct);
+        var residual = await residualModel.LoadAsync(account.Id, artifact, ct);
+        // The account's monotone predicted→actual map, applied after the residual so a paged-in card
+        // carries the same number the snapshot build would have given it.
+        var calibrator = await calibration.GetAsync(account.Id, ct);
 
         var pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-        var all = await ScoreWindowAsync(artifact, taste, pool, residual, now, ct);
+        var all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
         var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
@@ -181,7 +185,7 @@ public sealed class FeedPaginator(
             if (grew > 0)
             {
                 pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-                all = await ScoreWindowAsync(artifact, taste, pool, residual, now, ct);
+                all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
                 scored = all.Where(s => s.Predicted >= minPredicted).ToList();
             }
         }
@@ -609,7 +613,8 @@ public sealed class FeedPaginator(
     /// </summary>
     private async Task<List<Scored>> ScoreWindowAsync(
         ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Title> pool, OnlineResidualModel.ResidualState residual, DateTime now, CancellationToken ct)
+        IReadOnlyList<Title> pool, OnlineResidualModel.ResidualState residual, RatingCalibrator calibrator,
+        DateTime now, CancellationToken ct)
     {
         if (pool.Count == 0)
         {
@@ -636,10 +641,14 @@ public sealed class FeedPaginator(
 
         return scorable.Zip(rows, (title, row) =>
             {
-                var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[title.Id]);
+                // base + residual → calibrator → demotion: the same fixed order as the snapshot
+                // build and OnDemandScorer. The pre-calibration value and the map's delta ride along
+                // for the exposure log, and are never written to a column.
+                var adjusted = row.Score + OnlineResidualModel.Residual(residual, vectors[title.Id]);
+                var calibrated = calibrator.Calibrate(adjusted);
                 var predicted = DislikeSignal.ApplyDemotion(
-                    Math.Clamp((decimal)adjusted, 0m, 10m), demotions.GetValueOrDefault(title.Id));
-                return new Scored(title, row, predicted);
+                    (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
+                return new Scored(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
             })
             .ToList();
     }
@@ -1002,7 +1011,14 @@ public sealed class FeedPaginator(
     /// <summary>The rail's anchor as the why-lines need it: its name and its genres.</summary>
     private sealed record AnchorInfo(string Name, string[] Genres);
 
-    private sealed record Scored(Title Title, ScoredRow Row, decimal Predicted);
+    /// <summary>
+    /// One scored title in a page window. <paramref name="Predicted"/> is what the user sees;
+    /// <paramref name="BaseScore"/> is the pre-calibration value (base model + online residual) and
+    /// <paramref name="CalibrationDelta"/> how far the calibrator moved it — carried for the exposure
+    /// log the closed-loop work lands next, never persisted as a column.
+    /// </summary>
+    private sealed record Scored(
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
 
     /// <summary>A model-scored title after the LLM curation pass — Why is the agent's line, or null.</summary>
     private sealed record Curated(Scored Scored, string? Why);

@@ -40,6 +40,7 @@ public class BuildFeedJobHandler(
     TitleHydrator hydrator,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    RatingCalibrationService calibration,
     DislikeSignal dislikes,
     ISearchAgent agent,
     IMemoryCache cache,
@@ -109,7 +110,13 @@ public class BuildFeedJobHandler(
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         // The online residual head for this Active artifact, loaded once and folded into every score
         // (first-pass ranking + final predicted rating). Zero head ⇒ no change from the base model.
-        var residual = await residualModel.LoadAsync(accountId, artifact.Id, ct);
+        var residual = await residualModel.LoadAsync(accountId, artifact, ct);
+
+        // The monotone predicted→actual map, fit on this account's own closed loop. Applied to BOTH
+        // scoring passes: it cannot reorder the shortlist (it is monotone by construction), but a
+        // first pass on one scale and a final pass on another would be two different numbers for the
+        // same title, and the shortlist cut-off would be taken on a scale nothing else uses.
+        var calibrator = await calibration.GetAsync(accountId, ct);
         var minPredictedRaw = await db.ContentFilters
             .Where(f => f.AccountId == accountId && f.Kind == Domain.Filters.FilterKind.MinPredictedRating)
             .Select(f => f.Value)
@@ -141,7 +148,7 @@ public class BuildFeedJobHandler(
         var poolIds = pool.Where(t => poolVectors.ContainsKey(t.Id)).Select(t => t.Id).ToList();
         var firstPass = engine.Score(artifact.ArtifactBytes, poolIds.Select(id => poolVectors[id]).ToArray());
         var shortlistIds = poolIds.Zip(firstPass, (id, score) =>
-                (id, score: score + (float)OnlineResidualModel.Residual(residual.Weights, residual.Bias, poolVectors[id])))
+                (id, score: calibrator.Calibrate(score + OnlineResidualModel.Residual(residual, poolVectors[id]))))
             .OrderByDescending(x => x.score)
             .Take(ShortlistSize)
             .Select(x => x.id)
@@ -177,10 +184,15 @@ public class BuildFeedJobHandler(
             dislikeProfile, ordered.Select(t => t.Id).ToList(), ct);
         var candidates = ordered.Zip(scored, (title, row) =>
         {
-            var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, finalVectors[title.Id]);
+            // base + residual, then the calibrator, then the demotion — the fixed order every
+            // scoring surface uses. The pre-calibration value and the map's delta are carried on the
+            // candidate so the exposure log (Phase 2) can persist what the model said before the
+            // calibrator touched it, without re-deriving it from a number that has already moved.
+            var adjusted = row.Score + OnlineResidualModel.Residual(residual, finalVectors[title.Id]);
+            var calibrated = calibrator.Calibrate(adjusted);
             var predicted = DislikeSignal.ApplyDemotion(
-                Math.Clamp((decimal)adjusted, 0m, 10m), demotions.GetValueOrDefault(title.Id));
-            return new Candidate(title, row, predicted);
+                (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
+            return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
         }).ToList();
         await PersistScoresAsync(accountId, artifact.Id, candidates, now, ct);
 
@@ -260,7 +272,15 @@ public class BuildFeedJobHandler(
             snapshot.Id, accountId, candidates.Count);
     }
 
-    private sealed record Candidate(Title Title, ScoredRow Row, decimal Predicted);
+    /// <summary>
+    /// One scored candidate. <paramref name="Predicted"/> is what the user sees;
+    /// <paramref name="BaseScore"/> is the pre-calibration value (base model + online residual) and
+    /// <paramref name="CalibrationDelta"/> is how far the calibrator moved it. The latter two are
+    /// carried for the exposure log the closed-loop work lands next — deliberately NOT persisted as
+    /// columns on <c>TitleScore</c>, which stays the write-only serving cache it is documented to be.
+    /// </summary>
+    private sealed record Candidate(
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
 
     /// <summary>
     /// The counts assembly knows and the caller needs for <see cref="FeedBuildStat"/>. A mutable

@@ -281,7 +281,8 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
             new OnlineResidualModel(
                 db, featureBuilder, engine,
                 new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance),
-            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())));
+            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+            new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())));
         var handler = new BuildDigestJobHandler(
             db, new EligibilityQueryBuilder(db), scorer, sender, NullLogger<BuildDigestJobHandler>.Instance);
 

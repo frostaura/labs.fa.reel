@@ -557,6 +557,10 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
                 NullLogger<OnlineResidualModel>.Instance),
+            new RatingCalibrationService(
+                db,
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             new DislikeSignal(
                 db,
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(

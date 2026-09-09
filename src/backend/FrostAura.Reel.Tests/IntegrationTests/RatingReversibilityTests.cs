@@ -131,7 +131,7 @@ public class RatingReversibilityTests(PostgresFixture fixture)
         await using var db = fixture.CreateContext(new AccountContext());
         await ReactionEndpoints.RateAsync(
             mediaType, tmdbId, new ReactionEndpoints.RateRequest(rating),
-            db, accountId, FeedRefresh(db), Residual(db), CancellationToken.None);
+            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), CancellationToken.None);
     }
 
     private async Task UnrateAsync(Guid accountId, string mediaType, long tmdbId)
@@ -148,6 +148,9 @@ public class RatingReversibilityTests(PostgresFixture fixture)
 
     private static FeedRefreshCoordinator FeedRefresh(IReelDbContext db) =>
         new(db, NullLogger<FeedRefreshCoordinator>.Instance);
+
+    private static RatingCalibrationService Calibration(IReelDbContext db) =>
+        new(db, new MemoryCache(new MemoryCacheOptions()));
 
     private static OnlineResidualModel Residual(IReelDbContext db) =>
         new(db, new FeatureVectorBuilder(db), new FastTreeModelEngine(),

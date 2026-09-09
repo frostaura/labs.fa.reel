@@ -43,8 +43,8 @@ public static class ReactionEndpoints
         group.MapPost("/rating", async (
             string mediaType, long tmdbId, RateRequest request,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
-            OnlineResidualModel residual, CancellationToken ct) =>
-            await RateAsync(mediaType, tmdbId, request, db, accountContext.AccountId!.Value, feedRefresh, residual, ct));
+            OnlineResidualModel residual, RatingCalibrationService calibrator, CancellationToken ct) =>
+            await RateAsync(mediaType, tmdbId, request, db, accountContext.AccountId!.Value, feedRefresh, residual, calibrator, ct));
 
         group.MapDelete("/rating", async (
             string mediaType, long tmdbId,
@@ -294,7 +294,7 @@ public static class ReactionEndpoints
     public static async Task<IResult> RateAsync(
         string mediaType, long tmdbId, RateRequest request,
         IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
-        OnlineResidualModel residual, CancellationToken ct)
+        OnlineResidualModel residual, RatingCalibrationService calibrator, CancellationToken ct)
     {
         if (request.Rating is < 1 or > 10)
         {
@@ -389,6 +389,7 @@ public static class ReactionEndpoints
         // Teach the online residual head the fresh label FIRST (target = the rating), so the
         // rebuild enqueued next already scores with the updated correction.
         await residual.ObserveAsync(accountId, title.Id, request.Rating, 1.0, ct);
+        calibrator.Invalidate(accountId);
 
         // A fresh rating is the strongest taste signal there is — regenerate the feed now (reuses
         // the Active model) so the picks reflect it within seconds, not at the nightly build.

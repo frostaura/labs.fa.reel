@@ -59,7 +59,8 @@ public class OnlineResidualModelTests(PostgresFixture fixture)
             db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance);
         var scorer = new OnDemandScorer(
             db, featureBuilder, engine, residualModel,
-            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())));
+            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+            new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())));
         var now = DateTime.UtcNow;
 
         // Baseline: no events yet ⇒ residual 0 ⇒ pure base score.

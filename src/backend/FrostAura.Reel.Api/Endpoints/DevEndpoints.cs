@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
@@ -102,6 +103,61 @@ public static class DevEndpoints
             });
 
             return Results.Ok(account.ToSessionPayload());
+        });
+
+        // ── Residual-head dry run ───────────────────────────────────────────────────────
+        // The offline replay the plan requires BEFORE RESIDUAL_OBSERVE_TRAKT_RATINGS is turned on:
+        // it runs the account's whole rating history through the v2 head in order, writing nothing,
+        // and reports where the head lands. Read `residual.finalBias` and `residual.weightsAtClamp`
+        // first — a bias near zero with nothing on the clamp means the head is learning shape rather
+        // than level, which is the only condition under which bulk-teaching it is safe. The same
+        // response carries the fitted calibrator, so the two mechanisms can be compared on one page:
+        //
+        //   curl -s localhost:5080/api/dev/residual-replay | jq
+        //
+        // Optional ?slug= picks an account when more than one is linked; otherwise TRAKT_DEV_PROFILE
+        // and then "the only account" are tried, in that order.
+        app.MapGet("/api/dev/residual-replay", async (
+            string? slug,
+            IReelDbContext db,
+            ResidualReplay replay,
+            RatingCalibrationService calibration,
+            IConfiguration configuration,
+            CancellationToken ct) =>
+        {
+            var wanted = slug ?? configuration["TRAKT_DEV_PROFILE"];
+            var accounts = db.Accounts.IgnoreQueryFilters();
+            var account = wanted is null
+                ? await accounts.OrderBy(a => a.CreatedAt).FirstOrDefaultAsync(ct)
+                : await accounts.FirstOrDefaultAsync(a => a.TraktUserSlug == wanted || a.TraktUsername == wanted, ct);
+            if (account is null)
+            {
+                return Results.NotFound(new { error = "No account to replay." });
+            }
+
+            var report = await replay.RunAsync(account.Id, sampleWeight: 1.0, ct);
+            var pairs = await calibration.LoadPairsAsync(account.Id, ct);
+            var calibrator = RatingCalibrator.Fit(pairs);
+
+            return Results.Ok(new
+            {
+                account = account.TraktUserSlug,
+                residual = report,
+                calibration = new
+                {
+                    kind = calibrator.Kind.ToString(),
+                    pairs = pairs.Count,
+                    // The plan's Phase 0 gate: MAE over the closed-loop pairs must fall toward ≤ 1.2.
+                    maeBefore = pairs.Count == 0 ? 0d : pairs.Average(p => Math.Abs(p.Predicted - p.Actual)),
+                    maeAfter = pairs.Count == 0 ? 0d : pairs.Average(p => Math.Abs(calibrator.Calibrate(p.Predicted) - p.Actual)),
+                    biasBefore = pairs.Count == 0 ? 0d : pairs.Average(p => p.Predicted - p.Actual),
+                    biasAfter = pairs.Count == 0 ? 0d : pairs.Average(p => calibrator.Calibrate(p.Predicted) - p.Actual),
+                    // A quick look at the map itself, so the shape is legible without a chart.
+                    curve = Enumerable.Range(0, 11)
+                        .Select(i => 5d + (i * 0.5d))
+                        .Select(x => new { predicted = x, calibrated = Math.Round(calibrator.Calibrate(x), 3) }),
+                },
+            });
         });
     }
 }
