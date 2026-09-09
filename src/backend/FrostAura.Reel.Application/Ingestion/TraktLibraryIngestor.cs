@@ -29,13 +29,28 @@ public class TraktLibraryIngestor(
 
     /// <summary>
     /// What a ratings ingest did. <paramref name="Count"/> is every row Trakt returned (the number the
-    /// progress copy has always shown); <paramref name="Changed"/> is the far smaller set that was
+    /// progress copy has always shown); <paramref name="Observed"/> is the far smaller set that was
     /// actually new or different — the only rows carrying information a learner has not already seen.
     /// Season and episode ratings are excluded: they are not title-level labels.
+    /// <para><paramref name="Added"/> and <paramref name="Updated"/> partition <paramref name="Observed"/>:
+    /// a rating Reel had never seen for that title vs one whose value moved. The post-sync moment says
+    /// "pulled 12 NEW ratings", and a re-rate is genuinely a different sentence from a first rating —
+    /// so the two are counted apart rather than summed at the call site.</para>
     /// </summary>
-    public record RatingIngestResult(int Count, IReadOnlyList<IngestedRating> Changed);
+    public record RatingIngestResult(int Count, int Added, int Updated, IReadOnlyList<IngestedRating> Observed);
 
-    public async Task<int> IngestMoviesAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
+    /// <summary>
+    /// What a watched-library ingest did. <paramref name="Count"/> is the size of Trakt's snapshot;
+    /// <paramref name="Added"/> is how many of those rows Reel had never seen — the only number that
+    /// answers "what arrived in this sync". A full paginated walk returns the whole library every
+    /// time, so <paramref name="Count"/> is never the answer to that question.
+    /// </summary>
+    public record WatchIngestResult(int Count, int Added);
+
+    /// <inheritdoc cref="WatchIngestResult"/>
+    public record ShowIngestResult(int Shows, int Episodes, int Added);
+
+    public async Task<WatchIngestResult> IngestMoviesAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
     {
         var watchedMovies = await trakt.GetWatchedMoviesAsync(token, priority, ct);
         events.Publish(accountId, PipelineEventTypes.IngestProgress, Progress("movies", watchedMovies.Count));
@@ -45,19 +60,23 @@ public class TraktLibraryIngestor(
         var watchedByTitleId = await LoadWatchedMapAsync(accountId, ct);
 
         var now = DateTime.UtcNow;
+        var added = 0;
         foreach (var item in watchedMovies)
         {
             var title = ResolveOrAddTitle(titlesByTraktId, titlesByTmdbId, MediaType.Movie, item.Movie.Ids.Trakt, item.Movie.Ids.Tmdb, now);
             IngestMapper.ApplyMovie(title, item.Movie);
-            UpsertWatched(watchedByTitleId, accountId, title.Id, item.Plays, item.LastWatchedAt,
-                IngestMapper.IsFullyWatched(MediaType.Movie, item.Plays, 0, null), now);
+            if (UpsertWatched(watchedByTitleId, accountId, title.Id, item.Plays, item.LastWatchedAt,
+                    IngestMapper.IsFullyWatched(MediaType.Movie, item.Plays, 0, null), now))
+            {
+                added++;
+            }
         }
 
-        logger.LogInformation("Ingested {Count} watched movies for {AccountId}.", watchedMovies.Count, accountId);
-        return watchedMovies.Count;
+        logger.LogInformation("Ingested {Count} watched movies for {AccountId} ({Added} new).", watchedMovies.Count, accountId, added);
+        return new WatchIngestResult(watchedMovies.Count, added);
     }
 
-    public async Task<(int Shows, int Episodes)> IngestShowsAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
+    public async Task<ShowIngestResult> IngestShowsAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
     {
         var watchedShows = await trakt.GetWatchedShowsAsync(token, priority, ct);
         var episodeCount = watchedShows.Sum(IngestMapper.CountDistinctWatchedEpisodes);
@@ -72,6 +91,7 @@ public class TraktLibraryIngestor(
             .ToDictionaryAsync(p => p.TitleId, ct);
 
         var now = DateTime.UtcNow;
+        var added = 0;
         // /sync/watched/shows is a complete snapshot, so the set of title ids it returns is the
         // current truth. Any progress row whose show is absent here had its history removed on
         // Trakt — reconciled away below so it leaves Continue Watching.
@@ -84,7 +104,10 @@ public class TraktLibraryIngestor(
 
             var distinctEpisodes = IngestMapper.CountDistinctWatchedEpisodes(item);
             var fullyWatched = IngestMapper.IsFullyWatched(MediaType.Show, item.Plays, distinctEpisodes, title.AiredEpisodes);
-            UpsertWatched(watchedByTitleId, accountId, title.Id, item.Plays, item.LastWatchedAt, fullyWatched, now);
+            if (UpsertWatched(watchedByTitleId, accountId, title.Id, item.Plays, item.LastWatchedAt, fullyWatched, now))
+            {
+                added++;
+            }
 
             var aired = title.AiredEpisodes ?? 0;
             var completion = aired > 0 ? Math.Clamp((decimal)distinctEpisodes / aired, 0m, 1m) : 0m;
@@ -125,9 +148,9 @@ public class TraktLibraryIngestor(
         }
 
         logger.LogInformation(
-            "Ingested {Shows} watched shows ({Episodes} episodes) for {AccountId}; reconciled away {Removed} progress rows no longer in Trakt history.",
-            watchedShows.Count, episodeCount, accountId, removedFromHistory.Count);
-        return (watchedShows.Count, episodeCount);
+            "Ingested {Shows} watched shows ({Episodes} episodes, {Added} new) for {AccountId}; reconciled away {Removed} progress rows no longer in Trakt history.",
+            watchedShows.Count, episodeCount, added, accountId, removedFromHistory.Count);
+        return new ShowIngestResult(watchedShows.Count, episodeCount, added);
     }
 
     public async Task<RatingIngestResult> IngestRatingsAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
@@ -145,6 +168,8 @@ public class TraktLibraryIngestor(
 
         var now = DateTime.UtcNow;
         var changed = new List<IngestedRating>();
+        var addedRatings = 0;
+        var updatedRatings = 0;
         foreach (var item in ratings)
         {
             Title title;
@@ -174,6 +199,7 @@ public class TraktLibraryIngestor(
             }
 
             var key = (subjectType, title.Id, season, episode);
+            var isNewRow = !existing.ContainsKey(key);
             if (!existing.TryGetValue(key, out var rating))
             {
                 rating = new UserRating
@@ -201,6 +227,18 @@ public class TraktLibraryIngestor(
                 && rating.Rating != item.Rating)
             {
                 changed.Add(new IngestedRating(title.Id, item.Rating));
+
+                // A brand-new row is "12 new ratings"; a row whose value moved is a re-rate. Both
+                // teach the head, but only one of them is what the post-sync moment counts, so the
+                // partition is made here — the one place that can still tell them apart.
+                if (isNewRow)
+                {
+                    addedRatings++;
+                }
+                else
+                {
+                    updatedRatings++;
+                }
             }
 
             rating.Rating = item.Rating;
@@ -216,8 +254,9 @@ public class TraktLibraryIngestor(
         }
 
         logger.LogInformation(
-            "Ingested {Count} ratings for {AccountId} ({Changed} new or changed).", ratings.Count, accountId, changed.Count);
-        return new RatingIngestResult(ratings.Count, changed);
+            "Ingested {Count} ratings for {AccountId} ({Added} new, {Updated} changed).",
+            ratings.Count, accountId, addedRatings, updatedRatings);
+        return new RatingIngestResult(ratings.Count, addedRatings, updatedRatings, changed);
     }
 
     /// <summary>
@@ -340,20 +379,24 @@ public class TraktLibraryIngestor(
     private async Task<Dictionary<Guid, WatchedTitle>> LoadWatchedMapAsync(Guid accountId, CancellationToken ct) =>
         await db.WatchedTitles.Where(w => w.AccountId == accountId).ToDictionaryAsync(w => w.TitleId, ct);
 
-    private void UpsertWatched(
+    /// <summary>Returns true when this call INSERTED the row — i.e. the watch is new to Reel.</summary>
+    private bool UpsertWatched(
         Dictionary<Guid, WatchedTitle> map, Guid accountId, Guid titleId,
         int plays, DateTime? lastWatchedAt, bool isFullyWatched, DateTime now)
     {
+        var added = false;
         if (!map.TryGetValue(titleId, out var watched))
         {
             watched = new WatchedTitle { Id = Guid.NewGuid(), AccountId = accountId, TitleId = titleId, FirstSyncedAt = now };
             map[titleId] = watched;
             db.WatchedTitles.Add(watched);
+            added = true;
         }
 
         watched.Plays = plays;
         watched.LastWatchedAt = lastWatchedAt;
         watched.IsFullyWatched = isFullyWatched;
         watched.UpdatedAt = now;
+        return added;
     }
 }

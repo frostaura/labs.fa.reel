@@ -30,6 +30,7 @@ public class DeltaSyncJobHandler(
     FeedRefreshCoordinator feedRefresh,
     ManagedListReconciler managedList,
     OnlineResidualModel residual,
+    RetrainGate retrainGate,
     IPipelineEventHub events,
     IConfiguration configuration,
     ILogger<DeltaSyncJobHandler> logger) : IJobHandler
@@ -92,17 +93,21 @@ public class DeltaSyncJobHandler(
         }
         var changes = DiffActivities(connection.LastActivitiesJson, activitiesRaw, force);
 
+        var watchedAdded = 0;
         if (changes.Movies)
         {
             await ReportAsync(12, "Pulling your watched movies…");
             var movies = await ingestor.IngestMoviesAsync(accountId, token, RatePriority.DeltaPoll, ct);
-            await ReportAsync(32, $"Watched movies · {movies:N0}", movies, movies);
+            watchedAdded += movies.Added;
+            await ReportAsync(32, $"Watched movies · {movies.Count:N0}", movies.Count, movies.Count);
         }
 
         if (changes.Shows)
         {
             await ReportAsync(38, "Pulling your watched shows…");
-            var (shows, episodes) = await ingestor.IngestShowsAsync(accountId, token, RatePriority.DeltaPoll, ct);
+            var showResult = await ingestor.IngestShowsAsync(accountId, token, RatePriority.DeltaPoll, ct);
+            var (shows, episodes) = (showResult.Shows, showResult.Episodes);
+            watchedAdded += showResult.Added;
             await ReportAsync(60, $"Watched shows · {shows:N0} · {episodes:N0} episodes", shows, shows);
 
             // Continue-watching enrichment is a per-show Trakt call, so it carries a genuine x / y.
@@ -113,11 +118,15 @@ public class DeltaSyncJobHandler(
         }
 
         IReadOnlyList<TraktLibraryIngestor.IngestedRating> ratings = [];
+        var ratingsAdded = 0;
+        var ratingsChanged = 0;
         if (changes.Ratings)
         {
             await ReportAsync(82, "Pulling your ratings…");
             var result = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.DeltaPoll, ct);
-            ratings = result.Changed;
+            ratings = result.Observed;
+            ratingsAdded = result.Added;
+            ratingsChanged = result.Updated;
             await ReportAsync(94, $"Ratings · {result.Count:N0}", result.Count, result.Count);
         }
 
@@ -208,10 +217,24 @@ public class DeltaSyncJobHandler(
             await feedRefresh.RequestRebuildAsync(accountId, force ? "reconcile" : "delta-sync", ct);
         }
 
+        // What the sync actually did, in the user's terms. `picksChanged` is deliberately null here:
+        // the rebuild above was ENQUEUED, not awaited (a sync that blocked on a feed build would
+        // stall the 5-minute poll behind a seconds-to-minutes job), so the number arrives later on
+        // the build's own feed-ready frame and the client joins the two.
+        var (retrainQueued, retrainAt) = await retrainGate.OutlookAsync(accountId, DateTime.UtcNow, ct);
+        var summary = new SyncSummary(
+            RatingsAdded: ratingsAdded,
+            RatingsChanged: ratingsChanged,
+            WatchedAdded: watchedAdded,
+            RetrainQueued: retrainQueued,
+            RetrainAt: retrainAt,
+            PicksChanged: null);
+
         job.ProgressPct = 100;
-        job.ProgressMessage = changes.Any
-            ? $"synced: {(changes.Movies ? "movies " : "")}{(changes.Shows ? "shows " : "")}{(changes.Ratings ? "ratings" : "")}".Trim()
-            : "Already up to date";
+        // The persisted message is the SSE frame's sentence, not a different one: the header pill
+        // polls this every 5 seconds as its fallback, and two renderers meant the copy changed under
+        // the user whenever the poll overtook the frame.
+        job.ProgressMessage = SyncSummaryCopy.Describe(summary);
         await db.SaveChangesAsync(ct);
 
         if (changes.Any)
@@ -219,6 +242,12 @@ public class DeltaSyncJobHandler(
             events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
             {
                 ["kind"] = force ? "reconcile" : "delta",
+                ["ratingsAdded"] = summary.RatingsAdded,
+                ["ratingsChanged"] = summary.RatingsChanged,
+                ["watchedAdded"] = summary.WatchedAdded,
+                ["retrainQueued"] = summary.RetrainQueued,
+                ["retrainAt"] = summary.RetrainAt,
+                ["picksChanged"] = summary.PicksChanged,
             });
         }
 
