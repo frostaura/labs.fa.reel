@@ -76,7 +76,8 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         var candidateGenerator = new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance);
         var agent = new UnavailableSearchAgent();
         var paginator = new FeedPaginator(
-            db, featureBuilder, retriever, engine, residual, new DislikeSignal(db, cache),
+            db, featureBuilder, retriever, engine, residual,
+            new RatingCalibrationService(db, cache), new DislikeSignal(db, cache),
             candidateGenerator, tmdb, agent, cache, NullLogger<FeedPaginator>.Instance);
 
         var req = new MoreFeedRequest(FeedRowContext.Hero, AnchorTitleId: null, Genre: null, ExcludeTitleIds: [], Limit: 12, MediaType: media);

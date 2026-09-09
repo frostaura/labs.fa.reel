@@ -284,6 +284,15 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
         // One residual head per account (upserted on every event); unique so the online update
         // has a single row to load-modify-write against.
+        // The online residual head is read-modify-write (load weights → SGD step → save), so two
+        // concurrent observes for one account would otherwise have the loser's step silently
+        // overwritten — the event lost, with nothing to see. The natural fix is a row version on
+        // Postgres's xmin system column (e.Property<uint>("xmin").IsRowVersion()), which needs no
+        // DDL; it is NOT here because it is still a MODEL change, and `ef migrations
+        // has-pending-model-changes` goes dirty the moment it is declared — this branch is not the
+        // one that owns the Phase 0 migration. OnlineResidualModel enforces the same guarantee in
+        // application code instead: it writes through a guarded UPDATE predicated on the UpdateCount
+        // it read, and treats "no rows affected" as the conflict. Move it here when a migration lands.
         modelBuilder.Entity<OnlineModelState>(e => e.HasIndex(s => s.AccountId).IsUnique());
 
         // ── Feed ───────────────────────────────────────────────────────────────────────────

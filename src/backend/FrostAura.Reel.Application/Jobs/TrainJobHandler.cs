@@ -98,6 +98,14 @@ public class TrainJobHandler(
 
         var trained = engine.Train(matrix, hyperparams);
 
+        // Per-feature μ/σ over the very matrix this artifact was trained on. The FastTree base does
+        // not need them (trees are scale-invariant); the LINEAR online residual head does, because
+        // the raw vector's ‖x‖² is almost entirely runtimeMinutes and every other slot would learn at
+        // a rate set by a number unrelated to it. Persisted inside the existing FeatureSchemaJson
+        // document rather than as a column, so this carries no migration and no schema-version bump —
+        // the computed FeatureSchemaVersion column reads 'version', which is untouched.
+        var standardizer = FeatureStandardizer.FromRows(matrix.Features);
+
         var latestRun = await db.TrainingRuns
             .Where(r => r.AccountId == accountId)
             .OrderByDescending(r => r.StartedAt)
@@ -121,7 +129,12 @@ public class TrainJobHandler(
             Version = version + 1,
             Algo = "FastTree",
             ArtifactBytes = trained.ArtifactBytes,
-            FeatureSchemaJson = JsonSerializer.Serialize(new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
+            FeatureSchemaJson = JsonSerializer.Serialize(new
+            {
+                version = FeatureSchema.Version,
+                names = FeatureSchema.AllNames(),
+                stats = standardizer.ToPayload(),
+            }),
             TrainingRunId = latestRun?.Id ?? Guid.Empty,
             Status = ArtifactStatus.Active,
             TrainedAt = now,

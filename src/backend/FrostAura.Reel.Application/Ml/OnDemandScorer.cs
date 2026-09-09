@@ -12,16 +12,18 @@ namespace FrostAura.Reel.Application.Ml;
 /// Loads the account's Active artifact, scores through the engine's per-model cache (so the model
 /// is deserialized once per artifact, not once per request), builds taste state once, vectorises,
 /// and upserts <see cref="TitleScore"/>. Serving uses <c>asOf = now</c>; leakage-clean because
-/// TitleScore is write-only and never read by training/eval. The final score is base + online
-/// residual − the <see cref="DislikeSignal"/> demotion, so declined reasons steer every surface
-/// that scores through here (title page, search badges, Ask Reel's blend) without a retrain.
+/// TitleScore is write-only and never read by training/eval. The final score is
+/// <c>Calibrate(base + online residual) − the <see cref="DislikeSignal"/> demotion</c> — the same
+/// order as every other scoring surface, so declined reasons steer the title page, search badges and
+/// Ask Reel's blend without a retrain, and the number they steer is on the account's real scale.
 /// </summary>
 public sealed class OnDemandScorer(
     IReelDbContext db,
     FeatureVectorBuilder featureBuilder,
     IModelEngine engine,
     OnlineResidualModel residualModel,
-    DislikeSignal dislikes)
+    DislikeSignal dislikes,
+    RatingCalibrationService calibration)
 {
     /// <summary>
     /// Predicts the user's rating for each title and persists it. Returns titleId → predicted
@@ -67,7 +69,12 @@ public sealed class OnDemandScorer(
 
         // Fold in the online residual head (loaded once): base + learned correction, then clamp.
         // Zero head ⇒ no change, so this is a strict no-op until the account has logged events.
-        var residual = await residualModel.LoadAsync(accountId, artifact.Id, ct);
+        var residual = await residualModel.LoadAsync(accountId, artifact, ct);
+
+        // The monotone predicted→actual map, fit on this account's own closed loop and applied LAST
+        // (before the demotion) wherever a number reaches a human. Identity until the account has
+        // pairs, so a new account is unaffected.
+        var calibrator = await calibration.GetAsync(accountId, ct);
 
         // The reason-weighted dislike demotion, from the ~10-min-cached profile (reaction
         // endpoints evict it on create/revoke, so a fresh dislike bites immediately).
@@ -82,8 +89,8 @@ public sealed class OnDemandScorer(
         for (var i = 0; i < orderedIds.Count; i++)
         {
             var titleId = orderedIds[i];
-            var adjusted = scores[i] + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[titleId]);
-            var predicted = Math.Round(Math.Clamp((decimal)adjusted, 0m, 10m), 2);
+            var adjusted = scores[i] + OnlineResidualModel.Residual(residual, vectors[titleId]);
+            var predicted = Math.Round((decimal)calibrator.Calibrate(adjusted), 2);
             predicted = Math.Round(
                 DislikeSignal.ApplyDemotion(predicted, demotions.GetValueOrDefault(titleId)), 2);
             result[titleId] = predicted;
