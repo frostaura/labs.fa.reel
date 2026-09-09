@@ -4,7 +4,7 @@ using FrostAura.Reel.Tests.IntegrationTests;
 namespace FrostAura.Reel.Tests.Harness;
 
 /// <summary>
-/// The quarantine is a claim about five named tests, so it is pinned like any other contract:
+/// The quarantine is a claim about three named tests, so it is pinned like any other contract:
 /// the set may only change deliberately, and the marker may never skip by default. Offline —
 /// pure reflection, no database.
 /// <para>
@@ -13,6 +13,16 @@ namespace FrostAura.Reel.Tests.Harness;
 /// GLOBAL sweep counted as a total, so other classes' seeded titles inflated it) and both the
 /// handler's ordering and the assertion's grain were fixed. Removing a row is the goal; removing
 /// one without fixing what made it red is the thing this pin exists to prevent.
+/// </para>
+/// <para>
+/// It was five until 2026-09-10, when both <c>CandidateRetrieverTests</c> rows left, again on
+/// their merits. Their cause was named right there in the quarantine comment — the catalogue is
+/// GLOBAL, so a sibling class's popular title displaced the popularity head and a sibling's
+/// embedding became a nearer ANN neighbour than the deep cut the test plants — and it is now
+/// fixed at the cause: that class stamps a synthetic genre on every title it seeds and gives its
+/// account a matching IncludeGenre allowlist, so the eligibility lane both arms compose contains
+/// its own rows and nothing else. Not one assertion changed. The three that remain are search
+/// surfaces whose pools are not scoped this way; the same fix is the obvious route out for them.
 /// </para>
 /// </summary>
 public class LocalFlakyQuarantineTests
@@ -23,8 +33,6 @@ public class LocalFlakyQuarantineTests
     /// </summary>
     private static readonly string[] Quarantined =
     [
-        "CandidateRetrieverTests.Cold_start_with_no_loved_centroid_falls_back_to_pure_popularity",
-        "CandidateRetrieverTests.RetrieveSimilar_surfaces_unseen_neighbours_and_excludes_the_anchor_and_seen_titles",
         "LexicalSearchIntegrationTests.Keyword_exclusion_filter_removes_titles_by_tmdb_keyword",
         "LiveSearchExpansionTests.A_director_query_returns_the_filmography_including_watched_titles",
         "LiveSearchExpansionTests.Streams_unseen_matches_excludes_seen_and_caches_the_fetch",
@@ -42,7 +50,7 @@ public class LocalFlakyQuarantineTests
     }
 
     [Fact]
-    public void Exactly_the_five_known_local_failures_are_quarantined()
+    public void Exactly_the_three_known_local_failures_are_quarantined()
     {
         var marked = typeof(PostgresFixture).Assembly.GetTypes()
             .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))

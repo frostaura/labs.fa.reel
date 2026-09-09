@@ -28,6 +28,15 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class RateSuggestionsTests(PostgresFixture fixture)
 {
+    /// <summary>
+    /// A synthetic genre stamped on every title this instance seeds, with a matching IncludeGenre
+    /// allowlist row on its account. The catalogue is GLOBAL and shared by every class in the
+    /// postgres collection, so without this the rate grid's 30 slots are contested by whatever the
+    /// sibling classes happened to seed. xUnit builds one instance per test, so the scope is unique
+    /// per test and the assertions are about this test's rows and nothing else.
+    /// </summary>
+    private readonly string _scope = $"ratescope{Guid.NewGuid():N}";
+
     [Fact]
     public async Task Watched_but_unrated_titles_come_first_and_the_popularity_pool_only_fills_behind_them()
     {
@@ -38,14 +47,16 @@ public class RateSuggestionsTests(PostgresFixture fixture)
 
         var accountId = await SeedAccountAsync();
 
-        // Watched, never rated — the whole point of the screen. Deliberately the LEAST popular
-        // rows, so ranking them first cannot be an accident of the old popularity order.
+        // Watched, never rated — the whole point of the screen. Deliberately LESS popular than the
+        // unwatched row below, so ranking them first cannot be an accident of the old popularity
+        // order. (All of them sit at the bottom of the global order; see SeedTitleAsync.)
         var watchedA = await SeedTitleAsync(t => t.TmdbPopularity = 0.01m);
         var watchedB = await SeedTitleAsync(t => t.TmdbPopularity = 0.01m);
-        // Never watched, wildly popular: under the old query these were the entire answer.
-        var popular = await SeedTitleAsync(t => { t.TmdbPopularity = 9_999m; t.TmdbVoteCount = 50_000; });
+        // Never watched, the most popular row in this test's scope: under the old query rows like
+        // this one were the entire answer.
+        var popular = await SeedTitleAsync(t => { t.TmdbPopularity = 0.9m; t.TmdbVoteCount = 50_000; });
         // Watched AND rated — already told us, must not be asked again.
-        var alreadyRated = await SeedTitleAsync(t => t.TmdbPopularity = 5_000m);
+        var alreadyRated = await SeedTitleAsync(t => t.TmdbPopularity = 0.7m);
 
         await SeedWatchedAsync(accountId, watchedA, DateTime.UtcNow.AddDays(-2));
         await SeedWatchedAsync(accountId, watchedB, DateTime.UtcNow.AddDays(-9));
@@ -153,13 +164,13 @@ public class RateSuggestionsTests(PostgresFixture fixture)
         var popularHorror = await SeedTitleAsync(t =>
         {
             t.Genres = ["horror"];
-            t.TmdbPopularity = 9_999m;
+            t.TmdbPopularity = 0.9m;
             t.TmdbVoteCount = 50_000;
         });
         var popularDrama = await SeedTitleAsync(t =>
         {
             t.Genres = ["drama"];
-            t.TmdbPopularity = 9_998m;
+            t.TmdbPopularity = 0.8m;
             t.TmdbVoteCount = 50_000;
         });
 
@@ -232,6 +243,14 @@ public class RateSuggestionsTests(PostgresFixture fixture)
             PipelineStageChangedAt = DateTime.UtcNow,
         };
         db.Accounts.Add(account);
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            Kind = FilterKind.IncludeGenre,
+            Value = _scope,
+            CreatedAt = DateTime.UtcNow,
+        });
         await db.SaveChangesAsync();
         return account.Id;
     }
@@ -252,10 +271,14 @@ public class RateSuggestionsTests(PostgresFixture fixture)
             // Above the popularity fallback's vote gate by default, so a test that means to
             // exercise that half does not have to say so.
             TmdbVoteCount = 5_000,
-            TmdbPopularity = 1m,
+            // Everything this class seeds sits at the very bottom of the GLOBAL popularity order
+            // on purpose: CandidateRetrieverTests asserts on the catalogue's popularity head.
+            TmdbPopularity = 0.01m,
             CreatedAt = DateTime.UtcNow,
         };
         configure(title);
+        // Appended AFTER configure so a test that sets its own genres still lands in scope.
+        title.Genres = [.. title.Genres, _scope];
         db.Titles.Add(title);
         await db.SaveChangesAsync();
         return title.Id;
