@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useDispatch, useSelector } from "react-redux";
 import { Link } from "react-router-dom";
 import { X } from "lucide-react";
@@ -20,12 +21,44 @@ const DISMISS_AFTER_MS = 9000;
  * product being wrong by two or three points, and dressing a miss in the same green as a hit is how
  * a scorecard stops meaning anything. Over-promises get the warning edge, hits get the success one,
  * and the wording carries the rest.</p>
+ *
+ * <p><b>Why a portal, attached lazily.</b> The commonest place to rate is the title detail modal,
+ * which is a Radix dialog — and Radix marks every other child of <c>body</c> <c>aria-hidden</c>
+ * while it is open. Rendered inside the layout tree, this live region would be announced to nobody
+ * at exactly the moment it has something to say. So the toast portals to its own host, and that
+ * host is appended to <c>body</c> only once a verdict exists — after the dialog has already taken
+ * its snapshot of what to hide, which is why the toast stays in the accessibility tree. Being
+ * reachable by role in a test is a side effect; the accessibility is the reason.</p>
  */
 export default function VerdictToast() {
   const verdict = useSelector((state: RootState) => state.verdict.current);
   const dispatch = useDispatch<AppDispatch>();
-
   const shownKey = verdict?.shownKey;
+  const hasVerdict = verdict != null;
+
+  // The host element is CREATED once and ATTACHED only while a verdict is on screen. Both halves
+  // matter, for different reasons.
+  //
+  // Radix's scroll lock sets `pointer-events: none` on <body> and re-enables it only inside the
+  // dialog, so a toast portalled to <body> renders but cannot be clicked while the title modal is
+  // open — which is the commonest place to rate, and therefore the commonest place this toast
+  // appears. Re-enabling pointer events on the host is what makes the dismiss button and the
+  // track-record link usable at all.
+  const [host] = useState<HTMLElement | null>(() => {
+    if (typeof document === "undefined") return null;
+    const element = document.createElement("div");
+    element.style.pointerEvents = "auto";
+    return element;
+  });
+
+  useEffect(() => {
+    if (!host || !hasVerdict) return;
+    document.body.appendChild(host);
+    return () => {
+      host.remove();
+    };
+  }, [host, hasVerdict]);
+
   useEffect(() => {
     if (shownKey == null) return;
     const timer = window.setTimeout(() => dispatch(verdictDismissed()), DISMISS_AFTER_MS);
@@ -33,12 +66,12 @@ export default function VerdictToast() {
     // Keyed on shownKey so a second rating restarts the clock instead of inheriting the first's.
   }, [shownKey, dispatch]);
 
-  if (!verdict) return null;
+  if (!verdict || !host) return null;
 
   const band = verdictBand(verdict.delta);
   const missed = band === "over" || band === "under";
 
-  return (
+  return createPortal(
     <div
       role="status"
       aria-live="polite"
@@ -65,6 +98,7 @@ export default function VerdictToast() {
       >
         See the track record
       </Link>
-    </div>
+    </div>,
+    host
   );
 }
