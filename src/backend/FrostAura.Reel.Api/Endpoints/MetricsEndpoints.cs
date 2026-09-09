@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ml;
@@ -18,7 +19,12 @@ public static class MetricsEndpoints
     {
         var group = app.MapGroup("/api/metrics").RequireAccount();
 
-        group.MapGet("/model", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+        group.MapGet("/model", async (
+            IReelDbContext db,
+            IAccountContext accountContext,
+            RetroLoopQuery retroLoop,
+            IConfiguration configuration,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
 
@@ -39,6 +45,14 @@ public static class MetricsEndpoints
                 .Select(r => evals.GetValueOrDefault(r.Id))
                 .FirstOrDefault(e => e is not null);
 
+            // The kill criterion is a founder decision, not a constant: it was hard-coded to 3 while
+            // the ledger ran past 12, so the page kept rendering "iteration 12 of 3" without ever
+            // saying the criterion had been blown. Read it from config, and state the breach.
+            var killCriterionAt = configuration.GetValue("KILL_CRITERION_ITERATIONS", 3);
+            var iterationsUsed = runs.Select(r => r.Iteration).DefaultIfEmpty(0).Max();
+
+            var retro = await retroLoop.ComputeAsync(DateTime.UtcNow, ct);
+
             return Results.Ok(new
             {
                 gate = new
@@ -46,9 +60,11 @@ public static class MetricsEndpoints
                     threshold = 0.20m,
                     passed = latestEval?.PassedGate ?? false,
                     latestLift = latestEval?.RelativeImprovement,
-                    iterationsUsed = runs.Select(r => r.Iteration).DefaultIfEmpty(0).Max(),
-                    killCriterionAt = 3,
+                    iterationsUsed,
+                    killCriterionAt,
+                    criterionExceeded = iterationsUsed > killCriterionAt,
                 },
+                efficiency = Efficiency(retro),
                 activeArtifact,
                 runs = runs.Select(r =>
                 {
@@ -147,4 +163,67 @@ public static class MetricsEndpoints
             return Results.Ok(new { jobs, outbox, apiUsage = usage });
         });
     }
+
+    /// <summary>
+    /// The founder-visible track record. Rounding happens HERE and nowhere else — the query itself
+    /// keeps full precision so the numbers can be re-derived, and the page gets the digits a human
+    /// can read. Nothing is softened: a negative delta or a near-zero correlation renders as-is.
+    /// </summary>
+    private static object Efficiency(RetroLoopReport retro) => new
+    {
+        computedAt = retro.ComputedAt,
+        conversions = new
+        {
+            count = retro.Conversions.Count,
+            ratedCount = retro.Conversions.RatedCount,
+            scoredCount = retro.Conversions.ScoredCount,
+            accuracy = Accuracy(retro.Conversions.Accuracy),
+            ratingDistribution = retro.Conversions.RatingDistribution
+                .Select(kv => new { rating = kv.Key, count = kv.Value }),
+            worstMisses = retro.Conversions.WorstMisses.Select(Miss),
+        },
+        predictedVsActual = new
+        {
+            pairs = retro.PredictedVsActualPairs,
+            accuracy = Accuracy(retro.PredictedVsActual),
+            worstMisses = retro.PredictedVsActualWorstMisses.Select(Miss),
+        },
+        counterfactual = retro.Counterfactual.Select(w => new
+        {
+            window = w.Window,
+            days = w.Days,
+            viaReelCount = w.ViaReelCount,
+            viaReelMeanRating = Round(w.ViaReelMeanRating, 2),
+            otherCount = w.OtherCount,
+            otherMeanRating = Round(w.OtherMeanRating, 2),
+            delta = Round(w.Delta, 2),
+        }),
+    };
+
+    private static object Accuracy(PredictionAccuracy accuracy) => new
+    {
+        count = accuracy.Count,
+        meanPredicted = Round(accuracy.MeanPredicted, 2),
+        meanActual = Round(accuracy.MeanActual, 2),
+        meanAbsoluteError = Round(accuracy.MeanAbsoluteError, 2),
+        bias = Round(accuracy.Bias, 2),
+        withinOnePointRate = Round(accuracy.WithinOnePointRate, 4),
+        pearsonCorrelation = Round(accuracy.PearsonCorrelation, 4),
+    };
+
+    private static object Miss(RetroMiss miss) => new
+    {
+        titleId = miss.TitleId,
+        name = miss.Name,
+        year = miss.Year,
+        predicted = Round(miss.Predicted, 2),
+        actual = miss.Actual,
+        gap = Round(miss.Gap, 2),
+    };
+
+    private static double? Round(double? value, int digits) =>
+        value is null ? null : Math.Round(value.Value, digits, MidpointRounding.AwayFromZero);
+
+    private static double Round(double value, int digits) =>
+        Math.Round(value, digits, MidpointRounding.AwayFromZero);
 }

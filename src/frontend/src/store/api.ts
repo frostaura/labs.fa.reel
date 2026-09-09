@@ -166,6 +166,59 @@ export interface ModelRun {
   eval: ModelEval | null;
 }
 
+/** Predicted-vs-actual summary. `pearsonCorrelation` is null when it is genuinely undefined. */
+export interface PredictionAccuracy {
+  count: number;
+  meanPredicted: number;
+  meanActual: number;
+  meanAbsoluteError: number;
+  bias: number;
+  withinOnePointRate: number;
+  pearsonCorrelation: number | null;
+}
+
+export interface RetroMiss {
+  titleId: string;
+  name: string;
+  year: number | null;
+  predicted: number;
+  actual: number;
+  gap: number;
+}
+
+/** "Titles you watched because of Reel average X; titles you found yourself average Y." */
+export interface CounterfactualWindow {
+  window: string;
+  days: number | null;
+  viaReelCount: number;
+  viaReelMeanRating: number | null;
+  otherCount: number;
+  otherMeanRating: number | null;
+  delta: number | null;
+}
+
+/**
+ * The retro closed loop: what Reel predicted against what actually happened. Computed live from
+ * the managed list, ratings and stored scores — no new schema, and no smoothing.
+ */
+export interface ModelEfficiency {
+  computedAt: string;
+  conversions: {
+    count: number;
+    ratedCount: number;
+    scoredCount: number;
+    accuracy: PredictionAccuracy;
+    ratingDistribution: { rating: number; count: number }[];
+    worstMisses: RetroMiss[];
+  };
+  predictedVsActual: {
+    pairs: number;
+    accuracy: PredictionAccuracy;
+    worstMisses: RetroMiss[];
+  };
+  counterfactual: CounterfactualWindow[];
+}
+
 export interface ModelMetrics {
   gate: {
     threshold: number;
@@ -173,7 +226,9 @@ export interface ModelMetrics {
     latestLift: number | null;
     iterationsUsed: number;
     killCriterionAt: number;
+    criterionExceeded: boolean;
   };
+  efficiency: ModelEfficiency;
   activeArtifact: { version: number; algo: string; trainedAt: string } | null;
   runs: ModelRun[];
 }

@@ -77,7 +77,7 @@ public sealed class NightlyReconcileService(
                     // (via sync, outside the app) leaves the live queue — the stated product promise.
                     // The reactive DeltaSync path already does this within minutes; this nightly pass is
                     // the drift repair via the same shared reconciler.
-                    listRemovals += await managedList.RemoveWatchedAsync(accountId, now, stoppingToken);
+                    listRemovals += (await managedList.RemoveWatchedAsync(accountId, now, stoppingToken)).Count;
 
                     var deltaInFlight = await db.SyncJobs.AnyAsync(
                         j => j.AccountId == accountId && j.Kind == JobKind.DeltaSync
