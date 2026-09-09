@@ -373,7 +373,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             tmdb,
             new StubEmbeddingProvider(),
             eligibility,
-            new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
+            new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             featureBuilder,
             new OnDemandScorer(
@@ -496,7 +496,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
             string? region, DateTime? releasedAfter, int page,
             IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default)
+            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null, CancellationToken ct = default)
         {
             Interlocked.Increment(ref ConceptFetches);
             if (movies)
@@ -541,6 +541,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>

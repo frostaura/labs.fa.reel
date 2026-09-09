@@ -27,6 +27,15 @@ public interface ITmdbClient
     /// </summary>
     Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default);
 
+    /// <summary>
+    /// TMDB's <c>similar</c> list for a title — a DIFFERENT signal to
+    /// <see cref="GetRecommendationsAsync"/>, not a synonym: recommendations are behavioural
+    /// ("people who liked this also liked…"), similar is content-derived from genres and keywords.
+    /// Running both over the same seed set widens the pool along two independent axes for one extra
+    /// call per seed, which is why the seed arms alternate between them rather than picking one.
+    /// </summary>
+    Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default);
+
     /// <summary>Resolve free-text keyword names to TMDB keyword ids (/search/keyword). Interactive priority — drives live Ask Reel.</summary>
     Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default);
 
@@ -59,12 +68,19 @@ public interface ITmdbClient
     /// <paramref name="maxRuntimeMinutes"/> maps to <c>with_runtime.lte</c> ("under 90 minutes") —
     /// discovery-side only; the caller still post-filters the final pool, because the semantic arm
     /// bypasses TMDB entirely.
+    /// <para>
+    /// <paramref name="options"/> carries the account's standing content rules (language, crowd-rating
+    /// floor, vote-count floor), the optional person constraint, and the rate-gate lane. It is how the
+    /// feed build reuses this method instead of growing a second query builder next to it — the whole
+    /// point of routing supply through here. Omitting it reproduces the original Ask Reel behaviour.
+    /// </para>
     /// </summary>
     Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page,
         IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default);
+        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
+        TmdbDiscoverOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Watch providers for one title in one region (JustWatch-powered; attribution required).</summary>
     Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default);

@@ -107,6 +107,9 @@ public class GlobalTypeaheadLookupTests
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
 
@@ -120,7 +123,7 @@ public class GlobalTypeaheadLookupTests
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
             string? region, DateTime? releasedAfter, int page,
             IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default) =>
+            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>

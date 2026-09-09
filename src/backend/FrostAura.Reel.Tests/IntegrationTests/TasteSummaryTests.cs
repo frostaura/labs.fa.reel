@@ -137,7 +137,8 @@ public class TasteSummaryTests(PostgresFixture fixture)
             FeatureVectorBuilder.SelfExclusion.Empty,
             [],
             new Dictionary<string, double>(),
-            null);
+            null,
+            0.5m);
 
     private async Task<Guid> SeedAccountAsync()
     {
