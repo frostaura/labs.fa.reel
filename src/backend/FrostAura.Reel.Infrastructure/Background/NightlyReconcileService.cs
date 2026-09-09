@@ -68,6 +68,8 @@ public sealed class NightlyReconcileService(
                 // The gate is shared with DeltaSyncJobHandler's post-sync message on purpose: the
                 // pill promises "retraining tonight" from exactly the rules that decide it here.
                 var retrainGate = scope.ServiceProvider.GetRequiredService<RetrainGate>();
+                var personAffinities = scope.ServiceProvider.GetRequiredService<PersonAffinityWriter>();
+                var featureBuilder = scope.ServiceProvider.GetRequiredService<FeatureVectorBuilder>();
                 var now = DateTime.UtcNow;
 
                 var accountIds = await db.TraktConnections
@@ -78,6 +80,7 @@ public sealed class NightlyReconcileService(
                 var enqueued = 0;
                 var retrains = 0;
                 var listRemovals = 0;
+                var affinityBackfills = 0;
                 foreach (var accountId in accountIds)
                 {
                     // Managed-list auto-remove backstop: anything in "Reel — Up Next" detected watched
@@ -132,6 +135,23 @@ public sealed class NightlyReconcileService(
                         logger.LogInformation(
                             "Nightly reconcile queued a retrain for {AccountId} ({Trigger}).", accountId, trigger);
                     }
+
+                    // Person-affinity backfill, ONCE, for an account that has none. The steady-state
+                    // writer is TrainJobHandler — affinities are refreshed with the model they are
+                    // served alongside — so this exists only to close the gap for accounts that were
+                    // trained before the writer existed, or that are not due a retrain tonight. It is
+                    // deliberately conditional on the table being empty rather than on age: a nightly
+                    // unconditional rewrite would build a full taste state per account for a cache
+                    // that a retrain is about to rebuild anyway.
+                    if (await personAffinities.IsEmptyAsync(accountId, stoppingToken))
+                    {
+                        var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, stoppingToken);
+                        var written = await personAffinities.RefreshAsync(accountId, taste, now, stoppingToken);
+                        if (written.Total > 0)
+                        {
+                            affinityBackfills++;
+                        }
+                    }
                 }
 
                 // A concurrent enqueue (EnrichCatalogJobHandler's chain, another instance's nightly
@@ -145,8 +165,9 @@ public sealed class NightlyReconcileService(
                 }
 
                 logger.LogInformation(
-                    "Nightly reconcile: {Sync} delta sync(s), {Retrain} retrain(s), {ListRemove} managed-list removal(s).",
-                    enqueued, retrains, listRemovals);
+                    "Nightly reconcile: {Sync} delta sync(s), {Retrain} retrain(s), {ListRemove} managed-list removal(s), "
+                    + "{AffinityBackfill} person-affinity backfill(s).",
+                    enqueued, retrains, listRemovals, affinityBackfills);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
