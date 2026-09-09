@@ -14,14 +14,27 @@ using Npgsql;
 namespace FrostAura.Reel.Application.Jobs;
 
 /// <summary>
-/// Trains the SERVING model on all ratings as-of now and persists the versioned artifact
-/// (exactly one Active per account). Chains to Evaluate, which validates the same config on
-/// the leakage-clean time split — serving and gate always measure the same engine.
+/// Evaluates, THEN trains. The leakage-clean split runs first, inside this job, on the same
+/// hyperparameters and the same <see cref="FeatureSchema"/> version; the serving model is then fit
+/// on 100% of the ratings and the artifact records that eval run's id as its
+/// <c>TrainingRunId</c>. Chains straight to BuildFeed.
+///
+/// <para><b>What "served model = evaluated model" does and does not claim.</b> The two models are
+/// not byte-identical and cannot be: the gate is only meaningful on a holdout, and the serving
+/// model must see every row. What is now guaranteed — and was not, when Train fit an artifact and
+/// then enqueued a separate Evaluate job that fit its own model from its own job payload — is that
+/// the artifact the user is served and the measurement printed on the ledger come from one job,
+/// one hyperparameter string, one feature-schema version and one <c>ConfigHash</c>, and that the
+/// artifact points at the run that measured it. The only difference between them is the split.</para>
+///
+/// <para>The old <c>Evaluate</c> job kind still exists and still works when explicitly enqueued —
+/// a founder re-run, or a row queued before this change — but nothing chains it any more.</para>
 /// </summary>
 public class TrainJobHandler(
     IReelDbContext db,
     FeatureVectorBuilder featureBuilder,
     IModelEngine engine,
+    EvalHarness harness,
     IPipelineEventHub events,
     ILogger<TrainJobHandler> logger) : IJobHandler
 {
@@ -81,6 +94,41 @@ public class TrainJobHandler(
             ["total"] = labels.Count,
         });
 
+        // ── Evaluate FIRST, on this job's hyperparameters ────────────────────────────────
+        // The harness writes its own TrainingRun + EvaluationResult and saves them; whatever it
+        // returns describes the very config the serving fit below is about to use. A null outcome
+        // means the account has no evaluable split yet (too few ratings, or too thin a clean
+        // holdout) — the serving artifact is still built, because a user with 60 ratings deserves
+        // a feed, and only the ledger waits.
+        //
+        // A harness FAILURE must not cost the user a model. When evaluation was a separate job that
+        // was structurally true — Train had already persisted its artifact by the time Evaluate ran.
+        // Running it inline puts the ledger on the serving path, so the failure is absorbed here,
+        // loudly, rather than being allowed to leave the account without an artifact and behind a
+        // spinner while the job burns its three retries on the same exception.
+        EvalHarness.HarnessOutcome? outcome;
+        try
+        {
+            outcome = await harness.RunAsync(accountId, hyperparams, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Eval harness failed for {AccountId}; training the serving model without a ledger row.", accountId);
+            outcome = null;
+        }
+
+        if (outcome is null)
+        {
+            job.ProgressMessage = "evaluation skipped — not enough clean data; feed built from the trained model";
+            logger.LogWarning("Eval produced no ledger row for {AccountId}; training the serving model anyway.", accountId);
+        }
+        else
+        {
+            job.ProgressMessage =
+                $"iteration {outcome.Run.Iteration}: NDCG@10 {outcome.Result.NdcgAt10Model:F3} vs {outcome.Result.NdcgAt10Baseline:F3} "
+                + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}";
+        }
+
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         var vectors = await featureBuilder.BuildAsync(taste, labels.Select(l => l.TitleId).ToList(), now, ct);
         var rows = labels.Where(l => vectors.ContainsKey(l.TitleId)).ToList();
@@ -106,10 +154,13 @@ public class TrainJobHandler(
         // the computed FeatureSchemaVersion column reads 'version', which is untouched.
         var standardizer = FeatureStandardizer.FromRows(matrix.Features);
 
-        var latestRun = await db.TrainingRuns
+        // The artifact points at the run that MEASURED it — this job's own eval, not whichever run
+        // happened to be newest. Falling back to the newest only covers the skipped-eval case.
+        var trainingRunId = outcome?.Run.Id ?? (await db.TrainingRuns
             .Where(r => r.AccountId == accountId)
             .OrderByDescending(r => r.StartedAt)
-            .FirstOrDefaultAsync(ct);
+            .Select(r => (Guid?)r.Id)
+            .FirstOrDefaultAsync(ct)) ?? Guid.Empty;
 
         // IgnoreQueryFilters: artifacts trained against a superseded FeatureSchema version are hidden
         // from every read path on purpose (see ReelDbContext), but this handler is the one place that
@@ -135,25 +186,38 @@ public class TrainJobHandler(
                 names = FeatureSchema.AllNames(),
                 stats = standardizer.ToPayload(),
             }),
-            TrainingRunId = latestRun?.Id ?? Guid.Empty,
+            TrainingRunId = trainingRunId,
             Status = ArtifactStatus.Active,
             TrainedAt = now,
         });
 
-        // Validate this same config on the time split.
-        var hasEval = await db.SyncJobs.AnyAsync(
-            j => j.AccountId == accountId && j.Kind == JobKind.Evaluate
+        // The evaluation already ran, above. Advance the stage and chain the feed build directly —
+        // this is the work the separate Evaluate job used to do after Train enqueued it.
+        if (account.PipelineStage is PipelineStage.Training or PipelineStage.Extracting)
+        {
+            account.PipelineStage = PipelineStage.Evaluated;
+            account.PipelineStageChangedAt = DateTime.UtcNow;
+            events.Publish(accountId, PipelineEventTypes.StageChanged, new Dictionary<string, object?>
+            {
+                ["stage"] = PipelineStage.Evaluated.ToString(),
+            });
+        }
+
+        var hasFeedBuild = await db.SyncJobs.AnyAsync(
+            j => j.AccountId == accountId && j.Kind == JobKind.BuildFeed
                 && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
-        if (!hasEval)
+        if (!hasFeedBuild)
         {
             db.SyncJobs.Add(new SyncJob
             {
                 Id = Guid.NewGuid(),
                 AccountId = accountId,
-                Kind = JobKind.Evaluate,
+                Kind = JobKind.BuildFeed,
                 Priority = 1,
                 EnqueuedAt = DateTime.UtcNow,
-                CursorJson = JsonSerializer.Serialize(new { hyperparams = JsonSerializer.Deserialize<JsonElement>(hyperparams) }),
+                // Provenance only — a freshly-trained artifact already forces a Fresh build via
+                // FeedBuildPolicy's artifact-id check, whatever reason is recorded here.
+                TriggerReason = "model-trained",
             });
         }
 

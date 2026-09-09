@@ -111,8 +111,14 @@ public sealed class NightlyReconcileService(
                             .FirstOrDefaultAsync(stoppingToken);
                         if (trainedAt is { } since)
                         {
+                            // FirstRatedAt, not RatedAt: the gate asks "how much has REEL learned
+                            // since it last trained", and RatedAt is Trakt's own timestamp, freely
+                            // rewritten on every ratings walk. A back-dated import used to look
+                            // like nothing new, and a re-rate of an ancient title used to look like
+                            // a fresh one. FirstRatedAt is set on insert and never moves, so this
+                            // counts exactly the rows the artifact could not have seen.
                             var newRatings = await db.UserRatings
-                                .CountAsync(r => r.AccountId == accountId && r.RatedAt > since, stoppingToken);
+                                .CountAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, stoppingToken);
                             if (newRatings >= retrainThreshold || (now - since).TotalDays > 14)
                             {
                                 db.SyncJobs.Add(new SyncJob

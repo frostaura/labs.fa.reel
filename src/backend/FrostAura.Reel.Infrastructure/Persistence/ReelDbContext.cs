@@ -200,6 +200,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         {
             e.HasIndex(r => new { r.AccountId, r.SubjectType, r.TitleId, r.SeasonNumber, r.EpisodeNumber }).IsUnique();
             e.HasIndex(r => new { r.AccountId, r.RatedAt });
+            // The eval split axis and the nightly retrain gate both order/count on this.
+            e.HasIndex(r => new { r.AccountId, r.FirstRatedAt });
         });
 
         modelBuilder.Entity<UserPersonRating>(e =>

@@ -684,6 +684,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("EpisodeNumber")
                         .HasColumnType("integer");
 
+                    b.Property<DateTime>("FirstRatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime>("RatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -710,6 +713,8 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "FirstRatedAt");
 
                     b.HasIndex("AccountId", "RatedAt");
 
@@ -837,12 +842,21 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal>("BaselinePrecisionAt10")
                         .HasColumnType("numeric");
 
+                    b.Property<decimal?>("CalibrationBias")
+                        .HasColumnType("numeric");
+
                     b.Property<DateTime>("ComputedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DetailJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
+
+                    b.Property<decimal?>("Ece")
+                        .HasColumnType("numeric");
+
+                    b.Property<int?>("EligibleHoldoutCount")
+                        .HasColumnType("integer");
 
                     b.Property<int>("HoldoutPositiveCount")
                         .HasColumnType("integer");
@@ -856,7 +870,25 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal>("ModelPrecisionAt10")
                         .HasColumnType("numeric");
 
+                    b.Property<decimal?>("NdcgAt10Baseline")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal?>("NdcgAt10Model")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal?>("NdcgLiftCiHigh")
+                        .HasColumnType("numeric");
+
+                    b.Property<decimal?>("NdcgLiftCiLow")
+                        .HasColumnType("numeric");
+
+                    b.Property<string>("OriginsJson")
+                        .HasColumnType("text");
+
                     b.Property<bool>("PassedGate")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("PassedLegacyGate")
                         .HasColumnType("boolean");
 
                     b.Property<decimal>("RelativeImprovement")
@@ -868,8 +900,14 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal>("SpearmanRho")
                         .HasColumnType("numeric");
 
+                    b.Property<decimal?>("SpearmanSe")
+                        .HasColumnType("numeric");
+
                     b.Property<Guid>("TrainingRunId")
                         .HasColumnType("uuid");
+
+                    b.Property<int?>("UnfilteredHoldoutCount")
+                        .HasColumnType("integer");
 
                     b.HasKey("Id");
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
@@ -57,9 +58,21 @@ public static class MetricsEndpoints
             {
                 gate = new
                 {
-                    threshold = 0.20m,
+                    // The gate is NDCG@10: the bootstrap 95% CI on the paired model-minus-baseline
+                    // lift must exclude zero, AND the mean relative lift across the five rolling
+                    // split origins must clear 20%. `threshold` is that second clause; the CI
+                    // bounds are reported so the page can say which clause failed.
+                    threshold = EvalHarness.NdcgLiftGateThreshold,
                     passed = latestEval?.PassedGate ?? false,
                     latestLift = latestEval?.RelativeImprovement,
+                    ndcgModel = latestEval?.NdcgAt10Model,
+                    ndcgBaseline = latestEval?.NdcgAt10Baseline,
+                    ndcgLiftCiLow = latestEval?.NdcgLiftCiLow,
+                    ndcgLiftCiHigh = latestEval?.NdcgLiftCiHigh,
+                    ciExcludesZero = latestEval?.NdcgLiftCiLow > 0m,
+                    // The retired precision@10 gate, carried so the ledger stays continuous.
+                    legacyThreshold = EvalHarness.LegacyGateThreshold,
+                    legacyPassed = latestEval?.PassedLegacyGate ?? false,
                     iterationsUsed,
                     killCriterionAt,
                     criterionExceeded = iterationsUsed > killCriterionAt,
@@ -89,9 +102,20 @@ public static class MetricsEndpoints
                             rmse = eval.Rmse,
                             mae = eval.Mae,
                             spearmanRho = eval.SpearmanRho,
+                            spearmanSe = eval.SpearmanSe,
+                            ndcgAt10Model = eval.NdcgAt10Model,
+                            ndcgAt10Baseline = eval.NdcgAt10Baseline,
+                            ndcgLiftCiLow = eval.NdcgLiftCiLow,
+                            ndcgLiftCiHigh = eval.NdcgLiftCiHigh,
+                            calibrationBias = eval.CalibrationBias,
+                            ece = eval.Ece,
+                            eligibleHoldoutCount = eval.EligibleHoldoutCount,
+                            unfilteredHoldoutCount = eval.UnfilteredHoldoutCount,
                             eval.HoldoutPositiveCount,
                             eval.LowSample,
                             eval.PassedGate,
+                            eval.PassedLegacyGate,
+                            origins = eval.OriginsJson is null ? null : (JsonElement?)JsonSerializer.Deserialize<JsonElement>(eval.OriginsJson),
                             detail = JsonSerializer.Deserialize<JsonElement>(eval.DetailJson),
                         },
                     };

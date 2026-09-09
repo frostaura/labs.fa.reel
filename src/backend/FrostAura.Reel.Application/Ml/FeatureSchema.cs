@@ -10,7 +10,11 @@ namespace FrostAura.Reel.Application.Ml;
 /// <remarks>
 /// Version history:
 /// <list type="bullet">
-/// <item><b>1</b> — original 86-column vector.</item>
+/// <item><b>1</b> — the original vector: 30 scalars, 25 genres, 32 subgenre buckets. Prose across
+/// the codebase called it "86" and then went on saying "~86" after v2 and v3 appended five more
+/// scalars. Never type the width into prose again — it is <see cref="VectorLength"/> (currently
+/// 92), and the user-visible caveat in <c>EvalHarness</c> interpolates it rather than repeating
+/// a number that has already been wrong twice.</item>
 /// <item><b>2</b> — missing crowd data stopped being imputed as a real zero. Added the
 /// <c>hasRuntime</c> / <c>hasTraktRating</c> / <c>hasPopularity</c> presence flags and neutral
 /// imputation for the three fields behind them. The flags are APPENDED (never interleaved next to
