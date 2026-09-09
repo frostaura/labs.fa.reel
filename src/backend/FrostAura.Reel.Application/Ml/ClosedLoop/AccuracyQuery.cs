@@ -148,7 +148,7 @@ public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountCont
             now,
             source,
             headline,
-            Bucket(pairs),
+            Bucket(pairs.Select(p => new PredictionPair(p.Predicted, p.Actual)).ToList()),
             pairs
                 .OrderByDescending(p => p.RatedAt)
                 .ThenBy(p => p.Name, StringComparer.Ordinal)
@@ -249,7 +249,7 @@ public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountCont
     /// the empty ones: a chart drawn only over the bands that happen to have data hides that the
     /// model has never once predicted below 4, which is itself the finding.
     /// </summary>
-    private static List<CalibrationBucket> Bucket(IReadOnlyList<Pair> pairs)
+    internal static List<CalibrationBucket> Bucket(IReadOnlyList<PredictionPair> pairs)
     {
         var width = 10m / CalibrationBuckets;
         var buckets = new List<CalibrationBucket>(CalibrationBuckets);
@@ -269,7 +269,7 @@ public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountCont
                 high,
                 members.Count,
                 members.Count == 0 ? null : members.Average(p => p.Predicted),
-                members.Count == 0 ? null : members.Average(p => (double)p.Actual)));
+                members.Count == 0 ? null : members.Average(p => p.Actual)));
         }
 
         return buckets;
@@ -327,10 +327,11 @@ public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountCont
     }
 
     /// <summary>A rate, or null. Never zero over an empty denominator — "unknown" is not "none".</summary>
-    private static double? Rate(int numerator, int denominator) =>
+    internal static double? Rate(int numerator, int denominator) =>
         denominator == 0 ? null : numerator / (double)denominator;
 
-    private static double? Median(IReadOnlyList<double> sorted) =>
+    /// <summary>Median of an ALREADY-SORTED sequence; null when empty.</summary>
+    internal static double? Median(IReadOnlyList<double> sorted) =>
         sorted.Count == 0
             ? null
             : sorted.Count % 2 == 1
