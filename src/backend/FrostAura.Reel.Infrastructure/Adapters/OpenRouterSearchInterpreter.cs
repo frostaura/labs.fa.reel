@@ -35,7 +35,12 @@ public class OpenRouterSearchInterpreter(
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
-    public bool IsAvailable => true; // the stub always answers
+    // Honest availability: a real key, or an explicit test stub — the same gate the agent and the
+    // attribute extractor apply. This used to answer an unconditional "true, the stub always
+    // answers", which is the very bug the agent's own comment says it fixed: a keyless install
+    // reported an LLM capability it did not have. Interpretation still degrades to the free
+    // deterministic Heuristic when this is false; what changes is that callers can now tell.
+    public bool IsAvailable => ApiKey is not null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
@@ -47,12 +52,7 @@ public class OpenRouterSearchInterpreter(
     public async Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default)
     {
         var trimmed = (query ?? string.Empty).Trim();
-        if (trimmed.Length == 0)
-        {
-            return new SearchIntent([], [], [], string.Empty, null, null);
-        }
-
-        if (StubMode)
+        if (trimmed.Length == 0 || StubMode)
         {
             return Heuristic(trimmed);
         }
@@ -80,12 +80,12 @@ public class OpenRouterSearchInterpreter(
             response.EnsureSuccessStatusCode();
             var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
             var content = dto?.Choices?.FirstOrDefault()?.Message?.Content;
-            return string.IsNullOrWhiteSpace(content) ? Heuristic(trimmed) : Parse(content, trimmed);
+            return string.IsNullOrWhiteSpace(content) ? HeuristicIntent(trimmed) : Parse(content, trimmed);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Query interpretation failed for {Query}; falling back to heuristic.", trimmed);
-            return Heuristic(trimmed);
+            return HeuristicIntent(trimmed);
         }
     }
 
@@ -94,12 +94,25 @@ public class OpenRouterSearchInterpreter(
         try
         {
             using var doc = JsonDocument.Parse(json);
-            return SearchIntentParser.FromJson(doc.RootElement, fallbackText, Heuristic(fallbackText));
+            return SearchIntentParser.FromJson(doc.RootElement, fallbackText, HeuristicIntent(fallbackText));
         }
         catch (JsonException)
         {
-            return Heuristic(fallbackText);
+            return HeuristicIntent(fallbackText);
         }
+    }
+
+    /// <summary>
+    /// The port's free, deterministic reading of a query. Public so a collaborator that only needs
+    /// a FALLBACK intent — <c>OpenRouterSearchAgent</c> — can have one without paying for a second
+    /// chat completion it will usually discard.
+    /// </summary>
+    public SearchIntent Heuristic(string query)
+    {
+        var trimmed = (query ?? string.Empty).Trim();
+        return trimmed.Length == 0
+            ? new SearchIntent([], [], [], string.Empty, null, null)
+            : HeuristicIntent(trimmed);
     }
 
     /// <summary>
@@ -107,7 +120,7 @@ public class OpenRouterSearchInterpreter(
     /// genres, the rest into keywords. "shark horrors" → genres:[horror], keywords:[shark]. No
     /// network; same input → same output.
     /// </summary>
-    private static SearchIntent Heuristic(string query)
+    private static SearchIntent HeuristicIntent(string query)
     {
         var lower = query.ToLowerInvariant();
         var tokens = Tokenize(lower);

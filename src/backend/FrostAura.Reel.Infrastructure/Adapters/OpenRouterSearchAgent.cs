@@ -49,7 +49,13 @@ public class OpenRouterSearchAgent(
     public async Task<AgentReply> InterpretAsync(
         IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default)
     {
-        var intentFallback = await interpreter.InterpretAsync(message, ct);
+        // The interpreter's FREE deterministic reading, not a second billable round-trip. This
+        // value is only ever a fallback — SearchIntentParser consumes it solely when the model's
+        // own answer carries no usable signal, and StubReply only when the reply line is missing —
+        // yet the agent used to buy a full chat completion for it on EVERY turn, doubling the
+        // per-turn interpreter spend for output that is byte-identical whenever the primary call
+        // succeeds. The paid interpreter is now consulted only where this turn has already failed.
+        var intentFallback = interpreter.Heuristic(message);
         if (StubMode)
         {
             return new AgentReply(StubReply(message, intentFallback), intentFallback);
@@ -60,23 +66,29 @@ public class OpenRouterSearchAgent(
             usageRecorder.Record(ApiProvider.OpenRouter);
             var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles);
             var content = await ChatAsync(InterpretSystemPrompt, user, ct);
-            if (string.IsNullOrWhiteSpace(content))
+            if (!string.IsNullOrWhiteSpace(content))
             {
-                return new AgentReply(StubReply(message, intentFallback), intentFallback);
+                using var doc = JsonDocument.Parse(content);
+                var root = doc.RootElement;
+                var reply = root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } s
+                    ? s : StubReply(message, intentFallback);
+                var intent = SearchIntentParser.FromJson(root, message, intentFallback);
+                return new AgentReply(reply, intent);
             }
 
-            using var doc = JsonDocument.Parse(content);
-            var root = doc.RootElement;
-            var reply = root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } s
-                ? s : StubReply(message, intentFallback);
-            var intent = SearchIntentParser.FromJson(root, message, intentFallback);
-            return new AgentReply(reply, intent);
+            logger.LogWarning("Agent interpret returned no content for '{Message}'; asking the interpreter.", message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Agent interpret failed for '{Message}'; using heuristic intent.", message);
-            return new AgentReply(StubReply(message, intentFallback), intentFallback);
+            logger.LogWarning(ex, "Agent interpret failed for '{Message}'; asking the interpreter.", message);
         }
+
+        // Reached only when this turn's own model call produced nothing usable. HERE a second call
+        // earns its cost: the interpreter's prompt is smaller and single-purpose, so it often
+        // answers where the agent's did not — and it degrades to the same free heuristic if it
+        // fails too, which is exactly what the old code fell back to.
+        var recovered = await interpreter.InterpretAsync(message, ct);
+        return new AgentReply(StubReply(message, recovered), recovered);
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
