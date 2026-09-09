@@ -357,6 +357,15 @@ export default function TitleDetail() {
                     )}
                   </div>
 
+                  {/* The why-line — second person, the model's own reason, above the studio's blurb.
+                      Same voice and weight the hero card gives it, so opening a card no longer
+                      REMOVES the one personalised sentence on it. */}
+                  {title.whyThis && (
+                    <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug" data-testid="why-this">
+                      {title.whyThis}
+                    </p>
+                  )}
+
                   {/* Synopsis */}
                   {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}
 

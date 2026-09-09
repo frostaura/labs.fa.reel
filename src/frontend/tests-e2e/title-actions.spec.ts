@@ -4,7 +4,9 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
 /**
  * Title-detail reactions: the one-tap rate popover ("Seen it — you rated N"), the clear-rating
  * escape hatch the remediation added, and the not-interested reason menu — asserting what actually
- * goes over the wire, not just what the optimistic UI paints.
+ * goes over the wire, not just what the optimistic UI paints. Plus the why-line, which used to
+ * VANISH on tap — rendered on every card, absent from the title DTO, so the modal replaced the one
+ * personalised sentence with the studio's own blurb.
  */
 
 const TITLE = {
@@ -14,6 +16,7 @@ const TITLE = {
   name: "Quiet Harbor",
   year: 2024,
   overview: "A harbormaster keeps one last secret.",
+  whyThis: "Shares the slow-burn dread you love, and you rate Denis Villeneuve 8.4.",
   tagline: null,
   runtimeMinutes: 112,
   certification: "PG-13",
@@ -45,14 +48,14 @@ interface CapturedCall {
   body: unknown;
 }
 
-async function bootTitle(page: Page) {
+async function bootTitle(page: Page, titleOverrides: Record<string, unknown> = {}) {
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
     pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
-  await mockJson(page, "**/api/titles/movie/1001", TITLE);
+  await mockJson(page, "**/api/titles/movie/1001", { ...TITLE, ...titleOverrides });
   await mockJson(page, "**/api/titles/movie/1001/providers", {
     region: "US", attribution: "JustWatch", tmdbWatchPage: "https://www.themoviedb.org/movie/1001/watch", providers: [],
   });
@@ -111,5 +114,27 @@ test.describe("title detail actions", () => {
     // …and the wire carried the specific reason, not a bare reaction.
     expect(reactionCalls).toHaveLength(1);
     expect(reactionCalls[0]).toEqual({ method: "POST", body: { reason: "not-for-me" } });
+  });
+
+  test("the modal carries the why-line, above the synopsis", async ({ page }) => {
+    await bootTitle(page);
+
+    const why = page.getByTestId("why-this");
+    await expect(why).toHaveText("Shares the slow-burn dread you love, and you rate Denis Villeneuve 8.4.");
+
+    // Above the synopsis, not below it: the personal reason leads, the studio blurb follows.
+    const order = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="why-this"]')!;
+      const overview = Array.from(document.querySelectorAll("p")).find((p) =>
+        p.textContent?.includes("A harbormaster keeps one last secret.")
+      )!;
+      return el.compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING ? "after" : "before";
+    });
+    expect(order).toBe("after");
+  });
+
+  test("no why-line renders nothing rather than boilerplate", async ({ page }) => {
+    await bootTitle(page, { whyThis: null });
+    await expect(page.getByTestId("why-this")).toHaveCount(0);
   });
 });

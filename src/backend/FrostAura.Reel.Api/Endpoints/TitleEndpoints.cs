@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
@@ -107,10 +108,22 @@ public static class TitleEndpoints
             // The tap-through behind the contribution bars — who/what is driving the person and
             // era features, from the same verified-person data the why-sentences cite. Only built
             // when a prediction exists: the bars it annotates render under the prediction block.
-            IReadOnlyList<ContributionDetails.Detail> contributionDetails = score is null
+            // The taste state is built once and shared with the why-line fallback below.
+            var taste = score is null
+                ? null
+                : await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
+            IReadOnlyList<ContributionDetails.Detail> contributionDetails = taste is null
                 ? []
-                : await ContributionDetails.BuildAsync(
-                    db, await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct), title, ct);
+                : await ContributionDetails.BuildAsync(db, taste, title, ct);
+
+            // The one personalised sentence used to VANISH on tap: cards render it, the modal
+            // showed the raw TMDB overview instead. The persisted line from the account's Active
+            // snapshot is the authoritative one — it is the exact text this user was shown — and
+            // when the title is not in the current build the same deterministic templater every
+            // card goes through rebuilds it from the persisted contributions. No score, no
+            // contributions, nothing verifiable to cite ⇒ null, and the modal renders nothing.
+            var whyThis = await SnapshotWhyAsync(db, accountId, title.Id, ct)
+                ?? await TemplatedWhyAsync(db, taste, title, score, ct);
 
             // The serving-time dislike demotion behind this score (the PredictedRating already
             // reflects it — OnDemandScorer subtracted it). When it is big enough to notice, the
@@ -149,6 +162,7 @@ public static class TitleEndpoints
                 name = title.Name,
                 year = title.Year,
                 overview = title.Overview,
+                whyThis,
                 tagline = title.Tagline,
                 runtimeMinutes = title.RuntimeMinutes,
                 certification = title.Certification,
@@ -282,6 +296,89 @@ public static class TitleEndpoints
 
             return title;
         });
+    }
+
+    /// <summary>
+    /// The why-line this account was actually shown for this title, read from the Active feed
+    /// snapshot. Preferred over any rebuild: it is the sentence on the card the user tapped, so the
+    /// modal cannot quietly disagree with the rail it opened from. Null when the title is not in
+    /// the current build (the shortlist is a fraction of the eligible pool).
+    /// </summary>
+    internal static async Task<string?> SnapshotWhyAsync(
+        IReelDbContext db, Guid accountId, Guid titleId, CancellationToken ct)
+    {
+        var why = await db.FeedItems
+            .Where(i => i.AccountId == accountId && i.TitleId == titleId)
+            .Join(
+                db.FeedSnapshots.Where(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active),
+                i => i.FeedSnapshotId, s => s.Id, (i, s) => i.WhyThisSentence)
+            .FirstOrDefaultAsync(ct);
+        return string.IsNullOrWhiteSpace(why) ? null : why;
+    }
+
+    /// <summary>
+    /// The templater fallback for a title outside the current build. Cheap by construction: the
+    /// taste state is already built for the contribution bars, the contributions are already
+    /// persisted on the score, and the two extra reads are single-title lookups. Returns null
+    /// rather than the generic boilerplate — a modal that has nothing verifiable to say says
+    /// nothing, exactly as the feed's once-per-response guard intends.
+    /// </summary>
+    internal static async Task<string?> TemplatedWhyAsync(
+        IReelDbContext db, FeatureVectorBuilder.TasteState? taste, Title title, TitleScore? score, CancellationToken ct)
+    {
+        if (taste is null || score is null)
+        {
+            return null;
+        }
+
+        var contributions = ParseContributions(score.ContributionsJson);
+        if (contributions.Length == 0)
+        {
+            return null;
+        }
+
+        var personsByTitle = VerifiedPeople.BestByRole(
+            await VerifiedPeople.ForTitlesAsync(db, taste, [title.Id], ct));
+        var tone = await db.TitleAttributes
+            .Where(a => a.TitleId == title.Id && a.Tone != null)
+            .Select(a => a.Tone)
+            .FirstOrDefaultAsync(ct);
+
+        var sentence = ExplanationTemplater.BuildSentence(new ExplanationTemplater.Context(
+            title,
+            contributions,
+            personsByTitle.GetValueOrDefault(title.Id) ?? ExplanationTemplater.NoPersons,
+            title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet(),
+            AnchorName: null,
+            Tone: tone));
+
+        // The generic fallback is not personalisation — it is the templater admitting it found
+        // nothing. Never worth pushing above the synopsis.
+        return sentence == ExplanationTemplater.GenericFallback ? null : sentence;
+    }
+
+    /// <summary>Persisted ContributionsJson → the templater's (feature, contribution) pairs.</summary>
+    private static (string Feature, float Contribution)[] ParseContributions(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.EnumerateArray()
+                .Select(e => (
+                    Feature: e.GetProperty("feature").GetString() ?? string.Empty,
+                    Contribution: e.GetProperty("value").GetSingle()))
+                .Where(x => x.Feature.Length > 0)
+                .ToArray();
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     /// <summary>
