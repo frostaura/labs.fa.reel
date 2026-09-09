@@ -126,6 +126,47 @@ public class RatingReversibilityTests(PostgresFixture fixture)
         Assert.Null(watched.ReelLoggedWatchedAt);
     }
 
+    [Fact]
+    public async Task Re_rating_moves_RatedAt_and_never_moves_FirstRatedAt()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // FirstRatedAt is the eval split axis and the nightly retrain gate's drift axis. If a
+        // re-rate could move it, an old title would cross into the holdout carrying a label the
+        // split model was fitted on — the leak the harness exists to prevent.
+        var accountId = await SeedAccountAsync();
+        var tmdbId = await SeedTitleAsync(MediaType.Movie);
+
+        await RateAsync(accountId, "movie", tmdbId, 6);
+
+        await using (var first = fixture.CreateContext(new AccountContext()))
+        {
+            var row = await first.UserRatings.SingleAsync(r => r.AccountId == accountId);
+            Assert.Equal(row.RatedAt, row.FirstRatedAt);
+            // Back-date both so the re-rate below has somewhere to move to.
+            row.RatedAt = row.RatedAt.AddDays(-400);
+            row.FirstRatedAt = row.FirstRatedAt.AddDays(-400);
+            await first.SaveChangesAsync();
+        }
+
+        DateTime backdated;
+        await using (var probe = fixture.CreateContext(new AccountContext()))
+        {
+            backdated = (await probe.UserRatings.SingleAsync(r => r.AccountId == accountId)).FirstRatedAt;
+        }
+
+        await RateAsync(accountId, "movie", tmdbId, 9);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var rerated = await verify.UserRatings.SingleAsync(r => r.AccountId == accountId);
+        Assert.Equal(9, rerated.Rating);
+        Assert.True(rerated.RatedAt > backdated, "a re-rate must move Trakt's own RatedAt forward");
+        Assert.Equal(backdated, rerated.FirstRatedAt);
+    }
+
     private async Task RateAsync(Guid accountId, string mediaType, long tmdbId, short rating)
     {
         await using var db = fixture.CreateContext(new AccountContext());
