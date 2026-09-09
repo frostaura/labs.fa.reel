@@ -74,7 +74,7 @@ export default function Lab() {
         </div>
       </div>
 
-      {/* Gate badge */}
+      {/* Gate badge — two clauses, stated in plain language, and the retired gate beside it. */}
       <section
         className={`fa-card p-5 border ${
           gate?.passed ? "border-fa-success/50" : "border-fa-edge"
@@ -83,18 +83,31 @@ export default function Lab() {
       >
         <div className="flex items-center justify-between flex-wrap gap-4">
           <div>
-            <p className="fa-overline text-fa-frost-dim">M2 edge-proof gate</p>
+            <p className="fa-overline text-fa-frost-dim">M2 edge-proof gate — NDCG@10</p>
             <p className={`text-3xl font-light mt-1 ${gate?.passed ? "text-fa-success" : "text-fa-frost-bright"}`}>
               {gate?.passed ? "PASSED" : "NOT MET"}
             </p>
             <p className="fa-caption text-fa-frost-dim mt-1">
-              needs ≥ {pct(gate?.threshold)} relative lift over popularity
+              needs both: the 95% range on the model-minus-popularity difference stays above zero,
+              and the average lift across five split points is ≥ {pct(gate?.threshold)}
             </p>
+            {gate && (
+              <ul className="fa-caption mt-2 space-y-0.5" data-testid="gate-clauses">
+                <li className={gate.ciExcludesZero ? "text-fa-success" : "text-fa-danger"}>
+                  {gate.ciExcludesZero ? "✓" : "✗"} the difference is real — 95% range{" "}
+                  {signed(gate.ndcgLiftCiLow, 3)} to {signed(gate.ndcgLiftCiHigh, 3)}
+                  {!gate.ciExcludesZero && " (includes zero, so it could be noise)"}
+                </li>
+                <li className={gate.passed ? "text-fa-success" : "text-fa-frost-dim"}>
+                  {gate.passed ? "✓" : "✗"} the difference is big enough — needs ≥ {pct(gate.threshold)}
+                </li>
+              </ul>
+            )}
           </div>
           <div className="text-right">
-            <p className="fa-stat-label">latest lift</p>
+            <p className="fa-stat-label">ndcg@10 — model vs popularity</p>
             <p className={`fa-metric ${gate?.passed ? "text-fa-success" : "text-fa-frost-bright"}`}>
-              {latest ? pct(latest.relativeImprovement) : "—"}
+              {num(gate?.ndcgModel, 3)} <span className="text-fa-frost-dim">vs</span> {num(gate?.ndcgBaseline, 3)}
             </p>
             <p className="fa-caption text-fa-frost-dim mt-1">
               iteration {gate?.iterationsUsed ?? 0} of {gate?.killCriterionAt ?? 3} (kill criterion)
@@ -106,6 +119,12 @@ export default function Lab() {
                 kill criterion exceeded — {gate.iterationsUsed} iterations against a limit of {gate.killCriterionAt}
               </p>
             )}
+            {/* The old gate, kept visible so twelve rows of history stay readable rather than
+                being quietly re-scored against a metric they were never measured on. */}
+            <p className="fa-caption text-fa-frost-dim/70 mt-2" data-testid="legacy-gate">
+              old precision@10 gate: {gate?.legacyPassed ? "passed" : "not met"} ·{" "}
+              {latest ? pct(latest.relativeImprovement) : "—"} lift, needs ≥ {pct(gate?.legacyThreshold)}
+            </p>
           </div>
         </div>
       </section>
@@ -241,23 +260,131 @@ export default function Lab() {
 
       {/* Metric tiles */}
       {latest && (
-        <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="fa-card px-4 py-3">
-            <p className="fa-stat-label">model p@10</p>
-            <p className="fa-stat-value">{pct(latest.modelPrecisionAt10)}</p>
+        <section className="space-y-3" data-testid="metric-tiles">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">ndcg@10 — model</p>
+              <p className="fa-stat-value">{num(latest.ndcgAt10Model, 3)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">popularity {num(latest.ndcgAt10Baseline, 3)}</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">lift, 95% range</p>
+              <p className="fa-stat-value">
+                {signed(latest.ndcgLiftCiLow, 3)} … {signed(latest.ndcgLiftCiHigh, 3)}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                {latest.ndcgLiftCiLow == null
+                  ? "not measured on this run"
+                  : latest.ndcgLiftCiLow > 0
+                    ? "above zero — a real edge"
+                    : "spans zero — could be noise"}
+              </p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">rank agreement (ρ ± se)</p>
+              <p className="fa-stat-value">
+                {latest.spearmanRho.toFixed(2)} ± {num(latest.spearmanSe, 3)}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                does the order match yours? 0 = no better than shuffling
+              </p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">how wrong the number is</p>
+              <p className="fa-stat-value">
+                {signed(latest.calibrationBias, 2)} · {latest.mae.toFixed(2)}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                bias (+ = over-promised) · average miss, in rating points
+              </p>
+            </div>
           </div>
-          <div className="fa-card px-4 py-3">
-            <p className="fa-stat-label">popularity p@10</p>
-            <p className="fa-stat-value">{pct(latest.baselinePrecisionAt10)}</p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">calibration error (ece)</p>
+              <p className="fa-stat-value">{num(latest.ece, 3)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                across 10 predicted-rating bands; 0 = every band lands where it promised
+              </p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">holdout — could actually be shown</p>
+              <p className="fa-stat-value">
+                {latest.eligibleHoldoutCount ?? "—"} / {latest.unfilteredHoldoutCount ?? "—"}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                {latest.eligibleHoldoutCount != null && latest.unfilteredHoldoutCount != null
+                  ? `${latest.unfilteredHoldoutCount - latest.eligibleHoldoutCount} dropped by your own filters`
+                  : "not recorded on this run"}
+              </p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">model p@10 (display only)</p>
+              <p className="fa-stat-value">
+                {pct(latest.modelPrecisionAt10)} <span className="text-fa-frost-dim">vs</span>{" "}
+                {pct(latest.baselinePrecisionAt10)}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                jumps in steps of 10% — too coarse to gate on
+              </p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">rmse</p>
+              <p className="fa-stat-value">{latest.rmse.toFixed(2)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                {latest.lowSample ? "low sample — threshold fell back to your median" : `loved = ≥ threshold`}
+              </p>
+            </div>
           </div>
-          <div className="fa-card px-4 py-3">
-            <p className="fa-stat-label">rmse</p>
-            <p className="fa-stat-value">{latest.rmse.toFixed(2)}</p>
+        </section>
+      )}
+
+      {/* Five rolling split points — one origin is one draw, and the ledger used to report one. */}
+      {latest?.origins && latest.origins.length > 0 && (
+        <section className="fa-card p-5" data-testid="split-origins">
+          <h2 className="fa-section-title mb-1">Five split points, not one</h2>
+          <p className="fa-caption text-fa-frost-dim mb-3">
+            The same question asked at five different moments in your rating history. One split point
+            is a single draw; five say whether the answer holds.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="fa-overline text-fa-frost-dim border-b border-fa-edge/50">
+                  <th className="py-2 pr-4">split at</th>
+                  <th className="py-2 pr-4">train / holdout</th>
+                  <th className="py-2 pr-4">ndcg model</th>
+                  <th className="py-2 pr-4">ndcg popularity</th>
+                  <th className="py-2">lift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latest.origins.map((o) => (
+                  <tr key={o.fraction} className="border-b border-fa-edge/30 fa-body">
+                    <td className="py-2 pr-4 tabular-nums">{pct(o.fraction)}</td>
+                    <td className="py-2 pr-4 tabular-nums">
+                      {o.trainRows} / {o.eligibleHoldout}
+                      <span className="text-fa-frost-dim"> of {o.unfilteredHoldout}</span>
+                    </td>
+                    <td className="py-2 pr-4 tabular-nums">{o.ndcgModel.toFixed(3)}</td>
+                    <td className="py-2 pr-4 tabular-nums">{o.ndcgBaseline.toFixed(3)}</td>
+                    <td
+                      className={`py-2 tabular-nums ${o.ndcgRelativeLift > 0 ? "text-fa-success" : "text-fa-danger"}`}
+                    >
+                      {pct(o.ndcgRelativeLift)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <div className="fa-card px-4 py-3">
-            <p className="fa-stat-label">spearman ρ</p>
-            <p className="fa-stat-value">{latest.spearmanRho.toFixed(2)}</p>
-          </div>
+          <p className="fa-caption text-fa-frost-dim mt-3">
+            mean lift across all five:{" "}
+            <span className="tabular-nums">
+              {pct(latest.origins.reduce((sum, o) => sum + o.ndcgRelativeLift, 0) / latest.origins.length)}
+            </span>
+          </p>
         </section>
       )}
 
@@ -308,10 +435,12 @@ export default function Lab() {
                   <th className="py-2 pr-4">when</th>
                   <th className="py-2 pr-4">train / holdout</th>
                   <th className="py-2 pr-4">threshold</th>
-                  <th className="py-2 pr-4">model p@10</th>
-                  <th className="py-2 pr-4">baseline</th>
-                  <th className="py-2 pr-4">lift</th>
-                  <th className="py-2">gate</th>
+                  <th className="py-2 pr-4">ndcg@10</th>
+                  <th className="py-2 pr-4">popularity</th>
+                  <th className="py-2 pr-4">95% range on the lift</th>
+                  <th className="py-2 pr-4">p@10 (old)</th>
+                  <th className="py-2 pr-4">gate</th>
+                  <th className="py-2">old gate</th>
                 </tr>
               </thead>
               <tbody>
@@ -328,16 +457,36 @@ export default function Lab() {
                       ≥{run.positiveThreshold}
                       {run.eval?.lowSample ? " (low sample)" : ""}
                     </td>
-                    <td className="py-2 pr-4 tabular-nums">{pct(run.eval?.modelPrecisionAt10)}</td>
-                    <td className="py-2 pr-4 tabular-nums">{pct(run.eval?.baselinePrecisionAt10)}</td>
-                    <td className="py-2 pr-4 tabular-nums">{pct(run.eval?.relativeImprovement)}</td>
-                    <td className="py-2">
+                    <td className="py-2 pr-4 tabular-nums">{num(run.eval?.ndcgAt10Model, 3)}</td>
+                    <td className="py-2 pr-4 tabular-nums">{num(run.eval?.ndcgAt10Baseline, 3)}</td>
+                    <td className="py-2 pr-4 tabular-nums">
+                      {run.eval?.ndcgLiftCiLow == null
+                        ? "—"
+                        : `${signed(run.eval.ndcgLiftCiLow, 3)} … ${signed(run.eval.ndcgLiftCiHigh, 3)}`}
+                    </td>
+                    <td className="py-2 pr-4 tabular-nums text-fa-frost-dim">
+                      {pct(run.eval?.modelPrecisionAt10)} / {pct(run.eval?.baselinePrecisionAt10)}
+                    </td>
+                    <td className="py-2 pr-4">
                       {run.eval == null ? (
                         <span className="fa-caption text-fa-frost-dim">—</span>
+                      ) : run.eval.ndcgAt10Model == null ? (
+                        <span className="fa-caption text-fa-frost-dim" title="measured before the instrument repair">
+                          not measured
+                        </span>
                       ) : run.eval.passedGate ? (
                         <span className="fa-caption text-fa-success">passed</span>
                       ) : (
                         <span className="fa-caption text-fa-danger">not met</span>
+                      )}
+                    </td>
+                    <td className="py-2">
+                      {run.eval == null ? (
+                        <span className="fa-caption text-fa-frost-dim">—</span>
+                      ) : run.eval.passedLegacyGate ? (
+                        <span className="fa-caption text-fa-success/70">passed</span>
+                      ) : (
+                        <span className="fa-caption text-fa-frost-dim">not met</span>
                       )}
                     </td>
                   </tr>
