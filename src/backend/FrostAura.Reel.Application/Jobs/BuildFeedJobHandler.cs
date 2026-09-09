@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
@@ -8,6 +9,7 @@ using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
@@ -44,6 +46,8 @@ public class BuildFeedJobHandler(
     RatingCalibrationService calibration,
     DislikeSignal dislikes,
     ISearchAgent agent,
+    TasteFactsBuilder tasteFacts,
+    PersonalisationContext personalisation,
     IMemoryCache cache,
     IPipelineEventHub events,
     ExposureLog exposures,
@@ -306,6 +310,19 @@ public class BuildFeedJobHandler(
             });
         }
 
+        // A NEW snapshot exists, so the titles that carry the day have changed and their lens copy
+        // is owed. Enqueued here and only here — deliberately not on the Preserve path, because
+        // that page is unchanged and its copy is already written. This is what "per FRESH build"
+        // means for the lens volume basis: eight builds in nine minutes produce one of these, not
+        // eight. Priority 3 puts it behind the feed it decorates; it never blocks the build, whose
+        // why pass is already time-boxed and would turn into a timeout if generation joined it.
+        await EnqueueOnceAsync(accountId, JobKind.PersonaliseTitles, priority: 3, cursor: null, now, ct);
+
+        // And the narrative itself, when the account's taste has actually moved. The comparison is
+        // against the stored fingerprint, not a clock, so an ordinary week of ratings costs nothing
+        // and a genuine shift is picked up the same night rather than waiting for Sunday.
+        await EnqueueNarrativeIfProfileMovedAsync(accountId, taste, now, ct);
+
         // See the no-op path above: the availability and enrichment enqueues both race the index.
         await db.SaveAbsorbingRebuildRaceAsync(ct);
 
@@ -328,6 +345,66 @@ public class BuildFeedJobHandler(
         });
         logger.LogInformation("Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored).",
             snapshot.Id, accountId, candidates.Count);
+    }
+
+    /// <summary>
+    /// The in-flight guard every enqueue in this codebase uses: check the partial unique index's
+    /// own predicate, then insert. Losing the race is normal and is absorbed by
+    /// <c>SaveAbsorbingRebuildRaceAsync</c> at the call site — the point of the check is to avoid
+    /// provoking it, not to make it impossible.
+    /// </summary>
+    private async Task EnqueueOnceAsync(
+        Guid accountId, JobKind kind, short priority, string? cursor, DateTime now, CancellationToken ct)
+    {
+        var inFlight = await db.SyncJobs.AnyAsync(
+            j => j.AccountId == accountId && j.Kind == kind
+                && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
+        if (inFlight)
+        {
+            return;
+        }
+
+        db.SyncJobs.Add(new SyncJob
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            Priority = priority,
+            EnqueuedAt = now,
+            CursorJson = cursor,
+        });
+    }
+
+    /// <summary>
+    /// Queues a narrative rewrite when the account's taste fingerprint no longer matches the one
+    /// its current narrative was written from. Computing the fingerprint costs a handful of
+    /// aggregate queries and no LLM spend, so it is cheap to ask every Fresh build; writing the
+    /// narrative is what costs, and that only happens when the answer is yes.
+    /// </summary>
+    private async Task EnqueueNarrativeIfProfileMovedAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, DateTime now, CancellationToken ct)
+    {
+        try
+        {
+            var built = await tasteFacts.BuildAsync(accountId, taste, now, ct);
+            var current = await db.AccountTasteNarratives
+                .Where(n => n.AccountId == accountId)
+                .OrderByDescending(n => n.Version)
+                .Select(n => n.ProfileHash)
+                .FirstOrDefaultAsync(ct);
+            if (string.Equals(current, built.ProfileHash, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await EnqueueOnceAsync(accountId, JobKind.BuildTasteNarrative, priority: 4, cursor: null, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A narrative is a decoration on a feed that has already been built and is already
+            // being served. Nothing here is worth failing the build over.
+            logger.LogWarning(ex, "Could not evaluate the taste fingerprint for {AccountId}; narrative not queued.", accountId);
+        }
     }
 
     /// <summary>
@@ -1059,6 +1136,7 @@ public class BuildFeedJobHandler(
                 previousWhys[(item.Row, item.AnchorTitleId, item.TitleId)] = item.WhyThisSentence;
             }
         }
+
         var pending = new List<PlannedItem>(planned.Count);
         foreach (var item in planned)
         {
@@ -1107,20 +1185,28 @@ public class BuildFeedJobHandler(
             }
         }
 
-        // Budget and ceiling are owned here so the hero swap pass below draws on the SAME clock —
-        // a swap is part of this why pass, never a second budget.
-        using var whyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        whyCts.CancelAfter(WhyPassCeiling);
-        var started = System.Diagnostics.Stopwatch.StartNew();
+        // ONE budget for the whole why pass, including the hero swap that follows it — a swap is
+        // part of this pass, never a second budget. The mechanics (first batch always runs, soft
+        // budget between batches, hard ceiling inside one) live in LlmBudgetLoop, shared with the
+        // paginator, Ask Reel and lens generation.
+        using var loop = new LlmBudgetLoop(new LlmBudgetOptions(WhyPassBudget, WhyPassCeiling, RerankBatch), ct);
 
         if (uncached.Count > 0 && agent.IsAvailable)
         {
-            await CurateWhysAsync(accountId, taste, uncached, anchorNames, heroFits, started, whyCts, ct);
-        }
+            var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
+            var contexts = await RerankContextsAsync(planned, ct);
 
-        if (agent.IsAvailable && heroFits.Count > 0)
-        {
-            await SwapLowFitHeroesAsync(accountId, taste, planned, heroFits, heroSpares, heroContext, started, whyCts, ct);
+            // A title can sit on two rails, so it is judged twice at two different prompt
+            // positions. Averaging the verdicts is the caller's half of the position-bias
+            // mitigation — see PositionDebiasedFit.
+            var debiased = new PositionDebiasedFit();
+            await CurateWhysAsync(accountId, persona, uncached, anchorNames, heroFits, contexts, debiased, loop, ct);
+
+            if (heroFits.Count > 0)
+            {
+                await SwapLowFitHeroesAsync(
+                    accountId, persona, planned, heroFits, heroSpares, heroContext, contexts, debiased, loop, ct);
+            }
         }
 
         // No-repeat guard, per rail: two cards rendering IDENTICAL text is exactly the founder's
@@ -1140,6 +1226,83 @@ public class BuildFeedJobHandler(
     }
 
     /// <summary>
+    /// The enrichment the rerank prompt used to leave on the floor: tone, era, themes, the seven
+    /// scalars, the credited people and the model's own top contributions, for every planned card.
+    /// Three queries for the whole page — the prompt was previously handed genres and 300
+    /// characters of overview and asked to judge personal fit from that.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, RerankTitleContext>> RerankContextsAsync(
+        List<PlannedItem> planned, CancellationToken ct)
+    {
+        var ids = planned.Select(i => i.Candidate.Title.Id).Distinct().ToList();
+        if (ids.Count == 0)
+        {
+            return new Dictionary<Guid, RerankTitleContext>();
+        }
+
+        var attributes = await db.TitleAttributes
+            .Where(a => ids.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)
+            .ToDictionaryAsync(a => a.TitleId, ct);
+
+        var credits = (await db.TitleCredits
+                .Where(c => ids.Contains(c.TitleId))
+                .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.Role, c.CastOrder, p.Name })
+                .ToListAsync(ct))
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .GroupBy(c => c.TitleId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var contributionsByTitle = planned
+            .GroupBy(i => i.Candidate.Title.Id)
+            .ToDictionary(
+                g => g.Key,
+                g => g.First().Candidate.Row.TopContributions
+                    .OrderByDescending(c => Math.Abs(c.Contribution))
+                    .Take(3)
+                    .Select(c => c.Feature)
+                    .ToList());
+
+        var contexts = new Dictionary<Guid, RerankTitleContext>();
+        foreach (var id in ids)
+        {
+            attributes.TryGetValue(id, out var attrs);
+            var titleCredits = credits.GetValueOrDefault(id) ?? [];
+            contexts[id] = new RerankTitleContext(
+                // Only a closed-vocabulary tone is trusted: rows written before enforcement carry
+                // polluted free-text labels (see AttributeVocabulary).
+                AttributeVocabulary.IsClosedVocabTone(attrs?.Tone) ? attrs!.Tone : null,
+                attrs?.Era,
+                attrs?.Themes ?? [],
+                attrs?.Darkness,
+                attrs?.Pacing,
+                attrs?.Complexity,
+                attrs?.EmotionalIntensity,
+                attrs?.Humor,
+                attrs?.Optimism,
+                attrs?.EnsembleVsSolo,
+                titleCredits.Where(c => c.Role == CreditRole.Director)
+                    .OrderBy(c => c.Name, StringComparer.Ordinal).Select(c => c.Name).FirstOrDefault(),
+                titleCredits.Where(c => c.Role == CreditRole.Writer)
+                    .OrderBy(c => c.Name, StringComparer.Ordinal).Select(c => c.Name).FirstOrDefault(),
+                titleCredits.Where(c => c.Role == CreditRole.Actor)
+                    .OrderBy(c => c.CastOrder ?? int.MaxValue).ThenBy(c => c.Name, StringComparer.Ordinal)
+                    .Select(c => c.Name).Take(3).ToList(),
+                contributionsByTitle.GetValueOrDefault(id) ?? []);
+        }
+
+        return contexts;
+    }
+
+    /// <summary>One candidate in the shape the agent judges, with everything the catalogue knows about it.</summary>
+    private static RerankInput RerankInputFor(
+        Candidate candidate, IReadOnlyDictionary<Guid, RerankTitleContext> contexts) =>
+        new(
+            candidate.Title.Id, candidate.Title.Name, candidate.Title.Year,
+            candidate.Title.MediaType.ToString(), candidate.Title.Genres,
+            candidate.Title.Overview, candidate.Predicted,
+            contexts.GetValueOrDefault(candidate.Title.Id));
+
+    /// <summary>
     /// The hero coherence floor. A hero card whose agent fit came in at or below
     /// <see cref="HeroFitFloor"/> reads as "here's tonight's pick; you'll probably dislike it" —
     /// so the slot is swapped for the next spare candidate (drawn from the hero orderings'
@@ -1150,10 +1313,11 @@ public class BuildFeedJobHandler(
     /// Deterministic: low-fit heroes are handled in rank order, spares in their ranking order.
     /// </summary>
     private async Task SwapLowFitHeroesAsync(
-        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> planned,
+        Guid accountId, LensPersona persona, List<PlannedItem> planned,
         IReadOnlyDictionary<Guid, double> heroFits, IReadOnlyList<Candidate> heroSpares,
         Func<Candidate, ExplanationTemplater.Context> heroContext,
-        System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
+        IReadOnlyDictionary<Guid, RerankTitleContext> contexts, PositionDebiasedFit debiased,
+        LlmBudgetLoop loop, CancellationToken ct)
     {
         var lowFit = planned
             .Where(i => i.Row == FeedRowKind.Hero
@@ -1169,7 +1333,7 @@ public class BuildFeedJobHandler(
         var swaps = new List<(PlannedItem Item, Candidate Replacement, double OldFit)>();
         foreach (var item in lowFit)
         {
-            if (spares.Count == 0 || started.Elapsed > WhyPassBudget)
+            if (spares.Count == 0 || loop.BudgetExhausted)
             {
                 // No spare, or no budget to earn the replacement a why: the pick stays, but its
                 // caption must not argue against it — fall back to the templater sentence.
@@ -1185,29 +1349,26 @@ public class BuildFeedJobHandler(
             return;
         }
 
-        var batch = swaps
-            .Select(s => new RerankInput(
-                s.Replacement.Title.Id, s.Replacement.Title.Name, s.Replacement.Title.Year,
-                s.Replacement.Title.MediaType.ToString(), s.Replacement.Title.Genres,
-                s.Replacement.Title.Overview, s.Replacement.Predicted))
-            .ToList();
-
-        IReadOnlyList<RerankResult> results;
-        try
+        var batch = swaps.Select(s => RerankInputFor(s.Replacement, contexts)).ToList();
+        var resultByTitle = new Dictionary<Guid, RerankResult>();
+        var stop = await loop.RunAsync(batch, async (inputs, batchCt) =>
         {
-            var tasteSummary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
-            results = await agent.RerankBatchAsync(
-                batch, FeedPaginator.QueryForRow(FeedRowKind.Hero), tasteSummary, anchorName: null, whyCts.Token);
-        }
-        catch (Exception ex) when (
-            (ex is OperationCanceledException && whyCts.IsCancellationRequested && !ct.IsCancellationRequested)
-            || ex is HttpRequestException or TaskCanceledException)
+            var results = await agent.RerankBatchAsync(
+                inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null, batchCt);
+            foreach (var result in results)
+            {
+                debiased.Observe(result);
+                resultByTitle[result.TitleId] = debiased.For(result.TitleId)!;
+            }
+        });
+
+        if (resultByTitle.Count == 0)
         {
             // The replacement could not be judged, so nothing is swapped — but the low-fit LLM
             // captions still go: each original hero keeps its slot with its templater sentence.
-            logger.LogInformation(ex,
-                "Hero swap pass could not judge replacements; {Count} low-fit heroes keep their slots with templater whys.",
-                swaps.Count);
+            logger.LogInformation(
+                "Hero swap pass could not judge replacements ({Stop}); {Count} low-fit heroes keep their slots with templater whys.",
+                stop, swaps.Count);
             foreach (var (item, _, _) in swaps)
             {
                 item.WhyThis = ExplanationTemplater.BuildSentence(item.WhyContext);
@@ -1216,7 +1377,6 @@ public class BuildFeedJobHandler(
             return;
         }
 
-        var resultByTitle = results.ToDictionary(r => r.TitleId);
         var rowKey = FeedPaginator.RowKeyFor(FeedRowKind.Hero, null);
         foreach (var (item, replacement, oldFit) in swaps)
         {
@@ -1234,26 +1394,25 @@ public class BuildFeedJobHandler(
             }
 
             logger.LogInformation(
-                "Hero swap for {AccountId}: '{Replaced}' (fit {Fit:0.00} ≤ {Floor}) swapped for '{Replacement}'.",
+                "Hero swap for {AccountId}: '{Replaced}' (fit {Fit:0.00} <= {Floor}) swapped for '{Replacement}'.",
                 accountId, replacedName, oldFit, HeroFitFloor, replacement.Title.Name);
         }
     }
 
     /// <summary>
     /// The agent leg of the why pass: rail by rail (so the anchor name rides the prompt and the
-    /// cache key stays per-rail), batched, first batch always allowed to finish, soft budget
-    /// checked BETWEEN batches, hard ceiling backstop — the same mechanics as the paginator's
-    /// curation pass. Accepted lines are cached for both this build and the serve path. The
-    /// stopwatch and ceiling are the caller's, shared with the hero swap pass; every hero fit
-    /// verdict is recorded into <paramref name="heroFits"/> whether or not its why was accepted.
+    /// cache key stays per-rail), batched through the shared budget loop. Accepted lines are cached
+    /// for both this build and the serve path. Every hero fit verdict is recorded into
+    /// <paramref name="heroFits"/> whether or not its why was accepted, and every verdict goes
+    /// through <paramref name="debiased"/> first, so a title judged on two rails is scored on the
+    /// average of its two prompt positions rather than on whichever landed last.
     /// </summary>
     private async Task CurateWhysAsync(
-        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> uncached,
+        Guid accountId, LensPersona persona, List<PlannedItem> uncached,
         IReadOnlyDictionary<Guid, string> anchorNames, Dictionary<Guid, double> heroFits,
-        System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
+        IReadOnlyDictionary<Guid, RerankTitleContext> contexts, PositionDebiasedFit debiased,
+        LlmBudgetLoop loop, CancellationToken ct)
     {
-        var tasteSummary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
-        var batchesDone = 0;
         var curated = 0;
 
         foreach (var rail in uncached.GroupBy(i => (i.Row, i.AnchorTitleId)))
@@ -1262,50 +1421,20 @@ public class BuildFeedJobHandler(
             var anchorName = rail.Key.AnchorTitleId is { } anchorId ? anchorNames.GetValueOrDefault(anchorId) : null;
             var items = rail.OrderBy(i => i.Rank).ToList();
             var byTitleId = items.ToDictionary(i => i.Candidate.Title.Id);
+            var isHeroRail = rail.Key.Row == FeedRowKind.Hero;
 
-            for (var i = 0; i < items.Count; i += RerankBatch)
+            var stop = await loop.RunAsync(items, async (batch, batchCt) =>
             {
-                // Checked BEFORE starting a batch, never during one — a cancelled batch caches
-                // nothing, so the work would simply be lost and the next build would repeat it.
-                if (batchesDone > 0 && started.Elapsed > WhyPassBudget)
-                {
-                    logger.LogInformation(
-                        "Feed why pass stopped after {Elapsed:0.0}s with {Done} of {Total} cards curated; the rest keep templater sentences.",
-                        started.Elapsed.TotalSeconds, curated, uncached.Count);
-                    return;
-                }
+                var inputs = batch.Select(p => RerankInputFor(p.Candidate, contexts)).ToList();
+                var results = await agent.RerankBatchAsync(
+                    inputs, FeedPaginator.QueryForRow(rail.Key.Row), persona, anchorName, batchCt);
 
-                var batch = items.Skip(i).Take(RerankBatch)
-                    .Select(p => new RerankInput(
-                        p.Candidate.Title.Id, p.Candidate.Title.Name, p.Candidate.Title.Year,
-                        p.Candidate.Title.MediaType.ToString(), p.Candidate.Title.Genres,
-                        p.Candidate.Title.Overview, p.Candidate.Predicted))
-                    .ToList();
-
-                IReadOnlyList<RerankResult> results;
-                try
+                foreach (var raw in results)
                 {
-                    results = await agent.RerankBatchAsync(
-                        batch, FeedPaginator.QueryForRow(rail.Key.Row), tasteSummary, anchorName, whyCts.Token);
-                }
-                catch (OperationCanceledException) when (whyCts.IsCancellationRequested && !ct.IsCancellationRequested)
-                {
-                    logger.LogInformation(
-                        "Feed why pass exceeded its {Ceiling}s ceiling after {Done} of {Total} cards; the rest keep templater sentences.",
-                        WhyPassCeiling.TotalSeconds, curated, uncached.Count);
-                    return;
-                }
-                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-                {
-                    logger.LogWarning(ex, "Feed why pass rerank failed; remaining cards keep templater sentences.");
-                    return;
-                }
-
-                batchesDone++;
-                foreach (var result in results)
-                {
+                    debiased.Observe(raw);
+                    var result = debiased.For(raw.TitleId)!;
                     cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
-                    if (rail.Key.Row == FeedRowKind.Hero)
+                    if (isHeroRail)
                     {
                         heroFits[result.TitleId] = result.Fit;
                     }
@@ -1322,6 +1451,14 @@ public class BuildFeedJobHandler(
                         curated++;
                     }
                 }
+            });
+
+            if (stop != LlmBudgetStop.Completed)
+            {
+                logger.LogInformation(
+                    "Feed why pass stopped ({Stop}) after {Elapsed:0.0}s with {Done} of {Total} cards curated; the rest keep templater sentences.",
+                    stop, loop.Elapsed.TotalSeconds, curated, uncached.Count);
+                return;
             }
         }
     }

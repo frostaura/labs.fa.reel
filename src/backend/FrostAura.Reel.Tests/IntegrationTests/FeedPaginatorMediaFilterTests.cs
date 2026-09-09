@@ -4,6 +4,7 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
@@ -78,7 +79,9 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         var paginator = new FeedPaginator(
             db, featureBuilder, retriever, engine, residual,
             new RatingCalibrationService(db, cache), new DislikeSignal(db, cache),
-            candidateGenerator, tmdb, agent, cache, NullLogger<FeedPaginator>.Instance);
+            candidateGenerator, tmdb, agent,
+            new PersonalisationContext(db, new DislikeSignal(db, cache)),
+            cache, NullLogger<FeedPaginator>.Instance);
 
         var req = new MoreFeedRequest(FeedRowContext.Hero, AnchorTitleId: null, Genre: null, ExcludeTitleIds: [], Limit: 12, MediaType: media);
         return await paginator.MoreAsync(account, req, CancellationToken.None);
@@ -219,7 +222,7 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 }

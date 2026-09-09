@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -96,7 +97,7 @@ public class OpenRouterSearchAgent(
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-        IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+        IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
     {
         if (titles.Count == 0)
         {
@@ -110,7 +111,7 @@ public class OpenRouterSearchAgent(
 
         try
         {
-            var user = BuildRerankPrompt(titles, query, tasteSummary, anchorName);
+            var user = BuildRerankPrompt(titles, query, persona, anchorName);
             var (content, usage) = await ChatAsync(RerankSystemPrompt, user, ct);
             RecordCall(ApiUsagePurpose.Rerank, usage);
             if (string.IsNullOrWhiteSpace(content))
@@ -302,10 +303,19 @@ public class OpenRouterSearchAgent(
     /// each candidate's overview must actually reach the model, or the "name the concrete
     /// connection" instruction has nothing to work with and the whys collapse back to generic.
     /// </summary>
-    internal static string BuildRerankPrompt(IReadOnlyList<RerankInput> titles, string query, string taste, string? anchorName = null)
+    internal static string BuildRerankPrompt(
+        IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null)
     {
         var sb = new StringBuilder();
-        sb.Append("Your taste: ").Append(taste).Append('\n');
+        sb.Append("THE VIEWER\n").Append(persona.Taste).Append('\n');
+
+        // The declined line was already riding the Ask Reel prompts and had never reached the feed,
+        // so the feed's judge had never been told a single thing this person dislikes.
+        if (persona.Declined is { Length: > 0 } declined)
+        {
+            sb.Append(declined).Append('\n');
+        }
+
         sb.Append("Your request: ").Append(query).Append('\n');
         if (!string.IsNullOrWhiteSpace(anchorName))
         {
@@ -316,12 +326,18 @@ public class OpenRouterSearchAgent(
         }
 
         sb.Append("Score each title 0.0-1.0 for how well it fits YOU and your request, with a one-line reason addressed to you:\n");
-        foreach (var t in titles)
+
+        // Candidate order is SHUFFLED deterministically per batch (see RerankOrder). LLM rankers
+        // score items later in a prompt lower — a documented position bias — and the caller
+        // averages a title's fit across the batches it appears in, so the shuffle is what turns
+        // that bias into noise that averaging can cancel instead of a systematic penalty on
+        // whatever the model ranked last.
+        foreach (var t in RerankOrder.Shuffle(titles, query, anchorName))
         {
             sb.Append("- id=").Append(t.TitleId).Append(" | ").Append(t.Name);
             if (t.Year is { } y)
             {
-                sb.Append(" (").Append(y).Append(')');
+                sb.Append(" (").Append(y.ToString(CultureInfo.InvariantCulture)).Append(')');
             }
 
             sb.Append(" | ").Append(t.MediaType).Append(" | ").Append(string.Join(", ", t.Genres));
@@ -334,6 +350,8 @@ public class OpenRouterSearchAgent(
                 sb.Append(" | predicted ").Append(p.ToString("0.0", CultureInfo.InvariantCulture));
             }
 
+            AppendContext(sb, t.Context);
+
             if (!string.IsNullOrWhiteSpace(t.Overview))
             {
                 // ~300 chars of overview: enough plot premise for the why to cite something
@@ -345,6 +363,71 @@ public class OpenRouterSearchAgent(
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// The enrichment the prompt used to leave on the floor: tone, era, themes, the seven scalars,
+    /// the people, and the model's own top contributions. Every field is omitted rather than
+    /// zero-filled when it is missing — a title with no attributes should read as unenriched, not
+    /// as uniformly neutral.
+    /// </summary>
+    private static void AppendContext(StringBuilder sb, RerankTitleContext? context)
+    {
+        if (context is null)
+        {
+            return;
+        }
+
+        var c = CultureInfo.InvariantCulture;
+        if (context.Tone is { Length: > 0 } tone)
+        {
+            sb.Append(" | tone ").Append(tone);
+        }
+
+        if (context.Era is { Length: > 0 } era)
+        {
+            sb.Append(" | set ").Append(era);
+        }
+
+        if (context.Themes.Count > 0)
+        {
+            sb.Append(" | themes ").Append(string.Join(", ", context.Themes.Take(4)));
+        }
+
+        if (context.Darkness is not null)
+        {
+            sb.Append(string.Format(
+                c,
+                " | dark {0:0.00} pace {1:0.00} complex {2:0.00} intense {3:0.00} funny {4:0.00} hopeful {5:0.00} ensemble {6:0.00}",
+                context.Darkness, context.Pacing, context.Complexity, context.EmotionalIntensity,
+                context.Humor, context.Optimism, context.EnsembleVsSolo));
+        }
+
+        var people = new List<string>();
+        if (context.Director is { Length: > 0 } director)
+        {
+            people.Add("dir " + director);
+        }
+
+        if (context.Writer is { Length: > 0 } writer)
+        {
+            people.Add("wr " + writer);
+        }
+
+        if (context.TopCast.Count > 0)
+        {
+            people.Add(string.Join(", ", context.TopCast.Take(3)));
+        }
+
+        if (people.Count > 0)
+        {
+            sb.Append(" | ").Append(string.Join(" · ", people));
+        }
+
+        if (context.TopContributions.Count > 0)
+        {
+            sb.Append(" | picked for ").Append(string.Join(", ", context.TopContributions.Take(3)));
+        }
     }
 
     /// <summary>
@@ -396,6 +479,10 @@ public class OpenRouterSearchAgent(
         "you loved\". Vary the sentence openers across the batch — no two whys may start with the same words. " +
         "titleId MUST be the id string quoted exactly as given, never a number. fit MUST be a " +
         "bare JSON number between 0.0 and 1.0 — never a 0-10 or 0-100 score and never a string. " +
+        "Judge fit against WHO THE VIEWER IS as described above — not against how popular, " +
+        "well-known or widely-watched a title is. A format that fills schedules (reality, talk, " +
+        "game and panel shows) earns a high fit ONLY if the viewer description actually says they " +
+        "enjoy that kind of thing; its reach is not evidence about this person. " +
         "Be discerning — spread the scores. Output strictly valid JSON.";
 
     private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);

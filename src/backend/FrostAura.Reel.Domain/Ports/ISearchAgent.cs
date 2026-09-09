@@ -6,9 +6,33 @@ public sealed record ChatTurn(string Role, string Text);
 /// <summary>The agent's response to a turn: a conversational reply + the resolved discovery intent.</summary>
 public sealed record AgentReply(string Reply, SearchIntent Intent);
 
+/// <summary>
+/// The half of a candidate the rerank prompt used NOT to carry, and the reason its verdicts were
+/// shallow: tone, era and themes (extracted per title by a paid model and then read by almost
+/// nothing), the seven attribute scalars, the people, and the model's own top contributions — so
+/// the judge can see WHY the recommender picked this and agree or disagree with a reason.
+/// Null where the title has not been enriched, which is honest rather than zero-filled.
+/// </summary>
+public sealed record RerankTitleContext(
+    string? Tone,
+    string? Era,
+    IReadOnlyList<string> Themes,
+    decimal? Darkness,
+    decimal? Pacing,
+    decimal? Complexity,
+    decimal? EmotionalIntensity,
+    decimal? Humor,
+    decimal? Optimism,
+    decimal? EnsembleVsSolo,
+    string? Director,
+    string? Writer,
+    IReadOnlyList<string> TopCast,
+    IReadOnlyList<string> TopContributions);
+
 /// <summary>A candidate handed to the per-movie re-rank (enough for the model to judge fit).</summary>
 public sealed record RerankInput(
-    Guid TitleId, string Name, int? Year, string MediaType, IReadOnlyList<string> Genres, string? Overview, decimal? Predicted);
+    Guid TitleId, string Name, int? Year, string MediaType, IReadOnlyList<string> Genres, string? Overview, decimal? Predicted,
+    RerankTitleContext? Context = null);
 
 /// <summary>The model's hyper-personal verdict for one title: fit 0–1 + a one-line "why this fits you".</summary>
 public sealed record RerankResult(Guid TitleId, double Fit, string Why);
@@ -37,5 +61,5 @@ public interface ISearchAgent
     /// whose anchor is the user's request itself.
     /// </summary>
     Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-        IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default);
+        IReadOnlyList<RerankInput> titles, string query, Lens.LensPersona persona, string? anchorName = null, CancellationToken ct = default);
 }

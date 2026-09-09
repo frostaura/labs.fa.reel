@@ -53,6 +53,9 @@ public static class DependencyInjection
         // ── Fair-Use usage ledger ──────────────────────────────────────────────────────────
         services.AddSingleton<ApiUsageRecorder>();
         services.AddHostedService(sp => sp.GetRequiredService<ApiUsageRecorder>());
+        // The same instance, seen as the port the lens budget gate reads its in-flight counters
+        // through — the ledger flushes every 15s and a burst can outrun it.
+        services.AddSingleton<Domain.Sync.IPendingApiUsage>(sp => sp.GetRequiredService<ApiUsageRecorder>());
 
         // ── External adapters ──────────────────────────────────────────────────────────────
         // Trakt/TMDB both front with Cloudflare, which rejects UA-less requests — HttpClient
@@ -119,6 +122,17 @@ public static class DependencyInjection
             client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
         }).AddStandardResilienceHandler();
 
+        // The lens writer runs longer than the other chat calls: a narrative is ~10 sentences and a
+        // lens is five to ten times a why-line's output tokens, so the transport cap has to sit
+        // above the callers' own budgets rather than pre-empting them.
+        services.AddHttpClient<Domain.Lens.ILensWriter, OpenRouterLensWriter>(client =>
+        {
+            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(90);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        }).AddStandardResilienceHandler();
+
         // ── Shared-work coordination + request caching ───────────────────────────────────
         services.AddMemoryCache();
         services.AddSingleton<Application.Abstractions.ICatalogWorkCoordinator, Concurrency.CatalogWorkCoordinator>();
@@ -138,6 +152,15 @@ public static class DependencyInjection
         services.AddScoped<Application.Ml.ClosedLoop.ExposureLog>();
         services.AddScoped<Application.Ml.ClosedLoop.AccuracyQuery>();
         services.AddScoped<Application.Ml.ClosedLoop.RatingVerdictQuery>();
+        services.AddScoped<Application.Ml.TasteFactsBuilder>();
+        services.AddScoped<Application.Ml.PersonalisationContext>();
+
+        // ── "Through your lens" ────────────────────────────────────────────────────────────
+        services.AddScoped<Application.Lens.LensBudget>();
+        services.AddScoped<Application.Lens.LensInputBuilder>();
+        services.AddScoped<Application.Lens.LensVerifier>();
+        services.AddScoped<Application.Lens.LensService>();
+        services.AddScoped<Application.Lens.TasteNarrativeService>();
 
         // ── Serving pipeline ─────────────────────────────────────────────────────────────
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();
@@ -166,6 +189,8 @@ public static class DependencyInjection
         services.AddScoped<IJobHandler, BuildFeedJobHandler>();
         services.AddScoped<IJobHandler, RefreshAvailabilityJobHandler>();
         services.AddScoped<IJobHandler, BuildDigestJobHandler>();
+        services.AddScoped<IJobHandler, BuildTasteNarrativeJobHandler>();
+        services.AddScoped<IJobHandler, PersonaliseTitlesJobHandler>();
         services.AddHostedService<JobRunnerService>();
         services.AddHostedService<TraktDeltaPollService>();
         services.AddHostedService<NightlyReconcileService>();

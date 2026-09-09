@@ -25,7 +25,7 @@ namespace FrostAura.Reel.Infrastructure.Telemetry;
 /// reads as "never reported" rather than "cost nothing".
 /// </summary>
 public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<ApiUsageRecorder> logger)
-    : BackgroundService
+    : BackgroundService, IPendingApiUsage
 {
     private readonly ConcurrentDictionary<UsageKey, Counters> _pending = new();
 
@@ -62,6 +62,30 @@ public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<
             Interlocked.Add(ref counters.CompletionTokens, completion);
             Interlocked.Increment(ref counters.CompletionReports);
         }
+    }
+
+    /// <inheritdoc />
+    public (long Calls, long Tokens) PendingToday(ApiProvider provider, Guid? accountId, string purpose)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        long calls = 0, tokens = 0;
+        // Iterating the whole dictionary rather than probing a key: the ledger's grain includes the
+        // MODEL, which the caller has no business knowing, so a budget for a purpose has to sum
+        // across whichever models served it. The dictionary holds at most one entry per
+        // (provider, day, account, model, purpose) within a 15s window — this is a handful of rows.
+        foreach (var (key, counters) in _pending)
+        {
+            if (key.Provider != provider || key.Day != today || key.AccountId != accountId
+                || !string.Equals(key.Purpose, purpose, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            calls += Interlocked.Read(ref counters.Calls);
+            tokens += Interlocked.Read(ref counters.PromptTokens) + Interlocked.Read(ref counters.CompletionTokens);
+        }
+
+        return (calls, tokens);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

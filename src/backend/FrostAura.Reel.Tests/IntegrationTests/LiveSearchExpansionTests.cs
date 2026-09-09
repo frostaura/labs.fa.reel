@@ -7,6 +7,7 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
@@ -263,7 +264,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -281,7 +282,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null, null)));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -341,7 +342,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent([], [], [], message, null, null, [person])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 

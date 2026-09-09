@@ -11,6 +11,7 @@ using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
@@ -563,7 +564,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
         {
             Interlocked.Increment(ref RerankCalls);
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
@@ -586,7 +587,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
         {
             Interlocked.Increment(ref RerankCalls);
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
@@ -616,7 +617,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default)
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
         {
             if (query == HeroQuery && Interlocked.Increment(ref heroCalls) == 1)
             {
@@ -665,6 +666,8 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             agent ?? new UnavailableSearchAgent(),
+            new TasteFactsBuilder(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
+            new PersonalisationContext(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
             new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             new NoopEventHub(),
@@ -866,7 +869,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 

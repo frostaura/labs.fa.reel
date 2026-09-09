@@ -231,6 +231,8 @@ public class TitleHydratorResilienceTests
 
         public DbSet<FeedBuildStat> FeedBuildStats => throw Unexpected();
         public DbSet<AccountDigest> AccountDigests => throw Unexpected();
+        public DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives => throw Unexpected();
+        public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => throw Unexpected();
         public DbSet<ExposureEvent> ExposureEvents => throw Unexpected();
         public DbSet<ExposureOutcome> ExposureOutcomes => throw Unexpected();
         public DbSet<TitleExposureRollup> TitleExposureRollups => throw Unexpected();

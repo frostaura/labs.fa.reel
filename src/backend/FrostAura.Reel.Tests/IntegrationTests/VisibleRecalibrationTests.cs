@@ -11,6 +11,7 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
@@ -775,6 +776,8 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
             new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())),
             new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
             new UnavailableSearchAgent(),
+            new TasteFactsBuilder(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
+            new PersonalisationContext(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
             new MemoryCache(new MemoryCacheOptions()),
             events ?? new RecordingEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
@@ -856,7 +859,7 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 }
