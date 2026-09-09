@@ -20,6 +20,7 @@ import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
+import { DISLIKE_REASONS } from "../lib/dislikeReasons";
 import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
@@ -330,10 +331,14 @@ export default function TitleDetail() {
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "not-for-me" })}>Just not for me</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>
+                          {DISLIKE_REASONS.map((reason) => (
+                            <DropdownMenuItem
+                              key={reason.value}
+                              onClick={() => notInterested({ ...args, titleId: title.titleId, reason: reason.value })}
+                            >
+                              {reason.label}
+                            </DropdownMenuItem>
+                          ))}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     )}
