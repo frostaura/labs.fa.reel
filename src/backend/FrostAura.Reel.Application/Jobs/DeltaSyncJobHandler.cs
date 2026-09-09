@@ -49,6 +49,55 @@ public class DeltaSyncJobHandler(
 
     private record Cursor(bool Force);
 
+    /// <summary>
+    /// Which passive watches this delta may teach the online residual head — the whole rule in one
+    /// place, so every clause of it is directly assertable. Extracted from the job body on
+    /// 2026-09-10 for exactly that reason: the bound had no test at all, and it is the mechanism
+    /// behind a runaway bias that was expensive to diagnose.
+    ///
+    /// <para>Three ways this returns nothing, each load-bearing:</para>
+    /// <list type="bullet">
+    /// <item><description><paramref name="force"/> — a forced reconcile replays the whole library
+    /// and would drown the head in one pass.</description></item>
+    /// <item><description>Neither watch category moved — nothing landed to learn from.</description></item>
+    /// <item><description><paramref name="previousDeltaSyncAt"/> is null — this is the first delta
+    /// after the full ingest, where EVERY row was "first synced" by that ingest. There is no new
+    /// information in the backlog.</description></item>
+    /// </list>
+    ///
+    /// <para>
+    /// And the window is <c>FirstSyncedAt &gt; since</c>, not "the most recent N unrated watches".
+    /// The old bound was the latter, and with a delta poll running every few minutes against a
+    /// library that changes far more slowly it re-taught the head the SAME rows over and over —
+    /// 224 updates on the founder's account, dominated by repeats of a handful of titles, which is
+    /// a large part of how its bias ran away. <see cref="PassiveWatchBudget"/> then caps a single
+    /// unusually large delta on top of that.
+    /// </para>
+    /// </summary>
+    internal static async Task<IReadOnlyList<Guid>> PassiveWatchesToObserveAsync(
+        IReelDbContext db,
+        Guid accountId,
+        bool force,
+        bool watchCategoriesChanged,
+        DateTime? previousDeltaSyncAt,
+        CancellationToken ct)
+    {
+        if (force || !watchCategoriesChanged || previousDeltaSyncAt is not { } since)
+        {
+            return [];
+        }
+
+        return await db.WatchedTitles
+            .Where(w => w.AccountId == accountId
+                && w.FirstSyncedAt > since
+                && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == w.TitleId
+                    && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)))
+            .OrderByDescending(w => w.FirstSyncedAt)
+            .Take(PassiveWatchBudget)
+            .Select(w => w.TitleId)
+            .ToListAsync(ct);
+    }
+
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("DeltaSync requires an account.");
@@ -177,35 +226,19 @@ public class DeltaSyncJobHandler(
             }
         }
 
-        // Passive watches nudge the residual head too — but ONLY on a normal delta, never on a force/
-        // full reconcile (that replays the whole library and would drown the head in one pass), and
-        // only for rows FIRST SEEN SINCE THE PREVIOUS DELTA. The old bound was "the 20 most recently
-        // first-synced unrated watches", full stop: with a delta poll running every few minutes and a
-        // library that changes far more slowly, that re-taught the head the SAME 20 rows over and over
-        // — 224 updates on Dean's account, dominated by repeats of a handful of titles, which is a
-        // large part of how its bias ran away. A null cursor means this is the first delta after the
-        // full ingest, where every row was "first synced" by that ingest: there is no new information
-        // in the backlog, so nothing is observed.
-        if (!force && (changes.Movies || changes.Shows) && previousDeltaSyncAt is { } since)
+        // Passive watches nudge the residual head too, under the bound documented and asserted on
+        // PassiveWatchesToObserveAsync — normal deltas only, rows first seen since the previous one
+        // only, capped at PassiveWatchBudget.
+        var newlyWatched = await PassiveWatchesToObserveAsync(
+            db, accountId, force, changes.Movies || changes.Shows, previousDeltaSyncAt, ct);
+        if (newlyWatched.Count > 0)
         {
-            var newlyWatched = await db.WatchedTitles
-                .Where(w => w.AccountId == accountId
-                    && w.FirstSyncedAt > since
-                    && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == w.TitleId
-                        && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)))
-                .OrderByDescending(w => w.FirstSyncedAt)
-                .Take(PassiveWatchBudget)
-                .Select(w => w.TitleId)
-                .ToListAsync(ct);
-            if (newlyWatched.Count > 0)
-            {
-                await residual.ObserveBatchAsync(
-                    accountId,
-                    newlyWatched
-                        .Select(id => new OnlineResidualModel.ObservedEvent(id, PassiveWatchTarget, PassiveWatchWeight))
-                        .ToList(),
-                    ct);
-            }
+            await residual.ObserveBatchAsync(
+                accountId,
+                newlyWatched
+                    .Select(id => new OnlineResidualModel.ObservedEvent(id, PassiveWatchTarget, PassiveWatchWeight))
+                    .ToList(),
+                ct);
         }
 
         // Trakt-synced ratings are ~98% of the founder's ratings and have never reached the head —

@@ -1340,10 +1340,10 @@ public class BuildFeedJobHandler(
     /// is the demotion, exactly. Widening the record for two derivable numbers would be a change to
     /// the type every scoring surface passes around, for nothing.
     ///
-    /// <para><c>PredictedRating</c> is the FULL-precision prediction, not <see cref="DisplayRating"/>'s
-    /// one decimal. The card renders one; the log keeps two, because a calibration join spanning
-    /// <c>FeedItem</c> (1 dp) and <c>TitleScore</c> (2 dp) otherwise inherits a 0.05 quantisation
-    /// floor. One resolution for every surface, chosen in <c>ExposureLog</c>.</para>
+    /// <para><c>PredictedRating</c> is the FULL-precision prediction; <c>ExposureLog</c> chooses the
+    /// stored resolution (2 dp) for every surface. <see cref="DisplayRating"/> now also stores 2 dp
+    /// on <c>FeedItem</c>, so a calibration join across <c>FeedItem</c>, <c>TitleScore</c> and the
+    /// exposure log no longer inherits a quantisation floor from whichever side is coarsest.</para>
     /// </summary>
     private static ExposureCard CardOf(PlannedItem item) => new(
         item.Candidate.Title.Id,
@@ -1358,8 +1358,20 @@ public class BuildFeedJobHandler(
         item.WhySource,
         FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId));
 
-    /// <summary>What the card shows. Rounded here, once, so the write path and the drift path agree.</summary>
-    private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 1);
+    /// <summary>
+    /// What the card shows. Rounded here, once, so the write path and the drift path agree.
+    /// <para>
+    /// TWO decimals, matching <c>TitleScore.PredictedRating</c> and the exposure log. It was one
+    /// until 2026-09-10, and the odd resolution out is what mattered: a calibration or accuracy
+    /// join that spans <c>FeedItem</c> and <c>TitleScore</c> inherits the COARSER of the two, so a
+    /// 1 dp column put a 0.05 quantisation floor under every residual measured across that join —
+    /// which is the same order as the calibration deltas being measured. The card is unaffected:
+    /// the frontend badge renders <c>toFixed(1)</c> and always has, so this changes what is
+    /// measurable without changing what is shown. The column is unconstrained <c>numeric</c>, so
+    /// no migration.
+    /// </para>
+    /// </summary>
+    private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 2);
 
     /// <inheritdoc cref="DisplayRating"/>
     private static decimal FinalScoreOf(Candidate candidate, Func<Title, decimal> freshness) =>
