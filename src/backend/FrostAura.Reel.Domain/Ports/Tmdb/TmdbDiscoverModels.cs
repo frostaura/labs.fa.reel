@@ -36,6 +36,45 @@ public record TmdbListItem(
     string? OriginalLanguage = null);
 
 /// <summary>
+/// Everything a concept-discover call needs beyond genres, keywords and dates: the account's own
+/// content rules projected into TMDB parameters, the optional person constraint the credit-affinity
+/// arm uses, and which rate-gate lane the call belongs in.
+///
+/// <para>
+/// It exists because the feed build used to ask TMDB for whatever was popular and let the
+/// eligibility layer throw most of it away. On the founder's account ~421 of 5,319 catalogue titles
+/// are eligible, so ~92% of every fetched page was waste by construction — and no amount of deeper
+/// paging fixes that, because deeper pages of an unfiltered query are simply more ineligible titles.
+/// A rule applied AFTER the fetch can only shrink the pool; the same rule sent WITH the fetch
+/// changes what is in it.
+/// </para>
+///
+/// <para>
+/// The defaults reproduce the pre-existing Ask Reel behaviour exactly — no language constraint, no
+/// vote-average floor, the endpoint's own vote-count floor, and the Interactive lane — so an
+/// existing caller that passes nothing is unchanged.
+/// </para>
+/// </summary>
+public sealed record TmdbDiscoverOptions(
+    /// <summary><c>with_original_language</c> (ISO-639-1). Null leaves language unconstrained —
+    /// which is also what a "*" or multi-language allow-list must project to, since TMDB takes a
+    /// single code here and silently ignores the rest of an OR-list.</summary>
+    string? OriginalLanguage = null,
+    /// <summary><c>vote_average.gte</c> — the account's MinCrowdRating floor. TMDB-only, whereas
+    /// eligibility resolves the crowd rating TMDB-then-Trakt; the gap is titles TMDB has not rated,
+    /// which fail the eligibility floor anyway.</summary>
+    decimal? MinVoteAverage = null,
+    /// <summary><c>vote_count.gte</c> override. Null keeps the endpoint's own default (10 for the
+    /// concept firehose, which wants recall); the feed build passes 50 to match its old lane.</summary>
+    int? MinVoteCount = null,
+    /// <summary><c>with_people</c>, OR-joined. TMDB movie discover only — <c>/discover/tv</c> has no
+    /// person parameter, so this is ignored for TV rather than silently returning an unfiltered page.</summary>
+    IReadOnlyList<long>? PeopleIds = null,
+    /// <summary>Which shared rate-gate lane the call drains. Interactive by default (Ask Reel);
+    /// background supply passes Reconcile so a feed build cannot starve a live search.</summary>
+    RatePriority Priority = RatePriority.Interactive);
+
+/// <summary>
 /// TMDB genre-id ↔ Trakt-style slug mapping (movie and TV id spaces differ). Slugs align with
 /// the ingest vocabulary so genre features and filters treat discovery candidates identically.
 /// </summary>

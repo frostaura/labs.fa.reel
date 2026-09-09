@@ -249,6 +249,9 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -264,7 +267,7 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page,
             IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
-            CancellationToken ct = default) =>
+            TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>

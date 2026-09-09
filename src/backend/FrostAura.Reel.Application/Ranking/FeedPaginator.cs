@@ -656,8 +656,10 @@ public sealed class FeedPaginator(
     /// <summary>Pull another TMDB page into the catalog for this lane. Returns rows newly created.</summary>
     private async Task<int> DeepenAsync(MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, string region, int seenCount, CancellationToken ct)
     {
-        // Walk deeper into TMDB as the user scrolls: each ~20 cards seen advances a page.
-        var page = Math.Clamp(2 + seenCount / 20, 2, MaxDeepenPage);
+        // Walk deeper into TMDB as the user scrolls: each ~20 cards seen advances a page. The
+        // arithmetic lives in DiscoveryPaging, which the feed BUILD now reads from too — it used to
+        // exist only here, which is why the build read page 1 for ever.
+        var page = DiscoveryPaging.DeepenPage(seenCount, MaxDeepenPage);
         // Media-aware deepen: a "Movies" lane pulls ONLY movies from TMDB (and vice versa), so a thin
         // movies lane grows with movies instead of half its deepen budget landing shows the media
         // window would then drop. Null medium keeps the original both-media behaviour.

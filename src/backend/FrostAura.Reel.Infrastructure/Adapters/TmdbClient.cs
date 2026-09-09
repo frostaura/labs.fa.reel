@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -33,6 +34,10 @@ public class TmdbClient(
 
     /// <summary>Ceiling on a single backoff — a hostile Retry-After must not park a background job for an hour.</summary>
     private static readonly TimeSpan MaxThrottleDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>The concept firehose's own vote-count floor, overridable per call — see the note in
+    /// <see cref="DiscoverByConceptAsync"/>.</summary>
+    private const int DefaultConceptVoteCount = 10;
 
     public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
         GetDetailsAsync($"movie/{tmdbId}?append_to_response=credits,videos,keywords", ct);
@@ -71,6 +76,9 @@ public class TmdbClient(
 
     public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
         GetListAsync($"{(movies ? "movie" : "tv")}/{tmdbId}/recommendations", movies, RatePriority.Reconcile, ct);
+
+    public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+        GetListAsync($"{(movies ? "movie" : "tv")}/{tmdbId}/similar", movies, RatePriority.Reconcile, ct);
 
     public async Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default)
     {
@@ -176,12 +184,16 @@ public class TmdbClient(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page,
         IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default)
+        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
+        TmdbDiscoverOptions? options = null, CancellationToken ct = default)
     {
         var path = movies ? "discover/movie" : "discover/tv";
-        // vote_count.gte is lower than the feed's discover (50) — concept queries want recall over
-        // the most niche unseen titles, not just the popular ones. Genres + keywords OR-joined.
-        var query = $"?sort_by=popularity.desc&include_adult=false&page={page}&vote_count.gte=10";
+        // vote_count.gte defaults lower than the feed's discover (50) — concept queries want recall
+        // over the most niche unseen titles, not just the popular ones. The feed build overrides it
+        // back to 50 through options, so routing supply through here does not quietly widen its
+        // quality floor. Genres + keywords OR-joined.
+        var query = $"?sort_by=popularity.desc&include_adult=false&page={page}"
+            + $"&vote_count.gte={options?.MinVoteCount ?? DefaultConceptVoteCount}";
         var dateField = movies ? "primary_release_date" : "first_air_date";
         if (genreIds.Count > 0)
         {
@@ -191,6 +203,15 @@ public class TmdbClient(
         if (keywordIds.Count > 0)
         {
             query += $"&with_keywords={string.Join('|', keywordIds)}";
+        }
+
+        // with_people is a MOVIE-discover parameter; /discover/tv has no person filter at all, so
+        // sending it there would return an unconstrained page that looks like a person arm and is
+        // not one. Silently dropping it for TV is the honest reading — the caller's own media plan
+        // decides whether a person arm happens at all.
+        if (movies && options?.PeopleIds is { Count: > 0 } peopleIds)
+        {
+            query += $"&with_people={string.Join('|', peopleIds)}";
         }
 
         // TMDB AND-s the without_* filters, which is what we want: a title is dropped if it carries
@@ -222,12 +243,26 @@ public class TmdbClient(
             query += $"&with_runtime.lte={maxRuntime}";
         }
 
+        // The account's standing content rules. Both are allow/floor semantics rather than
+        // exclusions, so an absent rule means "unconstrained", never "exclude everything".
+        if (options?.OriginalLanguage is { Length: 2 } language)
+        {
+            query += $"&with_original_language={language.ToLowerInvariant()}";
+        }
+
+        if (options?.MinVoteAverage is { } minVoteAverage)
+        {
+            // Invariant culture: a decimal formatted under a comma-decimal locale would produce
+            // vote_average.gte=6,0, which TMDB reads as a malformed number and ignores.
+            query += $"&vote_average.gte={minVoteAverage.ToString(CultureInfo.InvariantCulture)}";
+        }
+
         if (movies && region is { Length: 2 })
         {
             query += $"&region={region}";
         }
 
-        return GetListAsync(path + query, movies, RatePriority.Interactive, ct);
+        return GetListAsync(path + query, movies, options?.Priority ?? RatePriority.Interactive, ct);
     }
 
     public async Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default)

@@ -127,7 +127,9 @@ public class BuildFeedJobHandler(
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         ReportProgress(job, accountId, 10, "Scouting fresh candidates");
-        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, ct);
+        // `now` is threaded in so the seed rotation is a pure function of the build's own timestamp —
+        // the same replayability contract the row anchors hold.
+        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN

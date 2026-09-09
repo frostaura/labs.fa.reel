@@ -1063,13 +1063,13 @@ public sealed class LiveSearchExpansionService(
         var tasks = new List<Task<IReadOnlyList<TmdbListItem>>>();
         if (wantMovies)
         {
-            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, excludeMovieGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct));
+            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, excludeMovieGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct: ct));
             tasks.Add(tmdb.SearchTitlesAsync(true, intent.FreeText, SearchPages, ct));
         }
 
         if (wantTv)
         {
-            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, excludeTvGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct));
+            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, excludeTvGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct: ct));
             tasks.Add(tmdb.SearchTitlesAsync(false, intent.FreeText, SearchPages, ct));
         }
 

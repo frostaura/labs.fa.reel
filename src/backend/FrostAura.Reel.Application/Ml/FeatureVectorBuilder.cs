@@ -110,7 +110,14 @@ public class FeatureVectorBuilder(IReelDbContext db)
         SelfExclusion Self,
         IReadOnlyList<Guid> LovedAnchorPool,
         IReadOnlyDictionary<string, double> DislikedGenreWeights,
-        float[]? NotInterestedCentroid);
+        float[]? NotInterestedCentroid,
+        /// <summary>
+        /// The share of the user's movie/show-level ratings that are MOVIES, 0..1 — 0.5 when they
+        /// have rated nothing yet. It is a supply signal, not a feature: discovery uses it to ask
+        /// TMDB for the two media in the proportion the user actually rates, instead of a fixed 1:1
+        /// intake that produced an all-TV live feed on the founder's account.
+        /// </summary>
+        decimal MovieRatedShare);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -125,8 +132,16 @@ public class FeatureVectorBuilder(IReelDbContext db)
         var ratedTitleIds = titleRatings.Select(r => r.TitleId).Distinct().ToList();
         var ratedTitles = await db.Titles
             .Where(t => ratedTitleIds.Contains(t.Id))
-            .Select(t => new { t.Id, t.Genres, t.Year, t.TraktRating })
+            .Select(t => new { t.Id, t.Genres, t.Year, t.TraktRating, t.MediaType })
             .ToDictionaryAsync(t => t.Id, ct);
+
+        // Media mix over DISTINCT rated titles, not rating rows — a show rated once and a movie
+        // rated once are one vote each. Neutral with nothing rated: an even split asserts nothing.
+        var ratedMedia = ratedTitleIds.Where(ratedTitles.ContainsKey).ToList();
+        var ratedMovies = ratedMedia.Count(id => ratedTitles[id].MediaType == MediaType.Movie);
+        var movieRatedShare = ratedMedia.Count == 0
+            ? 0.5m
+            : (decimal)ratedMovies / ratedMedia.Count;
 
         var userMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
 
@@ -371,7 +386,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
             self,
             lovedAnchorPool,
             dislikedGenreWeights,
-            notInterestedCentroid);
+            notInterestedCentroid,
+            movieRatedShare);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
