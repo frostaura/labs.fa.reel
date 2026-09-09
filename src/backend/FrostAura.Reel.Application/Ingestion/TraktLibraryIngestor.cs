@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Domain.Catalog;
@@ -18,9 +19,21 @@ public class TraktLibraryIngestor(
     IReelDbContext db,
     ITraktClient trakt,
     IPipelineEventHub events,
+    RatingCalibrationService calibrator,
     ILogger<TraktLibraryIngestor> logger)
 {
     public record IngestCounts(int Movies, int Shows, int Episodes, int Ratings);
+
+    /// <summary>One title-level rating this pass actually inserted or changed.</summary>
+    public readonly record struct IngestedRating(Guid TitleId, short Rating);
+
+    /// <summary>
+    /// What a ratings ingest did. <paramref name="Count"/> is every row Trakt returned (the number the
+    /// progress copy has always shown); <paramref name="Changed"/> is the far smaller set that was
+    /// actually new or different — the only rows carrying information a learner has not already seen.
+    /// Season and episode ratings are excluded: they are not title-level labels.
+    /// </summary>
+    public record RatingIngestResult(int Count, IReadOnlyList<IngestedRating> Changed);
 
     public async Task<int> IngestMoviesAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
     {
@@ -117,7 +130,7 @@ public class TraktLibraryIngestor(
         return (watchedShows.Count, episodeCount);
     }
 
-    public async Task<int> IngestRatingsAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
+    public async Task<RatingIngestResult> IngestRatingsAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
     {
         var ratings = await trakt.GetRatingsAsync(token, priority, ct);
         events.Publish(accountId, PipelineEventTypes.IngestProgress, Progress("ratings", ratings.Count));
@@ -131,6 +144,7 @@ public class TraktLibraryIngestor(
             .ToDictionaryAsync(r => (r.SubjectType, r.TitleId, r.SeasonNumber, r.EpisodeNumber), ct);
 
         var now = DateTime.UtcNow;
+        var changed = new List<IngestedRating>();
         foreach (var item in ratings)
         {
             Title title;
@@ -176,13 +190,29 @@ public class TraktLibraryIngestor(
                 db.UserRatings.Add(rating);
             }
 
+            // Captured BEFORE the assignment: a re-ingest replays Trakt's whole ratings snapshot, so
+            // "did this row move" is the only thing separating 20 new ratings from 2,000 old ones.
+            if (subjectType is RatingSubjectType.Movie or RatingSubjectType.Show
+                && rating.Rating != item.Rating)
+            {
+                changed.Add(new IngestedRating(title.Id, item.Rating));
+            }
+
             rating.Rating = item.Rating;
             rating.RatedAt = item.RatedAt;
             rating.SyncedAt = now;
         }
 
-        logger.LogInformation("Ingested {Count} ratings for {AccountId}.", ratings.Count, accountId);
-        return ratings.Count;
+        // A rating is a closed-loop outcome, so the account's fitted predicted→actual map is now out
+        // of date. Same eviction the in-app rating endpoint performs, for the same reason.
+        if (changed.Count > 0)
+        {
+            calibrator.Invalidate(accountId);
+        }
+
+        logger.LogInformation(
+            "Ingested {Count} ratings for {AccountId} ({Changed} new or changed).", ratings.Count, accountId, changed.Count);
+        return new RatingIngestResult(ratings.Count, changed);
     }
 
     /// <summary>

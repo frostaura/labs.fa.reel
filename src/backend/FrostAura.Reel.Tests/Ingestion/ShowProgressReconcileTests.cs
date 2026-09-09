@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using FrostAura.Reel.Application.Ingestion;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -10,6 +11,7 @@ using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Tests.Fakes;
 using FrostAura.Reel.Tests.IntegrationTests;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.Ingestion;
@@ -62,7 +64,10 @@ public class ShowProgressReconcileTests(PostgresFixture fixture)
 
         await using (var db = fixture.CreateContext(ctx))
         {
-            var ingestor = new TraktLibraryIngestor(db, trakt, new NoopEventHub(), NullLogger<TraktLibraryIngestor>.Instance);
+            var ingestor = new TraktLibraryIngestor(
+                db, trakt, new NoopEventHub(),
+                new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())),
+                NullLogger<TraktLibraryIngestor>.Instance);
             await ingestor.IngestShowsAsync(account.Id, "token", RatePriority.DeltaPoll, CancellationToken.None);
             await db.SaveChangesAsync();
         }
