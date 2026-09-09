@@ -127,6 +127,7 @@ public static class DependencyInjection
         services.AddSingleton<IModelEngine, Ml.FastTreeModelEngine>();
         services.AddScoped<Application.Ml.FeatureVectorBuilder>();
         services.AddScoped<Application.Ml.OnlineResidualModel>();
+        services.AddScoped<Application.Ml.RatingCalibrationService>();
         services.AddScoped<Application.Ranking.DislikeSignal>();
         services.AddScoped<Application.Ml.OnDemandScorer>();
         services.AddScoped<Application.Ml.EvalHarness>();
