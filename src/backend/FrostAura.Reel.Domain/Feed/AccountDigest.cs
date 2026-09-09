@@ -43,6 +43,13 @@ public static class DigestReasons
 {
     public const string NewRelease = "new-release";
     public const string NewOnProvider = "new-on-provider";
+
+    /// <summary>
+    /// The user-facing why for a digest item. Single-sourced because the digest rail and the push
+    /// notification are two renderings of the same pick and must not describe it differently.
+    /// </summary>
+    public static string CopyFor(string reason) =>
+        reason == NewOnProvider ? "Just landed on your services" : "New this week";
 }
 
 /// <summary>Week arithmetic shared by the digest job, its scheduler and the API.</summary>

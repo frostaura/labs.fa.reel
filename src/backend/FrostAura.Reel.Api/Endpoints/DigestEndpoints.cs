@@ -54,9 +54,7 @@ public static class DigestEndpoints
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
                 var (crowd, crowdVotes) = CrowdRating.Resolve(title);
-                var whyThis = item.Reason == DigestReasons.NewOnProvider
-                    ? "Just landed on your services"
-                    : "New this week";
+                var whyThis = DigestReasons.CopyFor(item.Reason);
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
