@@ -32,6 +32,30 @@ cd src/frontend && npm install && npm run dev   # http://localhost:5173
 
 Create a Trakt API app at <https://trakt.tv/oauth/applications> with redirect URI `http://localhost:5173/auth/trakt/callback` for dev.
 
+### Tests
+
+```bash
+# Unit suite — no database needed.
+dotnet test src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj
+
+# Integration suite — needs a real pgvector Postgres. Point it at a THROWAWAY database:
+# the fixture drops and re-migrates it on every run.
+REEL_TEST_CONNECTION_STRING="Host=localhost;Port=5433;Database=reel_test;Username=reel;Password=…" \
+REEL_SKIP_LOCAL_FLAKY=1 \
+  dotnet test src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj \
+    --filter "FullyQualifiedName~IntegrationTests"
+```
+
+`REEL_SKIP_LOCAL_FLAKY=1` skips six integration tests that are known local-only failures on the
+dev Mac (see `[LocalFlakyFact]` in `src/backend/FrostAura.Reel.Tests/IntegrationTests/`). **It is
+set nowhere in CI, and must never be** — CI's `pgvector/pgvector:pg16` service is authoritative
+for this suite and runs all six. Drop the variable to see them.
+
+Integration tests skip silently when `REEL_TEST_CONNECTION_STRING` is absent, so a plain local
+`dotnet test` stays green without a database. CI sets `REEL_REQUIRE_INTEGRATION=1`, which turns
+that silence into a hard failure — a suite that reports green having run nothing is worse than a
+red one.
+
 ## Data sources & attribution
 
 - **Trakt** — watch history, ratings, in-progress shows, write-back (ratings, watchlist, the managed "Reel — Up Next" list).
