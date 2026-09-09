@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Tenancy;
 using Pgvector;
@@ -18,6 +19,22 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class CandidateRetrieverTests(PostgresFixture fixture)
 {
+    /// <summary>
+    /// A synthetic genre stamped on every title this instance seeds, with a matching IncludeGenre
+    /// allowlist row on its account — so the eligibility lane both arms compose sees THIS test's
+    /// rows and nothing else.
+    ///
+    /// <para>This is the fix for the contamination that had two of the three tests here
+    /// quarantined as local-only failures. The catalogue is GLOBAL and shared by every class in the
+    /// postgres collection, so a sibling class seeding a popular title displaced the popularity
+    /// head, and a sibling seeding an embedding became a nearer ANN neighbour than the deep cut
+    /// this file plants. Neither symptom was a defect in the retriever, and neither assertion was
+    /// wrong — the POOL was wrong. Narrowing the pool to this test's own rows fixes the cause;
+    /// nothing about what is asserted has been weakened. xUnit builds one instance per test, so
+    /// the scope is unique per test as well as per class.</para>
+    /// </summary>
+    private readonly string _scope = $"retrieverscope{Guid.NewGuid():N}";
+
     [Fact]
     public async Task Ann_arm_surfaces_a_similar_unseen_title_past_the_popularity_head()
     {
@@ -55,13 +72,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
         Assert.DoesNotContain(seenId, ids);   // watched ⇒ excluded
     }
 
-    // QUARANTINED (local-only): passes when this class runs alone; fails in the full
-    // integration run because every IntegrationTests class shares one [Collection("postgres")]
-    // database and the catalog is GLOBAL, so titles seeded by sibling classes fill the
-    // popularity head and displace this test's expectations. Local symptom (3/3 runs,
-    // 2026-09-09): the seeded fallback title id is absent from the returned set. Passes on CI.
-    [LocalFlakyFact]
-    [Trait("Flaky", "local")]
+    [Fact]
     public async Task Cold_start_with_no_loved_centroid_falls_back_to_pure_popularity()
     {
         if (!fixture.Available)
@@ -80,12 +91,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
         Assert.Contains(b, ids);
     }
 
-    // QUARANTINED (local-only): same shared-catalog contamination as the cold-start test —
-    // passes when this class runs alone, fails in the full run because sibling classes' titles
-    // become nearer ANN neighbours than the ones seeded here. Local symptom (3/3 runs,
-    // 2026-09-09): Assert.True on the neighbour set at this file's line ~111 is false. Passes on CI.
-    [LocalFlakyFact]
-    [Trait("Flaky", "local")]
+    [Fact]
     public async Task RetrieveSimilar_surfaces_unseen_neighbours_and_excludes_the_anchor_and_seen_titles()
     {
         if (!fixture.Available)
@@ -162,6 +168,14 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
             PipelineStageChangedAt = DateTime.UtcNow,
         };
         db.Add(account);
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            Kind = FilterKind.IncludeGenre,
+            Value = _scope,
+            CreatedAt = DateTime.UtcNow,
+        });
         await db.SaveChangesAsync();
         return account.Id;
     }
@@ -178,7 +192,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
             Name = name,
             Language = "en", // eligibility defaults to English-only when no language filter is configured
             PosterPath = "/p.jpg",
-            Genres = ["drama"],
+            Genres = ["drama", _scope],
             TmdbPopularity = popularity,
             CreatedAt = DateTime.UtcNow,
         };

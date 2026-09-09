@@ -18,6 +18,7 @@ import { useGetSessionQuery, useGetTasteDnaQuery } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";
 import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
 import ShareCard from "../components/dna/ShareCard";
+import DislikePanel from "../components/dna/DislikePanel";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -184,6 +185,9 @@ export default function TasteDna() {
           </ResponsiveContainer>
         </section>
       </div>
+
+      {/* What you've said no to — the strongest negative signal, made legible and revocable. */}
+      <DislikePanel />
 
       {/* Taste drift */}
       {driftData.length > 1 && (

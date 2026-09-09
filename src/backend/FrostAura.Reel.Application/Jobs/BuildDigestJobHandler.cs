@@ -192,7 +192,7 @@ public sealed class BuildDigestJobHandler(
         // to deliver every week, and it teaches the user to ignore the notification entirely.
         if (items.Count > 0)
         {
-            await NotifyAsync(accountId, items.Count, now, ct);
+            await NotifyAsync(accountId, items, now, ct);
         }
         else
         {
@@ -202,7 +202,46 @@ public sealed class BuildDigestJobHandler(
         }
     }
 
-    private async Task NotifyAsync(Guid accountId, int itemCount, DateTime now, CancellationToken ct)
+    /// <summary>
+    /// The web-push payload for a built digest. Pure and internal so the copy is unit-testable
+    /// without a database or a push service.
+    ///
+    /// <para>Title: the top pick by name with its predicted rating, plus how many others are
+    /// waiting — "Sicario: Day of the Soldado — 8.2 for you, plus 9 more this week". A digest of
+    /// one drops the "plus" clause rather than saying "plus 0 more".</para>
+    ///
+    /// <para>Body: the top item's own why — or, when the "high for you" floor had to be relaxed,
+    /// the degraded reason instead, because a push that oversells a relaxed digest is exactly the
+    /// dishonesty the relaxed floor exists to avoid.</para>
+    ///
+    /// <para>Url: the deep link to that title. Falls back to "/" only when the title row is missing
+    /// or carries no TMDB id, which is the one case the route cannot express.</para>
+    ///
+    /// <para>Invariant culture on the rating, deliberately: the same reasoning as the degraded
+    /// copy above — a server whose locale renders "8,2" would quote a number the user has never
+    /// seen anywhere else in the product.</para>
+    /// </summary>
+    internal static DigestPushPayload BuildPushPayload(
+        string? topName, string? topMediaType, long? topTmdbId, DigestItem top, int itemCount)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var rating = Math.Round(top.PredictedRating, 1).ToString("0.0", culture);
+        var others = itemCount - 1;
+
+        var title = topName is { Length: > 0 } name
+            ? others > 0
+                ? string.Format(culture, "{0} \u2014 {1} for you, plus {2} more this week", name, rating, others)
+                : string.Format(culture, "{0} \u2014 {1} for you", name, rating)
+            : $"Your week in Reel: {itemCount} new high-for-you titles";
+
+        var url = topMediaType is { Length: > 0 } mediaType && topTmdbId is { } tmdbId
+            ? $"/title/{mediaType.ToLowerInvariant()}/{tmdbId}"
+            : "/";
+
+        return new DigestPushPayload(title, top.DegradedReason ?? DigestReasons.CopyFor(top.Reason), url);
+    }
+
+    private async Task NotifyAsync(Guid accountId, IReadOnlyList<DigestItem> items, DateTime now, CancellationToken ct)
     {
         var subscriptions = await db.PushSubscriptions
             .Where(s => s.AccountId == accountId)
@@ -212,12 +251,21 @@ public sealed class BuildDigestJobHandler(
             return;
         }
 
-        var payload = JsonSerializer.Serialize(new
-        {
-            title = "Your week in Reel",
-            body = $"{itemCount} new high-for-you titles",
-            url = "/",
-        });
+        // The digest itself is personalised; the notification announcing it was two hardcoded
+        // strings and a link to the home page. Name the pick, quote its number, and land the tap on
+        // the title it is talking about.
+        var top = items[0];
+        var topTitle = await db.Titles
+            .Where(t => t.Id == top.TitleId)
+            .Select(t => new { t.Name, t.MediaType, t.TmdbId })
+            .FirstOrDefaultAsync(ct);
+
+        var payload = JsonSerializer.Serialize(BuildPushPayload(
+            topTitle?.Name,
+            topTitle?.MediaType.ToString(),
+            topTitle?.TmdbId,
+            top,
+            items.Count));
 
         foreach (var subscription in subscriptions)
         {
@@ -257,3 +305,12 @@ public sealed class BuildDigestJobHandler(
         await db.SaveChangesAsync(ct);
     }
 }
+
+/// <summary>
+/// The web-push notification body. Property names are pinned to the lowercase keys the service
+/// worker reads — a rename of the C# property must not silently change the wire contract.
+/// </summary>
+internal sealed record DigestPushPayload(
+    [property: System.Text.Json.Serialization.JsonPropertyName("title")] string Title,
+    [property: System.Text.Json.Serialization.JsonPropertyName("body")] string Body,
+    [property: System.Text.Json.Serialization.JsonPropertyName("url")] string Url);

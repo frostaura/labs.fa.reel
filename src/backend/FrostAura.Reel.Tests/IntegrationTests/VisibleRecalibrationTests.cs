@@ -762,7 +762,7 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         var handler = new BuildFeedJobHandler(
             db,
             featureBuilder,
-            new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
+            new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             new CandidateRetriever(db, eligibility),
             eligibility,
             new FeedStarvationDiagnostic(db, eligibility),
@@ -823,6 +823,9 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
 
@@ -834,7 +837,7 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         public Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
-        public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page, IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page, IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>

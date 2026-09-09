@@ -56,6 +56,12 @@ export interface TitleDetailPayload {
   name: string;
   year: number | null;
   overview: string | null;
+  /**
+   * The personalised why-line for this title — the persisted sentence from the account's Active
+   * feed snapshot, or the same deterministic templater's rebuild when the title is outside the
+   * current build. Null when nothing verifiable can be cited; never the generic boilerplate.
+   */
+  whyThis: string | null;
   tagline: string | null;
   runtimeMinutes: number | null;
   certification: string | null;

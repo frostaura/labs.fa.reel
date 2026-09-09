@@ -24,6 +24,7 @@ import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
 import PostWatchStrip from "../components/saved/PostWatchStrip";
+import { pipelineStageCopy } from "../lib/syncCopy";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -136,7 +137,7 @@ export default function Home() {
           </div>
           {building && (
             <p className="fa-body text-fa-frost-dim text-center">
-              Your picks are being assembled ({session?.pipelineStage}) — they&apos;ll appear here the moment they&apos;re ready.
+              Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
             </p>
           )}
         </div>

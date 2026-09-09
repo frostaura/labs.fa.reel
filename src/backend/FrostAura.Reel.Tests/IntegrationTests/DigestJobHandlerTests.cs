@@ -136,9 +136,14 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         var items = await ReadDigestItemsAsync(accountId);
         Assert.Equal(new[] { genuinelyNew }, items.Select(i => i.TitleId).ToArray());
 
-        // One send per subscription; the payload advertises the single fresh pick.
+        // One send per subscription, and the payload NAMES the single fresh pick, quotes its
+        // number, says why it is there, and deep-links to it — no "1 new high-for-you titles"
+        // pointing at the home page.
         Assert.Equal(3, sender.Sent.Count);
-        Assert.Contains("1 new high-for-you", sender.Sent[0].PayloadJson);
+        var push = await ReadPushAsync(sender.Sent[0].PayloadJson, genuinelyNew);
+        Assert.Equal($"{push.Name} \u2014 8.0 for you", push.Title);
+        Assert.Equal("Just landed on your services", push.Body);
+        Assert.Equal($"/title/movie/{push.TmdbId}", push.Url);
 
         await using var db = fixture.CreateContext(Pinned(accountId));
         var survivor = await db.PushSubscriptions.SingleAsync(s => s.AccountId == accountId);
@@ -187,7 +192,12 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         Assert.Contains("7", items[0].DegradedReason!, StringComparison.Ordinal);
         Assert.Contains("6", items[0].DegradedReason!, StringComparison.Ordinal);
         Assert.Single(sender.Sent);
-        Assert.Contains("4 new high-for-you", sender.Sent[0].PayloadJson);
+
+        // A relaxed digest's push says so, rather than selling the pick as if it cleared the bar.
+        var push = await ReadPushAsync(sender.Sent[0].PayloadJson, strong);
+        Assert.Equal($"{push.Name} \u2014 7.4 for you, plus 3 more this week", push.Title);
+        Assert.Equal(items[0].DegradedReason, push.Body);
+        Assert.Equal($"/title/movie/{push.TmdbId}", push.Url);
     }
 
     [Fact]
@@ -259,6 +269,22 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
             var outcome = Outcomes.GetValueOrDefault(endpoint, WebPushOutcome.Success);
             return Task.FromResult(new WebPushResult(outcome, outcome == WebPushOutcome.Failure ? "boom" : null));
         }
+    }
+
+    /// <summary>The sent payload, paired with the top title's own row so the copy can be asserted
+    /// against real values rather than re-derived from the fixture's random name.</summary>
+    private async Task<(string Title, string Body, string Url, string Name, long TmdbId)> ReadPushAsync(
+        string payloadJson, Guid topTitleId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = await db.Titles.SingleAsync(t => t.Id == topTitleId);
+        using var doc = JsonDocument.Parse(payloadJson);
+        return (
+            doc.RootElement.GetProperty("title").GetString()!,
+            doc.RootElement.GetProperty("body").GetString()!,
+            doc.RootElement.GetProperty("url").GetString()!,
+            title.Name,
+            title.TmdbId!.Value);
     }
 
     private static AccountContext Pinned(Guid accountId)

@@ -20,6 +20,7 @@ import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
+import { DISLIKE_REASONS } from "../lib/dislikeReasons";
 import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
@@ -330,10 +331,14 @@ export default function TitleDetail() {
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "not-for-me" })}>Just not for me</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>
+                          {DISLIKE_REASONS.map((reason) => (
+                            <DropdownMenuItem
+                              key={reason.value}
+                              onClick={() => notInterested({ ...args, titleId: title.titleId, reason: reason.value })}
+                            >
+                              {reason.label}
+                            </DropdownMenuItem>
+                          ))}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     )}
@@ -351,6 +356,15 @@ export default function TitleDetail() {
                       )
                     )}
                   </div>
+
+                  {/* The why-line — second person, the model's own reason, above the studio's blurb.
+                      Same voice and weight the hero card gives it, so opening a card no longer
+                      REMOVES the one personalised sentence on it. */}
+                  {title.whyThis && (
+                    <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug" data-testid="why-this">
+                      {title.whyThis}
+                    </p>
+                  )}
 
                   {/* Synopsis */}
                   {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}
