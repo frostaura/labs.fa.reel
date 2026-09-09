@@ -1,6 +1,8 @@
+using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
+using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -78,6 +80,23 @@ public sealed class CatalogGrowthService(
                     .ToList();
                 var added = await generator.UpsertCandidatesAsync(items, stoppingToken);
                 logger.LogInformation("Catalog growth: {Items} items swept, {Added} new title(s).", items.Count, added);
+
+                if (added > 0)
+                {
+                    // Everything this pass just added is unembedded and unattributed, and belongs to
+                    // no tenant — so the enrich job that covers it is GLOBAL (null AccountId). It
+                    // needs no account: the handler's priority tiers simply fall through to id order
+                    // and it publishes no SSE and chains no Train, because there is nobody to tell
+                    // and no model to retrain. Postgres treats NULL index keys as distinct, so the
+                    // partial unique index cannot dedup global jobs — the scheduler's explicit
+                    // in-flight check is the only dedup, exactly as that index's comment says.
+                    var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+                    if (await EnrichmentScheduler.EnqueueAsync(db, null, DateTime.UtcNow, stoppingToken))
+                    {
+                        await db.SaveChangesAsync(stoppingToken);
+                        logger.LogInformation("Catalog growth: queued a global enrich run for the {Added} new title(s).", added);
+                    }
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

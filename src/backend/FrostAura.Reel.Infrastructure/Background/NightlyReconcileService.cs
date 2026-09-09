@@ -1,6 +1,8 @@
+using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -54,6 +56,7 @@ public sealed class NightlyReconcileService(
             }
 
             await SweepStaleSchemaArtifactsAsync(stoppingToken);
+            await SweepEnrichmentBacklogAsync(stoppingToken);
 
             try
             {
@@ -223,6 +226,79 @@ public sealed class NightlyReconcileService(
             // Never take the host down over the sweep — the query filter already prevents the stale
             // artifact from being scored with, so the worst case is a delayed retrain.
             logger.LogError(ex, "Feature-schema artifact sweep failed; stale artifacts stay hidden until the next pass.");
+        }
+    }
+
+    /// <summary>
+    /// The nightly ENRICHMENT pass — two steps, both bounded by the same per-run cap the handler
+    /// uses, and deliberately kept out of the account loop above so that a failure here can never
+    /// cost the reconcile its delta syncs or its retrains.
+    /// <para>
+    /// <b>Step 1 — ExtractorVersion invalidation.</b> The exact analogue of the feature-schema sweep
+    /// above, one layer down: an artifact trained against a superseded <c>FeatureSchema</c> misreads
+    /// its own inputs, and an attribute row written by a superseded PROMPT misreports its own title.
+    /// The failure mode is worse here because it is invisible — the row looks Done, and a Tone that
+    /// predates the closed vocabulary is silently dropped by every reader that verifies it. Rows
+    /// below the running version go back to Pending with a fresh attempt budget.
+    /// </para>
+    /// <para>
+    /// <b>Step 2 — one EnrichCatalog per active account.</b> This is the floor under the whole
+    /// pipeline: builds enqueue enrichment only when they upserted something, so an account whose
+    /// discovery is dry would otherwise never enrich the backlog it already has.
+    /// </para>
+    /// </summary>
+    private async Task SweepEnrichmentBacklogAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            var extractor = scope.ServiceProvider.GetRequiredService<ITitleAttributeExtractor>();
+            var cap = EnrichCatalogJobHandler.MaxTitlesPerRun(configuration);
+
+            // Committed on its own, before the enqueues: SaveToleratingUniqueRaceAsync DISCARDS the
+            // whole unit of work when a concurrent enqueue wins the job race, and losing a batch of
+            // version resets to an unrelated job collision would silently stall the drain.
+            var requeued = await EnrichmentScheduler.RequeueStaleExtractorVersionsAsync(
+                db, extractor.Version, cap, ct);
+            if (requeued > 0)
+            {
+                await db.SaveChangesAsync(ct);
+                logger.LogWarning(
+                    "Extractor-version sweep re-queued {Count} attribute row(s) written before prompt v{Version}; "
+                    + "the backlog drains at {Cap} titles per enrich run.",
+                    requeued, extractor.Version, cap);
+            }
+
+            var accountIds = await db.TraktConnections
+                .Where(c => c.Status == ConnectionStatus.Active)
+                .Select(c => c.AccountId)
+                .ToListAsync(ct);
+
+            var now = DateTime.UtcNow;
+            var enqueued = 0;
+            foreach (var accountId in accountIds)
+            {
+                if (await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct))
+                {
+                    enqueued++;
+                }
+            }
+
+            if (enqueued > 0 && !await SaveToleratingUniqueRaceAsync(db, ct))
+            {
+                logger.LogInformation("Nightly enrichment: a concurrent enqueue won the race; this pass's duplicates were dropped.");
+                return;
+            }
+
+            logger.LogInformation("Nightly enrichment: {Enqueued} enrich job(s) queued, {Requeued} row(s) invalidated.",
+                enqueued, requeued);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Never take the reconcile down over enrichment — the backlog is a quality problem, not
+            // a correctness one, and the next nightly pass retries from wherever this one stopped.
+            logger.LogError(ex, "Nightly enrichment sweep failed; the next pass continues the drain.");
         }
     }
 
