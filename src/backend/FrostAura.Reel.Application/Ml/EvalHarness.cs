@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -366,8 +367,10 @@ public class EvalHarness(
         {
             ["id"] = $"eval:{run.Id:N}",
             ["kind"] = "stat",
-            ["text"] = $"NDCG@10 {primary.ModelNdcg:F3} vs popularity {primary.BaselineNdcg:F3} "
-                + $"(95% CI on the lift {ciLow:F3}…{ciHigh:F3}) — {(passedGate ? "gate PASSED" : "gate not met")} (iteration {iteration})",
+            ["text"] = string.Create(
+                CultureInfo.InvariantCulture,
+                $"NDCG@10 {primary.ModelNdcg:F3} vs popularity {primary.BaselineNdcg:F3} "
+                + $"(95% CI on the lift {ciLow:F3}…{ciHigh:F3}) — {(passedGate ? "gate PASSED" : "gate not met")} (iteration {iteration})"),
         });
 
         logger.LogInformation(
@@ -456,7 +459,11 @@ public class EvalHarness(
             matrixRows.Select(kv => trainLabelByTitle[kv.Key]).ToArray(),
             FeatureSchema.AllNames());
 
-        PublishProgress(accountId, $"Fitting the split model ({fraction:P0})", matrixRows.Count, labels.Count);
+        PublishProgress(
+            accountId,
+            string.Create(CultureInfo.InvariantCulture, $"Fitting the split model ({fraction:P0})"),
+            matrixRows.Count,
+            labels.Count);
         var model = engine.Train(matrix, hyperparamsJson);
 
         // ── Threshold: frozen per account, "loved" not "tolerated" ──────────────────────

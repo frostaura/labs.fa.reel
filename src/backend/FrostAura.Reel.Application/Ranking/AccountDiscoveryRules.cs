@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
@@ -131,7 +132,10 @@ public sealed record AccountDiscoveryRules(
 
         DateTime? Bound(FilterKind kind, bool upper)
         {
-            if (!int.TryParse(Values(kind).FirstOrDefault(), out var year) || year is < 1870 or > 2999)
+            // ContentFilterRules is the only sanctioned writer of these rows and reads them back
+            // invariantly; going through it keeps this reader from inventing a second shape.
+            if (ContentFilterRules.ParseYear(Values(kind).FirstOrDefault()) is not { } year
+                || year is < 1870 or > 2999)
             {
                 return null;
             }

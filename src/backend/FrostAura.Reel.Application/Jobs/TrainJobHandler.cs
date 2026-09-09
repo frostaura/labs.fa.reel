@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
@@ -125,8 +126,10 @@ public class TrainJobHandler(
         else
         {
             job.ProgressMessage =
-                $"iteration {outcome.Run.Iteration}: NDCG@10 {outcome.Result.NdcgAt10Model:F3} vs {outcome.Result.NdcgAt10Baseline:F3} "
-                + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}";
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"iteration {outcome.Run.Iteration}: NDCG@10 {outcome.Result.NdcgAt10Model:F3} vs {outcome.Result.NdcgAt10Baseline:F3} "
+                    + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}");
         }
 
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);

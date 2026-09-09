@@ -1,3 +1,4 @@
+using System.Globalization;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
@@ -186,6 +187,15 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // The floor is read through a scalar subquery whose CAST sits in the SELECT list, so Postgres
         // only ever casts rows that already matched Kind = MinCrowdRating. Language rows ("en") and
         // keyword rows are never fed to the numeric cast.
+        //
+        // Convert.ToDecimal / Convert.ToInt32 are called here WITHOUT an IFormatProvider, and that is
+        // deliberate rather than an oversight the culture sweep missed: EF Core translates only the
+        // single-argument overloads, so passing CultureInfo.InvariantCulture makes the whole predicate
+        // untranslatable and the query falls apart (verified 2026-09-10 — ~40 integration tests go red).
+        // No host culture is involved either way: the conversion happens inside Postgres as a CAST,
+        // never in .NET. The stored string shape is what makes that safe, and it is guaranteed by
+        // ContentFilterRules.FormatRating / FormatYear, which are already invariant and are the only
+        // sanctioned writers of these rows.
         query = query.Where(t =>
             skipCrowd
             || !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.MinCrowdRating)

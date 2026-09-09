@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using FrostAura.Reel.Application.Configuration;
@@ -99,7 +100,11 @@ public class DeltaSyncJobHandler(
             await ReportAsync(12, "Pulling your watched movies…");
             var movies = await ingestor.IngestMoviesAsync(accountId, token, RatePriority.DeltaPoll, ct);
             watchedAdded += movies.Added;
-            await ReportAsync(32, $"Watched movies · {movies.Count:N0}", movies.Count, movies.Count);
+            await ReportAsync(
+                32,
+                string.Create(CultureInfo.InvariantCulture, $"Watched movies · {movies.Count:N0}"),
+                movies.Count,
+                movies.Count);
         }
 
         if (changes.Shows)
@@ -108,13 +113,19 @@ public class DeltaSyncJobHandler(
             var showResult = await ingestor.IngestShowsAsync(accountId, token, RatePriority.DeltaPoll, ct);
             var (shows, episodes) = (showResult.Shows, showResult.Episodes);
             watchedAdded += showResult.Added;
-            await ReportAsync(60, $"Watched shows · {shows:N0} · {episodes:N0} episodes", shows, shows);
+            await ReportAsync(
+                60,
+                string.Create(CultureInfo.InvariantCulture, $"Watched shows · {shows:N0} · {episodes:N0} episodes"),
+                shows,
+                shows);
 
             // Continue-watching enrichment is a per-show Trakt call, so it carries a genuine x / y.
             await ingestor.EnrichNextEpisodesAsync(accountId, token, budget: 15, ct,
                 onProgress: (done, total) => ReportAsync(
                     60 + (total == 0 ? 18 : 18 * done / total),
-                    $"Finding your next episodes · {done:N0}/{total:N0}", done, total));
+                    string.Create(CultureInfo.InvariantCulture, $"Finding your next episodes · {done:N0}/{total:N0}"),
+                    done,
+                    total));
         }
 
         IReadOnlyList<TraktLibraryIngestor.IngestedRating> ratings = [];
@@ -127,7 +138,11 @@ public class DeltaSyncJobHandler(
             ratings = result.Observed;
             ratingsAdded = result.Added;
             ratingsChanged = result.Updated;
-            await ReportAsync(94, $"Ratings · {result.Count:N0}", result.Count, result.Count);
+            await ReportAsync(
+                94,
+                string.Create(CultureInfo.InvariantCulture, $"Ratings · {result.Count:N0}"),
+                result.Count,
+                result.Count);
         }
 
         // The cursor BEFORE this sync moved it — everything the passive-watch observe below is

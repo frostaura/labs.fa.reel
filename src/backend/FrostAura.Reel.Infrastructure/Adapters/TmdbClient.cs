@@ -60,7 +60,7 @@ public class TmdbClient(
         if (releasedAfter is { } after)
         {
             var dateField = movies ? "primary_release_date" : "first_air_date";
-            query += $"&{dateField}.gte={after:yyyy-MM-dd}";
+            query += string.Create(CultureInfo.InvariantCulture, $"&{dateField}.gte={after:yyyy-MM-dd}");
         }
 
         if (movies && region is { Length: 2 })
@@ -228,12 +228,12 @@ public class TmdbClient(
 
         if (releasedAfter is { } after)
         {
-            query += $"&{dateField}.gte={after:yyyy-MM-dd}";
+            query += string.Create(CultureInfo.InvariantCulture, $"&{dateField}.gte={after:yyyy-MM-dd}");
         }
 
         if (releasedBefore is { } before)
         {
-            query += $"&{dateField}.lte={before:yyyy-MM-dd}";
+            query += string.Create(CultureInfo.InvariantCulture, $"&{dateField}.lte={before:yyyy-MM-dd}");
         }
 
         // "Under 90 minutes" — TMDB supports with_runtime.lte on both movie and tv discover
