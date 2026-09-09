@@ -45,9 +45,7 @@ public class TenancyModelTests
             typeof(Domain.Catalog.TitleAttributes),
             typeof(Domain.Catalog.Person),
             typeof(Domain.Catalog.TitleCredit),
-            typeof(Domain.Catalog.Episode),
             typeof(Domain.Providers.StreamingProvider),
-            typeof(Domain.Providers.ProviderLinkPattern),
             typeof(Domain.Providers.TitleAvailability),
         };
 
@@ -79,7 +77,30 @@ public class TenancyModelTests
     public void Model_builds_with_all_expected_tables()
     {
         using var db = CreateContext();
-        var tableCount = db.Model.GetEntityTypes().Count(t => !t.IsOwned());
-        Assert.Equal(39, tableCount); // +UserPersonRating, +UserPreferenceTag, +SearchConversation, +SearchTurn (2026-06-17); +OnlineModelState (2026-07-05); +AccountDigest, +PushSubscription, +AppSecret (2026-08-07); +FeedBuildStat (2026-09-09)
+        // Tables only. Keyless view mappings are pinned separately below, because "how many tables
+        // does this product have" and "how many derived views does it read" are different questions
+        // and a single number that answers both hides a table being swapped for a view.
+        var tableCount = db.Model.GetEntityTypes().Count(t => !t.IsOwned() && t.FindPrimaryKey() is not null);
+        Assert.Equal(38, tableCount); // +UserPersonRating, +UserPreferenceTag, +SearchConversation, +SearchTurn (2026-06-17); +OnlineModelState (2026-07-05); +AccountDigest, +PushSubscription, +AppSecret (2026-08-07); +FeedBuildStat (2026-09-09); −Episode, −ProviderLinkPattern, −AccountTasteProfile, +ExposureEvent, +UserRatingEvent (2026-09-10)
+    }
+
+    [Fact]
+    public void The_closed_loop_views_are_mapped_keyless_and_never_as_tables()
+    {
+        // A view that quietly becomes a table would be scaffolded into a migration and then start
+        // drifting from the SQL it was supposed to derive itself from — the exact staleness class
+        // the view was chosen to avoid. Pin the mapping, not just the count.
+        using var db = CreateContext();
+
+        var views = db.Model.GetEntityTypes()
+            .Where(t => !t.IsOwned() && t.FindPrimaryKey() is null)
+            .Select(t => t.ClrType.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(["ExposureOutcome", "TitleExposureRollup"], views);
+        Assert.All(
+            db.Model.GetEntityTypes().Where(t => t.FindPrimaryKey() is null),
+            t => Assert.NotNull(t.GetViewName()));
     }
 }

@@ -45,15 +45,14 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<TitleAttributes> TitleAttributes => Set<TitleAttributes>();
     public DbSet<Person> Persons => Set<Person>();
     public DbSet<TitleCredit> TitleCredits => Set<TitleCredit>();
-    public DbSet<Episode> Episodes => Set<Episode>();
     public DbSet<StreamingProvider> StreamingProviders => Set<StreamingProvider>();
-    public DbSet<ProviderLinkPattern> ProviderLinkPatterns => Set<ProviderLinkPattern>();
     public DbSet<TitleAvailability> TitleAvailabilities => Set<TitleAvailability>();
 
     // Account library
     public DbSet<WatchedTitle> WatchedTitles => Set<WatchedTitle>();
     public DbSet<ShowWatchProgress> ShowWatchProgresses => Set<ShowWatchProgress>();
     public DbSet<UserRating> UserRatings => Set<UserRating>();
+    public DbSet<UserRatingEvent> UserRatingEvents => Set<UserRatingEvent>();
     public DbSet<UserPersonRating> UserPersonRatings => Set<UserPersonRating>();
 
     public DbSet<UserPreferenceTag> UserPreferenceTags => Set<UserPreferenceTag>();
@@ -66,7 +65,6 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
     // ML
     public DbSet<PersonAffinity> PersonAffinities => Set<PersonAffinity>();
-    public DbSet<AccountTasteProfile> AccountTasteProfiles => Set<AccountTasteProfile>();
     public DbSet<TrainingRun> TrainingRuns => Set<TrainingRun>();
     public DbSet<ModelArtifact> ModelArtifacts => Set<ModelArtifact>();
     public DbSet<EvaluationResult> EvaluationResults => Set<EvaluationResult>();
@@ -78,6 +76,13 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<FeedItem> FeedItems => Set<FeedItem>();
     public DbSet<FeedBuildStat> FeedBuildStats => Set<FeedBuildStat>();
     public DbSet<AccountDigest> AccountDigests => Set<AccountDigest>();
+
+    // ── The closed loop ────────────────────────────────────────────────────────────────
+    // ExposureEvents is append-only and is never touched by the feed builder's prune.
+    // The other two are read-only SQL views created in the Phase2ExposureLog migration.
+    public DbSet<ExposureEvent> ExposureEvents => Set<ExposureEvent>();
+    public DbSet<ExposureOutcome> ExposureOutcomes => Set<ExposureOutcome>();
+    public DbSet<TitleExposureRollup> TitleExposureRollups => Set<TitleExposureRollup>();
 
     // Notifications
     public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => Set<Domain.Notifications.PushSubscription>();
@@ -172,14 +177,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(c => c.PersonId);
         });
 
-        modelBuilder.Entity<Episode>(e =>
-        {
-            e.HasIndex(x => new { x.TitleId, x.SeasonNumber, x.EpisodeNumber }).IsUnique();
-        });
-
         modelBuilder.Entity<StreamingProvider>(e => e.HasIndex(p => p.TmdbProviderId).IsUnique());
-
-        modelBuilder.Entity<ProviderLinkPattern>(e => e.HasIndex(p => new { p.ProviderId, p.Region }));
 
         modelBuilder.Entity<TitleAvailability>(e =>
         {
@@ -228,14 +226,6 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
         // ── ML ─────────────────────────────────────────────────────────────────────────────
         modelBuilder.Entity<PersonAffinity>(e => e.HasIndex(a => new { a.AccountId, a.PersonId, a.Role }).IsUnique());
-
-        modelBuilder.Entity<AccountTasteProfile>(e =>
-        {
-            e.HasIndex(p => p.AccountId).IsUnique();
-            e.Property(p => p.LovedCentroid).HasColumnType("vector(1536)");
-            e.Property(p => p.RecentCentroid).HasColumnType("vector(1536)");
-            e.Property(p => p.ProfileJson).HasColumnType("jsonb");
-        });
 
         modelBuilder.Entity<TrainingRun>(e =>
         {
@@ -389,6 +379,64 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(s => new { s.AccountId, s.BuiltAt }).IsDescending(false, true);
             e.Property(s => s.ShortlistP50).HasPrecision(4, 2);
             e.Property(s => s.ShortlistP90).HasPrecision(4, 2);
+        });
+
+        // ── The closed loop ────────────────────────────────────────────────────────────────
+        modelBuilder.Entity<ExposureEvent>(e =>
+        {
+            // Postgres computes the minute bucket from the timestamp it truncates, so the two can
+            // never disagree. It exists ONLY to carry the idempotency index below.
+            e.Property(x => x.MinuteBucket)
+                .HasComputedColumnSql("date_trunc('minute', \"OccurredAt\", 'UTC')", stored: true);
+
+            // The idempotency key. AreNullsDistinct(false) is load-bearing: FeedSnapshotId is
+            // legitimately null on the digest, Ask Reel and similar surfaces, and under the default
+            // NULLS DISTINCT those rows would never collide — every RTK refetch inside one minute
+            // would insert a fresh duplicate and the calibration denominator would inflate.
+            e.HasIndex(x => new { x.AccountId, x.TitleId, x.Surface, x.FeedSnapshotId, x.MinuteBucket })
+                .IsUnique()
+                .AreNullsDistinct(false);
+
+            // "What did you say about this title, and when" — the toast's and the moments list's read.
+            e.HasIndex(x => new { x.AccountId, x.TitleId, x.OccurredAt }).IsDescending(false, false, true);
+            // The window scan behind every /api/accuracy query.
+            e.HasIndex(x => new { x.AccountId, x.OccurredAt }).IsDescending(false, true);
+            // Per-artifact-era slicing: which model made which promises.
+            e.HasIndex(x => new { x.AccountId, x.ModelArtifactId });
+
+            e.Property(x => x.PredictedRating).HasPrecision(4, 2);
+            e.Property(x => x.BaseScore).HasPrecision(6, 3);
+            e.Property(x => x.CalibrationDelta).HasPrecision(6, 3);
+            e.Property(x => x.ResidualApplied).HasPrecision(6, 3);
+            e.Property(x => x.DemotionApplied).HasPrecision(6, 3);
+            e.Property(x => x.LlmFit).HasPrecision(4, 3);
+            e.Property(x => x.RowKey).HasMaxLength(128);
+            e.Property(x => x.WhySource).HasMaxLength(32);
+        });
+
+        modelBuilder.Entity<UserRatingEvent>(e =>
+        {
+            e.HasIndex(x => new { x.AccountId, x.ObservedAt }).IsDescending(false, true);
+            e.HasIndex(x => new { x.AccountId, x.TitleId, x.ObservedAt }).IsDescending(false, false, true);
+        });
+
+        // Read-only views, created by raw SQL in the Phase2ExposureLog migration. ToView keeps the
+        // migration scaffolder from trying to own them as tables while still letting the tenancy
+        // loop below hang a query filter on each — so a caller cannot read another tenant's loop
+        // even though the view's own SQL already names AccountId on every join.
+        modelBuilder.Entity<ExposureOutcome>(e =>
+        {
+            e.HasNoKey();
+            e.ToView("ExposureOutcomes");
+            e.Property(x => x.PredictedRating).HasPrecision(4, 2);
+        });
+
+        modelBuilder.Entity<TitleExposureRollup>(e =>
+        {
+            e.HasNoKey();
+            e.ToView("TitleExposureRollups");
+            e.Property(x => x.MinPredicted).HasPrecision(4, 2);
+            e.Property(x => x.MaxPredicted).HasPrecision(4, 2);
         });
 
         // ── Row-level tenancy, enforced once ───────────────────────────────────────────────

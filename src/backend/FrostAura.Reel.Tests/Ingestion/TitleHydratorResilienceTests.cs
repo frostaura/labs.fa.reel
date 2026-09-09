@@ -208,13 +208,12 @@ public class TitleHydratorResilienceTests
         public DbSet<TitleAttributes> TitleAttributes => throw Unexpected();
         public DbSet<Person> Persons => throw Unexpected();
         public DbSet<TitleCredit> TitleCredits => throw Unexpected();
-        public DbSet<Episode> Episodes => throw Unexpected();
         public DbSet<StreamingProvider> StreamingProviders => throw Unexpected();
-        public DbSet<ProviderLinkPattern> ProviderLinkPatterns => throw Unexpected();
         public DbSet<TitleAvailability> TitleAvailabilities => throw Unexpected();
         public DbSet<WatchedTitle> WatchedTitles => throw Unexpected();
         public DbSet<ShowWatchProgress> ShowWatchProgresses => throw Unexpected();
         public DbSet<UserRating> UserRatings => throw Unexpected();
+        public DbSet<UserRatingEvent> UserRatingEvents => throw Unexpected();
         public DbSet<UserPersonRating> UserPersonRatings => throw Unexpected();
         public DbSet<UserTitleReaction> UserTitleReactions => throw Unexpected();
         public DbSet<ContentFilter> ContentFilters => throw Unexpected();
@@ -222,7 +221,6 @@ public class TitleHydratorResilienceTests
         public DbSet<Domain.Search.SearchConversation> SearchConversations => throw Unexpected();
         public DbSet<Domain.Search.SearchTurn> SearchTurns => throw Unexpected();
         public DbSet<PersonAffinity> PersonAffinities => throw Unexpected();
-        public DbSet<AccountTasteProfile> AccountTasteProfiles => throw Unexpected();
         public DbSet<TrainingRun> TrainingRuns => throw Unexpected();
         public DbSet<ModelArtifact> ModelArtifacts => throw Unexpected();
         public DbSet<EvaluationResult> EvaluationResults => throw Unexpected();
@@ -233,6 +231,9 @@ public class TitleHydratorResilienceTests
 
         public DbSet<FeedBuildStat> FeedBuildStats => throw Unexpected();
         public DbSet<AccountDigest> AccountDigests => throw Unexpected();
+        public DbSet<ExposureEvent> ExposureEvents => throw Unexpected();
+        public DbSet<ExposureOutcome> ExposureOutcomes => throw Unexpected();
+        public DbSet<TitleExposureRollup> TitleExposureRollups => throw Unexpected();
         public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => throw Unexpected();
         public DbSet<Domain.Notifications.AppSecret> AppSecrets => throw Unexpected();
         public DbSet<SyncJob> SyncJobs => throw Unexpected();

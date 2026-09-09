@@ -63,38 +63,6 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("RefreshSessions");
                 });
 
-            modelBuilder.Entity("FrostAura.Reel.Domain.Catalog.Episode", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("AiredAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("EpisodeNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Name")
-                        .HasColumnType("text");
-
-                    b.Property<int?>("RuntimeMinutes")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("SeasonNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("TitleId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TitleId", "SeasonNumber", "EpisodeNumber")
-                        .IsUnique();
-
-                    b.ToTable("Episodes");
-                });
-
             modelBuilder.Entity("FrostAura.Reel.Domain.Catalog.Person", b =>
                 {
                     b.Property<Guid>("Id")
@@ -418,6 +386,156 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("AccountDigests");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.Feed.ExposureEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("BaseScore")
+                        .HasPrecision(6, 3)
+                        .HasColumnType("numeric(6,3)");
+
+                    b.Property<decimal>("CalibrationDelta")
+                        .HasPrecision(6, 3)
+                        .HasColumnType("numeric(6,3)");
+
+                    b.Property<decimal>("DemotionApplied")
+                        .HasPrecision(6, 3)
+                        .HasColumnType("numeric(6,3)");
+
+                    b.Property<Guid?>("FeedSnapshotId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal?>("LlmFit")
+                        .HasPrecision(4, 3)
+                        .HasColumnType("numeric(4,3)");
+
+                    b.Property<DateTime>("MinuteBucket")
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("timestamp with time zone")
+                        .HasComputedColumnSql("date_trunc('minute', \"OccurredAt\", 'UTC')", true);
+
+                    b.Property<Guid>("ModelArtifactId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PageIndex")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("PredictedRating")
+                        .HasPrecision(4, 2)
+                        .HasColumnType("numeric(4,2)");
+
+                    b.Property<int>("Rank")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("ResidualApplied")
+                        .HasPrecision(6, 3)
+                        .HasColumnType("numeric(6,3)");
+
+                    b.Property<string>("RowKey")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Surface")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("TitleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("WhySentence")
+                        .HasColumnType("text");
+
+                    b.Property<string>("WhySource")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "ModelArtifactId");
+
+                    b.HasIndex("AccountId", "OccurredAt")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("AccountId", "TitleId", "OccurredAt")
+                        .IsDescending(false, false, true);
+
+                    b.HasIndex("AccountId", "TitleId", "Surface", "FeedSnapshotId", "MinuteBucket")
+                        .IsUnique();
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("AccountId", "TitleId", "Surface", "FeedSnapshotId", "MinuteBucket"), false);
+
+                    b.ToTable("ExposureEvents");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.Feed.ExposureOutcome", b =>
+                {
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<short?>("ActualRating")
+                        .HasColumnType("smallint");
+
+                    b.Property<DateTime?>("DismissedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ExposureId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ListCloseReason")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("ListClosedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ModelArtifactId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<decimal>("PredictedRating")
+                        .HasPrecision(4, 2)
+                        .HasColumnType("numeric(4,2)");
+
+                    b.Property<int>("Rank")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("RatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("SavedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Surface")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("TitleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("WatchedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.ToTable((string)null);
+
+                    b.ToView("ExposureOutcomes", (string)null);
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Feed.FeedBuildStat", b =>
                 {
                     b.Property<Guid>("Id")
@@ -558,6 +676,44 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasFilter("\"Status\" = 'Active'");
 
                     b.ToTable("FeedSnapshots");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.Feed.TitleExposureRollup", b =>
+                {
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("FirstShownAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("LastShownAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("MaxPredicted")
+                        .HasPrecision(4, 2)
+                        .HasColumnType("numeric(4,2)");
+
+                    b.Property<decimal>("MinPredicted")
+                        .HasPrecision(4, 2)
+                        .HasColumnType("numeric(4,2)");
+
+                    b.Property<int>("MinRank")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ShowCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Surface")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("TitleId")
+                        .HasColumnType("uuid");
+
+                    b.ToTable((string)null);
+
+                    b.ToView("TitleExposureRollups", (string)null);
                 });
 
             modelBuilder.Entity("FrostAura.Reel.Domain.Filters.ContentFilter", b =>
@@ -724,6 +880,62 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("UserRatings");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.Library.UserRatingEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ChangeKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("Episode")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("ObservedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<short?>("PreviousRating")
+                        .HasColumnType("smallint");
+
+                    b.Property<DateTime>("RatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<short>("Rating")
+                        .HasColumnType("smallint");
+
+                    b.Property<int>("Season")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("SubjectType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("TitleId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "ObservedAt")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("AccountId", "TitleId", "ObservedAt")
+                        .IsDescending(false, false, true);
+
+                    b.ToTable("UserRatingEvents");
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Library.UserTitleReaction", b =>
                 {
                     b.Property<Guid>("Id")
@@ -798,36 +1010,6 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("WatchedTitles");
-                });
-
-            modelBuilder.Entity("FrostAura.Reel.Domain.Ml.AccountTasteProfile", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("AccountId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("ComputedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Vector>("LovedCentroid")
-                        .HasColumnType("vector(1536)");
-
-                    b.Property<string>("ProfileJson")
-                        .IsRequired()
-                        .HasColumnType("jsonb");
-
-                    b.Property<Vector>("RecentCentroid")
-                        .HasColumnType("vector(1536)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AccountId")
-                        .IsUnique();
-
-                    b.ToTable("AccountTasteProfiles");
                 });
 
             modelBuilder.Entity("FrostAura.Reel.Domain.Ml.EvaluationResult", b =>
@@ -1179,55 +1361,6 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("PushSubscriptions");
-                });
-
-            modelBuilder.Entity("FrostAura.Reel.Domain.Providers.ProviderLinkPattern", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid?>("CanaryTitleId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("ConsecutiveFailures")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsHealthy")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<DateTime?>("LastCheckedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("LastHttpStatus")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Notes")
-                        .HasColumnType("text");
-
-                    b.Property<int>("Priority")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("ProviderId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Region")
-                        .HasColumnType("text");
-
-                    b.Property<string>("UrlTemplate")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ProviderId", "Region");
-
-                    b.ToTable("ProviderLinkPatterns");
                 });
 
             modelBuilder.Entity("FrostAura.Reel.Domain.Providers.StreamingProvider", b =>
@@ -1710,6 +1843,8 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                             b1.Property<Guid>("AccountId");
 
                             b1.Property<string>("EmailForBilling");
+
+                            b1.Property<int?>("EveningBudgetMinutes");
 
                             b1.Property<string>("MaturityCeiling");
 
