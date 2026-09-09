@@ -24,7 +24,7 @@ public class CandidateGenerator(
     private const int RecommendationSeeds = 5;
 
     /// <summary>
-/// Widens the pool for one account and reports what it found: how many TMDB items came back
+    /// Widens the pool for one account and reports what it found: how many TMDB items came back
     /// across all arms, and how many of those the catalogue had never seen. The second number is the
     /// direct instrument for "the picks get weaker every round" — it was computed on every build and
     /// only ever logged.

@@ -54,7 +54,7 @@ public class ReactionEnqueueRaceTests(PostgresFixture fixture)
         await LoseTheRaceAsync(db, accountId);
         var result = await ReactionEndpoints.RateAsync(
             "movie", tmdbId, new ReactionEndpoints.RateRequest(9),
-            db, accountId, FeedRefresh(db), Residual(db), CancellationToken.None);
+            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), CancellationToken.None);
 
         Assert.NotNull(result);
         await using var verify = fixture.CreateContext(new AccountContext());
@@ -78,7 +78,7 @@ public class ReactionEnqueueRaceTests(PostgresFixture fixture)
         {
             await ReactionEndpoints.RateAsync(
                 "movie", tmdbId, new ReactionEndpoints.RateRequest(8),
-                seed, accountId, FeedRefresh(seed), Residual(seed), CancellationToken.None);
+                seed, accountId, FeedRefresh(seed), Residual(seed), Calibration(seed), CancellationToken.None);
         }
 
         await ClearInFlightBuildsAsync(accountId);
@@ -259,6 +259,9 @@ public class ReactionEnqueueRaceTests(PostgresFixture fixture)
 
     private static FeedRefreshCoordinator FeedRefresh(IReelDbContext db) =>
         new(db, NullLogger<FeedRefreshCoordinator>.Instance);
+
+    private static RatingCalibrationService Calibration(IReelDbContext db) =>
+        new(db, new MemoryCache(new MemoryCacheOptions()));
 
     private static OnlineResidualModel Residual(IReelDbContext db) =>
         new(db, new FeatureVectorBuilder(db), new FastTreeModelEngine(),
