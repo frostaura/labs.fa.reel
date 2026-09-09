@@ -24,6 +24,7 @@ import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
 import PostWatchStrip from "../components/saved/PostWatchStrip";
+import TrackRecordStrip from "../components/rec/TrackRecordStrip";
 import { pipelineStageCopy } from "../lib/syncCopy";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
@@ -126,6 +127,10 @@ export default function Home() {
       </div>
 
       <PostWatchStrip />
+
+      {/* The product's own error rate, on its front page. Hides itself when there is no number
+          yet — an absence of evidence is not a bad score. */}
+      <TrackRecordStrip />
 
       {isLoading || building ? (
         <div className="space-y-8">

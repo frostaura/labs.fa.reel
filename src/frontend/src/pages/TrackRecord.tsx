@@ -1,0 +1,308 @@
+import { useState } from "react";
+import { Link } from "react-router-dom";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { Target } from "lucide-react";
+import { useGetAccuracyQuery, type AccuracyMoment } from "../store/api";
+import { posterUrl } from "../lib/tmdbImages";
+import { verdictSurface } from "../lib/verdictCopy";
+import {
+  agreementNote,
+  biasNote,
+  headlineSentence,
+  learnedSentence,
+  num,
+  pct,
+  signed,
+  sourceNote,
+} from "../lib/trackRecordCopy";
+
+const FROST = "#A4D4F4";
+const FROST_DIM = "#5C8AB4";
+const AMBER = "#F6C667";
+const GRID = "rgba(164,212,244,0.12)";
+
+const WINDOWS = [
+  { value: "90d", label: "90 days" },
+  { value: "365d", label: "a year" },
+  { value: "all", label: "all time" },
+] as const;
+
+function ChartTip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number }[]; label?: string }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded-md border border-fa-edge bg-fa-ink/95 backdrop-blur px-3 py-2">
+      {label != null && <p className="fa-overline text-fa-frost-dim mb-1">{label}</p>}
+      {payload.map((entry) => (
+        <p key={entry.name} className="fa-caption text-fa-frost">
+          {entry.name}: <span className="text-fa-frost-bright tabular-nums">{Number(entry.value).toFixed(2)}</span>
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function MomentCard({ moment }: { moment: AccuracyMoment }) {
+  const poster = posterUrl(moment.posterPath, "w185");
+  const gap = moment.predicted - moment.actual;
+  const missed = Math.abs(gap) > 1;
+  const where = verdictSurface(moment.surface);
+
+  return (
+    <Link
+      to={moment.tmdbId ? `/title/${moment.mediaType.toLowerCase()}/${moment.tmdbId}` : "/track-record"}
+      className="w-32 shrink-0 group"
+      data-testid="moment-card"
+    >
+      <div className="aspect-[2/3] rounded-lg overflow-hidden bg-fa-ink-3 border border-fa-edge/50 group-hover:border-fa-frost/40 transition">
+        {poster ? (
+          <img src={poster} alt="" loading="lazy" className="h-full w-full object-cover" />
+        ) : (
+          <div className="h-full w-full flex items-center justify-center fa-caption text-fa-frost-dim px-2 text-center">
+            {moment.name}
+          </div>
+        )}
+      </div>
+      <p className="fa-caption text-fa-frost-bright mt-1.5 truncate">{moment.name}</p>
+      <p className="fa-caption tabular-nums">
+        <span className={missed ? "text-fa-warning" : "text-fa-success"}>
+          {moment.predicted.toFixed(1)} → {moment.actual}
+        </span>
+      </p>
+      {(where || moment.daysToOutcome != null) && (
+        <p className="fa-caption text-fa-frost-dim truncate">
+          {where ?? "scored"}
+          {moment.daysToOutcome != null && ` · ${moment.daysToOutcome}d`}
+        </p>
+      )}
+    </Link>
+  );
+}
+
+/**
+ * The track record — free, linked from the avatar menu for everyone.
+ *
+ * Everything on this page is deliberately unflattering where the data is unflattering. It exists
+ * because the alternative — a product that shows a confident 8.4 on every card and never says how
+ * often that 8.4 was right — is the version nobody should trust. The founder's decision was
+ * "honest from day one", which means this ships before the numbers are good, not after.
+ */
+export default function TrackRecord() {
+  const [window_, setWindow] = useState<string>("90d");
+  const { data, isLoading } = useGetAccuracyQuery({ window: window_ });
+
+  if (isLoading || !data) {
+    return <div className="h-72 rounded-2xl reel-shimmer" data-testid="track-record-loading" />;
+  }
+
+  const empty = data.headline.n === 0;
+  const calibration = data.calibration
+    .filter((b) => b.n > 0)
+    .map((b) => ({
+      band: `${b.low.toFixed(0)}–${b.high.toFixed(0)}`,
+      predicted: b.meanPredicted,
+      actual: b.meanActual,
+      n: b.n,
+    }));
+
+  return (
+    <div className="space-y-6" data-testid="track-record">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
+            <Target className="h-6 w-6 text-fa-frost" /> Reel's track record
+          </h1>
+          <p className="fa-caption text-fa-frost-dim mt-1">
+            How wrong Reel has been about you, and what it is doing about it.
+          </p>
+        </div>
+        <div className="flex items-center gap-1" role="group" aria-label="Time window">
+          {WINDOWS.map((w) => (
+            <button
+              key={w.value}
+              type="button"
+              onClick={() => setWindow(w.value)}
+              aria-pressed={window_ === w.value}
+              className={`fa-caption px-3 py-1.5 rounded-md border transition ${
+                window_ === w.value
+                  ? "border-fa-frost/50 bg-fa-glass-strong text-fa-frost-bright"
+                  : "border-fa-edge text-fa-frost-dim hover:text-fa-frost"
+              }`}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Headline — the one sentence the page exists to say. */}
+      <section className="fa-card p-5" data-testid="headline">
+        <p className="fa-overline text-fa-frost-dim">the honest number</p>
+        <p className="text-3xl font-light text-fa-frost-bright mt-1" data-testid="headline-sentence">
+          {headlineSentence(data)}
+        </p>
+        <p className="fa-caption text-fa-frost-dim mt-2" data-testid="source-note">
+          {sourceNote(data)}
+        </p>
+
+        {!empty && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">average miss</p>
+              <p className="fa-stat-value">{num(data.headline.meanAbsoluteError)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">rating points, either way</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">bias</p>
+              <p className="fa-stat-value">{signed(data.headline.bias)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">{biasNote(data.headline.bias)}</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">agreement</p>
+              <p className="fa-stat-value">{num(data.headline.correlation, 3)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">{agreementNote(data.headline.correlation)}</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">scored on</p>
+              <p className="fa-stat-value">{data.headline.n}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                predictions you have since rated
+              </p>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Calibration — the shape of the wrongness, not just its size. */}
+      <section className="fa-card p-5" data-testid="calibration">
+        <h2 className="fa-section-title mb-1">Where the number lands</h2>
+        <p className="fa-caption text-fa-frost-dim mb-3">
+          For every band Reel predicts in, what you actually gave. A model that meant what it said
+          would have the two bars level in every band.
+        </p>
+        {calibration.length === 0 ? (
+          <p className="fa-body text-fa-frost-dim" data-testid="calibration-empty">
+            No bands to draw yet — nothing Reel has scored has come back with a rating.
+          </p>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={calibration} barCategoryGap="25%">
+              <CartesianGrid stroke={GRID} vertical={false} />
+              <XAxis dataKey="band" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} />
+              <YAxis domain={[0, 10]} tick={{ fill: FROST_DIM, fontSize: 11 }} width={28} />
+              <Tooltip content={<ChartTip />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
+              <Legend wrapperStyle={{ fontSize: 11, color: FROST_DIM }} />
+              <Bar dataKey="predicted" fill={FROST} radius={[4, 4, 0, 0]} name="Reel said" />
+              <Bar dataKey="actual" fill={AMBER} radius={[4, 4, 0, 0]} name="you said" />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </section>
+
+      {/* Moments — the specific claims, newest first. */}
+      <section className="fa-card p-5" data-testid="moments">
+        <h2 className="fa-section-title mb-1">Recent calls</h2>
+        <p className="fa-caption text-fa-frost-dim mb-3">
+          What Reel said, what you said. Newest first.
+        </p>
+        {data.moments.length === 0 ? (
+          <p className="fa-body text-fa-frost-dim" data-testid="moments-empty">
+            No calls to show yet. Rate something Reel has already put a number on and it appears here.
+          </p>
+        ) : (
+          <div className="flex gap-3 overflow-x-auto pb-2">
+            {data.moments.map((m) => (
+              <MomentCard key={`${m.titleId}-${m.ratedAt}`} moment={m} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Conversion — the honest half. These numbers are about the loop, not the model. */}
+      <section className="fa-card p-5" data-testid="conversion">
+        <h2 className="fa-section-title mb-1">The queue, end to end</h2>
+        <p className="fa-caption text-fa-frost-dim mb-3">
+          Shown → saved → watched. This measures whether the loop closes, which is a different
+          question from whether the number was right.
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="fa-card px-4 py-3">
+            <p className="fa-stat-label">shown → saved</p>
+            <p className="fa-stat-value">{pct(data.conversion.shownToSaved, 1)}</p>
+            <p className="fa-caption text-fa-frost-dim mt-1">
+              {data.conversion.saved} of {data.conversion.shown || "—"} titles
+            </p>
+          </div>
+          <div className="fa-card px-4 py-3">
+            <p className="fa-stat-label">saved → watched</p>
+            <p className="fa-stat-value">{pct(data.conversion.savedToWatched, 1)}</p>
+            <p className="fa-caption text-fa-frost-dim mt-1">{data.conversion.watched} watched</p>
+          </div>
+          <div className="fa-card px-4 py-3">
+            <p className="fa-stat-label">shown → rated</p>
+            <p className="fa-stat-value">{pct(data.conversion.shownToRated, 1)}</p>
+            <p className="fa-caption text-fa-frost-dim mt-1">{data.conversion.rated} rated</p>
+          </div>
+          <div className="fa-card px-4 py-3">
+            <p className="fa-stat-label">days to watch</p>
+            <p className="fa-stat-value">{num(data.conversion.medianDaysToWatch, 1)}</p>
+            <p className="fa-caption text-fa-frost-dim mt-1">median, once saved</p>
+          </div>
+        </div>
+      </section>
+
+      {/* The counterfactual — the one number that says whether Reel helped at all. */}
+      {data.counterfactual.length > 0 && (
+        <section className="fa-card p-5" data-testid="counterfactual">
+          <h2 className="fa-section-title mb-1">Because of Reel, vs found yourself</h2>
+          <p className="fa-caption text-fa-frost-dim mb-3">
+            Your own ratings, split by how the title reached you. A negative gap means Reel steered
+            you toward films you liked less than the ones you found on your own.
+          </p>
+          <div className="space-y-1">
+            {data.counterfactual.map((w) => (
+              <p key={w.window} className="fa-body">
+                <span className="text-fa-frost-dim">
+                  {w.days == null ? "all time" : `last ${w.days} days`}:
+                </span>{" "}
+                via Reel {num(w.viaReelMeanRating)} ({w.viaReelCount}) · found yourself{" "}
+                {num(w.otherMeanRating)} ({w.otherCount}) ·{" "}
+                <span className={w.delta != null && w.delta < 0 ? "text-fa-danger" : "text-fa-success"}>
+                  {signed(w.delta)}
+                </span>
+              </p>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* What changed since last time — the "and what I'm doing about it" half. */}
+      {data.learnedThisWeek && (
+        <section className="fa-card p-5" data-testid="learned">
+          <h2 className="fa-section-title mb-1">What Reel learned since last retrain</h2>
+          <p className="fa-body text-fa-frost mt-2" data-testid="learned-sentence">
+            {learnedSentence(data.learnedThisWeek)}
+          </p>
+          <p className="fa-caption text-fa-frost-dim mt-2">
+            Retrained {new Date(data.learnedThisWeek.trainedAt).toLocaleDateString()} · bias{" "}
+            {signed(data.learnedThisWeek.calibrationBias)} · average miss{" "}
+            {num(data.learnedThisWeek.calibrationMae)}
+          </p>
+        </section>
+      )}
+
+      <p className="fa-caption text-fa-frost-dim">
+        These are the same numbers the engine is judged on internally — nothing here is a marketing
+        figure. <Link to="/dna" className="underline underline-offset-2 hover:text-fa-frost">See your taste profile</Link>.
+      </p>
+    </div>
+  );
+}
