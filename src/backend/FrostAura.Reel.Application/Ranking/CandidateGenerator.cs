@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
@@ -22,9 +23,28 @@ public class CandidateGenerator(
     private const int TopGenreCount = 4;
     private const int RecommendationSeeds = 5;
 
-    public async Task<int> RefreshPoolAsync(FeatureVectorBuilder.TasteState taste, string region, CancellationToken ct)
+    /// <summary>
+    /// Widens the pool for one account. <paramref name="accountId"/> is load-bearing, not
+    /// bookkeeping: the account's ExcludeGenre rules have to shape the discovery calls themselves.
+    /// A banned genre can sit high in the taste map — Dean bans 8 of 25 including two of his
+    /// highest-COUNT genres — so up to half the per-build discover budget was being spent fetching
+    /// titles the eligibility layer is guaranteed to reject, every build, for ever.
+    /// </summary>
+    public async Task<int> RefreshPoolAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, string region, CancellationToken ct)
     {
+        // Read the ban list first: a genre the user has excluded is not a "top genre" of theirs in
+        // any sense the pool cares about, whatever their historical ratings say.
+        var excludedGenres = (await db.ContentFilters
+                .Where(f => f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre)
+                .Select(f => f.Value)
+                .ToListAsync(ct))
+            .Select(v => v.Trim().ToLowerInvariant())
+            .Where(v => v.Length > 0)
+            .ToHashSet();
+
         var topGenres = taste.GenreRatings
+            .Where(kv => !excludedGenres.Contains(kv.Key))
             .Select(kv => new
             {
                 Genre = kv.Key,
@@ -42,6 +62,12 @@ public class CandidateGenerator(
         {
             if (!TmdbGenres.SlugToIds.TryGetValue(genre, out var ids))
             {
+                // Not silent: an unmapped slug costs this build a whole discover arm, and the only
+                // evidence used to be a pool that came back thinner than it should have. Phase 1
+                // replaces the skip with a keyword/concept fallback; until then, say which slug.
+                logger.LogInformation(
+                    "Candidate pool: no TMDB genre id for slug '{Genre}' — that discovery arm is skipped this build.",
+                    genre);
                 continue;
             }
 
@@ -63,11 +89,20 @@ public class CandidateGenerator(
         // Collaborative signal: TMDB recommendations for the user's most-loved titles — "people
         // who liked your favourites also liked these". Real CF from day one, no cross-tenant data
         // needed (our own matrix-factorisation CF waits until we have ~200 tenants to be non-noise).
-        var lovedTitles = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id) && t.TmdbId != null)
-            .Select(t => new { t.MediaType, TmdbId = t.TmdbId!.Value })
+        // TopLovedTitleIds arrives ordered (rating desc, then RatedAt desc), and that order is the
+        // whole point of a "most-loved" seed. The query had a Take with no ORDER BY, so Postgres was
+        // free to hand back any five rows it liked — a different five between builds, and rarely the
+        // actual top five. Re-impose the taste order client-side, then take.
+        var lovedRank = taste.TopLovedTitleIds
+            .Select((id, index) => (id, index))
+            .ToDictionary(x => x.id, x => x.index);
+        var lovedTitles = (await db.Titles
+                .Where(t => taste.TopLovedTitleIds.Contains(t.Id) && t.TmdbId != null)
+                .Select(t => new { t.Id, t.MediaType, TmdbId = t.TmdbId!.Value })
+                .ToListAsync(ct))
+            .OrderBy(t => lovedRank[t.Id])
             .Take(RecommendationSeeds)
-            .ToListAsync(ct);
+            .ToList();
         foreach (var loved in lovedTitles)
         {
             batches.Add(await tmdb.GetRecommendationsAsync(loved.MediaType == MediaType.Movie, loved.TmdbId, ct));

@@ -114,7 +114,7 @@ public class BuildFeedJobHandler(
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         ReportProgress(job, accountId, 10, "Scouting fresh candidates");
-        await candidateGenerator.RefreshPoolAsync(taste, account.Region, ct);
+        await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, ct);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
