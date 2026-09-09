@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
@@ -110,12 +111,17 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         }
     }
 
-    // QUARANTINED (local-only): passes when this class runs alone. In the full run the handler
-    // sweeps every Pending TitleAttributes row in the SHARED global catalog, not just the one
-    // seeded here, so the attempt-budget assertion counts other classes' titles. Local symptom
-    // (3/3 runs, 2026-09-09): expected 4 extractor calls, observed 212. Passes on CI.
-    [LocalFlakyFact]
-    [Trait("Flaky", "local")]
+    /// <summary>
+    /// De-quarantined 2026-09-09. It failed in the full local run for a real reason, not a flaky
+    /// one: the sweep is global by design, so <c>TitlesSeen</c> as a TOTAL counted every other
+    /// class's seeded titles (expected 4, observed 212). Two changes make it deterministic without
+    /// weakening it — the handler now takes titles in account-priority order under a per-run cap, so
+    /// a cap of 2 over an account with exactly 2 library titles selects exactly those two; and the
+    /// assertion counts calls PER TITLE, which is the contract that was always meant and is exact
+    /// whatever else shares the database. CI still runs it against the authoritative pgvector
+    /// service, as it always did.
+    /// </summary>
+    [Fact]
     public async Task An_unextractable_title_is_never_marked_Done_and_stops_billing_after_the_attempt_budget()
     {
         if (!fixture.Available)
@@ -131,7 +137,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         // retry cap can never engage and the title bills for ever.
         for (var run = 0; run < 3; run++)
         {
-            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor);
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: titleIds.Count);
         }
 
         await using var db = fixture.CreateContext(new AccountContext());
@@ -144,16 +150,171 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         Assert.All(rows, a => Assert.Equal(0m, a.Darkness));
         Assert.All(rows, a => Assert.Equal("openai/gpt-5.4-mini", a.ExtractorModel));
         Assert.All(rows, a => Assert.Equal(2, a.AttemptCount));
-        Assert.Equal(4, extractor.TitlesSeen); // 2 titles × 2 attempts, not × 3
+
+        // 2 attempts each, not 3 — and asserted per title, so the global sweep's other work cannot
+        // move the number in either direction.
+        Assert.All(titleIds, id => Assert.Equal(2, extractor.TitlesSeen.Count(seen => seen == id)));
     }
 
-    private async Task RunEnrichAsync(Guid accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor)
+    /// <summary>
+    /// The per-run cap is the whole reason enrichment can now be scheduled from three places. It is
+    /// asserted here on the account's OWN titles: with a cap of 1 and two eligible library titles,
+    /// exactly one is settled per run and the other waits for the next one.
+    /// </summary>
+    [Fact]
+    public async Task The_per_run_cap_bounds_how_many_titles_one_run_touches()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(2);
+        var extractor = new RenamingExtractor("cap/test-model");
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            Assert.Equal(1, await db.TitleAttributes.CountAsync(a => titleIds.Contains(a.TitleId)));
+        }
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+            Assert.Equal(2, rows.Count);
+            Assert.All(rows, a => Assert.Equal(AttributeExtractionStatus.Done, a.Status));
+        }
+
+        // One title per run, each seen exactly once — the cap bounds work, it does not re-do it.
+        Assert.All(titleIds, id => Assert.Equal(1, extractor.TitlesSeen.Count(seen => seen == id)));
+    }
+
+    /// <summary>
+    /// The account's own titles come first. Seeded here as a title this account has a FeedItem for
+    /// (tier 0) alongside two library titles (tier 2) and a bare catalogue title it has never met
+    /// (tier 3): with a cap of 1, the run must pick the feed title, whatever the ids sort to.
+    /// <para>
+    /// Without this ordering a capped run over a 5,000-title catalogue enriches, on average, titles
+    /// that have nothing to do with the account that asked — which would make the cap a way of
+    /// never getting to the features behind your own next feed.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task The_sweep_takes_the_accounts_own_titles_before_the_rest_of_the_catalogue()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, libraryIds) = await SeedLibraryAsync(2);
+        var servedId = await SeedServedTitleAsync(accountId);
+        var extractor = new RenamingExtractor("priority/test-model");
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+
+        Assert.Equal([servedId], extractor.TitlesSeen);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Equal(0, await db.TitleAttributes.CountAsync(a => libraryIds.Contains(a.TitleId)));
+    }
+
+    /// <summary>
+    /// ExtractorVersion invalidation, the attribute-side analogue of the feature-schema sweep: a Done
+    /// row written by an older prompt generation is re-extracted and re-stamped, and a fresh attempt
+    /// budget comes with it. Without this a prompt improvement could never reach the 2,312 rows
+    /// written before the Tone/Era vocabularies closed — they look settled and read as "no tone".
+    /// </summary>
+    [Fact]
+    public async Task A_row_written_by_an_older_prompt_version_is_re_extracted_and_restamped()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var v1 = new RenamingExtractor("version/test-model", version: 1);
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v1, cap: 1);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
+            Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+            Assert.Equal(1, row.ExtractorVersion);
+        }
+
+        // Same model, same Done row — only the prompt generation moved. A version-blind sweep would
+        // treat it as settled for ever.
+        var v2 = new RenamingExtractor("version/test-model", version: 2);
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v2, cap: 1);
+
+        Assert.Equal(titleIds, v2.TitlesSeen);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
+            Assert.Equal(2, row.ExtractorVersion);
+            Assert.Equal(1, row.AttemptCount); // budget reset, not inherited
+            Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+        }
+    }
+
+    /// <summary>
+    /// A GLOBAL run — the shape the weekly catalogue-growth sweep queues. It has no account, so it
+    /// must neither demand one nor chain a Train for one, and it still enriches. This used to throw
+    /// on the first line of the handler.
+    /// </summary>
+    [Fact]
+    public async Task A_global_run_enriches_without_an_account_and_chains_no_train()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var titleId = await SeedOrphanTitleAsync();
+        var extractor = new RenamingExtractor("global/test-model");
+
+        await RunEnrichAsync(accountId: null, new StubEmbeddingProvider(true), extractor, cap: 400);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Contains(titleId, extractor.TitlesSeen);
+        Assert.True(await db.TitleEmbeddings.AnyAsync(e => e.TitleId == titleId));
+        Assert.Equal(AttributeExtractionStatus.Done,
+            (await db.TitleAttributes.SingleAsync(a => a.TitleId == titleId)).Status);
+        Assert.False(await db.SyncJobs.AnyAsync(j => j.AccountId == null && j.Kind == JobKind.Train));
+    }
+
+    /// <summary>
+    /// Runs one enrich pass exactly as JobRunnerService would.
+    /// <para>
+    /// <paramref name="cap"/> sets <c>ENRICH_MAX_TITLES_PER_RUN</c>. Tests that assert on WHICH
+    /// titles a run touched must set it: the catalogue is deliberately global and shared with every
+    /// other class in this collection, so a run at the production cap sweeps whatever they seeded
+    /// too. A small cap plus the handler's account-first ordering is what makes a run over a shared
+    /// database deterministic for the caller that seeded it.
+    /// </para>
+    /// <para>
+    /// A null <paramref name="accountId"/> is the GLOBAL sweep the weekly catalogue growth pass
+    /// queues — no account pinned, so no priority tiers, no SSE and no Train chain.
+    /// </para>
+    /// </summary>
+    private async Task RunEnrichAsync(
+        Guid? accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor, int? cap = null)
     {
         var scoped = new AccountContext();
-        scoped.SetAccount(accountId);
+        if (accountId is { } pinned)
+        {
+            scoped.SetAccount(pinned);
+        }
+
         await using var db = fixture.CreateContext(scoped);
         var handler = new EnrichCatalogJobHandler(
-            db, embeddings, extractor, new NoopEventHub(), NullLogger<EnrichCatalogJobHandler>.Instance);
+            db, embeddings, extractor, new NoopEventHub(), Config(cap), NullLogger<EnrichCatalogJobHandler>.Instance);
         var job = new SyncJob
         {
             Id = Guid.NewGuid(),
@@ -172,6 +333,15 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         job.CompletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
     }
+
+    private static IConfiguration Config(int? cap) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [EnrichCatalogJobHandler.MaxTitlesPerRunKey] =
+                    cap?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            })
+            .Build();
 
     private async Task<(Guid AccountId, List<Guid> TitleIds)> SeedLibraryAsync(int count)
     {
@@ -220,6 +390,61 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         return (account.Id, ids);
     }
 
+    /// <summary>
+    /// A hydrated title this account has actually been SHOWN — tier 0 of the sweep's priority order.
+    /// No snapshot row is needed: FeedItem carries plain ids with no foreign keys, and this test
+    /// cares about the tier, not about a renderable feed.
+    /// </summary>
+    private async Task<Guid> SeedServedTitleAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = NewHydratedTitle("Served Title");
+        db.Add(title);
+        db.FeedItems.Add(new FeedItem
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = Guid.NewGuid(),
+            Row = FeedRowKind.Hero,
+            Rank = 0,
+            TitleId = title.Id,
+            PredictedRating = 8m,
+            FinalScore = 8m,
+            WhyThisSentence = "seeded",
+        });
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    /// <summary>
+    /// A hydrated title belonging to no account, with an id that sorts FIRST in Postgres's uuid
+    /// order. The global sweep has no priority tiers and falls back to id order, so this is how a
+    /// test over a shared catalogue can name the row a capped global run will pick — without a
+    /// large cap that would sweep every other class's titles as a side effect.
+    /// </summary>
+    private async Task<Guid> SeedOrphanTitleAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = NewHydratedTitle("Orphan Title");
+        title.Id = new Guid($"00000000-0000-0000-0000-{Guid.NewGuid():N}"[..36]);
+        db.Add(title);
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    private static Title NewHydratedTitle(string name) => new()
+    {
+        Id = Guid.NewGuid(),
+        MediaType = MediaType.Movie,
+        TraktId = Random.Shared.NextInt64(1, long.MaxValue),
+        TraktSlug = $"title-{Guid.NewGuid():N}",
+        Name = $"{name} {Guid.NewGuid():N}",
+        Overview = "A film in the shared catalogue.",
+        Genres = ["drama"],
+        LastMetadataRefreshAt = DateTime.UtcNow,
+        CreatedAt = DateTime.UtcNow,
+    };
+
     private static OpenRouterAttributeExtractor StubExtractor(bool stub)
     {
         var config = new ConfigurationBuilder()
@@ -263,15 +488,20 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     }
 
     /// <summary>An available extractor that reports a given model id and stamps it on every row.</summary>
-    private sealed class RenamingExtractor(string modelId) : ITitleAttributeExtractor
+    private sealed class RenamingExtractor(string modelId, int version = 1) : ITitleAttributeExtractor
     {
         public bool IsAvailable => true;
 
         public string ModelId => modelId;
 
+        public int Version => version;
+
+        public List<Guid> TitlesSeen { get; } = [];
+
         public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
             IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
         {
+            TitlesSeen.AddRange(inputs.Select(i => i.TitleId));
             IReadOnlyList<ExtractedTitleAttributes?> result = inputs
                 .Select(_ => (ExtractedTitleAttributes?)new ExtractedTitleAttributes(
                     0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, "neutral", "contemporary", ["t"], "{}"))
@@ -291,12 +521,20 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         public string ModelId => modelId;
 
-        public int TitlesSeen { get; private set; }
+        public int Version => 1;
+
+        /// <summary>
+        /// Every title id this extractor was asked about, in order and WITH repeats. A total call
+        /// count cannot be asserted on in a shared catalogue — the sweep is global by design, so the
+        /// number includes whatever other test classes seeded. The per-title tally is the contract
+        /// that actually matters and it is exact regardless of what else is in the database.
+        /// </summary>
+        public List<Guid> TitlesSeen { get; } = [];
 
         public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
             IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
         {
-            TitlesSeen += inputs.Count;
+            TitlesSeen.AddRange(inputs.Select(i => i.TitleId));
             IReadOnlyList<ExtractedTitleAttributes?> result = inputs.Select(_ => (ExtractedTitleAttributes?)null).ToList();
             return Task.FromResult(result);
         }
