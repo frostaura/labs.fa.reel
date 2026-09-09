@@ -21,6 +21,7 @@ import PickConditionsButton, { PickConditionsSummary } from "../components/rec/P
 import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
+import PostWatchStrip from "../components/saved/PostWatchStrip";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -116,6 +117,8 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      <PostWatchStrip />
 
       {isLoading || building ? (
         <div className="space-y-8">

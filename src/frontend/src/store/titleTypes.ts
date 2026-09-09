@@ -103,14 +103,3 @@ export interface ProvidersPayload {
   providers: ProviderEntry[];
 }
 
-export interface SavedEntry {
-  titleId: string;
-  mediaType: "Movie" | "Show";
-  tmdbId: number | null;
-  name: string;
-  year: number | null;
-  posterPath: string | null;
-  predictedRating: number | null;
-  savedAt: string;
-  onManagedList: boolean;
-}
