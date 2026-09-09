@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -7,6 +8,7 @@ using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -23,6 +25,9 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// set with the sharpest signal in the product (predicted 6.81, actual 5.78).</item>
 /// <item>Counting a title twice because both sources return it, which double-weights it in the
 /// isotonic pooling.</item>
+/// <item>Losing the artifact each prediction came from, or resolving the wrong artifact as Active.
+/// A prediction only means something relative to the model that made it, so without that column the
+/// fit silently pools several models' levels and reads the difference between them as curvature.</item>
 /// </list>
 ///
 /// Skips when REEL_TEST_CONNECTION_STRING is unset, matching the other integration tests.
@@ -196,13 +201,155 @@ public class RatingCalibrationServiceTests(PostgresFixture fixture)
         Assert.Equal(13, (await service.GetAsync(accountId, CancellationToken.None)).PairCount);
     }
 
-    private RatingCalibrationService ServiceFor(Guid accountId, IMemoryCache? cache = null)
+    [Fact]
+    public async Task Every_pair_carries_the_artifact_that_made_the_prediction()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var artifactId = Guid.NewGuid();
+        var ratedAt = DateTime.UtcNow.AddDays(-2);
+
+        var titleId = await SeedTitleAsync();
+        await SeedScoreAsync(accountId, titleId, 8.2m, ratedAt.AddDays(-1), artifactId);
+        await SeedRatingAsync(accountId, titleId, 6, ratedAt);
+
+        var pairs = await ServiceFor(accountId).LoadPairsAsync(accountId, CancellationToken.None);
+
+        Assert.Equal(artifactId, Assert.Single(pairs).ArtifactId);
+    }
+
+    [Fact]
+    public async Task Only_the_active_artifacts_pairs_are_fitted_once_it_has_enough_of_them()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var active = Guid.NewGuid();
+        var retired = Guid.NewGuid();
+        await SeedArtifactAsync(accountId, retired, ArtifactStatus.Superseded, version: 1);
+        await SeedArtifactAsync(accountId, active, ArtifactStatus.Active, version: 2);
+
+        var ratedAt = DateTime.UtcNow.AddDays(-1);
+
+        // 35 pairs from the model in service: it reads exactly one point high.
+        for (var i = 0; i < 35; i++)
+        {
+            var titleId = await SeedTitleAsync();
+            var predicted = 5m + (i * 0.1m);
+            await SeedScoreAsync(accountId, titleId, predicted, ratedAt.AddDays(-1), active);
+            await SeedRatingAsync(accountId, titleId, (short)Math.Clamp(Math.Round(predicted - 1m), 1m, 10m), ratedAt);
+        }
+
+        // 40 from a retired model that sat three points high. Real predictions, but of a model
+        // nobody is being shown any more — including them would drag the map toward a level that no
+        // longer exists.
+        for (var i = 0; i < 40; i++)
+        {
+            var titleId = await SeedTitleAsync();
+            var predicted = 6m + (i * 0.1m);
+            await SeedScoreAsync(accountId, titleId, predicted, ratedAt.AddDays(-1), retired);
+            await SeedRatingAsync(accountId, titleId, (short)Math.Clamp(Math.Round(predicted - 3m), 1m, 10m), ratedAt);
+        }
+
+        var service = ServiceFor(accountId);
+        Assert.Equal(active, await service.ActiveArtifactIdAsync(accountId, CancellationToken.None));
+        Assert.Equal(75, (await service.LoadPairsAsync(accountId, CancellationToken.None)).Count);
+
+        var calibrator = await service.GetAsync(accountId, CancellationToken.None);
+
+        Assert.Equal(35, calibrator.PairCount);
+        Assert.True(Math.Abs(calibrator.Calibrate(7d) - 6d) < 0.4d,
+            $"the map must describe the ACTIVE model's one-point bias, not the pool's ({calibrator.Calibrate(7d)}).");
+    }
+
+    [Fact]
+    public async Task Two_artifacts_at_different_levels_are_de_meaned_before_they_are_pooled()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var active = Guid.NewGuid();
+        var retired = Guid.NewGuid();
+        await SeedArtifactAsync(accountId, retired, ArtifactStatus.Superseded, version: 1);
+        await SeedArtifactAsync(accountId, active, ArtifactStatus.Active, version: 2);
+
+        var ratedAt = DateTime.UtcNow.AddDays(-1);
+
+        // Neither artifact reaches 30 pairs on its own, so both are kept — but the retired one sat
+        // two points higher for the same taste. De-meaned, they describe one relationship; pooled
+        // raw, the overlap contradicts itself and the map flattens.
+        foreach (var (artifactId, offset, count) in new[] { (active, 0m, 15), (retired, 2m, 15) })
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var titleId = await SeedTitleAsync();
+                var level = 6m + (i * 0.2m);
+                await SeedScoreAsync(accountId, titleId, level + offset, ratedAt.AddDays(-1), artifactId);
+                await SeedRatingAsync(accountId, titleId, (short)Math.Round(level - 1m), ratedAt);
+            }
+        }
+
+        var calibrator = await ServiceFor(accountId).GetAsync(accountId, CancellationToken.None);
+
+        Assert.Equal(30, calibrator.PairCount);
+        Assert.True(Math.Abs(calibrator.Calibrate(7d) - 6d) < 0.6d,
+            $"both artifacts describe y = x − 1 on the active level ({calibrator.Calibrate(7d)}).");
+        Assert.True(calibrator.Calibrate(8d) > calibrator.Calibrate(6d), "the levelled fit must still differentiate.");
+    }
+
+    [Fact]
+    public async Task CALIBRATOR_MODE_pins_the_selection_rule()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var ratedAt = DateTime.UtcNow.AddDays(-1);
+        for (var i = 0; i < 40; i++)
+        {
+            var titleId = await SeedTitleAsync();
+            var predicted = 4m + (i * 0.15m);
+            await SeedScoreAsync(accountId, titleId, predicted, ratedAt.AddDays(-1));
+            await SeedRatingAsync(accountId, titleId, (short)Math.Clamp(Math.Round(predicted - 1m), 1m, 10m), ratedAt);
+        }
+
+        Assert.Equal(CalibratorMode.Auto, ServiceFor(accountId).Mode);
+
+        var off = await ServiceFor(accountId, mode: "off").GetAsync(accountId, CancellationToken.None);
+        Assert.Equal(CalibrationKind.Identity, off.Kind);
+        Assert.Equal(8d, off.Calibrate(8d), 6);
+
+        var shift = await ServiceFor(accountId, mode: "SHIFT").GetAsync(accountId, CancellationToken.None);
+        Assert.Equal(CalibrationKind.BiasShift, shift.Kind);
+
+        // Nonsense degrades to the documented default rather than silently disabling calibration.
+        Assert.Equal(CalibratorMode.Auto, ServiceFor(accountId, mode: "sideways").Mode);
+    }
+
+    private RatingCalibrationService ServiceFor(Guid accountId, IMemoryCache? cache = null, string? mode = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         return new RatingCalibrationService(
             fixture.CreateContext(scoped),
-            cache ?? new MemoryCache(new MemoryCacheOptions()));
+            cache ?? new MemoryCache(new MemoryCacheOptions()),
+            mode is null
+                ? null
+                : new ConfigurationBuilder()
+                    .AddInMemoryCollection(new Dictionary<string, string?> { [FeatureFlags.CalibratorMode] = mode })
+                    .Build());
     }
 
     private async Task<Guid> SeedAccountAsync()
@@ -248,7 +395,8 @@ public class RatingCalibrationServiceTests(PostgresFixture fixture)
         return title.Id;
     }
 
-    private async Task SeedScoreAsync(Guid accountId, Guid titleId, decimal predicted, DateTime scoredAt)
+    private async Task SeedScoreAsync(
+        Guid accountId, Guid titleId, decimal predicted, DateTime scoredAt, Guid? artifactId = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         db.TitleScores.Add(new TitleScore
@@ -256,12 +404,33 @@ public class RatingCalibrationServiceTests(PostgresFixture fixture)
             Id = Guid.NewGuid(),
             AccountId = accountId,
             TitleId = titleId,
-            // A distinct artifact id per score row: the query deliberately does NOT filter on the
-            // Active artifact, because a prediction the product served under an older model is still
-            // a prediction it made.
-            ModelArtifactId = Guid.NewGuid(),
+            // A distinct artifact id per score row unless the test says otherwise: the QUERY
+            // deliberately does not filter on the Active artifact, because a prediction the product
+            // served under an older model is still a prediction it made. Deciding which of those
+            // pairs are comparable is the calibrator's job, not the query's.
+            ModelArtifactId = artifactId ?? Guid.NewGuid(),
             PredictedRating = predicted,
             ScoredAt = scoredAt,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedArtifactAsync(Guid accountId, Guid artifactId, ArtifactStatus status, int version)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ModelArtifacts.Add(new ModelArtifact
+        {
+            Id = artifactId,
+            AccountId = accountId,
+            Version = version,
+            Status = status,
+            // The schema version must be current or the global query filter hides the artifact and
+            // ActiveArtifactIdAsync reports null — the deliberate "no model yet" degradation, and a
+            // vacuously green test if it is seeded stale.
+            FeatureSchemaJson = System.Text.Json.JsonSerializer.Serialize(
+                new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
+            TrainingRunId = Guid.NewGuid(),
+            TrainedAt = DateTime.UtcNow.AddDays(-version),
         });
         await db.SaveChangesAsync();
     }
