@@ -158,6 +158,43 @@ export interface RateSuggestion {
   source: "watched" | "popular";
 }
 
+/**
+ * One live dislike — a NotInterested or Dropped reaction that has not been revoked. `reason` is
+ * null on rows recorded before the card overlay offered a picker (and on Dropped, which has no
+ * reason), which is itself worth showing: it is why the profile below says less than the total.
+ */
+export interface DislikeEntry {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number | null;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  kind: "NotInterested" | "Dropped";
+  reason: "Genre" | "SeenEnough" | "Tone" | "NotForMe" | null;
+  createdAt: string;
+}
+
+/**
+ * The dislike history plus what it currently teaches the model. `total` counts every live dislike;
+ * `profile.activeCount` counts only those inside `profile.windowDays`, which is the set the
+ * recency-decayed demotion is actually built from — the two are reported separately rather than
+ * letting one stand in for the other.
+ */
+export interface DislikesPayload {
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  items: DislikeEntry[];
+  profile: {
+    windowDays: number;
+    activeCount: number;
+    genres: { genre: string; weight: number }[];
+    tones: { tone: string; weight: number }[];
+  };
+}
+
 export interface AccountSettings {
   region: string;
   onboarded: boolean;
@@ -343,7 +380,7 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags", "Dislikes"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -517,6 +554,9 @@ export const api = createApi({
         method: "POST",
         body: { reason },
       }),
+      // The dislike history on Taste DNA is a plain list of these rows — safe to invalidate,
+      // unlike Feed (see below), because nothing is scrolled through it.
+      invalidatesTags: ["Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -539,6 +579,7 @@ export const api = createApi({
     }),
     undoNotInterested: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/not_interested`, method: "DELETE" }),
+      invalidatesTags: ["Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -595,7 +636,7 @@ export const api = createApi({
     }),
     undrop: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "DELETE" }),
-      invalidatesTags: ["ContinueWatching"],
+      invalidatesTags: ["ContinueWatching", "Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -720,6 +761,13 @@ export const api = createApi({
       query: () => "billing/status",
       providesTags: ["Session"],
     }),
+    getDislikes: b.query<DislikesPayload, { offset?: number; limit?: number } | void>({
+      query: (args) => ({
+        url: "taste/dislikes",
+        params: { offset: args?.offset ?? 0, limit: args?.limit ?? 20 },
+      }),
+      providesTags: ["Dislikes"],
+    }),
     getRateSuggestions: b.query<RateSuggestion[], void>({
       query: () => "titles/rate-suggestions",
     }),
@@ -792,6 +840,7 @@ export const {
   useRemovePreferenceTagMutation,
   useGetBillingStatusQuery,
   useCreateCheckoutMutation,
+  useGetDislikesQuery,
   useGetRateSuggestionsQuery,
   useSetPinMutation,
   useVerifyPinMutation,
