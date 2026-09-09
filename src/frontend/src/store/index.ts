@@ -4,6 +4,7 @@ import { api } from "./api";
 import onboarding from "./onboardingSlice";
 import syncUi from "./syncSlice";
 import removedTitles from "./removedTitlesSlice";
+import scoreOverrides from "./scoreOverridesSlice";
 
 export const store = configureStore({
   reducer: {
@@ -11,6 +12,7 @@ export const store = configureStore({
     onboarding,
     syncUi,
     removedTitles,
+    scoreOverrides,
   },
   middleware: (gDM) => gDM().concat(api.middleware),
 });

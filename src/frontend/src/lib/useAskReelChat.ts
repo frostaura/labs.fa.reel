@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useSelector } from "react-redux";
+import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
 import { isFailedDone, streamAskReel, type AskCard, type PhaseData } from "./askReelStream";
 
 type Status = "idle" | "streaming" | "done" | "error";
@@ -211,6 +213,10 @@ export function chatReducer(state: State, action: Action): State {
  */
 export function useAskReelChat() {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
+  // Predicted ratings the server has recalibrated since these cards were streamed. Ask Reel's
+  // results live in this reducer, not in the RTK cache, so a `feed-scores-updated` frame cannot
+  // reach them any other way — the same reason removedTitlesSlice exists for removals.
+  const overrides = useSelector(selectScoreOverrides);
   // `send`/`loadMore`/`reask` must stay referentially stable (an effect and an IntersectionObserver
   // depend on them) while still reading current state. Synced in an effect rather than during
   // render: writing a ref mid-render is what the React Compiler rule flags, and the callbacks only
@@ -299,7 +305,9 @@ export function useAskReelChat() {
 
   // NO render-time sort: `order` is the state's stream-stable order, so rows only ever move when
   // the reducer re-sorts it (phase / done) — sorting here is what made cards jump on every event.
-  const all = state.order.map((id) => state.byId[id]).filter(Boolean);
+  // Without the override pass an open Ask Reel view would keep quoting the pre-recalibration
+  // number for a title the hero has already updated.
+  const all = applyScoreOverrides(state.order.map((id) => state.byId[id]).filter(Boolean), overrides);
   const cards = all.filter((c) => !c.outsideRequest);
   const outsideCards = all.filter((c) => c.outsideRequest);
   return {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import { useLoadMoreFeedMutation } from "../store/api";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
+import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
 import type { FeedCard, MoreFeedRequest, MoreFeedResponse } from "../store/feedTypes";
 
 export interface RowContext {
@@ -43,6 +44,10 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[]) {
   // Titles the user just made ineligible (seen/rated, not-interested, saved) drop from view at
   // once. Pagination still tracks the full set via seenRef, so excluding these doesn't re-fetch them.
   const removed = useSelector(selectRemovedKeys);
+  // Recalibrated numbers for cards this row is already holding. Rows render from local state fed by
+  // `loadMoreFeed` — a mutation with no cache tag — so an RTK cache patch cannot reach them; without
+  // this, a `feed-scores-updated` frame would update the hero and leave every paginated card stale.
+  const overrides = useSelector(selectScoreOverrides);
 
   const loadMore = useCallback(async () => {
     if (inFlight.current || exhausted) return;
@@ -83,7 +88,10 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[]) {
   }, [row, anchorTitleId, genre, mediaType, exhausted, loadMoreFeed]);
 
   const removedSet = useMemo(() => new Set(removed), [removed]);
-  const visible = useMemo(() => items.filter((c) => !removedSet.has(c.titleId)), [items, removedSet]);
+  const visible = useMemo(
+    () => applyScoreOverrides(items.filter((c) => !removedSet.has(c.titleId)), overrides),
+    [items, removedSet, overrides]
+  );
 
   // Backfill after removals. `loadMore` is idempotent (in-flight guard) and `exhausted` latches on
   // a genuinely dry lane, so this settles rather than looping: each pass either grows `visible` or
