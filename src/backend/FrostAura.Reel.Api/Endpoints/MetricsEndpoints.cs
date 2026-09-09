@@ -1,8 +1,10 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
@@ -127,7 +129,11 @@ public static class MetricsEndpoints
             return Results.Accepted();
         });
 
-        group.MapGet("/pipeline", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+        group.MapGet("/pipeline", async (
+            IReelDbContext db,
+            IAccountContext accountContext,
+            ITitleAttributeExtractor extractor,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var jobs = await db.SyncJobs
@@ -183,7 +189,29 @@ public static class MetricsEndpoints
                 })
                 .ToListAsync(ct);
 
-            return Results.Ok(new { jobs, outbox, apiUsage = usage, builds });
+            // How far behind LLM enrichment is. Global, not per-account: catalog rows are
+            // tenant-shared, so one enrichment serves everyone and the gap is one number for the
+            // whole system. This is the drain gauge for the 2026-09-09 finding that EnrichCatalog
+            // was enqueued only from the onboarding chain — ~1,360 hydrated titles with no embedding
+            // and ~1,400 with no Done attributes. staleExtractorVersion counts rows that are present
+            // and Done and still wrong: written by a prompt generation whose values mean something
+            // else now (the pre-2026-08-07 free-text Tone/Era rows).
+            var enrichment = await EnrichmentScheduler.BacklogAsync(db, extractor.Version, ct);
+
+            return Results.Ok(new
+            {
+                jobs,
+                outbox,
+                apiUsage = usage,
+                builds,
+                enrichment = new
+                {
+                    missingEmbedding = enrichment.MissingEmbedding,
+                    missingAttributes = enrichment.MissingAttributes,
+                    staleExtractorVersion = enrichment.StaleExtractorVersion,
+                    lastRunAt = enrichment.LastRunAt,
+                },
+            });
         });
     }
 

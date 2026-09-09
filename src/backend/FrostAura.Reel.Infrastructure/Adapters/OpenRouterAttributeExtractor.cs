@@ -101,6 +101,25 @@ public class OpenRouterAttributeExtractor(
         ? "stub/deterministic-v1"
         : configuration["OPENROUTER_MODEL"] ?? "openai/gpt-5.4-mini";
 
+    /// <summary>
+    /// The prompt generation stamped on every row this adapter writes. Bump it whenever a change
+    /// here alters what a stored value MEANS, never for a change that only alters how the answer
+    /// is obtained (a retry strategy, a token budget, a transport fix).
+    /// <para>
+    /// <b>v1 → v2 (2026-09-09).</b> The 2026-08-07 prompt closed the Tone and Era vocabularies and
+    /// began enforcing them through <c>json_schema</c>. Rows written before that carry free-text
+    /// labels: 2,312 pre-vocabulary rows hold <b>215 distinct Tone</b> and <b>97 distinct Era</b>
+    /// values against vocabularies of 16 and 13. Those are not merely untidy — the why-line
+    /// templater verifies a stored Tone against the closed list and silently drops anything else,
+    /// so a pre-vocabulary row reads as "no tone" everywhere downstream while looking Done in the
+    /// table. Only re-extraction fixes them, and until this constant existed nothing could ask
+    /// for it: the handler hard-coded <c>ExtractorVersion = 1</c> and no sweep ever read it back.
+    /// </para>
+    /// </summary>
+    public const int CurrentExtractorVersion = 2;
+
+    public int Version => CurrentExtractorVersion;
+
     public async Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
         IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
     {
