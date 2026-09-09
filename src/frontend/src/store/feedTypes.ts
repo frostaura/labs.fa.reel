@@ -17,6 +17,15 @@ export interface FeedCard {
   whyThis: string;
   isReleased: boolean;
   providers?: { name: string; logoPath: string | null }[];
+  /**
+   * Hero cards only: "confident" when the pick cleared the hero's confidence bar on its own merits,
+   * "reaching" when the never-blank backfill put it there because nothing did. Absent on every other
+   * surface, and absent on hero cards paged in after the snapshot — those are selected against the
+   * account's own floor, not the hero bar, so they have no bar to be measured against.
+   */
+  confidence?: "confident" | "reaching";
+  /** The bar `confidence` was measured against (7.5, or the account's higher "for you" minimum). */
+  floorUsed?: number;
 }
 
 export interface FeedRow {

@@ -6,6 +6,7 @@ import PredictedRatingBadge from "./PredictedRatingBadge";
 import CrowdRatingBadge from "./CrowdRatingBadge";
 import { formatRuntime } from "../../lib/format";
 import { hasPredictedRating } from "../../lib/predictedRating";
+import { heroReachingNote, reachingLabel } from "../../lib/heroConfidence";
 
 interface HeroProps {
   cards: FeedCard[];
@@ -19,6 +20,11 @@ const NEAR_END_PX = 1200;
 /**
  * Tonight's-picks hero: big confident picks in a snap carousel that scrolls forever — backdrop art
  * with the frost scrim carrying an oversized why-this, the answer to "what should I watch tonight".
+ *
+ * "Confident" is a claim, and the build is allowed to fall short of it: when nothing clears the 7.5
+ * bar it backfills the row from the best of what is left, silently. On live data that is the normal
+ * case. So a pick that came in under the bar says so on the card, and a row where every measured
+ * pick is a reach says so once above the row — the derivation is in lib/heroConfidence.ts.
  */
 export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
   const [active, setActive] = useState(0);
@@ -28,8 +34,17 @@ export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
     return null;
   }
 
+  const reachingNote = heroReachingNote(cards);
+
   return (
     <section aria-label="Tonight's picks" className="space-y-3">
+      {/* Said once, above the row, in the same register as the feed's degraded-reason copy — the
+          whole headline is a reach and pretending otherwise is the thing that costs trust. */}
+      {reachingNote && (
+        <p className="fa-caption text-fa-warning" data-testid="hero-reaching-note">
+          {reachingNote}
+        </p>
+      )}
       <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory scroll-smooth pb-1 -mx-1 px-1"
         onScroll={(e) => {
           const el = e.currentTarget;
@@ -79,6 +94,13 @@ export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
                     .join(" · ")}
                 </p>
                 <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug">{card.whyThis}</p>
+                {/* Quiet on purpose: an admission, not an alarm. It sits under the why-line so the
+                    pick is still the headline and the caveat is attached to it, not to the row. */}
+                {reachingLabel(card) && (
+                  <p className="fa-caption text-fa-frost-dim" data-testid="hero-reaching-label">
+                    {reachingLabel(card)}
+                  </p>
+                )}
               </div>
             </Link>
           );
