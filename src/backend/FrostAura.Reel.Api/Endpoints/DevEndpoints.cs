@@ -137,7 +137,7 @@ public static class DevEndpoints
 
             var report = await replay.RunAsync(account.Id, sampleWeight: 1.0, ct);
             var pairs = await calibration.LoadPairsAsync(account.Id, ct);
-            var calibrator = RatingCalibrator.Fit(pairs);
+            var calibrator = await calibration.FitAsync(account.Id, ct);
 
             return Results.Ok(new
             {
@@ -146,16 +146,28 @@ public static class DevEndpoints
                 calibration = new
                 {
                     kind = calibrator.Kind.ToString(),
+                    // What the selection rule was allowed to choose from, and what it turned on.
+                    mode = calibration.Mode.ToString(),
+                    correlation = calibrator.Correlation,
+                    activeArtifactId = await calibration.ActiveArtifactIdAsync(account.Id, ct),
+                    // `pairs` is every closed-loop pair on record; `fittedPairs` is what survived
+                    // artifact selection, and is the set every metric below is measured over.
                     pairs = pairs.Count,
+                    fittedPairs = calibrator.PairCount,
                     // The plan's Phase 0 gate: MAE over the closed-loop pairs must fall toward ≤ 1.2.
-                    maeBefore = pairs.Count == 0 ? 0d : pairs.Average(p => Math.Abs(p.Predicted - p.Actual)),
-                    maeAfter = pairs.Count == 0 ? 0d : pairs.Average(p => Math.Abs(calibrator.Calibrate(p.Predicted) - p.Actual)),
+                    maeBefore = calibrator.MaeBefore,
+                    maeAfter = calibrator.MaeAfter,
+                    // The band the UI renders beside a prediction — "7.4, ±1.9".
+                    expectedAbsoluteError = calibrator.ExpectedAbsoluteError,
                     biasBefore = pairs.Count == 0 ? 0d : pairs.Average(p => p.Predicted - p.Actual),
                     biasAfter = pairs.Count == 0 ? 0d : pairs.Average(p => calibrator.Calibrate(p.Predicted) - p.Actual),
-                    // A quick look at the map itself, so the shape is legible without a chart.
+                    // A quick look at the map itself, so the shape is legible without a chart. The
+                    // spread across it is what the minimum-slope guard exists to keep off the floor.
                     curve = Enumerable.Range(0, 11)
                         .Select(i => 5d + (i * 0.5d))
                         .Select(x => new { predicted = x, calibrated = Math.Round(calibrator.Calibrate(x), 3) }),
+                    curveRange = Math.Round(
+                        calibrator.Calibrate(RatingCalibrator.RangeProbeHigh) - calibrator.Calibrate(RatingCalibrator.RangeProbeLow), 3),
                 },
             });
         });
