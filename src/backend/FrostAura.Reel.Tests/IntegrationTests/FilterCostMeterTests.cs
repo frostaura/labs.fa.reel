@@ -1,0 +1,338 @@
+using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
+using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+
+namespace FrostAura.Reel.Tests.IntegrationTests;
+
+/// <summary>
+/// The filter cost meter on real Postgres — the only place it can be trusted, because the draft
+/// predicate is a second phrasing of the eligibility rule and a translation fault in it is invisible
+/// to an in-memory test.
+///
+/// Three things are pinned here and nothing else will catch them:
+/// 1. the marginals are the real subtractive counts, per VALUE rather than per kind;
+/// 2. the draft path and the persisted path agree title-for-title on the same rules — this is the
+///    anti-drift guard the builder's doc-comment points at, and the reason a second phrasing is
+///    allowed to exist at all;
+/// 3. the meter refuses to answer without an account scope, and one account's rules never see
+///    another account's interaction footprint.
+///
+/// Every assertion is scoped to the ids this test seeded, so a shared catalogue left behind by other
+/// integration tests can neither satisfy nor break it — except <c>Total</c>, which is catalogue-wide
+/// by definition and is therefore asserted as a lower bound rather than an equality.
+/// </summary>
+[Collection("postgres")]
+public class FilterCostMeterTests(PostgresFixture fixture)
+{
+    [Fact]
+    public async Task Marginals_are_the_titles_each_single_rule_alone_is_keeping_out()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+
+        // A catalogue shaped so each of the three rules owns a distinct, countable slice.
+        // Baseline survivors: English, 2010, crowd 8.0, drama — nothing excludes them.
+        var keepA = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2010; t.TmdbVoteAverage = 8.0m; });
+        var keepB = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Year = 2015; t.TmdbVoteAverage = 7.4m; });
+
+        // Held out ONLY by the comedy exclusion.
+        var comedy1 = await SeedTitleAsync(t => { t.Genres = ["comedy"]; t.Year = 2012; t.TmdbVoteAverage = 8.2m; });
+        var comedy2 = await SeedTitleAsync(t => { t.Genres = ["comedy", "drama"]; t.Year = 2011; t.TmdbVoteAverage = 7.9m; });
+        var comedy3 = await SeedTitleAsync(t => { t.Genres = ["comedy"]; t.Year = 2018; t.TmdbVoteAverage = 9.1m; });
+
+        // Held out ONLY by the crowd floor.
+        var weak = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2013; t.TmdbVoteAverage = 5.1m; });
+
+        // Held out ONLY by the language allow-list.
+        var french = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2016; t.TmdbVoteAverage = 8.4m; t.Language = "fr"; });
+        var korean = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2017; t.TmdbVoteAverage = 8.6m; t.Language = "ko"; });
+
+        // Held out by TWO rules at once — the reason marginals do not sum, and the reason this test
+        // asserts each marginal separately instead of a single "your filters cost you N".
+        var frenchComedy = await SeedTitleAsync(t => { t.Genres = ["comedy"]; t.Year = 2014; t.TmdbVoteAverage = 8.8m; t.Language = "fr"; });
+
+        var mine = new[] { keepA, keepB, comedy1, comedy2, comedy3, weak, french, korean, frenchComedy };
+
+        var rules = FilterRuleSet.Create(
+            excludeGenres: ["comedy"],
+            includeGenres: null,
+            excludeKeywords: null,
+            languages: ["en"],
+            minCrowdRating: 7.0m,
+            minYear: 2000,
+            maxYear: null);
+
+        Assert.Equal(
+            new[] { keepA, keepB }.ToHashSet(),
+            (await EligibleAsync(accountId, rules, mine)).ToHashSet());
+
+        // Relaxing comedy returns the three English comedies — NOT the French one, which the language
+        // rule is still holding.
+        Assert.Equal(
+            new[] { keepA, keepB, comedy1, comedy2, comedy3 }.ToHashSet(),
+            (await EligibleAsync(accountId, rules.Without(new FilterRule(FilterKind.ExcludeGenre, "comedy")), mine)).ToHashSet());
+
+        // Relaxing the language rule returns both foreign dramas AND the French comedy is still held
+        // by the genre rule — so this marginal is 2, not 3.
+        Assert.Equal(
+            new[] { keepA, keepB, french, korean }.ToHashSet(),
+            (await EligibleAsync(accountId, rules.Without(new FilterRule(FilterKind.Language, "en")), mine)).ToHashSet());
+
+        var report = await MeasureAsync(accountId, rules);
+
+        // Total is the whole catalogue — the denominator in "421 of 5,319" — so it is at least what
+        // this test seeded and usually much more on a shared database.
+        Assert.True(report.Total >= mine.Length, $"catalogue total {report.Total} < seeded {mine.Length}");
+
+        // Marginals are catalogue-wide, so they are asserted as "at least the slice this test owns":
+        // another test's fixtures can only ever add to them, never subtract.
+        Assert.True(Marginal(report, FilterKind.ExcludeGenre, "comedy") >= 3);
+        Assert.True(Marginal(report, FilterKind.MinCrowdRating, "7.0") >= 1);
+        Assert.True(Marginal(report, FilterKind.Language, "en") >= 2);
+
+        // Every rule that is ON is reported, addressed by VALUE — the editor renders a badge per chip,
+        // so a per-kind report would have nowhere to put the number.
+        Assert.Equal(
+            new[] { "ExcludeGenre", "Language", "MinCrowdRating", "MinYear" },
+            report.ByRule.Select(r => r.Kind).ToArray());
+
+        // Suggestions are the top three by gain, biggest first, and never include a rule that returns
+        // nothing — offering a one-tap relaxation worth zero titles is worse than offering none.
+        Assert.True(report.Suggestions.Count <= FilterCostMeter.SuggestionCount);
+        Assert.All(report.Suggestions, s => Assert.True(s.Gain > 0));
+        Assert.Equal(report.Suggestions.OrderByDescending(s => s.Gain).ToArray(), report.Suggestions.ToArray());
+        // Deliberately NOT asserting WHICH rule leads: marginals are catalogue-wide, and on a shared
+        // integration database another test's fixtures can legitimately make the crowd floor the most
+        // expensive rule. The orderings that are properties of the meter are asserted above.
+        Assert.All(report.Suggestions, s => Assert.Contains(report.ByRule, r => r.Kind == s.Kind && r.Value == s.Value && r.Marginal == s.Gain));
+    }
+
+    [Fact]
+    public async Task Draft_rules_match_the_persisted_rules_title_for_title()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The whole justification for a second phrasing of the content predicate. Same rules, saved
+        // one way and drafted the other, must select the identical set — including the awkward edges:
+        // an unrated title fails a crowd floor, an undated title passes a year window, a null-language
+        // title reads as not-English, and a keyword matches name, overview or TMDB keyword alike.
+        var accountId = await SeedAccountAsync();
+
+        var plain = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; t.TmdbVoteAverage = 7.7m; });
+        var excluded = await SeedTitleAsync(t => { t.Genres = ["documentary"]; t.Year = 2005; t.TmdbVoteAverage = 8.9m; });
+        var unrated = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; });
+        var traktOnly = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; t.TraktRating = 8.5m; t.TraktVotes = 30; });
+        var undated = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.TmdbVoteAverage = 7.7m; });
+        var tooOld = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 1980; t.TmdbVoteAverage = 9.5m; });
+        var tooNew = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2024; t.TmdbVoteAverage = 9.5m; });
+        var noLanguage = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; t.TmdbVoteAverage = 8.1m; t.Language = null; });
+        var keywordInName = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; t.TmdbVoteAverage = 8.1m; t.Name = $"A Zombie Story {Guid.NewGuid():N}"; });
+        var keywordInOverview = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; t.TmdbVoteAverage = 8.1m; t.Overview = "Quiet drama about a ZOMBIE outbreak."; });
+        var keywordInKeywords = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2005; t.TmdbVoteAverage = 8.1m; t.Keywords = ["zombie apocalypse"]; });
+        var included = await SeedTitleAsync(t => { t.Genres = ["drama", "horror"]; t.Year = 2005; t.TmdbVoteAverage = 8.1m; });
+
+        var mine = new[]
+        {
+            plain, excluded, unrated, traktOnly, undated, tooOld, tooNew, noLanguage,
+            keywordInName, keywordInOverview, keywordInKeywords, included,
+        };
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "documentary");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeKeyword, "zombie");
+        await SeedFilterAsync(accountId, FilterKind.Language, "en");
+        await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, ContentFilterRules.FormatRating(7.0m));
+        await SeedFilterAsync(accountId, FilterKind.MinYear, ContentFilterRules.FormatYear(2000));
+        await SeedFilterAsync(accountId, FilterKind.MaxYear, ContentFilterRules.FormatYear(2020));
+
+        HashSet<Guid> persisted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            persisted = (await new EligibilityQueryBuilder(db)
+                .EligibleTitles(accountId)
+                .Where(t => mine.Contains(t.Id))
+                .Select(t => t.Id)
+                .ToListAsync()).ToHashSet();
+        }
+
+        FilterRuleSet drafted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            drafted = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        }
+
+        var draft = (await EligibleAsync(accountId, drafted, mine)).ToHashSet();
+
+        Assert.Equal(persisted, draft);
+        // Sanity: the fixture must actually exercise the edges, or "both agree" is a vacuous truth.
+        Assert.Contains(plain, draft);
+        Assert.Contains(traktOnly, draft);
+        Assert.Contains(undated, draft);
+        Assert.Contains(included, draft);
+        Assert.DoesNotContain(excluded, draft);
+        Assert.DoesNotContain(unrated, draft);
+        Assert.DoesNotContain(tooOld, draft);
+        Assert.DoesNotContain(tooNew, draft);
+        Assert.DoesNotContain(noLanguage, draft);
+        Assert.DoesNotContain(keywordInName, draft);
+        Assert.DoesNotContain(keywordInOverview, draft);
+        Assert.DoesNotContain(keywordInKeywords, draft);
+    }
+
+    [Fact]
+    public async Task An_unscoped_context_is_refused_rather_than_answered_for_nobody()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var meter = new FilterCostMeter(
+            db, new EligibilityQueryBuilder(db), new AccountContext(), new MemoryCache(new MemoryCacheOptions()));
+
+        // Unscoped means the global query filters pass everything, so an answer would be a real
+        // number belonging to no one — the exact failure mode that must be loud, not silent.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => meter.MeasureAsync(FilterRuleSet.Create(["comedy"], null, null, ["en"], null, null, null)));
+    }
+
+    [Fact]
+    public async Task One_accounts_footprint_never_moves_another_accounts_count()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var mine = await SeedAccountAsync();
+        var theirs = await SeedAccountAsync();
+
+        var shared = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Year = 2012; t.TmdbVoteAverage = 8.3m; });
+        var ids = new[] { shared };
+        var rules = FilterRuleSet.Create(null, null, null, ["en"], null, 2000, null);
+
+        Assert.Contains(shared, await EligibleAsync(mine, rules, ids));
+        Assert.Contains(shared, await EligibleAsync(theirs, rules, ids));
+
+        // The OTHER account watches it. Eligibility is per-account by construction, so this must move
+        // exactly one of the two counts.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            db.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = theirs,
+                TitleId = shared,
+                Plays = 1,
+                LastWatchedAt = DateTime.UtcNow,
+                IsFullyWatched = true,
+                FirstSyncedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Contains(shared, await EligibleAsync(mine, rules, ids));
+        Assert.DoesNotContain(shared, await EligibleAsync(theirs, rules, ids));
+
+        // And through the meter itself: two accounts, one draft, two different eligible counts —
+        // proving the cache key is per-account and not just per-draft.
+        // Both accounts are freshly seeded and carry the identical draft, so the ONLY difference
+        // between their eligible counts is that one watched title — exactly one, catalogue-wide.
+        var minesReport = await MeasureAsync(mine, rules);
+        var theirsReport = await MeasureAsync(theirs, rules);
+        Assert.Equal(minesReport.Total, theirsReport.Total);
+        Assert.Equal(minesReport.Eligible, theirsReport.Eligible + 1);
+    }
+
+    private static int Marginal(FilterCostReport report, FilterKind kind, string value) =>
+        report.ByRule.Single(r => r.Kind == kind.ToString() && r.Value == value).Marginal;
+
+    private async Task<FilterCostReport> MeasureAsync(Guid accountId, FilterRuleSet rules)
+    {
+        var context = new AccountContext();
+        context.SetAccount(accountId);
+        await using var db = fixture.CreateContext(context);
+        var meter = new FilterCostMeter(
+            db, new EligibilityQueryBuilder(db), context, new MemoryCache(new MemoryCacheOptions()));
+        return await meter.MeasureAsync(rules);
+    }
+
+    /// <summary>Eligible ids among <paramref name="mine"/> under a DRAFT rule set.</summary>
+    private async Task<IReadOnlyList<Guid>> EligibleAsync(Guid accountId, FilterRuleSet rules, IReadOnlyCollection<Guid> mine)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        return await new EligibilityQueryBuilder(db)
+            .EligibleTitles(accountId, rules)
+            .Where(t => mine.Contains(t.Id))
+            .Select(t => t.Id)
+            .ToListAsync();
+    }
+
+    private async Task<Guid> SeedAccountAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"cost-{Guid.NewGuid():N}",
+            Tier = AccountTier.Paid,
+            CreatedAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            PipelineStageChangedAt = DateTime.UtcNow,
+        };
+        db.Add(account);
+        await db.SaveChangesAsync();
+        return account.Id;
+    }
+
+    private async Task<Guid> SeedTitleAsync(Action<Title> shape)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+            TraktSlug = string.Empty,
+            Name = $"cost-fixture {Guid.NewGuid():N}",
+            Language = "en",
+            PosterPath = "/p.jpg",
+            Genres = ["drama"],
+            // Bottom of the popularity order, so these fixtures never displace another integration
+            // test's top-N assertions on the shared catalogue.
+            TmdbPopularity = 0m,
+            CreatedAt = DateTime.UtcNow,
+        };
+        shape(title);
+        db.Add(title);
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    private async Task SeedFilterAsync(Guid accountId, FilterKind kind, string value)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            Value = value,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+}

@@ -153,6 +153,35 @@ public static class FilterEndpoints
             });
         });
 
+        // Read-only, and deliberately NOT behind the settings PIN. The PIN protects CHANGING what a
+        // shared device is allowed to show; this changes nothing, and gating it would leave the one
+        // person who can see the conditions unable to see what they cost. It is a POST because it
+        // carries the DRAFT the editor is currently showing — costing only the saved rules would
+        // answer a question nobody is asking while their finger is on a chip.
+        group.MapPost("/filters/cost", async (
+            FiltersPayload payload, FilterCostMeter meter, CancellationToken ct) =>
+        {
+            // The year window is validated, not clamped, on the way in — the same call the save makes,
+            // so a typo is refused here too rather than costing a window the user cannot store.
+            if (!ContentFilterRules.TryNormalizeYears(payload.MinYear, payload.MaxYear, out var years, out var yearError))
+            {
+                return Results.BadRequest(new { error = yearError });
+            }
+
+            var rules = FilterRuleSet.Create(
+                payload.ExcludeGenres,
+                payload.IncludeGenres,
+                // Umbrella keyword terms expand on save, so they expand here too — otherwise the meter
+                // costs "lgbtq" as one rule while the save would store the whole family.
+                KeywordFilterExpansion.Expand(payload.ExcludeKeywords),
+                payload.Languages,
+                payload.MinCrowdRating,
+                years.MinYear,
+                years.MaxYear);
+
+            return Results.Ok(await meter.MeasureAsync(rules, ct));
+        });
+
         group.MapPost("/pin", async (PinRequest request, IReelDbContext db, HttpContext http, CancellationToken ct) =>
         {
             if (request.Pin is not { Length: >= 4 and <= 8 } || !request.Pin.All(char.IsDigit))
