@@ -1,8 +1,23 @@
 import { FlaskConical, Play } from "lucide-react";
 import { useGetModelMetricsQuery, useTrainModelMutation, useGetSyncStatusQuery } from "../store/api";
+import type { CounterfactualWindow } from "../store/api";
 
 function pct(value: number | null | undefined, digits = 0): string {
   return value == null ? "—" : `${(value * 100).toFixed(digits)}%`;
+}
+
+/** A plain number, or an em-dash when there genuinely isn't one. Never a fabricated zero. */
+function num(value: number | null | undefined, digits = 2): string {
+  return value == null ? "—" : value.toFixed(digits);
+}
+
+/** Signed, so an over-promise reads as "+1.03" and never hides behind an absolute value. */
+function signed(value: number | null | undefined, digits = 2): string {
+  return value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function windowLabel(w: CounterfactualWindow): string {
+  return w.days == null ? "all time" : `last ${w.days} days`;
 }
 
 /**
@@ -15,6 +30,7 @@ export default function Lab() {
   const [train, { isLoading: starting }] = useTrainModelMutation();
 
   const gate = data?.gate;
+  const efficiency = data?.efficiency;
   const latest = data?.runs.find((r) => r.eval != null)?.eval ?? null;
   const trainActive = sync?.activeJob != null && ["Train", "Evaluate"].includes(sync.activeJob.kind);
 
@@ -83,9 +99,145 @@ export default function Lab() {
             <p className="fa-caption text-fa-frost-dim mt-1">
               iteration {gate?.iterationsUsed ?? 0} of {gate?.killCriterionAt ?? 3} (kill criterion)
             </p>
+            {/* The criterion was hard-coded at 3 while the ledger ran past 12, and the page said
+                nothing. Stating the breach is the whole point of a kill criterion. */}
+            {gate?.criterionExceeded && (
+              <p className="fa-caption text-fa-danger mt-1" data-testid="criterion-exceeded">
+                kill criterion exceeded — {gate.iterationsUsed} iterations against a limit of {gate.killCriterionAt}
+              </p>
+            )}
           </div>
         </div>
       </section>
+
+      {/* Track record — the retro closed loop. Zero new schema: what Reel predicted, joined to what
+          actually happened. Deliberately unflattering where the data is unflattering. */}
+      {efficiency && (
+        <section className="fa-card p-5 space-y-5" data-testid="retro-loop">
+          <div>
+            <h2 className="fa-section-title">Track record — retro loop</h2>
+            <p className="fa-caption text-fa-frost-dim mt-1">
+              Saved via Reel → watched → rated. This is how wrong the number on the card has been.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">conversions</p>
+              <p className="fa-stat-value">{efficiency.conversions.count}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                {efficiency.conversions.ratedCount} rated · {efficiency.conversions.scoredCount} scored
+              </p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">predicted vs actual</p>
+              <p className="fa-stat-value">
+                {num(efficiency.conversions.accuracy.meanPredicted, 2)} →{" "}
+                {num(efficiency.conversions.accuracy.meanActual, 2)}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">mean on converted titles</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">mae · bias</p>
+              <p className="fa-stat-value">
+                {num(efficiency.conversions.accuracy.meanAbsoluteError, 2)} ·{" "}
+                {signed(efficiency.conversions.accuracy.bias, 2)}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">positive bias = over-promised</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">within 1 point</p>
+              <p className="fa-stat-value">{pct(efficiency.conversions.accuracy.withinOnePointRate)}</p>
+              <p className="fa-caption text-fa-frost-dim mt-1">
+                ρ {efficiency.conversions.accuracy.pearsonCorrelation == null
+                  ? "undefined"
+                  : num(efficiency.conversions.accuracy.pearsonCorrelation, 3)}
+              </p>
+            </div>
+          </div>
+
+          {/* The wider evidence base: every rating that arrived after Reel had already committed
+              to a number, not just the ones it converted. */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3" data-testid="predicted-vs-actual">
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">scored-before-rated pairs</p>
+              <p className="fa-stat-value">{efficiency.predictedVsActual.pairs}</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">mae (all pairs)</p>
+              <p className="fa-stat-value">{num(efficiency.predictedVsActual.accuracy.meanAbsoluteError, 2)}</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">bias (all pairs)</p>
+              <p className="fa-stat-value">{signed(efficiency.predictedVsActual.accuracy.bias, 2)}</p>
+            </div>
+            <div className="fa-card px-4 py-3">
+              <p className="fa-stat-label">correlation</p>
+              <p className="fa-stat-value">
+                {efficiency.predictedVsActual.accuracy.pearsonCorrelation == null
+                  ? "—"
+                  : num(efficiency.predictedVsActual.accuracy.pearsonCorrelation, 3)}
+              </p>
+            </div>
+          </div>
+
+          {/* The within-user counterfactual — the one number that says whether Reel helped. */}
+          {efficiency.counterfactual.length > 0 && (
+            <div data-testid="counterfactual">
+              <h3 className="fa-overline text-fa-frost-dim mb-2">Because of Reel vs found yourself</h3>
+              <div className="space-y-1">
+                {efficiency.counterfactual.map((w) => (
+                  <p key={w.window} className="fa-body">
+                    <span className="text-fa-frost-dim">{windowLabel(w)}:</span>{" "}
+                    via Reel {num(w.viaReelMeanRating, 2)} ({w.viaReelCount}) · found yourself{" "}
+                    {num(w.otherMeanRating, 2)} ({w.otherCount}) ·{" "}
+                    <span className={w.delta != null && w.delta < 0 ? "text-fa-danger" : "text-fa-success"}>
+                      {signed(w.delta, 2)}
+                    </span>
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {efficiency.conversions.worstMisses.length > 0 && (
+            <div>
+              <h3 className="fa-overline text-fa-frost-dim mb-2">Worst misses</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left" data-testid="worst-misses">
+                  <thead>
+                    <tr className="fa-overline text-fa-frost-dim border-b border-fa-edge/50">
+                      <th className="py-2 pr-4">title</th>
+                      <th className="py-2 pr-4">predicted</th>
+                      <th className="py-2 pr-4">you said</th>
+                      <th className="py-2">over by</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {efficiency.conversions.worstMisses.map((miss) => (
+                      <tr key={miss.titleId} className="border-b border-fa-edge/30 fa-body">
+                        <td className="py-2 pr-4">
+                          {miss.name}
+                          {miss.year != null && <span className="text-fa-frost-dim"> ({miss.year})</span>}
+                        </td>
+                        <td className="py-2 pr-4 tabular-nums">{num(miss.predicted, 2)}</td>
+                        <td className="py-2 pr-4 tabular-nums">{miss.actual}</td>
+                        <td className="py-2 tabular-nums text-fa-danger">{signed(miss.gap, 2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {efficiency.conversions.count === 0 && (
+            <p className="fa-body text-fa-frost-dim">
+              No conversions yet — nothing Reel put on the list has been watched and rated.
+            </p>
+          )}
+        </section>
+      )}
 
       {/* Metric tiles */}
       {latest && (

@@ -128,9 +128,11 @@ public class DeltaSyncJobHandler(
         if (changes.Movies || changes.Shows)
         {
             var removed = await managedList.RemoveWatchedAsync(accountId, DateTime.UtcNow, ct);
-            if (removed > 0)
+            if (removed.Count > 0)
             {
-                logger.LogInformation("DeltaSync for {AccountId}: removed {Count} watched item(s) from the managed list.", accountId, removed);
+                logger.LogInformation(
+                    "DeltaSync for {AccountId}: removed {Count} watched item(s) from the managed list ({TitleIds}).",
+                    accountId, removed.Count, string.Join(", ", removed));
             }
         }
 

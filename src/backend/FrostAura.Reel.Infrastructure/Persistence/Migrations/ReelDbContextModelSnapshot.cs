@@ -418,6 +418,69 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("AccountDigests");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.Feed.FeedBuildStat", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("BuiltAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("CandidateCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("DegradedReason")
+                        .HasColumnType("text");
+
+                    b.Property<int>("DurationMs")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("EligiblePoolCount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid?>("FeedSnapshotId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("HeroEligibleCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("ModelArtifactId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("NewCandidatesUpserted")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("RailsDropped")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ShortlistCount")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal?>("ShortlistP50")
+                        .HasPrecision(4, 2)
+                        .HasColumnType("numeric(4,2)");
+
+                    b.Property<decimal?>("ShortlistP90")
+                        .HasPrecision(4, 2)
+                        .HasColumnType("numeric(4,2)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "BuiltAt")
+                        .IsDescending(false, true);
+
+                    b.ToTable("FeedBuildStats");
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Feed.FeedItem", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1252,24 +1315,43 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("AccountId")
+                        .HasColumnType("uuid");
+
                     b.Property<long>("CallCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("CompletionTokens")
                         .HasColumnType("bigint");
 
                     b.Property<DateTime>("Day")
                         .HasColumnType("date");
+
+                    b.Property<string>("Model")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<long?>("PromptTokens")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Provider")
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<string>("Purpose")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<long?>("TokensUsed")
                         .HasColumnType("bigint");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("Provider", "Day")
+                    b.HasIndex("Provider", "Day", "AccountId", "Model", "Purpose")
                         .IsUnique();
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("Provider", "Day", "AccountId", "Model", "Purpose"), false);
 
                     b.ToTable("ExternalApiUsages");
                 });

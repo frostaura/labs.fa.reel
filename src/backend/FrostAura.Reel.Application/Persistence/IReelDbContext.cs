@@ -52,6 +52,7 @@ public interface IReelDbContext
 
     DbSet<FeedSnapshot> FeedSnapshots { get; }
     DbSet<FeedItem> FeedItems { get; }
+    DbSet<FeedBuildStat> FeedBuildStats { get; }
     DbSet<AccountDigest> AccountDigests { get; }
 
     DbSet<Domain.Notifications.PushSubscription> PushSubscriptions { get; }

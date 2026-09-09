@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -35,7 +36,10 @@ public class OpenRouterAttributeExtractor(
     HttpClient httpClient,
     ApiUsageRecorder usageRecorder,
     IConfiguration configuration,
-    ILogger<OpenRouterAttributeExtractor> logger)
+    ILogger<OpenRouterAttributeExtractor> logger,
+    // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
+    // every real code path, but the adapter must still be `new`-able in tests without a scope.
+    IAccountContext? accountContext = null)
     : ITitleAttributeExtractor
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -201,10 +205,14 @@ public class OpenRouterAttributeExtractor(
         TitleAttributeInput input, string? repairHint, bool compact, CancellationToken ct)
     {
         var strict = _strictSchemaSupported;
+
+        // Recorded in a finally, AFTER the response: the counts live in the response body, so the
+        // old record-then-send ordering could never see them. The finally keeps every HTTP attempt
+        // counted — including the ones that fail before a body exists, which then read as
+        // "unknown tokens" rather than "free".
+        OpenRouterUsage? usage = null;
         try
         {
-            usageRecorder.Record(ApiProvider.OpenRouter);
-
             using var request = BuildRequest(input, repairHint, compact, strict);
             using var response = await httpClient.SendAsync(request, ct);
 
@@ -231,6 +239,7 @@ public class OpenRouterAttributeExtractor(
             }
 
             var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
+            usage = dto?.Usage;
             var choice = dto?.Choices?.FirstOrDefault();
             var content = choice?.Message?.Content;
             if (string.IsNullOrWhiteSpace(content))
@@ -254,6 +263,16 @@ public class OpenRouterAttributeExtractor(
         {
             logger.LogWarning(ex, "Attribute extraction failed for {Title} ({TitleId}).", input.Name, input.TitleId);
             return AttemptOutcome.Failed(ExtractionFailure.Transport, [ex.GetType().Name]);
+        }
+        finally
+        {
+            usageRecorder.Record(
+                ApiProvider.OpenRouter,
+                ApiUsagePurpose.ExtractAttributes,
+                ModelId,
+                accountContext?.AccountId,
+                usage?.PromptTokens,
+                usage?.CompletionTokens);
         }
     }
 
@@ -593,7 +612,7 @@ public class OpenRouterAttributeExtractor(
             new(null, failure, problems);
     }
 
-    private sealed record ChatResponse(ChatChoice[]? Choices);
+    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 
     private sealed record ChatChoice(ChatMessage? Message, [property: JsonPropertyName("finish_reason")] string? FinishReason);
 

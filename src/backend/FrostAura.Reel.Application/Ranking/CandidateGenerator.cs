@@ -24,13 +24,18 @@ public class CandidateGenerator(
     private const int RecommendationSeeds = 5;
 
     /// <summary>
-    /// Widens the pool for one account. <paramref name="accountId"/> is load-bearing, not
-    /// bookkeeping: the account's ExcludeGenre rules have to shape the discovery calls themselves.
-    /// A banned genre can sit high in the taste map — Dean bans 8 of 25 including two of his
-    /// highest-COUNT genres — so up to half the per-build discover budget was being spent fetching
-    /// titles the eligibility layer is guaranteed to reject, every build, for ever.
+/// Widens the pool for one account and reports what it found: how many TMDB items came back
+    /// across all arms, and how many of those the catalogue had never seen. The second number is the
+    /// direct instrument for "the picks get weaker every round" — it was computed on every build and
+    /// only ever logged.
+    ///
+    /// <paramref name="accountId"/> is load-bearing, not bookkeeping: the account's ExcludeGenre
+    /// rules have to shape the discovery calls themselves. A banned genre can sit high in the taste
+    /// map — Dean bans 8 of 25 including two of his highest-COUNT genres — so up to half the
+    /// per-build discover budget was being spent fetching titles the eligibility layer is
+    /// guaranteed to reject, every build, for ever.
     /// </summary>
-    public async Task<int> RefreshPoolAsync(
+    public async Task<PoolRefreshResult> RefreshPoolAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, string region, CancellationToken ct)
     {
         // Read the ban list first: a genre the user has excluded is not a "top genre" of theirs in
@@ -116,8 +121,11 @@ public class CandidateGenerator(
         var upserted = await UpsertCandidatesAsync(items, ct);
         logger.LogInformation("Candidate pool refreshed: {Items} TMDB items ({Upserted} new) across genres [{Genres}].",
             items.Count, upserted, string.Join(", ", topGenres));
-        return items.Count;
+        return new PoolRefreshResult(items.Count, upserted);
     }
+
+    /// <summary>What one pool refresh produced: items seen, and titles genuinely new to the catalogue.</summary>
+    public readonly record struct PoolRefreshResult(int Discovered, int NewlyUpserted);
 
     /// <summary>
     /// Upserts TMDB list items as global, TMDB-only <see cref="Title"/> rows (dedup by

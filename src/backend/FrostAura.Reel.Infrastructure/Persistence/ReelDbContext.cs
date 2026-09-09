@@ -76,6 +76,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     // Feed
     public DbSet<FeedSnapshot> FeedSnapshots => Set<FeedSnapshot>();
     public DbSet<FeedItem> FeedItems => Set<FeedItem>();
+    public DbSet<FeedBuildStat> FeedBuildStats => Set<FeedBuildStat>();
     public DbSet<AccountDigest> AccountDigests => Set<AccountDigest>();
 
     // Notifications
@@ -358,8 +359,25 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
         modelBuilder.Entity<ExternalApiUsage>(e =>
         {
-            e.HasIndex(u => new { u.Provider, u.Day }).IsUnique();
+            // NULLS NOT DISTINCT is load-bearing, not a nicety: AccountId/Model/Purpose are legitimately
+            // null for Trakt, TMDB and catalogue-wide work, and under the default NULLS DISTINCT the
+            // recorder's ON CONFLICT upsert would never fire for those rows — the 15s flush would
+            // insert a fresh duplicate every tick, forever. See ExternalApiUsage's doc-comment.
+            e.HasIndex(u => new { u.Provider, u.Day, u.AccountId, u.Model, u.Purpose })
+                .IsUnique()
+                .AreNullsDistinct(false);
             e.Property(u => u.Day).HasColumnType("date");
+            e.Property(u => u.Model).HasMaxLength(128);
+            e.Property(u => u.Purpose).HasMaxLength(64);
+        });
+
+        // ── Build instrumentation ──────────────────────────────────────────────────────────
+        // No FK on FeedSnapshotId: snapshots are pruned to the last seven and these rows outlive them.
+        modelBuilder.Entity<FeedBuildStat>(e =>
+        {
+            e.HasIndex(s => new { s.AccountId, s.BuiltAt }).IsDescending(false, true);
+            e.Property(s => s.ShortlistP50).HasPrecision(4, 2);
+            e.Property(s => s.ShortlistP90).HasPrecision(4, 2);
         });
 
         // ── Row-level tenancy, enforced once ───────────────────────────────────────────────
