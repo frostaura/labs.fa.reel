@@ -16,7 +16,8 @@ namespace FrostAura.Reel.Application.Jobs;
 /// <summary>
 /// Builds the account's weekly digest: eligible titles that either released in the trailing
 /// 7 days or newly landed on one of the account's flatrate providers, scored by the personal
-/// model, floored at 7.0 predicted, top 10 kept. Upserts <see cref="AccountDigest"/> on
+/// model, floored at 7.0 predicted — softly, see <see cref="MinPredictedRating"/> — top 10 kept.
+/// Upserts <see cref="AccountDigest"/> on
 /// (AccountId, WeekStart = Monday of the current ISO week, UTC) so re-runs within a week
 /// refresh rather than duplicate. When the digest has items, notifies every Web Push
 /// subscription the account holds — dead endpoints (404/410) are deleted on the spot and
@@ -31,8 +32,22 @@ public sealed class BuildDigestJobHandler(
 {
     public JobKind Kind => JobKind.BuildDigest;
 
-    /// <summary>"High for you" floor — below this predicted rating a candidate never ships.</summary>
+    /// <summary>
+    /// The "high for you" bar. SOFT, like the feed's own MinPredictedRating: a hard 7.0 sat above
+    /// the catalogue's p90 prediction (~6.9), so the weekly digest shipped zero items, the Home
+    /// rail hid itself, and the push read "0 new high-for-you titles" — a floor nothing could clear
+    /// is a blank page, not a standard. When fewer than <see cref="ThinDigestCount"/> candidates
+    /// clear it the floor drops to <see cref="RelaxedMinPredictedRating"/> and the digest SAYS SO,
+    /// exactly as BuildFeedJobHandler does. Content rules are unaffected: the trailing-7-day window,
+    /// the zero-interaction-footprint rule and last week's suppression all still bind absolutely.
+    /// </summary>
     private const decimal MinPredictedRating = 7.0m;
+
+    /// <summary>The relaxed floor. Still a floor — below this a title is not worth a push.</summary>
+    private const decimal RelaxedMinPredictedRating = 6.0m;
+
+    /// <summary>A digest thinner than this is treated as a failure to find, not a verdict.</summary>
+    private const int ThinDigestCount = 5;
 
     private const int MaxItems = 10;
 
@@ -129,11 +144,33 @@ public sealed class BuildDigestJobHandler(
             }
         }
 
-        var items = scores
-            .Where(kv => kv.Value >= MinPredictedRating)
+        var qualified = scores.Where(kv => kv.Value >= MinPredictedRating).ToList();
+        var selected = qualified;
+        string? degradedReason = null;
+        if (qualified.Count < ThinDigestCount)
+        {
+            var relaxed = scores.Where(kv => kv.Value >= RelaxedMinPredictedRating).ToList();
+            if (relaxed.Count > qualified.Count)
+            {
+                selected = relaxed;
+
+                // Invariant culture, deliberately: these are ratings on the same 0-10 scale the
+                // settings screen shows, and a server whose locale renders "7,0" would quote the
+                // user a threshold they have never seen. Same reasoning as the feed's degraded copy.
+                degradedReason = string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "Only {0} of this week's arrivals cleared the {1:0.#} \u201Chigh for you\u201D bar, so it was "
+                        + "relaxed to {2:0.#} for this digest.",
+                    qualified.Count,
+                    MinPredictedRating,
+                    RelaxedMinPredictedRating);
+            }
+        }
+
+        var items = selected
             .OrderByDescending(kv => kv.Value)
             .Take(MaxItems)
-            .Select(kv => new DigestItem(kv.Key, Math.Round(kv.Value, 2), reasons[kv.Key]))
+            .Select(kv => new DigestItem(kv.Key, Math.Round(kv.Value, 2), reasons[kv.Key], degradedReason))
             .ToList();
 
         var digest = await db.AccountDigests
@@ -146,12 +183,22 @@ public sealed class BuildDigestJobHandler(
 
         digest.GeneratedAt = now;
         digest.ItemsJson = JsonSerializer.Serialize(items);
-        job.ProgressMessage = $"Digest ready: {items.Count} picks";
+        job.ProgressMessage = degradedReason is null
+            ? $"Digest ready: {items.Count} picks"
+            : $"Digest ready: {items.Count} picks (floor relaxed)";
         await db.SaveChangesAsync(ct);
 
+        // Never a push with nothing in it. "0 new high-for-you titles" is what the hard floor used
+        // to deliver every week, and it teaches the user to ignore the notification entirely.
         if (items.Count > 0)
         {
             await NotifyAsync(accountId, items.Count, now, ct);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Digest for {AccountId} is empty even at the relaxed {Floor:0.#} floor — no push sent.",
+                accountId, RelaxedMinPredictedRating);
         }
     }
 

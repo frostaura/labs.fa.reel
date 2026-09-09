@@ -316,7 +316,7 @@ public sealed class FeedPaginator(
             var curationCt = curationCts.Token;
             var timedOut = false;
 
-            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+            var tasteSummary = await TasteSummary.BuildAsync(db, account.Id, taste, ct);
             var holdsGate = false;
             try
             {
@@ -408,27 +408,6 @@ public sealed class FeedPaginator(
             .OrderByDescending(x => x.Blend)
             .Select(x => new Curated(x.Scored, x.Fit?.Why))
             .ToList();
-    }
-
-    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
-    {
-        var topGenres = taste.GenreRatings
-            .OrderByDescending(kv => kv.Value.Count).Take(4).Select(kv => kv.Key).ToList();
-        var loved = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id)).Select(t => t.Name).Take(4).ToListAsync(ct);
-
-        var parts = new List<string>();
-        if (topGenres.Count > 0)
-        {
-            parts.Add("favours " + string.Join(", ", topGenres));
-        }
-
-        if (loved.Count > 0)
-        {
-            parts.Add("loves " + string.Join(", ", loved));
-        }
-
-        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
     }
 
     private static string QueryFor(MoreFeedRequest req) => req.Context switch

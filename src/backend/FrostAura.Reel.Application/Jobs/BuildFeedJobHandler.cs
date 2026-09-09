@@ -114,7 +114,7 @@ public class BuildFeedJobHandler(
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         ReportProgress(job, accountId, 10, "Scouting fresh candidates");
-        await candidateGenerator.RefreshPoolAsync(taste, account.Region, ct);
+        await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, ct);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
@@ -959,7 +959,7 @@ public class BuildFeedJobHandler(
         IReadOnlyList<RerankResult> results;
         try
         {
-            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+            var tasteSummary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
             results = await agent.RerankBatchAsync(
                 batch, FeedPaginator.QueryForRow(FeedRowKind.Hero), tasteSummary, anchorName: null, whyCts.Token);
         }
@@ -1014,7 +1014,7 @@ public class BuildFeedJobHandler(
         IReadOnlyDictionary<Guid, string> anchorNames, Dictionary<Guid, double> heroFits,
         System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
     {
-        var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
+        var tasteSummary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
         var batchesDone = 0;
         var curated = 0;
 
@@ -1080,28 +1080,6 @@ public class BuildFeedJobHandler(
                 }
             }
         }
-    }
-
-    /// <summary>The compact taste summary the rerank prompt rides on — mirrors the paginator's.</summary>
-    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
-    {
-        var topGenres = taste.GenreRatings
-            .OrderByDescending(kv => kv.Value.Count).Take(4).Select(kv => kv.Key).ToList();
-        var loved = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id)).Select(t => t.Name).Take(4).ToListAsync(ct);
-
-        var parts = new List<string>();
-        if (topGenres.Count > 0)
-        {
-            parts.Add("favours " + string.Join(", ", topGenres));
-        }
-
-        if (loved.Count > 0)
-        {
-            parts.Add("loves " + string.Join(", ", loved));
-        }
-
-        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
     }
 
     /// <summary>

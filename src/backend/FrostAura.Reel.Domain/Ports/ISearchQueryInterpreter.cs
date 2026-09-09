@@ -62,4 +62,12 @@ public interface ISearchQueryInterpreter
 
     /// <summary>Parse a free-text query into a discovery spec. Never throws — degrades to a keyword-only intent.</summary>
     Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default);
+
+    /// <summary>
+    /// The deterministic, offline, FREE reading of the query — the same fallback
+    /// <see cref="InterpretAsync"/> degrades to, exposed on its own so a caller that needs a
+    /// fallback intent does not have to buy a chat completion to obtain one. Same input, same
+    /// output, no network, no spend. Never throws.
+    /// </summary>
+    SearchIntent Heuristic(string query);
 }

@@ -230,9 +230,54 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.Equal(1989, reply.Intent.MaxYear);
     }
 
+    [Fact]
+    public async Task A_successful_turn_makes_exactly_one_chat_call_and_never_pays_the_interpreter()
+    {
+        // The waste this pins: the agent used to await interpreter.InterpretAsync — a SECOND
+        // billable OpenRouter completion — on every turn, purely to hold a fallback that the
+        // parser discards whenever the primary call carries usable signal.
+        var handler = new CannedHandler(Ok("""{"reply":"ok","genres":["horror"],"keywords":["shark"]}"""));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "shark horrors", "likes horror", []);
+
+        Assert.Single(handler.Bodies); // one chat completion for the turn, not two
+        Assert.Equal(0, interpreter.InterpretCalls);
+        Assert.Equal(1, interpreter.HeuristicCalls); // the free reading, once
+        Assert.Contains("horror", reply.Intent.Genres);
+    }
+
+    [Fact]
+    public async Task The_exception_path_still_yields_a_heuristic_intent_and_asks_the_interpreter()
+    {
+        // A turn whose own model call is unusable is exactly where a second call earns its cost.
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.InternalServerError, "{}"));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "shark horrors", "likes horror", []);
+
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.Equal(["shark horrors"], reply.Intent.Keywords); // the heuristic reading, not an empty intent
+        Assert.False(string.IsNullOrWhiteSpace(reply.Reply));
+    }
+
+    [Fact]
+    public async Task An_empty_model_answer_falls_back_to_the_interpreter_rather_than_shipping_nothing()
+    {
+        var handler = new CannedHandler(Ok(string.Empty));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "quiet space films", "likes sci-fi", []);
+
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.Equal(["quiet space films"], reply.Intent.Keywords);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
-    private static OpenRouterSearchAgent Agent(CannedHandler handler)
+    private static OpenRouterSearchAgent Agent(CannedHandler handler) => Agent(handler, new HeuristicInterpreter());
+
+    private static OpenRouterSearchAgent Agent(CannedHandler handler, HeuristicInterpreter interpreter)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -245,7 +290,7 @@ public class OpenRouterSearchAgentLiveModeTests
         var recorder = new ApiUsageRecorder(scopeFactory, NullLogger<ApiUsageRecorder>.Instance);
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterSearchAgent(
-            client, new HeuristicInterpreter(), recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
+            client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
     }
 
     private static List<RerankInput> Titles() =>
@@ -271,15 +316,36 @@ public class OpenRouterSearchAgentLiveModeTests
             .GetProperty("content").GetString()!;
     }
 
-    /// <summary>Stands in for the deterministic interpreter — the agent only needs a fallback intent.</summary>
+    /// <summary>
+    /// Stands in for the deterministic interpreter. It counts BOTH members, because the whole point
+    /// of the split is that <see cref="ISearchQueryInterpreter.Heuristic"/> is free and
+    /// <see cref="ISearchQueryInterpreter.InterpretAsync"/> costs a chat completion — a regression
+    /// that reinstates the paid call on the happy path is invisible to an assertion on the intent.
+    /// </summary>
     private sealed class HeuristicInterpreter : ISearchQueryInterpreter
     {
+        public int InterpretCalls { get; private set; }
+
+        public int HeuristicCalls { get; private set; }
+
         public bool IsAvailable => true;
 
         public string ModelId => "fake/heuristic";
 
-        public Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult(new SearchIntent([], [query], Array.Empty<MediaType>(), query, null, null));
+        public Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default)
+        {
+            InterpretCalls++;
+            return Task.FromResult(Intent(query));
+        }
+
+        public SearchIntent Heuristic(string query)
+        {
+            HeuristicCalls++;
+            return Intent(query);
+        }
+
+        private static SearchIntent Intent(string query) =>
+            new([], [query], Array.Empty<MediaType>(), query, null, null);
     }
 
     private sealed record CannedResponse(HttpStatusCode Status, string Body);

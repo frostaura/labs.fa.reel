@@ -15,6 +15,19 @@ namespace FrostAura.Reel.Api.Endpoints;
 /// Reactions are free for every tier — they feed the model. Each endpoint commits the local
 /// change AND its Trakt outbox row in one transaction, then returns instantly; the dispatcher
 /// makes Trakt consistent within seconds.
+/// <para>
+/// Every mutation here commits through <see cref="UniqueRaceSave.SaveAbsorbingRebuildRaceAsync"/>,
+/// never a bare SaveChanges. Each one asks <see cref="FeedRefreshCoordinator"/> for a rebuild, and
+/// that enqueue is a check-then-insert against a partial unique index — so a second rapid reaction,
+/// or a delta sync enqueuing concurrently, loses the race with Postgres 23505. Unabsorbed, that
+/// rolled back the user's reaction, its managed-list row and its outbox rows and answered 500: the
+/// save the user just made silently vanished, in exactly the queueing burst that provokes the race.
+/// The reaction is what must survive; the rebuild is already owned by the job that won.
+/// </para>
+/// <para>
+/// Every handler body is a public static method rather than an inline lambda, so integration tests
+/// exercise the exact endpoint semantics — including that save path — without an HTTP host.
+/// </para>
 /// </summary>
 public static class ReactionEndpoints
 {
@@ -43,205 +56,233 @@ public static class ReactionEndpoints
             string mediaType, long tmdbId, ReactionRequest request,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
             OnlineResidualModel residual, DislikeSignal dislikes, CancellationToken ct) =>
-        {
-            var accountId = accountContext.AccountId!.Value;
-            var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
-            if (title is null)
-            {
-                return Results.NotFound();
-            }
-
-            var existing = await db.UserTitleReactions.FirstOrDefaultAsync(
-                r => r.AccountId == accountId && r.TitleId == title.Id
-                    && r.Kind == ReactionKind.NotInterested && r.RevokedAt == null, ct);
-            if (existing is null)
-            {
-                db.UserTitleReactions.Add(new UserTitleReaction
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = title.Id,
-                    Kind = ReactionKind.NotInterested,
-                    Reason = ParseReason(request.Reason),
-                    CreatedAt = DateTime.UtcNow,
-                });
-                // A rejection is a soft-negative label — nudge the residual down. Softened from the
-                // original (2, 0.8) to (3, 0.4) in Phase 8b: the reason-weighted DislikeSignal
-                // demotion now carries the per-similarity penalty, so the residual only needs to
-                // learn the general direction, not shoulder the whole correction.
-                await residual.ObserveAsync(accountId, title.Id, 3.0, 0.4, ct);
-                // Evict the cached dislike profile so the demotion sees this reaction immediately.
-                dislikes.Invalidate(accountId);
-                // Rebuild so the rejected title is replaced by the next-best pick, not just left as a gap.
-                await feedRefresh.RequestRebuildAsync(accountId, "not interested", ct);
-                await db.SaveChangesAsync(ct);
-            }
-
-            return Results.Ok(new { notInterested = true });
-        });
+            await NotInterestedAsync(
+                mediaType, tmdbId, request, db, accountContext.AccountId!.Value, feedRefresh, residual, dislikes, ct));
 
         // ── Drop a show (manual) — leaves Continue Watching AND every suggestion surface ──
         group.MapPost("/reactions/dropped", async (
             string mediaType, long tmdbId,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
             OnlineResidualModel residual, DislikeSignal dislikes, CancellationToken ct) =>
-        {
-            var accountId = accountContext.AccountId!.Value;
-            var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
-            if (title is null)
-            {
-                return Results.NotFound();
-            }
-
-            var existing = await db.UserTitleReactions.FirstOrDefaultAsync(
-                r => r.AccountId == accountId && r.TitleId == title.Id
-                    && r.Kind == ReactionKind.Dropped && r.RevokedAt == null, ct);
-            if (existing is null)
-            {
-                // No rating, no managed-list, no Trakt outbox (Trakt has no dropped concept). It
-                // DOES teach the model since Phase 8b — founder decision: "the dislikes I give must
-                // be taken into account". A drop is milder than not-interested (the user gave it a
-                // shot), so the pseudo-label is a lukewarm 4 at a light 0.3 weight, and the dislike
-                // profile folds it into the genre map when a reason is ever attached.
-                db.UserTitleReactions.Add(new UserTitleReaction
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = title.Id,
-                    Kind = ReactionKind.Dropped,
-                    CreatedAt = DateTime.UtcNow,
-                });
-                await residual.ObserveAsync(accountId, title.Id, 4.0, 0.3, ct);
-                dislikes.Invalidate(accountId);
-                // Dropped now excludes from discovery too, so rebuild to backfill the slot it vacates
-                // with the next-best pick — same treatment as not-interested / saved-for-later. GET
-                // /api/feed also prunes it from the live snapshot immediately, so the picks list is
-                // correct before this rebuild lands.
-                await feedRefresh.RequestRebuildAsync(accountId, "dropped", ct);
-                await db.SaveChangesAsync(ct);
-            }
-
-            return Results.Ok(new { dropped = true });
-        });
+            await DroppedAsync(
+                mediaType, tmdbId, db, accountContext.AccountId!.Value, feedRefresh, residual, dislikes, ct));
 
         group.MapPost("/reactions/save_for_later", async (
             string mediaType, long tmdbId,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
             OnlineResidualModel residual, CancellationToken ct) =>
-        {
-            var accountId = accountContext.AccountId!.Value;
-            var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
-            if (title is null)
-            {
-                return Results.NotFound();
-            }
-
-            var now = DateTime.UtcNow;
-            var existing = await db.UserTitleReactions.FirstOrDefaultAsync(
-                r => r.AccountId == accountId && r.TitleId == title.Id
-                    && r.Kind == ReactionKind.SaveForLater && r.RevokedAt == null, ct);
-            if (existing is null)
-            {
-                db.UserTitleReactions.Add(new UserTitleReaction
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = title.Id,
-                    Kind = ReactionKind.SaveForLater,
-                    CreatedAt = now,
-                });
-
-                var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
-                    m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
-                if (listItem is null)
-                {
-                    db.ManagedListItems.Add(new ManagedListItem
-                    {
-                        Id = Guid.NewGuid(),
-                        AccountId = accountId,
-                        TitleId = title.Id,
-                        AddedAt = now,
-                    });
-                }
-
-                Enqueue(db, accountId, OutboxKind.AddToWatchlist, title, null, null);
-                Enqueue(db, accountId, OutboxKind.ListAdd, title, null, null);
-                // A save is a mild positive intent — nudge the residual up (target 7.5, light weight).
-                await residual.ObserveAsync(accountId, title.Id, 7.5, 0.4, ct);
-                // Saved-for-later is an exclusion on the suggestion surfaces (it lives on Saved), so
-                // rebuild to backfill the slot it vacates with the next-best pick.
-                await feedRefresh.RequestRebuildAsync(accountId, "saved for later", ct);
-                await db.SaveChangesAsync(ct);
-            }
-
-            return Results.Ok(new { savedForLater = true });
-        });
+            await SaveForLaterAsync(
+                mediaType, tmdbId, db, accountContext.AccountId!.Value, feedRefresh, residual, ct));
 
         group.MapDelete("/reactions/{kind}", async (
             string mediaType, long tmdbId, string kind,
             IReelDbContext db, IAccountContext accountContext, FeedRefreshCoordinator feedRefresh,
             DislikeSignal dislikes, CancellationToken ct) =>
+            await RevokeAsync(
+                mediaType, tmdbId, kind, db, accountContext.AccountId!.Value, feedRefresh, dislikes, ct));
+    }
+
+    /// <summary>"Not for me" — an exclusion on every suggestion surface, and a soft negative label.</summary>
+    public static async Task<IResult> NotInterestedAsync(
+        string mediaType, long tmdbId, ReactionRequest request,
+        IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
+        OnlineResidualModel residual, DislikeSignal dislikes, CancellationToken ct)
+    {
+        var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
+        if (title is null)
         {
-            var accountId = accountContext.AccountId!.Value;
-            var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
-            if (title is null)
-            {
-                return Results.NotFound();
-            }
+            return Results.NotFound();
+        }
 
-            var reactionKind = kind switch
+        var existing = await db.UserTitleReactions.FirstOrDefaultAsync(
+            r => r.AccountId == accountId && r.TitleId == title.Id
+                && r.Kind == ReactionKind.NotInterested && r.RevokedAt == null, ct);
+        if (existing is null)
+        {
+            db.UserTitleReactions.Add(new UserTitleReaction
             {
-                "not_interested" => ReactionKind.NotInterested,
-                "save_for_later" => ReactionKind.SaveForLater,
-                "dropped" => ReactionKind.Dropped,
-                _ => (ReactionKind?)null,
-            };
-            if (reactionKind is null)
-            {
-                return Results.BadRequest(new { error = "unknown reaction kind" });
-            }
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                Kind = ReactionKind.NotInterested,
+                Reason = ParseReason(request.Reason),
+                CreatedAt = DateTime.UtcNow,
+            });
+            // A rejection is a soft-negative label — nudge the residual down. Softened from the
+            // original (2, 0.8) to (3, 0.4) in Phase 8b: the reason-weighted DislikeSignal
+            // demotion now carries the per-similarity penalty, so the residual only needs to
+            // learn the general direction, not shoulder the whole correction.
+            await residual.ObserveAsync(accountId, title.Id, 3.0, 0.4, ct);
+            // Evict the cached dislike profile so the demotion sees this reaction immediately.
+            dislikes.Invalidate(accountId);
+            // Rebuild so the rejected title is replaced by the next-best pick, not just left as a gap.
+            await feedRefresh.RequestRebuildAsync(accountId, "not interested", ct);
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
+        }
 
-            var now = DateTime.UtcNow;
-            var reaction = await db.UserTitleReactions.FirstOrDefaultAsync(
-                r => r.AccountId == accountId && r.TitleId == title.Id
-                    && r.Kind == reactionKind && r.RevokedAt == null, ct);
-            if (reaction is not null)
-            {
-                reaction.RevokedAt = now;
+        return Results.Ok(new { notInterested = true });
+    }
 
-                if (reactionKind == ReactionKind.SaveForLater)
+    /// <summary>Drop a show the user gave a shot — a milder negative than "not interested".</summary>
+    public static async Task<IResult> DroppedAsync(
+        string mediaType, long tmdbId,
+        IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
+        OnlineResidualModel residual, DislikeSignal dislikes, CancellationToken ct)
+    {
+        var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
+        if (title is null)
+        {
+            return Results.NotFound();
+        }
+
+        var existing = await db.UserTitleReactions.FirstOrDefaultAsync(
+            r => r.AccountId == accountId && r.TitleId == title.Id
+                && r.Kind == ReactionKind.Dropped && r.RevokedAt == null, ct);
+        if (existing is null)
+        {
+            // No rating, no managed-list, no Trakt outbox (Trakt has no dropped concept). It
+            // DOES teach the model since Phase 8b — founder decision: "the dislikes I give must
+            // be taken into account". A drop is milder than not-interested (the user gave it a
+            // shot), so the pseudo-label is a lukewarm 4 at a light 0.3 weight, and the dislike
+            // profile folds it into the genre map when a reason is ever attached.
+            db.UserTitleReactions.Add(new UserTitleReaction
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                Kind = ReactionKind.Dropped,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await residual.ObserveAsync(accountId, title.Id, 4.0, 0.3, ct);
+            dislikes.Invalidate(accountId);
+            // Dropped now excludes from discovery too, so rebuild to backfill the slot it vacates
+            // with the next-best pick — same treatment as not-interested / saved-for-later. GET
+            // /api/feed also prunes it from the live snapshot immediately, so the picks list is
+            // correct before this rebuild lands.
+            await feedRefresh.RequestRebuildAsync(accountId, "dropped", ct);
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
+        }
+
+        return Results.Ok(new { dropped = true });
+    }
+
+    /// <summary>Save for later — the managed Trakt list plus the local queue, in one transaction.</summary>
+    public static async Task<IResult> SaveForLaterAsync(
+        string mediaType, long tmdbId,
+        IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
+        OnlineResidualModel residual, CancellationToken ct)
+    {
+        var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
+        if (title is null)
+        {
+            return Results.NotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        var existing = await db.UserTitleReactions.FirstOrDefaultAsync(
+            r => r.AccountId == accountId && r.TitleId == title.Id
+                && r.Kind == ReactionKind.SaveForLater && r.RevokedAt == null, ct);
+        if (existing is null)
+        {
+            db.UserTitleReactions.Add(new UserTitleReaction
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                Kind = ReactionKind.SaveForLater,
+                CreatedAt = now,
+            });
+
+            var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
+                m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
+            if (listItem is null)
+            {
+                db.ManagedListItems.Add(new ManagedListItem
                 {
-                    var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
-                        m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
-                    if (listItem is not null)
-                    {
-                        listItem.RemovedAt = now;
-                        listItem.RemovalReason = ListRemovalReason.UserRemoved;
-                    }
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    TitleId = title.Id,
+                    AddedAt = now,
+                });
+            }
 
-                    Enqueue(db, accountId, OutboxKind.RemoveFromWatchlist, title, null, null);
-                    Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
+            Enqueue(db, accountId, OutboxKind.AddToWatchlist, title, null, null);
+            Enqueue(db, accountId, OutboxKind.ListAdd, title, null, null);
+            // A save is a mild positive intent — nudge the residual up (target 7.5, light weight).
+            await residual.ObserveAsync(accountId, title.Id, 7.5, 0.4, ct);
+            // Saved-for-later is an exclusion on the suggestion surfaces (it lives on Saved), so
+            // rebuild to backfill the slot it vacates with the next-best pick.
+            await feedRefresh.RequestRebuildAsync(accountId, "saved for later", ct);
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
+        }
+
+        return Results.Ok(new { savedForLater = true });
+    }
+
+    /// <summary>Revoke any of the three exclusions, restoring eligibility symmetrically.</summary>
+    public static async Task<IResult> RevokeAsync(
+        string mediaType, long tmdbId, string kind,
+        IReelDbContext db, Guid accountId, FeedRefreshCoordinator feedRefresh,
+        DislikeSignal dislikes, CancellationToken ct)
+    {
+        var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
+        if (title is null)
+        {
+            return Results.NotFound();
+        }
+
+        var reactionKind = kind switch
+        {
+            "not_interested" => ReactionKind.NotInterested,
+            "save_for_later" => ReactionKind.SaveForLater,
+            "dropped" => ReactionKind.Dropped,
+            _ => (ReactionKind?)null,
+        };
+        if (reactionKind is null)
+        {
+            return Results.BadRequest(new { error = "unknown reaction kind" });
+        }
+
+        var now = DateTime.UtcNow;
+        var reaction = await db.UserTitleReactions.FirstOrDefaultAsync(
+            r => r.AccountId == accountId && r.TitleId == title.Id
+                && r.Kind == reactionKind && r.RevokedAt == null, ct);
+        if (reaction is not null)
+        {
+            reaction.RevokedAt = now;
+
+            if (reactionKind == ReactionKind.SaveForLater)
+            {
+                var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
+                    m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
+                if (listItem is not null)
+                {
+                    listItem.RemovedAt = now;
+                    listItem.RemovalReason = ListRemovalReason.UserRemoved;
                 }
 
-                // Revoking any of the three exclusions makes the title a suggestion candidate again —
-                // rebuild so it can re-earn a slot live. Dropped is in this list because it now
-                // excludes from discovery, so un-dropping must restore eligibility symmetrically.
-                // The dislike profile drops the revoked reaction on the next read; the residual
-                // observe made on create is deliberately NOT reversed — a single soft-weighted
-                // pseudo-label inside a clamped online head is noise-level, and the head auto-resets
-                // on every retrain anyway.
-                if (reactionKind is ReactionKind.NotInterested or ReactionKind.Dropped)
-                {
-                    dislikes.Invalidate(accountId);
-                }
-
-                await feedRefresh.RequestRebuildAsync(accountId, "reaction revoked", ct);
-
-                await db.SaveChangesAsync(ct);
+                Enqueue(db, accountId, OutboxKind.RemoveFromWatchlist, title, null, null);
+                Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
             }
 
-            return Results.Ok(new { revoked = kind });
-        });
+            // Revoking any of the three exclusions makes the title a suggestion candidate again —
+            // rebuild so it can re-earn a slot live. Dropped is in this list because it now
+            // excludes from discovery, so un-dropping must restore eligibility symmetrically.
+            // The dislike profile drops the revoked reaction on the next read; the residual
+            // observe made on create is deliberately NOT reversed — a single soft-weighted
+            // pseudo-label inside a clamped online head is noise-level, and the head auto-resets
+            // on every retrain anyway.
+            if (reactionKind is ReactionKind.NotInterested or ReactionKind.Dropped)
+            {
+                dislikes.Invalidate(accountId);
+            }
+
+            await feedRefresh.RequestRebuildAsync(accountId, "reaction revoked", ct);
+
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
+        }
+
+        return Results.Ok(new { revoked = kind });
     }
 
     /// <summary>
@@ -353,7 +394,7 @@ public static class ReactionEndpoints
         // the Active model) so the picks reflect it within seconds, not at the nightly build.
         await feedRefresh.RequestRebuildAsync(accountId, "in-app rating", ct);
 
-        await db.SaveChangesAsync(ct);
+        await db.SaveAbsorbingRebuildRaceAsync(ct);
         return Results.Ok(new
         {
             userRating = rating.Rating,
@@ -408,7 +449,7 @@ public static class ReactionEndpoints
 
             // Retracting a rating both changes taste and makes the title eligible again — rebuild.
             await feedRefresh.RequestRebuildAsync(accountId, "rating retracted", ct);
-            await db.SaveChangesAsync(ct);
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
         }
 
         return Results.Ok(new { userRating = (short?)null });
