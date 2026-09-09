@@ -225,6 +225,18 @@ public class BuildFeedJobHandler(
             DurationMs = (int)stopwatch.ElapsedMilliseconds,
         });
 
+        // Supply just moved, so enrichment has work. A title that is brand new to the catalogue has
+        // no embedding and no attributes: it is invisible to the ANN retrieval arm and to rail
+        // similarity, and 13 of its 92 feature slots read zero while every training row's read live.
+        // Enrichment used to be enqueued from the onboarding chain and nowhere else, which is why
+        // ~1,360 discovered titles had never been embedded. Enqueued on BOTH exits below — a
+        // Preserve/no-op build discovers candidates exactly like a fresh one does, and suppressing
+        // the enqueue with the snapshot would starve enrichment precisely on the quiet nights.
+        if (poolRefresh.NewlyUpserted > 0)
+        {
+            await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct);
+        }
+
         if (snapshot is null)
         {
             // Preserve-mode no-op: the assembled feed is item-for-item what the Active snapshot
@@ -233,7 +245,10 @@ public class BuildFeedJobHandler(
             // cannot churn the page the user is reading. TitleScores were persisted above, so
             // score freshness is not lost; the page itself stays put.
             job.ProgressMessage = "feed unchanged — kept tonight's picks";
-            await db.SaveChangesAsync(ct);
+            // Absorbing, not plain: the enqueues above are check-then-insert against the partial
+            // unique index, and losing that race means the work is already scheduled. The build's
+            // own writes — the stat row, the scores — must not roll back over a coalesced job.
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
             events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
             logger.LogInformation("Feed unchanged for {AccountId} — snapshot suppressed.", accountId);
             return;
@@ -259,7 +274,8 @@ public class BuildFeedJobHandler(
             });
         }
 
-        await db.SaveChangesAsync(ct);
+        // See the no-op path above: the availability and enrichment enqueues both race the index.
+        await db.SaveAbsorbingRebuildRaceAsync(ct);
 
         events.Publish(accountId, PipelineEventTypes.StageChanged, new Dictionary<string, object?> { ["stage"] = "FeedReady" });
         events.Publish(accountId, PipelineEventTypes.FeedReady, new Dictionary<string, object?>
