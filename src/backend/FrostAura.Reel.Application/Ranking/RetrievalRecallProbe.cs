@@ -50,7 +50,8 @@ public sealed class RetrievalRecallProbe(
     IReelDbContext db,
     FeatureVectorBuilder featureBuilder,
     CandidateRetriever retriever,
-    EligibilityQueryBuilder eligibility)
+    EligibilityQueryBuilder eligibility,
+    TasteClusterProvider clusters)
 {
     /// <summary>Ratings at or above this are "loved" — the titles the pool is judged on finding.</summary>
     public const short LovedThreshold = 8;
@@ -119,6 +120,9 @@ public sealed class RetrievalRecallProbe(
             .ToList();
 
         var outcomes = new List<Outcome>(targets.Count);
+        // Every (day, ordinal) the partition held. Averaged at the end, because a partition is
+        // recomputed per as-of day and a single day's weight is not the window's.
+        var clusterShape = new List<ClusterShape>();
         var daysEvaluated = 0;
         var exhausted = false;
 
@@ -143,17 +147,34 @@ public sealed class RetrievalRecallProbe(
             Func<IQueryable<Title>, IQueryable<Title>> lane =
                 q => q.Where(t => t.TmdbId != null && t.PosterPath != null && t.CreatedAt <= asOf);
 
-            var pool = await retriever.RetrieveWithArmsAsync(
-                accountId, taste, lane, popCount, annCount, maturityCeiling, ct, asOf: asOf);
+            // The day's taste partition — the same one the retriever will have split its ANN budget
+            // across, taken from the same day-granular cache, so "which pocket was this title
+            // nearest" is answered against the pockets that actually paid for the pull.
+            var partition = await clusters.GetAsync(accountId, asOf, ct);
+            var dayTargetIds = day.Select(t => t.TitleId).ToList();
+            var targetVectors = partition.Count == 0
+                ? []
+                : await db.TitleEmbeddings
+                    .Where(e => dayTargetIds.Contains(e.TitleId))
+                    .Select(e => new { e.TitleId, e.Embedding })
+                    .ToDictionaryAsync(e => e.TitleId, e => e.Embedding.ToArray(), ct);
+
+            foreach (var cluster in partition)
+            {
+                clusterShape.Add(new ClusterShape(cluster.Ordinal, cluster.Weight, cluster.MemberCount));
+            }
+
+            var pool = (await retriever.RetrieveWithArmsAsync(
+                accountId, taste, lane, popCount, annCount, maturityCeiling, ct, asOf: asOf)).Hits;
 
             // A second pass with the popularity arm switched OFF. Attribution in the combined pool
             // is first-claim (matching the cross-arm dedup), so popularity — which runs first —
             // shadows every title ANN would also have found, and ANN's own reach is unreadable from
             // it. Popularity needs no such pass: nothing runs ahead of it, so its first-claim
             // number IS its reach.
-            var annOnly = annCount > 0
-                ? await retriever.RetrieveWithArmsAsync(
-                    accountId, taste, lane, popCount: 0, annCount, maturityCeiling, ct, asOf: asOf)
+            IReadOnlyList<RetrievedTitle> annOnly = annCount > 0
+                ? (await retriever.RetrieveWithArmsAsync(
+                    accountId, taste, lane, popCount: 0, annCount, maturityCeiling, ct, asOf: asOf)).Hits
                 : [];
 
             var pooled = pool.ToDictionary(hit => hit.Title.Id, hit => hit.Arm);
@@ -163,9 +184,8 @@ public sealed class RetrievalRecallProbe(
             // has already narrowed to titles that existed then — so a target that is in the
             // catalogue but absent from this set was excluded by a content rule or an interaction,
             // not by not existing yet.
-            var dayIds = day.Select(t => t.TitleId).ToList();
             var eligibleRows = await lane(eligibility.EligibleTitlesAsOf(accountId, asOf))
-                .Where(t => dayIds.Contains(t.Id))
+                .Where(t => dayTargetIds.Contains(t.Id))
                 .ToListAsync(ct);
             var eligibleIds = eligibleRows
                 // The maturity ceiling cannot order in SQL, so retrieval applies it in memory after
@@ -183,7 +203,8 @@ public sealed class RetrievalRecallProbe(
                     InCatalogue: target.CreatedAt <= asOf,
                     Eligible: eligibleIds.Contains(target.TitleId),
                     PoolArm: pooled.TryGetValue(target.TitleId, out var arm) ? arm : null,
-                    AnnArm: annReach.TryGetValue(target.TitleId, out var ann) ? ann : null));
+                    AnnArm: annReach.TryGetValue(target.TitleId, out var ann) ? ann : null,
+                    NearestCluster: NearestOrdinal(partition, targetVectors.GetValueOrDefault(target.TitleId))));
             }
 
             daysEvaluated++;
@@ -207,6 +228,7 @@ public sealed class RetrievalRecallProbe(
                 skipped.Count),
             Loved: Summarise($">= {LovedThreshold}", outcomes.Where(o => o.Target.Rating >= LovedThreshold).ToList()),
             Disliked: Summarise($"<= {DislikedThreshold}", outcomes.Where(o => o.Target.Rating <= DislikedThreshold).ToList()),
+            PerCluster: PerCluster(clusterShape, outcomes.Where(o => o.Target.Rating >= LovedThreshold).ToList()),
             NotReachable: outcomes
                 .Where(o => o.Target.Rating >= LovedThreshold && o.PoolArm is null)
                 .OrderByDescending(o => o.Target.FirstRatedAt)
@@ -221,6 +243,70 @@ public sealed class RetrievalRecallProbe(
                     Reason(o)))
                 .ToList());
     }
+
+    /// <summary>
+    /// The ordinal of the cluster whose centroid <paramref name="embedding"/> is nearest, or null
+    /// when the account has no partition that day or the title carries no embedding. Cosine over
+    /// unit vectors, ties to the lower ordinal — the same rule the clusterer assigns members by.
+    /// </summary>
+    private static int? NearestOrdinal(IReadOnlyList<TasteClusterer.Cluster> partition, float[]? embedding)
+    {
+        if (partition.Count == 0 || embedding is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        var unit = TasteClusterer.Normalise(embedding);
+        int? best = null;
+        var bestScore = double.NegativeInfinity;
+        foreach (var cluster in partition)
+        {
+            var score = TasteClusterer.Dot(unit, cluster.Centroid);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = cluster.Ordinal;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Recall broken out by the taste pocket each loved title actually belongs to — <b>the table
+    /// that decides whether B1 worked</b>.
+    ///
+    /// <para>The pass condition is not "recall went up". It is that recall rises <b>concentrated in
+    /// the LOW-weight clusters</b>: those are the pockets the single mean vector could not point at,
+    /// and they are the entire claim. A rise spread evenly across every ordinal means the extra
+    /// slots bought it, not the partition, in which case the honest response is to raise
+    /// <c>FirstPassAnnPool</c> and delete the clusterer rather than keep a table that is doing
+    /// nothing.</para>
+    ///
+    /// <para><b>Read the ordinal as a RANK, not an identity.</b> The partition is recomputed for
+    /// every as-of day, so ordinal 2 in March and ordinal 2 in September are both "the third-heaviest
+    /// pocket" and need not hold the same titles. <c>weight</c> and <c>memberCount</c> are therefore
+    /// means over the days evaluated, and a window in which the account's taste genuinely
+    /// reorganised will blur this table rather than lie about it.</para>
+    /// </summary>
+    private static IReadOnlyList<ClusterRecall> PerCluster(
+        IReadOnlyList<ClusterShape> shape, IReadOnlyList<Outcome> loved) =>
+        shape
+            .GroupBy(s => s.Ordinal)
+            .OrderBy(g => g.Key)
+            .Select(g =>
+            {
+                var near = loved.Where(o => o.NearestCluster == g.Key).ToList();
+                var hits = near.Count(o => o.PoolArm is not null);
+                return new ClusterRecall(
+                    g.Key,
+                    Math.Round(g.Average(s => s.Weight), 4),
+                    (int)Math.Round(g.Average(s => (double)s.MemberCount)),
+                    near.Count,
+                    hits,
+                    Rate(hits, near.Count));
+            })
+            .ToList();
 
     /// <summary>
     /// Why one loved title was missed, in the order that matters operationally: a title that did not
@@ -253,11 +339,13 @@ public sealed class RetrievalRecallProbe(
                 Popularity: Pooled(RetrievalArm.Popularity),
                 AnnLoved: Reached(RetrievalArm.AnnLoved),
                 AnnRecent: Reached(RetrievalArm.AnnRecent),
+                AnnCluster: Reached(RetrievalArm.AnnCluster),
                 Union: union),
             new Rates(
                 Popularity: Rate(Pooled(RetrievalArm.Popularity), total),
                 AnnLoved: Rate(Reached(RetrievalArm.AnnLoved), total),
                 AnnRecent: Rate(Reached(RetrievalArm.AnnRecent), total),
+                AnnCluster: Rate(Reached(RetrievalArm.AnnCluster), total),
                 Union: Rate(union, total),
                 InCatalogue: Rate(inCatalogue, total)),
             // The retrieval-only number: of the titles that existed AND were eligible that day, how
@@ -281,7 +369,11 @@ public sealed class RetrievalRecallProbe(
         bool InCatalogue,
         bool Eligible,
         RetrievalArm? PoolArm,
-        RetrievalArm? AnnArm);
+        RetrievalArm? AnnArm,
+        int? NearestCluster);
+
+    /// <summary>One (day, ordinal) observation of the partition's shape, averaged into the report.</summary>
+    private readonly record struct ClusterShape(int Ordinal, double Weight, int MemberCount);
 }
 
 /// <summary>The probe's whole answer. Persisted nowhere — it is read, acted on, and thrown away.</summary>
@@ -294,7 +386,17 @@ public sealed record RetrievalRecallReport(
     BudgetReport Budget,
     ArmRecall Loved,
     ArmRecall Disliked,
+    IReadOnlyList<ClusterRecall> PerCluster,
     IReadOnlyList<MissedTitle> NotReachable);
+
+/// <summary>
+/// Loved-title recall for ONE taste pocket. <paramref name="TargetsNear"/> counts the loved titles
+/// whose embedding is nearest this cluster's centroid — so the denominators partition the loved set
+/// and the rates are directly comparable across ordinals. Empty (no partition on any evaluated day)
+/// on an account below <c>TasteClusterProvider.MinClusterInputs</c>.
+/// </summary>
+public sealed record ClusterRecall(
+    int Ordinal, double Weight, int MemberCount, int TargetsNear, int Hits, double? Recall);
 
 /// <summary>
 /// How much of the window the run actually covered. <paramref name="Exhausted"/> true means the
@@ -325,14 +427,14 @@ public sealed record ArmRecall(
 /// from the popularity-free pass, so they are not shadowed by it. They therefore do NOT sum to
 /// <paramref name="Union"/>, and are not meant to.
 /// </summary>
-public sealed record Hits(int Popularity, int AnnLoved, int AnnRecent, int Union);
+public sealed record Hits(int Popularity, int AnnLoved, int AnnRecent, int AnnCluster, int Union);
 
 /// <summary>
 /// <see cref="Hits"/> over the evaluated target count. <paramref name="InCatalogue"/> is the supply
 /// ceiling every other rate here sits under: no arm can beat it.
 /// </summary>
 public sealed record Rates(
-    double? Popularity, double? AnnLoved, double? AnnRecent, double? Union, double? InCatalogue);
+    double? Popularity, double? AnnLoved, double? AnnRecent, double? AnnCluster, double? Union, double? InCatalogue);
 
 /// <summary>One loved title no arm returned, with the reason it was missed.</summary>
 public sealed record MissedTitle(

@@ -26,7 +26,13 @@ namespace FrostAura.Reel.Application.Ml;
 /// warmly about a taste the surface forbids.</para>
 /// </summary>
 public sealed class TasteFactsBuilder(
-    IReelDbContext db, DislikeSignal dislikes, FeatureVectorBuilder features, IMemoryCache cache)
+    IReelDbContext db,
+    DislikeSignal dislikes,
+    FeatureVectorBuilder features,
+    IMemoryCache cache,
+    // Optional: a construction site without it simply produces a fact sheet with no clusters, which
+    // is also what an account below TasteClusterProvider.MinClusterInputs gets.
+    TasteClusterProvider? tasteClusters = null)
 {
     /// <summary>
     /// How long a computed profile hash is reused on the RENDER paths.
@@ -61,7 +67,13 @@ public sealed class TasteFactsBuilder(
     /// <summary>Recent dislikes named to the writer. Fewer — one is usually the whole point.</summary>
     public const int RecentDislikes = 4;
 
-    /// <summary>How far back "recently" reaches for the recent-loves and recent-dislikes facts.</summary>
+    /// <summary>
+    /// How far back "recently" reaches for the recent-loves and recent-dislikes facts.
+    ///
+    /// <para><b>Narrative prose only. No feature, score or retrieval arm reads this.</b> It exists so
+    /// a sentence can say "lately" and mean something; the model's own view of the account is
+    /// all-time and separately recency-WEIGHTED, never truncated.</para>
+    /// </summary>
     public static readonly TimeSpan RecentWindow = TimeSpan.FromDays(120);
 
     /// <summary>Loved anchors named to the writer. More than this and the prose starts listing.</summary>
@@ -72,6 +84,23 @@ public sealed class TasteFactsBuilder(
 
     /// <summary>A genre needs this many ratings before a drift figure means anything.</summary>
     private const int MinDriftObservations = 4;
+
+    /// <summary>
+    /// The share of total taste weight a cluster needs before the fact sheet will call it something
+    /// the account "keeps returning to". Below three percent it is a weekend, not a taste.
+    ///
+    /// <para>Paired with <see cref="MinGenreRatingsFloor"/> as a member floor, for exactly the reason
+    /// <see cref="MinGenreRatings"/> is two-sided: a relative bar alone lets three percent of a thin
+    /// library pass as a preference, and an absolute bar alone is a meaningful pool at two hundred
+    /// ratings and noise at ten thousand. <b>This is the PROSE bar and it is deliberately stricter
+    /// than the retrieval one</b> — a small pocket absolutely should get its own ANN budget (that is
+    /// the entire point of the partition), and absolutely should not open a sentence about who
+    /// someone is.</para>
+    /// </summary>
+    public const decimal MinClusterShare = 0.03m;
+
+    /// <summary>Pockets named on the fact sheet, heaviest first. More than this and the prose starts listing.</summary>
+    public const int TopClusters = 4;
 
     /// <summary>Drift smaller than this is formula noise, not a change of taste.</summary>
     private const decimal MinDriftDelta = 0.3m;
@@ -250,6 +279,7 @@ public sealed class TasteFactsBuilder(
             .ToListAsync(ct);
 
         var (recentLoves, recentDislikes) = await RecentAsync(accountId, asOf, ct);
+        var clusters = await ClustersAsync(accountId, asOf, ratingsCount, ct);
 
         var facts = new TasteFacts(
             Math.Round(taste.UserMean, 2),
@@ -265,7 +295,8 @@ public sealed class TasteFactsBuilder(
             people,
             texture,
             contrarian,
-            preferenceTags);
+            preferenceTags,
+            clusters);
 
         // The account's last stored fingerprint is the hysteresis anchor — see TasteProfileHash.
         // Read here, once, so every caller (the feed build, the endpoints, both jobs) computes the
@@ -281,6 +312,55 @@ public sealed class TasteFactsBuilder(
             facts, taste.TopLovedTitleIds, dislikeProfile.Version, previous);
 
         return new Result(facts, fingerprint.Hash, fingerprint.Components, taste.TopLovedTitleIds);
+    }
+
+    /// <summary>
+    /// The pockets of taste worth naming, heaviest first.
+    ///
+    /// <para>Ranked by weight and filtered by <see cref="MinClusterShare"/> plus the same absolute
+    /// member floor the genre bar uses. Exemplar titles are resolved to names here — a cluster has no
+    /// label (that would be an LLM call with its own budget), so the titles nearest its centre ARE
+    /// its name, and a pocket whose exemplars cannot be named is dropped rather than described as an
+    /// anonymous percentage.</para>
+    /// </summary>
+    private async Task<List<ClusterFact>> ClustersAsync(
+        Guid accountId, DateTime asOf, int ratingsCount, CancellationToken ct)
+    {
+        if (tasteClusters is null)
+        {
+            return [];
+        }
+
+        var partition = await tasteClusters.GetAsync(accountId, asOf, ct);
+        var totalWeight = partition.Sum(c => c.Weight);
+        if (partition.Count == 0 || totalWeight <= 0d)
+        {
+            return [];
+        }
+
+        var memberFloor = Math.Max(MinGenreRatingsFloor, ratingsCount / 100);
+        var qualifying = partition
+            .Where(c => (decimal)(c.Weight / totalWeight) >= MinClusterShare && c.MemberCount >= memberFloor)
+            .Take(TopClusters)
+            .ToList();
+        if (qualifying.Count == 0)
+        {
+            return [];
+        }
+
+        var exemplarIds = qualifying.SelectMany(c => c.ExemplarTitleIds).Distinct().ToList();
+        var names = await db.Titles
+            .Where(t => exemplarIds.Contains(t.Id) && t.Name != null && t.Name != "")
+            .Select(t => new { t.Id, t.Name })
+            .ToDictionaryAsync(t => t.Id, t => t.Name, ct);
+
+        return qualifying
+            .Select(c => new ClusterFact(
+                c.ExemplarTitleIds.Where(names.ContainsKey).Select(id => names[id]).ToList(),
+                Math.Round((decimal)(c.Weight / totalWeight), 3),
+                c.MemberCount))
+            .Where(f => f.Exemplars.Count > 0)
+            .ToList();
     }
 
     /// <summary>

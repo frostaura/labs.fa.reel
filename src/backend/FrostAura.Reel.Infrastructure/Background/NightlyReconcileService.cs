@@ -69,6 +69,7 @@ public sealed class NightlyReconcileService(
                 // pill promises "retraining tonight" from exactly the rules that decide it here.
                 var retrainGate = scope.ServiceProvider.GetRequiredService<RetrainGate>();
                 var personAffinities = scope.ServiceProvider.GetRequiredService<PersonAffinityWriter>();
+                var tasteClusters = scope.ServiceProvider.GetRequiredService<Application.Ranking.TasteClusterProvider>();
                 var featureBuilder = scope.ServiceProvider.GetRequiredService<FeatureVectorBuilder>();
                 var now = DateTime.UtcNow;
 
@@ -83,6 +84,7 @@ public sealed class NightlyReconcileService(
                 var affinityBackfills = 0;
                 var narratives = 0;
                 var lensPasses = 0;
+                var clustersPruned = 0;
                 foreach (var accountId in accountIds)
                 {
                     // Managed-list auto-remove backstop: anything in "Reel — Up Next" detected watched
@@ -137,6 +139,13 @@ public sealed class NightlyReconcileService(
                         logger.LogInformation(
                             "Nightly reconcile queued a retrain for {AccountId} ({Trigger}).", accountId, trigger);
                     }
+
+                    // Taste-cluster retention. The partition is rewritten every build, so without a
+                    // sweep an active account accrues a 6 KB vector per cluster per day for ever.
+                    // A fortnight is what the probe's before/after comparison reads back, and it is
+                    // pruned here rather than at write time because a build must never spend its box
+                    // on housekeeping for days it is not otherwise touching.
+                    clustersPruned += await tasteClusters.PruneAsync(accountId, now, stoppingToken);
 
                     // Person-affinity backfill, ONCE, for an account that has none. The steady-state
                     // writer is TrainJobHandler — affinities are refreshed with the model they are
@@ -220,8 +229,8 @@ public sealed class NightlyReconcileService(
                 logger.LogInformation(
                     "Nightly reconcile: {Sync} delta sync(s), {Retrain} retrain(s), {ListRemove} managed-list removal(s), "
                     + "{AffinityBackfill} person-affinity backfill(s), {Narrative} taste narrative(s), "
-                    + "{Lens} lens pass(es).",
-                    enqueued, retrains, listRemovals, affinityBackfills, narratives, lensPasses);
+                    + "{Lens} lens pass(es), {ClusterPrune} expired taste cluster(s) pruned.",
+                    enqueued, retrains, listRemovals, affinityBackfills, narratives, lensPasses, clustersPruned);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

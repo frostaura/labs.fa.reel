@@ -171,6 +171,10 @@ public static class DependencyInjection
         services.AddScoped<Application.Search.LexicalSearchService>();
         services.AddScoped<Application.Search.LiveSearchExpansionService>();
         services.AddScoped<Application.Ranking.CandidateGenerator>();
+        // The day's taste partition. Scoped so it shares the request/job DbContext; the partition
+        // itself is cached day-granular in IMemoryCache, which is a singleton, so a build and the
+        // rails it triggers all split their ANN budget across the same pockets.
+        services.AddScoped<Application.Ranking.TasteClusterProvider>();
         services.AddScoped<Application.Ranking.CandidateRetriever>();
         // Offline diagnostic, reached only through the founder-only /api/dev surface. Scoped like
         // everything else it composes; it writes nothing.

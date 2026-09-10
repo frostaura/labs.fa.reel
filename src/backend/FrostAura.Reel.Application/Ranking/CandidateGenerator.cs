@@ -126,7 +126,7 @@ public class CandidateGenerator(
         var rotation = AnchorRotation.OffsetFor(now);
         var media = new MediaPlanner((double)taste.MovieRatedShare);
         var budget = new CallBudget(MaxTmdbCallsPerBuild);
-        var batches = new List<IReadOnlyList<TmdbListItem>>();
+        var batches = new List<(DiscoveryArm Arm, IReadOnlyList<TmdbListItem> Items)>();
 
         // ── Arm 1: collaborative seeds ─────────────────────────────────────────────────────────
         // Three ordered pools of four, alternating between TMDB's two collaborative endpoints:
@@ -138,6 +138,11 @@ public class CandidateGenerator(
         // a carried-over seed slides one place and the two rotations cancel — the seed would be asked
         // the identical question every day, which is the thing this alternation exists to prevent.
         var seeds = await BuildSeedsAsync(accountId, taste, rotation, ct);
+        // What the seed arm COULD have drawn from, against what it did. Twelve seeds over a
+        // thousand-anchor pool is a ~90-week rotation, and until this was counted the gap was an
+        // argument rather than a number — it is the evidence B2's widening is gated on.
+        var seedPoolSize = taste.TopLovedTitleIds.Count + taste.LovedAnchorPool.Count;
+        var seedsUsed = 0;
         foreach (var seed in seeds)
         {
             if (!budget.TryTake())
@@ -145,9 +150,10 @@ public class CandidateGenerator(
                 break;
             }
 
-            batches.Add(((rotation + seed.TmdbId) & 1L) == 1L
+            batches.Add((DiscoveryArm.Seed, ((rotation + seed.TmdbId) & 1L) == 1L
                 ? await tmdb.GetSimilarAsync(seed.IsMovie, seed.TmdbId, ct)
-                : await tmdb.GetRecommendationsAsync(seed.IsMovie, seed.TmdbId, ct));
+                : await tmdb.GetRecommendationsAsync(seed.IsMovie, seed.TmdbId, ct)));
+            seedsUsed++;
         }
 
         // ── Arm 2: the people the user loves ───────────────────────────────────────────────────
@@ -158,10 +164,10 @@ public class CandidateGenerator(
         var peopleIds = await TopPeopleTmdbIdsAsync(accountId, ct);
         if (peopleIds.Count > 0 && budget.TryTake())
         {
-            batches.Add(await tmdb.DiscoverByConceptAsync(
+            batches.Add((DiscoveryArm.People, await tmdb.DiscoverByConceptAsync(
                 movies: true, [], [], region, rules.ReleasedAfter, page: 1,
                 rules.ExcludedGenreIds(true), null, rules.ReleasedBefore, null,
-                rules.Options(peopleIds), ct));
+                rules.Options(peopleIds), ct)));
         }
 
         // ── Arm 3: the keywords the loved set is made of ───────────────────────────────────────
@@ -170,10 +176,10 @@ public class CandidateGenerator(
         if (lovedKeywordIds.Count > 0 && !budget.Exhausted
             && media.NextIsMovie() is { } keywordIsMovie && budget.TryTake())
         {
-            batches.Add(await tmdb.DiscoverByConceptAsync(
+            batches.Add((DiscoveryArm.Keyword, await tmdb.DiscoverByConceptAsync(
                 keywordIsMovie, [], lovedKeywordIds, region, rules.ReleasedAfter, startPage,
                 rules.ExcludedGenreIds(keywordIsMovie), null, rules.ReleasedBefore, null,
-                rules.Options(), ct));
+                rules.Options(), ct)));
         }
 
         // ── Arm 4: top genres TMDB has no id for ───────────────────────────────────────────────
@@ -190,10 +196,10 @@ public class CandidateGenerator(
                 continue;
             }
 
-            batches.Add(await tmdb.DiscoverByConceptAsync(
+            batches.Add((DiscoveryArm.UnmappedGenre, await tmdb.DiscoverByConceptAsync(
                 slugIsMovie, [], keywordIds, region, rules.ReleasedAfter, startPage,
                 rules.ExcludedGenreIds(slugIsMovie), null, rules.ReleasedBefore, null,
-                rules.Options(), ct));
+                rules.Options(), ct)));
         }
 
         // ── Arm 5: this week's trending ────────────────────────────────────────────────────────
@@ -205,7 +211,7 @@ public class CandidateGenerator(
         {
             if (budget.TryTake())
             {
-                batches.Add(await tmdb.GetTrendingAsync(trendingIsMovie, ct));
+                batches.Add((DiscoveryArm.Trending, await tmdb.GetTrendingAsync(trendingIsMovie, ct)));
             }
         }
 
@@ -213,10 +219,10 @@ public class CandidateGenerator(
         var freshAfter = Latest(rules.ReleasedAfter, now.AddDays(-FreshReleaseDays));
         if (!budget.Exhausted && media.NextIsMovie() is { } freshIsMovie && budget.TryTake())
         {
-            batches.Add(await tmdb.DiscoverByConceptAsync(
+            batches.Add((DiscoveryArm.Fresh, await tmdb.DiscoverByConceptAsync(
                 freshIsMovie, [], [], region, freshAfter, page: 1,
                 rules.ExcludedGenreIds(freshIsMovie), null, rules.ReleasedBefore, null,
-                rules.Options(), ct));
+                rules.Options(), ct)));
         }
 
         // ── Arm 7: the genre lane, page-major ──────────────────────────────────────────────────
@@ -243,20 +249,51 @@ public class CandidateGenerator(
                 }
 
                 var genreId = isMovie ? ids.Movie!.Value : ids.Tv!.Value;
-                batches.Add(await tmdb.DiscoverByConceptAsync(
+                batches.Add((DiscoveryArm.Genre, await tmdb.DiscoverByConceptAsync(
                     isMovie, [genreId], [], region, rules.ReleasedAfter, startPage + offset,
                     rules.ExcludedGenreIds(isMovie), null, rules.ReleasedBefore, null,
-                    rules.Options(), ct));
+                    rules.Options(), ct)));
                 genresDiscovered.Add(slug);
             }
         }
 
-        var items = batches.SelectMany(b => b)
+        // FIRST-CLAIM attribution, matching the dedup below: the arm that returned an item first
+        // owns it. An arm that would also have found it gets no credit, so these counts describe the
+        // pool as assembled rather than what each arm could reach on its own — the same honesty
+        // caveat the retrieval probe carries about its own arms.
+        var claimedBy = new Dictionary<(bool IsMovie, long Id), DiscoveryArm>();
+        foreach (var (arm, batchItems) in batches)
+        {
+            foreach (var item in batchItems)
+            {
+                claimedBy.TryAdd((item.IsMovie, item.Id), arm);
+            }
+        }
+
+        var items = batches.SelectMany(b => b.Items)
             .GroupBy(i => (i.IsMovie, i.Id))
             .Select(g => g.First())
             .ToList();
 
         var upsert = await UpsertAndCollectAsync(items, ct);
+
+        // The upsert returns ids in the order it created them, which is `items` order, so the two
+        // zip — but the mapping is built from the rows themselves rather than from that coincidence,
+        // because the day someone reorders the upsert this would silently start lying.
+        var addedSet = upsert.AddedTitleIds.ToHashSet();
+        var armByTitleId = addedSet.Count == 0
+            ? []
+            : await db.Titles
+                .Where(t => addedSet.Contains(t.Id) && t.TmdbId != null)
+                .Select(t => new { t.Id, t.MediaType, TmdbId = t.TmdbId!.Value })
+                // Nullable on purpose: a row we cannot attribute is reported as attributed to
+                // nothing, never folded into whichever arm happens to be the enum's default.
+                .ToDictionaryAsync(
+                    t => t.Id,
+                    t => claimedBy.TryGetValue((t.MediaType == MediaType.Movie, t.TmdbId), out var arm)
+                        ? (DiscoveryArm?)arm
+                        : null,
+                    ct);
 
         // How many of the brand-new titles this account can actually be shown. This is the number the
         // supply work is judged on — "discovered" and even "newly upserted" both count titles the
@@ -265,11 +302,25 @@ public class CandidateGenerator(
         //
         // It is NOT persisted: FeedBuildStat has no column for it and this branch takes no EF
         // migration, so it is logged and returned on PoolRefreshResult for the caller.
-        var newlyEligible = upsert.AddedTitleIds.Count == 0
-            ? 0
+        // Run PER ARM. The single aggregate could say "twenty new eligible titles" for a build in
+        // which the genre lane produced all twenty and every personal arm produced none — which is
+        // the exact reallocation question B2 is gated on, and it was unanswerable.
+        var eligibleAddedIds = upsert.AddedTitleIds.Count == 0
+            ? []
             : await eligibility.EligibleTitles(accountId)
-                .Where(t => upsert.AddedTitleIds.Contains(t.Id))
-                .CountAsync(ct);
+                .Where(t => addedSet.Contains(t.Id))
+                .Select(t => t.Id)
+                .ToListAsync(ct);
+        var newlyEligible = eligibleAddedIds.Count;
+
+        var perArm = Enum.GetValues<DiscoveryArm>()
+            .Select(arm => new ArmSupply(
+                arm.ToString(),
+                batches.Where(b => b.Arm == arm).Sum(b => b.Items.Count),
+                armByTitleId.Count(kv => kv.Value == arm),
+                eligibleAddedIds.Count(id => armByTitleId.GetValueOrDefault(id) == arm)))
+            .Where(a => a.Discovered > 0)
+            .ToList();
 
         logger.LogInformation(
             "Candidate pool refreshed: {Items} TMDB items ({Upserted} new, {Eligible} of them eligible) "
@@ -286,7 +337,8 @@ public class CandidateGenerator(
                 MaxTmdbCallsPerBuild, accountId);
         }
 
-        return new PoolRefreshResult(items.Count, upsert.Added, newlyEligible, budget.Used);
+        return new PoolRefreshResult(
+            items.Count, upsert.Added, newlyEligible, budget.Used, seedPoolSize, seedsUsed, perArm);
     }
 
     /// <summary>
@@ -294,7 +346,21 @@ public class CandidateGenerator(
     /// those new titles are eligible for this account, and the TMDB calls it cost.
     /// </summary>
     public readonly record struct PoolRefreshResult(
-        int Discovered, int NewlyUpserted, int NewlyEligible, int TmdbCalls);
+        int Discovered,
+        int NewlyUpserted,
+        int NewlyEligible,
+        int TmdbCalls,
+        int SeedPoolSize,
+        int SeedsUsed,
+        IReadOnlyList<ArmSupply> PerArm);
+
+    /// <summary>
+    /// One discovery arm's contribution: items returned, rows it was the first to create, and how
+    /// many of those this account can actually be shown. The last number is the only one that
+    /// answers "is this arm worth its call", and it is per-arm precisely because the aggregate hides
+    /// a genre lane carrying arms that produce nothing.
+    /// </summary>
+    public readonly record struct ArmSupply(string Arm, int Discovered, int Upserted, int NewlyEligible);
 
     /// <summary>
     /// Upserts TMDB list items as global, TMDB-only <see cref="Title"/> rows (dedup by
@@ -380,6 +446,34 @@ public class CandidateGenerator(
 
     /// <summary>One TMDB seed: the id and which endpoint family it belongs to.</summary>
     private readonly record struct Seed(long TmdbId, bool IsMovie);
+
+    /// <summary>
+    /// Which discovery arm a batch came from. Named rather than positional because the counts ride
+    /// a jsonb column that outlives this file's arm ordering.
+    /// </summary>
+    public enum DiscoveryArm
+    {
+        /// <summary>Collaborative seeds — TMDB recommendations / similar over the account's own anchors.</summary>
+        Seed,
+
+        /// <summary>Credit-affinity discover over the directors and writers the account reliably likes.</summary>
+        People,
+
+        /// <summary>Keyword discover over the keywords the loved set is made of.</summary>
+        Keyword,
+
+        /// <summary>A top genre TMDB has no genre id for, degraded to keyword discover.</summary>
+        UnmappedGenre,
+
+        /// <summary>This week's trending — the one arm that is deliberately not filter-aware.</summary>
+        Trending,
+
+        /// <summary>Fresh releases inside the account's own rules.</summary>
+        Fresh,
+
+        /// <summary>The page-major genre lane, which absorbs whatever budget the personal arms leave.</summary>
+        Genre,
+    }
 
     /// <summary>
     /// Three ordered pools of four, concatenated and de-duplicated in order.

@@ -225,7 +225,12 @@ public static class DevEndpoints
         //      and were eligible, what share the arms returned. This is the only one a bigger pool
         //      or a new arm can move, and it is the one the plan's decision rule reads: a
         //      public-corpus collaborative arm is worth its licensing cost only if THIS is low.
-        //   3. `disliked` is the same computation over titles rated <= 4 — the false-positive side.
+        //   3. `perCluster` is the B1 verdict, and it is the block to read before the headline moved.
+        //      Multi-centroid retrieval claims to reach the pockets one mean vector points away
+        //      from, so the recall rise has to CONCENTRATE in the low-weight clusters. A rise spread
+        //      evenly across every ordinal means the extra slots bought it, not the partition — in
+        //      which case raise `FirstPassAnnPool` and delete the clusterer.
+        //   4. `disliked` is the same computation over titles rated <= 4 — the false-positive side.
         //      A high union there is a RANKING problem, not a supply one.
         //
         // `popCount` / `annCount` default to the feed's own first-pass budgets; raise them and

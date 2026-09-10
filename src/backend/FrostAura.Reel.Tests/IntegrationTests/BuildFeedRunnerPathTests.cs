@@ -186,11 +186,234 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// The B1 instrumentation columns are populated on EVERY outcome, including the ones that
+    /// produce no page.
+    ///
+    /// <para>Zeros and empty arrays are written explicitly rather than left to the column defaults,
+    /// and that distinction is the whole reason this test exists. A NULL in
+    /// <c>AnnPerClusterJson</c> six months from now reads as "this build predates the column"; an
+    /// empty array reads as "this build retrieved from no clusters". They are different facts and
+    /// only one of them is true of a Skipped build. The instrument that was supposed to show the
+    /// 2026-09-10 two-runner outage wrote nothing at all, for exactly this class of reason.</para>
+    /// </summary>
+    [Fact]
+    public async Task Every_build_outcome_records_the_cluster_and_supply_columns()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // ── Fresh, then a same-day rebuild, then a rebuild after a reaction vacates a slot ──────
+        // One cache across all three, exactly as a live process has: the provider's key is
+        // day-granular, so the rebuilds share the partition the first build computed.
+        var clusterCache = new MemoryCache(new MemoryCacheOptions());
+        var accountId = await SeedAccountAsync();
+        // Scoped seeding, unlike the tests above: this one plants ~160 titles of which 40 carry
+        // EMBEDDINGS, and the catalogue is global. A semantic-search test elsewhere in the postgres
+        // collection ranks the whole catalogue by cosine, so an unscoped forty-vector fixture
+        // quietly decides what that test finds — verified, it did. The scope makes these rows
+        // eligible for this account and invisible to every other, in both directions.
+        await SeedScopedLovedTitlesAsync(accountId, 40);
+        await SeedScopedEligibleTitlesAsync(accountId, 120);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunThroughJobRunnerPathAsync(await EnqueueBuildAsync(accountId), clusterCache);
+        await RunThroughJobRunnerPathAsync(await EnqueueBuildAsync(accountId), clusterCache);
+        await DeclineAHeroTitleAsync(accountId);
+        await RunThroughJobRunnerPathAsync(await EnqueueBuildAsync(accountId), clusterCache);
+
+        // ── Skipped: a second account with no artifact at all ───────────────────────────────────
+        var modelless = await SeedAccountAsync();
+        await RunThroughJobRunnerPathAsync(await EnqueueBuildAsync(modelless), clusterCache);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var stats = await db.FeedBuildStats
+            .Where(s => s.AccountId == accountId || s.AccountId == modelless)
+            .OrderBy(s => s.BuiltAt)
+            .ToListAsync();
+
+        // All four outcomes actually occurred — otherwise this test is asserting about three.
+        // Declaration order of FeedBuildOutcome, so the assertion reads as "all four".
+        Assert.Equal(
+            [FeedBuildOutcome.Fresh, FeedBuildOutcome.Preserve, FeedBuildOutcome.NoOp, FeedBuildOutcome.Skipped],
+            stats.Select(s => s.Mode).Distinct().Order().ToList());
+
+        Assert.All(stats, stat =>
+        {
+            Assert.NotNull(stat.AnnPerClusterJson);
+            Assert.NotNull(stat.NewlyEligiblePerArmJson);
+            Assert.StartsWith("[", stat.AnnPerClusterJson, StringComparison.Ordinal);
+            Assert.StartsWith("[", stat.NewlyEligiblePerArmJson, StringComparison.Ordinal);
+        });
+
+        var skipped = Assert.Single(stats, s => s.Mode == FeedBuildOutcome.Skipped);
+        Assert.Equal(0, skipped.ClustersUsed);
+        Assert.Equal(0, skipped.SeedPoolSize);
+        Assert.Equal(0, skipped.SeedsUsed);
+        Assert.Equal("[]", skipped.AnnPerClusterJson);
+        Assert.Equal("[]", skipped.NewlyEligiblePerArmJson);
+
+        // The account with a real history clustered, split its ANN budget, and said how: one entry
+        // per cluster, each carrying what it was asked for and what it could find.
+        var built = stats.Where(s => s.AccountId == accountId).ToList();
+        Assert.All(built, stat => Assert.True(stat.ClustersUsed > 0, $"{stat.Mode} recorded no clusters"));
+        Assert.All(built, stat =>
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(stat.AnnPerClusterJson!);
+            Assert.Equal(stat.ClustersUsed, document.RootElement.GetArrayLength());
+            foreach (var entry in document.RootElement.EnumerateArray())
+            {
+                Assert.True(entry.GetProperty("target").GetInt32() >= CandidateRetriever.MinPerClusterPull);
+                Assert.True(entry.GetProperty("returned").GetInt32() <= entry.GetProperty("target").GetInt32());
+                Assert.True(entry.GetProperty("weight").GetDouble() > 0d);
+            }
+        });
+
+        // Seed coverage: the pool it COULD have drawn from, beside what it spent. B2 is gated on
+        // this gap, and until it was counted it was an argument rather than a number.
+        Assert.All(built, stat => Assert.True(stat.SeedPoolSize > 0));
+
+        // And the partition was persisted from the build path, once per day, ordinals contiguous.
+        await using var scoped = fixture.CreateContext(Scoped(accountId));
+        var persisted = await scoped.TasteClusters.OrderBy(c => c.Ordinal).ToListAsync();
+        Assert.NotEmpty(persisted);
+        Assert.Single(persisted.Select(c => c.ComputedForDate).Distinct());
+        Assert.Equal(Enumerable.Range(0, persisted.Count), persisted.Select(c => c.Ordinal));
+
+        // A modelless account never reached retrieval, so it has no partition to persist.
+        await using var theirs = fixture.CreateContext(Scoped(modelless));
+        Assert.Empty(await theirs.TasteClusters.ToListAsync());
+
+        // The forty embedded vectors this test planted go back out of the catalogue's SHARED HNSW
+        // index. That index is approximate, so a tight cluster of vectors changes which neighbours
+        // an unrelated semantic-search test finds even though every one of them is ineligible for
+        // its account — measured, and documented in TasteClusterRetrievalTests.DisposeAsync.
+        await using var cleanup = fixture.CreateContext(new AccountContext());
+        var scope = ScopeFor(accountId);
+        var plantedIds = await cleanup.Titles.Where(t => t.Language == scope).Select(t => t.Id).ToListAsync();
+        await cleanup.UserRatings.Where(r => plantedIds.Contains(r.TitleId)).ExecuteDeleteAsync();
+        await cleanup.TitleEmbeddings.Where(e => plantedIds.Contains(e.TitleId)).ExecuteDeleteAsync();
+    }
+
+    /// <summary>
+    /// Loved titles carrying EMBEDDINGS in two directions, plus the allowlist rows that make them
+    /// this account's and nobody else's. Two pockets, so the k rule (min(3, 40/20) = 2) has two real
+    /// directions to find rather than one split in half.
+    /// </summary>
+    private async Task SeedScopedLovedTitlesAsync(Guid accountId, int count)
+    {
+        var scope = ScopeFor(accountId);
+        await using var db = fixture.CreateContext(new AccountContext());
+        await AddScopeFiltersAsync(db, accountId, scope);
+
+        for (var i = 0; i < count; i++)
+        {
+            var title = NewTitle($"scoped loved {i}", popularity: 1m + (i * 0.01m), scope);
+            title.Language = scope;
+            db.Add(title);
+            db.UserRatings.Add(new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = title.Id,
+                SubjectType = RatingSubjectType.Movie,
+                Rating = (short)(8 + (i % 3)),
+                RatedAt = DateTime.UtcNow.AddDays(-30 * i),
+            });
+
+            var v = new float[1536];
+            // Three quarters in one pocket, a quarter in another, with a small per-title nudge so the
+            // members are not literally identical vectors.
+            var axis = i % 4 == 3 ? 31 : 0;
+            v[axis] = 1f;
+            v[axis + 1] = 0.01f * (i % 5);
+            var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
+            for (var j = 0; j < v.Length; j++)
+            {
+                v[j] /= norm;
+            }
+
+            db.TitleEmbeddings.Add(new TitleEmbedding
+            {
+                TitleId = title.Id,
+                Embedding = new Pgvector.Vector(v),
+                EmbeddingModel = "test",
+                SourceTextHash = Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Unseen, scoped candidates for the pool to rank.</summary>
+    private async Task SeedScopedEligibleTitlesAsync(Guid accountId, int count)
+    {
+        var scope = ScopeFor(accountId);
+        await using var db = fixture.CreateContext(new AccountContext());
+        for (var i = 0; i < count; i++)
+        {
+            var title = NewTitle($"scoped candidate {i}", popularity: 2m + (i * 0.001m), scope);
+            title.Language = scope;
+            db.Add(title);
+        }
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A per-account synthetic genre and language. Deterministic from the account id.</summary>
+    private static string ScopeFor(Guid accountId) => $"buildstatscope{accountId:N}";
+
+    private static async Task AddScopeFiltersAsync(ReelDbContext db, Guid accountId, string scope)
+    {
+        foreach (var kind in new[] { Domain.Filters.FilterKind.IncludeGenre, Domain.Filters.FilterKind.Language })
+        {
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = kind,
+                Value = scope,
+                CreatedAt = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Declines one title the Active snapshot is showing, which vacates its slot and forces the next
+    /// same-day rebuild to WRITE a Preserve snapshot rather than suppress an identical one.
+    /// </summary>
+    private async Task DeclineAHeroTitleAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var titleId = await db.FeedItems
+            .Where(i => i.AccountId == accountId)
+            .OrderBy(i => i.Rank)
+            .Select(i => i.TitleId)
+            .FirstAsync();
+
+        db.UserTitleReactions.Add(new UserTitleReaction
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            TitleId = titleId,
+            Kind = ReactionKind.NotInterested,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
     /// Mirrors <c>JobRunnerService.RunJobAsync</c>: one scope, one context, the account pinned
     /// BEFORE the handler is resolved, the handler run, and the job's own completion committed on
     /// that same context afterwards.
     /// </summary>
-    private async Task RunThroughJobRunnerPathAsync(Guid jobId)
+    private Task RunThroughJobRunnerPathAsync(Guid jobId) => RunThroughJobRunnerPathAsync(jobId, null);
+
+    private async Task RunThroughJobRunnerPathAsync(Guid jobId, MemoryCache? clusterCache)
     {
         var accountContext = new AccountContext();
         await using var db = fixture.CreateContext(accountContext);
@@ -206,7 +429,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
         var job = await db.SyncJobs.FirstAsync(j => j.Id == jobId);
         accountContext.SetAccount(job.AccountId!.Value);
 
-        var handler = HandlerFor(db);
+        var handler = HandlerFor(db, clusterCache);
         await handler.ExecuteAsync(job, CancellationToken.None);
 
         job.Status = JobStatus.Succeeded;
@@ -216,16 +439,25 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
         await db.SaveChangesAsync();
     }
 
-    private static BuildFeedJobHandler HandlerFor(ReelDbContext db)
+    private static BuildFeedJobHandler HandlerFor(ReelDbContext db) => HandlerFor(db, null);
+
+    private static BuildFeedJobHandler HandlerFor(ReelDbContext db, MemoryCache? clusterCache)
     {
         var featureBuilder = new FeatureVectorBuilder(db);
         var eligibility = new EligibilityQueryBuilder(db);
         var tmdb = new OfflineTmdbClient();
+        // ONE provider, handed to both the retriever (which splits the ANN budget across the
+        // partition) and the handler (which persists it) — exactly as the DI container does, since
+        // both resolve the same scoped instance. Two instances would still agree through the
+        // day-granular cache, but only by luck, and a test should not depend on that.
+        var clusters = clusterCache is null
+            ? null
+            : new TasteClusterProvider(db, clusterCache, NullLogger<TasteClusterProvider>.Instance);
         return new BuildFeedJobHandler(
             db,
             featureBuilder,
             new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
-            new CandidateRetriever(db, eligibility),
+            new CandidateRetriever(db, eligibility, clusters),
             eligibility,
             new FeedStarvationDiagnostic(db, eligibility),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
@@ -239,7 +471,11 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
             NewCache(),
             new NoopEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            NullLogger<BuildFeedJobHandler>.Instance);
+            NullLogger<BuildFeedJobHandler>.Instance,
+            interleaveOptions: null,
+            // Null unless a test asks for it: the handler without a cluster provider is the pre-B1
+            // build, which is exactly what every assertion in this file predates and still describes.
+            tasteClusters: clusters);
     }
 
     private static MemoryCache NewCache() => new(new MemoryCacheOptions());

@@ -71,6 +71,10 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<TitleScore> TitleScores => Set<TitleScore>();
     public DbSet<OnlineModelState> OnlineModelStates => Set<OnlineModelState>();
 
+    // The day's taste partition. Account-owned and therefore filtered; see TasteCluster for why it
+    // is persisted at all and why nothing but the feed build writes it.
+    public DbSet<TasteCluster> TasteClusters => Set<TasteCluster>();
+
     // Feed
     public DbSet<FeedSnapshot> FeedSnapshots => Set<FeedSnapshot>();
     public DbSet<FeedItem> FeedItems => Set<FeedItem>();
@@ -378,6 +382,23 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(u => u.Purpose).HasMaxLength(64);
         });
 
+        // ── Taste clusters ─────────────────────────────────────────────────────────────────
+        modelBuilder.Entity<TasteCluster>(e =>
+        {
+            // One row per (account, day, ordinal). The unique index is what makes the day's
+            // partition replaceable rather than append-only: a second build on the same day rewrites
+            // it, and two concurrent builds cannot leave a half-partition of interleaved ordinals.
+            e.HasIndex(c => new { c.AccountId, c.ComputedForDate, c.Ordinal }).IsUnique();
+            // The nightly prune's scan, and the "what did the partition look like then" read.
+            e.HasIndex(c => new { c.AccountId, c.ComputedForDate }).IsDescending(false, true);
+            // A real pgvector column, configured exactly like TitleEmbedding.Embedding — never JSON
+            // floats. No ANN index: this table is read by account and day, never searched by vector.
+            e.Property(c => c.Centroid).HasColumnType("vector(1536)");
+            e.Property(c => c.Weight).HasPrecision(12, 4);
+            e.Property(c => c.ExemplarTitleIdsJson).HasColumnType("jsonb");
+            e.Property(c => c.Label).HasMaxLength(128);
+        });
+
         // ── Build instrumentation ──────────────────────────────────────────────────────────
         // No FK on FeedSnapshotId: snapshots are pruned to the last seven and these rows outlive them.
         modelBuilder.Entity<FeedBuildStat>(e =>
@@ -385,6 +406,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(s => new { s.AccountId, s.BuiltAt }).IsDescending(false, true);
             e.Property(s => s.ShortlistP50).HasPrecision(4, 2);
             e.Property(s => s.ShortlistP90).HasPrecision(4, 2);
+            e.Property(s => s.AnnPerClusterJson).HasColumnType("jsonb");
+            e.Property(s => s.NewlyEligiblePerArmJson).HasColumnType("jsonb");
         });
 
         // ── "Through your lens" ────────────────────────────────────────────────────────────

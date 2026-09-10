@@ -43,6 +43,14 @@ public class FeatureVectorBuilder(IReelDbContext db)
     /// <summary>Prior used when leave-one-out leaves no observations at all (matches the cold-start mean).</summary>
     private const decimal NeutralUserMean = 7m;
 
+    /// <summary>
+    /// How far back <see cref="TasteState.RecentCentroid"/> reaches — <b>a drift arm layered on the
+    /// all-time signal, not a filter on it.</b> See the comment at the cutoff for the full statement;
+    /// in short, no rating is ever excluded from the taste state by age, and this window only decides
+    /// which loved titles ALSO get a second, drift-shaped centroid of their own.
+    /// </summary>
+    public const int RecentCentroidWindowDays = 365;
+
     /// <summary>The user's own label on a title, plus the crowd rating it was paired against.</summary>
     public readonly record struct SelfRating(short Rating, DateTime RatedAt, decimal? GlobalRating);
 
@@ -257,7 +265,17 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .ToList();
 
         var lovedIds = titleRatings.Where(r => r.Rating >= LovedThreshold).Select(r => r.TitleId).Distinct().ToList();
-        var recentCutoff = asOf.AddDays(-365);
+
+        // The ONLY window in this method, and it is a DRIFT arm layered on the all-time signal, not
+        // a filter on it. `lovedIds` above is every loved title ever rated and feeds LovedCentroid
+        // and the similarity features; this narrower set feeds RecentCentroid, which exists so a
+        // taste that has moved in the last year can pull ~35% of the ANN budget its way. Nothing is
+        // dropped by it: a title outside the window still counts in full through LovedCentroid, and
+        // separately carries its own TasteMath.RecencyWeight wherever weighting applies. The founder
+        // asked for "every single one, not just 180 days" and this is the window people find when
+        // they look — so it is named rather than left as a literal, and 2,966 of his 3,354 watched
+        // titles are older than a year, which is how much a real cutoff here would have cost.
+        var recentCutoff = asOf.AddDays(-RecentCentroidWindowDays);
         var recentLovedIds = titleRatings
             .Where(r => r.Rating >= LovedThreshold && r.RatedAt >= recentCutoff)
             .Select(r => r.TitleId).Distinct().ToList();
