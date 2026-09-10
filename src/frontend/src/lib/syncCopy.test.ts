@@ -17,6 +17,9 @@ describe("syncExplainer", () => {
     expect(syncExplainer("reconcile").title).toBe("Nightly reconcile");
     expect(syncExplainer("train").title).toBe("Training your model");
     expect(syncExplainer("feed").title).toBe("Building tonight's picks");
+    expect(syncExplainer("xref").title).toBe("Cross-referencing against your history");
+    expect(syncExplainer("narrative").title).toBe("Writing your taste profile");
+    expect(syncExplainer("lens").title).toBe("Writing tonight's notes");
   });
 
   it("falls back generically for unknown or missing kinds (backend-first jobs are safe)", () => {
@@ -26,7 +29,7 @@ describe("syncExplainer", () => {
   });
 
   it("every explainer has at least one line", () => {
-    for (const kind of ["ingest", "hydrate", "delta", "reconcile", "train", "feed", "unknown"]) {
+    for (const kind of ["ingest", "hydrate", "delta", "reconcile", "train", "feed", "xref", "narrative", "lens", "unknown"]) {
       expect(syncExplainer(kind).lines.length).toBeGreaterThan(0);
     }
   });
@@ -38,6 +41,10 @@ describe("syncExplainer", () => {
     expect(jobKindToSseKind("EnrichCatalog")).toBe("enrich");
     expect(jobKindToSseKind("Train")).toBe("train");
     expect(jobKindToSseKind("Evaluate")).toBe("evaluate");
+    expect(jobKindToSseKind("CrossReference")).toBe("xref");
+    // Both of these used to fall through to "Background sync" while the user watched them run.
+    expect(jobKindToSseKind("BuildTasteNarrative")).toBe("narrative");
+    expect(jobKindToSseKind("PersonaliseTitles")).toBe("lens");
     expect(jobKindToSseKind("SomethingNew")).toBeNull();
     expect(jobKindToSseKind(null)).toBeNull();
   });
@@ -46,6 +53,13 @@ describe("syncExplainer", () => {
     expect(syncExplainer(jobKindToSseKind("HydrateCatalog")).title).toBe("Enriching your library");
     expect(syncExplainer(jobKindToSseKind("FullIngest")).title).toBe("First sync with Trakt");
     expect(syncExplainer(jobKindToSseKind("EnrichCatalog")).title).toBe("Reading every title");
+    expect(syncExplainer(jobKindToSseKind("CrossReference")).title).toBe(
+      "Cross-referencing against your history"
+    );
+    // The regression this pair exists to prevent: a real job rendering as the generic fallback.
+    for (const kind of ["BuildTasteNarrative", "PersonaliseTitles", "CrossReference"]) {
+      expect(syncExplainer(jobKindToSseKind(kind)).title).not.toBe("Background sync");
+    }
   });
 
   it("classifies background polls so they cannot hijack the pill from a primary job", () => {
@@ -54,6 +68,8 @@ describe("syncExplainer", () => {
     expect(isBackgroundKind("enrich")).toBe(false);
     expect(isBackgroundKind("ingest")).toBe(false);
     expect(isBackgroundKind("train")).toBe(false);
+    // A ten-minute pass owns the pill for its whole run; a delta poll must not take it away.
+    expect(isBackgroundKind("xref")).toBe(false);
     expect(isBackgroundKind(null)).toBe(false);
   });
 });

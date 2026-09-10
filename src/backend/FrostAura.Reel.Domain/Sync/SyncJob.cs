@@ -33,6 +33,24 @@ public enum JobKind
     /// <see cref="SyncJob.CursorJson"/> and re-enqueues itself while the plan is unfinished.
     /// </summary>
     SeedCatalog,
+
+    /// <summary>
+    /// The cross-reference pass: judges the eligible pool in batches against the k nearest titles
+    /// the viewer has actually rated, and persists a closed-enum verdict per candidate.
+    ///
+    /// <para>Priority 2 — above <see cref="PersonaliseTitles"/> (3), because lens copy for a card
+    /// the cross-reference is about to demote is waste, and below a reactive
+    /// <see cref="BuildFeed"/> (1), because a rating that just landed reshapes the page first.</para>
+    ///
+    /// <para><b>It never re-enqueues itself.</b> The partial unique index on (AccountId, Kind)
+    /// WHERE Pending/Running guarantees a 23505 for a per-account kind, and the absorbing save at
+    /// the enqueue sites would swallow the continuation silently. A run boxes itself at 8 minutes
+    /// soft / 10 hard, saves per batch, and stops; the enqueue point in <c>BuildFeedJobHandler</c>
+    /// picks the remainder up on the next build. <see cref="SyncJob.CursorJson"/> carries
+    /// {round, judgedSoFar, ruledOutSoFar} for COPY only — the resume state is the verdict table's
+    /// own sweep index, which is correct after a crash, a budget stop or a partial batch.</para>
+    /// </summary>
+    CrossReference,
 }
 
 public enum JobStatus
