@@ -18,7 +18,7 @@ All of these are founder-owned. None blocks Phase 0 of the Ask Reel plan (`~/.cl
 - **An API/MCP surface for Gaia** collides with "Sign in with Trakt only". Decide before any demand test.
 - **Ad-hoc lists from chat.** Spec §6: one list per profile with a defined auto-removal contract. Define it for extra lists or refuse.
 - **The panel's test conversations.** 15 sit in the live DB (ids in `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`); one is what `/search` resumes as "latest". Delete, or leave until the conversation list ships.
-- **Push.** 107 commits, five migrations, one Mac.
+- **Push.** The whole 2026-09 range — five migrations — exists on one Mac; `main` is ahead-only, a push is a fast-forward. Re-measure with `git rev-list --left-right --count @{u}...HEAD`; never quote a count from here.
 
 ## Standing
 

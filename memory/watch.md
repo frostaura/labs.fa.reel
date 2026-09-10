@@ -1,6 +1,6 @@
 ---
 name: fa-reel-watch
-description: "One Mac holds 107 unpushed commits with five migrations; the Ask Reel plan of record (2026-09-10) is written and NOTHING in it is implemented — mobile chat has never worked, the Portainer deploy file 404s every route, and 15 probe conversations sit in the live DB; M2 settled negative (iteration 14); 25.5% recall ceiling; 50-read lens review owed; Tone/Era re-extraction draining; interleaving off; no counter behind the 5-external-users gate"
+description: "One Mac holds the whole unpushed 2026-09 range, five migrations in it; the Ask Reel plan of record (2026-09-10) is written and NOTHING in it is implemented — mobile chat has never worked, the Portainer deploy file 404s every route, and 15 probe conversations sit in the live DB; M2 settled negative (iteration 14); 25.5% recall ceiling; 50-read lens review owed; Tone/Era re-extraction draining; interleaving off; no counter behind the 5-external-users gate"
 type: watch
 last_verified: 2026-09-10
 ---
