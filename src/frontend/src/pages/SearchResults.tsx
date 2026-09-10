@@ -151,7 +151,9 @@ export default function SearchResults() {
         : "";
 
   return (
-    <div className="space-y-5 pb-32">
+    // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise
+    // the last row of cards and the "Show me more" button sit permanently behind the composer.
+    <div className="space-y-5 pb-44 md:pb-32">
       <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
         <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
       </h1>
@@ -343,10 +345,17 @@ export default function SearchResults() {
         </p>
       )}
 
-      {/* Composer */}
+      {/* Composer.
+          It sits ABOVE the mobile tab bar, not under it. Both are `fixed` at `bottom-0` and the
+          tab bar is `z-40`, so on every phone width Send and the input were behind it and a tap
+          on Send navigated to /dna — invisible to any visibility assertion, since the composer
+          renders perfectly, just covered. `3.5rem` is the tab bar's height and the safe-area
+          inset is added on top of it (the bar pads itself by the same inset). From `md` up the
+          tab bar is gone, so the composer returns to the very bottom. `askreel-mobile.spec.ts`
+          hit-tests this with `elementFromPoint` at three widths. */}
       <form
         onSubmit={(e) => { e.preventDefault(); submit(draft); }}
-        className="fixed bottom-0 inset-x-0 z-20 border-t border-fa-frost/10 bg-background/95 backdrop-blur px-4 py-3"
+        className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0 inset-x-0 z-30 border-t border-fa-frost/10 bg-background/95 backdrop-blur px-4 py-3"
       >
         <div className="max-w-3xl mx-auto flex items-center gap-2">
           <input
@@ -373,6 +382,7 @@ export default function SearchResults() {
           <button
             type="submit"
             disabled={!draft.trim() || streaming}
+            data-testid="askreel-send"
             className="rounded-full bg-fa-frost/20 p-2.5 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
             aria-label="Send"
           >
