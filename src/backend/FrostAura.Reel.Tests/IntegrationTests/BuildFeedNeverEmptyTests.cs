@@ -48,7 +48,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// Skips when REEL_TEST_CONNECTION_STRING is unset (no DB in the run).
 /// </summary>
 [Collection("postgres")]
-public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
+public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>Above anything the seeded model can predict — so the strict floor admits nothing.</summary>
     private const decimal UnreachableFloor = 9.9m;
@@ -56,7 +56,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_healthy_pool_never_builds_an_empty_feed_and_says_why_the_floor_was_relaxed()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -77,7 +77,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
         await RunBuildAsync(accountId);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
 
@@ -99,7 +99,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task Every_card_the_build_plans_is_written_to_the_exposure_log_exactly_once()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -115,7 +115,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
         await RunBuildAsync(accountId);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
         var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
@@ -154,7 +154,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_suppressed_no_op_rebuild_logs_nothing_and_the_prune_leaves_the_log_alone()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -173,7 +173,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
         Guid firstSnapshotId;
         int afterFirstBuild;
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             firstSnapshotId = (await ActiveSnapshotAsync(db, accountId)).Id;
             afterFirstBuild = await db.ExposureEvents.CountAsync(e => e.AccountId == accountId);
@@ -183,7 +183,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         // matches, and AssembleAsync returns before it ever reaches the snapshot write.
         await RunBuildAsync(accountId);
 
-        await using var verify = fixture.CreateContext(new AccountContext());
+        await using var verify = Fixture.CreateContext(new AccountContext());
         Assert.Equal(firstSnapshotId, (await ActiveSnapshotAsync(verify, accountId)).Id);
         Assert.Equal(afterFirstBuild, await verify.ExposureEvents.CountAsync(e => e.AccountId == accountId));
 
@@ -197,7 +197,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_build_that_clears_the_floor_is_not_marked_degraded()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -211,7 +211,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
         await RunBuildAsync(accountId);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         Assert.Null(snapshot.DegradedReason);
         Assert.NotEmpty(await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync());
@@ -220,7 +220,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_manual_refresh_supersedes_the_snapshot_and_anchors_on_different_titles()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -251,7 +251,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_same_day_background_rebuild_with_unchanged_inputs_writes_no_new_snapshot()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -277,7 +277,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task Rating_a_hero_title_vacates_only_its_slot_and_keeps_the_rest_of_the_hero()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -304,7 +304,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         // The user rates a hero pick from the card — "seen" by the eligibility rule, so it must
         // leave the feed immediately. This is the reactive rebuild ReactionEndpoints enqueues.
         var ratedTitleId = heroBefore[heroBefore.Count / 2];
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             db.UserRatings.Add(new UserRating
             {
@@ -333,7 +333,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
     private async Task<(Guid ActiveId, int Count)> ActiveSnapshotIdAndCountAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var activeId = (await ActiveSnapshotAsync(db, accountId)).Id;
         return (activeId, await db.FeedSnapshots.CountAsync(s => s.AccountId == accountId));
     }
@@ -341,7 +341,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     /// <summary>The Active snapshot's hero title ids, in rank order.</summary>
     private async Task<List<Guid>> HeroOfActiveSnapshotAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         return await db.FeedItems
             .Where(i => i.FeedSnapshotId == snapshot.Id && i.Row == FeedRowKind.Hero)
@@ -352,7 +352,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
     private async Task<HashSet<Guid>> AnchorsOfActiveSnapshotAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         return (await db.FeedItems
                 .Where(i => i.FeedSnapshotId == snapshot.Id && i.AnchorTitleId != null)
@@ -368,7 +368,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task Llm_whys_are_persisted_at_build_time_and_a_preserve_rebuild_never_recalls_the_agent()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -382,7 +382,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         var agent = new CannedWhyAgent();
         await RunBuildAsync(accountId, agent: agent);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
 
@@ -410,7 +410,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task An_anti_recommendation_agent_line_is_discarded_for_the_templater_sentence()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -426,7 +426,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         var agent = new AntiRecommendationWhyAgent();
         await RunBuildAsync(accountId, agent: agent);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
 
@@ -442,7 +442,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_low_fit_hero_is_swapped_for_the_next_spare_candidate()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -458,7 +458,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         var agent = new LowFitFirstHeroBatchAgent();
         await RunBuildAsync(accountId, agent: agent);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
         var hero = items.Where(i => i.Row == FeedRowKind.Hero).OrderBy(i => i.Rank).ToList();
@@ -476,7 +476,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     [Fact]
     public async Task A_seen_enough_dislike_keeps_similar_titles_out_of_the_hero()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -496,13 +496,13 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         // mode was silent: with the victim never scored at all, "the victim is not in the hero"
         // passes vacuously. An IncludeGenre allow-list is the product's OWN mechanism for "only
         // these titles are eligible", so the test borrows it instead of inventing something.
-        const string fixtureGenre = "dislike-demotion-fixture";
+        const string fixtureGenre = "dislike-demotion-Fixture";
         var accountId = await SeedAccountAsync();
         await AddContentFilterAsync(accountId, FilterKind.IncludeGenre, fixtureGenre);
         await SeedLovedTitlesAsync(accountId, 12);
 
         Guid victimId;
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var disliked = NewTitle("declined saturation", popularity: 1.5m, genre: fixtureGenre);
             db.Add(disliked);
@@ -535,7 +535,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         await SeedActiveArtifactAsync(accountId);
         await RunBuildAsync(accountId);
 
-        await using var verify = fixture.CreateContext(new AccountContext());
+        await using var verify = Fixture.CreateContext(new AccountContext());
         var snapshot = await ActiveSnapshotAsync(verify, accountId);
         var items = await verify.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
         var heroIds = items.Where(i => i.Row == FeedRowKind.Hero).Select(i => i.TitleId).ToList();
@@ -666,7 +666,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
     private async Task RunBuildAsync(Guid accountId, string? triggerReason = null, ISearchAgent? agent = null)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
         var eligibility = new EligibilityQueryBuilder(db);
         var tmdb = new OfflineTmdbClient();
@@ -719,7 +719,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -741,7 +741,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
     /// </summary>
     private async Task SeedLovedTitlesAsync(Guid accountId, int count)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
             var title = NewTitle($"loved {i}", popularity: 1m + (i * 0.01m));
@@ -762,7 +762,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
     private async Task SeedEligibleTitlesAsync(int count, string genre = "drama")
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
             // Popularity kept low so this seeding never perturbs the popularity head the other
@@ -799,7 +799,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
 
     private async Task AddContentFilterAsync(Guid accountId, FilterKind kind, string value)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.ContentFilters.Add(new ContentFilter
         {
             Id = Guid.NewGuid(),
@@ -834,7 +834,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             new TrainingMatrix(rows, labels, names),
             """{"Trees":40,"Leaves":8,"MinExamplesPerLeaf":5,"LearningRate":0.2}""");
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.ModelArtifacts.Add(new ModelArtifact
         {
             Id = Guid.NewGuid(),

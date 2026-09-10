@@ -14,7 +14,7 @@ namespace FrostAura.Reel.Tests.CrossReference;
 /// exists only because the predicate is written out in the query text.
 /// </summary>
 [Collection("postgres")]
-public class NeighbourFinderTests(PostgresFixture fixture)
+public class NeighbourFinderTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>
     /// A language nothing else in the postgres collection uses.
@@ -49,7 +49,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task Neighbours_come_back_in_descending_similarity_with_the_viewers_own_rating()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -72,7 +72,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task A_candidate_never_appears_as_its_own_neighbour()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -93,7 +93,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task Skip_moves_the_window_down_the_ranking()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -120,7 +120,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task A_candidate_with_no_embedding_is_simply_absent_from_the_map()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -141,7 +141,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task Another_accounts_ratings_are_never_neighbours()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -165,7 +165,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task Episode_and_season_ratings_are_not_neighbours()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -187,7 +187,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task The_nearest_disliked_neighbour_is_appended_only_when_it_is_near_enough()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -223,7 +223,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     [Fact]
     public async Task An_empty_batch_asks_the_database_nothing()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -235,7 +235,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     private async Task<IReadOnlyDictionary<Guid, IReadOnlyList<Domain.Ports.CrossReferenceNeighbour>>> FindAsync(
         Guid accountId, IReadOnlyList<Guid> ids, NeighbourFinder.Options options)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         return await new NeighbourFinder(db).FindAsync(accountId, ids, options, CancellationToken.None);
     }
 
@@ -255,7 +255,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -271,7 +271,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(string name, float[]? embedding)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -307,7 +307,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
         RatingSubjectType subjectType = RatingSubjectType.Movie)
     {
         var titleId = await SeedTitleAsync(name, embedding);
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var at = DateTime.UtcNow.AddDays(-10);
         db.UserRatings.Add(new UserRating
         {

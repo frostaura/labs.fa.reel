@@ -2,7 +2,7 @@
 name: fa-reel-state
 description: "2026-09-10: Phases 0–4 + lens prompt v4 + a feed-build fix on local main 1681382 in ~/src/fa.reel — unpushed, ahead-only; suites green at the merges. An adversarial panel on Ask Reel (chat) the same evening produced a plan of record and changed NO code: continuity broken by construction, mobile never worked, deploy file 404s every route, ~$0.003/turn. Iteration 14 no lift; 25.5% retrieval-recall ceiling. Not deployed, zero external users"
 type: state
-last_verified: 2026-09-10
+last_verified: 2026-09-11
 ---
 
 # Current state
@@ -43,3 +43,7 @@ _Git re-inspected 2026-09-10 (evening) in the dev clone: `main` at `1681382`, tr
 - **Model v5 (width 132):** genre-dislike demotion bounded by the user's own evidence (drama 0.60 → 0.15 — 44 genre dismissals sat on his favourite genres), unknown cast imputed at mean−0.5 with `knownPeopleFraction`/`knownDirectorOrWriter`, unscripted genre slots + `isUnscripted`. Boot sweep retrained (v20).
 - **Catalogue seed (`JobKind.SeedCatalog`, `POST/GET /api/dev/seed-catalog`) running** at `SEED_MOVIE_MIN_VOTES=50`/`SEED_SHOW_MIN_VOTES=50` (measured ≈ 34,752 titles; the 500/200 defaults gave only 9,331); daily ceilings `HYDRATE_MAX_TITLES_PER_DAY=1500`, `EXTRACT_DAILY_TOKENS=1.5M` (≈ $0.23/day), `EMBED_DAILY_TOKENS=3M`; `CatalogFollowThroughService` drains from deploy (gate `Background:CatalogFollowThrough`). Eligible pool already 897 → 2,242.
 - **Live hero after all of it (Fresh, v5):** all movies — Ad Astra, The Hummingbird Project, Tomb Raider, Maleficent 2, and The Search for Santa Paws (his holiday/family affinity is high on a tiny volume; watch whether the fit pass demotes it). Reality shows still top the raw model scores (no negative examples) and are held out only by the prior.
+
+## 2026-09-11 — filtered-ANN recall fix
+
+Ask Reel's `An_exclusion_with_enough_clean_candidates_never_shows_a_contradicting_title` and its sibling were failing ~2 runs in 8 on merged `main`; the cause was **not** the fixture contamination three earlier passes had each patched, but a real product defect underneath it — a filtered HNSW scan returning a fraction of its window (10 of a 20-row eligible set, in situ; 13 of 40 on a controlled 600-vector probe). Fixed at the connection with `hnsw.iterative_scan = 'strict_order'`, plus `EmbeddedCatalogTestBase` and a source guard so embedded fixtures stop contaminating the shared index. Backend suite 1281 tests, green three times consecutively on a throwaway DB; `dotnet format --verify-no-changes` clean. Nothing pushed.

@@ -17,7 +17,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// cleanly to pure popularity. Skips when REEL_TEST_CONNECTION_STRING is unset (no DB in the run).
 /// </summary>
 [Collection("postgres")]
-public class CandidateRetrieverTests(PostgresFixture fixture)
+public class CandidateRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>
     /// A synthetic genre stamped on every title this instance seeds, with a matching IncludeGenre
@@ -38,7 +38,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
     [Fact]
     public async Task Ann_arm_surfaces_a_similar_unseen_title_past_the_popularity_head()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -75,7 +75,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
     [Fact]
     public async Task Cold_start_with_no_loved_centroid_falls_back_to_pure_popularity()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -94,7 +94,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
     [Fact]
     public async Task RetrieveSimilar_surfaces_unseen_neighbours_and_excludes_the_anchor_and_seen_titles()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -130,7 +130,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
 
     private async Task<IReadOnlyList<Title>> RetrieveSimilarAsync(Guid accountId, Guid anchorId, float[] anchorEmbedding, int count)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var retriever = new CandidateRetriever(db, new EligibilityQueryBuilder(db));
         return await retriever.RetrieveSimilarAsync(
             accountId,
@@ -143,7 +143,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
 
     private async Task<IReadOnlyList<Title>> RetrieveAsync(Guid accountId, int popCount, int annCount)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, DateTime.UtcNow, CancellationToken.None);
         var retriever = new CandidateRetriever(db, new EligibilityQueryBuilder(db));
         return await retriever.RetrieveAsync(
@@ -158,7 +158,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -182,7 +182,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(string name, decimal popularity, float[] embedding)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -211,7 +211,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
 
     private async Task SeedLovedRatingAsync(Guid accountId, Guid titleId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserRatings.Add(new UserRating
         {
             Id = Guid.NewGuid(),
@@ -229,7 +229,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
 
     private async Task SeedWatchedAsync(Guid accountId, Guid titleId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.WatchedTitles.Add(new WatchedTitle
         {
             Id = Guid.NewGuid(),

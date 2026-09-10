@@ -16,14 +16,14 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// were pure train/serve skew. Skips when REEL_TEST_CONNECTION_STRING is unset.
 /// </summary>
 [Collection("postgres")]
-public class FeatureVectorLeakageTests(PostgresFixture fixture)
+public class FeatureVectorLeakageTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     private static int IndexOf(string scalar) => Array.IndexOf(FeatureSchema.Scalars, scalar);
 
     [Fact]
     public async Task SimTopLovedMax_is_strictly_below_one_for_a_title_the_user_loved()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -59,7 +59,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task A_single_loved_title_gets_no_centroid_similarity_from_itself()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -81,7 +81,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task An_unrated_candidate_still_sees_the_full_loved_set()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -107,7 +107,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task A_titles_own_rating_does_not_move_its_own_affinity_features()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -164,7 +164,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task Missing_crowd_data_is_flagged_and_imputed_neutrally()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -197,7 +197,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task An_all_unknown_cast_is_no_longer_imputed_as_a_solidly_average_one()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -275,7 +275,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task A_role_with_no_credit_row_at_all_is_imputed_low_rather_than_at_the_mean()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -313,7 +313,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task Known_people_fraction_obeys_leave_one_out()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -354,7 +354,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task Unscripted_titles_light_their_own_genre_slots_instead_of_none_at_all()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -396,7 +396,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        await using var db = fixture.CreateContext(scoped);
+        await using var db = Fixture.CreateContext(scoped);
         var builder = new FeatureVectorBuilder(db);
         var now = DateTime.UtcNow;
         var taste = await builder.BuildTasteStateAsync(accountId, now, CancellationToken.None);
@@ -405,7 +405,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -421,7 +421,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(string name, float[] embedding, decimal? traktRating = 7m, int? year = 2000)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = NewTitle(name, runtime: 100, traktRating, popularity: 12m, year);
         db.Add(title);
         db.TitleEmbeddings.Add(new TitleEmbedding
@@ -439,7 +439,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
     private async Task<Guid> SeedBareTitleAsync(
         string name, int? runtime, decimal? traktRating, decimal? popularity, string[]? genres = null)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = NewTitle(name, runtime, traktRating, popularity, year: 2010, genres);
         db.Add(title);
         await db.SaveChangesAsync();
@@ -470,7 +470,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedPersonAsync(string name)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var person = new Person
         {
             Id = Guid.NewGuid(),
@@ -484,7 +484,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
 
     private async Task SeedCreditAsync(Guid titleId, Guid personId, CreditRole role, int? castOrder)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.TitleCredits.Add(new TitleCredit
         {
             Id = Guid.NewGuid(),
@@ -498,7 +498,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
 
     private async Task SeedRatingAsync(Guid accountId, Guid titleId, short rating, DateTime ratedAt)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserRatings.Add(new UserRating
         {
             Id = Guid.NewGuid(),

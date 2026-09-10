@@ -22,14 +22,14 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// live reactions, strictly as-of aware. Skips when REEL_TEST_CONNECTION_STRING is unset.
 /// </summary>
 [Collection("postgres")]
-public class DislikeSteeringTests(PostgresFixture fixture)
+public class DislikeSteeringTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     private const int EmbeddingDims = 1536;
 
     [Fact]
     public async Task Genre_reasoned_dislikes_demote_same_genre_candidates_and_leave_others_untouched()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -68,7 +68,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
     [Fact]
     public async Task Seen_enough_dislikes_demote_near_identical_plots_hard()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -106,7 +106,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
     [Fact]
     public async Task Schema_v3_features_populate_from_reactions_and_respect_as_of()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -123,7 +123,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
 
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        await using var db = fixture.CreateContext(scoped);
+        await using var db = Fixture.CreateContext(scoped);
         var builder = new FeatureVectorBuilder(db);
 
         var overlapIndex = Array.IndexOf(FeatureSchema.Scalars, "dislikedGenreOverlap");
@@ -160,7 +160,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
         var featureBuilder = new FeatureVectorBuilder(db);
         var engine = new FastTreeModelEngine();
         var residualModel = new OnlineResidualModel(
@@ -172,7 +172,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -188,7 +188,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(string name, string[] genres)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -212,7 +212,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
     /// <summary>A unit embedding along one axis — pairs are either identical (cos 1) or orthogonal (cos 0).</summary>
     private async Task SeedEmbeddingAsync(Guid titleId, int axis)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var vector = new float[EmbeddingDims];
         vector[axis] = 1f;
         db.TitleEmbeddings.Add(new TitleEmbedding
@@ -229,7 +229,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
     private async Task AddReactionAsync(
         Guid accountId, Guid titleId, ReactionReason reason, DateTime? createdAt = null)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserTitleReactions.Add(new UserTitleReaction
         {
             Id = Guid.NewGuid(),
@@ -264,7 +264,7 @@ public class DislikeSteeringTests(PostgresFixture fixture)
             new TrainingMatrix(rows.ToArray(), labels.ToArray(), FeatureSchema.AllNames()),
             TrainJobHandler.DefaultHyperparams);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.ModelArtifacts.Add(new ModelArtifact
         {
             Id = Guid.NewGuid(),
