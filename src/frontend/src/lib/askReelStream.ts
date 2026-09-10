@@ -261,9 +261,16 @@ export function isConversation(data: unknown): data is { id: string } {
 }
 
 /**
- * Only the fields the grid cannot render without are required. Everything else stays tolerant on
- * purpose: a server that adds a field, or omits one an older client thought mandatory, must not
- * cost the user a card.
+ * Two classes of field, and the difference matters. Required: the ones the grid cannot render
+ * without (`titleId`, `mediaType`, `name`). Type-checked but optional: the ones the grid renders
+ * DIRECTLY as a value — `year` into a paragraph, `tmdbId` into the card's href. Absent is fine for
+ * those (an older server, a title with no release year); the wrong TYPE is not, because
+ * `{year: {oops: true}}` cleared this guard, reached `<p>{card.year}</p>` and threw "Objects are
+ * not valid as a React child" three modules away from the frame that caused it. The error boundary
+ * caught it, which is what a last resort is for — it is not the plan.
+ *
+ * Everything else stays tolerant on purpose: a server that adds a field, or omits one an older
+ * client thought mandatory, must not cost the user a card.
  */
 export function isCard(data: unknown): data is AskCard {
   return (
@@ -271,7 +278,9 @@ export function isCard(data: unknown): data is AskCard {
     typeof data.titleId === "string" &&
     data.titleId.length > 0 &&
     (data.mediaType === "Movie" || data.mediaType === "Show") &&
-    typeof data.name === "string"
+    typeof data.name === "string" &&
+    isNumberOrNull(data.year) &&
+    isNumberOrNull(data.tmdbId)
   );
 }
 
