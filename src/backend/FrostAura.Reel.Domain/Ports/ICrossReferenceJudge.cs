@@ -78,6 +78,36 @@ public sealed record CrossReferenceBatchResult(
     int RejectedEntries);
 
 /// <summary>
+/// Everything about a batch that is a property of the PROMPT GENERATION rather than of the
+/// candidates — carried in one record so adding a v3 input does not re-shape the port again.
+///
+/// <para><b>Every field but the version is optional and is OMITTED from the prompt when null</b>,
+/// the same rule the candidate line follows: an affinity line reading "genres you rate highest:"
+/// with nothing after it, or a base rate of 0%, are both claims about the viewer rather than
+/// admissions that nobody measured.</para>
+/// </summary>
+/// <param name="PromptVersion">
+/// Which prompt generation to render and validate against. It is also part of the verdict key, so
+/// two generations judging the same title are two rows rather than an overwrite — which is exactly
+/// what makes a v1-versus-v2 comparison possible on one account's history.
+/// </param>
+/// <param name="GenreAffinity">
+/// The account's as-of genre affinity line — top genres by shrunken mean with the mean itself, and
+/// the bottom few. <b>As-of only</b>: the stored taste narrative was written from every rating the
+/// account has ever made, holdout included, and handing it to a backtest is the answer key.
+/// </param>
+/// <param name="LovedShare">
+/// The share of this viewer's rated titles scored ≥ 8, 0–1. Rendered as the base rate a calibrated
+/// confidence is supposed to be anchored on.
+/// </param>
+/// <param name="DislikedShare">The share scored ≤ 4, 0–1.</param>
+public sealed record CrossReferenceJudgeOptions(
+    int PromptVersion,
+    string? GenreAffinity = null,
+    decimal? LovedShare = null,
+    decimal? DislikedShare = null);
+
+/// <summary>
 /// The cross-reference judge — its own port rather than a method on <c>ISearchAgent</c>.
 ///
 /// <para><b>Why not reuse the search agent.</b> <c>ISearchAgent.RerankBatchAsync</c> transports
@@ -107,14 +137,34 @@ public interface ICrossReferenceJudge
     int PromptVersion { get; }
 
     /// <summary>
-    /// Judge one batch. <paramref name="usagePurpose"/> is <c>cross-reference</c> for a serving run
-    /// and <c>cross-reference-eval</c> for the backtest — deliberately different strings, so
-    /// validating the instrument cannot consume the budget it is validating.
+    /// Judge one batch at this adapter's current prompt generation. <paramref name="usagePurpose"/>
+    /// is <c>cross-reference</c> for a serving run and <c>cross-reference-eval</c> for the backtest
+    /// — deliberately different strings, so validating the instrument cannot consume the budget it
+    /// is validating.
     /// </summary>
     Task<CrossReferenceBatchResult> JudgeAsync(
         IReadOnlyList<CrossReferenceCandidate> candidates,
         LensPersona persona,
         CrossReferenceRound round,
         string usagePurpose,
+        CancellationToken ct = default)
+        => JudgeAsync(
+            candidates, persona, round, usagePurpose, new CrossReferenceJudgeOptions(PromptVersion), ct);
+
+    /// <summary>
+    /// Judge one batch at an EXPLICIT prompt generation.
+    ///
+    /// <para>The serving job never calls this — it takes the overload above and rides
+    /// <see cref="PromptVersion"/>, so a generation reaches production by being made current and
+    /// not by a caller choosing one. This exists for the backtest, which has to be able to measure
+    /// a generation that is not yet current: the whole point of the instrument is that a prompt
+    /// change is a measured decision rather than a hopeful edit.</para>
+    /// </summary>
+    Task<CrossReferenceBatchResult> JudgeAsync(
+        IReadOnlyList<CrossReferenceCandidate> candidates,
+        LensPersona persona,
+        CrossReferenceRound round,
+        string usagePurpose,
+        CrossReferenceJudgeOptions options,
         CancellationToken ct = default);
 }
