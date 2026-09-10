@@ -86,4 +86,20 @@ test.describe("Ask Reel on a phone", () => {
     await page.setViewportSize({ width: 320, height: 568 });
     await expectComposerReachable(page, "320×568");
   });
+
+  test("transcript is a log landmark with speaker labels", async ({ page }) => {
+    await bootSearch(page);
+
+    const transcript = page.getByTestId("askreel-transcript");
+    await expect(transcript).toHaveAttribute("role", "log");
+    await expect(transcript).toHaveAttribute("aria-live", "polite");
+
+    await page.getByTestId("askreel-composer").fill("tense small-town thriller");
+    await page.getByTestId("askreel-composer").press("Enter");
+
+    // The user's own turn, and Reel's reply, are each announced with who is speaking — without
+    // the labels a screen reader reads one undifferentiated run of sentences.
+    await expect(transcript.getByText("You said", { exact: true })).toHaveCount(1);
+    await expect(transcript.getByText("tense small-town thriller")).toBeVisible();
+  });
 });

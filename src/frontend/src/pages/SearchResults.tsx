@@ -228,19 +228,28 @@ function AskReel() {
           settled outcome only; the phase narration has its own live region inside the banner. */}
       <p className="sr-only" role="status" aria-live="polite" data-testid="askreel-status">{settled}</p>
 
-      {/* Transcript */}
-      <div className="space-y-3">
+      {/* Transcript.
+          A `log` landmark, announced politely: Reel's replies arrive whenever the model finishes,
+          so a screen-reader user is told about them only if the region says it updates. The
+          speaker labels are sr-only because sighted users read the bubble alignment and the
+          sparkle for the same information — without them the whole thread is announced as one
+          undifferentiated run of sentences with no way to tell question from answer. */}
+      <div className="space-y-3" data-testid="askreel-transcript" role="log" aria-live="polite">
         {turns.map((turn, i) =>
           turn.role === "user" ? (
             <div key={i} className="flex justify-end">
               <p className="fa-body bg-fa-frost/15 text-fa-frost-bright rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]">
+                <span className="sr-only">You said</span>
                 {turn.text}
               </p>
             </div>
           ) : (
             <div key={i} className="flex items-start gap-3 max-w-[85%]" data-testid="askreel-reply">
               <Sparkles className="h-5 w-5 text-fa-frost shrink-0 mt-1" />
-              <p className="fa-body text-fa-frost-bright">{turn.text}</p>
+              <p className="fa-body text-fa-frost-bright">
+                <span className="sr-only">Reel said</span>
+                {turn.text}
+              </p>
             </div>
           ),
         )}
@@ -508,6 +517,7 @@ function AskReel() {
             data-testid="askreel-composer"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            aria-label="Ask Reel"
             placeholder="Ask for more, or refine — “something funnier”, “more like the second one”…"
             className="flex-1 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
           />
@@ -552,7 +562,11 @@ function ResultCard({ card }: { card: AskCard }) {
       state={{ backgroundLocation: location }}
       className="group block focus:outline-none reel-rise"
     >
-      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
+      {/* The focus ring lives here, not on the <a>: the link sets `focus:outline-none` so the
+          browser default does not cut across the poster, which left keyboard navigation with NO
+          visible focus at all. `group-focus-visible` puts it back, on the card, and only for
+          keyboard focus. */}
+      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-focus-visible:ring-2 group-focus-visible:ring-fa-frost/60 group-focus-visible:ring-offset-2">
         <PosterImage path={card.posterPath} alt={card.name} size="w185" />
         {/* The shared stack: prediction over crowd, no-overlap, scrimmed — and it owns the
             null/NaN guards, so a title with no community score shows one badge, never a dash. */}
