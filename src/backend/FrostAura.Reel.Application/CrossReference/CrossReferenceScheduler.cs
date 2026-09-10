@@ -51,6 +51,7 @@ public sealed class CrossReferenceScheduler(
     {
         if (!judge.IsAvailable)
         {
+            logger.LogInformation("Cross-reference not queued for {AccountId}: no judge is configured.", accountId);
             return false;
         }
 
@@ -62,6 +63,7 @@ public sealed class CrossReferenceScheduler(
                 && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
         if (inFlight)
         {
+            logger.LogInformation("Cross-reference not queued for {AccountId}: a pass is already in flight.", accountId);
             return false;
         }
 
@@ -72,6 +74,7 @@ public sealed class CrossReferenceScheduler(
             .FirstOrDefaultAsync(ct);
         if (artifactId is not { } artifact)
         {
+            logger.LogInformation("Cross-reference not queued for {AccountId}: no readable Active model artifact.", accountId);
             return false;
         }
 
@@ -97,6 +100,9 @@ public sealed class CrossReferenceScheduler(
             ct);
         if (!pending)
         {
+            logger.LogInformation(
+                "Cross-reference not queued for {AccountId}: nothing unjudged at fingerprint {ProfileHash} (prompt v{Version}).",
+                accountId, profileHash, judge.PromptVersion);
             return false;
         }
 
