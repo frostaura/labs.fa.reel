@@ -297,9 +297,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : EmbeddedCatal
 
         var accountId = await SeedAccountAsync();
         await SeedPocketsAsync(accountId);
-        // Anchored to midday so the +1h call below stays inside the same UTC day — a 23:xx run
-        // otherwise writes a second partition and this assertion reddens for one hour every day.
-        var now = DateTime.UtcNow.Date.AddHours(12);
+        var now = DateTime.UtcNow;
 
         int Count() => Fixture.CreateContext(Scoped(accountId)).TasteClusters.Count();
 
