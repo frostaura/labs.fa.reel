@@ -98,6 +98,40 @@ export function plural(n: number, word: string): string {
   return n === 1 ? word : `${word}s`;
 }
 
+/**
+ * How many the quality floor held back, as the tray must state it.
+ *
+ * The tray's contents are the truth when it HAS contents. It used to be labelled from
+ * `droppedByFloor`, a scalar the server sends beside the cards, so a `done` carrying
+ * `droppedByFloor: 2` and one card put "Show the 2 under your 6 bar" over a tray holding one
+ * title. The two happened to agree on live turns, which is exactly why it survived: any server
+ * path that sets one without the other prints a number the user can count and disprove.
+ *
+ * The scalar is still the answer when the tray is empty — a turn can report a cut without sending
+ * the cards down, and "3 held back" is honest there. `null` means the server said nothing at all,
+ * which is not the same as a zero.
+ */
+export function floorHeldBack(belowFloorCount: number, droppedByFloor: number | null): number {
+  if (belowFloorCount > 0) return belowFloorCount;
+  return typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : 0;
+}
+
+/**
+ * The floor, formatted for the tray label — always one decimal, always the same string.
+ *
+ * `toLocaleString(undefined, { maximumFractionDigits: 1 })` printed "6" in the tray while the
+ * server's own sentence forty pixels below it read "6.0 bar", and on a comma-decimal locale it
+ * printed "6,5" beside the server's "6.5". Both halves of that are fixed by pinning the locale
+ * and the fraction digits: this is chrome, but it is chrome quoting the SAME number the server
+ * quotes, so it renders as an invariant one-decimal string. Display only — it is never sent
+ * anywhere, never a cache key, never a filter row.
+ */
+const FLOOR_FORMAT = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+export function formatFloor(floor: number | null | undefined): string | null {
+  return typeof floor === "number" && Number.isFinite(floor) ? FLOOR_FORMAT.format(floor) : null;
+}
+
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
 export function lastUserQuery(turns: ChatTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {

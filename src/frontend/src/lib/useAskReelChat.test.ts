@@ -8,6 +8,8 @@ import {
   createMountGuard,
   initialChatState,
   lastUserQuery,
+  floorHeldBack,
+  formatFloor,
   nextBootstrap,
   plural,
   showMoodPresets,
@@ -645,6 +647,43 @@ describe("plural", () => {
     expect(plural(0, "pick")).toBe("picks");
     expect(plural(2, "pick")).toBe("picks");
     expect(plural(17, "title")).toBe("titles");
+  });
+});
+
+/**
+ * The under-floor tray's label. Two independent defects lived in one sentence: the count came from
+ * a scalar beside the cards rather than from the cards ("Show the 2 under your 6 bar" over a tray
+ * holding one title), and the number was formatted with the ambient locale and no minimum fraction
+ * digits, so it read "6" beside the server's own "6.0 bar" — and "6,5" beside "6.5" on a
+ * comma-decimal machine.
+ */
+describe("floorHeldBack", () => {
+  it("counts the tray's own contents, and the server's scalar only when the tray is empty", () => {
+    // Fixture variation on the ONE field that differs between the two sources. The disagreeing
+    // case is the whole point: while they agree — which is what live turns did — a wrong
+    // implementation is indistinguishable from a right one.
+    expect(floorHeldBack(1, 2)).toBe(1);
+    expect(floorHeldBack(3, 3)).toBe(3);
+    // Nothing sent down, but the server counted a cut: the scalar is the honest answer there.
+    expect(floorHeldBack(0, 3)).toBe(3);
+    // Silence is not a count, and neither is a zero. Both leave the tray closed.
+    expect(floorHeldBack(0, null)).toBe(0);
+    expect(floorHeldBack(0, 0)).toBe(0);
+    // Cards but no scalar — an older server that sends the tray and not the count.
+    expect(floorHeldBack(2, null)).toBe(2);
+  });
+});
+
+describe("formatFloor", () => {
+  it("always renders one decimal, matching the server's own sentence", () => {
+    // Fixture variation across the three shapes a saved bar takes: a whole number (the one that
+    // printed "6" beside "6.0"), one that already has a decimal, and one that needs rounding.
+    expect(formatFloor(6)).toBe("6.0");
+    expect(formatFloor(6.5)).toBe("6.5");
+    expect(formatFloor(7.25)).toBe("7.3");
+    // No saved bar is not a bar of zero — the tray falls back to wording rather than "0.0".
+    expect(formatFloor(null)).toBeNull();
+    expect(formatFloor(undefined)).toBeNull();
   });
 });
 

@@ -287,7 +287,7 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(tray.locator("summary")).toHaveText("Show the 1 pick Reel held back");
   });
 
-  test("the floor tray names the account's own bar when there is one", async ({ page }) => {
+  test("the floor tray names the account's own bar, to one decimal, and counts its own contents", async ({ page }) => {
     // Same tray, one field different from the test above: the account has a saved
     // `minPredictedRating`. That single field is what turns "Reel held some back" into a sentence
     // naming a number the user chose and can go and change.
@@ -297,7 +297,9 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page);
 
-    // Three cut, one card sent down: the label must quote the SERVER's count, not the tray's.
+    // The two sources DISAGREE on purpose: the server says it cut three, and sends one card down.
+    // The label used to quote the scalar, so it read "Show the 2 under your 6 bar" over a tray the
+    // user could open and count to one. A number beside its own contents has to match them.
     await askPush(page, "done", {
       results: [ALPHA, BORDER],
       reason: "2 picks ranked for you, from 40 pulled.",
@@ -308,6 +310,10 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
 
     const tray = page.getByTestId("askreel-below-floor");
     await expect(tray).toBeVisible();
-    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6 bar");
+    // …and "6.0", not "6": `minPredictedRating` is 6, and the server's own sentence beside this
+    // one says "6.0 bar". One number, one rendering, whatever the browser's locale.
+    await expect(tray.locator("summary")).toHaveText("Show the 1 under your 6.0 bar");
+    await tray.locator("summary").click();
+    await expect(tray.locator('a[href*="/title/"]')).toHaveCount(1);
   });
 });

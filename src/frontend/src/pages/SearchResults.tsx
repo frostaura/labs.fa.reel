@@ -12,7 +12,7 @@ import { useGetFiltersQuery } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import { nextBootstrap, plural, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
+import { floorHeldBack, formatFloor, nextBootstrap, plural, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
 
@@ -149,20 +149,12 @@ function AskReel() {
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
   // and was, until now, invisible: the picks simply never existed as far as the screen was
-  // concerned. Two independent sources, and each degrades on its own: `droppedByFloor` rides the
-  // `done` frame and is null against an older server (fall back to counting the cards we were
-  // handed), and the bar comes from the account's saved conditions and is null when the user has
-  // set none (fall back to the unnumbered wording). Neither absence blanks the tray.
+  // concerned. The count is the tray's OWN contents wherever it has any (see `floorHeldBack`), and
+  // the bar comes from the account's saved conditions — null when the user has set none, which
+  // falls back to the unnumbered wording rather than blanking the tray.
   const belowFloorVisible = belowFloor.filter((c) => !removedSet.has(c.titleId));
-  const floorHeldBack =
-    typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : belowFloorVisible.length;
-  // Localised deliberately, and this is the one place in Reel where that is the right answer: the
-  // label is chrome the user reads and nothing else — it is never sent to the server, never a cache
-  // key, never a filter row. (The invariant-culture rule that governs everything the BACKEND
-  // formats is about strings that get compared or parsed; this one only gets read.)
-  const floor = accountFilters?.minPredictedRating ?? null;
-  const floorLabel =
-    typeof floor === "number" ? floor.toLocaleString(undefined, { maximumFractionDigits: 1 }) : null;
+  const heldBack = floorHeldBack(belowFloorVisible.length, droppedByFloor);
+  const floorLabel = formatFloor(accountFilters?.minPredictedRating);
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
@@ -448,16 +440,18 @@ function AskReel() {
 
           {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
               collapsed: these picks are not being recommended, they are being accounted for. The
-              count comes from the server (`droppedByFloor`) so the tray is honest even on a turn
-              where the cards themselves were not sent down, and the bar comes from the account's
-              own conditions — naming it is what turns "Reel held some back" into a sentence the
-              user can act on, because the number in it is one they chose and can change. */}
-          {floorHeldBack > 0 && !streaming && (
+              count is what the tray actually holds, falling back to the server's own scalar only
+              on a turn where the cards were not sent down (see `floorHeldBack`) — a label the user
+              can count and disprove has to agree with its contents. The bar comes from the
+              account's own conditions, formatted to the one decimal the server's sentence uses:
+              naming it turns "Reel held some back" into something the user can act on, because
+              the number in it is one they chose and can change. */}
+          {heldBack > 0 && !streaming && (
             <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
               <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
                 {floorLabel
-                  ? `Show the ${floorHeldBack} under your ${floorLabel} bar`
-                  : `Show the ${floorHeldBack} ${plural(floorHeldBack, "pick")} Reel held back`}
+                  ? `Show the ${heldBack} under your ${floorLabel} bar`
+                  : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
               </summary>
               <p className="fa-caption text-fa-frost-dim/70 mt-1">
                 These matched the request but scored below the bar Reel holds itself to.
