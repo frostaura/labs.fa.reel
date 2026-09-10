@@ -18,6 +18,7 @@ using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Persistence;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -893,21 +894,6 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
-    }
-
-    /// <summary>Never available, so every why stays the deterministic templater sentence — these
-    /// tests pin feed structure, not curated copy.</summary>
-    private sealed class UnavailableSearchAgent : ISearchAgent
-    {
-        public bool IsAvailable => false;
-
-        public string ModelId => "stub";
-
-        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
-            throw new NotSupportedException();
     }
 
     private sealed class NoopEventHub : IPipelineEventHub
