@@ -11,7 +11,7 @@ import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type DoneDat
  * returned. Callers that want "there is a conversation here" should test `turns.length`, not the
  * status.
  */
-type Status = "idle" | "streaming" | "done" | "resumed" | "error";
+export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "error";
 
 /** Why the stream ended badly, where the client can tell. `null` = an unclassified failure. */
 export type ErrorReason = "session" | "timeout" | null;
@@ -89,7 +89,7 @@ export function lastUserQuery(turns: ChatTurn[]): string {
 
 interface State {
   turns: ChatTurn[];
-  status: Status;
+  status: ChatStatus;
   phase: PhaseData | null;
   byId: Record<string, AskCard>;
   order: string[];
