@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Mic, RotateCcw, Send, Sparkles } from "lucide-react";
+import { AlertTriangle, Mic, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
+import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
@@ -84,7 +85,22 @@ function narrate(phase: PhaseData | null): string {
   }
 }
 
+/**
+ * The route. The page body is wrapped rather than the route element itself, so a render failure
+ * inside the transcript or the grid is contained on the page instead of blanking the shell —
+ * see {@link ChatErrorBoundary}. The `key` bump remounts the whole conversation on "Start again",
+ * which is what makes the retry a real recovery and not a re-throw.
+ */
 export default function SearchResults() {
+  const [crashKey, setCrashKey] = useState(0);
+  return (
+    <ChatErrorBoundary onReset={() => setCrashKey((k) => k + 1)}>
+      <AskReel key={crashKey} />
+    </ChatErrorBoundary>
+  );
+}
+
+function AskReel() {
   const [params, setParams] = useSearchParams();
   const seed = params.get("q") ?? "";
   const [filter, setFilter] = useBrowseFilter("search");
@@ -94,7 +110,7 @@ export default function SearchResults() {
     turns, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
     exhausted, appending, canRetry,
   } = chat;
-  const { status, conflict, droppedByFloor, belowFloor, floor } = pendingApi(chat);
+  const { status, stop, conflict, droppedByFloor, belowFloor, floor } = pendingApi(chat);
   const speech = useSpeech((text) => send(text, false));
 
   // The media toggle is per-device and persists across visits, so a resumed thread starts with a
@@ -247,14 +263,33 @@ export default function SearchResults() {
             >
               {narrate(phase)}
             </p>
-            <div className="mt-2 h-1 w-full overflow-hidden rounded bg-fa-frost/10">
-              <div className="h-full w-1/3 rounded bg-fa-frost/60" style={{ animation: "fa-progress-slide 1.2s ease-in-out infinite" }} />
+            {/* The sweep only moves if the track is a positioning context: `fa-progress-slide`
+                animates `left` from -40% to 100%, and on a statically-positioned child that
+                animation applies to nothing at all — the bar sat frozen at one third for the whole
+                turn, which reads as a hang exactly when the page is claiming to be working. Same
+                markup as the onboarding build-up, which had it right. */}
+            <div className="relative mt-2 h-1 w-full overflow-hidden rounded bg-fa-frost/10">
+              <div className="absolute inset-y-0 rounded bg-fa-frost/60 fa-progress-slide" />
             </div>
           </div>
           {phase && phase.found > 0 && (
             <span className="fa-caption text-fa-frost-dim shrink-0 tabular-nums">
               {phase.scored > 0 ? `${phase.scored} scored` : `${phase.found} found`}
             </span>
+          )}
+          {/* A turn can run for tens of seconds against a slow model, and until now the only way
+              out was to navigate away — the stream kept running and kept billing. Rendered only
+              when the hook actually offers `stop`, so it is never a button that does nothing. */}
+          {stop && (
+            <button
+              type="button"
+              onClick={stop}
+              data-testid="askreel-stop"
+              aria-label="Stop searching"
+              className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 text-fa-frost-dim shrink-0 hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
+            >
+              <Square className="h-3 w-3" /> Stop
+            </button>
           )}
         </div>
       )}
