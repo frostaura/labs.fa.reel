@@ -26,8 +26,8 @@ is auditing.
 | `rejectedByReason[]` | Those refusals grouped by failure class, worst first, each with the distinct **tokens** behind it — `{"reason": "invented-anchor", "count": 9, "tokens": ["Frontera", "Lawless"]}`. |
 | `meanSpecificity` | Is every clause true of this title and no other, or is it filler? |
 | `meanGrounding` | Does every plot fact trace to the overview, and every name to the credits? |
-| `meanSpoilerFreeness` | First-act premise only? |
-| `meanVoice` | Second person, honest, no marketing register, no numbers? |
+| `meanSpoilerFreeness` | Does it say anything the official overview does not? The premise itself is **not** a spoiler. |
+| `meanVoice` | Spoken **to** the viewer — hook included — plain, honest, no marketing adjectives, no numbers? |
 | `rows[]` | Every sampled note — **including the refused ones** — with its prose, its stored anchors, its scores and the judge's one-line complaint. |
 
 Each row in `rows[]` carries the refusal in three forms, because they answer different questions:
@@ -38,6 +38,7 @@ Each row in `rows[]` carries the refusal in three forms, because they answer dif
 | `rejectionKind` | The class alone, for grouping: `invented-anchor`. |
 | `rejectionToken` | The offending name alone: `Frontera`. Null when the guard names no token. |
 | `anchors[]` | The anchor titles **as stored** — after any ungrounded entry was stripped. |
+| `povSlips` | The judge's quoted POV slips, or null — see below. |
 
 Refused rows are never scored by the judge. A note a deterministic guard already refused has a
 deterministic verdict on it, and paying a model to agree is spend for nothing.
@@ -71,6 +72,25 @@ one droppable comparison is what took the on-demand path to a hundred percent re
 account does not have. Stripped anchors are not on this report; they are in the application log, as
 `dropped N ungrounded anchor(s)`. If `invented-anchor` counts fall to zero after a prompt edit,
 check that log before concluding the prompt got better.
+
+**`povSlips` is a note, not a score, and it is not in any mean.** It quotes every place the copy
+made the **viewer** a character in the plot — `"the city that failed you"`, of a city that failed
+*her*. The slip is rare enough that folding it into `voice` would move the mean by less than the
+judge's own noise, and specific enough that the phrase is worth more than a number. It is also the
+one defect with **no deterministic guard behind it**: "the city that failed you" and "the pacing
+that suited you" are the same shape and only the first is wrong, and separating them needs to know
+that "the city" is a story entity. A regex tuned to catch the first refuses the second, and honest
+second-person address is the entire product — so the rule is stated in the prompt and measured
+here, and `rejectedByGuards` will never count it. Read this field directly; do not expect it in a
+mean.
+
+**A note on comparing v3 to v4.** Prompt v4 and the judge rubric changed in the same commit, on
+purpose. v3's rubric said "first-act premise only" and the judge read the premise itself as the
+spoiler, marking notes down for "revealing the childhood-memory premise" — a premise printed on the
+poster. `meanSpoilerFreeness` was therefore measuring something the product never wanted. The rubric
+now says the official overview's setup is fair game and only what comes after it is a spoiler, which
+means **a v3 spoiler-freeness number and a v4 one are not the same measurement**. Everything else on
+the report compares cleanly; that one dimension re-baselines at v4.
 
 **Watch for specificity rising while grounding falls.** That combination is what "more confident and
 less true" looks like, and it is exactly what a prompt tweak aimed at livelier copy tends to buy. If

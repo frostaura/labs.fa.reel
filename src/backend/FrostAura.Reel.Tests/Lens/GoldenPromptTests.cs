@@ -199,6 +199,111 @@ public class GoldenPromptTests
         Assert.Contains("Sicario: Day of the Soldado", prompt, StringComparison.Ordinal);
     }
 
+    // ── The lens SYSTEM prompt: generation 4 ─────────────────────────────────────────────────
+
+    [Fact]
+    public void The_lens_prompt_is_stamped_as_generation_four()
+    {
+        // Half the lens cache key. A rule change that does not move this number leaves every v3 row
+        // — third-person taglines and all — being served as fresh forever.
+        Assert.Equal(4, OpenRouterLensWriter.CurrentLensPromptVersion);
+    }
+
+    [Fact]
+    public void The_hook_is_briefed_as_something_said_to_the_viewer_not_as_a_tagline()
+    {
+        // v3 described the hook as "the single reason to press play tonight" and got posters back:
+        // "Jodie Foster turns grief into a tight revenge chase." The brief is the defect, not the
+        // model, so the brief is what this pins.
+        var prompt = OpenRouterLensWriter.LensSystemPrompt;
+
+        Assert.Contains("THE HOOK IS SAID TO THE VIEWER", prompt, StringComparison.Ordinal);
+        Assert.Contains("second person, or an imperative", prompt, StringComparison.Ordinal);
+        Assert.Contains("\"You get ...\"", prompt, StringComparison.Ordinal);
+        Assert.Contains("\"Expect ...\"", prompt, StringComparison.Ordinal);
+        Assert.Contains("\"Give this an evening if ...\"", prompt, StringComparison.Ordinal);
+        // The refusal is stated with the live example that produced it.
+        Assert.Contains("poster line, not a hook", prompt, StringComparison.Ordinal);
+        Assert.Contains("said TO the viewer and never as a tagline", prompt, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("gripping")]
+    [InlineData("must-see")]
+    [InlineData("unmissable")]
+    [InlineData("masterful")]
+    [InlineData("stunning")]
+    [InlineData("thrilling ride")]
+    [InlineData("edge of your seat")]
+    [InlineData("tour de force")]
+    [InlineData("unforgettable")]
+    public void Every_word_the_marketing_guard_refuses_is_banned_by_name_in_the_prompt(string word)
+    {
+        // The prompt and the deterministic guard must ban exactly the same list. A word the guard
+        // refuses and the prompt never mentions is a rejection the model was never warned about,
+        // which spends a generation to teach nothing.
+        Assert.Contains(word, OpenRouterLensWriter.LensSystemPrompt, StringComparison.Ordinal);
+        Assert.Equal(word, LensGuards.FirstMarketingWord("It is " + word + " throughout."));
+    }
+
+    [Fact]
+    public void The_prompt_asks_for_plain_specific_language_rather_than_a_verdict_on_quality()
+    {
+        var prompt = OpenRouterLensWriter.LensSystemPrompt;
+
+        Assert.Contains("NO MARKETING VOICE", prompt, StringComparison.Ordinal);
+        Assert.Contains("Plain, specific language only", prompt, StringComparison.Ordinal);
+        Assert.Contains("rather than asserting how good it is", prompt, StringComparison.Ordinal);
+        // The judge's third complaint, verbatim: "it overstates the pacing".
+        Assert.Contains("Do not overstate the pacing", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_premise_is_stated_to_be_allowed_and_its_development_forbidden()
+    {
+        // v3 said "first act only" and the copy read as though the premise itself were the leak.
+        // A pitch that will not say what the film is about is not spoiler-safe; it is useless.
+        var prompt = OpenRouterLensWriter.LensSystemPrompt;
+
+        Assert.Contains("THE PREMISE IS NOT A SPOILER", prompt, StringComparison.Ordinal);
+        Assert.Contains("as printed in the official", prompt, StringComparison.Ordinal);
+        Assert.Contains("how that premise DEVELOPS", prompt, StringComparison.Ordinal);
+        Assert.Contains("Write \"sets up\", never \"reveals\".", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_point_of_view_rule_is_explicit_and_carries_its_example()
+    {
+        // Named by a live slip: "a radio show host turns vigilante and starts pushing back against
+        // the city that failed you" — a city that failed HER. An abstract rule did not prevent it;
+        // the corrected sentence beside the wrong one is the part that teaches.
+        var prompt = OpenRouterLensWriter.LensSystemPrompt;
+
+        Assert.Contains("POINT OF VIEW", prompt, StringComparison.Ordinal);
+        Assert.Contains("nothing in the plot ever happens to", prompt, StringComparison.Ordinal);
+        Assert.Contains("\"the city that failed her\"", prompt, StringComparison.Ordinal);
+        Assert.Contains("never \"the city that failed you\"", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generation_four_kept_everything_generation_three_was_getting_right()
+    {
+        // Specificity 0.91 and grounding 0.95 were what v3 did well. A voice fix that quietly drops
+        // the anchor contract, the length discipline or the honest caution trades one regression
+        // for another and the means would not say which.
+        var prompt = OpenRouterLensWriter.LensSystemPrompt;
+
+        Assert.Contains("copied verbatim", prompt, StringComparison.Ordinal);
+        Assert.Contains("An empty array is a correct answer", prompt, StringComparison.Ordinal);
+        Assert.Contains("a real reservation is worth more than a polite one", prompt, StringComparison.Ordinal);
+        Assert.Contains("FINISH EVERY SENTENCE INSIDE ITS LIMIT", prompt, StringComparison.Ordinal);
+        Assert.Contains("NO NUMBERS ANYWHERE IN THE PROSE", prompt, StringComparison.Ordinal);
+        // The requested budgets, not the parse ceilings — the numbers the provider truncates against.
+        Assert.Contains("<=" + LensNote.RequestLensChars + " chars", prompt, StringComparison.Ordinal);
+        Assert.Contains("<=" + LensNote.RequestHookChars + " chars", prompt, StringComparison.Ordinal);
+        Assert.Contains("<=" + LensNote.RequestCautionChars + " chars", prompt, StringComparison.Ordinal);
+    }
+
     // ── The rerank prompt ───────────────────────────────────────────────────────────────────
 
     private static RerankInput Candidate(string id, string name) => new(

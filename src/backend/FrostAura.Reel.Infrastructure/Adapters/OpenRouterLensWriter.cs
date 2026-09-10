@@ -75,8 +75,32 @@ public class OpenRouterLensWriter(
     /// <c>ResolveAsync</c> would keep serving it as fresh forever. Regeneration is lazy and
     /// budget-gated — the background job and the on-demand path pay for it a few notes at a
     /// time — so this is not a bulk re-spend.</para>
+    ///
+    /// <para><b>v4: the two dimensions the founder-only audit said v3 was failing.</b> Over a
+    /// model-judged sample the v3 prompt scored 0.91 specificity and 0.95 grounding — it knew what
+    /// it was talking about — against 0.57 voice and 0.63 spoiler-freeness. The judge's complaints
+    /// were the same two sentences over and over: "third-person marketing-style copy" and "gives
+    /// away the premise too explicitly". Both were prompt defects rather than model failures.</para>
+    ///
+    /// <para><i>Voice.</i> v3 asked for second person and then described <c>hook</c> as "the single
+    /// reason to press play tonight", which is a brief for a poster line — and posters came back:
+    /// "Jodie Foster turns grief into a tight revenge chase." v4 requires the hook to be said TO the
+    /// viewer, bans a short list of marketing adjectives outright, and adds the POV rule the copy
+    /// was missing: "you" is the viewer watching and is never a character in the plot. The live slip
+    /// that named the rule — "the city that failed you", of a city that failed <i>her</i> — reads as
+    /// a typo and is actually the model losing track of who it is talking to.</para>
+    ///
+    /// <para><i>Spoilers.</i> v3 said "first act only" and the judge read that as forbidding the
+    /// premise itself, marking down notes for "revealing the childhood-memory premise". A pitch that
+    /// will not say what the film is about is not spoiler-safe, it is useless. v4 states the line
+    /// the product actually holds: the setup as printed in the official overview is fair game, and
+    /// how it DEVELOPS never is. The judge rubric was corrected in the same pass, so the score and
+    /// the prompt now mean the same thing — which is the only reason a v3→v4 mean is comparable.</para>
+    ///
+    /// <para>Bumped rather than edited in place for the usual reason: a v3 row is a third-person
+    /// tagline that <c>ResolveAsync</c> would serve as fresh forever.</para>
     /// </summary>
-    public const int CurrentLensPromptVersion = 3;
+    public const int CurrentLensPromptVersion = 4;
 
     /// <summary>Sentence bounds for a narrative — fewer reads as a stub, more reads as a list.</summary>
     private const int MinSentences = 6;
@@ -416,7 +440,8 @@ public class OpenRouterLensWriter(
             // test can assert a stable number, with the comment saying exactly what it is.
             var seed = SHA256.HashData(Encoding.UTF8.GetBytes(note.Lens + note.Hook));
             double Unit(int i) => Math.Round(0.5 + (seed[i % seed.Length] / 510d), 3);
-            return new LensAuditScore(Unit(0), Unit(1), Unit(2), Unit(3), "stub/deterministic-v1 — not a real judgement");
+            return new LensAuditScore(
+                Unit(0), Unit(1), Unit(2), Unit(3), null, "stub/deterministic-v1 — not a real judgement");
         }
 
         var user = new StringBuilder()
@@ -448,10 +473,16 @@ public class OpenRouterLensWriter(
                 return null;
             }
 
-            var comment = root.TryGetProperty("comment", out var c) && c.ValueKind == JsonValueKind.String
-                ? c.GetString()
-                : null;
-            return new LensAuditScore(specificity, grounding, spoilerFree, voice, comment);
+            string? Text(string name) =>
+                root.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String
+                    && el.GetString() is { Length: > 0 } value
+                    ? value
+                    : null;
+
+            // povSlips is a NOTE, not a dimension — a judge that omits it has not returned a
+            // partial rubric, so unlike the four scores its absence is not a reason to discard.
+            return new LensAuditScore(
+                specificity, grounding, spoilerFree, voice, Text("povSlips"), Text("comment"));
         }
         catch (JsonException)
         {
@@ -635,13 +666,16 @@ public class OpenRouterLensWriter(
             {
                 type = "object",
                 additionalProperties = false,
-                required = new[] { "specificity", "grounding", "spoilerFreeness", "voice", "comment" },
+                // Every property is listed in `required` because strict json_schema demands it; a
+                // field that may legitimately be absent is expressed as a nullable TYPE instead.
+                required = new[] { "specificity", "grounding", "spoilerFreeness", "voice", "povSlips", "comment" },
                 properties = new Dictionary<string, object>
                 {
                     ["specificity"] = new { type = "number", minimum = 0, maximum = 1 },
                     ["grounding"] = new { type = "number", minimum = 0, maximum = 1 },
                     ["spoilerFreeness"] = new { type = "number", minimum = 0, maximum = 1 },
                     ["voice"] = new { type = "number", minimum = 0, maximum = 1 },
+                    ["povSlips"] = new { type = new[] { "string", "null" } },
                     ["comment"] = new { type = new[] { "string", "null" } },
                 },
             },
@@ -679,14 +713,20 @@ public class OpenRouterLensWriter(
         + "do not know it — say less instead.\n"
         + "Output strictly valid JSON.";
 
-    private static readonly string LensSystemPrompt =
+    /// <summary>
+    /// The lens brief, generation 4. Exposed to the golden-prompt tests because a prompt is the
+    /// least reviewable artefact in the product: a rule that silently stops being stated degrades
+    /// every note by a degree nobody attributes to the edit that caused it.
+    /// </summary>
+    internal static readonly string LensSystemPrompt =
         "You retell ONE film or show to ONE specific viewer, in their own taste vocabulary, speaking "
         + "to them as \"you\".\n"
         + "Return ONLY a JSON object with exactly these six keys:\n"
         + "  lens        <=" + LensNote.RequestLensChars + " chars. The premise, told the way THIS viewer "
         + "would want it told. Cite at least two specifics of the title and at least one thing about "
         + "the viewer.\n"
-        + "  hook        <=" + LensNote.RequestHookChars + " chars. The single reason to press play tonight.\n"
+        + "  hook        <=" + LensNote.RequestHookChars + " chars. The single reason to press play tonight, "
+        + "said TO the viewer and never as a tagline about the film. See rule 4.\n"
         + "  caution     <=" + LensNote.RequestCautionChars + " chars, or null. The honest reservation — the "
         + "thing about this title that might genuinely not land for this viewer. This is the one field "
         + "allowed to argue against the recommendation, and a real reservation is worth more than a "
@@ -699,33 +739,78 @@ public class OpenRouterLensWriter(
         + "  mood        EXACTLY ONE of: " + string.Join(", ", LensVocabulary.Moods) + ".\n"
         + "  whenToWatch EXACTLY ONE of: " + string.Join(", ", LensVocabulary.WhenToWatch) + ".\n"
         + "HARD RULES:\n"
-        + "  1. SPOILERS: first act only. Never describe an ending, a finale, a twist, a reveal, a "
-        + "death, or anything that happens late. Every plot fact must come from the overview and "
-        + "keywords given below and nothing else. If the overview does not say it, you do not know it.\n"
+        + "  1. SPOILERS — THE PREMISE IS NOT A SPOILER. The setup as printed in the official "
+        + "overview below is what the title is about, and restating it is exactly your job; a pitch "
+        + "that will not say what the film is about is not safe, it is useless. What you may never "
+        + "do is say how that premise DEVELOPS. No ending, no finale, no twist, no reveal, no death, "
+        + "no late turn, nothing that happens after the setup, and no consequence of it. Every plot "
+        + "fact must come from the overview and keywords given below and nothing else — if the "
+        + "overview does not say it, you do not know it. Write \"sets up\", never \"reveals\".\n"
         + "  2. Never name a person who is not listed in this title's credits below, and never "
         + "name a film or show anywhere in the prose that is not this title or an entry on the "
         + "ANCHORS list.\n"
-        + "  3. Second person throughout. Never \"they\", \"their\", \"them\", or \"the user\".\n"
-        + "  4. NO NUMBERS ANYWHERE IN THE PROSE. A predicted rating may be given to you as context "
+        + "  3. POINT OF VIEW. \"You\" is ALWAYS the viewer, sitting down to watch. \"You\" is never a "
+        + "character, and nothing in the plot ever happens to \"you\". Characters stay in the third "
+        + "person and keep their own pronouns: write \"the city that failed her\", never \"the city "
+        + "that failed you\"; \"the men hunting him\", never \"the men hunting you\". Speak to the "
+        + "viewer ABOUT the film; speak about the film THROUGH its characters.\n"
+        + "  4. THE HOOK IS SAID TO THE VIEWER. It is second person, or an imperative aimed straight "
+        + "at them — \"You get ...\", \"Expect ...\", \"Give this an evening if ...\". A third-person "
+        + "tagline is refused outright: \"Jodie Foster turns grief into a tight revenge chase\" is a "
+        + "poster line, not a hook.\n"
+        + "  5. NO MARKETING VOICE. These are banned outright, in lens and hook alike: gripping, "
+        + "must-see, unmissable, masterful, stunning, thrilling ride, edge of your seat, tour de "
+        + "force, unforgettable. Plain, specific language only — name what is actually on screen, "
+        + "the register, the pace, the pressure it keeps, rather than asserting how good it is. Do "
+        + "not overstate the pacing. Every clause must be true of THIS title and no other.\n"
+        + "  6. Never call the viewer \"they\", \"their\", \"them\" or \"the user\" — and avoid those "
+        + "three pronouns entirely, even for characters. Name the character, or use he or she.\n"
+        + "  7. NO NUMBERS ANYWHERE IN THE PROSE. A predicted rating may be given to you as context "
         + "so you know how confidently to pitch — never restate it, never allude to a score, a "
         + "percentage or a count.\n"
-        + "  5. No marketing filler. \"A gripping ride\" and \"a must-watch\" say nothing. Every clause "
-        + "must be true of THIS title and no other.\n"
-        + "  6. FINISH EVERY SENTENCE INSIDE ITS LIMIT. The limits above are hard: a field that "
+        + "  8. FINISH EVERY SENTENCE INSIDE ITS LIMIT. The limits above are hard: a field that "
         + "reaches one is cut off exactly there, mid-word if that is where it lands. Plan the last "
         + "clause and close it with a full stop. Say less rather than stopping short.\n"
         + "Output strictly valid JSON.";
 
+    /// <summary>
+    /// The judge's rubric, corrected in the same pass that shipped prompt v4 — and the correction is
+    /// the reason a v3→v4 mean is readable at all.
+    ///
+    /// <para><b>spoilerFreeness was measuring the wrong thing.</b> v3's rubric said "first-act
+    /// premise only" and the judge read the premise itself as the spoiler, marking notes down for
+    /// "revealing the childhood-memory premise" — a premise printed on the poster. The rubric now
+    /// states what the product actually holds: the official overview's setup is fair game, and only
+    /// what comes AFTER it is a spoiler. A note that restates the overview and stops now scores 1.0
+    /// where it used to score around 0.6.</para>
+    ///
+    /// <para><b><c>povSlips</c> is a note, not a score</b>, deliberately. The slip it catches — "the
+    /// city that failed you", of a city that failed <i>her</i> — is rare enough that folding it into
+    /// <c>voice</c> would move a mean by noise, and specific enough that the exact phrase is worth
+    /// more than any number. It is also the one defect a deterministic guard could not be built for
+    /// (see <c>LensGuards</c>), so this is where it gets caught.</para>
+    /// </summary>
     private static readonly string AuditSystemPrompt =
         "You are auditing a piece of personalised film copy against a fixed rubric. Score each "
         + "dimension from 0.0 to 1.0 and return ONLY "
-        + "{\"specificity\":n,\"grounding\":n,\"spoilerFreeness\":n,\"voice\":n,\"comment\":\"...\"}.\n"
+        + "{\"specificity\":n,\"grounding\":n,\"spoilerFreeness\":n,\"voice\":n,\"povSlips\":\"...\","
+        + "\"comment\":\"...\"}.\n"
         + "  specificity     1.0 = every clause is true of this title and no other; 0.0 = generic filler.\n"
         + "  grounding       1.0 = every plot fact traces to the overview and every name to the credits; "
         + "0.0 = invented.\n"
-        + "  spoilerFreeness 1.0 = first-act premise only; 0.0 = names an ending, twist, death or reveal.\n"
-        + "  voice           1.0 = second person, honest, no marketing register and no numbers; 0.0 = "
-        + "third person, flattering, or quotes a score.\n"
+        + "  spoilerFreeness THE OFFICIAL PREMISE IS NOT A SPOILER. The setup as printed in the "
+        + "title's overview — who the characters are, what situation the story starts in, what the "
+        + "first act sets up — is what the copy is FOR, and restating it must never cost a point, "
+        + "however central it is to the film. 1.0 = says nothing the overview does not; 0.0 = names "
+        + "an ending, a finale, a twist, a reveal, a death, or any way the premise later develops. "
+        + "Score only what is past the setup.\n"
+        + "  voice           1.0 = spoken TO the viewer in second person (the hook included, as \"You "
+        + "get ...\" or an imperative), plain and specific, honest, no marketing adjectives and no "
+        + "numbers; 0.0 = a third-person tagline, marketing register, flattery, or a quoted score.\n"
+        + "povSlips names every place the copy makes the VIEWER a character in the plot — \"the city "
+        + "that failed you\" where the city failed HER, \"the men hunting you\" where they hunt HIM. "
+        + "Quote the offending phrase; null when there is none. \"You\" addressing the viewer as a "
+        + "viewer is correct and is never a slip.\n"
         + "comment is one short sentence naming the worst problem, or null when there is none. "
         + "Be harsh; a lenient audit is worthless. Output strictly valid JSON.";
 
