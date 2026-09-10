@@ -668,7 +668,7 @@ public class OpenRouterSearchAgent(
         "YEAR RANGES: a decade means both bounds — \"80s\" is minYear 1980 and maxYear 1989, \"from the 90s\" is 1990-1999. " +
         "\"before 2000\" sets only maxYear; \"after 2015\" sets only minYear. Do not infer a year from a title that merely " +
         "looks like one (\"1917\", \"300\", \"2001\"). " +
-        "STANDING FILTERS: when the user's request collides with a standing filter given above — they ask for " +
+        "STANDING FILTERS: when the request collides with a rule listed under \"Standing filters\" — they ask for " +
         "something those rules exclude — say so plainly in reply and offer the closest thing that DOES pass, " +
         "instead of promising the excluded thing. Never put an excluded genre or term in genres/keywords. " +
         "Use the conversation + shown list to resolve references. Output strictly valid JSON.";
