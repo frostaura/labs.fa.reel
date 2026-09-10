@@ -102,20 +102,42 @@ public static class TmdbGenres
         [37] = "western",
     };
 
-    public static readonly IReadOnlyDictionary<int, string> TvIdToSlug = new Dictionary<int, string>
+    /// <summary>
+    /// EVERY TMDB TV genre id, mapped to the Trakt-style slugs it stands for. Complete as of
+    /// 2026-09-10 — <c>TvGenreIdsGoldenTests</c> pins the id set so a TMDB addition fails a test
+    /// rather than silently vanishing.
+    ///
+    /// <para>One id maps to MANY slugs because TMDB's TV taxonomy fuses pairs the movie taxonomy
+    /// keeps apart: <c>Action &amp; Adventure</c>, <c>Sci-Fi &amp; Fantasy</c>, <c>War &amp;
+    /// Politics</c>. Before this it was a 1:1 map covering 11 of the 25 ingest slugs, so a
+    /// TMDB-discovered SHOW lit <c>action</c> but never <c>adventure</c>, <c>science-fiction</c> but
+    /// never <c>fantasy</c> — while the same show ingested from the user's Trakt library lit both.
+    /// Fourteen of the 25 genre one-hots were train-only for TV, which is train/serve skew
+    /// indistinguishable from a signal.</para>
+    ///
+    /// <para><c>reality</c>, <c>news</c>, <c>talk-show</c> and <c>soap</c> are Trakt slugs with NO
+    /// slot in <c>FeatureSchema.Genres</c>, so they light no one-hot. They are mapped anyway,
+    /// because <c>Title.Genres</c> is also the substrate for the account's ExcludeGenre rules: a
+    /// user who bans reality TV was previously banning it on library titles only.</para>
+    /// </summary>
+    public static readonly IReadOnlyDictionary<int, string[]> TvIdToSlugs = new Dictionary<int, string[]>
     {
-        [10759] = "action",
-        [16] = "animation",
-        [35] = "comedy",
-        [80] = "crime",
-        [99] = "documentary",
-        [18] = "drama",
-        [10751] = "family",
-        [10762] = "family",
-        [9648] = "mystery",
-        [10765] = "science-fiction",
-        [10768] = "war",
-        [37] = "western",
+        [10759] = ["action", "adventure"],   // Action & Adventure
+        [16] = ["animation"],                // Animation
+        [35] = ["comedy"],                   // Comedy
+        [80] = ["crime"],                    // Crime
+        [99] = ["documentary"],              // Documentary
+        [18] = ["drama"],                    // Drama
+        [10751] = ["family"],                // Family
+        [10762] = ["family"],                // Kids — no "children" slug in the ingest vocabulary
+        [9648] = ["mystery"],                // Mystery
+        [10763] = ["news"],                  // News
+        [10764] = ["reality"],               // Reality
+        [10765] = ["science-fiction", "fantasy"], // Sci-Fi & Fantasy
+        [10766] = ["soap"],                  // Soap
+        [10767] = ["talk-show"],             // Talk
+        [10768] = ["war"],                   // War & Politics
+        [37] = ["western"],                  // Western
     };
 
     /// <summary>Slug → (movie genre id, tv genre id); null when that medium has no equivalent.</summary>
@@ -124,21 +146,42 @@ public static class TmdbGenres
 
     public static string[] MapToSlugs(bool isMovie, int[] genreIds)
     {
-        var map = isMovie ? MovieIdToSlug : TvIdToSlug;
-        return genreIds.Where(map.ContainsKey).Select(id => map[id]).Distinct().ToArray();
+        if (isMovie)
+        {
+            return genreIds.Where(MovieIdToSlug.ContainsKey).Select(id => MovieIdToSlug[id]).Distinct().ToArray();
+        }
+
+        return genreIds
+            .Where(TvIdToSlugs.ContainsKey)
+            .SelectMany(id => TvIdToSlugs[id])
+            .Distinct()
+            .ToArray();
     }
 
+    /// <summary>
+    /// The reverse map used to ASK TMDB for a slug. A fused TV id is the answer for both of its
+    /// slugs — discovering "fantasy" on TV means asking for 10765, which is the closest thing TMDB
+    /// has and is exactly what the forward map says a 10765 show is. First writer wins per medium,
+    /// which only matters for <c>family</c> (10751 Family, ahead of 10762 Kids).
+    /// </summary>
     private static Dictionary<string, (int?, int?)> BuildReverse()
     {
-        var result = new Dictionary<string, (int?, int?)>();
+        var result = new Dictionary<string, (int?, int?)>(StringComparer.Ordinal);
         foreach (var (id, slug) in MovieIdToSlug)
         {
             result[slug] = (id, result.TryGetValue(slug, out var existing) ? existing.Item2 : null);
         }
 
-        foreach (var (id, slug) in TvIdToSlug)
+        // Ordered by id so the "first writer wins" tie-break is deterministic rather than a
+        // property of dictionary insertion order. The only tie is `family`, which resolves to
+        // 10751 (Family) ahead of 10762 (Kids).
+        foreach (var (id, slugs) in TvIdToSlugs.OrderBy(kv => kv.Key))
         {
-            result[slug] = (result.TryGetValue(slug, out var existing) ? existing.Item1 : null, id);
+            foreach (var slug in slugs)
+            {
+                var existing = result.TryGetValue(slug, out var found) ? found : (null, null);
+                result[slug] = (existing.Item1, existing.Item2 ?? id);
+            }
         }
 
         return result;

@@ -129,7 +129,6 @@ public class TasteSummaryTests(PostgresFixture fixture)
             new Dictionary<string, decimal>(),
             new Dictionary<int, List<short>>(),
             new Dictionary<Guid, List<short>>(),
-            new Dictionary<Guid, decimal>(),
             topLoved ?? [],
             null,
             null,

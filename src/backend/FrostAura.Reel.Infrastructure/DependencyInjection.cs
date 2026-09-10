@@ -172,6 +172,9 @@ public static class DependencyInjection
         services.AddScoped<Application.Search.LiveSearchExpansionService>();
         services.AddScoped<Application.Ranking.CandidateGenerator>();
         services.AddScoped<Application.Ranking.CandidateRetriever>();
+        // Offline diagnostic, reached only through the founder-only /api/dev surface. Scoped like
+        // everything else it composes; it writes nothing.
+        services.AddScoped<Application.Ranking.RetrievalRecallProbe>();
         services.AddScoped<Application.Ranking.FeedStarvationDiagnostic>();
         services.AddScoped<Application.Ranking.FeedPaginator>();
         services.AddScoped<Application.Ranking.FeedRefreshCoordinator>();

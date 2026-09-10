@@ -218,7 +218,6 @@ public static class ExplanationTemplater
                     string.Create(CultureInfo.InvariantCulture, $"the crowd backs it too ({rating:0.0} on Trakt)"),
                     string.Create(CultureInfo.InvariantCulture, $"rated {rating:0.0} on Trakt by the crowd")),
             "tmdbPopularityLog" => Pick(id, seed, "trending right now", "having a moment right now"),
-            "showEngagement" => Pick(id, seed, "you're already deep in this one", "you've put real time into this one"),
             "releaseAgeLog" when IsFresh(context.Title) => Pick(id, seed, "fresh off release", "just released"),
             "contrarianAdjustedRating" =>
                 Pick(id, seed,
@@ -232,6 +231,14 @@ public static class ExplanationTemplater
             // A per-genre indicator clause names a genre only when the user has actually rated it.
             _ when feature.StartsWith("genre:") && context.RatedGenres.Contains(feature[6..]) =>
                 Pick(id, seed, $"squarely {Pretty(feature[6..])}", $"firmly in {Pretty(feature[6..])} territory"),
+            // Tone one-hots (schema v4), guarded by the same closed-vocabulary check AnchorClause
+            // applies — a pre-enforcement row's free text must never reach the screen.
+            _ when feature.StartsWith("tone:") && AttributeVocabulary.IsClosedVocabTone(feature[5..]) =>
+                Pick(id, seed, $"{feature[5..]} in tone", $"has that {feature[5..]} streak"),
+            // The era one-hots deliberately have NO clause yet. Half the vocabulary ("timeless",
+            // "unknown", "contemporary") produces a sentence that says nothing, and an unexplained
+            // feature costs nothing here: BuildSentence walks the whole contribution list, so a null
+            // clause is skipped rather than blanking the card.
             _ => null,
         };
     }

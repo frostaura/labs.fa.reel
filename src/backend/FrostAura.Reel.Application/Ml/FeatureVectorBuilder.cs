@@ -102,7 +102,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
         IReadOnlyDictionary<string, decimal> GenreContrarianOffset,
         IReadOnlyDictionary<int, List<short>> DecadeRatings,
         IReadOnlyDictionary<Guid, List<short>> PersonRatings,
-        IReadOnlyDictionary<Guid, decimal> ShowEngagement,
         IReadOnlyList<Guid> TopLovedTitleIds,
         float[]? LovedCentroid,
         float[]? RecentCentroid,
@@ -121,8 +120,9 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
-        // Movie/show-level ratings are the label-bearing events; everything user-side derives
-        // from them (episode/season ratings feed only the showEngagement auxiliary signal).
+        // Movie/show-level ratings are the label-bearing events; everything user-side derives from
+        // them. Episode and season ratings are still INGESTED, but since schema v4 deleted
+        // `showEngagement` they feed no feature at all — see the note where it was computed.
         var titleRatings = await db.UserRatings
             .Where(r => r.AccountId == accountId && r.RatedAt <= asOf
                 && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
@@ -226,14 +226,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // per-title contribution to subtract and leave-one-out must skip them.
         var explicitPersonIds = explicitPersonRatings.Select(pr => pr.PersonId).ToHashSet();
 
-        // Show engagement: episode/season ratings averaged per parent show.
-        var showEngagement = (await db.UserRatings
-                .Where(r => r.AccountId == accountId && r.RatedAt <= asOf
-                    && (r.SubjectType == RatingSubjectType.Episode || r.SubjectType == RatingSubjectType.Season))
-                .GroupBy(r => r.TitleId)
-                .Select(g => new { g.Key, Mean = g.Average(r => (double)r.Rating) })
-                .ToListAsync(ct))
-            .ToDictionary(x => x.Key, x => (decimal)x.Mean);
+        // NOTE: a per-show mean of episode/season ratings used to be computed here for the
+        // `showEngagement` feature. That feature was pinned to 0 from Phase 8b and deleted outright
+        // in schema v4, so this was a database round-trip per taste-state build feeding a field
+        // nothing read. Removed with the slot.
 
         // Loved set for embedding similarity features (centroids tolerate missing embeddings).
         var topLoved = titleRatings
@@ -378,7 +374,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
             genreContrarian,
             decadeRatings,
             personRatings,
-            showEngagement,
             topLoved,
             lovedCentroid,
             recentCentroid,
@@ -479,19 +474,13 @@ public class FeatureVectorBuilder(IReelDbContext db)
             // ── Contrarian calibration ─────────────────────────────────────────────────
             vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, self));
 
-            // ── Show engagement ────────────────────────────────────────────────────────
-            // showEngagement is the mean of the user's own episode/season ratings for THIS show, so
-            // it is non-zero only for a show they have already watched — and the founder-locked
-            // zero-interaction-footprint rule guarantees a scored candidate never has. It is
-            // therefore always 0 at serving time and only ever non-zero during training: the same
-            // train/serve skew as the embedding and affinity leaks, just quieter, because a
-            // train-only signal teaches the model to lean on something that can never fire in
-            // production.
-            //
-            // Held at 0 on both paths rather than deleted, so v2 feature indices stay put — the
-            // slot is dead weight FastTree will simply never split on, and removing it is a
-            // schema-version decision to take deliberately, not a side effect of this fix.
-            vector[s++] = 0f;
+            // NOTE: v1-v3 wrote a `showEngagement` slot here, pinned to 0 on both paths. It was the
+            // mean of the user's own episode/season ratings for THIS show, so it could only ever be
+            // non-zero for a show they had already watched — which the founder-locked
+            // zero-interaction-footprint rule guarantees a scored candidate never is. Train-only by
+            // construction, therefore pure train/serve skew, therefore pinned; and pinned rather than
+            // deleted only because deleting it renumbers the vector. Schema v4 takes that renumber
+            // deliberately and the slot is gone. Do not reinstate it without a version bump.
 
             // ── LLM attributes ─────────────────────────────────────────────────────────
             if (attributes.TryGetValue(id, out var attrs))
@@ -565,6 +554,36 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 : 0f;
             vector[s++] = (float)DislikeSignal.GenreOverlap(title.Genres, taste.DislikedGenreWeights);
 
+            // ── Attribute/metadata presence (schema v4) ────────────────────────────────
+            // The v2 lesson applied to the four signals that carried the SAME defect one layer up:
+            // certification and subgenres are written only by Trakt ingest (IngestMapper), never by
+            // TitleHydrator, so before v4 a TMDB-discovered candidate scored certificationOrdinal 0
+            // and 32 zero subgenre buckets while every training row — the user's own Trakt library —
+            // had them populated. The model could learn "certification 0 ⇒ library title ⇒ rated",
+            // which is a label proxy that serving can never reproduce. v4 both SOURCES certification
+            // from TMDB during hydration and says out loud when it is missing.
+            //
+            // Tone/Era are gated on the extractor version as well as on presence: see
+            // FeatureSchema.MinTrustedExtractorVersion. A stale row reads exactly like no row.
+            var toneIndex = -1;
+            var eraIndex = -1;
+            if (attributes.TryGetValue(id, out var vocab)
+                && vocab.ExtractorVersion >= FeatureSchema.MinTrustedExtractorVersion)
+            {
+                toneIndex = AttributeVocabulary.ToneIndex(vocab.Tone);
+                eraIndex = AttributeVocabulary.EraIndex(vocab.Era);
+            }
+
+            vector[s++] = string.IsNullOrWhiteSpace(title.Certification) ? 0f : 1f;
+            // Both sources feed the shared hash buckets below, so the flag has to cover both — a
+            // title with themes but no Trakt subgenres genuinely does light buckets.
+            vector[s++] = title.Subgenres.Length > 0
+                || (attributes.TryGetValue(id, out var subgenreSource) && subgenreSource.Themes.Length > 0)
+                    ? 1f
+                    : 0f;
+            vector[s++] = toneIndex >= 0 ? 1f : 0f;
+            vector[s++] = eraIndex >= 0 ? 1f : 0f;
+
             // ── Genre multi-hot ────────────────────────────────────────────────────────
             var genreSet = title.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
             for (var g = 0; g < FeatureSchema.Genres.Length; g++)
@@ -586,6 +605,25 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 {
                     vector[s + TasteMath.StableBucket(theme, FeatureSchema.SubgenreBuckets)] = 1f;
                 }
+            }
+
+            s += FeatureSchema.SubgenreBuckets;
+
+            // ── Tone one-hot (schema v4) ───────────────────────────────────────────────
+            // At most one slot lights; an untrusted, out-of-vocabulary or missing tone lights none,
+            // which is why hasAttributesTone sits beside it — an all-zero block would otherwise be
+            // indistinguishable from a tone the model has simply never seen.
+            if (toneIndex >= 0)
+            {
+                vector[s + toneIndex] = 1f;
+            }
+
+            s += FeatureSchema.Tones.Length;
+
+            // ── Era one-hot (schema v4) ────────────────────────────────────────────────
+            if (eraIndex >= 0)
+            {
+                vector[s + eraIndex] = 1f;
             }
 
             result[id] = vector;

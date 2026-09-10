@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using FrostAura.Reel.Application.Ml;
@@ -420,11 +421,16 @@ public class EvalHarnessMathTests
     [Fact]
     public void The_popularity_caveat_carries_the_live_vector_length()
     {
-        // It shipped "~86" to the user for months after the vector reached 92. Interpolated now,
-        // and pinned here so a schema bump cannot make it a lie again.
-        Assert.Contains(FeatureSchema.VectorLength.ToString(), EvalHarness.PopularityCaveat, StringComparison.Ordinal);
+        // It shipped "~86" to the user for months after the vector reached 92, and v4 moved it again
+        // (to 124). Interpolated now, and pinned here so a schema bump cannot make it a lie again —
+        // the literal below is the tripwire that forces this test to be re-read on every bump.
+        Assert.Contains(
+            FeatureSchema.VectorLength.ToString(CultureInfo.InvariantCulture),
+            EvalHarness.PopularityCaveat,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("~86", EvalHarness.PopularityCaveat, StringComparison.Ordinal);
-        Assert.Equal(92, FeatureSchema.VectorLength);
+        Assert.DoesNotContain("92 features", EvalHarness.PopularityCaveat, StringComparison.Ordinal);
+        Assert.Equal(124, FeatureSchema.VectorLength);
 
         // And it still must not claim the leak is symmetric — the asymmetry runs against the model.
         Assert.Contains("NOT symmetric", EvalHarness.PopularityCaveat, StringComparison.Ordinal);
