@@ -9,6 +9,7 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Adapters;

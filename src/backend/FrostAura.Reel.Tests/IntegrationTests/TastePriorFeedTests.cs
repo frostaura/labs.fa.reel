@@ -535,6 +535,8 @@ public class TastePriorFeedTests(PostgresFixture fixture)
             tmdb,
             new UnavailableSearchAgent(),
             new PersonalisationContext(db, new DislikeSignal(db, cache)),
+            new FrostAura.Reel.Application.CrossReference.RerankBudget(
+                db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
             cache,
             NullLogger<FeedPaginator>.Instance);
 

@@ -359,6 +359,171 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.ToTable("TitleEmbeddings");
                 });
 
+            modelBuilder.Entity("FrostAura.Reel.Domain.CrossReference.CrossReferenceEvaluation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Caveat")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<long>("CompletionTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("DislikedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("EvaluatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("FalseRuleOutRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<int>("FalseRuleOuts")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("GatingDecision")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("HoldoutJudged")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("LovedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ModelId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("NoEmbeddingCount")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("PromptTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("PromptVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("SplitAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<double?>("SplitFraction")
+                        .HasColumnType("double precision");
+
+                    b.Property<decimal>("TrueRuleOutRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<int>("TrueRuleOuts")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("UnsureRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<decimal>("WilsonHigh")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<decimal>("WilsonLow")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "EvaluatedAt")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("AccountId", "RunId");
+
+                    b.ToTable("CrossReferenceEvaluations");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.CrossReference.TitleCrossReferenceVerdict", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("BatchIndex")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Confidence")
+                        .HasPrecision(4, 3)
+                        .HasColumnType("numeric(4,3)");
+
+                    b.Property<DateTime>("GeneratedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("ModelArtifactId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ModelId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("NeighbourIdsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("ProfileHash")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<int>("PromptVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Round")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("TitleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Verdict")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "TitleId", "GeneratedAt")
+                        .IsDescending(false, false, true);
+
+                    b.HasIndex("AccountId", "ProfileHash", "PromptVersion", "Round", "Verdict")
+                        .HasDatabaseName("IX_TitleCrossReferenceVerdicts_Sweep");
+
+                    b.HasIndex("AccountId", "TitleId", "ProfileHash", "PromptVersion", "Round")
+                        .IsUnique()
+                        .HasDatabaseName("IX_TitleCrossReferenceVerdicts_Key");
+
+                    b.ToTable("TitleCrossReferenceVerdicts");
+                });
+
             modelBuilder.Entity("FrostAura.Reel.Domain.Feed.AccountDigest", b =>
                 {
                     b.Property<Guid>("Id")
@@ -463,6 +628,14 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("WhySource")
                         .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<decimal?>("XrefConfidence")
+                        .HasPrecision(4, 3)
+                        .HasColumnType("numeric(4,3)");
+
+                    b.Property<string>("XrefVerdict")
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 

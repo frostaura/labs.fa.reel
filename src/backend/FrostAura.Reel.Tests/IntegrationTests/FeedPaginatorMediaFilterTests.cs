@@ -6,6 +6,7 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Ml;
@@ -81,6 +82,8 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
             new RatingCalibrationService(db, cache), new DislikeSignal(db, cache),
             candidateGenerator, tmdb, agent,
             new PersonalisationContext(db, new DislikeSignal(db, cache)),
+            new FrostAura.Reel.Application.CrossReference.RerankBudget(
+                db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
             cache, NullLogger<FeedPaginator>.Instance);
 
         var req = new MoreFeedRequest(FeedRowContext.Hero, AnchorTitleId: null, Genre: null, ExcludeTitleIds: [], Limit: 12, MediaType: media);
