@@ -243,6 +243,9 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     const stopped = page.getByTestId("askreel-stopped");
     await expect(stopped).toHaveText(/Stopped before any picks arrived\./);
     await expect(stopped.getByTestId("askreel-retry")).toBeVisible();
+    // The seam stays, and re-words itself: nothing is being waited for any more.
+    await expect(page.getByTestId("askreel-previous-answer"))
+      .toHaveText("Previous answer — the last question never replaced it.");
     await expect(page.getByTestId("askreel-composer")).toBeEditable();
   });
 

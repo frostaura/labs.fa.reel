@@ -405,7 +405,9 @@ function AskReel() {
               turn replaces it. */}
           {holdingPrevious && (visible.length > 0 || outsideVisible.length > 0) && (
             <p className="fa-caption text-fa-frost-dim" data-testid="askreel-previous-answer">
-              Previous answer — held until the new one arrives.
+              {streaming
+                ? "Previous answer — held until the new one arrives."
+                : "Previous answer — the last question never replaced it."}
             </p>
           )}
           <div
