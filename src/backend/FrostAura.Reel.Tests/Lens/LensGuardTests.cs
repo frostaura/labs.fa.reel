@@ -147,19 +147,43 @@ public class LensGuardTests
     // ── Provenance ──────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void An_invented_person_is_fatal_and_outranks_an_invented_anchor()
+    public void An_invented_person_is_fatal_and_outranks_an_invented_title()
     {
+        // The token rides the reason so the audit can say WHICH name sank it — a count of eleven
+        // refusals is a number, and nine of them naming the same title is a diagnosis.
         Assert.Equal(
-            LensRejectionReasons.InventedPerson,
+            "invented-person:Denis Villeneuve",
             LensGuards.InspectProvenance(["Denis Villeneuve"], ["Some Film Nobody Rated"]));
     }
 
     [Fact]
-    public void An_unrated_anchor_is_fatal()
+    public void A_title_named_in_the_prose_that_is_not_in_the_library_is_fatal()
     {
         Assert.Equal(
-            LensRejectionReasons.InventedAnchor,
+            "invented-anchor:Some Film Nobody Rated",
             LensGuards.InspectProvenance([], ["Some Film Nobody Rated"]));
+    }
+
+    [Fact]
+    public void A_reason_token_is_clipped_to_the_width_of_the_column_that_stores_it()
+    {
+        // RejectionReason is varchar(128). A pathological name must truncate the EVIDENCE, never
+        // the reason — a row reading "invented-anch" would be unreadable and ungroupable.
+        var reason = LensRejectionReasons.WithToken(LensRejectionReasons.InventedAnchor, new string('x', 400));
+
+        Assert.True(reason.Length <= 128);
+        Assert.StartsWith(LensRejectionReasons.InventedAnchor + ":", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_reason_with_no_token_stays_exactly_the_bare_reason()
+    {
+        Assert.Equal(
+            LensRejectionReasons.Spoiler,
+            LensRejectionReasons.WithToken(LensRejectionReasons.Spoiler, null));
+        Assert.Equal(
+            LensRejectionReasons.Spoiler,
+            LensRejectionReasons.WithToken(LensRejectionReasons.Spoiler, "   "));
     }
 
     [Fact]

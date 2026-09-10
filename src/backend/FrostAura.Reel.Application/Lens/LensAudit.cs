@@ -6,19 +6,33 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Application.Lens;
 
-/// <summary>One audited note: what was generated, and what the judge thought of it.</summary>
+/// <summary>
+/// One audited note: what was generated, and what the judge thought of it.
+///
+/// <para><b>A rejected note is a row like any other</b>, carrying its reason and its anchors.
+/// Reading why the guards refused something is the whole point of running this before and after a
+/// prompt edit, and a report that showed only the notes that passed would be a report on the
+/// prompt's best day.</para>
+/// </summary>
 public sealed record LensAuditRow(
     Guid TitleId,
     string TitleName,
     string ProfileHash,
     int PromptVersion,
     string Status,
+    /// <summary>The guard's verdict, with the offending token appended — "invented-anchor:Frontera".</summary>
     string? RejectionReason,
+    /// <summary>The reason without its token, so rows can be grouped by failure class.</summary>
+    string? RejectionKind,
+    /// <summary>The token that caused the refusal, or null. The evidence a prompt edit is judged on.</summary>
+    string? RejectionToken,
     DateTime GeneratedAt,
     string? Lens,
     string? Hook,
     string? Caution,
     string? Mood,
+    /// <summary>The anchor titles as stored — after any ungrounded entry was stripped.</summary>
+    IReadOnlyList<string> Anchors,
     double? Specificity,
     double? Grounding,
     double? SpoilerFreeness,
@@ -32,12 +46,21 @@ public sealed record LensAuditReport(
     int Scored,
     int Unscored,
     int RejectedByGuards,
+    /// <summary>
+    /// Refusals by failure class, worst count first — "invented-anchor: 9". The single most useful
+    /// number on the report, because it says WHICH way a prompt version is failing rather than how
+    /// often, and a prompt edit that trades one class for another is invisible in the total.
+    /// </summary>
+    IReadOnlyList<LensRejectionCount> RejectedByReason,
     double? MeanSpecificity,
     double? MeanGrounding,
     double? MeanSpoilerFreeness,
     double? MeanVoice,
     double? MeanOverall,
     IReadOnlyList<LensAuditRow> Rows);
+
+/// <summary>One failure class, its count, and the distinct tokens that produced it.</summary>
+public sealed record LensRejectionCount(string Reason, int Count, IReadOnlyList<string> Tokens);
 
 /// <summary>
 /// The founder-only LLM-judge pass over recently generated lens copy.
@@ -78,7 +101,7 @@ public sealed class LensAudit(
             .ToListAsync(ct);
         if (rows.Count == 0)
         {
-            return new LensAuditReport(writer.LensPromptVersion, 0, 0, 0, null, null, null, null, null, []);
+            return new LensAuditReport(writer.LensPromptVersion, 0, 0, 0, [], null, null, null, null, null, []);
         }
 
         var titleIds = rows.Select(r => r.TitleId).Distinct().ToList();
@@ -110,6 +133,7 @@ public sealed class LensAudit(
                 verdict = await writer.JudgeAsync(input, persona, note, ct);
             }
 
+            var (kind, token) = SplitReason(row.RejectionReason);
             audited.Add(new LensAuditRow(
                 row.TitleId,
                 names.GetValueOrDefault(row.TitleId) ?? "(unknown)",
@@ -117,11 +141,14 @@ public sealed class LensAudit(
                 row.PromptVersion,
                 row.Status.ToString(),
                 row.RejectionReason,
+                kind,
+                token,
                 row.GeneratedAt,
                 note?.Lens,
                 note?.Hook,
                 note?.Caution,
                 note?.Mood,
+                note?.Anchors.Select(a => a.Title).ToList() ?? [],
                 verdict?.Specificity,
                 verdict?.Grounding,
                 verdict?.SpoilerFreeness,
@@ -136,6 +163,7 @@ public sealed class LensAudit(
             scored.Count,
             audited.Count - scored.Count,
             audited.Count(a => a.Status == nameof(LensStatus.Rejected)),
+            ByReason(audited),
             Mean(scored.Select(a => a.Specificity)),
             Mean(scored.Select(a => a.Grounding)),
             Mean(scored.Select(a => a.SpoilerFreeness)),
@@ -143,6 +171,41 @@ public sealed class LensAudit(
             Mean(scored.Select(a => a.Overall)),
             audited);
     }
+
+    /// <summary>
+    /// Splits a stored reason into its class and the token that caused it. A reason written before
+    /// tokens existed has no colon and simply reports no token, rather than being unreadable.
+    /// </summary>
+    internal static (string? Kind, string? Token) SplitReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return (null, null);
+        }
+
+        var split = reason.IndexOf(':');
+        return split <= 0
+            ? (reason, null)
+            : (reason[..split], reason[(split + 1)..]);
+    }
+
+    /// <summary>Refusals grouped by failure class, worst first, with the distinct tokens behind each.</summary>
+    private static IReadOnlyList<LensRejectionCount> ByReason(IReadOnlyList<LensAuditRow> rows) =>
+        rows
+            .Where(r => r.RejectionKind is { Length: > 0 })
+            .GroupBy(r => r.RejectionKind!, StringComparer.Ordinal)
+            .OrderByDescending(g => g.Count())
+            .ThenBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => new LensRejectionCount(
+                g.Key,
+                g.Count(),
+                g.Select(r => r.RejectionToken)
+                    .Where(t => t is { Length: > 0 })
+                    .Select(t => t!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(t => t, StringComparer.Ordinal)
+                    .ToList()))
+            .ToList();
 
     /// <summary>The mean, or null over an empty set — a mean of nothing is not zero.</summary>
     private static double? Mean(IEnumerable<double?> values)

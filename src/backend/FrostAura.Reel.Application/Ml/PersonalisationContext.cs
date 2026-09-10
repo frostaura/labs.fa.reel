@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Lens;
+using FrostAura.Reel.Domain.Library;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Application.Ml;
@@ -56,17 +57,98 @@ public sealed class PersonalisationContext(IReelDbContext db, DislikeSignal disl
         return await TasteSummary.BuildAsync(db, accountId, taste, ct);
     }
 
+    /// <summary>Loved anchor candidates named to a lens prompt. Enough to choose from, few enough to read.</summary>
+    public const int LovedCandidates = 12;
+
+    /// <summary>Disliked anchor candidates. Fewer, because a note may carry at most one honest negative.</summary>
+    public const int DislikedCandidates = 6;
+
+    /// <summary>Rated at or above this is a "loved" candidate — the bar the eval harness uses.</summary>
+    private const short LovedFloor = 8;
+
+    /// <summary>Rated at or below this is a "disliked" candidate.</summary>
+    private const short DislikedCeiling = 4;
+
     /// <summary>
-    /// The full persona — taste context plus the recently-declined line. The declined line was
-    /// already reaching Ask Reel and had never reached the feed, so the feed's model had never been
-    /// told a single thing the account dislikes.
+    /// The full persona — taste context, the recently-declined line, and the titles a lens may
+    /// anchor against. The declined line was already reaching Ask Reel and had never reached the
+    /// feed, so the feed's model had never been told a single thing the account dislikes.
     /// </summary>
     public async Task<LensPersona> PersonaForAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, CancellationToken ct)
     {
         var taste_ = await ContextForAsync(accountId, taste, ct);
         var profile = await dislikes.GetProfileAsync(accountId, ct);
-        return new LensPersona(taste_, DislikeSignal.DeclinedLine(profile));
+        var anchors = await AnchorCandidatesAsync(accountId, profile, ct);
+        return new LensPersona(taste_, DislikeSignal.DeclinedLine(profile), anchors);
+    }
+
+    /// <summary>
+    /// The titles a lens note is permitted to name as an anchor: what this account loved, what it
+    /// disliked, and what it declined — each with the year and the account's own verdict, so the
+    /// model can write a true relation clause without guessing at one.
+    ///
+    /// <para><b>Declined titles are candidates on purpose.</b> They were already the only titles
+    /// named anywhere in a lens prompt, by way of the declined line, and the model anchored on them
+    /// because they were there. Listing them explicitly, with their stance, turns an accident into
+    /// the intent: "you said this was not for you" is a legitimate and useful anchor, and it is now
+    /// one the downstream check accepts.</para>
+    ///
+    /// <para>Ordered deterministically — rating, then recency, then name — so the same account
+    /// produces the same prompt twice and a golden test means something.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<LensAnchorCandidate>> AnchorCandidatesAsync(
+        Guid accountId, DislikeSignal.Profile profile, CancellationToken ct)
+    {
+        var rated = await db.UserRatings
+            .Where(r => r.AccountId == accountId
+                && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)
+                && (r.Rating >= LovedFloor || r.Rating <= DislikedCeiling))
+            .Join(
+                db.Titles,
+                r => r.TitleId,
+                t => t.Id,
+                (r, t) => new { t.Name, t.Year, r.Rating, r.RatedAt })
+            .Where(x => x.Name != null && x.Name != "")
+            .ToListAsync(ct);
+
+        var loved = rated
+            .Where(x => x.Rating >= LovedFloor)
+            .OrderByDescending(x => x.Rating)
+            .ThenByDescending(x => x.RatedAt)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(LovedCandidates)
+            .Select(x => new LensAnchorCandidate(x.Name, x.Year, x.Rating, AnchorStance.Loved));
+
+        var disliked = rated
+            .Where(x => x.Rating <= DislikedCeiling)
+            .OrderBy(x => x.Rating)
+            .ThenByDescending(x => x.RatedAt)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(DislikedCandidates)
+            .Select(x => new LensAnchorCandidate(x.Name, x.Year, x.Rating, AnchorStance.Disliked));
+
+        var declinedIds = profile.Recent
+            .Take(DislikeSignal.PromptCount)
+            .Select(d => d.TitleId)
+            .ToList();
+        var years = declinedIds.Count == 0
+            ? new Dictionary<Guid, int?>()
+            : await db.Titles
+                .Where(t => declinedIds.Contains(t.Id))
+                .ToDictionaryAsync(t => t.Id, t => t.Year, ct);
+        var declined = profile.Recent
+            .Take(DislikeSignal.PromptCount)
+            .Where(d => !string.IsNullOrWhiteSpace(d.Name))
+            .Select(d => new LensAnchorCandidate(
+                d.Name, years.GetValueOrDefault(d.TitleId), null, AnchorStance.Declined));
+
+        // De-duplicated by name, first stance winning: a title that was rated AND later declined
+        // is better described by the rating, which is the stronger statement.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return loved.Concat(disliked).Concat(declined)
+            .Where(c => seen.Add(c.Name))
+            .ToList();
     }
 
     /// <summary>Trims to <see cref="MaxInjectedChars"/> on the last sentence boundary that fits.</summary>
