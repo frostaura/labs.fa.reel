@@ -4,6 +4,7 @@ import { matchesBrowseFilter, type BrowseFilter } from "../../lib/browseFilter";
 import { useInfiniteRow } from "../../lib/useInfiniteRow";
 import { sortForMood, type TonightMood } from "../../lib/tonightMood";
 import RecCardHero from "./RecCardHero";
+import type { HeroRows } from "../../lib/heroLayout";
 
 interface Props {
   /** The snapshot's confident hero picks — the seed; the carousel pages on from there. */
@@ -14,10 +15,17 @@ interface Props {
    * have shown is still shown, in a different order. See lib/tonightMood.
    */
   mood?: TonightMood | null;
+  /**
+   * Rows of picks to lay out (see RecCardHero). Passed straight through: the row producer has no
+   * opinion about layout, and `useInfiniteRow` needs none either — two rows is still one list, and
+   * TOPUP_THRESHOLD's six cards are three columns, enough to overflow two visible columns and keep
+   * the carousel pulling.
+   */
+  rows?: HeroRows;
 }
 
 /** Tonight's picks as an endless reel: seeds from the hero snapshot, then pages forever. */
-export default function InfiniteHero({ seed, filter, mood = null }: Props) {
+export default function InfiniteHero({ seed, filter, mood = null, rows = 1 }: Props) {
   // The medium goes to the server so a Movies view pages movies (deepening from TMDB when the
   // eligible slice thins) — the parent re-keys this component on filter.media, so a switch remounts
   // with a fresh, correct-medium seed. Availability (released/coming) stays a client-side filter.
@@ -42,5 +50,5 @@ export default function InfiniteHero({ seed, filter, mood = null }: Props) {
     );
   }
 
-  return <RecCardHero cards={hero} loadMore={loadMore} loading={loading} />;
+  return <RecCardHero cards={hero} loadMore={loadMore} loading={loading} rows={rows} />;
 }

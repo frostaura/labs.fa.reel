@@ -28,6 +28,7 @@ import TrackRecordStrip from "../components/rec/TrackRecordStrip";
 import TonightMoodChips from "../components/rec/TonightMoodChips";
 import type { TonightMood } from "../lib/tonightMood";
 import { pipelineStageCopy } from "../lib/syncCopy";
+import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -38,6 +39,11 @@ export default function Home() {
   const dispatch = useDispatch();
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;
+
+  // Two rows of tonight's picks for anyone who can page for more of them. Free is capped at three
+  // hero cards server-side and its /more returns exhausted, so a second row there would be a half-
+  // empty grid advertising the cap. Below `md` the grid collapses back to one row on its own.
+  const heroRows: HeroRows = session?.tier === "Free" ? 1 : 2;
 
   // Every row is keyed on `resetKey`, so changing it remounts them and discards the pages the user
   // has scrolled. The snapshot's own generatedAt is therefore NOT the key: acting on a card queues
@@ -142,7 +148,13 @@ export default function Home() {
 
       {isLoading || building ? (
         <div className="space-y-8">
-          <div className="aspect-[16/8.5] rounded-2xl reel-shimmer" />
+          {/* Literally the hero's own container and card metrics, so the picks land in the space
+              already held for them. The full-bleed block this replaced was a head taller than the
+              card it stood in for, and a second row would have doubled that shove. */}
+          <div className={heroContainerClass(heroRows)} aria-hidden>
+            <div className={heroShimmerClass(heroRows)} />
+            {heroRows === 2 && <div className={heroShimmerClass(heroRows)} />}
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
             {Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="reel-poster reel-shimmer" />
@@ -163,7 +175,7 @@ export default function Home() {
           {/* Above the hero, because it is a question about tonight rather than about the model. */}
           <TonightMoodChips value={mood} onChange={setMood} />
 
-          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} />
+          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
 
           <ContinueWatchingRow entries={continueFiltered} />
 
