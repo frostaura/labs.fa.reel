@@ -145,8 +145,10 @@ public static class SearchEndpoints
             LiveSearchExpansionService expansion,
             IAccountContext accountContext,
             IReelDbContext db,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
+            var logger = loggerFactory.CreateLogger("FrostAura.Reel.Api.AskReel");
             if (accountContext.AccountId is not { } accountId)
             {
                 return Results.Unauthorized();
@@ -162,12 +164,26 @@ public static class SearchEndpoints
             var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
 
             string? assistantText = null;
+            // Whether the turn's terminal frame admitted a crash. A turn can emit a perfectly good
+            // assistant message and THEN fall over on the pipeline behind it, so "we have text" is
+            // not evidence the turn succeeded — and an assistant row written for a failed turn is a
+            // transcript that lies on reload.
+            var turnFailed = false;
             LiveSearchExpansionService.Emit emit = async (eventName, payload) =>
             {
                 var json = System.Text.Json.JsonSerializer.Serialize(payload, jsonOptions);
                 if (eventName == "assistant-message")
                 {
                     try { assistantText = System.Text.Json.JsonDocument.Parse(json).RootElement.GetProperty("text").GetString(); }
+                    catch { /* non-fatal */ }
+                }
+                else if (eventName == "done")
+                {
+                    try
+                    {
+                        turnFailed = System.Text.Json.JsonDocument.Parse(json).RootElement
+                            .TryGetProperty("failed", out var failed) && failed.ValueKind == System.Text.Json.JsonValueKind.True;
+                    }
                     catch { /* non-fatal */ }
                 }
 
@@ -181,6 +197,18 @@ public static class SearchEndpoints
                 .ToList();
             var shown = request.ShownTmdbIds ?? [];
             var message = request.Query ?? string.Empty;
+
+            // The pre-spend ceiling. Everything about this request is unbounded — the query and the
+            // history go straight into a prompt, the shown ids become an IN (…) over the catalogue —
+            // so a client bug that appends instead of replacing, or a pasted document, used to buy a
+            // full-price turn. Refused BEFORE the interpret call, the TMDB pull and the persisted
+            // turn, and refused gracefully: nothing broke, so `failed` stays false and the reason is
+            // prose the person can act on. See AskRequestLimits for the bounds and the why.
+            if (AskRequestLimits.Refuse(message, (request.History ?? []).Select(t => t.Text).ToList(), shown.Count) is { } refusal)
+            {
+                await emit("done", AskRequestLimits.RefusalPayload(refusal));
+                return Results.Empty;
+            }
 
             // Persist the turn so the conversation survives a reload (resume on the /search page).
             var now = DateTime.UtcNow;
@@ -239,7 +267,16 @@ public static class SearchEndpoints
                 // client navigated away mid-stream — normal teardown
             }
 
-            if (conversation is not null && !request.Continuation && assistantText is { Length: > 0 })
+            if (turnFailed)
+            {
+                // The user row stays — they did ask — but nothing is written that would replay as an
+                // answer. A transcript that shows a question and no reply is honest about what
+                // happened; one that shows a reply the pipeline never stood behind is not.
+                logger.LogWarning(
+                    "Ask Reel turn for account {AccountId} ended in a failure frame; no assistant row persisted.",
+                    accountId);
+            }
+            else if (conversation is not null && !request.Continuation && assistantText is { Length: > 0 })
             {
                 db.SearchTurns.Add(new Domain.Search.SearchTurn
                 {
@@ -254,7 +291,11 @@ public static class SearchEndpoints
             }
 
             return Results.Empty;
-        });
+        })
+        // The transport half of the ceiling: a body past this never reaches the handler, so work the
+        // handler cannot inspect stays bounded too. Route metadata rather than a Kestrel-wide limit,
+        // because Program.cs speaks for every endpoint and only this one streams an unbounded prompt.
+        .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(AskRequestLimits.MaxBodyBytes));
 
         // Resume: the most-recent conversation's transcript (newest convo, turns oldest→newest).
         group.MapGet("/conversations/latest", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>

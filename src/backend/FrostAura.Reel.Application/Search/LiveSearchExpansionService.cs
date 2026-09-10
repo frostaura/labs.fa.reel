@@ -79,6 +79,24 @@ public sealed class LiveSearchExpansionService(
     /// still interleave rejected titles among clean ones.
     /// </summary>
     private const double NegationPenalty = 0.22;
+    /// <summary>
+    /// The calendar window a release year is allowed to name. The lower bound is the year of the
+    /// first surviving film; the upper is the largest year <see cref="DateTime"/> can hold.
+    /// </summary>
+    /// <remarks>
+    /// This is a CRASH guard, not a taste guard. <see cref="SearchIntent.MinYear"/> and
+    /// <see cref="SearchIntent.MaxYear"/> arrive from a language model reading free text, so
+    /// "movies from the year 99999" reaches four <c>new DateTime(year, …)</c> sites — two in the
+    /// concept fetch, two in the person-credit fetch — every one of which throws
+    /// <see cref="ArgumentOutOfRangeException"/> and takes the whole turn down as a "snag". A
+    /// clamped bound answers a nonsense year with an ordinary, if unhelpful, result set; the
+    /// parser narrows the range further for sense, which is a different job.
+    /// </remarks>
+    private const int MinCalendarYear = 1870;
+
+    /// <inheritdoc cref="MinCalendarYear"/>
+    private const int MaxCalendarYear = 9999;
+
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -313,12 +331,7 @@ public sealed class LiveSearchExpansionService(
             // highest on the very similarity used to pick the top ReturnCount. Falls back to the
             // raw text only when the intent carries no positive signal at all.
             var seedText = RankingSeedText(agentReply, trimmed);
-            var queryVec = (await embeddings.EmbedAsync([seedText], ct))[0];
-
-            // Reference anchoring: pull the query vector towards the mean of the named titles'
-            // embeddings, so "like Blade Runner but more emotional" ranks by proximity to Blade
-            // Runner's actual neighbourhood rather than to the bare words. No-op without references.
-            queryVec = BlendQueryVector(queryVec, referenceVectors);
+            var queryVec = await RankingSeedVectorAsync(seedText, referenceVectors, ct);
 
             // Negation is applied BEFORE the cut, not after it — and it is HARD. Titles that
             // contradict what the user ruled out never appear as ordinary picks: with enough clean
@@ -327,9 +340,14 @@ public sealed class LiveSearchExpansionService(
             // outside the request, ordered after every clean pick, captioned with WHICH exclusion
             // they trip. (The old top-up refilled to ReturnCount unflagged, which is how "no
             // horror please" returned seven horror titles with why-lines admitting the violation.)
+            // With no usable seed there is no cosine to rank by, so the vector requirement is
+            // dropped too: every candidate carries a zero similarity and the personal score plus
+            // the LLM fit decide the order. Thinner than a seeded turn, never empty.
             var scoredPool = eligible
-                .Where(t => vectorsByTitle.ContainsKey(t.Id))
-                .Select(t => (Title: t, Sim: Cosine(queryVec, vectorsByTitle[t.Id])))
+                .Where(t => queryVec is null || vectorsByTitle.ContainsKey(t.Id))
+                .Select(t => (
+                    Title: t,
+                    Sim: queryVec is not null && vectorsByTitle.TryGetValue(t.Id, out var vec) ? Cosine(queryVec, vec) : 0d))
                 // A stable tiebreak: the base query has no ORDER BY, so equal similarities would
                 // otherwise resolve in whatever order Postgres happened to return rows, and an
                 // identical re-ask could come back in a different order.
@@ -585,6 +603,15 @@ public sealed class LiveSearchExpansionService(
         return fitById;
     }
 
+    /// <summary>
+    /// The TMDB discovery arm. Returns empty on any failure ⇒ the semantic arm carries the turn
+    /// alone — the mirror of what <see cref="SemanticNeighbourIdsAsync"/> already does when the
+    /// concept embedding fails, and for the same reason: a blip on ONE of two arms must not
+    /// discard the other. Before this guard a TMDB timeout, a 429 or a keyword-search failure
+    /// propagated to the turn's catch-all and returned "search hit a snag" with zero results,
+    /// even though every semantically-nearest unseen title was already in hand and needed no
+    /// network at all.
+    /// </summary>
     private async Task<List<Guid>> DiscoverCandidateIdsAsync(SearchIntent intent, string? region, CancellationToken ct)
     {
         var key = IntentKey(intent);
@@ -593,20 +620,28 @@ public sealed class LiveSearchExpansionService(
             return cached;
         }
 
-        // The TMDB firehose for this intent runs once even under concurrent identical searches;
-        // CancellationToken.None so a disconnecting waiter can't starve a sharer (dev StrictMode
-        // remount), and it warms the cache regardless.
-        var items = await coordinator.RunOnceAsync(
-            $"askreel:fetch:{key}",
-            () => FetchFromTmdbAsync(intent, region, CancellationToken.None));
-        if (items.Count == 0)
+        try
         {
+            // The TMDB firehose for this intent runs once even under concurrent identical searches;
+            // CancellationToken.None so a disconnecting waiter can't starve a sharer (dev StrictMode
+            // remount), and it warms the cache regardless.
+            var items = await coordinator.RunOnceAsync(
+                $"askreel:fetch:{key}",
+                () => FetchFromTmdbAsync(intent, region, CancellationToken.None));
+            if (items.Count == 0)
+            {
+                return [];
+            }
+
+            var ids = await UpsertAndCollectIdsAsync(items, ct);
+            cache.Set(CacheKey(key), ids, DiscoveryTtl);
+            return ids;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel TMDB arm: discovery failed; falling back to semantic-only discovery.");
             return [];
         }
-
-        var ids = await UpsertAndCollectIdsAsync(items, ct);
-        cache.Set(CacheKey(key), ids, DiscoveryTtl);
-        return ids;
     }
 
     /// <summary>
@@ -752,6 +787,32 @@ public sealed class LiveSearchExpansionService(
     }
 
     /// <summary>
+    /// The reference-anchored ranking seed, or <c>null</c> when the provider gave nothing usable to
+    /// anchor on.
+    ///
+    /// <para>The seed used to be a bare <c>[0]</c> index into the provider's answer, so an empty or
+    /// truncated response threw and the turn reported a crash. A missing seed costs the turn its
+    /// cosine ordering — real, and worth degrading for — but the pool has already been discovered
+    /// and is still worth showing. Where the turn named comparison titles, their mean carries the
+    /// seed on its own, exactly as the semantic arm already does.</para>
+    /// </summary>
+    private async Task<float[]?> RankingSeedVectorAsync(
+        string seedText, IReadOnlyList<float[]> referenceVectors, CancellationToken ct)
+    {
+        var embedded = await embeddings.EmbedAsync([seedText], ct);
+        if (embedded is [{ Length: > 0 }, ..])
+        {
+            return BlendQueryVector(embedded[0], referenceVectors);
+        }
+
+        logger.LogWarning(
+            "Ask Reel: the ranking seed came back empty; ranking this turn without a similarity signal.");
+        return referenceVectors.Count > 0
+            ? BlendQueryVector(new float[referenceVectors[0].Length], referenceVectors)
+            : null;
+    }
+
+    /// <summary>
     /// The reference-anchored query vector: <c>normalize(concept + 0.5 × mean(references))</c>.
     /// The concept keeps the majority weight — "like Blade Runner but MORE EMOTIONAL" must still
     /// honour the modifier — while the reference mean drags the query into the named titles'
@@ -857,6 +918,25 @@ public sealed class LiveSearchExpansionService(
             ? Math.Clamp(value, 0m, 10m)
             : 0m;
     }
+
+    /// <summary>
+    /// The first instant of a release-year window, or null when unbounded — the single definition
+    /// the concept fetch and the person-credit fetch both use. See <see cref="MinCalendarYear"/>
+    /// for why the year is clamped rather than trusted.
+    /// </summary>
+    private static DateTime? YearStart(int? year) =>
+        year is { } y ? new DateTime(ClampYear(y), 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
+
+    /// <summary>
+    /// The last instant of a release-year window, or null when unbounded. End-of-day, because
+    /// <see cref="SearchIntent.MaxYear"/> is documented as inclusive of the whole year — the two
+    /// call sites used to disagree about that by 24 hours.
+    /// </summary>
+    private static DateTime? YearEnd(int? year) =>
+        year is { } y ? new DateTime(ClampYear(y), 12, 31, 23, 59, 59, DateTimeKind.Utc) : null;
+
+    /// <inheritdoc cref="MinCalendarYear"/>
+    private static int ClampYear(int year) => Math.Clamp(year, MinCalendarYear, MaxCalendarYear);
 
     /// <summary>True when the title matches the requested media types (empty list = no constraint).</summary>
     private static bool MatchesMedia(Title title, IReadOnlyList<MediaType> mediaTypes) =>
@@ -1140,8 +1220,8 @@ public sealed class LiveSearchExpansionService(
 
         var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
         var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
-        DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        DateTime? before = intent.MaxYear is { } my ? new DateTime(my, 12, 31, 0, 0, 0, DateTimeKind.Utc) : null;
+        var after = YearStart(intent.MinYear);
+        var before = YearEnd(intent.MaxYear);
 
         var tasks = new List<Task<IReadOnlyList<TmdbListItem>>>();
         if (wantMovies)
@@ -1187,8 +1267,8 @@ public sealed class LiveSearchExpansionService(
     {
         var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
         var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
-        DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        DateTime? before = intent.MaxYear is { } my ? new DateTime(my, 12, 31, 23, 59, 59, DateTimeKind.Utc) : null;
+        var after = YearStart(intent.MinYear);
+        var before = YearEnd(intent.MaxYear);
 
         var all = new List<TmdbListItem>();
         foreach (var person in people.Take(2))
@@ -1261,8 +1341,27 @@ public sealed class LiveSearchExpansionService(
             return;
         }
 
-        for (var i = 0; i < missing.Count; i++)
+        // The provider's answer is assumed row-aligned to the texts, and it is not contractually
+        // guaranteed to be: a truncated or partially rate-limited response comes back SHORT, and
+        // this loop indexed straight off the end of it — an IndexOutOfRangeException that the
+        // turn's catch-all then reported as "search hit a snag" with zero results, having already
+        // discovered and hydrated a full pool. Store what arrived; the rest sit this turn out.
+        if (vectors.Length != missing.Count)
         {
+            logger.LogWarning(
+                "Ask Reel: the embedding provider answered with {Returned} vectors for {Requested} titles; "
+                + "storing the ones that arrived and ranking on those.",
+                vectors.Length, missing.Count);
+        }
+
+        var usable = Math.Min(missing.Count, vectors.Length);
+        for (var i = 0; i < usable; i++)
+        {
+            if (vectors[i] is not { Length: > 0 })
+            {
+                continue;
+            }
+
             db.TitleEmbeddings.Add(new TitleEmbedding
             {
                 TitleId = missing[i].Id,
