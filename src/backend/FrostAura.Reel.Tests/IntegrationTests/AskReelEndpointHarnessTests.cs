@@ -26,10 +26,33 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 [TestCaseOrderer(MoneyGateLastOrderer.TypeName, MoneyGateLastOrderer.AssemblyName)]
 public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory api)
-    : IClassFixture<ReelApiFactory>
+    : IClassFixture<ReelApiFactory>, IAsyncLifetime
 {
     /// <summary>Every account this class has signed in, so the money gate can name them all.</summary>
     private static readonly List<Guid> TouchedAccounts = [];
+
+    /// <summary>
+    /// OpenRouter rows in the ledger table before this class ran anything. The money gate asserts
+    /// the count is UNCHANGED rather than zero, because the whole integration suite shares one
+    /// database and other classes — <c>ApiUsageLedgerTests</c>, the lens pipeline — legitimately
+    /// write OpenRouter rows into it. Asserting zero passed in isolation and failed in the suite,
+    /// which is the worst of both: a gate that only holds when nothing else has run is not a gate.
+    /// </summary>
+    private static int? _openRouterRowBaseline;
+
+    /// <summary>Runs before every test in the class; the first one to arrive takes the baseline.</summary>
+    public async Task InitializeAsync()
+    {
+        if (!fixture.Available || _openRouterRowBaseline is not null)
+        {
+            return;
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        _openRouterRowBaseline = await db.ExternalApiUsages.CountAsync(u => u.Provider == ApiProvider.OpenRouter);
+    }
+
+    public Task DisposeAsync() => Task.CompletedTask;
 
     // ── Who may ask ─────────────────────────────────────────────────────────────────────────
 
@@ -204,7 +227,8 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
     /// pipeline; none of them may have cost anything.
     ///
     /// <para>Two assertions, because one of them alone would be a lie. The persisted ledger is
-    /// checked because that is where spend is ultimately recorded — but with the hosted services
+    /// checked for an UNCHANGED row count rather than a zero one — the suite shares one database
+    /// and other classes write OpenRouter rows into it legitimately — but with the hosted services
     /// removed nothing drains the recorder to Postgres (and <c>ApiUsageRecorder.FlushAsync</c> is
     /// <c>internal</c>, so a test cannot force it), which means a table check on its own would pass
     /// even if the run had spent a fortune. So the in-memory counters are checked too, per account
@@ -227,7 +251,7 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
 
         await using var db = fixture.CreateContext(new AccountContext());
         var openRouterRows = await db.ExternalApiUsages.CountAsync(u => u.Provider == ApiProvider.OpenRouter);
-        Assert.Equal(0, openRouterRows);
+        Assert.Equal(_openRouterRowBaseline, openRouterRows);
 
         foreach (var touched in TouchedAccounts.Append(accountId).Distinct())
         {
