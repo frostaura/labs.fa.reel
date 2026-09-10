@@ -47,6 +47,32 @@ namespace FrostAura.Reel.Application.Ml;
 /// their own blocks, and nothing already in the vector moves because of them.</item>
 /// </list>
 /// </item>
+/// <item><b>5</b> — the CREDIT-KNOWLEDGE and UNSCRIPTED bump, and a pure append (no reorder).
+/// Three scalars and five genre slots, all at the end of their own blocks:
+/// <list type="number">
+/// <item><b><c>knownPeopleFraction</c> / <c>knownDirectorOrWriter</c>.</b> <c>hasCredits</c> answers
+/// "does this title have credit rows", which is nearly always yes and was being read as "we know
+/// something about these people" — it is not the same question. A reality show with twelve unknown
+/// presenters and no director or writer row scored <c>hasCredits = 1</c> alongside
+/// <c>directorAffinity</c> / <c>writerAffinity</c> imputed at the user's own mean, and the model
+/// could not tell "known and average" from "we know nothing", so an all-unknown title read as a
+/// solidly-average one. These two scalars carry the KNOWLEDGE signal that <c>hasCredits</c> was
+/// being asked to carry and cannot; see <see cref="NeutralLowPersonAffinityOffset"/> for the second
+/// half of the same fix.</item>
+/// <item><b><c>isUnscripted</c>.</b> The aggregate of the five genre slots below, so a tree can
+/// split "any unscripted format" once instead of five times. Deliberately a SCALAR rather than a
+/// <c>genre:unscripted</c> slot: <c>Genres</c> is also read by <c>LexicalSearchService</c> as the
+/// searchable genre vocabulary, so a pseudo-slug there would become a search facet matching no
+/// title's actual genre list.</item>
+/// <item><b>Five unscripted genre slots APPENDED</b> — <c>reality</c>, <c>soap</c>,
+/// <c>talk-show</c>, <c>news</c>, <c>game-show</c>. They are real Trakt slugs that <c>TmdbGenres</c>
+/// has mapped all along (bar <c>game-show</c>, which TMDB's TV taxonomy has no id for and which
+/// therefore reaches the vector only through Trakt ingest), and which had NO slot here: a reality
+/// show lit zero of the 25 genre one-hots, so the whole unscripted half of television was
+/// indistinguishable from a title with no genres at all. Appended after <c>western</c>, so every
+/// pre-existing genre index is unmoved relative to the start of the block.</item>
+/// </list>
+/// </item>
 /// </list>
 /// A version bump makes every stored artifact unreadable by construction — the vector width and
 /// column meanings move. <c>ModelArtifact.FeatureSchemaJson</c> records the version an artifact was
@@ -55,7 +81,7 @@ namespace FrostAura.Reel.Application.Ml;
 /// </remarks>
 public static class FeatureSchema
 {
-    public const int Version = 4;
+    public const int Version = 5;
 
     /// <summary>
     /// Neutral fill-ins for crowd data the catalogue simply does not have. Half the catalogue has no
@@ -85,6 +111,27 @@ public static class FeatureSchema
     public static decimal NeutralPopularity(MediaType mediaType) =>
         mediaType == MediaType.Show ? NeutralShowPopularity : NeutralMoviePopularity;
 
+    /// <summary>
+    /// How far BELOW the user's own mean a person-affinity is imputed when nothing is known about a
+    /// title's credited people (schema v5). Half a rating point, and deliberately not zero.
+    ///
+    /// <para>Until v5 an unknown person's affinity was imputed at the user's mean, which is the
+    /// correct prior for a person the user has rated too few times to estimate — and quite wrong for
+    /// one they have never encountered at all. The two cases were spelled identically, so a title
+    /// whose entire cast was unknown scored <c>directorAffinity</c> and <c>writerAffinity</c> at the
+    /// mean and those slots then turned up as the TOP POSITIVE contributors on exactly the titles
+    /// with nobody known in them. "We know nothing" was being sold to the model, and to the
+    /// explanation layer, as "solidly average for you".</para>
+    ///
+    /// <para>Half a point is a nudge, not a verdict: it is smaller than the spread between the
+    /// user's best and worst genres, so a genuinely well-matched unknown title still outranks a
+    /// poorly-matched known one. It is also not the whole fix — <c>knownPeopleFraction</c> and
+    /// <c>knownDirectorOrWriter</c> carry the presence signal, so the model can learn its own
+    /// discount rather than inheriting this one. This constant only stops the imputed value from
+    /// being an outright lie in the meantime.</para>
+    /// </summary>
+    public const decimal NeutralLowPersonAffinityOffset = 0.5m;
+
     /// <summary>Canonical Trakt genre vocabulary (static — title genres are not user state).</summary>
     public static readonly string[] Genres =
     [
@@ -92,6 +139,11 @@ public static class FeatureSchema
         "drama", "family", "fantasy", "history", "holiday", "horror", "music", "musical",
         "mystery", "romance", "science-fiction", "short", "sports", "superhero",
         "suspense", "thriller", "war", "western",
+        // Unscripted formats (schema v5), APPENDED so every slug above keeps its block index.
+        // Before this the entire unscripted half of television lit no genre one-hot at all — a
+        // reality show and a title with an empty genre list were the same vector to the model,
+        // which is how "no genre demotion" and "no genre evidence" came to mean the same thing.
+        "reality", "soap", "talk-show", "news", "game-show",
     ];
 
     public const int SubgenreBuckets = 32;
@@ -152,6 +204,13 @@ public static class FeatureSchema
         "hasSubgenres",           // 0 when neither Title.Subgenres nor TitleAttributes.Themes had a value
         "hasAttributesTone",      // 0 when Tone is absent, out-of-vocabulary, or from a stale extractor
         "hasAttributesEra",       // 0 when Era is absent, out-of-vocabulary, or from a stale extractor
+        // Credit KNOWLEDGE and the unscripted aggregate (schema v5). Appended, same rule again.
+        // hasCredits (index 14) answers "do credit rows exist"; these answer "do we know anything
+        // about the people in them", which is the question the affinity scalars are actually
+        // conditioned on and which hasCredits was silently being read as.
+        "knownPeopleFraction",    // distinct credited people the user has rated / distinct credited people; 0 with no credits
+        "knownDirectorOrWriter",  // 1 when at least one director or writer credit resolves to a rated person
+        "isUnscripted",           // aggregate of the five unscripted genre slots (reality/soap/talk-show/news/game-show)
     ];
 
     /// <summary>

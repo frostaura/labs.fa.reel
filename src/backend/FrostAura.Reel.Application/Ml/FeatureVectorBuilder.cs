@@ -464,12 +464,13 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
             // ── Cast & crew affinities ─────────────────────────────────────────────────
             var credits = creditsByTitle.GetValueOrDefault(id);
-            var (director, cast, writer, lovedCast, hasCredits) = CreditAffinities(taste, personStats, credits, prior, self);
-            vector[s++] = (float)director;
-            vector[s++] = (float)cast;
-            vector[s++] = (float)writer;
-            vector[s++] = lovedCast;
-            vector[s++] = hasCredits;
+            var creditFeatures = CreditAffinities(taste, personStats, credits, prior, self);
+            vector[s++] = (float)creditFeatures.Director;
+            vector[s++] = (float)creditFeatures.Cast;
+            vector[s++] = (float)creditFeatures.Writer;
+            vector[s++] = creditFeatures.LovedCast;
+            // Literally "credit rows exist" — the KNOWLEDGE half moved to the two v5 scalars below.
+            vector[s++] = creditFeatures.HasCredits;
 
             // ── Contrarian calibration ─────────────────────────────────────────────────
             vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, self));
@@ -583,6 +584,19 @@ public class FeatureVectorBuilder(IReelDbContext db)
                     : 0f;
             vector[s++] = toneIndex >= 0 ? 1f : 0f;
             vector[s++] = eraIndex >= 0 ? 1f : 0f;
+
+            // ── Credit knowledge + unscripted aggregate (schema v5) ────────────────────
+            // The v2/v4 lesson one more time, on the last signal still telling it: hasCredits above
+            // says only that credit ROWS exist. These two say how much of the people behind them the
+            // user has any record with, which is the question directorAffinity / castAffinity /
+            // writerAffinity are conditioned on and which nothing was answering.
+            vector[s++] = creditFeatures.KnownPeopleFraction;
+            vector[s++] = creditFeatures.KnownDirectorOrWriter;
+            // The aggregate of the five v5 genre slots, via the SAME predicate the fit-verdict
+            // demotion uses — one vocabulary, not two. Note `soap` deliberately does NOT light it:
+            // a soap is scripted, it just shares the scheduling-filler economics, so it gets its own
+            // genre slot and no claim about being unscripted.
+            vector[s++] = UnscriptedFormats.IsUnscripted(title.Genres) ? 1f : 0f;
 
             // ── Genre multi-hot ────────────────────────────────────────────────────────
             var genreSet = title.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -714,7 +728,41 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
     private sealed record CreditRow(Guid TitleId, Guid PersonId, CreditRole Role, int? CastOrder);
 
-    private static (decimal Director, decimal Cast, decimal Writer, float LovedCast, float HasCredits) CreditAffinities(
+    /// <summary>
+    /// The neutral-LOW imputation for a person-affinity nothing is known about (schema v5):
+    /// <c>prior − 0.5</c>, floored at 1 so it stays inside the rating scale for a user whose mean is
+    /// already at the bottom of it. See <see cref="FeatureSchema.NeutralLowPersonAffinityOffset"/>
+    /// for why it is not the prior itself.
+    /// </summary>
+    private static decimal NeutralLowAffinity(decimal prior) =>
+        Math.Max(1m, prior - FeatureSchema.NeutralLowPersonAffinityOffset);
+
+    /// <summary>
+    /// Person-affinity features, and the two v5 scalars that say how much of them is actually known.
+    ///
+    /// <para><b>Known-and-average and know-nothing used to be the same number.</b> A title whose
+    /// credited people the user has never rated fell through every branch below and returned the
+    /// prior — the user's own mean — for director, cast and writer alike, behind a
+    /// <c>hasCredits = 1</c> that only ever meant "credit rows exist". On the founder's live account
+    /// this made <c>directorAffinity</c> and <c>writerAffinity</c> the top POSITIVE contributors on
+    /// precisely the titles with nobody known in them: a reality show with twelve unknown presenters
+    /// and no director or writer row read as three solidly-average signals plus a presence flag.</para>
+    ///
+    /// <para>v5 separates the three questions that were collapsed into one. <c>hasCredits</c> keeps
+    /// its literal meaning (any credit row exists) and is now honest because it is no longer the
+    /// only thing asked. <c>knownPeopleFraction</c> carries how much of the cast and crew the user
+    /// has any record with. <c>knownDirectorOrWriter</c> singles out the above-the-line roles, whose
+    /// affinities are the ones that were being fabricated. And an unknown affinity is imputed
+    /// neutral-LOW rather than at the mean, so the fabricated value at least errs toward "we do not
+    /// know" instead of toward "this is for you".</para>
+    ///
+    /// <para><b>Leave-one-out holds for the two new scalars by construction:</b> both are computed
+    /// from the SAME post-subtraction counts the affinities are. A training row whose only shared
+    /// person is that title itself has <c>count &lt;= 0</c> after subtraction, so the person is not
+    /// known — exactly as they would not be at serving time, where the candidate is unrated and
+    /// contributed nothing to any pool. One path, no divergence.</para>
+    /// </summary>
+    private static CreditFeatures CreditAffinities(
         TasteState taste,
         IReadOnlyDictionary<Guid, Stat> personStats,
         IReadOnlyList<CreditRow>? credits,
@@ -723,7 +771,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
     {
         if (credits is null || credits.Count == 0)
         {
-            return (prior, prior, prior, 0f, 0f);
+            var unknown = NeutralLowAffinity(prior);
+            return new CreditFeatures(unknown, unknown, unknown, 0f, 0f, 0f, 0f);
         }
 
         // A person credited on this title in two roles was handed this title's rating twice, so the
@@ -740,9 +789,14 @@ public class FeatureVectorBuilder(IReelDbContext db)
         decimal directorSum = 0m, writerSum = 0m;
         int directorCount = 0, writerCount = 0, lovedCast = 0;
         var cast = new List<decimal>();
+        // DISTINCT people, so a person credited twice on one title is one person in the fraction.
+        var creditedPeople = new HashSet<Guid>();
+        var knownPeople = new HashSet<Guid>();
+        var knownAboveTheLine = false;
 
         foreach (var credit in credits)
         {
+            creditedPeople.Add(credit.PersonId);
             if (!personStats.TryGetValue(credit.PersonId, out var stat))
             {
                 continue;
@@ -764,15 +818,22 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 continue;
             }
 
+            // Known = the user has at least one rating that reaches this person, AFTER this title's
+            // own rating is taken back out. That subtraction is what keeps the fraction honest on a
+            // training row (see the leave-one-out note above).
+            knownPeople.Add(credit.PersonId);
+
             switch (credit.Role)
             {
                 case CreditRole.Director:
                     directorCount += count;
                     directorSum += sum;
+                    knownAboveTheLine = true;
                     break;
                 case CreditRole.Writer:
                     writerCount += count;
                     writerSum += sum;
+                    knownAboveTheLine = true;
                     break;
                 default:
                     if (credit.CastOrder is null or < 5)
@@ -789,13 +850,35 @@ public class FeatureVectorBuilder(IReelDbContext db)
             }
         }
 
-        return (
-            TasteMath.ShrunkenMean(directorSum, directorCount, prior),
-            cast.Count > 0 ? cast.Average() : prior,
-            TasteMath.ShrunkenMean(writerSum, writerCount, prior),
+        // A role with nothing known behind it is imputed neutral-LOW, not at the prior. ShrunkenMean
+        // still handles the KNOWN-but-thin case exactly as before — that is what shrinkage is for —
+        // so this only ever fires where the alternative was inventing a number outright.
+        var unknownAffinity = NeutralLowAffinity(prior);
+        return new CreditFeatures(
+            directorCount > 0 ? TasteMath.ShrunkenMean(directorSum, directorCount, prior) : unknownAffinity,
+            cast.Count > 0 ? cast.Average() : unknownAffinity,
+            writerCount > 0 ? TasteMath.ShrunkenMean(writerSum, writerCount, prior) : unknownAffinity,
             lovedCast,
-            1f);
+            HasCredits: 1f,
+            KnownPeopleFraction: creditedPeople.Count == 0
+                ? 0f
+                : (float)knownPeople.Count / creditedPeople.Count,
+            KnownDirectorOrWriter: knownAboveTheLine ? 1f : 0f);
     }
+
+    /// <summary>
+    /// The credit block's outputs. A named record rather than a seven-place tuple: the two v5
+    /// additions made the positional form a trap, and <c>HasCredits</c> vs <c>KnownPeopleFraction</c>
+    /// are precisely the pair nobody should be able to transpose by accident.
+    /// </summary>
+    private readonly record struct CreditFeatures(
+        decimal Director,
+        decimal Cast,
+        decimal Writer,
+        float LovedCast,
+        float HasCredits,
+        float KnownPeopleFraction,
+        float KnownDirectorOrWriter);
 
     /// <summary>
     /// The user's genre-level contrarian offset for this title, with the title's own (user, crowd)

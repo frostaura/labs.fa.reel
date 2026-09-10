@@ -89,22 +89,45 @@ public class TmdbTvGenreMapTests
     }
 
     [Fact]
-    public void Every_tv_slug_is_either_a_feature_genre_or_a_documented_filter_only_slug()
+    public void Every_tv_slug_now_has_a_feature_genre_slot()
     {
-        // reality / news / talk-show / soap are real Trakt genres with NO slot in
-        // FeatureSchema.Genres, so they light no one-hot. They are mapped anyway because
-        // Title.Genres is also the substrate for the account's ExcludeGenre rules — a user who bans
-        // reality TV was previously banning it on library titles only. Anything ELSE outside the
-        // feature vocabulary is a typo, and this is where it fails.
-        string[] filterOnly = ["reality", "news", "talk-show", "soap"];
-
+        // Until schema v5 this test carried a `filterOnly` escape hatch for reality / news /
+        // talk-show / soap: real Trakt genres, mapped here so the account's ExcludeGenre rules could
+        // see them, with no slot in FeatureSchema.Genres and therefore no one-hot. v5 gave all four
+        // a slot, so the escape hatch is gone and the assertion is the stronger one it always wanted
+        // to be — EVERY slug this map can produce lands in the vector.
         var stray = TmdbGenres.TvIdToSlugs.Values
             .SelectMany(slugs => slugs)
             .Distinct(StringComparer.Ordinal)
-            .Where(slug => !FeatureSchema.Genres.Contains(slug) && !filterOnly.Contains(slug))
+            .Where(slug => !FeatureSchema.Genres.Contains(slug))
             .ToList();
 
         Assert.Empty(stray);
+    }
+
+    [Fact]
+    public void Game_show_is_a_feature_slot_that_tmdb_has_no_id_for()
+    {
+        // The one unscripted slot TMDB's TV taxonomy cannot fill: it has Reality, Soap, Talk and
+        // News ids but no game-show id, so that slot lights through Trakt ingest only. Pinned so the
+        // asymmetry is a stated fact rather than a silent hole — and so it FAILS if TMDB ever adds
+        // one, which is the moment the map should gain a row.
+        Assert.Contains("game-show", FeatureSchema.Genres);
+        Assert.DoesNotContain(
+            "game-show",
+            TmdbGenres.TvIdToSlugs.Values.SelectMany(slugs => slugs),
+            StringComparer.Ordinal);
+
+        // The other four DO map, so a TMDB-discovered unscripted show lights the same one-hot its
+        // Trakt-ingested counterpart does. That parity is the reason the slots were added.
+        foreach (var slug in new[] { "reality", "soap", "talk-show", "news" })
+        {
+            Assert.Contains(slug, FeatureSchema.Genres);
+            Assert.Contains(
+                slug,
+                TmdbGenres.TvIdToSlugs.Values.SelectMany(slugs => slugs),
+                StringComparer.Ordinal);
+        }
     }
 
     [Fact]

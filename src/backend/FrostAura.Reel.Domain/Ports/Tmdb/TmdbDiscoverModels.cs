@@ -115,10 +115,14 @@ public static class TmdbGenres
     /// Fourteen of the 25 genre one-hots were train-only for TV, which is train/serve skew
     /// indistinguishable from a signal.</para>
     ///
-    /// <para><c>reality</c>, <c>news</c>, <c>talk-show</c> and <c>soap</c> are Trakt slugs with NO
-    /// slot in <c>FeatureSchema.Genres</c>, so they light no one-hot. They are mapped anyway,
-    /// because <c>Title.Genres</c> is also the substrate for the account's ExcludeGenre rules: a
-    /// user who bans reality TV was previously banning it on library titles only.</para>
+    /// <para><c>reality</c>, <c>news</c>, <c>talk-show</c> and <c>soap</c> were mapped here before
+    /// they had any slot in <c>FeatureSchema.Genres</c>, because <c>Title.Genres</c> is also the
+    /// substrate for the account's ExcludeGenre rules. Since schema v5 they DO have slots, so a
+    /// TMDB-discovered unscripted show now lights its genre one-hot on both paths — which is the
+    /// whole point of mapping them here rather than only at ingest. <c>game-show</c> is the one
+    /// unscripted slot with no TMDB TV id to map (their taxonomy has none), so it reaches the vector
+    /// through Trakt ingest only; that is a gap in TMDB, not an omission here, and it is pinned by
+    /// <c>TmdbTvGenreMapTests</c> so it fails loudly if TMDB ever adds one.</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<int, string[]> TvIdToSlugs = new Dictionary<int, string[]>
     {
