@@ -89,12 +89,6 @@ public class OpenRouterSearchAgent(
         IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
         CancellationToken ct = default, string? standingFilters = null)
     {
-        // standingFilters is accepted and deliberately unused here: the prompt half is a separate
-        // change (A2 injects this into both the interpret and rerank user messages). Threading the
-        // port first means the caller that computes the summary and the prompt that consumes it can
-        // land independently without a signature churn in between.
-        _ = standingFilters;
-
         // The interpreter's FREE deterministic reading, not a second billable round-trip. This
         // value is only ever a fallback — SearchIntentParser consumes it solely when the model's
         // own answer carries no usable signal, and StubReply only when the reply line is missing —
@@ -109,7 +103,7 @@ public class OpenRouterSearchAgent(
 
         try
         {
-            var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles);
+            var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles, standingFilters);
             // schema: null deliberately. The interpret spec is a dozen fields wide and strict mode
             // requires every one of them declared and required, with nullability expressed as a
             // union type — that schema is Phase 3's, written against the finished field set rather
@@ -138,7 +132,11 @@ public class OpenRouterSearchAgent(
         // earns its cost: the interpreter's prompt is smaller and single-purpose, so it often
         // answers where the agent's did not — and it degrades to the same free heuristic if it
         // fails too, which is exactly what the old code fell back to.
-        var recovered = await interpreter.InterpretAsync(message, ct);
+        // The standing filters ride the fallback too. This is THE drift the two-prompt gotcha is
+        // about: the recovery path is the one a failing turn actually takes, so a rule the live
+        // prompt honours and this one does not is invisible until a user is told about a title
+        // their own filters exclude.
+        var recovered = await interpreter.InterpretAsync(message, ct, standingFilters);
         return new AgentReply(StubReply(message, recovered), recovered);
     }
 
@@ -463,10 +461,30 @@ public class OpenRouterSearchAgent(
         return new RerankResult(t.TitleId, fit, $"A {genre} pick aligned with your taste.");
     }
 
-    private static string BuildInterpretPrompt(IReadOnlyList<ChatTurn> history, string message, string taste, IReadOnlyList<string> shown)
+    /// <summary>
+    /// The line that carries the account's standing content rules into a prompt. Single-sourced
+    /// and internal because BOTH Ask Reel prompts must carry it identically — this agent's live
+    /// prompt and <see cref="OpenRouterSearchInterpreter"/>'s fallback. A session was already lost
+    /// to that pair drifting once, when maxYear reached one prompt and not the other.
+    /// </summary>
+    internal static string StandingFiltersLine(string filters) =>
+        "Standing filters (the account's own rules; the answer space is limited to titles that pass them): "
+        + filters + '\n';
+
+    private static string BuildInterpretPrompt(
+        IReadOnlyList<ChatTurn> history, string message, string taste, IReadOnlyList<string> shown,
+        string? standingFilters = null)
     {
         var sb = new StringBuilder();
         sb.Append("Your taste: ").Append(taste).Append('\n');
+
+        // Beside taste, deliberately: both describe WHO is asking rather than what was asked, and
+        // the model reads the pair as one frame. In the USER message rather than the system one
+        // because it is per-account data, not policy.
+        if (standingFilters is { Length: > 0 } filters)
+        {
+            sb.Append(StandingFiltersLine(filters));
+        }
         if (history.Count > 0)
         {
             sb.Append("Conversation so far:\n");
@@ -650,6 +668,9 @@ public class OpenRouterSearchAgent(
         "YEAR RANGES: a decade means both bounds — \"80s\" is minYear 1980 and maxYear 1989, \"from the 90s\" is 1990-1999. " +
         "\"before 2000\" sets only maxYear; \"after 2015\" sets only minYear. Do not infer a year from a title that merely " +
         "looks like one (\"1917\", \"300\", \"2001\"). " +
+        "STANDING FILTERS: when the user's request collides with a standing filter given above — they ask for " +
+        "something those rules exclude — say so plainly in reply and offer the closest thing that DOES pass, " +
+        "instead of promising the excluded thing. Never put an excluded genre or term in genres/keywords. " +
         "Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
     private const string RerankSystemPrompt =

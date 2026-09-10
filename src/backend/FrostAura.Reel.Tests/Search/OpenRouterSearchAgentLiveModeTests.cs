@@ -274,6 +274,66 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.Equal(["quiet space films"], reply.Intent.Keywords);
     }
 
+    // ── Standing filters ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Standing_filters_appear_in_the_user_message_of_both_prompts()
+    {
+        // Ask Reel has TWO prompt/parser pairs: this agent's, which the live turn uses, and
+        // OpenRouterSearchInterpreter's, which the RECOVERY path uses when the live call fails.
+        // A rule that reaches one and not the other is invisible — the fallback quietly answers
+        // outside the account's own filters, and only a user who is offered an excluded title
+        // ever finds out. So both are asserted here, in one test, carrying the IDENTICAL line.
+        const string filters = "never horror; nothing before 1990";
+
+        var agentHandler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
+        await Agent(agentHandler).InterpretAsync(
+            [], "something scary", "likes sci-fi", [], standingFilters: filters);
+
+        var interpreterHandler = new InterpreterHandler(Envelope("""{"genres":["science-fiction"]}"""));
+        await Interpreter(interpreterHandler).InterpretAsync("something scary", default, filters);
+
+        var expected = OpenRouterSearchAgent.StandingFiltersLine(filters).TrimEnd('\n');
+        Assert.Contains(expected, UserMessageOf(agentHandler.Bodies[0]), StringComparison.Ordinal);
+        Assert.Contains(expected, UserMessageOf(interpreterHandler.Bodies[0]), StringComparison.Ordinal);
+
+        // Both SYSTEM prompts state what to do about a collision, or the data above is inert.
+        Assert.Contains("STANDING FILTERS", SystemMessageOf(agentHandler.Bodies[0]), StringComparison.Ordinal);
+        Assert.Contains("STANDING FILTERS", SystemMessageOf(interpreterHandler.Bodies[0]), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task No_standing_filters_leaves_both_user_messages_exactly_as_they_were()
+    {
+        // The probe on the other side of the branch. Most accounts have no content rules at all,
+        // and a prompt that grows an empty "Standing filters: " header for them is spend and noise.
+        var agentHandler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
+        await Agent(agentHandler).InterpretAsync([], "something scary", "likes sci-fi", []);
+
+        var interpreterHandler = new InterpreterHandler(Envelope("""{"genres":["science-fiction"]}"""));
+        await Interpreter(interpreterHandler).InterpretAsync("something scary");
+
+        Assert.DoesNotContain("Standing filters", UserMessageOf(agentHandler.Bodies[0]), StringComparison.Ordinal);
+        // The fallback's message is the bare query when there are no rules — byte-identical to
+        // every request it made before this change.
+        Assert.Equal("something scary", UserMessageOf(interpreterHandler.Bodies[0]));
+    }
+
+    [Fact]
+    public async Task The_recovery_path_hands_the_standing_filters_down_to_the_fallback()
+    {
+        // The wiring, not the wording: a live call that fails routes through the interpreter, and
+        // that hop is where the summary was most likely to be dropped on the floor.
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.InternalServerError, "{}"));
+        var interpreter = new HeuristicInterpreter();
+
+        await Agent(handler, interpreter).InterpretAsync(
+            [], "something scary", "likes sci-fi", [], standingFilters: "never horror");
+
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.Equal("never horror", interpreter.LastStandingFilters);
+    }
+
     // ── Ceilings ────────────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -487,6 +547,28 @@ public class OpenRouterSearchAgentLiveModeTests
         return doc.RootElement.GetProperty("response_format").GetProperty("type").GetString()!;
     }
 
+    private static OpenRouterSearchInterpreter Interpreter(InterpreterHandler handler)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OPENROUTER_API_KEY"] = "test-key-not-a-real-one",
+                ["TestHelpers:ModelStubMode"] = "false",
+            })
+            .Build();
+        var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
+        return new OpenRouterSearchInterpreter(
+            client, Recorder(), config, NullLogger<OpenRouterSearchInterpreter>.Instance);
+    }
+
+    private static string UserMessageOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("messages").EnumerateArray()
+            .First(m => m.GetProperty("role").GetString() == "user")
+            .GetProperty("content").GetString()!;
+    }
+
     private static string SystemMessageOf(string body)
     {
         using var doc = JsonDocument.Parse(body);
@@ -507,13 +589,18 @@ public class OpenRouterSearchAgentLiveModeTests
 
         public int HeuristicCalls { get; private set; }
 
+        /// <summary>What the RECOVERY path handed down — the half the two-prompt gotcha is about.</summary>
+        public string? LastStandingFilters { get; private set; }
+
         public bool IsAvailable => true;
 
         public string ModelId => "fake/heuristic";
 
-        public Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default)
+        public Task<SearchIntent> InterpretAsync(
+            string query, CancellationToken ct = default, string? standingFilters = null)
         {
             InterpretCalls++;
+            LastStandingFilters = standingFilters;
             return Task.FromResult(Intent(query));
         }
 
@@ -525,6 +612,21 @@ public class OpenRouterSearchAgentLiveModeTests
 
         private static SearchIntent Intent(string query) =>
             new([], [query], Array.Empty<MediaType>(), query, null, null);
+    }
+
+    /// <summary>The fallback interpreter's transport — same shape, its own capture list.</summary>
+    private sealed class InterpreterHandler(string body) : HttpMessageHandler
+    {
+        public List<string> Bodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Bodies.Add(await request.Content!.ReadAsStringAsync(ct));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+        }
     }
 
     private sealed record CannedResponse(HttpStatusCode Status, string Body);

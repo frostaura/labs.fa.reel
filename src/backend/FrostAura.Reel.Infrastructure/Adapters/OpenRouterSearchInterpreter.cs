@@ -53,7 +53,8 @@ public class OpenRouterSearchInterpreter(
         : configuration["OPENROUTER_MODEL"] is { Length: > 0 } o ? o
         : "openai/gpt-5.4-mini";
 
-    public async Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default)
+    public async Task<SearchIntent> InterpretAsync(
+        string query, CancellationToken ct = default, string? standingFilters = null)
     {
         var trimmed = (query ?? string.Empty).Trim();
         if (trimmed.Length == 0 || StubMode)
@@ -76,7 +77,7 @@ public class OpenRouterSearchInterpreter(
                     messages = new object[]
                     {
                         new { role = "system", content = SystemPrompt },
-                        new { role = "user", content = trimmed },
+                        new { role = "user", content = BuildUserMessage(trimmed, standingFilters) },
                     },
                 }, options: JsonOptions),
             };
@@ -448,6 +449,19 @@ public class OpenRouterSearchInterpreter(
         "but", "instead", "rather", "want", "prefer", "more", "just", "only", "give",
     };
 
+    /// <summary>
+    /// The user message. Bare query when the account has no standing rules — which keeps every
+    /// existing request byte-identical — and the query beneath the shared standing-filters line
+    /// when it does. The line itself comes from <see cref="OpenRouterSearchAgent"/> so the two
+    /// Ask Reel prompts cannot express the same rules in two different sentences: this one is the
+    /// FALLBACK half of that pair, and the pair drifting is a defect this codebase has already
+    /// paid for once.
+    /// </summary>
+    private static string BuildUserMessage(string query, string? standingFilters) =>
+        standingFilters is { Length: > 0 } filters
+            ? OpenRouterSearchAgent.StandingFiltersLine(filters) + "Request: " + query
+            : query;
+
     private const string SystemPrompt =
         "You convert a movie/TV search request into a JSON discovery spec. Return ONLY a JSON object with keys: " +
         "genres (array of slugs from EXACTLY this set: action, adventure, animation, comedy, crime, documentary, " +
@@ -470,7 +484,10 @@ public class OpenRouterSearchInterpreter(
         "user refused. Rejection lists can be long: put EVERY rejected item in the exclude arrays, not just the first few. " +
         "YEAR RANGES: a decade means both bounds — \"80s\" is minYear 1980 and maxYear 1989, \"from the 90s\" is 1990-1999. " +
         "\"before 2000\" sets only maxYear; \"after 2015\" sets only minYear. Do not infer a year from a title that merely " +
-        "looks like one (\"1917\", \"300\", \"2001\"). Output strictly valid JSON.";
+        "looks like one (\"1917\", \"300\", \"2001\"). " +
+        "STANDING FILTERS: where a standing-filters line is given, those are the account's own content rules and " +
+        "they bound the answer space — never put an excluded genre or term in genres or keywords, even when the " +
+        "request asks for it. Output strictly valid JSON.";
 
     private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 

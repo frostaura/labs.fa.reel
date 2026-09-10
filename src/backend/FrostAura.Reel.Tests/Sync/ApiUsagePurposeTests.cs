@@ -134,19 +134,40 @@ public class ApiUsagePurposeTests
     }
 
     [Fact]
-    public async Task The_standing_filter_summary_is_accepted_and_changes_nothing_yet()
+    public async Task The_standing_filter_summary_reaches_the_prompt_and_still_costs_one_call()
     {
-        // The port carries it before any prompt reads it. This pins the "changes nothing" half, so
-        // the commit that DOES inject it into the prompt has to move this assertion deliberately.
+        // MOVED, deliberately. This test previously asserted the OPPOSITE — that the port accepted
+        // the summary and changed nothing — because the signature landed a commit before the
+        // prompt did. That "changes nothing" assertion was scaffolding for exactly this change,
+        // and the pin that survives is the one that matters to the ledger: injecting per-account
+        // context into the prompt must not turn one turn into two billable calls.
+        var recorder = Recorder();
         var handler = new CannedHandler("""{"reply":"ok","genres":["science-fiction"]}""");
-        var withFilters = await Agent(handler, Recorder()).InterpretAsync(
+        var withFilters = await Agent(handler, recorder).InterpretAsync(
             [], "80s sci-fi movies", "likes sci-fi", [], standingFilters: "never horror; nothing before 1990");
 
         var plainHandler = new CannedHandler("""{"reply":"ok","genres":["science-fiction"]}""");
         var without = await Agent(plainHandler, Recorder()).InterpretAsync([], "80s sci-fi movies", "likes sci-fi", []);
 
+        Assert.NotEqual(plainHandler.Bodies[0], handler.Bodies[0]);
+        Assert.Contains("never horror; nothing before 1990", UserMessageOf(handler.Bodies[0]), StringComparison.Ordinal);
+        Assert.DoesNotContain("Standing filters", UserMessageOf(plainHandler.Bodies[0]), StringComparison.Ordinal);
+
+        // Same reply, same single SearchAgent row, nothing in the rerank family.
         Assert.Equal(without.Reply, withFilters.Reply);
-        Assert.Equal(plainHandler.Bodies[0], handler.Bodies[0]);
+        Assert.Single(handler.Bodies);
+        Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, accountId: null, ApiUsagePurpose.SearchAgent).Calls);
+        Assert.All(
+            ApiUsagePurpose.RerankFamily,
+            p => Assert.Equal(0, recorder.PendingToday(ApiProvider.OpenRouter, accountId: null, p).Calls));
+    }
+
+    private static string UserMessageOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("messages").EnumerateArray()
+            .First(m => m.GetProperty("role").GetString() == "user")
+            .GetProperty("content").GetString()!;
     }
 
     private static ApiUsageRecorder Recorder()
@@ -176,7 +197,8 @@ public class ApiUsagePurposeTests
 
         public string ModelId => "fake/heuristic";
 
-        public Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default) =>
+        public Task<SearchIntent> InterpretAsync(
+            string query, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(Intent(query));
 
         public SearchIntent Heuristic(string query) => Intent(query);
