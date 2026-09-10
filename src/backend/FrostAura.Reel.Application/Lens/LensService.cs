@@ -206,15 +206,21 @@ public sealed class LensService(
                     continue;
                 }
 
+                // The length repair runs before anything reads the copy, so the guards judge — and
+                // the row stores — exactly the characters the surface will render. A word the
+                // response schema cut in half is damage, not a judgement, and it should not reach
+                // a rule that is trying to decide whether the prose is honest.
+                var note = LensGuards.Tidy(draft.Note);
+
                 // The pure guards first, then the provenance pass — which may TRIM the note rather
                 // than refuse it. What gets stored is the verdict's note, never the raw draft: a
                 // stripped anchor that survives into LensJson is a dropped anchor that still
                 // renders the next time anything reads the row back.
-                var deterministic = LensGuards.Inspect(draft.Note, title.Name);
+                var deterministic = LensGuards.Inspect(note, title.Name);
                 var verdict = deterministic is not null
-                    ? new LensVerdict(draft.Note, deterministic, [])
+                    ? new LensVerdict(note, deterministic, [])
                     : await verifier.VerifyAsync(
-                        accountId, draft.Note, built.CreditedNames.GetValueOrDefault(title.TitleId) ?? [], batchCt);
+                        accountId, note, built.CreditedNames.GetValueOrDefault(title.TitleId) ?? [], batchCt);
 
                 if (verdict.StrippedAnchors.Count > 0)
                 {

@@ -85,6 +85,130 @@ public static partial class LensGuards
     [GeneratedRegex(@"\b[A-Z][\p{L}'’\-]+(?:\s+(?:van|von|de|del|della|di|da|der|den)\s+|\s+)[A-Z][\p{L}'’\-]+(?:\s+[A-Z][\p{L}'’\-]+)?")]
     private static partial Regex ProperNounRegex();
 
+    /// <summary>
+    /// Characters that may trail the last real word of a field: whitespace, and the punctuation a
+    /// sentence can legitimately or accidentally end on.
+    /// </summary>
+    private static readonly char[] TailChars =
+        [' ', '\t', '\n', '\r', '.', ',', ';', ':', '!', '?', '…', '-', '–', '—'];
+
+    /// <summary>The marks that actually close a sentence, as opposed to joining one to the next.</summary>
+    private static readonly char[] Terminals = ['.', '!', '?', '…'];
+
+    /// <summary>
+    /// Trailing shapes that are already correct English and must be left exactly as they are.
+    /// <c>"..."</c> is in here deliberately: a written-out ellipsis is a choice, not damage.
+    /// </summary>
+    private static readonly string[] CleanTails = [".", "!", "?", "?!", "!?", "…", "..."];
+
+    /// <summary>
+    /// How close to the requested cap a field has to sit before a missing full stop is read as a
+    /// truncation rather than as a style. One character, because constrained decoding stops on the
+    /// exact character and the only slack is a trailing space that <c>Trim</c> then removes.
+    /// </summary>
+    private const int CapSlack = 1;
+
+    /// <summary>
+    /// Repairs the two ways the response schema's <c>maxLength</c> damages copy, and nothing else.
+    ///
+    /// <para><b>One: a word cut in half.</b> A structured-output length limit is enforced by
+    /// constrained decoding, so the string simply stops at the cap — live copy came back ending
+    /// "…and a crowd-pleasing sw". A field sitting on its cap that does not close a sentence was
+    /// cut, so the partial word goes and an ellipsis says so. The length gate is what keeps this
+    /// off a hook that is merely a headline without a full stop; a short field that ends on a bare
+    /// word is left alone, because there is no evidence anything was lost.</para>
+    ///
+    /// <para><b>Two: punctuation left stranded.</b> A model steering for a cap it can feel coming
+    /// abandons a clause and closes anyway — "…the marriage strain,." — or trails a comma with
+    /// nothing after it. The trailing run collapses to the last real terminal, or to an ellipsis
+    /// when the run was all joiners and the sentence plainly went unfinished.</para>
+    ///
+    /// <para>Applied before the guards rather than after, so the deterministic rules judge the copy
+    /// exactly as it will be stored and rendered. It is a repair, never a rewrite: a field that is
+    /// already well-formed comes back reference-identical.</para>
+    /// </summary>
+    public static LensNote Tidy(LensNote note)
+    {
+        var lens = TidyField(note.Lens, LensNote.RequestLensChars);
+        var hook = TidyField(note.Hook, LensNote.RequestHookChars);
+        var caution = TidyCopy(note.Caution, LensNote.RequestCautionChars);
+
+        return ReferenceEquals(lens, note.Lens)
+            && ReferenceEquals(hook, note.Hook)
+            && ReferenceEquals(caution, note.Caution)
+            ? note
+            : note with { Lens = lens, Hook = hook, Caution = caution };
+    }
+
+    /// <summary>
+    /// One field. <paramref name="requestedMax"/> is the cap the PROMPT asked for, not the parse
+    /// ceiling — it is the number the provider truncated against, so it is the number that says
+    /// whether a truncation happened.
+    /// </summary>
+    public static string? TidyCopy(string? text, int requestedMax) =>
+        text is null ? null : TidyField(text, requestedMax);
+
+    /// <inheritdoc cref="TidyCopy"/>
+    public static string TidyField(string text, int requestedMax)
+    {
+        var value = text.Trim();
+        if (value.Length == 0)
+        {
+            return text;
+        }
+
+        if (value.Length >= requestedMax - CapSlack && !EndsOnATerminal(value))
+        {
+            var cut = value.LastIndexOf(' ');
+            var body = (cut > 0 ? value[..cut] : value).TrimEnd(TailChars);
+
+            // Everything before the last space was punctuation — there is no sentence left to
+            // salvage, so the original stands rather than being reduced to an ellipsis.
+            return body.Length == 0 ? text : body + "…";
+        }
+
+        var end = value.Length;
+        while (end > 0 && TailChars.Contains(value[end - 1]))
+        {
+            end--;
+        }
+
+        if (end == value.Length)
+        {
+            return Same(text, value);
+        }
+
+        var prose = value[..end];
+        var tail = new string(value[end..].Where(c => !char.IsWhiteSpace(c)).ToArray());
+        if (tail.Length == 0)
+        {
+            return Same(text, prose);
+        }
+
+        if (CleanTails.Contains(tail, StringComparer.Ordinal))
+        {
+            return Same(text, prose + tail);
+        }
+
+        var lastTerminal = tail.LastIndexOfAny(Terminals);
+        return Same(text, lastTerminal >= 0 ? prose + tail[lastTerminal] : prose + "…");
+    }
+
+    /// <summary>Hands back the caller's own string when nothing actually changed, so
+    /// <see cref="Tidy"/> can tell a repaired note from an untouched one by reference.</summary>
+    private static string Same(string original, string candidate) =>
+        string.Equals(original, candidate, StringComparison.Ordinal) ? original : candidate;
+
+    /// <summary>
+    /// Whether the field closes properly. A closing quote or bracket counts — it is the mark
+    /// AFTER the full stop, not the absence of one.
+    /// </summary>
+    private static bool EndsOnATerminal(string value)
+    {
+        var last = value[^1];
+        return Terminals.Contains(last) || last is '"' or '\'' or '’' or '”' or ')' or ']';
+    }
+
     /// <summary>Every prose field of a note, for the guards that apply to all of them.</summary>
     public static IEnumerable<string> ProseFields(LensNote note)
     {

@@ -72,6 +72,30 @@ public sealed record LensNote(
     public const int MaxAnchors = 3;
 
     /// <summary>
+    /// What the PROMPT and the response schema ask for — roughly a tenth under the hard ceilings
+    /// above, which stay where they are as the parse and storage limit.
+    ///
+    /// <para><b>Why the two numbers differ.</b> A structured-output <c>maxLength</c> is enforced by
+    /// constrained decoding: the string stops at exactly that character, mid-word if that is where
+    /// the budget ran out. Live copy came back reading "…a crowd-pleasing sw" and "…marriage
+    /// strain,." for precisely that reason. Asking for less than the ceiling gives the model room
+    /// to land its own sentence before the hard stop, which is a better fix than tidying up after
+    /// one — <c>LensGuards.Tidy</c> is the backstop for the times it still overruns, not the
+    /// policy.</para>
+    ///
+    /// <para>Keeping <see cref="MaxLensChars"/> and friends at their old values matters: every note
+    /// already persisted was written against them, and narrowing the parse ceiling would make
+    /// perfectly good stored copy unreadable.</para>
+    /// </summary>
+    public const int RequestLensChars = 378;
+
+    /// <inheritdoc cref="RequestLensChars"/>
+    public const int RequestHookChars = 81;
+
+    /// <inheritdoc cref="RequestLensChars"/>
+    public const int RequestCautionChars = 108;
+
+    /// <summary>
     /// The first clause of <see cref="Lens"/> — what a rail card's two-line why and the hero's
     /// second line render. Split on the first sentence boundary, falling back to a word-boundary
     /// trim so a single long sentence still yields something readable rather than nothing.

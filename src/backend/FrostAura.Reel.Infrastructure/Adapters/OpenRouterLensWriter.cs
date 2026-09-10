@@ -68,8 +68,15 @@ public class OpenRouterLensWriter(
     /// <para>v2: the prompt now NAMES the titles a note may anchor against. v1 told the model to
     /// take anchors "verbatim from the lists below" and supplied no lists, so its anchors were
     /// guesses and every note carrying one was refused. A v1 row is not a v2 row.</para>
+    ///
+    /// <para>v3: the length budgets asked for dropped about a tenth under the hard ceilings and the
+    /// prompt now says the limit is a hard stop. The bump is what makes the fix visible: a v2 row
+    /// was written against the old cap and may be sitting on screen ending mid-word, and
+    /// <c>ResolveAsync</c> would keep serving it as fresh forever. Regeneration is lazy and
+    /// budget-gated — the background job and the on-demand path pay for it a few notes at a
+    /// time — so this is not a bulk re-spend.</para>
     /// </summary>
-    public const int CurrentLensPromptVersion = 2;
+    public const int CurrentLensPromptVersion = 3;
 
     /// <summary>Sentence bounds for a narrative — fewer reads as a stub, more reads as a list.</summary>
     private const int MinSentences = 6;
@@ -591,9 +598,9 @@ public class OpenRouterLensWriter(
                 required = new[] { "lens", "hook", "caution", "anchors", "mood", "whenToWatch" },
                 properties = new Dictionary<string, object>
                 {
-                    ["lens"] = new { type = "string", maxLength = LensNote.MaxLensChars },
-                    ["hook"] = new { type = "string", maxLength = LensNote.MaxHookChars },
-                    ["caution"] = new { type = new[] { "string", "null" }, maxLength = LensNote.MaxCautionChars },
+                    ["lens"] = new { type = "string", maxLength = LensNote.RequestLensChars },
+                    ["hook"] = new { type = "string", maxLength = LensNote.RequestHookChars },
+                    ["caution"] = new { type = new[] { "string", "null" }, maxLength = LensNote.RequestCautionChars },
                     ["anchors"] = new
                     {
                         type = "array",
@@ -676,11 +683,11 @@ public class OpenRouterLensWriter(
         "You retell ONE film or show to ONE specific viewer, in their own taste vocabulary, speaking "
         + "to them as \"you\".\n"
         + "Return ONLY a JSON object with exactly these six keys:\n"
-        + "  lens        <=" + LensNote.MaxLensChars + " chars. The premise, told the way THIS viewer "
+        + "  lens        <=" + LensNote.RequestLensChars + " chars. The premise, told the way THIS viewer "
         + "would want it told. Cite at least two specifics of the title and at least one thing about "
         + "the viewer.\n"
-        + "  hook        <=" + LensNote.MaxHookChars + " chars. The single reason to press play tonight.\n"
-        + "  caution     <=" + LensNote.MaxCautionChars + " chars, or null. The honest reservation — the "
+        + "  hook        <=" + LensNote.RequestHookChars + " chars. The single reason to press play tonight.\n"
+        + "  caution     <=" + LensNote.RequestCautionChars + " chars, or null. The honest reservation — the "
         + "thing about this title that might genuinely not land for this viewer. This is the one field "
         + "allowed to argue against the recommendation, and a real reservation is worth more than a "
         + "polite one. Use null only when you genuinely have none.\n"
@@ -704,6 +711,9 @@ public class OpenRouterLensWriter(
         + "percentage or a count.\n"
         + "  5. No marketing filler. \"A gripping ride\" and \"a must-watch\" say nothing. Every clause "
         + "must be true of THIS title and no other.\n"
+        + "  6. FINISH EVERY SENTENCE INSIDE ITS LIMIT. The limits above are hard: a field that "
+        + "reaches one is cut off exactly there, mid-word if that is where it lands. Plan the last "
+        + "clause and close it with a full stop. Say less rather than stopping short.\n"
         + "Output strictly valid JSON.";
 
     private static readonly string AuditSystemPrompt =
