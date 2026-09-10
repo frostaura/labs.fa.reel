@@ -206,9 +206,25 @@ public sealed class LensService(
                     continue;
                 }
 
-                var reason = LensGuards.Inspect(draft.Note, title.Name)
-                    ?? await verifier.VerifyAsync(
+                // The pure guards first, then the provenance pass — which may TRIM the note rather
+                // than refuse it. What gets stored is the verdict's note, never the raw draft: a
+                // stripped anchor that survives into LensJson is a dropped anchor that still
+                // renders the next time anything reads the row back.
+                var deterministic = LensGuards.Inspect(draft.Note, title.Name);
+                var verdict = deterministic is not null
+                    ? new LensVerdict(draft.Note, deterministic, [])
+                    : await verifier.VerifyAsync(
                         accountId, draft.Note, built.CreditedNames.GetValueOrDefault(title.TitleId) ?? [], batchCt);
+
+                if (verdict.StrippedAnchors.Count > 0)
+                {
+                    // Not a rejection and not silent. An anchor the model could not ground is the
+                    // single most informative thing a prompt iteration can read, and it is invisible
+                    // in the stored note precisely because this dropped it.
+                    logger.LogInformation(
+                        "Lens for '{Title}' dropped {Count} ungrounded anchor(s) ({Anchors}); the note stands.",
+                        title.Name, verdict.StrippedAnchors.Count, string.Join(", ", verdict.StrippedAnchors));
+                }
 
                 db.TitleLensCopies.Add(new TitleLensCopy
                 {
@@ -217,16 +233,16 @@ public sealed class LensService(
                     TitleId = title.TitleId,
                     ProfileHash = profileHash,
                     PromptVersion = PromptVersion,
-                    LensJson = JsonSerializer.Serialize(draft.Note, JsonOptions),
+                    LensJson = JsonSerializer.Serialize(verdict.Note, JsonOptions),
                     ModelId = draft.ModelId,
                     PromptTokens = draft.PromptTokens,
                     CompletionTokens = draft.CompletionTokens,
-                    Status = reason is null ? LensStatus.Done : LensStatus.Rejected,
-                    RejectionReason = reason,
+                    Status = verdict.IsRejected ? LensStatus.Rejected : LensStatus.Done,
+                    RejectionReason = verdict.Reason,
                     GeneratedAt = DateTime.UtcNow,
                 });
 
-                if (reason is null)
+                if (!verdict.IsRejected)
                 {
                     written++;
                 }
@@ -235,7 +251,7 @@ public sealed class LensService(
                     rejected++;
                     logger.LogInformation(
                         "Lens for '{Title}' rejected by the {Reason} guard; the surface falls back.",
-                        title.Name, reason);
+                        title.Name, verdict.Reason);
                 }
             }
 

@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
@@ -12,9 +14,39 @@ public static class LensRejectionReasons
     public const string BannedOpener = "because-you-loved-opener";
     public const string AntiRecommendation = "anti-recommendation";
     public const string InventedPerson = "invented-person";
+
+    /// <summary>
+    /// PROSE named a title this account's library does not contain. Note the narrowing: an anchor
+    /// entry that fails to resolve is stripped, not fatal — see <see cref="LensVerifier"/>.
+    /// </summary>
     public const string InventedAnchor = "invented-anchor";
+
     public const string RestatedNumber = "restated-number";
     public const string UserReportedSpoiler = "user-reported-spoiler";
+
+    /// <summary>
+    /// A reason plus the token that caused it — "invented-anchor:Frontera". Stored on the row so a
+    /// prompt iteration can be read as evidence rather than as a tally: knowing that eleven notes
+    /// were refused for an invented anchor is a number, and knowing that nine of them named the
+    /// same declined title is a diagnosis.
+    ///
+    /// <para>Clipped to the column's 128 characters, token-side, so a pathological name truncates
+    /// the evidence rather than the reason.</para>
+    /// </summary>
+    public static string WithToken(string reason, string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return reason;
+        }
+
+        const int columnWidth = 128;
+        var room = columnWidth - reason.Length - 1;
+        var trimmed = token.Trim();
+        return room <= 0
+            ? reason
+            : reason + ":" + (trimmed.Length <= room ? trimmed : trimmed[..room]);
+    }
 }
 
 /// <summary>
@@ -134,17 +166,25 @@ public static partial class LensGuards
     }
 
     /// <summary>
-    /// The provenance verdict, given what the lookups found: <paramref name="inventedPeople"/> are
+    /// The provenance verdict over the two PROSE findings: <paramref name="inventedPeople"/> are
     /// names the catalogue knows as real film people who are NOT in this title's credits, and
-    /// <paramref name="unratedAnchors"/> are anchor titles the account has never rated. Either is
-    /// fatal, and both for the same reason: a fabricated connection to your own history is the most
-    /// convincing kind of wrong, because it sounds like memory.
+    /// <paramref name="inventedTitles"/> are titles the catalogue knows that this account's library
+    /// does not contain, named in <c>lens</c>, <c>hook</c> or <c>caution</c>. Either is fatal, and
+    /// both for the same reason: a fabricated connection to your own history is the most convincing
+    /// kind of wrong, because it sounds like memory.
+    ///
+    /// <para><b>An unresolved ANCHOR entry is deliberately not here.</b> An anchor is a structured
+    /// field the surface can simply not render, so a single unresolvable one is a reason to drop
+    /// that entry — not a reason to throw away four sentences of otherwise sound prose. Refusing
+    /// the whole note for it is what took the on-demand path to a hundred percent rejection.</para>
     /// </summary>
     public static string? InspectProvenance(
-        IReadOnlyCollection<string> inventedPeople, IReadOnlyCollection<string> unratedAnchors) =>
-        inventedPeople.Count > 0 ? LensRejectionReasons.InventedPerson
-        : unratedAnchors.Count > 0 ? LensRejectionReasons.InventedAnchor
-        : null;
+        IReadOnlyCollection<string> inventedPeople, IReadOnlyCollection<string> inventedTitles) =>
+        inventedPeople.Count > 0
+            ? LensRejectionReasons.WithToken(LensRejectionReasons.InventedPerson, inventedPeople.First())
+            : inventedTitles.Count > 0
+                ? LensRejectionReasons.WithToken(LensRejectionReasons.InventedAnchor, inventedTitles.First())
+                : null;
 
     /// <summary>
     /// Blanks out every occurrence of a known title so the number check sees only the prose around
@@ -166,11 +206,167 @@ public static partial class LensGuards
         return masked;
     }
 
-    /// <summary>Normalises a title for comparison — case, whitespace and surrounding punctuation only.</summary>
-    public static string NormaliseTitle(string title) =>
-        WhitespaceRegex().Replace(title.Trim().Trim('"', '“', '”', '‘', '’', '\''), " ")
-            .ToLowerInvariant();
+    /// <summary>
+    /// Normalises a title for comparison: case, diacritics, punctuation, whitespace, a leading
+    /// article, and a parenthesised trailing year.
+    ///
+    /// <para><b>Why this is not the "case and punctuation only" rule it replaces.</b> The model
+    /// writes a title the way the sentence needs it — "Sicario (2015)", "The Amateur" for a
+    /// library row called "Amateur", "Amelie" for "Amélie" — and every one of those is the same
+    /// film. Comparing raw names calls all of them inventions, which is not a strict guard but a
+    /// broken one: it refuses the truth at exactly the same rate it refuses a fabrication.</para>
+    /// </summary>
+    public static string NormaliseTitle(string title)
+    {
+        var stripped = title.Trim().Trim('"', '“', '”', '‘', '’', '\'');
+        stripped = ParentheticalYearRegex().Replace(stripped, string.Empty);
+
+        var folded = new StringBuilder(stripped.Length);
+        foreach (var ch in stripped.Normalize(NormalizationForm.FormD))
+        {
+            var category = CharUnicodeInfo.GetUnicodeCategory(ch);
+            if (category == UnicodeCategory.NonSpacingMark)
+            {
+                continue;
+            }
+
+            folded.Append(char.IsLetterOrDigit(ch) ? char.ToLowerInvariant(ch) : ' ');
+        }
+
+        var collapsed = WhitespaceRegex().Replace(folded.ToString(), " ").Trim();
+        return LeadingArticleRegex().Replace(collapsed, string.Empty);
+    }
+
+    /// <summary>
+    /// The comparison keys for one title: its normalised form, plus — when the name ENDS in
+    /// something that reads as a year — the same form with that year removed.
+    ///
+    /// <para><b>Why a second key rather than always stripping the year.</b> "Blade Runner 2049"
+    /// and "1917" are titles whose names contain a year, and unconditional stripping turns the
+    /// first into "Blade Runner", a different film. Emitting both keys keeps the exact name
+    /// authoritative and lets the bare-year variant match only when nothing else does. The
+    /// asymmetry of cost settles it: a false match keeps an anchor that perhaps should have gone,
+    /// while a false miss deletes a true comparison to the viewer's own history.</para>
+    /// </summary>
+    public static IReadOnlyList<string> TitleKeys(string title)
+    {
+        var primary = NormaliseTitle(title);
+        var withoutYear = TrailingYearRegex().Replace(primary, string.Empty).Trim();
+        return withoutYear.Length > 0 && !string.Equals(withoutYear, primary, StringComparison.Ordinal)
+            ? [primary, withoutYear]
+            : [primary];
+    }
+
+    /// <summary>
+    /// A title long enough that near-equality means something. Below this, two characters of edit
+    /// distance is most of the word — "Up" and "Us" are one apart and unrelated.
+    /// </summary>
+    public const int MinFuzzyLength = 8;
+
+    /// <summary>Edit distance tolerated on a long name. Covers a dropped article, a plural, a typo.</summary>
+    public const int MaxEditDistance = 2;
+
+    /// <summary>
+    /// Does <paramref name="candidate"/> name something in <paramref name="library"/>? Exact on
+    /// normalised keys first, then an edit-distance fallback for names long enough to survive one.
+    /// <paramref name="library"/> is the key set built by <see cref="BuildTitleIndex"/>.
+    /// </summary>
+    public static bool MatchesLibrary(string candidate, IReadOnlyCollection<string> library)
+    {
+        var keys = TitleKeys(candidate);
+        if (keys.Any(library.Contains))
+        {
+            return true;
+        }
+
+        foreach (var key in keys.Where(k => k.Length >= MinFuzzyLength))
+        {
+            foreach (var known in library.Where(k => k.Length >= MinFuzzyLength))
+            {
+                // Length alone rules most pairs out before any matrix is allocated, and the whole
+                // library is scanned per anchor — at most three anchors per note.
+                if (Math.Abs(known.Length - key.Length) <= MaxEditDistance
+                    && EditDistanceWithin(key, known, MaxEditDistance))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Every comparison key for a set of known title names.</summary>
+    public static HashSet<string> BuildTitleIndex(IEnumerable<string> names)
+    {
+        var index = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in names.Where(n => !string.IsNullOrWhiteSpace(n)))
+        {
+            foreach (var key in TitleKeys(name))
+            {
+                if (key.Length > 0)
+                {
+                    index.Add(key);
+                }
+            }
+        }
+
+        return index;
+    }
+
+    /// <summary>
+    /// Levenshtein distance, abandoned as soon as it cannot come in at or under
+    /// <paramref name="limit"/>. Two rows rather than a full matrix; the early exit is what keeps a
+    /// per-anchor scan of a few thousand library keys cheap.
+    /// </summary>
+    internal static bool EditDistanceWithin(string a, string b, int limit)
+    {
+        if (Math.Abs(a.Length - b.Length) > limit)
+        {
+            return false;
+        }
+
+        var previous = new int[b.Length + 1];
+        var current = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++)
+        {
+            previous[j] = j;
+        }
+
+        for (var i = 1; i <= a.Length; i++)
+        {
+            current[0] = i;
+            var best = current[0];
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var substitution = previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1);
+                current[j] = Math.Min(Math.Min(current[j - 1] + 1, previous[j] + 1), substitution);
+                best = Math.Min(best, current[j]);
+            }
+
+            if (best > limit)
+            {
+                return false;
+            }
+
+            (previous, current) = (current, previous);
+        }
+
+        return previous[b.Length] <= limit;
+    }
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
+
+    /// <summary>A trailing "(2015)" or "[2015]" — how a model writes a disambiguating year.</summary>
+    [GeneratedRegex(@"\s*[\(\[](?:19|20)\d{2}[\)\]]\s*$")]
+    private static partial Regex ParentheticalYearRegex();
+
+    /// <summary>A bare trailing year on an already-normalised name. Used for the SECONDARY key only.</summary>
+    [GeneratedRegex(@"\s(?:19|20)\d{2}$")]
+    private static partial Regex TrailingYearRegex();
+
+    /// <summary>A leading article on an already-normalised name. "The Amateur" and "Amateur" are one film.</summary>
+    [GeneratedRegex(@"^(?:the|a|an)\s")]
+    private static partial Regex LeadingArticleRegex();
 }
