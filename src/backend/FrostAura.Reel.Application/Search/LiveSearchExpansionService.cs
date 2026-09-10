@@ -69,7 +69,15 @@ public sealed class LiveSearchExpansionService(
     /// <summary>How many progressively-wider discovery passes a turn may make before giving up.</summary>
     private const int MaxRelaxations = 3;
 
-    /// <summary>How many picks survive when the account's rating floor would otherwise return none.</summary>
+    /// <summary>
+    /// How many cards must clear the account's rating floor for the floor to BIND at all. Fewer
+    /// than this and the floor is dropped for the turn, because a bar honoured strictly enough to
+    /// leave three cards on screen has stopped being a preference and become an empty result.
+    ///
+    /// <para>It is a threshold, never a take. It used to be both — the relaxed branch also
+    /// truncated to it — so "your rating floor was relaxed" silently meant "and most of your
+    /// results were discarded".</para>
+    /// </summary>
     private const int MinFloorRelaxedCount = 6;
 
     /// <summary>
@@ -79,6 +87,24 @@ public sealed class LiveSearchExpansionService(
     /// still interleave rejected titles among clean ones.
     /// </summary>
     private const double NegationPenalty = 0.22;
+    /// <summary>
+    /// The calendar window a release year is allowed to name. The lower bound is the year of the
+    /// first surviving film; the upper is the largest year <see cref="DateTime"/> can hold.
+    /// </summary>
+    /// <remarks>
+    /// This is a CRASH guard, not a taste guard. <see cref="SearchIntent.MinYear"/> and
+    /// <see cref="SearchIntent.MaxYear"/> arrive from a language model reading free text, so
+    /// "movies from the year 99999" reaches four <c>new DateTime(year, …)</c> sites — two in the
+    /// concept fetch, two in the person-credit fetch — every one of which throws
+    /// <see cref="ArgumentOutOfRangeException"/> and takes the whole turn down as a "snag". A
+    /// clamped bound answers a nonsense year with an ordinary, if unhelpful, result set; the
+    /// parser narrows the range further for sense, which is a different job.
+    /// </remarks>
+    private const int MinCalendarYear = 1870;
+
+    /// <inheritdoc cref="MinCalendarYear"/>
+    private const int MaxCalendarYear = 9999;
+
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -99,7 +125,13 @@ public sealed class LiveSearchExpansionService(
         string message, IReadOnlyList<ChatTurn> history, IReadOnlyList<long> shownTmdbIds, string? region, Emit emit, CancellationToken ct) =>
         StreamAsync(message, history, shownTmdbIds, region, [], ApiUsagePurpose.RerankAsk, emit, ct);
 
-    /// <summary>An Ask Reel conversational turn — the shape <c>/api/search/ask</c> uses.</summary>
+    /// <summary>
+    /// An Ask Reel conversational turn — the shape <c>/api/search/ask</c> uses.
+    ///
+    /// <para><paramref name="debug"/> attaches the turn's own diagnostics to the terminal frame. The
+    /// ENTITLEMENT decision is not made here: the endpoint resolves it from the tier and the query
+    /// string, because that is where the account row and the request live.</para>
+    /// </summary>
     public Task StreamAsync(
         string message,
         IReadOnlyList<ChatTurn> history,
@@ -107,8 +139,9 @@ public sealed class LiveSearchExpansionService(
         string? region,
         IReadOnlyList<MediaType> mediaFilter,
         Emit emit,
-        CancellationToken ct) =>
-        StreamAsync(message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct);
+        CancellationToken ct,
+        bool debug = false) =>
+        StreamAsync(message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct, debug);
 
     /// <summary>
     /// Runs a conversational turn end-to-end, emitting the SSE event stream. Never throws for an
@@ -128,7 +161,8 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyList<MediaType> mediaFilter,
         string rerankPurpose,
         Emit emit,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool debug = false)
     {
         var accountId = accountContext.AccountId
             ?? throw new InvalidOperationException("Live search requires an account.");
@@ -139,15 +173,30 @@ public sealed class LiveSearchExpansionService(
             return;
         }
 
+        // Where this turn's seconds went. Stages accumulate, so discovery running three times at
+        // three relaxation levels reports one total rather than three entries, and a stage that
+        // never ran is absent rather than zero.
+        var timings = new AskStageTimings();
+
         try
         {
             await emit("phase", new { stage = "searching", found = 0, scored = 0 });
 
             // No embeddings provider → can't rank semantically. Fall back to the local lexical
             // engine so Ask Reel still answers (keyless installs); stream those, unscored-by-rank.
+            //
+            // This branch precedes the agent call, so it records `emit` alone: there is nothing to
+            // interpret, discover, embed, score, rerank or blend. A stage list is a record of work
+            // done, not a checklist to fill in.
             if (!embeddings.IsAvailable)
             {
-                await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
+                using (timings.Stage(AskStageTimings.Emit))
+                {
+                    await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
+                }
+
+                logger.LogInformation(
+                    "Ask Reel '{Query}': lexical fallback (no embeddings provider). {StageTimings}", trimmed, timings);
                 return;
             }
 
@@ -168,9 +217,24 @@ public sealed class LiveSearchExpansionService(
                 ? $"{persona.Taste}. {declined}"
                 : persona.Taste;
 
+            // The account's standing content rules, read ONCE per turn and used three times: to tell
+            // the model what it is allowed to promise, to name any collision that survives anyway,
+            // and to apply the rating floor at the end. They used to be read only at the floor, so
+            // the interpret prompt answered in total ignorance of the exclusions the pipeline was
+            // about to apply — the model said yes to a permanently-excluded genre and the turn came
+            // back empty with a reply that had just promised it.
+            var filterRows = await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync(ct);
+            var standingRules = FilterRuleSet.FromRows(filterRows);
+            var standingSummary = AskReelStandingFilters.Describe(standingRules);
+
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
             var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
-            var agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct);
+            AgentReply agentReply;
+            using (timings.Stage(AskStageTimings.Interpret))
+            {
+                agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct, standingSummary);
+            }
+
             await emit("assistant-message", new { text = agentReply.Reply });
 
             // A named-person query ("all movies Nolan directs") is a lookup: it relaxes the
@@ -225,16 +289,21 @@ public sealed class LiveSearchExpansionService(
             for (; relaxation < MaxRelaxations; relaxation++)
             {
                 var pass = Relax(intent, relaxation);
-                var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
-                var semanticIds = isPersonQuery
-                    ? new List<Guid>()
-                    : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, referenceVectors, ct);
-                discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
+                using (timings.Stage(AskStageTimings.Discover))
+                {
+                    var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
+                    var semanticIds = isPersonQuery
+                        ? new List<Guid>()
+                        : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, referenceVectors, ct);
+                    discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
+                }
+
                 await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
 
                 // OrderBy(t.Id) is not cosmetic: without it Postgres may return these rows in any
                 // order, and every downstream sort is stable-on-an-unstable-input, so an identical
                 // re-ask could present a different list.
+                using var eligibleStage = timings.Stage(AskStageTimings.Eligible);
                 eligible = (await baseQuery
                         .Where(t => discovered.Contains(t.Id))
                         .OrderBy(t => t.Id)
@@ -257,6 +326,7 @@ public sealed class LiveSearchExpansionService(
                     eligible = ApplyRuntimeCeiling(eligible, intent.MaxRuntimeMinutes, MinResults);
                 }
 
+                eligibleStage.Dispose();
                 if (eligible.Count >= MinResults || isPersonQuery)
                 {
                     break;
@@ -269,6 +339,7 @@ public sealed class LiveSearchExpansionService(
             // nothing. Only a truly empty eligible catalogue can still come back with zero.
             if (eligible.Count == 0)
             {
+                using var lastResortStage = timings.Stage(AskStageTimings.Eligible);
                 eligible = (await baseQuery
                         .Where(t => t.TmdbPopularity != null)
                         .OrderByDescending(t => t.TmdbPopularity)
@@ -287,9 +358,18 @@ public sealed class LiveSearchExpansionService(
                 relaxation = MaxRelaxations;
             }
 
+            // The account's WHOLE eligible catalogue, not this turn's slice. It is the number that
+            // explains a starved turn — 40 discovered out of 400 eligible is a discovery problem, out
+            // of 12 eligible it is a filter problem — and nothing logged it, so the two were
+            // indistinguishable in production. One count per turn, ~16 ms on the live catalogue.
+            var eligiblePoolSize = await baseQuery.CountAsync(ct);
+
             if (eligible.Count == 0)
             {
-                await emit("done", new { results = Array.Empty<object>(), reason = "no fresh matches — try another angle" });
+                logger.LogInformation(
+                    "Ask Reel '{Query}': nothing survived discovery. {EligiblePool} titles are eligible for this account overall.",
+                    trimmed, eligiblePoolSize);
+                await emit("done", new { results = Array.Empty<object>(), reason = AskReelReason.Empty });
                 return;
             }
 
@@ -297,12 +377,13 @@ public sealed class LiveSearchExpansionService(
             // you've seen, score for the predicted-rating badge — but never re-order or cull by fit.
             if (isPersonQuery)
             {
-                await StreamFilmographyAsync(accountId, agentReply.Intent, eligible, taste, now, emit, ct);
+                await StreamFilmographyAsync(accountId, agentReply.Intent, eligible, taste, now, timings, emit, ct);
                 return;
             }
 
             // ── Embed eligible candidates that lack a vector, then cosine pre-rank ───────────
             await emit("phase", new { stage = "embedding", found = eligible.Count, scored = 0 });
+            using var embedStage = timings.Stage(AskStageTimings.Embed);
             await EnsureEmbeddedAsync(eligible, ct);
             var vectorsByTitle = await LoadVectorsAsync(eligible.Select(t => t.Id).ToList(), ct);
             var tagVectors = await LoadPreferenceTagVectorsAsync(accountId, ct);
@@ -313,12 +394,8 @@ public sealed class LiveSearchExpansionService(
             // highest on the very similarity used to pick the top ReturnCount. Falls back to the
             // raw text only when the intent carries no positive signal at all.
             var seedText = RankingSeedText(agentReply, trimmed);
-            var queryVec = (await embeddings.EmbedAsync([seedText], ct))[0];
-
-            // Reference anchoring: pull the query vector towards the mean of the named titles'
-            // embeddings, so "like Blade Runner but more emotional" ranks by proximity to Blade
-            // Runner's actual neighbourhood rather than to the bare words. No-op without references.
-            queryVec = BlendQueryVector(queryVec, referenceVectors);
+            var queryVec = await RankingSeedVectorAsync(seedText, referenceVectors, ct);
+            embedStage.Dispose();
 
             // Negation is applied BEFORE the cut, not after it — and it is HARD. Titles that
             // contradict what the user ruled out never appear as ordinary picks: with enough clean
@@ -327,9 +404,14 @@ public sealed class LiveSearchExpansionService(
             // outside the request, ordered after every clean pick, captioned with WHICH exclusion
             // they trip. (The old top-up refilled to ReturnCount unflagged, which is how "no
             // horror please" returned seven horror titles with why-lines admitting the violation.)
+            // With no usable seed there is no cosine to rank by, so the vector requirement is
+            // dropped too: every candidate carries a zero similarity and the personal score plus
+            // the LLM fit decide the order. Thinner than a seeded turn, never empty.
             var scoredPool = eligible
-                .Where(t => vectorsByTitle.ContainsKey(t.Id))
-                .Select(t => (Title: t, Sim: Cosine(queryVec, vectorsByTitle[t.Id])))
+                .Where(t => queryVec is null || vectorsByTitle.ContainsKey(t.Id))
+                .Select(t => (
+                    Title: t,
+                    Sim: queryVec is not null && vectorsByTitle.TryGetValue(t.Id, out var vec) ? Cosine(queryVec, vec) : 0d))
                 // A stable tiebreak: the base query has no ORDER BY, so equal similarities would
                 // otherwise resolve in whatever order Postgres happened to return rows, and an
                 // identical re-ask could come back in a different order.
@@ -363,8 +445,13 @@ public sealed class LiveSearchExpansionService(
             var returned = ranked.Concat(outside).ToList();
             await emit("phase", new { stage = "scoring", found = returned.Count, scored = 0 });
             var sliceIds = returned.Select(x => x.Title.Id).ToList();
-            await HydrateAsync(sliceIds, ct);
-            var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+            IReadOnlyDictionary<Guid, decimal> scores;
+            using (timings.Stage(AskStageTimings.Score))
+            {
+                await HydrateAsync(sliceIds, ct);
+                scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+            }
+
             foreach (var id in sliceIds)
             {
                 await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
@@ -376,6 +463,24 @@ public sealed class LiveSearchExpansionService(
             // Their caption is the deterministic statement of which exclusion they trip, streamed
             // as a candidate-reranked frame so live cards pick it up the same way clean cards pick
             // up their LLM why.
+            // Rungs 1 and 2 of the filter-collision ladder: NAME the collision and show the
+            // conditions. Rung 3 — a per-turn "ignore my filters" override — is deliberately not
+            // built; an exclusion stays airtight and reopening that is the founder's call.
+            var collidingGenres = AskReelStandingFilters.CollidingGenres(standingRules, intent);
+            var yearCollides = AskReelStandingFilters.YearWindowCollides(standingRules, intent);
+            if (collidingGenres.Count > 0 || yearCollides)
+            {
+                await emit("conflict", new
+                {
+                    excludedGenres = collidingGenres,
+                    poolSize = eligiblePoolSize,
+                    catalogueSize = await db.Titles.CountAsync(ct),
+                    // The only prose in the frame. Every number the client renders travels beside it
+                    // as raw JSON so the copy is the client's to shape, not the server's to format.
+                    message = AskReelStandingFilters.Message(collidingGenres, yearCollides, standingRules),
+                });
+            }
+
             await emit("phase", new { stage = "ranking", found = returned.Count, scored = sliceIds.Count });
 
             // When the turn named comparison titles, tell the rerank model so the why-lines can
@@ -388,8 +493,13 @@ public sealed class LiveSearchExpansionService(
             var rerankQuery = referenceNames.Count > 0
                 ? $"{trimmed}\nThe user wants something like: {string.Join(", ", referenceNames)}"
                 : trimmed;
-            var fitById = await RerankStreamAsync(
-                accountId, rerankQuery, persona, ranked, scores, rerankPurpose, emit, ct);
+            Dictionary<Guid, RerankResult> fitById;
+            using (timings.Stage(AskStageTimings.Rerank))
+            {
+                fitById = await RerankStreamAsync(
+                    accountId, rerankQuery, persona, ranked, scores, rerankPurpose, emit, ct);
+            }
+
             foreach (var (title, _) in outside)
             {
                 await emit("candidate-reranked", new
@@ -418,40 +528,78 @@ public sealed class LiveSearchExpansionService(
                 .ThenBy(x => x.Title.Id)
                 .ToList();
 
-            var blended = BlendPool(ranked);
-            var blendedOutside = BlendPool(outside);
+            using var blendStage = timings.Stage(AskStageTimings.Blend);
 
             // The account's minimum-predicted-rating filter is an explicit instruction and has to
             // reach THIS surface too. It only ever lived in the (now removed) /semantic endpoint,
             // so a user who set a rating floor had it silently ignored by every Ask Reel turn.
-            var floor = await MinPredictedFloorAsync(accountId, ct);
-            var floorRelaxed = false;
+            var floor = MinPredictedFloor(filterRows);
+
+            // A card with no prediction CLEARS the floor, so an unscored card is an unannounced
+            // exemption from the user's own bar. Before judging anything, make one more attempt on
+            // exactly the cards that came back without a number — the first pass can miss a title
+            // whose feature vector was not buildable at the time. Only what is still unscored after
+            // this is genuinely unscorable, and only then does the exemption apply.
             if (floor > 0m)
             {
-                var abovefloor = blended.Where(x => x.Predicted is null || x.Predicted >= floor).ToList();
-                if (abovefloor.Count > 0)
+                var unscored = returned.Select(x => x.Title.Id).Where(id => !scores.ContainsKey(id)).ToList();
+                if (unscored.Count > 0)
                 {
-                    blended = abovefloor;
-                }
-                else
-                {
-                    // Honouring the floor strictly would empty the screen. Keep the best of what
-                    // there is and SAY the floor was relaxed, rather than silently ignoring the
-                    // setting (the old behaviour) or silently returning nothing.
-                    blended = blended.Take(MinFloorRelaxedCount).ToList();
-                    floorRelaxed = true;
+                    var late = await scorer.ScoreAsync(accountId, unscored, now, ct, taste);
+                    if (late.Count > 0)
+                    {
+                        var merged = scores.ToDictionary(kv => kv.Key, kv => kv.Value);
+                        foreach (var (id, predicted) in late)
+                        {
+                            merged[id] = predicted;
+                        }
+
+                        scores = merged;
+                        logger.LogInformation(
+                            "Ask Reel: {Late} of {Unscored} unscored cards were scored on the second pass, before the {Floor} rating floor.",
+                            late.Count, unscored.Count, floor);
+                    }
                 }
             }
+
+            var blended = BlendPool(ranked);
+            var blendedOutside = BlendPool(outside);
+
+            // Captured before the floor prunes the channel: a below-floor card still has to render
+            // with its outside-request flag, and the flag is a property of WHICH channel it came
+            // from, not of whether it survived.
+            var blendedOutsideIds = blendedOutside.Select(x => x.Title.Id).ToHashSet();
+
+            // MinFloorRelaxedCount is a THRESHOLD here, not a take: fewer than that many cards
+            // clearing the bar relaxes the floor for this turn and truncates nothing, and otherwise
+            // the cards that miss it are handed back to be shown in a tray and counted out loud.
+            var verdict = AskReelFloor.Apply(
+                blended, blendedOutside, x => x.Predicted, floor, MinFloorRelaxedCount);
+            var floorRelaxed = verdict.Relaxed;
+            blended = [.. verdict.Kept];
+            blendedOutside = [.. verdict.KeptOutside];
 
             // Outside cards ALWAYS trail every clean pick, each block ordered by its own blend,
             // and each outside card carries the flag plus its honest deterministic caption.
             var final = blended
-                .Select(x => Card(x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why))
+                .Select(x => Card(x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why, blend: x.Blend))
                 .Concat(blendedOutside.Select(x => Card(
                     x.Title, x.Sim, x.Predicted, fit: null,
                     why: OutsideWhy(NegationMatches(x.Title, intent)),
-                    outsideRequest: true)))
+                    outsideRequest: true, blend: x.Blend)))
                 .ToList();
+
+            // The tray. A card the floor removed is still a card the pipeline chose, and the user is
+            // owed the chance to look at it — a silent drop and a bug are indistinguishable from the
+            // outside. Rendered under a fence, never mixed into the picks.
+            var belowFloor = verdict.BelowFloor
+                .Select(x => Card(
+                    x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why,
+                    outsideRequest: blendedOutsideIds.Contains(x.Title.Id), blend: x.Blend))
+                .ToList();
+            blendStage.Dispose();
+
+            using var emitStage = timings.Stage(AskStageTimings.Emit);
 
             // Report what was RETURNED, not what was pulled. The old wording was derived purely
             // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —
@@ -460,13 +608,37 @@ public sealed class LiveSearchExpansionService(
             await emit("done", new
             {
                 results = final,
-                reason = final.Count == 0
-                    ? "no fresh matches — try another angle"
-                    : blendedOutside.Count > 0
-                        ? $"{blended.Count} picks matched everything you asked; {blendedOutside.Count} closest-but-outside shown separately."
-                        : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
-                            + (relaxation > 0 ? " (widened to find enough)" : "")
-                            + (floorRelaxed ? $" (nothing cleared your {floor.ToString("0.#", CultureInfo.InvariantCulture)} rating floor, so it was relaxed)" : "") + ".",
+                // The turn's own accounting, so no card can vanish unexplained: everything streamed
+                // is either kept or in the tray, and streamed == kept + droppedByFloor always holds.
+                streamed = ranked.Count + outside.Count,
+                kept = final.Count,
+                droppedByFloor = belowFloor.Count,
+                belowFloor,
+                reason = AskReelReason.Build(
+                    blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
+                    widened: relaxation > 0, floorRelaxed, floor),
+                // Founder-only, and only when asked for: the per-stage millisecond breakdown of this
+                // turn. Always PRESENT as a key so the client has one shape to render, null when the
+                // caller is not entitled to it. `emit` is absent here and only here — a payload
+                // cannot carry the duration of its own transmission, and a zero would be a claim
+                // rather than a rounding. The end-of-turn log line carries all eight.
+                timingsMs = debug ? timings.Snapshot() : null,
+                // The founder's own view of the turn. Same entitlement as timingsMs, same
+                // present-but-null shape, and deliberately a superset: what the model understood,
+                // how hard discovery had to work, and what happened to every card.
+                debug = debug
+                    ? (object?)new
+                    {
+                        intent,
+                        relaxation,
+                        eligibleCount = eligible.Count,
+                        eligiblePoolSize,
+                        streamed = ranked.Count + outside.Count,
+                        kept = final.Count,
+                        droppedByFloor = belowFloor.Count,
+                        timingsMs = timings.Snapshot(),
+                    }
+                    : null,
             });
             // The turn's answer, recorded. Ranked by the SAME blend the user is looking at, clean
             // picks first and outside ones trailing, so Rank is the position on screen. Written
@@ -503,9 +675,14 @@ public sealed class LiveSearchExpansionService(
 
             // Logs `final` too: the count the user actually sees is the one worth alerting on, and
             // its absence is what let an empty result set look healthy in the logs.
+            emitStage.Dispose();
+
             logger.LogInformation(
-                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible, {Scored} scored, {Reranked} reranked, {Returned} returned.",
-                trimmed, discovered.Count, relaxation, eligible.Count, sliceIds.Count, fitById.Count, final.Count);
+                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible "
+                + "of {EligiblePool} in the account's pool, {Scored} scored, {Reranked} reranked, {Returned} returned. "
+                + "{StageTimings}",
+                trimmed, discovered.Count, relaxation, eligible.Count, eligiblePoolSize, sliceIds.Count,
+                fitById.Count, final.Count, timings);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -536,6 +713,14 @@ public sealed class LiveSearchExpansionService(
         var qnorm = NormalizeQuery(query);
         var fitById = new Dictionary<Guid, RerankResult>();
 
+        // The evidence the feed build has always given the judge and this surface never did: tone,
+        // era, themes, the seven attribute scalars and the people. Two indexed reads for the whole
+        // turn, taken ONCE before the batching loop rather than per batch. Contributions are null
+        // because OnDemandScorer computes none — an empty list is the honest answer, and a title the
+        // catalogue has not enriched carries nulls rather than zeros.
+        var contexts = await RerankContextBuilder.BuildAsync(
+            db, ranked.Select(r => r.Title.Id).ToList(), topContributions: null, ct);
+
         // A title can be judged more than once across a long conversation; averaging the verdicts
         // is the caller's half of the LLM position-bias mitigation (see PositionDebiasedFit).
         var debiased = new PositionDebiasedFit();
@@ -546,7 +731,7 @@ public sealed class LiveSearchExpansionService(
             var uncached = new List<RerankInput>();
             foreach (var (title, _) in batch)
             {
-                if (cache.TryGetValue<RerankResult>(FitKey(accountId, title.Id, qnorm), out var cached) && cached is not null)
+                if (cache.TryGetValue<RerankResult>(FitKey(accountId, title.Id, qnorm, agent.ModelId), out var cached) && cached is not null)
                 {
                     fitById[title.Id] = cached;
                 }
@@ -554,7 +739,8 @@ public sealed class LiveSearchExpansionService(
                 {
                     uncached.Add(new RerankInput(
                         title.Id, title.Name, title.Year, title.MediaType.ToString(), title.Genres, title.Overview,
-                        scores.TryGetValue(title.Id, out var p) ? p : null));
+                        scores.TryGetValue(title.Id, out var p) ? p : null,
+                        contexts.GetValueOrDefault(title.Id)));
                 }
             }
 
@@ -569,7 +755,7 @@ public sealed class LiveSearchExpansionService(
                     debiased.Observe(raw);
                     var res = debiased.For(raw.TitleId)!;
                     fitById[res.TitleId] = res;
-                    cache.Set(FitKey(accountId, res.TitleId, qnorm), res, FitTtl);
+                    cache.Set(FitKey(accountId, res.TitleId, qnorm, agent.ModelId), res, FitTtl);
                 }
             }
 
@@ -585,28 +771,45 @@ public sealed class LiveSearchExpansionService(
         return fitById;
     }
 
+    /// <summary>
+    /// The TMDB discovery arm. Returns empty on any failure ⇒ the semantic arm carries the turn
+    /// alone — the mirror of what <see cref="SemanticNeighbourIdsAsync"/> already does when the
+    /// concept embedding fails, and for the same reason: a blip on ONE of two arms must not
+    /// discard the other. Before this guard a TMDB timeout, a 429 or a keyword-search failure
+    /// propagated to the turn's catch-all and returned "search hit a snag" with zero results,
+    /// even though every semantically-nearest unseen title was already in hand and needed no
+    /// network at all.
+    /// </summary>
     private async Task<List<Guid>> DiscoverCandidateIdsAsync(SearchIntent intent, string? region, CancellationToken ct)
     {
-        var key = IntentKey(intent);
-        if (cache.TryGetValue<List<Guid>>(CacheKey(key), out var cached) && cached is { Count: > 0 })
+        var key = IntentKey(intent, region);
+        if (cache.TryGetValue<List<Guid>>(CacheKey(key, agent.ModelId), out var cached) && cached is { Count: > 0 })
         {
             return cached;
         }
 
-        // The TMDB firehose for this intent runs once even under concurrent identical searches;
-        // CancellationToken.None so a disconnecting waiter can't starve a sharer (dev StrictMode
-        // remount), and it warms the cache regardless.
-        var items = await coordinator.RunOnceAsync(
-            $"askreel:fetch:{key}",
-            () => FetchFromTmdbAsync(intent, region, CancellationToken.None));
-        if (items.Count == 0)
+        try
         {
+            // The TMDB firehose for this intent runs once even under concurrent identical searches;
+            // CancellationToken.None so a disconnecting waiter can't starve a sharer (dev StrictMode
+            // remount), and it warms the cache regardless.
+            var items = await coordinator.RunOnceAsync(
+                $"askreel:fetch:{key}",
+                () => FetchFromTmdbAsync(intent, region, CancellationToken.None));
+            if (items.Count == 0)
+            {
+                return [];
+            }
+
+            var ids = await UpsertAndCollectIdsAsync(items, ct);
+            cache.Set(CacheKey(key, agent.ModelId), ids, DiscoveryTtl);
+            return ids;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel TMDB arm: discovery failed; falling back to semantic-only discovery.");
             return [];
         }
-
-        var ids = await UpsertAndCollectIdsAsync(items, ct);
-        cache.Set(CacheKey(key), ids, DiscoveryTtl);
-        return ids;
     }
 
     /// <summary>
@@ -760,6 +963,32 @@ public sealed class LiveSearchExpansionService(
     }
 
     /// <summary>
+    /// The reference-anchored ranking seed, or <c>null</c> when the provider gave nothing usable to
+    /// anchor on.
+    ///
+    /// <para>The seed used to be a bare <c>[0]</c> index into the provider's answer, so an empty or
+    /// truncated response threw and the turn reported a crash. A missing seed costs the turn its
+    /// cosine ordering — real, and worth degrading for — but the pool has already been discovered
+    /// and is still worth showing. Where the turn named comparison titles, their mean carries the
+    /// seed on its own, exactly as the semantic arm already does.</para>
+    /// </summary>
+    private async Task<float[]?> RankingSeedVectorAsync(
+        string seedText, IReadOnlyList<float[]> referenceVectors, CancellationToken ct)
+    {
+        var embedded = await embeddings.EmbedAsync([seedText], ct);
+        if (embedded is [{ Length: > 0 }, ..])
+        {
+            return BlendQueryVector(embedded[0], referenceVectors);
+        }
+
+        logger.LogWarning(
+            "Ask Reel: the ranking seed came back empty; ranking this turn without a similarity signal.");
+        return referenceVectors.Count > 0
+            ? BlendQueryVector(new float[referenceVectors[0].Length], referenceVectors)
+            : null;
+    }
+
+    /// <summary>
     /// The reference-anchored query vector: <c>normalize(concept + 0.5 × mean(references))</c>.
     /// The concept keeps the majority weight — "like Blade Runner but MORE EMOTIONAL" must still
     /// honour the modifier — while the reference mean drags the query into the named titles'
@@ -852,19 +1081,39 @@ public sealed class LiveSearchExpansionService(
     };
 
     /// <summary>
-    /// The account's minimum-predicted-rating content filter, clamped to 0-10. Zero means "no
-    /// floor set", which is also what a malformed stored value degrades to.
+    /// The account's minimum-predicted-rating content filter, clamped to 0-10. Zero means "no floor
+    /// set", which is also what a malformed stored value degrades to.
+    ///
+    /// <para>Reads rows the turn has ALREADY loaded rather than issuing its own query: the standing
+    /// rules are needed before the interpret call anyway, and two reads of the same table one turn
+    /// apart could disagree if the user edits their conditions mid-turn.</para>
     /// </summary>
-    private async Task<decimal> MinPredictedFloorAsync(Guid accountId, CancellationToken ct)
+    private static decimal MinPredictedFloor(IReadOnlyList<ContentFilter> rows)
     {
-        var raw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
-            .Select(f => f.Value)
-            .FirstOrDefaultAsync(ct);
+        var raw = rows.FirstOrDefault(f => f.Kind == FilterKind.MinPredictedRating)?.Value;
         return raw is not null && decimal.TryParse(raw, CultureInfo.InvariantCulture, out var value)
             ? Math.Clamp(value, 0m, 10m)
             : 0m;
     }
+
+    /// <summary>
+    /// The first instant of a release-year window, or null when unbounded — the single definition
+    /// the concept fetch and the person-credit fetch both use. See <see cref="MinCalendarYear"/>
+    /// for why the year is clamped rather than trusted.
+    /// </summary>
+    private static DateTime? YearStart(int? year) =>
+        year is { } y ? new DateTime(ClampYear(y), 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
+
+    /// <summary>
+    /// The last instant of a release-year window, or null when unbounded. End-of-day, because
+    /// <see cref="SearchIntent.MaxYear"/> is documented as inclusive of the whole year — the two
+    /// call sites used to disagree about that by 24 hours.
+    /// </summary>
+    private static DateTime? YearEnd(int? year) =>
+        year is { } y ? new DateTime(ClampYear(y), 12, 31, 23, 59, 59, DateTimeKind.Utc) : null;
+
+    /// <inheritdoc cref="MinCalendarYear"/>
+    private static int ClampYear(int year) => Math.Clamp(year, MinCalendarYear, MaxCalendarYear);
 
     /// <summary>True when the title matches the requested media types (empty list = no constraint).</summary>
     private static bool MatchesMedia(Title title, IReadOnlyList<MediaType> mediaTypes) =>
@@ -1065,7 +1314,7 @@ public sealed class LiveSearchExpansionService(
     /// </summary>
     private async Task StreamFilmographyAsync(
         Guid accountId, SearchIntent intent, List<Title> eligible,
-        FeatureVectorBuilder.TasteState taste, DateTime now, Emit emit, CancellationToken ct)
+        FeatureVectorBuilder.TasteState taste, DateTime now, AskStageTimings timings, Emit emit, CancellationToken ct)
     {
         var ordered = eligible
             .OrderByDescending(t => t.ReleasedAt ?? t.FirstAiredAt ?? DateTime.MinValue)
@@ -1080,8 +1329,13 @@ public sealed class LiveSearchExpansionService(
 
         // Score the top slice for the badge (no re-rank — the order is the filmography).
         var sliceIds = ordered.Take(HydrateScoreSlice).Select(t => t.Id).ToList();
-        await HydrateAsync(sliceIds, ct);
-        var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+        IReadOnlyDictionary<Guid, decimal> scores;
+        using (timings.Stage(AskStageTimings.Score))
+        {
+            await HydrateAsync(sliceIds, ct);
+            scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+        }
+
         foreach (var id in sliceIds)
         {
             await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
@@ -1098,8 +1352,14 @@ public sealed class LiveSearchExpansionService(
         var reason = who is null
             ? $"{ordered.Count} titles in this filmography."
             : $"{ordered.Count} titles {verb} {who.Name}.";
-        await emit("done", new { results, reason });
-        logger.LogInformation("Ask Reel filmography: {Count} titles for {Person}.", ordered.Count, who?.Name ?? "?");
+        using (timings.Stage(AskStageTimings.Emit))
+        {
+            await emit("done", new { results, reason });
+        }
+
+        logger.LogInformation(
+            "Ask Reel filmography: {Count} titles for {Person}. {StageTimings}",
+            ordered.Count, who?.Name ?? "?", timings);
     }
 
     /// <summary>The subset of the given title ids the account has watched or rated (for "seen" badges).</summary>
@@ -1148,8 +1408,8 @@ public sealed class LiveSearchExpansionService(
 
         var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
         var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
-        DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        DateTime? before = intent.MaxYear is { } my ? new DateTime(my, 12, 31, 0, 0, 0, DateTimeKind.Utc) : null;
+        var after = YearStart(intent.MinYear);
+        var before = YearEnd(intent.MaxYear);
 
         var tasks = new List<Task<IReadOnlyList<TmdbListItem>>>();
         if (wantMovies)
@@ -1195,8 +1455,8 @@ public sealed class LiveSearchExpansionService(
     {
         var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
         var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
-        DateTime? after = intent.MinYear is { } y ? new DateTime(y, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        DateTime? before = intent.MaxYear is { } my ? new DateTime(my, 12, 31, 23, 59, 59, DateTimeKind.Utc) : null;
+        var after = YearStart(intent.MinYear);
+        var before = YearEnd(intent.MaxYear);
 
         var all = new List<TmdbListItem>();
         foreach (var person in people.Take(2))
@@ -1269,8 +1529,27 @@ public sealed class LiveSearchExpansionService(
             return;
         }
 
-        for (var i = 0; i < missing.Count; i++)
+        // The provider's answer is assumed row-aligned to the texts, and it is not contractually
+        // guaranteed to be: a truncated or partially rate-limited response comes back SHORT, and
+        // this loop indexed straight off the end of it — an IndexOutOfRangeException that the
+        // turn's catch-all then reported as "search hit a snag" with zero results, having already
+        // discovered and hydrated a full pool. Store what arrived; the rest sit this turn out.
+        if (vectors.Length != missing.Count)
         {
+            logger.LogWarning(
+                "Ask Reel: the embedding provider answered with {Returned} vectors for {Requested} titles; "
+                + "storing the ones that arrived and ranking on those.",
+                vectors.Length, missing.Count);
+        }
+
+        var usable = Math.Min(missing.Count, vectors.Length);
+        for (var i = 0; i < usable; i++)
+        {
+            if (vectors[i] is not { Length: > 0 })
+            {
+                continue;
+            }
+
             db.TitleEmbeddings.Add(new TitleEmbedding
             {
                 TitleId = missing[i].Id,
@@ -1376,9 +1655,19 @@ public sealed class LiveSearchExpansionService(
         await emit("done", new { results = cards, reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords" });
     }
 
-    private static object Card(
+    /// <summary>
+    /// One card on the wire.
+    ///
+    /// <para><paramref name="similarity"/> and <paramref name="fit"/> are rounded to 2 dp because
+    /// they are RENDERED, and a cosine printed to seventeen significant figures reads as precision
+    /// the number does not have. <paramref name="blend"/> is the server's own ranking value, carried
+    /// so the client can show why one card sits above another — but the ARRAY ORDER is authoritative
+    /// and a client must never re-sort by it: blend is rounded for display and the server's ordering
+    /// has a stable tiebreak this number cannot reproduce.</para>
+    /// </summary>
+    internal static object Card(
         Title t, double? similarity, decimal? predicted, double? fit = null, string? why = null,
-        bool seen = false, bool outsideRequest = false) => new
+        bool seen = false, bool outsideRequest = false, double? blend = null) => new
         {
             titleId = t.Id,
             mediaType = t.MediaType.ToString(),
@@ -1387,15 +1676,18 @@ public sealed class LiveSearchExpansionService(
             year = t.Year,
             posterPath = t.PosterPath,
             genres = t.Genres,
-            similarity,
+            similarity = similarity is { } s ? Math.Round(s, 2) : (double?)null,
             predictedRating = predicted,
             // The community number the personal prediction is read against — same resolver as the feed
             // cards, so a title's badge cannot say 7.4 here and 6.9 on the home page.
             crowdRating = CrowdRating.For(t),
             crowdVotes = CrowdRating.VotesFor(t),
-            fit,
+            fit = fit is { } f ? Math.Round(f, 2) : (double?)null,
             why,
             seen,
+            // The server's ranking value for this card. Display only — the array order is the
+            // contract, and it carries a tiebreak this rounded number cannot express.
+            blend = blend is { } b ? Math.Round(b, 4) : (double?)null,
             // True only for the closest-but-outside reserve — a card that trips one of the user's
             // exclusions and is shown, flagged, solely because the clean picks could not fill the
             // floor. Additive: old clients simply ignore it.
@@ -1423,15 +1715,50 @@ public sealed class LiveSearchExpansionService(
     private static string NormalizeQuery(string query) =>
         string.Join(' ', query.ToLowerInvariant().Split([' ', '\t', '\n'], StringSplitOptions.RemoveEmptyEntries));
 
-    // MaxYear and MaxRuntimeMinutes are part of the key because both change the TMDB discover
-    // query — omitting them would serve "under 90 minutes" a cached unconstrained pull.
-    private static string IntentKey(SearchIntent intent) =>
-        $"{string.Join(',', intent.Genres.OrderBy(g => g))}|{string.Join(',', intent.Keywords.OrderBy(k => k))}|" +
-        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m))}|{intent.MinYear}|{intent.MaxYear}|" +
-        $"{intent.MaxRuntimeMinutes}|{NormalizeQuery(intent.FreeText)}|" +
-        $"{string.Join(',', (intent.People ?? []).Select(p => $"{p.Name}:{p.Role}").OrderBy(p => p))}";
+    /// <summary>
+    /// The identity of a TMDB discovery pull: every field that changes the query TMDB is asked, and
+    /// nothing else.
+    ///
+    /// <para><b>Every argument of the discover call has to appear here</b>, positive and negative
+    /// alike. The exclusions do not merely re-order a pull — they ride as <c>without_genres</c> /
+    /// <c>without_keywords</c> and change which rows come back, so a key that omitted them served
+    /// "a tense thriller, no horror" the cached, unexcluded answer to "a tense thriller". Region is
+    /// here for a second reason on top of that: the single-flight key is derived from this string,
+    /// so two accounts in different regions asking the same thing at the same moment would share one
+    /// fetch and one of them would get the other's catalogue.</para>
+    ///
+    /// <para><see cref="ReferenceTitles"/> is deliberately absent, and it is the only field that is:
+    /// references are resolved separately and blended into the RANKING vector, never handed to
+    /// discovery, so two turns differing only in what they name as a comparison genuinely do share a
+    /// pull. <c>AskReelCacheKeyTests</c> holds that reasoning to account by reflection.</para>
+    /// </summary>
+    internal static string IntentKey(SearchIntent intent, string? region) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"{string.Join(',', intent.Genres.OrderBy(g => g, StringComparer.Ordinal))}|" +
+        $"{string.Join(',', intent.Keywords.OrderBy(k => k, StringComparer.Ordinal))}|" +
+        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m, StringComparer.Ordinal))}|" +
+        $"{intent.MinYear}|{intent.MaxYear}|{intent.MaxRuntimeMinutes}|{NormalizeQuery(intent.FreeText)}|" +
+        $"{string.Join(',', (intent.People ?? []).Select(p => string.Create(CultureInfo.InvariantCulture, $"{p.Name}:{p.Role}")).OrderBy(p => p, StringComparer.Ordinal))}|" +
+        $"-{string.Join(',', (intent.ExcludeGenres ?? []).OrderBy(g => g, StringComparer.Ordinal))}|" +
+        $"-{string.Join(',', (intent.ExcludeKeywords ?? []).OrderBy(k => k, StringComparer.Ordinal))}|" +
+        $"@{region}");
 
-    private static string CacheKey(string intentKey) => $"askreel:ids:{intentKey}";
+    /// <summary>
+    /// The discovered-id cache key. Carries the prompt generation and the model id because the ids
+    /// cached under it are the ids a PARTICULAR interpretation of the turn produced — edit the
+    /// prompt or change the model and the same sentence resolves to a different intent, which is
+    /// precisely the case the author will re-test with and the one a version-less key would answer
+    /// from cache for the next six hours. Same lever as <c>TitleLensCopy</c>'s prompt version.
+    /// </summary>
+    internal static string CacheKey(string intentKey, string modelId) => string.Create(
+        CultureInfo.InvariantCulture, $"askreel:ids:{AskReelPromptVersion.Current}:{modelId}:{intentKey}");
 
-    private static string FitKey(Guid accountId, Guid titleId, string qnorm) => $"rerank:{accountId}:{titleId}:{qnorm}";
+    /// <summary>
+    /// The per-(account, title, query) re-rank verdict cache key, versioned for the same reason
+    /// <see cref="CacheKey"/> is: a fit and a why-line are the output of one prompt against one
+    /// model, and serving a six-hour-old verdict from the previous prompt is how a prompt fix looks
+    /// like it did nothing.
+    /// </summary>
+    internal static string FitKey(Guid accountId, Guid titleId, string qnorm, string modelId) => string.Create(
+        CultureInfo.InvariantCulture, $"rerank:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{titleId}:{qnorm}");
 }
