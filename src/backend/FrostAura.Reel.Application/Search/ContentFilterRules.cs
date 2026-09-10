@@ -66,15 +66,33 @@ public static class ContentFilterRules
     /// <summary>The canonical stored form of a year bound — plain digits, invariant culture.</summary>
     public static string FormatYear(int value) => value.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>Reads a stored rating row back, clamped; null when absent or malformed.</summary>
+    /// <summary>
+    /// Reads a stored rating row back, clamped; null when absent or malformed.
+    /// <para>
+    /// The style is <c>AllowDecimalPoint</c> and a leading sign, deliberately NOT
+    /// <c>NumberStyles.Number</c>: that style allows group separators, so a row written by a
+    /// comma-decimal host as "7,5" parsed cleanly as seventy-five and then clamped to a floor of
+    /// 10 — every title excluded, no error, no log line. A malformed row must read as absent, not
+    /// as an order of magnitude.
+    /// </para>
+    /// </summary>
     public static decimal? ParseRating(string? stored) =>
-        stored is not null && decimal.TryParse(stored, NumberStyles.Number, CultureInfo.InvariantCulture, out var value)
+        stored is not null && decimal.TryParse(
+            stored,
+            NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture,
+            out var value)
             ? Math.Clamp(value, 0m, 10m)
             : null;
 
-    /// <summary>Reads a stored year row back; null when absent or malformed.</summary>
+    /// <summary>Reads a stored year row back; null when absent or malformed. Same reasoning as
+    /// <see cref="ParseRating"/> on the style: no group separators, so "1,999" is not a year.</summary>
     public static int? ParseYear(string? stored) =>
-        stored is not null && int.TryParse(stored, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+        stored is not null && int.TryParse(
+            stored,
+            NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture,
+            out var value)
             ? value
             : null;
 }

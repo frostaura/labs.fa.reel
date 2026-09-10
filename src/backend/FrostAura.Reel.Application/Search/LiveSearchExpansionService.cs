@@ -437,7 +437,7 @@ public sealed class LiveSearchExpansionService(
                         ? $"{blended.Count} picks matched everything you asked; {blendedOutside.Count} closest-but-outside shown separately."
                         : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
                             + (relaxation > 0 ? " (widened to find enough)" : "")
-                            + (floorRelaxed ? $" (nothing cleared your {floor:0.#} rating floor, so it was relaxed)" : "") + ".",
+                            + (floorRelaxed ? $" (nothing cleared your {floor.ToString("0.#", CultureInfo.InvariantCulture)} rating floor, so it was relaxed)" : "") + ".",
             });
             // The turn's answer, recorded. Ranked by the SAME blend the user is looking at, clean
             // picks first and outside ones trailing, so Rank is the position on screen. Written

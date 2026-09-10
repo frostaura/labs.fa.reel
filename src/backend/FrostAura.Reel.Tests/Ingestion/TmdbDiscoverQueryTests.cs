@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using FrostAura.Reel.Domain.Ports;
@@ -174,6 +175,57 @@ public class TmdbDiscoverQueryTests
         // Forty background calls per build promoted into the lane live search shares would be a
         // supply win paid for with interactive latency.
         Assert.Equal([RatePriority.Interactive, RatePriority.Reconcile], gate.Acquired);
+    }
+
+    /// <summary>
+    /// The date bounds are the one parameter in this projection whose CORRECTNESS depends on the
+    /// host's culture rather than only its formatting: ar-SA defaults to the Umm al-Qura calendar,
+    /// so an unqualified <c>yyyy-MM-dd</c> writes a Hijri year — 2000-01-01 leaves as 1420-09-24.
+    /// TMDB parses that happily and returns the wrong two decades of films, with no error anywhere.
+    /// Same class of silent-ignore failure as <c>vote_average.gte=6,0</c>, which is why the numeric
+    /// half of this file was already invariant; the dates were not, until 2026-09-10.
+    /// </summary>
+    [Theory]
+    [InlineData("de-DE")]
+    [InlineData("fr-FR")]
+    [InlineData("ar-SA")]
+    public async Task The_discover_dates_stay_gregorian_under_a_hostile_host_calendar(string culture)
+    {
+        var previous = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(culture);
+            var (client, handler) = Build();
+
+            await client.DiscoverByConceptAsync(
+                movies: true,
+                genreIds: [],
+                keywordIds: [],
+                region: null,
+                releasedAfter: new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+                page: 1,
+                releasedBefore: new DateTime(2010, 12, 31, 0, 0, 0, DateTimeKind.Utc),
+                options: new TmdbDiscoverOptions("en", 6.0m, 50, null, RatePriority.Reconcile));
+
+            var conceptQuery = handler.LastUri!.Query;
+            Assert.Contains("primary_release_date.gte=2000-01-01", conceptQuery, StringComparison.Ordinal);
+            Assert.Contains("primary_release_date.lte=2010-12-31", conceptQuery, StringComparison.Ordinal);
+            Assert.Contains("vote_average.gte=6.0", conceptQuery, StringComparison.Ordinal);
+
+            // The plain-discover path builds its own query string and must agree.
+            await client.DiscoverAsync(
+                movies: false,
+                genreId: null,
+                region: null,
+                releasedAfter: new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+                page: 1);
+
+            Assert.Contains("first_air_date.gte=2000-01-01", handler.LastUri!.Query, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
     }
 
     private static (TmdbClient Client, RecordingHandler Handler) Build()

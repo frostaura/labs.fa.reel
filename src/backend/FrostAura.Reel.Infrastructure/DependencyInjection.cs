@@ -134,6 +134,7 @@ public static class DependencyInjection
         services.AddScoped<Application.Ranking.DislikeSignal>();
         services.AddScoped<Application.Ml.OnDemandScorer>();
         services.AddScoped<Application.Ml.EvalHarness>();
+        services.AddScoped<Application.Ml.PersonAffinityWriter>();
         services.AddScoped<Application.Ml.ClosedLoop.RetroLoopQuery>();
         services.AddScoped<Application.Ml.ClosedLoop.ExposureLog>();
         services.AddScoped<Application.Ml.ClosedLoop.AccuracyQuery>();

@@ -264,6 +264,97 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// The other half of version-scoping, and the half the budget test could not reach: a row that
+    /// EXHAUSTED its attempts under one prompt version must become eligible again when the version
+    /// moves, with a fresh budget rather than an inherited one.
+    ///
+    /// <para>
+    /// This is the case the ordering of the two eligibility effects was written for — "an exhausted
+    /// row with a stale version is eligible again, which is deliberate: the reason it failed may be
+    /// the reason the prompt changed". Without it, a prompt written specifically to fix the titles
+    /// the old one choked on could never reach them: they are the exact rows sitting at the cap.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task A_version_bump_reopens_the_attempt_budget_a_failed_row_had_exhausted()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var v1 = new AlwaysFailingExtractor("budget/test-model", version: 1);
+
+        // Burn the budget: three runs, two of which may reach the model.
+        for (var run = 0; run < 3; run++)
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v1, cap: 1);
+        }
+
+        Assert.Equal(2, v1.TitlesSeen.Count(seen => seen == titleIds[0]));
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
+            Assert.Equal(2, row.AttemptCount);
+            Assert.Equal(1, row.ExtractorVersion);
+            Assert.NotEqual(AttributeExtractionStatus.Done, row.Status);
+        }
+
+        // Same model, new prompt generation. The row is at the cap and NOT Done, so a version-blind
+        // sweep leaves it there for ever.
+        var v2 = new RenamingExtractor("budget/test-model", version: 2);
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v2, cap: 1);
+
+        Assert.Equal(titleIds, v2.TitlesSeen);
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
+            Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+            Assert.Equal(2, row.ExtractorVersion);
+            Assert.Equal(1, row.AttemptCount); // reset, not 3
+        }
+    }
+
+    /// <summary>
+    /// A model that keeps failing at a NEWER version must still stop at the cap. The reset is what
+    /// makes a prompt change reach an exhausted row; it must not become a way to bill for ever by
+    /// bumping a number.
+    /// </summary>
+    [Fact]
+    public async Task A_version_bump_grants_one_fresh_budget_not_an_unlimited_one()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var v1 = new AlwaysFailingExtractor("budget/still-failing", version: 1);
+        for (var run = 0; run < 3; run++)
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v1, cap: 1);
+        }
+
+        var v2 = new AlwaysFailingExtractor("budget/still-failing", version: 2);
+        for (var run = 0; run < 3; run++)
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v2, cap: 1);
+        }
+
+        // Two attempts under each version, never three — asserted per title, because the sweep is
+        // global and other classes' titles share this database.
+        Assert.Equal(2, v1.TitlesSeen.Count(seen => seen == titleIds[0]));
+        Assert.Equal(2, v2.TitlesSeen.Count(seen => seen == titleIds[0]));
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
+        Assert.Equal(2, row.AttemptCount);
+        Assert.Equal(2, row.ExtractorVersion);
+        Assert.NotEqual(AttributeExtractionStatus.Done, row.Status);
+    }
+
+    /// <summary>
     /// A GLOBAL run — the shape the weekly catalogue-growth sweep queues. It has no account, so it
     /// must neither demand one nor chain a Train for one, and it still enriches. This used to throw
     /// on the first line of the handler.
@@ -515,13 +606,13 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     /// keeps omitting or mistyping a required scalar. The adapter returns null rather than
     /// substituting neutral values, and the handler must honour that.
     /// </summary>
-    private sealed class AlwaysFailingExtractor(string modelId) : ITitleAttributeExtractor
+    private sealed class AlwaysFailingExtractor(string modelId, int version = 1) : ITitleAttributeExtractor
     {
         public bool IsAvailable => true;
 
         public string ModelId => modelId;
 
-        public int Version => 1;
+        public int Version => version;
 
         /// <summary>
         /// Every title id this extractor was asked about, in order and WITH repeats. A total call

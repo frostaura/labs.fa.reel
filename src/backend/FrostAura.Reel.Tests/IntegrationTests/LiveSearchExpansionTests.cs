@@ -31,13 +31,12 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class LiveSearchExpansionTests(PostgresFixture fixture)
 {
-    // QUARANTINED (local-only): fails in isolation AND in the full run on the dev Mac (3/3
-    // runs, 2026-09-09), with a different assertion each way — alone, no "candidate" event is
-    // ever emitted (phase reports found:3, scored:0); in the full run the expected names are
-    // missing from a result set filled with sibling classes' titles. That moving failure point
-    // is exactly why this pair reads as "flaky". CI is authoritative and green.
-    [LocalFlakyFact]
-    [Trait("Flaky", "local")]
+    // Was quarantined as a "local-only flake" until 2026-09-10. The cause was in the fake TMDB
+    // client below, not the environment: its list rows carried OriginalLanguage = null, so every
+    // freshly-discovered candidate was upserted with Language = null and then dropped by the
+    // English-only eligibility default added in e790bb2 — "found: 3, scored: 0". Deterministic
+    // everywhere, CI included. The fake now carries "en" the way TMDB's real discover rows do.
+    [Fact]
     public async Task Streams_unseen_matches_excludes_seen_and_caches_the_fetch()
     {
         if (!fixture.Available)
@@ -73,12 +72,10 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         Assert.Contains(events, e => e.Event == "done");
     }
 
-    // QUARANTINED (local-only): same local expansion failure as the sibling test above —
-    // in isolation the done event carries an EMPTY results array (3/3 runs, 2026-09-09), so
-    // neither "Inception" nor "Tenet" can be found. Passes on CI's pgvector service, which is
-    // authoritative. Not chased locally; see memory/watch.md.
-    [LocalFlakyFact]
-    [Trait("Flaky", "local")]
+    // Was quarantined alongside the sibling above and shared its cause exactly: the person-credit
+    // rows carried no OriginalLanguage, so both films were dropped by the English-only default
+    // before they could be badged. See that test's note; the fake now carries "en".
+    [Fact]
     public async Task A_director_query_returns_the_filmography_including_watched_titles()
     {
         if (!fixture.Available)
@@ -96,8 +93,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             PersonResult = new TmdbPerson(525, "Christopher Nolan", "Directing"),
             PersonCredits =
             [
-                new(27205, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878]),
-                new(577922, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878]),
+                new(27205, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
+                new(577922, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
             ],
         };
         var agent = new FakePersonAgent(new PersonQuery("Christopher Nolan", PersonRole.Director));
@@ -479,9 +476,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
         private static readonly TmdbListItem[] Movies =
         [
-            new(579, true, "Jaws 2", "/jaws2.jpg", null, "A killer shark returns to Amity.", 50m, 6.5m, 900, new DateTime(1978, 6, 16, 0, 0, 0, DateTimeKind.Utc), [27, 53]),
-            new(8914, true, "Deep Blue Sea", "/dbs.jpg", null, "Genetically enhanced sharks fight back.", 40m, 5.9m, 1800, new DateTime(1999, 7, 28, 0, 0, 0, DateTimeKind.Utc), [28, 27]),
-            new(8059, true, "Sharknado", "/sn.jpg", null, "Sharks rain on Los Angeles.", 30m, 3.3m, 1200, new DateTime(2013, 7, 11, 0, 0, 0, DateTimeKind.Utc), [27, 878]),
+            new(579, true, "Jaws 2", "/jaws2.jpg", null, "A killer shark returns to Amity.", 50m, 6.5m, 900, new DateTime(1978, 6, 16, 0, 0, 0, DateTimeKind.Utc), [27, 53], "en"),
+            new(8914, true, "Deep Blue Sea", "/dbs.jpg", null, "Genetically enhanced sharks fight back.", 40m, 5.9m, 1800, new DateTime(1999, 7, 28, 0, 0, 0, DateTimeKind.Utc), [28, 27], "en"),
+            new(8059, true, "Sharknado", "/sn.jpg", null, "Sharks rain on Los Angeles.", 30m, 3.3m, 1200, new DateTime(2013, 7, 11, 0, 0, 0, DateTimeKind.Utc), [27, 878], "en"),
         ];
 
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
@@ -530,7 +527,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
         public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<TmdbTitleDetails?>(new TmdbTitleDetails(
-                tmdbId, "/p.jpg", null, 40m, 6m, 500, 120, "An overview.", null, null, [], [], null, ["shark"]));
+                tmdbId, "/p.jpg", null, 40m, 6m, 500, 120, "An overview.", null, null, [], [], null, ["shark"], "en", ["en"]));
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<TmdbTitleDetails?>(null);

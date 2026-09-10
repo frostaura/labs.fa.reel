@@ -194,6 +194,7 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
                 new EligibilityQueryBuilder(db),
                 new NoopEventHub(),
                 NullLogger<EvalHarness>.Instance),
+            new PersonAffinityWriter(db, NullLogger<PersonAffinityWriter>.Instance),
             new NoopEventHub(),
             NullLogger<TrainJobHandler>.Instance);
         await handler.ExecuteAsync(job, CancellationToken.None);

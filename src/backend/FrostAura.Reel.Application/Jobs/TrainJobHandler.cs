@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
@@ -35,6 +36,7 @@ public class TrainJobHandler(
     FeatureVectorBuilder featureBuilder,
     IModelEngine engine,
     EvalHarness harness,
+    PersonAffinityWriter personAffinities,
     IPipelineEventHub events,
     ILogger<TrainJobHandler> logger) : IJobHandler
 {
@@ -125,8 +127,10 @@ public class TrainJobHandler(
         else
         {
             job.ProgressMessage =
-                $"iteration {outcome.Run.Iteration}: NDCG@10 {outcome.Result.NdcgAt10Model:F3} vs {outcome.Result.NdcgAt10Baseline:F3} "
-                + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}";
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"iteration {outcome.Run.Iteration}: NDCG@10 {outcome.Result.NdcgAt10Model:F3} vs {outcome.Result.NdcgAt10Baseline:F3} "
+                    + $"— gate {(outcome.Result.PassedGate ? "passed" : "not met")}");
         }
 
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
@@ -220,6 +224,13 @@ public class TrainJobHandler(
                 TriggerReason = "model-trained",
             });
         }
+
+        // Person affinities are a SERVING-time cache derived from the same taste state this train
+        // was fitted on, so they are refreshed here rather than on their own schedule: the discover
+        // arm that reads them and the model that ranks what it returns then describe one snapshot of
+        // the user, and there is no window where a new model is being served against people the old
+        // one implied. Staged, not saved — it lands in the same write as the artifact below.
+        await personAffinities.RefreshAsync(accountId, taste, now, ct);
 
         // The Active-artifact and in-flight-job indexes are check-then-insert races: another instance
         // (or the enqueue in EnrichCatalogJobHandler / NightlyReconcileService) can win between the

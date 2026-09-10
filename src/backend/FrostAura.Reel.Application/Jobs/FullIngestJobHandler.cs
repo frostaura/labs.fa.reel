@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Persistence;
@@ -111,7 +112,10 @@ public class FullIngestJobHandler(
             .CountAsync(m => m == MediaType.Show, ct);
         var ratingCount = await db.UserRatings.CountAsync(r => r.AccountId == accountId, ct);
 
-        PublishInsight(accountId, "library", $"Found {movieCount:N0} movies and {showCount:N0} shows in your history");
+        PublishInsight(
+            accountId,
+            "library",
+            string.Create(CultureInfo.InvariantCulture, $"Found {movieCount:N0} movies and {showCount:N0} shows in your history"));
 
         var lovedGenres = await db.UserRatings
             .Where(r => r.AccountId == accountId && r.Rating >= 8)
@@ -121,7 +125,12 @@ public class FullIngestJobHandler(
             .OrderByDescending(g => g.Count()).Take(2).Select(g => g.Key).ToList();
         if (topGenres.Count > 0)
         {
-            PublishInsight(accountId, "genre", $"You rate {string.Join(" and ", topGenres)} highest — {ratingCount:N0} ratings tell on you");
+            PublishInsight(
+                accountId,
+                "genre",
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"You rate {string.Join(" and ", topGenres)} highest — {ratingCount:N0} ratings tell on you"));
         }
 
         var decades = await db.UserRatings
