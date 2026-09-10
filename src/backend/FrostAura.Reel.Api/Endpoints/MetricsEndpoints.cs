@@ -213,6 +213,7 @@ public static class MetricsEndpoints
             IReelDbContext db,
             IAccountContext accountContext,
             ITitleAttributeExtractor extractor,
+            CatalogSeedProgressQuery seedProgress,
             CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
@@ -278,6 +279,13 @@ public static class MetricsEndpoints
             // else now (the pre-2026-08-07 free-text Tone/Era rows).
             var enrichment = await EnrichmentScheduler.BacklogAsync(db, extractor.Version, ct);
 
+            // The supply half of the same picture. It belongs in the enrichment block rather than
+            // beside it because the three numbers are one pipeline: the seed decides how many rows
+            // exist, hydration decides how many are usable, enrichment decides how many are
+            // FEATURISED — and a missingAttributes count read without knowing a seed is running
+            // looks like a regression instead of a queue.
+            var seed = await seedProgress.RunAsync(extractor.Version, DateTime.UtcNow, ct);
+
             return Results.Ok(new
             {
                 jobs,
@@ -290,6 +298,24 @@ public static class MetricsEndpoints
                     missingAttributes = enrichment.MissingAttributes,
                     staleExtractorVersion = enrichment.StaleExtractorVersion,
                     lastRunAt = enrichment.LastRunAt,
+                    seed = new
+                    {
+                        status = seed.Status,
+                        done = seed.Done,
+                        partitionsDone = seed.PartitionsDone,
+                        partitionsTotal = seed.PartitionsTotal,
+                        titlesAdded = seed.TitlesAdded,
+                        pagesFetched = seed.PagesFetched,
+                        pagesUsedToday = seed.PagesUsedToday,
+                        hydrationBacklog = seed.HydrationBacklog,
+                        hydrateTitlesPerDay = seed.HydrationAllowance.Limit,
+                        hydrateTitlesUsedToday = seed.HydrationAllowance.Used,
+                        extractDailyTokens = seed.ExtractAllowance.Limit,
+                        extractTokensUsedToday = seed.ExtractAllowance.Used,
+                        embedDailyTokens = seed.EmbedAllowance.Limit,
+                        embedTokensUsedToday = seed.EmbedAllowance.Used,
+                        estimatedDaysToFullyEnriched = seed.EstimatedDaysToEnriched,
+                    },
                 },
             });
         });

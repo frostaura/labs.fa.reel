@@ -77,6 +77,31 @@ public class BuildFeedJobHandler(
     // sharpen ordering toward stated taste, never enough to float a weak prediction over a strong one.
     private const double PreferenceTagWeight = 0.10;
 
+    /// <summary>
+    /// How many shortlist titles must clear the account's own <c>MinPredictedRating</c> before the
+    /// floor is taken at face value. Four times the hero: a floor that leaves fewer candidates than
+    /// four heroes' worth is not selecting the page, it IS the page, and the whole feed below the
+    /// hero then assembles out of whatever handful survived. On 2026-09-10 this was fourteen reality
+    /// shows on a 220-title shortlist.
+    /// </summary>
+    private const int FloorRelaxMinimum = 4 * HeroSize;
+
+    /// <summary>
+    /// The quantile the floor relaxes TO. Not zero — relaxing to nothing throws away the user's
+    /// setting entirely and lets the bottom of the shortlist onto rails. The 80th percentile keeps
+    /// the top fifth of what was actually scored, which is a weaker claim than the user asked for
+    /// and an honest one, and it is stated on the page rather than applied in silence.
+    /// </summary>
+    private const double FloorRelaxQuantile = 0.80d;
+
+    /// <summary>
+    /// How many shortlist candidates the pre-assembly fit pass judges on a Fresh build. Forty is
+    /// eight hero seats' worth of headroom at the batch size below — enough that the hero, the deep
+    /// cuts head and the top of each rail are all drawn from judged titles, and few enough that the
+    /// pass costs ~5 calls.
+    /// </summary>
+    private const int PreAssemblyFitCandidates = 40;
+
     // ── LLM why pass (mirrors FeedPaginator's curation budget mechanics) ────────────────────
     // Soft budget checked BETWEEN batches — the first batch always finishes so every build makes
     // forward progress into the shared 6h fit cache — plus a hard ceiling backstop against a hung
@@ -86,6 +111,23 @@ public class BuildFeedJobHandler(
     private static readonly TimeSpan WhyPassCeiling = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
     private const int RerankBatch = 9;
+
+    // ── Pre-assembly fit pass (Fresh only) ──────────────────────────────────────────────────
+    // Its own budget rather than a share of the why pass's, because the two answer to different
+    // failure modes: the why pass degrading costs a caption, this pass degrading costs the ORDER of
+    // the hero. Same shape though — soft budget between batches, hard ceiling inside one — and the
+    // same shared 6h fit cache, so the verdicts it buys are the verdicts the why pass then reuses
+    // for free instead of re-purchasing.
+    private static readonly TimeSpan PreAssemblyFitBudget = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan PreAssemblyFitCeiling = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// The fit a candidate is ordered as carrying when nobody judged it — the midpoint of the
+    /// agent's own 0–1 scale. Chosen so that <c>0.5 + fit</c> is exactly 1.0 for an unjudged title:
+    /// the LLM term then vanishes from the comparator rather than penalising everything the pass did
+    /// not reach, and a build with no agent at all orders by calibrated × prior, precisely.
+    /// </summary>
+    private const double NeutralFit = 0.5d;
 
     // Hero coherence floor: when the LLM's fit verdict for a hero card comes in at or below this,
     // "tonight's pick" and "you'll probably dislike it" are on the same card. The why pass swaps
@@ -354,8 +396,10 @@ public class BuildFeedJobHandler(
             ["kind"] = "feed",
             ["picksChanged"] = capture.PicksChanged,
         });
-        logger.LogInformation("Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored).",
-            snapshot.Id, accountId, candidates.Count);
+        logger.LogInformation(
+            "Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored, mean taste-prior magnitude {PriorMagnitude:0.000}, "
+                + "{Judged} candidates judged before assembly).",
+            snapshot.Id, accountId, candidates.Count, capture.AveragePriorMagnitude, capture.JudgedBeforeAssembly);
     }
 
     /// <summary>
@@ -552,6 +596,19 @@ public class BuildFeedJobHandler(
 
         /// <summary>Cards whose displayed rating moved on the score-only Preserve path.</summary>
         public IReadOnlyList<FeedScoreUpdate> ScoreUpdates { get; set; } = [];
+
+        /// <summary>
+        /// Mean |1 − taste prior| across the scored shortlist — how hard the product rule had to
+        /// push this build. <c>FeedBuildStat</c> has no column for it and this change takes no
+        /// migration, so it goes to the log; the number matters because the prior is explicitly
+        /// meant to SHRINK as the model earns its own discrimination, and a magnitude that is still
+        /// where it started in six months is a finding about the model rather than a success of the
+        /// rule. Promote it to a column the next time this table is migrated for another reason.
+        /// </summary>
+        public double AveragePriorMagnitude { get; set; }
+
+        /// <summary>How many shortlist candidates the pre-assembly fit pass actually judged.</summary>
+        public int JudgedBeforeAssembly { get; set; }
     }
 
     /// <summary>
@@ -614,15 +671,30 @@ public class BuildFeedJobHandler(
         // Content filters are the user's statement about CONTENT — they bind absolutely and are
         // already applied in retrieval. MinPredictedRating is a statement about the MODEL's opinion,
         // and the model's output scale is not something the user can see or calibrate against. When
-        // nothing at all clears it, honouring it strictly renders a blank page; relaxing it and SAYING
+        // almost nothing clears it, honouring it strictly renders a blank — or worse, a page built
+        // entirely out of the handful of titles that happened to squeak over; relaxing it and SAYING
         // SO shows honest, lower-confidence rankings instead. Same call Ask Reel already makes
         // (LiveSearchExpansionService's MinFloorRelaxedCount arm) — the feed build was the one
         // suggestion surface still treating "empty" as a verdict rather than a failure to look harder.
+        //
+        // TWO things changed here on 2026-09-10, both from the same live build.
+        //
+        // The TRIGGER is no longer "nothing clears it". A floor that admits fourteen titles out of a
+        // 220-title shortlist is not selecting a page, it is BEING the page — hero, deep cuts and
+        // every rail assemble out of those fourteen, and on the founder's account all fourteen were
+        // reality shows. The bar is now FloorRelaxMinimum: four heroes' worth of supply, or the floor
+        // is treated as the failure it is.
+        //
+        // The DESTINATION is no longer zero. Relaxing to nothing discards the user's setting whole
+        // and lets the bottom of the shortlist onto rails; relaxing to the shortlist's 80th
+        // percentile keeps the top fifth of what the model actually scored. Guarded with Math.Min so
+        // a "relaxation" can never RAISE the floor above what the user asked for.
         var effectiveFloor = minPredicted;
         string? degradedReason = null;
-        if (minPredicted > 0m && !candidates.Any(c => c.Predicted >= minPredicted))
+        var clearingFloor = candidates.Count(c => c.Predicted >= minPredicted);
+        if (minPredicted > 0m && clearingFloor < FloorRelaxMinimum)
         {
-            effectiveFloor = 0m;
+            effectiveFloor = Math.Min(minPredicted, Percentile(candidates, FloorRelaxQuantile) ?? 0m);
 
             // Invariant culture, deliberately: these numbers are ratings on the same 0–10 scale the
             // settings screen shows and ContentFilterRules stores, and a server whose locale renders
@@ -630,11 +702,11 @@ public class BuildFeedJobHandler(
             degradedReason = candidates.Count > 0
                 ? string.Format(
                     System.Globalization.CultureInfo.InvariantCulture,
-                    "Nothing scored at or above your {0:0.#} “for you” minimum, so it was relaxed for this build — "
-                        + "the best of {1} matching titles is {2:0.0}.",
+                    "Your ≥{0:0.0} “for you” floor left only {1} title{2} tonight; relaxed to {3:0.0} for this build.",
                     minPredicted,
-                    candidates.Count,
-                    candidates.Max(c => c.Predicted))
+                    clearingFloor,
+                    clearingFloor == 1 ? string.Empty : "s",
+                    effectiveFloor)
                 : null;
         }
 
@@ -646,11 +718,25 @@ public class BuildFeedJobHandler(
                 ?? "No candidates survived this build. Try relaxing a filter.";
         }
 
-        capture.DegradedReason = degradedReason;
-        if (degradedReason is not null)
-        {
-            logger.LogWarning("Feed build degraded for {AccountId}: {Reason}", account.Id, degradedReason);
-        }
+        // ── The taste prior ─────────────────────────────────────────────────────────────────
+        // A multiplicative RANKING adjustment on top of the calibrated prediction, and on nothing
+        // else — PredictedRating, the card's number, is untouched by every line below. See
+        // TastePrior for what it corrects and why it is meant to shrink toward 1.0 as the model
+        // earns its own discrimination. Computed once per build over the shortlist; the components
+        // are kept (not just the product) so the card can explain the demotion in the user's own
+        // terms — "you have rated 3 reality titles ever".
+        var tastePrior = TastePrior.From(taste);
+        var priorByTitle = candidates
+            .GroupBy(c => c.Title.Id)
+            .ToDictionary(g => g.Key, g => tastePrior.ComponentsFor(g.First().Title));
+        TastePrior.Components PriorOf(Title title) =>
+            priorByTitle.TryGetValue(title.Id, out var components)
+                ? components
+                : tastePrior.ComponentsFor(title);
+        double Prior(Title title) => PriorOf(title).Multiplier;
+        capture.AveragePriorMagnitude = priorByTitle.Count > 0
+            ? priorByTitle.Values.Average(p => Math.Abs(1d - p.Multiplier))
+            : 0d;
 
         // Per-title, per-role best-affinity person, restricted to people the user has actually rated
         // (count ≥ 2). Keying by role lets the why-sentence cite the person matching the contribution
@@ -825,6 +911,38 @@ public class BuildFeedJobHandler(
             return ageDays > 365 ? 1m : 1m + (decimal)(0.10 * Math.Exp(-ageDays / 180d));
         }
 
+        // The ranking key the whole page is ordered by, once, in one place: the calibrated
+        // prediction the card shows, times the account-level taste prior, times the two bounded
+        // presentation nudges that were already here. Every ordering below multiplies this by its
+        // own slate term (freshness, anchor similarity) rather than re-deriving the common part.
+        decimal RankKey(Candidate c) =>
+            c.Predicted * (decimal)Prior(c.Title) * (decimal)PreferenceBoost(c.Title);
+
+        // ── Pre-assembly fit pass (Fresh only) ──────────────────────────────────────────────
+        // The narrative-conditioned fit verdict used to arrive AFTER the page was assembled, which
+        // made it a caption and a last-resort hero swap — it could say a hero was wrong but never
+        // stop it being chosen. Judging the top slice first turns the same call into a ranking
+        // signal: the hero is ordered by calibrated × prior × (0.5 + fit), so a title the account's
+        // own taste narrative says nothing for cannot lead the page on a 0.2-point scoring edge.
+        //
+        // Fresh only. A Preserve rebuild keeps tonight's seats by contract, so re-judging them could
+        // only produce an order it is not allowed to use — and would spend for the privilege.
+        // Every verdict lands in the shared 6h fit cache, so the why pass below reads them back for
+        // free and the pass costs the build ~5 calls in total rather than two passes' worth.
+        var preAssemblyFits = mode == FeedBuildMode.Fresh
+            ? await JudgeFitBeforeAssemblyAsync(account.Id, taste, candidates, effectiveFloor, RankKey, ct)
+            : new Dictionary<Guid, double>();
+        capture.JudgedBeforeAssembly = preAssemblyFits.Count;
+
+        // The LLM term, as a multiplier. An unjudged title carries NeutralFit, which makes this
+        // exactly 1.0 — so a build with no agent, or one whose budget ran out, orders by
+        // calibrated × prior and nothing else. That is the documented fallback, not a degradation.
+        double FitFactor(Guid titleId) =>
+            NeutralFit + (preAssemblyFits.TryGetValue(titleId, out var fit) ? fit : NeutralFit);
+
+        decimal HeroKey(Candidate c) =>
+            RankKey(c) * Freshness(c.Title) * (decimal)FitFactor(c.Title.Id);
+
         // ── Team-draft interleaving ─────────────────────────────────────────────────────────
         // Off unless INTERLEAVE_ENABLED says otherwise, and Fresh-only: a Preserve rebuild's whole
         // contract is that tonight's seats do not move, so re-drafting them would be a different
@@ -868,7 +986,12 @@ public class BuildFeedJobHandler(
                     x.Fresh,
                     PreferenceBoost(x.Candidate.Title),
                     x.Candidate.Title.TmdbPopularity ?? 0m,
-                    x.Affinity))]);
+                    x.Affinity,
+                    Prior(x.Candidate.Title),
+                    // Null, not NeutralFit, where the pass did not reach this title: null is what
+                    // makes ProfileRerankPolicy fall back to the calibrated key for it rather than
+                    // ordering it as a genuine mid-scoring verdict it never received.
+                    preAssemblyFits.TryGetValue(x.Candidate.Title.Id, out var judged) ? judged : null))]);
 
             List<Candidate> Selected() => [.. draft.Selected.Select(id => byId[id].Candidate)];
             var stages = phases.Length > 0
@@ -888,9 +1011,14 @@ public class BuildFeedJobHandler(
         }
 
         // Hero: greedy pick with genre-diversity shaping (MMR with Jaccard until embeddings land).
+        // Ordered by HeroKey — calibrated × prior × freshness × preference × (0.5 + fit) — so the
+        // headline row is the one place all three ranking layers speak at once. The ADMISSION
+        // predicate is deliberately still c.Predicted: the confidence floor is a claim about what
+        // the model believes, and a title must not be admitted to the hero's own bar by a prior or
+        // an LLM opinion the label "confident" was never measured against.
         var heroPool = candidates
             .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
-            .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
+            .OrderByDescending(HeroKey)
             .ToList();
         // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
         // means the headline row is silently reaching, which is the founder's complaint in his words.
@@ -967,8 +1095,61 @@ public class BuildFeedJobHandler(
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
                 .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
+                .OrderByDescending(HeroKey)
                 .Take(HeroSize - hero.Count));
+        }
+
+        // ── Hero media balance ──────────────────────────────────────────────────────────────
+        // The prior demotes what the account has no history in; this covers the residual case where
+        // a whole MEDIUM is squeezed out by a fraction of a point. A 90%-movies account gets a hero
+        // that carries at least round(HeroSize × MovieRatedShare) movies — capped one seat below the
+        // row, so this can never make the hero single-medium by itself.
+        //
+        // The spares are drawn from the same admissible set the never-open-blank backfill uses:
+        // poster + effectiveFloor, ordered by HeroKey. Nothing here reaches below the floor to hit a
+        // mix number, and when the shortlist genuinely could not supply the medium, the page SAYS so
+        // instead of quietly missing the target.
+        //
+        // FRESH and non-interleaved only, for two separate contracts. A Preserve rebuild's seats do
+        // not move — swapping one for media balance would be a different page under the same
+        // GeneratedAt, which is exactly what the stable-"tonight" rule forbids; the mix is applied on
+        // the next Fresh build instead. And an interleaved build's every seat must carry the ranker
+        // that drafted it, so a post-draft swap would orphan a seat and quietly bias the comparison
+        // toward whichever arm happened to supply the medium (stated in docs/interleaving.md).
+        var heroTarget = MediaMix.TargetFor(HeroSize, taste.MovieRatedShare);
+        if (interleaver is null && mode == FeedBuildMode.Fresh && heroTarget.Count > 0 && hero.Count > 0)
+        {
+            var seated = hero.Select(h => h.Title.Id).ToHashSet();
+            var heroSparePool = candidates
+                .Where(c => !seated.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                .OrderByDescending(HeroKey)
+                .ToList();
+            var (balanced, met) = MediaMix.Balance(
+                hero,
+                heroSparePool,
+                c => (c.Title.MediaType == MediaType.Movie) == heroTarget.WantMovies,
+                Math.Min(heroTarget.Count, hero.Count));
+
+            // Re-sorted rather than left where the swap landed: a replacement that outranks the seat
+            // it took should lead, and the hero's order is a claim about ranking, not about history.
+            hero = [.. balanced.OrderByDescending(HeroKey)];
+            if (!met)
+            {
+                degradedReason = Append(
+                    degradedReason,
+                    string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "Tonight's picks are short on {0} — the shortlist had too few above your floor to reach {1} of {2}.",
+                        heroTarget.WantMovies ? "films" : "shows",
+                        heroTarget.Count,
+                        HeroSize));
+            }
+        }
+
+        capture.DegradedReason = degradedReason;
+        if (degradedReason is not null)
+        {
+            logger.LogWarning("Feed build degraded for {AccountId}: {Reason}", account.Id, degradedReason);
         }
 
         // Assembly writes into a buffer, not the DbContext: whether anything is persisted at all is
@@ -1016,7 +1197,7 @@ public class BuildFeedJobHandler(
         var reserved = new HashSet<Guid>();
         foreach (var id in candidates
                      .Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c))
-                     .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
+                     .OrderByDescending(RankKey)
                      .Take(RowMinMembers)
                      .Select(c => c.Title.Id))
         {
@@ -1025,11 +1206,34 @@ public class BuildFeedJobHandler(
 
         foreach (var id in candidates
                      .Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c))
-                     .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
+                     .OrderByDescending(c => RankKey(c) * Freshness(c.Title))
                      .Take(RowMinMembers)
                      .Select(c => c.Title.Id))
         {
             reserved.Add(id);
+        }
+
+        // Rails carry the same media-mix floor the hero does, at their own width. A rail is a
+        // narrower promise than the hero, so a miss here is not worth a banner — the target is
+        // simply met from what the rail's own pool holds, or it is not.
+        // Preserve is excluded here for the same reason the hero is: a kept rail's members are
+        // tonight's contract. Only the interleaver-free FRESH fill balances.
+        var rowTarget = mode == FeedBuildMode.Fresh
+            ? MediaMix.TargetFor(RowSize, taste.MovieRatedShare)
+            : (WantMovies: true, Count: 0);
+        List<Candidate> BalanceRow(IReadOnlyList<Candidate> members, IReadOnlyList<Candidate> spares)
+        {
+            if (rowTarget.Count == 0 || members.Count == 0)
+            {
+                return [.. members];
+            }
+
+            var (balanced, _) = MediaMix.Balance(
+                members,
+                spares,
+                c => (c.Title.MediaType == MediaType.Movie) == rowTarget.WantMovies,
+                Math.Min(rowTarget.Count, members.Count));
+            return balanced;
         }
 
         // Rail continuity mirrors hero continuity. Members are keyed to their anchor from the
@@ -1080,16 +1284,20 @@ public class BuildFeedJobHandler(
                 // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
                 // the calibrated policy reproduces this row's historical comparator exactly rather
                 // than substituting the hero's.
+                var railOrder = railPool
+                    .OrderByDescending(x => (double)RankKey(x.Candidate) * (0.5d + x.Sim))
+                    .Select(x => x.Candidate)
+                    .ToList();
+                var taking = RowSize - members.Count;
                 members.AddRange(interleaver is not null
                     ? DraftSlate(
                         FeedRowKind.BecauseYouLoved,
                         anchor.Id,
                         [.. railPool.Select(x => (x.Candidate, Fresh: 1m, Affinity: 0.5d + x.Sim))],
-                        RowSize - members.Count)
-                    : railPool
-                        .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
-                        .Take(RowSize - members.Count)
-                        .Select(x => x.Candidate));
+                        taking)
+                    : BalanceRow(
+                        [.. railOrder.Take(taking)],
+                        [.. railOrder.Skip(taking)]));
             }
 
             if (members.Count < RowMinMembers)
@@ -1115,10 +1323,9 @@ public class BuildFeedJobHandler(
                 null,
                 [.. deepCutPool.Select(c => (Candidate: c, Fresh: 1m, Affinity: 1d))],
                 RowSize)
-            : deepCutPool
-                .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
-                .Take(RowSize)
-                .ToList();
+            : BalanceRow(
+                [.. deepCutPool.OrderByDescending(RankKey).Take(RowSize)],
+                [.. deepCutPool.OrderByDescending(RankKey).Skip(RowSize)]);
         if (deepCuts.Count >= RowMinMembers)
         {
             for (var i = 0; i < deepCuts.Count; i++)
@@ -1139,10 +1346,9 @@ public class BuildFeedJobHandler(
                 null,
                 [.. newForYouPool.Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
                 RowSize)
-            : newForYouPool
-                .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
-                .Take(RowSize)
-                .ToList();
+            : BalanceRow(
+                [.. newForYouPool.OrderByDescending(c => RankKey(c) * Freshness(c.Title)).Take(RowSize)],
+                [.. newForYouPool.OrderByDescending(c => RankKey(c) * Freshness(c.Title)).Skip(RowSize)]);
         if (newForYou.Count >= RowMinMembers)
         {
             for (var i = 0; i < newForYou.Count; i++)
@@ -1173,7 +1379,7 @@ public class BuildFeedJobHandler(
             && SameFeed(previousItems, planned))
         {
             capture.PreservedGeneratedAt = previousSnapshot.GeneratedAt;
-            capture.ScoreUpdates = ApplyScoreDrift(previousItems, planned, Freshness);
+            capture.ScoreUpdates = ApplyScoreDrift(previousItems, planned, Freshness, Prior, PriorOf);
             return null;
         }
 
@@ -1184,7 +1390,7 @@ public class BuildFeedJobHandler(
         var heroSpares = heroPool
             .Concat(candidates
                 .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title)))
+                .OrderByDescending(HeroKey))
             .Where(c => !used.Contains(c.Title.Id))
             .DistinctBy(c => c.Title.Id)
             .Take(HeroSize)
@@ -1236,9 +1442,9 @@ public class BuildFeedJobHandler(
                 Rank = item.Rank,
                 TitleId = item.Candidate.Title.Id,
                 PredictedRating = DisplayRating(item.Candidate),
-                FinalScore = FinalScoreOf(item.Candidate, Freshness),
+                FinalScore = FinalScoreOf(item.Candidate, Freshness, Prior),
                 WhyThisSentence = item.WhyThis,
-                ExplanationJson = ExplanationOf(item.Candidate),
+                ExplanationJson = ExplanationOf(item.Candidate, PriorOf(item.Candidate.Title)),
             });
         }
 
@@ -1372,6 +1578,126 @@ public class BuildFeedJobHandler(
     }
 
     /// <summary>
+    /// Joins a second sentence onto a degraded reason. The banner is one paragraph on the page, so
+    /// two independent honesties about the same build read as one explanation rather than replacing
+    /// each other — which is what a naive assignment would do, and the relaxation notice is the one
+    /// that would have been lost.
+    /// </summary>
+    private static string Append(string? existing, string sentence) =>
+        string.IsNullOrWhiteSpace(existing) ? sentence : $"{existing} {sentence}";
+
+    /// <summary>
+    /// The pre-assembly fit pass: ask the agent how well the top slice of the shortlist fits THIS
+    /// account's taste narrative, before the hero and the rails are chosen, and return the verdicts
+    /// by title.
+    ///
+    /// <para>This is the same call, the same prompt (<c>RerankSystemPrompt</c> via
+    /// <see cref="ISearchAgent.RerankBatchAsync"/>) and the same purpose on the token ledger
+    /// (<c>rerank</c>) the why pass has always made — moved earlier. That move is the whole point:
+    /// after assembly, a fit verdict can only caption a pick or trigger a last-resort swap, and the
+    /// swap fires at a fit of 0.3 or below, which a mediocre-but-not-damning card never reaches. The
+    /// founder's hero on 2026-09-10 was five titles the model liked by a fraction of a point and his
+    /// own narrative had nothing to say for; nothing downstream of assembly could have stopped it.</para>
+    ///
+    /// <para>Every verdict is cached under the SHARED hero fit key, so the why pass below reads them
+    /// back instead of buying them twice, and the paginator's hero lane gets them free for six
+    /// hours. Never throws and never blocks: an unavailable agent, a stub, an exhausted budget or a
+    /// hung provider all return what was gathered so far, and an empty map means the build orders by
+    /// calibrated × prior — the documented fallback.</para>
+    /// </summary>
+    private async Task<Dictionary<Guid, double>> JudgeFitBeforeAssemblyAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, IReadOnlyList<Candidate> candidates,
+        decimal effectiveFloor, Func<Candidate, decimal> rankKey, CancellationToken ct)
+    {
+        var fits = new Dictionary<Guid, double>();
+        if (!agent.IsAvailable || candidates.Count == 0)
+        {
+            return fits;
+        }
+
+        // Ordered by calibrated × prior — the best guess available BEFORE any fit exists, and
+        // therefore the honest way to spend a bounded number of calls on the titles most likely to
+        // reach the page.
+        var slice = candidates
+            .Where(c => c.Predicted >= effectiveFloor)
+            .OrderByDescending(rankKey)
+            .ThenBy(c => c.Title.Id)
+            .Take(PreAssemblyFitCandidates)
+            .ToList();
+        if (slice.Count == 0)
+        {
+            return fits;
+        }
+
+        var rowKey = FeedPaginator.RowKeyFor(FeedRowKind.Hero, null);
+
+        // A verdict already in the shared cache is free and is used as-is — a build ten minutes
+        // after the last one re-judges nothing.
+        var uncached = new List<Candidate>(slice.Count);
+        foreach (var candidate in slice)
+        {
+            if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(accountId, candidate.Title.Id, rowKey), out var hit)
+                && hit is not null)
+            {
+                fits[candidate.Title.Id] = hit.Fit;
+            }
+            else
+            {
+                uncached.Add(candidate);
+            }
+        }
+
+        if (uncached.Count == 0)
+        {
+            return fits;
+        }
+
+        try
+        {
+            var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
+            var contexts = await RerankContextsAsync(slice, ct);
+            var byTitleId = uncached.ToDictionary(c => c.Title.Id);
+            var debiased = new PositionDebiasedFit();
+            using var loop = new LlmBudgetLoop(
+                new LlmBudgetOptions(PreAssemblyFitBudget, PreAssemblyFitCeiling, RerankBatch), ct);
+
+            var stop = await loop.RunAsync(uncached, async (batch, batchCt) =>
+            {
+                var inputs = batch.Select(c => RerankInputFor(c, contexts)).ToList();
+                var results = await agent.RerankBatchAsync(
+                    inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null, batchCt);
+
+                foreach (var raw in results)
+                {
+                    // The same deterministic unscripted-format correction the why pass applies, for
+                    // the same reason and revocable the same way (see UnscriptedFormats): an LLM's
+                    // sense of how well a long-running panel show "fits" someone is contaminated by
+                    // how many people watch it, and this pass now decides the hero.
+                    var adjusted = byTitleId.TryGetValue(raw.TitleId, out var scored)
+                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, scored.Title.Genres, persona.Taste) }
+                        : raw;
+                    debiased.Observe(adjusted);
+                    var result = debiased.For(raw.TitleId)!;
+                    cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
+                    fits[result.TitleId] = result.Fit;
+                }
+            });
+
+            logger.LogInformation(
+                "Pre-assembly fit pass for {AccountId} judged {Judged} of {Total} shortlist candidates ({Stop}, {Elapsed:0.0}s).",
+                accountId, fits.Count, slice.Count, stop, loop.Elapsed.TotalSeconds);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A fit verdict sharpens an order the model has already personalised. Losing it costs a
+            // slightly worse hero, never a build — exactly how every other agent path here behaves.
+            logger.LogWarning(ex, "Pre-assembly fit pass failed for {AccountId}; ordering by calibrated × prior.", accountId);
+        }
+
+        return fits;
+    }
+
+    /// <summary>
     /// True when an LLM why-line may be shown on a pick surface: the shared voice/shape guard
     /// (<see cref="SecondPersonVoice.Rejects"/>) plus the anti-recommendation guard — a feed card
     /// must never argue against its own pick, however honest the argument.
@@ -1463,7 +1789,7 @@ public class BuildFeedJobHandler(
         if (uncached.Count > 0 && agent.IsAvailable)
         {
             var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
-            var contexts = await RerankContextsAsync(planned, ct);
+            var contexts = await RerankContextsAsync([.. planned.Select(i => i.Candidate)], ct);
 
             // A title can sit on two rails, so it is judged twice at two different prompt
             // positions. Averaging the verdicts is the caller's half of the position-bias
@@ -1501,9 +1827,9 @@ public class BuildFeedJobHandler(
     /// characters of overview and asked to judge personal fit from that.
     /// </summary>
     private async Task<IReadOnlyDictionary<Guid, RerankTitleContext>> RerankContextsAsync(
-        List<PlannedItem> planned, CancellationToken ct)
+        IReadOnlyList<Candidate> scored, CancellationToken ct)
     {
-        var ids = planned.Select(i => i.Candidate.Title.Id).Distinct().ToList();
+        var ids = scored.Select(c => c.Title.Id).Distinct().ToList();
         if (ids.Count == 0)
         {
             return new Dictionary<Guid, RerankTitleContext>();
@@ -1521,11 +1847,11 @@ public class BuildFeedJobHandler(
             .GroupBy(c => c.TitleId)
             .ToDictionary(g => g.Key, g => g.ToList());
 
-        var contributionsByTitle = planned
-            .GroupBy(i => i.Candidate.Title.Id)
+        var contributionsByTitle = scored
+            .GroupBy(c => c.Title.Id)
             .ToDictionary(
                 g => g.Key,
-                g => g.First().Candidate.Row.TopContributions
+                g => g.First().Row.TopContributions
                     .OrderByDescending(c => Math.Abs(c.Contribution))
                     .Take(3)
                     .Select(c => c.Feature)
@@ -1788,14 +2114,31 @@ public class BuildFeedJobHandler(
     /// </summary>
     private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 2);
 
-    /// <inheritdoc cref="DisplayRating"/>
-    private static decimal FinalScoreOf(Candidate candidate, Func<Title, decimal> freshness) =>
-        Math.Round(candidate.Predicted * freshness(candidate.Title), 3);
+    /// <summary>
+    /// The RANKING score behind the card — predicted × the taste prior × freshness. Distinct from
+    /// <see cref="DisplayRating"/> on purpose and now more so: this is the number the page was
+    /// ordered by, and it has to carry the prior or the persisted ordering key would disagree with
+    /// the order actually served. Nothing renders it; it exists so a later reader can reconstruct
+    /// why a card sat where it sat.
+    /// </summary>
+    private static decimal FinalScoreOf(
+        Candidate candidate, Func<Title, decimal> freshness, Func<Title, double> prior) =>
+        Math.Round(candidate.Predicted * (decimal)prior(candidate.Title) * freshness(candidate.Title), 3);
 
-    /// <inheritdoc cref="DisplayRating"/>
-    private static string ExplanationOf(Candidate candidate) =>
+    /// <summary>
+    /// The card's contribution list: the model's own top features, plus the taste prior's factors
+    /// as synthetic signed entries (a ×0.6 demotion reads as −0.400). They are appended rather than
+    /// blended in because they are a different KIND of number — the model's are additive parts of a
+    /// score, the prior's are multiplicative parts of an ordering — and the card's "why not" needs
+    /// to be able to name the demotion in the user's own terms rather than imply the model produced
+    /// it. <see cref="DisplayRating"/> is unaffected by every one of them.
+    /// </summary>
+    private static string ExplanationOf(Candidate candidate, TastePrior.Components prior) =>
         JsonSerializer.Serialize(
-            candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) }));
+            candidate.Row.TopContributions
+                .Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })
+                .Concat(TastePrior.ContributionEntries(prior)
+                    .Select(e => new { feature = e.Feature, value = Math.Round(e.Value, 3) })));
 
     /// <summary>
     /// The score-only Preserve write. Called ONLY once <see cref="SameFeed"/> has proved the two
@@ -1813,7 +2156,8 @@ public class BuildFeedJobHandler(
     /// persisted but has no number on screen to patch, so it is not broadcast.</para>
     /// </summary>
     private static IReadOnlyList<FeedScoreUpdate> ApplyScoreDrift(
-        IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned, Func<Title, decimal> freshness)
+        IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned, Func<Title, decimal> freshness,
+        Func<Title, double> prior, Func<Title, TastePrior.Components> priorOf)
     {
         var before = previous
             .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
@@ -1828,7 +2172,7 @@ public class BuildFeedJobHandler(
             var row = before[i];
             var candidate = after[i].Candidate;
             var rating = DisplayRating(candidate);
-            var explanation = ExplanationOf(candidate);
+            var explanation = ExplanationOf(candidate, priorOf(candidate.Title));
             if (!FeedScoreDrift.Changed(row.PredictedRating, rating, row.ExplanationJson, explanation))
             {
                 continue;
@@ -1840,7 +2184,7 @@ public class BuildFeedJobHandler(
             }
 
             row.PredictedRating = rating;
-            row.FinalScore = FinalScoreOf(candidate, freshness);
+            row.FinalScore = FinalScoreOf(candidate, freshness, prior);
             row.ExplanationJson = explanation;
         }
 

@@ -282,9 +282,18 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             return;
         }
 
+        // ISOLATION, for the reason spelled out on the dislike-demotion test below: the catalogue is
+        // GLOBAL, so in a full run these 80 candidates compete against every other class's fixtures
+        // for a shortlist cut far smaller than the pool. The rails are then dealt out of a set this
+        // test does not control, and whether the reactive rebuild happens to re-deal them is a
+        // property of the run's ordering rather than of Preserve's continuity contract — which is
+        // exactly the flake this test showed. The allow-list is the product's own "only these
+        // titles are eligible" mechanism; not one assertion below changed.
+        var fixtureGenre = $"hero-vacancy-{Guid.NewGuid():N}";
         var accountId = await SeedAccountAsync();
+        await AddContentFilterAsync(accountId, FilterKind.IncludeGenre, fixtureGenre);
         await SeedLovedTitlesAsync(accountId, 12);
-        await SeedEligibleTitlesAsync(80);
+        await SeedEligibleTitlesAsync(80, genre: fixtureGenre);
         await SeedActiveArtifactAsync(accountId);
 
         await RunBuildAsync(accountId);
@@ -849,6 +858,12 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) => Task.FromResult<TmdbTitleDetails?>(null);
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => Task.FromResult<TmdbTitleDetails?>(null);
+
+        // The bulk-seed walk is not exercised by this fixture; SeedCatalogJobHandlerTests owns its own
+        // scripted TMDB client. An empty page reads as "this partition is exhausted", which is the
+        // only honest answer a fake that was never given a corpus can give.
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);

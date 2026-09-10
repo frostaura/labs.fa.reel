@@ -270,5 +270,134 @@ public static class DevEndpoints
 
             return Results.Ok(new { account = account.TraktUserSlug, recall = report });
         });
+
+        // ── The catalogue bulk seed ─────────────────────────────────────────────────────────
+        // Founder-only, and it is founder-only because it commits the system to tens of thousands
+        // of new rows and the weeks of hydration and LLM extraction that follow them. POST enqueues
+        // or RESUMES — those are the same call, because a run that stopped at its page budget left a
+        // cursor and the next job continues from it. Calling it twice is safe: one Pending/Running
+        // seed job exists at a time, and a second POST returns the one already in flight.
+        //
+        //   curl -s -X POST localhost:5080/api/dev/seed-catalog | jq
+        //   curl -s localhost:5080/api/dev/seed-catalog | jq
+        //
+        // GET is free and read-only. Read it in this order: `progress` says how far the WALK has
+        // got, `backlog` says how much of what it fetched is still unusable, and `estimate` turns
+        // the second into days at the current ceilings. `ceilings.extractTokensPerTitle` is the
+        // figure the estimate divides by — measured from the last week of the token ledger where
+        // there is one, and a stated assumption where there is not, so an estimate that looks wrong
+        // can be checked rather than argued with.
+        app.MapPost("/api/dev/seed-catalog", async (
+            IReelDbContext db,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return Results.Forbid();
+            }
+
+            var (queued, job) = await Application.Jobs.CatalogSeedScheduler.EnqueueAsync(db, DateTime.UtcNow, ct);
+            var cursor = Application.Jobs.CatalogSeedCursor.Read(job.CursorJson);
+            return Results.Accepted(value: new
+            {
+                queued,
+                jobId = job.Id,
+                status = job.Status.ToString(),
+                // False on the second POST, and that is the answer rather than an error: the seed is
+                // already running or already queued, so the caller's intent is satisfied.
+                resumedFrom = cursor is null
+                    ? null
+                    : new { cursor.Media, cursor.Year, cursor.Page, cursor.TitlesAdded },
+            });
+        });
+
+        app.MapGet("/api/dev/seed-catalog", async (
+            IReelDbContext db,
+            HttpContext http,
+            Application.Jobs.CatalogSeedProgressQuery progress,
+            ITitleAttributeExtractor extractor,
+            IConfiguration configuration,
+            CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return Results.Forbid();
+            }
+
+            var report = await progress.RunAsync(extractor.Version, DateTime.UtcNow, ct);
+            return Results.Ok(new
+            {
+                job = new
+                {
+                    id = report.JobId,
+                    status = report.Status,
+                    enqueuedAt = report.EnqueuedAt,
+                    startedAt = report.StartedAt,
+                    completedAt = report.CompletedAt,
+                    attemptCount = report.AttemptCount,
+                    error = report.Error,
+                    message = report.ProgressMessage,
+                },
+                plan = new
+                {
+                    firstYear = Application.Jobs.CatalogSeedPlan.FirstYear,
+                    yearsPerMedium = report.YearsPerMedium,
+                    partitions = report.PartitionsTotal,
+                    // The EFFECTIVE floors, not the compiled-in defaults: these are the two settings
+                    // that decide how big the corpus is, and reporting the default while the
+                    // environment overrides it is how a seed gets re-run to fix a number it already
+                    // has. Measured 2026-09-10, the defaults yield ~9,300 titles and 50/50 yields
+                    // ~34,800 — see CatalogSeedPlan for the table.
+                    movieMinVoteCount = Application.Jobs.CatalogSeedPlan.MinVoteCount(true, configuration),
+                    showMinVoteCount = Application.Jobs.CatalogSeedPlan.MinVoteCount(false, configuration),
+                    maxDiscoverPage = Application.Jobs.CatalogSeedPlan.MaxDiscoverPage,
+                },
+                cursor = report.Media is null
+                    ? null
+                    : new { media = report.Media, year = report.Year, page = report.Page },
+                progress = new
+                {
+                    done = report.Done,
+                    movieYearsDone = report.MovieYearsDone,
+                    showYearsDone = report.ShowYearsDone,
+                    yearsTotalPerMedium = report.YearsPerMedium,
+                    partitionsDone = report.PartitionsDone,
+                    partitionsTotal = report.PartitionsTotal,
+                    titlesAdded = report.TitlesAdded,
+                    pagesFetched = report.PagesFetched,
+                    pagesUsedToday = report.PagesUsedToday,
+                },
+                backlog = new
+                {
+                    hydration = report.HydrationBacklog,
+                    missingEmbedding = report.Enrichment.MissingEmbedding,
+                    missingAttributes = report.Enrichment.MissingAttributes,
+                    staleExtractorVersion = report.Enrichment.StaleExtractorVersion,
+                    lastEnrichAt = report.Enrichment.LastRunAt,
+                },
+                ceilings = new
+                {
+                    hydrateTitlesPerDay = report.HydrationAllowance.Limit,
+                    hydrateTitlesUsedToday = report.HydrationAllowance.Used,
+                    extractDailyTokens = report.ExtractAllowance.Limit,
+                    extractTokensUsedToday = report.ExtractAllowance.Used,
+                    embedDailyTokens = report.EmbedAllowance.Limit,
+                    embedTokensUsedToday = report.EmbedAllowance.Used,
+                    extractTokensPerTitle = report.ExtractTokensPerTitle,
+                },
+                estimate = new
+                {
+                    daysToHydrated = report.EstimatedDaysToHydrated,
+                    daysToAttributed = report.EstimatedDaysToAttributed,
+                    // The two stages run concurrently, so this is the max of the pair and never
+                    // their sum. Null means there is nothing outstanding — or, where a ceiling is
+                    // set to zero, that the answer is "never at this setting" rather than a number.
+                    daysToFullyEnriched = report.EstimatedDaysToEnriched,
+                },
+            });
+        });
     }
 }

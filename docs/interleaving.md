@@ -98,15 +98,29 @@ proceed without knowing it.
 
 | id | what it orders by |
 | --- | --- |
-| `CalibratedModel` | calibrated prediction × freshness × preference boost × the slate's own affinity term — today's served order, reproduced exactly |
+| `CalibratedModel` | calibrated prediction × **the taste prior** × freshness × preference boost × the slate's own affinity term — today's served order, reproduced exactly |
 | `PopularityBaseline` | present-day TMDB popularity within the eligible pool — the identical comparator `EvalHarness` uses |
-| `ProfileRerank` | LLM lens fit where one exists, calibrated order otherwise |
+| `ProfileRerank` | LLM narrative fit where one was judged before assembly, calibrated order otherwise |
 
-`ProfileRerank` is **a stub today and configuring it would compare a ranker against itself.** Fit
-verdicts are produced by the why/re-rank pass, which runs *after* assembly, so at draft time every
-candidate's fit is null and the policy is byte-for-byte the calibrated one. It becomes a real arm
-only once lens fit is computed before assembly. The panel reports the configured policy ids so this
-is visible rather than silent.
+`ProfileRerank` **is no longer a stub.** It was one for as long as the only fit verdicts came from
+the why/re-rank pass, which runs *after* assembly: at draft time every candidate's fit was null and
+the policy was byte-for-byte the calibrated one. A Fresh build now judges its **top 40 shortlist
+candidates by calibrated × prior** against the account's taste narrative *before* hero and rail
+selection, and hands those verdicts to the draft — so on a Fresh build this is a genuinely different
+order and a legitimate arm.
+
+Two limits are worth stating rather than discovering:
+
+- A candidate the pre-pass did not reach — outside the top 40, or a build where the agent was
+  unavailable or the budget ran out — carries no fit and falls back to the calibrated key. That is
+  correct behaviour, not a silent one.
+- A **Preserve** rebuild never re-drafts at all, so this policy only ever expresses itself on the
+  Fresh builds it is given.
+
+**The taste prior is an input to both arms, not an arm.** It is a property of the account and the
+title (see `TastePrior`), so it is supplied on `PolicyCandidate` exactly as freshness is — the
+harness's whole value is that two policies order the same information. `PopularityBaseline` ignores
+it, as it ignores everything except popularity.
 
 ## Reading the panel
 
@@ -126,9 +140,15 @@ is visible rather than silent.
    replacement was drafted by neither ranker, so the seat is credited to nobody. Crediting the team
    whose seat it took would feed the test an outcome neither ranker earned. The slate loses that
    seat instead.
-2. **Interleaving measures preference between rankers, not absolute quality.** Both arms can be bad.
+2. **An interleaved build gets no hero media balance.** The media-mix floor (`MediaMix`) is a
+   post-selection swap, and a post-*draft* swap would both orphan a seat and bias the comparison
+   toward whichever arm happened to supply the under-represented medium. So the balance runs only on
+   non-interleaved Fresh builds. While an experiment is live, the hero's movie/show mix is whatever
+   the two rankers produce — acceptable because the taste prior, which both arms order by, is doing
+   most of that work anyway, and unacceptable to fix by quietly editing a drafted slate.
+3. **Interleaving measures preference between rankers, not absolute quality.** Both arms can be bad.
    It cannot replace the calibration and track-record work, and it must not be allowed to.
-3. **Only slates drafted between the two currently configured arms enter the test.** Everything else
+4. **Only slates drafted between the two currently configured arms enter the test.** Everything else
    is reported in the standings and excluded from the p-value.
-4. **Ties carry no information and are not observations.** They are counted and shown because their
+5. **Ties carry no information and are not observations.** They are counted and shown because their
    volume is what sets the cadence.

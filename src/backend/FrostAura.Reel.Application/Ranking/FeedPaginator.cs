@@ -210,7 +210,12 @@ public sealed class FeedPaginator(
         }
 
         var boosts = await LoadPreferenceBoostsAsync(account.Id, scored, ct);
-        var ranked = await RankAsync(req, taste, scored, boosts, now, ct);
+        // The same account-level taste prior the snapshot build ranks by. Page 2 of a row is the
+        // same feed as page 1: a rule that keeps a no-history genre out of the hero and then lets it
+        // straight back in on scroll is not a rule, it is a delay. Ranking only — the card's
+        // PredictedRating below is untouched by it.
+        var prior = TastePrior.From(taste);
+        var ranked = await RankAsync(req, taste, scored, boosts, prior, now, ct);
 
         // The rail's anchor (name + genres), loaded once: the curation prompt names it so the LLM
         // can state the concrete link, and the templater fallback cites a genuinely shared genre.
@@ -226,7 +231,7 @@ public sealed class FeedPaginator(
         // LLM curation pass over the top slice: the model gives the personalised rating, the agent
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
-        var curated = await CurateAsync(account, req, taste, curationPool, anchor?.Name, ct);
+        var curated = await CurateAsync(account, req, taste, curationPool, prior, anchor?.Name, ct);
         var taken = curated.Take(req.Limit).ToList();
 
         var whyContexts = await BuildWhyContextsAsync(taste, taken.Select(c => c.Scored).ToList(), anchor, ct);
@@ -283,7 +288,8 @@ public sealed class FeedPaginator(
     /// unavailable or errors — the cards are already personalised, curation only sharpens them.
     /// </summary>
     private async Task<List<Curated>> CurateAsync(
-        Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool, string? anchorName, CancellationToken ct)
+        Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool,
+        TastePrior prior, string? anchorName, CancellationToken ct)
     {
         if (!agent.IsAvailable || pool.Count == 0)
         {
@@ -365,7 +371,13 @@ public sealed class FeedPaginator(
             .Select(s =>
             {
                 var fit = fitById.GetValueOrDefault(s.Title.Id);
-                var modelNorm = (double)s.Predicted / 10d;
+                // The prior rides the MODEL side of the blend, not the fit side: it is a statement
+                // about this account's evidence, which is exactly what the FastTree half is supposed
+                // to represent and the agent's genre-level judgment cannot see. Folding it in here
+                // rather than only in RankAsync is load-bearing — this blend RE-ORDERS the pool, so
+                // a prior applied only upstream would decide which titles are curated and then be
+                // thrown away deciding which are shown.
+                var modelNorm = (double)s.Predicted * prior.MultiplierFor(s.Title) / 10d;
                 var blend = fit is null ? modelNorm : (0.6 * modelNorm) + (0.4 * fit.Fit);
                 return (Scored: s, Fit: fit, Blend: blend);
             })
@@ -720,9 +732,10 @@ public sealed class FeedPaginator(
 
     private async Task<List<Scored>> RankAsync(
         MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> scored,
-        IReadOnlyDictionary<Guid, double> boosts, DateTime now, CancellationToken ct)
+        IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, DateTime now, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
+        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t);
 
         switch (req.Context)
         {
@@ -730,10 +743,10 @@ public sealed class FeedPaginator(
             // anchor-embedding cosine × predicted — the same blend, differing only in which title is
             // the anchor (a loved title vs the one being viewed).
             case FeedRowContext.BecauseYouLoved when req.AnchorTitleId is { } lovedAnchorId:
-                return await RankByAnchorSimilarityAsync(lovedAnchorId, scored, boosts, ct);
+                return await RankByAnchorSimilarityAsync(lovedAnchorId, scored, boosts, prior, ct);
 
             case FeedRowContext.Similar when req.AnchorTitleId is { } viewedAnchorId:
-                return await RankByAnchorSimilarityAsync(viewedAnchorId, scored, boosts, ct);
+                return await RankByAnchorSimilarityAsync(viewedAnchorId, scored, boosts, prior, ct);
 
             case FeedRowContext.DeepCuts:
                 {
@@ -742,16 +755,16 @@ public sealed class FeedPaginator(
                         ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
                     return scored
                         .Where(s => s.Predicted >= 6m && (s.Title.TmdbPopularity ?? 0m) <= threshold)
-                        .OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id))
+                        .OrderByDescending(s => (double)s.Predicted * Weight(s.Title))
                         .ToList();
                 }
 
             case FeedRowContext.Hero:
             case FeedRowContext.NewForYou:
-                return scored.OrderByDescending(s => (double)s.Predicted * (double)Freshness(s.Title, now) * Boost(s.Title.Id)).ToList();
+                return scored.OrderByDescending(s => (double)s.Predicted * (double)Freshness(s.Title, now) * Weight(s.Title)).ToList();
 
             default:
-                return scored.OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id)).ToList();
+                return scored.OrderByDescending(s => (double)s.Predicted * Weight(s.Title)).ToList();
         }
     }
 
@@ -764,14 +777,15 @@ public sealed class FeedPaginator(
     /// Shared by the home "because you loved" rail and the detail "more like this" rail.
     /// </summary>
     private async Task<List<Scored>> RankByAnchorSimilarityAsync(
-        Guid anchorId, List<Scored> scored, IReadOnlyDictionary<Guid, double> boosts, CancellationToken ct)
+        Guid anchorId, List<Scored> scored, IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
+        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t);
 
         var anchor = await db.Titles.FirstOrDefaultAsync(t => t.Id == anchorId, ct);
         if (anchor is null)
         {
-            return scored.OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id)).ToList();
+            return scored.OrderByDescending(s => (double)s.Predicted * Weight(s.Title)).ToList();
         }
 
         var embIds = scored.Select(s => s.Title.Id).Append(anchorId).ToList();
@@ -784,7 +798,7 @@ public sealed class FeedPaginator(
         return scored
             .Select(s => (s, sim: Sim(s.Title)))
             .Where(x => x.sim > 0.15d)
-            .OrderByDescending(x => (double)x.s.Predicted * (0.5 + x.sim) * Boost(x.s.Title.Id))
+            .OrderByDescending(x => (double)x.s.Predicted * (0.5 + x.sim) * Weight(x.s.Title))
             .Select(x => x.s)
             .ToList();
     }

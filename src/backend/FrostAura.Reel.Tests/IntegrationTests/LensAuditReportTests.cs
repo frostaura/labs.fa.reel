@@ -131,7 +131,7 @@ public class LensAuditReportTests(PostgresFixture fixture)
                 Id = Guid.NewGuid(),
                 MediaType = MediaType.Movie,
                 TraktSlug = $"audit-{Guid.NewGuid():N}",
-                TmdbId = 600_000 + Random.Shared.Next(1_000_000),
+                TmdbId = Random.Shared.Next(1, int.MaxValue),
                 Name = name,
                 Year = 2015,
                 Genres = ["crime"],
