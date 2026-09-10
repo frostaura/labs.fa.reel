@@ -205,6 +205,11 @@ public static class DependencyInjection
         // The enqueue gate the feed build asks before queuing a pass. Scoped so the job it adds
         // lands on the BUILD's tracked context and commits with the build's own writes.
         services.AddScoped<Application.CrossReference.CrossReferenceScheduler>();
+        // The read side of the same table, shared by the feed build and both read-path serves so
+        // the three cannot disagree about which prompt generation or which fingerprint is current.
+        services.AddScoped<Application.CrossReference.CrossReferenceFactors>();
+        // What the home band is allowed to say, in counted numbers only.
+        services.AddScoped<Application.CrossReference.CrossReferenceStatusQuery>();
         // Offline only, reached through the founder-only /api/dev surface.
         services.AddScoped<Application.CrossReference.CrossReferenceBacktest>();
 

@@ -510,6 +510,64 @@ export interface AccuracyPayload {
     spearman: number | null;
     picksChanged: number;
   } | null;
+  crossReference: CrossReferenceAccuracy;
+}
+
+/**
+ * How the titles served under one cross-reference standing actually turned out. `answerable` is the
+ * server's own judgement about whether `n` is large enough to read anything into — the panel shows
+ * the count and refuses to draw a conclusion below it, because this measurement can never reach
+ * significance (about 2% of ratings are made in the app) and the offline backtest is the gate.
+ */
+export interface CrossReferenceVerdictOutcome {
+  verdict: string;
+  n: number;
+  meanLaterRating: number | null;
+  lovedRate: number | null;
+  dislikedRate: number | null;
+  answerable: boolean;
+}
+
+/** The newest pooled backtest at one prompt generation — the evidence that decided what a verdict may do. */
+export interface CrossReferenceBacktest {
+  promptVersion: number;
+  evaluatedAt: string;
+  judged: number;
+  auc: number | null;
+  meanLaterRatingKeep: number | null;
+  meanLaterRatingOut: number | null;
+  keepLovedRate: number | null;
+  keepDislikedRate: number | null;
+  falseRuleOutRate: number;
+  falseRuleOutLow: number;
+  falseRuleOutHigh: number;
+  trueRuleOutRate: number;
+  unsureRate: number;
+  gating: string;
+  caveat: string;
+  /** Whether this is the generation the job is writing today. */
+  current: boolean;
+}
+
+export interface CrossReferenceAccuracy {
+  online: CrossReferenceVerdictOutcome[];
+  backtests: CrossReferenceBacktest[];
+  minimumOutcomes: number;
+}
+
+/**
+ * The home band's payload. The server answers 204 whenever there is nothing honest to say — no
+ * active model, or a pool nothing has judged and nothing is judging — which arrives here as null.
+ */
+export interface CrossReferenceStatus {
+  running: boolean;
+  judged: number;
+  total: number;
+  kept: number;
+  ruledOut: number;
+  unsure: number;
+  noSignal: number;
+  gating: string;
 }
 
 /**
@@ -545,7 +603,7 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy", "Narrative", "Lens"],
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy", "Narrative", "Lens", "CrossReference"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -628,6 +686,18 @@ export const api = createApi({
         responseHandler: async (response) => (response.status === 204 ? null : await response.json()),
       }),
       providesTags: ["Lab"],
+    }),
+    /**
+     * The cross-reference band's numbers. Its own endpoint for the same reason `feed/learned` is:
+     * the feed payload is refetched constantly and this moves on the cadence of a background pass.
+     * A 204 — nothing judged and nothing judging — arrives as null and the band renders nothing.
+     */
+    getCrossReference: b.query<CrossReferenceStatus | null, void>({
+      query: () => ({
+        url: "feed/cross-reference",
+        responseHandler: async (response) => (response.status === 204 ? null : await response.json()),
+      }),
+      providesTags: ["CrossReference"],
     }),
     getFeedGenres: b.query<GenreRail[], void>({
       query: () => "feed/genres",
@@ -1077,6 +1147,7 @@ export const {
   useRebuildFeedMutation,
   useGetFeedGenresQuery,
   useGetModelLearnedQuery,
+  useGetCrossReferenceQuery,
   useGetAccuracyQuery,
   useLoadMoreFeedMutation,
   useGetTitleQuery,

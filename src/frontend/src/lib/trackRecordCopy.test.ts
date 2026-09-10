@@ -39,6 +39,9 @@ const payload = (overrides: Partial<AccuracyPayload> = {}): AccuracyPayload => (
   },
   counterfactual: [],
   learnedThisWeek: null,
+  // Present and empty, which is what the endpoint sends for an account whose deep pass has never
+  // run — the block itself is never absent, so the page never has to guess whether it exists.
+  crossReference: { online: [], backtests: [], minimumOutcomes: 20 },
   ...overrides,
 });
 

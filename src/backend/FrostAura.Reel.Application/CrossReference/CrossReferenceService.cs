@@ -194,13 +194,15 @@ public sealed class CrossReferenceService(
     }
 
     /// <summary>
-    /// The ranking factor per title — what the feed multiplies <c>RankKey</c> by, and whether the
-    /// hero is barred. Titles with no verdict are simply absent; callers read a miss as
-    /// <see cref="VerdictFactor.Neutral"/>, so a provider outage orders the feed exactly as today.
+    /// The ranking factor per title — what the feed multiplies <c>RankKey</c> by. Titles with no
+    /// verdict are simply absent; callers read a miss as <see cref="VerdictFactor.Neutral"/>, so a
+    /// provider outage, an empty table or a budget held at zero all order the feed exactly as it
+    /// ordered before any of this existed.
     ///
-    /// <para>Unused by the feed in PR1 by design — the instrument is measured before a single pick
-    /// moves — but tested here, because the aggregation rule is the part a later PR must not
-    /// silently change.</para>
+    /// <para><b>Keep-only.</b> Only a Keep returns a factor above 1.0; Out and Unsure return
+    /// exactly 1.0 with the hero allowed. The measurements behind that are on
+    /// <see cref="VerdictAggregator"/>, and they are the reason the rule is what it is rather than
+    /// a placeholder waiting to be filled in.</para>
     /// </summary>
     public async Task<IReadOnlyDictionary<Guid, VerdictFactor>> VerdictFactorsAsync(
         Guid accountId, IReadOnlyList<Guid> titleIds, string currentProfileHash, int promptVersion,

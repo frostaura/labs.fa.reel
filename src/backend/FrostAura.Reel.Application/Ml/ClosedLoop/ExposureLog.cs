@@ -25,6 +25,12 @@ namespace FrostAura.Reel.Application.Ml.ClosedLoop;
 /// <param name="PageIndex">Pagination depth; 0 on the first page and every non-paginated surface.</param>
 /// <param name="PolicyId">The ranking policy that drafted this card, when a slate was interleaved.</param>
 /// <param name="InterleaveGroup">The slate the draft belonged to. Null wherever PolicyId is null.</param>
+/// <param name="XrefVerdict">
+/// The cross-reference standing this card carried at the moment it was served — an
+/// <c>AggregateVerdict</c> name. <b>Null means no verdict existed</b>, never "Unsure": a serve path
+/// that has not looked leaves it null, and the difference is unrecoverable afterwards.
+/// </param>
+/// <param name="XrefConfidence">The confidence behind that standing. Null wherever the verdict is.</param>
 public readonly record struct ExposureCard(
     Guid TitleId,
     int Rank,
@@ -39,7 +45,9 @@ public readonly record struct ExposureCard(
     string? RowKey = null,
     int PageIndex = 0,
     string? PolicyId = null,
-    Guid? InterleaveGroup = null);
+    Guid? InterleaveGroup = null,
+    string? XrefVerdict = null,
+    decimal? XrefConfidence = null);
 
 /// <summary>
 /// The closed vocabulary for <see cref="ExposureEvent.WhySource"/>. Strings rather than an enum
@@ -162,6 +170,13 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
                 // records neither.
                 PolicyId = card.InterleaveGroup is null ? null : card.PolicyId,
                 InterleaveGroup = card.PolicyId is null ? null : card.InterleaveGroup,
+                // The two travel as a pair for the same reason the interleaving attribution does:
+                // a confidence with no verdict is a number with no claim attached, and a verdict
+                // with no confidence cannot be read back against the backtest it is judged by.
+                XrefVerdict = card is { XrefVerdict: { } verdict, XrefConfidence: not null } ? verdict : null,
+                XrefConfidence = card is { XrefVerdict: not null, XrefConfidence: { } confidence }
+                    ? Math.Round(confidence, 3, MidpointRounding.AwayFromZero)
+                    : null,
             }));
         }
 

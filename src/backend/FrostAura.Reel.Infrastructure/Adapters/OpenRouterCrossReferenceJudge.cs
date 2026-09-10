@@ -66,13 +66,20 @@ public class OpenRouterCrossReferenceJudge(
     /// <c>unsure</c> is the correct answer far more often than it is comfortable; round 2 looks
     /// only for reasons to say no. Bump when a change alters what a stored verdict MEANS.</para>
     ///
-    /// <para><b>Still 1, deliberately, with <see cref="SecondPromptVersion"/> written and
-    /// selectable.</b> A generation becomes current by being MEASURED against the one it replaces,
-    /// not by being written — that is the entire ordering this PR exists to defend. The serving job
-    /// rides this constant; only the backtest may name a version, and only through
-    /// <c>POST /api/dev/cross-reference-eval?promptVersion=2</c>.</para>
+    /// <para><b>2 since 2026-09-11, because it was measured and v1 was not better.</b> A
+    /// generation becomes current by being MEASURED against the one it replaces, never by being
+    /// written. On the founder's holdout, five split origins pooled: v1 judged 1,307 titles at AUC
+    /// 0.611 / Spearman 0.128 with keeps later averaging 6.53 against 6.21 for outs; v2 judged
+    /// 1,194 at AUC 0.655 / Spearman 0.190 with keeps averaging 6.83 against 6.16, keep → loved
+    /// 33.2% and keep → disliked 8.1% against base rates of roughly 23% and 15%. v2's keep is the
+    /// better-separated verdict on every one of those axes, so v2 is what the job writes.</para>
+    ///
+    /// <para><b>Moving this constant does not rewrite a single stored row.</b> The version is part
+    /// of the verdict key, so v1 rows stay readable under their own key and are simply no longer
+    /// current: nothing reads them into the feed, the resume anti-join treats their titles as
+    /// unjudged at v2, and they are re-judged in the ordinary course rather than deleted.</para>
     /// </summary>
-    public const int CurrentPromptVersion = CrossReferencePromptVersions.First;
+    public const int CurrentPromptVersion = CrossReferencePromptVersions.Second;
 
     /// <summary>
     /// The second prompt generation — an experiment, selectable by the backtest and by nothing
@@ -93,6 +100,20 @@ public class OpenRouterCrossReferenceJudge(
     /// disagrees with itself" stops being recorded as "I was shown nothing".</para>
     /// </summary>
     public const int SecondPromptVersion = CrossReferencePromptVersions.Second;
+
+    /// <summary>
+    /// The generation the argument-light <c>BuildUserPrompt</c> / <c>ResultsSchema</c> /
+    /// <c>ParseResults</c> overloads render, and the ONLY thing those overloads are for: pinning v1
+    /// in the golden tests.
+    ///
+    /// <para>Deliberately a separate constant from <see cref="CurrentPromptVersion"/> and
+    /// deliberately frozen at 1. A stored v1 verdict has to keep meaning what it meant, so the
+    /// tests that pin v1's bytes must not follow the serving default around; and no production path
+    /// reaches these overloads — <c>JudgeAsync</c> names its version on every call, because the
+    /// version is a persisted key part and a prompt built at a version other than the one written
+    /// into the row would be a verdict nothing could ever reproduce.</para>
+    /// </summary>
+    internal const int GoldenPinnedVersion = CrossReferencePromptVersions.First;
 
     /// <summary>Completion tokens allowed per candidate. A closed-enum entry is ~45.</summary>
     private const int TokensPerCandidate = 64;
@@ -347,7 +368,7 @@ public class OpenRouterCrossReferenceJudge(
     /// </summary>
     internal static string BuildUserPrompt(
         IReadOnlyList<CrossReferenceCandidate> candidates, LensPersona persona, CrossReferenceRound round)
-        => BuildUserPrompt(candidates, persona, round, new CrossReferenceJudgeOptions(CurrentPromptVersion));
+        => BuildUserPrompt(candidates, persona, round, new CrossReferenceJudgeOptions(GoldenPinnedVersion));
 
     /// <summary>
     /// The user message at an explicit prompt generation.
@@ -556,7 +577,7 @@ public class OpenRouterCrossReferenceJudge(
     /// discarded batch every time. The reason vocabulary is closed for cost, and the cost is the
     /// reason the whole eligible pool can be judged at all.</para>
     /// </summary>
-    internal static object ResultsSchema(int batchSize) => ResultsSchema(batchSize, CurrentPromptVersion);
+    internal static object ResultsSchema(int batchSize) => ResultsSchema(batchSize, GoldenPinnedVersion);
 
     /// <summary>
     /// The schema for a prompt generation. The reason enum is
@@ -671,7 +692,7 @@ public class OpenRouterCrossReferenceJudge(
     /// </summary>
     internal static (IReadOnlyList<CrossReferenceEntry> Entries, int Rejected) ParseResults(
         string content, IReadOnlySet<Guid> batchIds)
-        => ParseResults(content, batchIds, CurrentPromptVersion);
+        => ParseResults(content, batchIds, GoldenPinnedVersion);
 
     /// <inheritdoc cref="ParseResults(string, IReadOnlySet{Guid})"/>
     internal static (IReadOnlyList<CrossReferenceEntry> Entries, int Rejected) ParseResults(

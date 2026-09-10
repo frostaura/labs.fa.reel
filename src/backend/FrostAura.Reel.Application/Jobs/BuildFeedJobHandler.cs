@@ -69,7 +69,11 @@ public class BuildFeedJobHandler(
     // Optional on the same terms again: a null scheduler means this build never queues a
     // cross-reference pass, which is precisely what every hand-built test handler was written
     // against. DI always supplies it.
-    CrossReference.CrossReferenceScheduler? crossReference = null) : IJobHandler
+    CrossReference.CrossReferenceScheduler? crossReference = null,
+    // Optional on exactly the same terms as the scheduler above. A null reader means every factor
+    // is 1.0, which is the feed as it ordered before any of this existed — the documented fallback
+    // for a provider outage, an empty verdict table and a hand-built test handler alike.
+    CrossReference.CrossReferenceFactors? crossReferenceFactors = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -286,9 +290,21 @@ public class BuildFeedJobHandler(
         }).ToList();
         await PersistScoresAsync(accountId, artifact.Id, candidates, now, ct);
 
+        // The taste fingerprint, computed ONCE and used three times: the two follow-up enqueues
+        // below, and the cross-reference factor assembly reads at. It costs a handful of aggregate
+        // queries and no LLM spend, which is what makes it affordable to ask on every build rather
+        // than on a timer. Null means it could not be computed — the enqueues then stand down
+        // rather than guessing a key, and assembly orders as though nothing had been judged.
+        //
+        // Computed BEFORE assembly since 2026-09-11: a verdict is keyed on this string, so reading
+        // the verdicts at any other fingerprint would silently return an empty map and order the
+        // page exactly as it did before the pass ever ran.
+        var profileHash = await ProfileHashOrNullAsync(accountId, taste, now, ct);
+
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
         ReportProgress(job, accountId, 85, "Assembling tonight's picks");
-        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, capture, ct);
+        var snapshot = await AssembleAsync(
+            account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, profileHash, capture, ct);
 
         // Written on the tracked context before either exit below commits, so the no-op path records
         // its no-op. The eligible-pool count is the supply ceiling: when retrieval asks for more
@@ -343,12 +359,6 @@ public class BuildFeedJobHandler(
         {
             await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct);
         }
-
-        // The taste fingerprint, computed ONCE for both follow-up enqueues below. It costs a handful
-        // of aggregate queries and no LLM spend, which is what makes it affordable to ask on every
-        // build rather than on a timer. Null means it could not be computed, and both enqueues then
-        // stand down rather than guessing a key.
-        var profileHash = await ProfileHashOrNullAsync(accountId, taste, now, ct);
 
         // Cross-reference is enqueued on BOTH exits, unlike the narrative below. A Preserve build
         // means the PAGE did not move, not that the pool did not: catalogue sweeps and enrichment
@@ -784,7 +794,7 @@ public class BuildFeedJobHandler(
     private async Task<FeedSnapshot?> AssembleAsync(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
         IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now,
-        BuildCapture capture, CancellationToken ct)
+        string? profileHash, BuildCapture capture, CancellationToken ct)
     {
         // ── The floor is soft; the content rules are not ────────────────────────────────────
         // Content filters are the user's statement about CONTENT — they bind absolutely and are
@@ -1030,12 +1040,40 @@ public class BuildFeedJobHandler(
             return ageDays > 365 ? 1m : 1m + (decimal)(0.10 * Math.Exp(-ageDays / 180d));
         }
 
+        // ── Cross-reference verdicts, read ONCE per build ───────────────────────────────────
+        // One map lookup per candidate below; no per-candidate query, and no read at all when the
+        // reader is absent or the fingerprint could not be computed. A miss is Neutral — factor
+        // exactly 1.0 — so an empty table, a provider outage or a budget held at zero all order the
+        // page precisely as it ordered before any of this existed.
+        //
+        // KEEP-ONLY. Only a Keep moves anything: +0.2 x confidence confirmed, +0.1 x confidence
+        // provisional, halved at a superseded fingerprint. Out and Unsure are 1.0 to the last
+        // decimal, because on the founder's own holdout the `out` verdict ruled out 16.2% [Wilson
+        // 12.3, 21.0] of the titles he went on to rate 8+ against 22.8% of the ones he rated 4 or
+        // under — the full argument and the v1 comparison are on VerdictAggregator.
+        var verdictFactors = crossReferenceFactors is not null && profileHash is not null
+            ? await crossReferenceFactors.ForAsync(
+                account.Id, candidates.Select(c => c.Title.Id).ToList(), profileHash, ct)
+            : new Dictionary<Guid, CrossReference.VerdictFactor>();
+
+        CrossReference.VerdictFactor Verdict(Guid titleId) =>
+            verdictFactors.TryGetValue(titleId, out var factor)
+                ? factor
+                : CrossReference.VerdictFactor.Neutral;
+
         // The ranking key the whole page is ordered by, once, in one place: the calibrated
         // prediction the card shows, times the account-level taste prior, times the two bounded
-        // presentation nudges that were already here. Every ordering below multiplies this by its
-        // own slate term (freshness, anchor similarity) rather than re-deriving the common part.
+        // presentation nudges that were already here, times the cross-reference keep factor. Every
+        // ordering below multiplies this by its own slate term (freshness, anchor similarity)
+        // rather than re-deriving the common part.
+        //
+        // The DISPLAYED PredictedRating is untouched by the verdict term, and there is a test that
+        // asserts it byte for byte with and without verdicts: this is the 2026-09-10 ranking-layer
+        // contract, and moving an LLM opinion into the shown number would make /api/accuracy a
+        // measurement of the judge rather than of the model.
         decimal RankKey(Candidate c) =>
-            c.Predicted * (decimal)Prior(c.Title) * (decimal)PreferenceBoost(c.Title);
+            c.Predicted * (decimal)Prior(c.Title) * (decimal)PreferenceBoost(c.Title)
+                * (decimal)Verdict(c.Title.Id).Factor;
 
         // ── Pre-assembly fit pass (Fresh only) ──────────────────────────────────────────────
         // The narrative-conditioned fit verdict used to arrive AFTER the page was assembled, which
@@ -1056,8 +1094,17 @@ public class BuildFeedJobHandler(
         // The LLM term, as a multiplier. An unjudged title carries NeutralFit, which makes this
         // exactly 1.0 — so a build with no agent, or one whose budget ran out, orders by
         // calibrated × prior and nothing else. That is the documented fallback, not a degradation.
+        //
+        // Where the fit pass judged nothing, a cross-reference KEEP stands in at 0.5 + confidence —
+        // the same scale, so a keep at confidence 0.5 is worth exactly what a judged fit of 0.5 is
+        // worth. Nothing else stands in: an Out supplies no fit at all rather than a number below
+        // 1.0, because the hero is where a wrong demotion costs the most and the out verdict has
+        // not earned one. The fit pass always wins where it ran — it looked at this account's own
+        // taste narrative, which the judge did not.
         double FitFactor(Guid titleId) =>
-            NeutralFit + (preAssemblyFits.TryGetValue(titleId, out var fit) ? fit : NeutralFit);
+            preAssemblyFits.TryGetValue(titleId, out var fit)
+                ? NeutralFit + fit
+                : CrossReference.VerdictAggregator.HeroFitFactorFor(Verdict(titleId)) ?? 1d;
 
         decimal HeroKey(Candidate c) =>
             RankKey(c) * Freshness(c.Title) * (decimal)FitFactor(c.Title.Id);
@@ -1598,6 +1645,23 @@ public class BuildFeedJobHandler(
             }
         }
 
+        // ── Cross-reference standing, stamped on the cards actually served ──────────────────
+        // Last, after the low-fit swap and the why pass, so a swapped seat records the standing of
+        // the title that ended up in it. Read from the same map the ordering used, so the exposure
+        // row and the rank it sat at can never describe two different verdicts.
+        //
+        // Written on EVERY planned card, including the ones the pass has never reached — those
+        // simply get null, which is what makes "no verdict existed" recoverable afterwards. It is
+        // never back-filled: a serve that happened before the verdict did must go on saying so.
+        foreach (var item in planned)
+        {
+            var verdict = Verdict(item.Candidate.Title.Id);
+            item.XrefVerdict = verdict.ExposureLabel;
+            item.XrefConfidence = verdict.ExposureLabel is null
+                ? null
+                : Math.Round((decimal)verdict.Confidence, 3, MidpointRounding.AwayFromZero);
+        }
+
         // ── Exposure log ────────────────────────────────────────────────────────────────────
         // Staged on the SAME tracked context as the snapshot rows above, so the exposures and the
         // cards they describe commit or roll back together — one round trip, no new transaction.
@@ -1667,6 +1731,15 @@ public class BuildFeedJobHandler(
         public decimal? LlmFit { get; set; }
 
         /// <summary>
+        /// The cross-reference standing this card carried when the page was assembled, for the
+        /// exposure row. Null means nothing had judged it — never "Unsure", which is a judgement.
+        /// </summary>
+        public string? XrefVerdict { get; set; }
+
+        /// <summary>The confidence behind <see cref="XrefVerdict"/>. Travels with it or not at all.</summary>
+        public decimal? XrefConfidence { get; set; }
+
+        /// <summary>
         /// The ranking policy that drafted this seat, on an interleaved Fresh build. Null on every
         /// other path — including a card the why pass swapped in, which neither ranker chose.
         /// </summary>
@@ -1687,6 +1760,12 @@ public class BuildFeedJobHandler(
             WhyThis = ExplanationTemplater.BuildSentence(whyContext);
             WhySource = ExposureWhySource.Templater;
             LlmFit = null;
+            // The verdict goes with the seat's occupant, not with the seat: the replacement is a
+            // different title and carries whatever the cross-reference said about IT. Cleared here
+            // and re-stamped by the caller, so a swap can never log the outgoing card's standing
+            // against the incoming card's exposure.
+            XrefVerdict = null;
+            XrefConfidence = null;
             // The interleaving attribution goes with it. A low-fit hero swap is a PRODUCT guard, not
             // a ranking decision: the replacement was drafted by nobody, and crediting the team
             // whose seat it took would feed the sequential test an outcome neither ranker earned.
@@ -2264,7 +2343,9 @@ public class BuildFeedJobHandler(
         FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId),
         0,
         item.PolicyId,
-        item.InterleaveGroup);
+        item.InterleaveGroup,
+        item.XrefVerdict,
+        item.XrefConfidence);
 
     /// <summary>
     /// What the card shows. Rounded here, once, so the write path and the drift path agree.

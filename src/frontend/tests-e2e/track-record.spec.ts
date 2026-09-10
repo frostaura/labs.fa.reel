@@ -85,6 +85,9 @@ const ACCURACY_EXPOSURES = {
     spearman: 0.18,
     picksChanged: 3,
   },
+  // Always present, even when empty — the endpoint sends the block unconditionally, so the page
+  // never has to guess whether it exists. The panel itself is exercised in cross-reference.spec.ts.
+  crossReference: { online: [], backtests: [], minimumOutcomes: 20 },
 };
 
 const ACCURACY_EMPTY = {
