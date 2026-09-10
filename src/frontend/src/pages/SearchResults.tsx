@@ -426,10 +426,10 @@ function AskReel() {
               <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
                 {floorLabel
                   ? `Show the ${floorHeldBack} under your ${floorLabel} bar`
-                  : `Show the ${floorHeldBack} Reel held under your bar`}
+                  : `Show the ${floorHeldBack} pick${floorHeldBack === 1 ? "" : "s"} Reel held back`}
               </summary>
               <p className="fa-caption text-fa-frost-dim/70 mt-1">
-                These matched the request but scored below the bar Reel holds itself to for you.
+                These matched the request but scored below the bar Reel holds itself to.
               </p>
               {belowFloorVisible.length > 0 && (
                 <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
