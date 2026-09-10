@@ -34,12 +34,12 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// rows while every one of those tests was green.</para>
 /// </summary>
 [Collection("postgres")]
-public class BuildFeedRunnerPathTests(PostgresFixture fixture)
+public class BuildFeedRunnerPathTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     [Fact]
     public async Task A_build_run_the_way_the_job_runner_runs_it_persists_its_stat_row_and_its_exposures()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -52,7 +52,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
         await RunThroughJobRunnerPathAsync(jobId);
 
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var stats = await db.FeedBuildStats.Where(s => s.AccountId == accountId).ToListAsync();
         var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
         var items = await db.FeedItems.CountAsync();
@@ -72,7 +72,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     [Fact]
     public async Task A_refill_recorded_on_a_pinned_request_context_persists_its_exposures()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -84,7 +84,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
         Guid titleId;
         Guid artifactId;
         Guid snapshotId;
-        await using (var seed = fixture.CreateContext(Scoped(accountId)))
+        await using (var seed = Fixture.CreateContext(Scoped(accountId)))
         {
             var title = NewTitle("refill", popularity: 3m);
             seed.Add(title);
@@ -103,7 +103,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
             artifactId = snapshot.ModelArtifactId;
         }
 
-        await using (var request = fixture.CreateContext(Scoped(accountId)))
+        await using (var request = Fixture.CreateContext(Scoped(accountId)))
         {
             var log = new ExposureLog(request, NullLogger<ExposureLog>.Instance);
             var written = await log.RecordAsync(
@@ -117,7 +117,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
             Assert.Equal(1, written);
         }
 
-        await using var verify = fixture.CreateContext(Scoped(accountId));
+        await using var verify = Fixture.CreateContext(Scoped(accountId));
         Assert.Equal(1, await verify.ExposureEvents.CountAsync(e => e.Surface == ExposureSurface.FeedRefill && e.AccountId == accountId));
     }
 
@@ -131,7 +131,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     [Fact]
     public async Task A_build_that_cannot_read_the_active_artifact_records_a_skipped_row_and_names_both_schema_versions()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -143,7 +143,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
         await RunThroughJobRunnerPathAsync(jobId);
 
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var stat = Assert.Single(await db.FeedBuildStats.Where(s => s.AccountId == accountId).ToListAsync());
         Assert.Equal(FeedBuildOutcome.Skipped, stat.Mode);
         // The artifact it could not use is named, so the row alone identifies the offending model.
@@ -168,7 +168,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     [Fact]
     public async Task A_build_with_no_artifact_at_all_records_a_skipped_row_that_asks_for_a_train()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -178,7 +178,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
         await RunThroughJobRunnerPathAsync(jobId);
 
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var stat = Assert.Single(await db.FeedBuildStats.Where(s => s.AccountId == accountId).ToListAsync());
         Assert.Equal(FeedBuildOutcome.Skipped, stat.Mode);
         Assert.Equal(Guid.Empty, stat.ModelArtifactId);
@@ -199,7 +199,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     [Fact]
     public async Task Every_build_outcome_records_the_cluster_and_supply_columns()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -227,7 +227,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
         var modelless = await SeedAccountAsync();
         await RunThroughJobRunnerPathAsync(await EnqueueBuildAsync(modelless), clusterCache);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var stats = await db.FeedBuildStats
             .Where(s => s.AccountId == accountId || s.AccountId == modelless)
             .OrderBy(s => s.BuiltAt)
@@ -275,21 +275,21 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
         Assert.All(built, stat => Assert.True(stat.SeedPoolSize > 0));
 
         // And the partition was persisted from the build path, once per day, ordinals contiguous.
-        await using var scoped = fixture.CreateContext(Scoped(accountId));
+        await using var scoped = Fixture.CreateContext(Scoped(accountId));
         var persisted = await scoped.TasteClusters.OrderBy(c => c.Ordinal).ToListAsync();
         Assert.NotEmpty(persisted);
         Assert.Single(persisted.Select(c => c.ComputedForDate).Distinct());
         Assert.Equal(Enumerable.Range(0, persisted.Count), persisted.Select(c => c.Ordinal));
 
         // A modelless account never reached retrieval, so it has no partition to persist.
-        await using var theirs = fixture.CreateContext(Scoped(modelless));
+        await using var theirs = Fixture.CreateContext(Scoped(modelless));
         Assert.Empty(await theirs.TasteClusters.ToListAsync());
 
         // The forty embedded vectors this test planted go back out of the catalogue's SHARED HNSW
         // index. That index is approximate, so a tight cluster of vectors changes which neighbours
         // an unrelated semantic-search test finds even though every one of them is ineligible for
         // its account — measured, and documented in TasteClusterRetrievalTests.DisposeAsync.
-        await using var cleanup = fixture.CreateContext(new AccountContext());
+        await using var cleanup = Fixture.CreateContext(new AccountContext());
         var scope = ScopeFor(accountId);
         var plantedIds = await cleanup.Titles.Where(t => t.Language == scope).Select(t => t.Id).ToListAsync();
         await cleanup.UserRatings.Where(r => plantedIds.Contains(r.TitleId)).ExecuteDeleteAsync();
@@ -304,7 +304,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     private async Task SeedScopedLovedTitlesAsync(Guid accountId, int count)
     {
         var scope = ScopeFor(accountId);
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         await AddScopeFiltersAsync(db, accountId, scope);
 
         for (var i = 0; i < count; i++)
@@ -351,7 +351,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     private async Task SeedScopedEligibleTitlesAsync(Guid accountId, int count)
     {
         var scope = ScopeFor(accountId);
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
             var title = NewTitle($"scoped candidate {i}", popularity: 2m + (i * 0.001m), scope);
@@ -388,7 +388,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     /// </summary>
     private async Task DeclineAHeroTitleAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var titleId = await db.FeedItems
             .Where(i => i.AccountId == accountId)
             .OrderBy(i => i.Rank)
@@ -416,7 +416,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
     private async Task RunThroughJobRunnerPathAsync(Guid jobId, MemoryCache? clusterCache)
     {
         var accountContext = new AccountContext();
-        await using var db = fixture.CreateContext(accountContext);
+        await using var db = Fixture.CreateContext(accountContext);
 
         // The claim, exactly as the runner issues it.
         await db.Database.ExecuteSqlAsync(
@@ -489,7 +489,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
     private async Task<Guid> EnqueueBuildAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var job = new SyncJob
         {
             Id = Guid.NewGuid(),
@@ -506,7 +506,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -523,7 +523,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
     private async Task SeedLovedTitlesAsync(Guid accountId, int count)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
             var title = NewTitle($"loved {i}", popularity: 1m + (i * 0.01m));
@@ -544,7 +544,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
 
     private async Task SeedEligibleTitlesAsync(int count, string genre = "drama")
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
             db.Add(NewTitle($"candidate {i}", popularity: 2m + (i * 0.001m), genre));
@@ -595,7 +595,7 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture)
             new TrainingMatrix(rows, labels, names),
             """{"Trees":40,"Leaves":8,"MinExamplesPerLeaf":5,"LearningRate":0.2}""");
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var artifact = new ModelArtifact
         {
             Id = Guid.NewGuid(),

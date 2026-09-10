@@ -26,7 +26,7 @@ namespace FrostAura.Reel.Tests.CrossReference;
 /// numbers a function of the fixture instead of a hand-checkable constant.</para>
 /// </summary>
 [Collection("postgres")]
-public class CrossReferenceBacktestTests(PostgresFixture fixture)
+public class CrossReferenceBacktestTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>
     /// A language nothing else in the postgres collection uses.
@@ -58,11 +58,6 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
 
     private const string TestLanguage = "zz";
 
-    /// <summary>Guards the one-time seed; xUnit builds a new instance per test.</summary>
-    private static readonly SemaphoreSlim HistoryLock = new(1, 1);
-
-    private static Guid? _sharedHistoryAccountId;
-
     private static int _seeded;
 
     private readonly string _scope = $"xrefbt{Guid.NewGuid():N}";
@@ -70,7 +65,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task An_account_below_the_history_floor_produces_no_run_at_all()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -89,7 +84,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task A_run_writes_one_row_per_evaluable_origin_plus_a_mean()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -102,7 +97,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
         Assert.All(report.Origins, o => Assert.NotNull(o.SplitFraction));
         Assert.Null(report.Mean.SplitFraction);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var stored = db.CrossReferenceEvaluations.Where(e => e.RunId == report.RunId).ToList();
         Assert.Equal(report.Origins.Count + 1, stored.Count);
         Assert.All(stored, e => Assert.False(string.IsNullOrWhiteSpace(e.Caveat)));
@@ -112,7 +107,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task A_judge_that_rules_out_everything_scores_a_false_rule_out_rate_of_one()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -135,7 +130,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task A_perfect_judge_still_cannot_gate_on_a_small_holdout()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -165,7 +160,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task The_run_bills_to_the_eval_purpose_and_never_to_the_serving_one()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -182,7 +177,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task The_backtest_judges_round_one_only()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -200,7 +195,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     [Fact]
     public async Task The_backtest_never_shows_the_judge_a_model_prediction()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -217,7 +212,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
 
     private async Task<CrossReferenceBacktest.Report?> RunAsync(Guid accountId, ICrossReferenceJudge judge)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var features = new FeatureVectorBuilder(db);
         var dislikes = new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions()));
         var personalisation = new PersonalisationContext(db, dislikes);
@@ -247,45 +242,43 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     /// judge is asked about, and an embedding on a train title would be forty more rows in the
     /// shared catalogue buying nothing.</para>
     /// </summary>
+    /// <summary>
+    /// One account with a 100-rating history, seeded FRESH for every test.
+    ///
+    /// <para>It used to be seeded once per class and cached in a static, which was a real saving and
+    /// is no longer available: <see cref="EmbeddedCatalogTestBase"/> removes this class's embedding
+    /// rows when each test ends, so a cached account would hand every test after the first a
+    /// holdout with no vectors — which is exactly how this file failed when the base was
+    /// introduced. Per-test seeding is the honest shape anyway; a static that survives between
+    /// tests is shared mutable state whether or not it is guarded, and this class's own scope genre
+    /// is per-instance, so tests two onwards were already running against an account configured for
+    /// a different scope.</para>
+    /// </summary>
     private async Task<Guid> SeedHistoryAsync()
     {
-        await HistoryLock.WaitAsync();
-        try
+        var accountId = await SeedAccountAsync();
+        var start = DateTime.UtcNow.AddDays(-400);
+
+        // The train half: 60 middling ratings, no embeddings needed.
+        for (var i = 0; i < 60; i++)
         {
-            if (_sharedHistoryAccountId is { } existing)
-            {
-                return existing;
-            }
-
-            var accountId = await SeedAccountAsync();
-            var start = DateTime.UtcNow.AddDays(-400);
-
-            // The train half: 60 middling ratings, no embeddings needed.
-            for (var i = 0; i < 60; i++)
-            {
-                await SeedRatedAsync(accountId, $"Train {i}", (short)(6 + (i % 3)), start.AddDays(i), embedded: false);
-            }
-
-            // The holdout half: 40 alternating loves and dislikes, all still ELIGIBLE as-of every
-            // split (no watch footprint, no reaction) so they reach the judge.
-            for (var i = 0; i < 40; i++)
-            {
-                await SeedRatedAsync(
-                    accountId, $"Holdout {i}", i % 2 == 0 ? (short)9 : (short)3, start.AddDays(100 + i));
-            }
-
-            _sharedHistoryAccountId = accountId;
-            return accountId;
+            await SeedRatedAsync(accountId, $"Train {i}", (short)(6 + (i % 3)), start.AddDays(i), embedded: false);
         }
-        finally
+
+        // The holdout half: 40 alternating loves and dislikes, all still ELIGIBLE as-of every
+        // split (no watch footprint, no reaction) so they reach the judge.
+        for (var i = 0; i < 40; i++)
         {
-            HistoryLock.Release();
+            await SeedRatedAsync(
+                accountId, $"Holdout {i}", i % 2 == 0 ? (short)9 : (short)3, start.AddDays(100 + i));
         }
+
+        return accountId;
     }
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -322,7 +315,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     private async Task<Guid> SeedRatedAsync(
         Guid accountId, string name, short rating, DateTime at, bool embedded = true)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
