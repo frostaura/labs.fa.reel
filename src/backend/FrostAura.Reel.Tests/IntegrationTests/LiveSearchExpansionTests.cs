@@ -16,6 +16,7 @@ using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Telemetry;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
@@ -31,7 +32,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// the user has already seen — and a repeat query reuses the cache instead of re-hitting TMDB.
 /// </summary>
 [Collection("postgres")]
-public class LiveSearchExpansionTests(PostgresFixture fixture)
+public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     // Was quarantined as a "local-only flake" until 2026-09-10. The cause was in the fake TMDB
     // client below, not the environment: its list rows carried OriginalLanguage = null, so every
@@ -41,7 +42,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     [Fact]
     public async Task Streams_unseen_matches_excludes_seen_and_caches_the_fetch()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -80,7 +81,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     [Fact]
     public async Task A_director_query_returns_the_filmography_including_watched_titles()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -122,7 +123,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     [Fact]
     public async Task A_vibe_query_returns_multiple_semantic_neighbours_from_the_embedded_catalog()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -152,7 +153,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     [Fact]
     public async Task An_exclusion_with_enough_clean_candidates_never_shows_a_contradicting_title()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -197,7 +198,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     [Fact]
     public async Task Too_few_clean_candidates_show_a_flagged_outside_channel_after_the_clean_picks()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -287,7 +288,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     /// <summary>Seeds a global, English, UNSEEN title that already carries a normalized embedding.</summary>
     private async Task SeedEmbeddedUnseenTitleAsync(long tmdbId, string name, int seed, string[]? genres = null, string? overview = null)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -349,7 +350,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["TestHelpers:ModelStubMode"] = "true" })
@@ -398,7 +399,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -420,7 +421,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
     /// </summary>
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var titleIds = await db.Titles.Select(t => t.Id).ToListAsync();
         foreach (var titleId in titleIds)
         {
@@ -442,7 +443,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
     private async Task SeedSeenTitleAsync(Guid accountId, long tmdbId, string name)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -555,32 +556,5 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
-    }
-
-    private sealed class StubEmbeddingProvider : IEmbeddingProvider
-    {
-        public bool IsAvailable => true;
-
-        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
-        {
-            var vectors = texts.Select(t =>
-            {
-                var v = new float[1536];
-                var seed = t.Length;
-                for (var i = 0; i < v.Length; i++)
-                {
-                    v[i] = (float)Math.Sin(seed + i);
-                }
-
-                var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
-                for (var i = 0; i < v.Length; i++)
-                {
-                    v[i] /= norm;
-                }
-
-                return v;
-            }).ToArray();
-            return Task.FromResult(vectors);
-        }
     }
 }
