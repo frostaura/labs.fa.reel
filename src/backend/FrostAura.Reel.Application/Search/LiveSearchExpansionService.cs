@@ -117,7 +117,13 @@ public sealed class LiveSearchExpansionService(
         string message, IReadOnlyList<ChatTurn> history, IReadOnlyList<long> shownTmdbIds, string? region, Emit emit, CancellationToken ct) =>
         StreamAsync(message, history, shownTmdbIds, region, [], ApiUsagePurpose.RerankAsk, emit, ct);
 
-    /// <summary>An Ask Reel conversational turn — the shape <c>/api/search/ask</c> uses.</summary>
+    /// <summary>
+    /// An Ask Reel conversational turn — the shape <c>/api/search/ask</c> uses.
+    ///
+    /// <para><paramref name="debug"/> attaches the turn's own diagnostics to the terminal frame. The
+    /// ENTITLEMENT decision is not made here: the endpoint resolves it from the tier and the query
+    /// string, because that is where the account row and the request live.</para>
+    /// </summary>
     public Task StreamAsync(
         string message,
         IReadOnlyList<ChatTurn> history,
@@ -125,8 +131,9 @@ public sealed class LiveSearchExpansionService(
         string? region,
         IReadOnlyList<MediaType> mediaFilter,
         Emit emit,
-        CancellationToken ct) =>
-        StreamAsync(message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct);
+        CancellationToken ct,
+        bool debug = false) =>
+        StreamAsync(message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct, debug);
 
     /// <summary>
     /// Runs a conversational turn end-to-end, emitting the SSE event stream. Never throws for an
@@ -146,7 +153,8 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyList<MediaType> mediaFilter,
         string rerankPurpose,
         Emit emit,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool debug = false)
     {
         var accountId = accountContext.AccountId
             ?? throw new InvalidOperationException("Live search requires an account.");
@@ -157,15 +165,30 @@ public sealed class LiveSearchExpansionService(
             return;
         }
 
+        // Where this turn's seconds went. Stages accumulate, so discovery running three times at
+        // three relaxation levels reports one total rather than three entries, and a stage that
+        // never ran is absent rather than zero.
+        var timings = new AskStageTimings();
+
         try
         {
             await emit("phase", new { stage = "searching", found = 0, scored = 0 });
 
             // No embeddings provider → can't rank semantically. Fall back to the local lexical
             // engine so Ask Reel still answers (keyless installs); stream those, unscored-by-rank.
+            //
+            // This branch precedes the agent call, so it records `emit` alone: there is nothing to
+            // interpret, discover, embed, score, rerank or blend. A stage list is a record of work
+            // done, not a checklist to fill in.
             if (!embeddings.IsAvailable)
             {
-                await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
+                using (timings.Stage(AskStageTimings.Emit))
+                {
+                    await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
+                }
+
+                logger.LogInformation(
+                    "Ask Reel '{Query}': lexical fallback (no embeddings provider). {StageTimings}", trimmed, timings);
                 return;
             }
 
@@ -188,7 +211,12 @@ public sealed class LiveSearchExpansionService(
 
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
             var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
-            var agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct);
+            AgentReply agentReply;
+            using (timings.Stage(AskStageTimings.Interpret))
+            {
+                agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct);
+            }
+
             await emit("assistant-message", new { text = agentReply.Reply });
 
             // A named-person query ("all movies Nolan directs") is a lookup: it relaxes the
@@ -243,16 +271,21 @@ public sealed class LiveSearchExpansionService(
             for (; relaxation < MaxRelaxations; relaxation++)
             {
                 var pass = Relax(intent, relaxation);
-                var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
-                var semanticIds = isPersonQuery
-                    ? new List<Guid>()
-                    : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, referenceVectors, ct);
-                discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
+                using (timings.Stage(AskStageTimings.Discover))
+                {
+                    var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
+                    var semanticIds = isPersonQuery
+                        ? new List<Guid>()
+                        : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, referenceVectors, ct);
+                    discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
+                }
+
                 await emit("phase", new { stage = "discovered", found = discovered.Count, scored = 0 });
 
                 // OrderBy(t.Id) is not cosmetic: without it Postgres may return these rows in any
                 // order, and every downstream sort is stable-on-an-unstable-input, so an identical
                 // re-ask could present a different list.
+                using var eligibleStage = timings.Stage(AskStageTimings.Eligible);
                 eligible = (await baseQuery
                         .Where(t => discovered.Contains(t.Id))
                         .OrderBy(t => t.Id)
@@ -275,6 +308,7 @@ public sealed class LiveSearchExpansionService(
                     eligible = ApplyRuntimeCeiling(eligible, intent.MaxRuntimeMinutes, MinResults);
                 }
 
+                eligibleStage.Dispose();
                 if (eligible.Count >= MinResults || isPersonQuery)
                 {
                     break;
@@ -287,6 +321,7 @@ public sealed class LiveSearchExpansionService(
             // nothing. Only a truly empty eligible catalogue can still come back with zero.
             if (eligible.Count == 0)
             {
+                using var lastResortStage = timings.Stage(AskStageTimings.Eligible);
                 eligible = (await baseQuery
                         .Where(t => t.TmdbPopularity != null)
                         .OrderByDescending(t => t.TmdbPopularity)
@@ -315,12 +350,13 @@ public sealed class LiveSearchExpansionService(
             // you've seen, score for the predicted-rating badge — but never re-order or cull by fit.
             if (isPersonQuery)
             {
-                await StreamFilmographyAsync(accountId, agentReply.Intent, eligible, taste, now, emit, ct);
+                await StreamFilmographyAsync(accountId, agentReply.Intent, eligible, taste, now, timings, emit, ct);
                 return;
             }
 
             // ── Embed eligible candidates that lack a vector, then cosine pre-rank ───────────
             await emit("phase", new { stage = "embedding", found = eligible.Count, scored = 0 });
+            using var embedStage = timings.Stage(AskStageTimings.Embed);
             await EnsureEmbeddedAsync(eligible, ct);
             var vectorsByTitle = await LoadVectorsAsync(eligible.Select(t => t.Id).ToList(), ct);
             var tagVectors = await LoadPreferenceTagVectorsAsync(accountId, ct);
@@ -332,6 +368,7 @@ public sealed class LiveSearchExpansionService(
             // raw text only when the intent carries no positive signal at all.
             var seedText = RankingSeedText(agentReply, trimmed);
             var queryVec = await RankingSeedVectorAsync(seedText, referenceVectors, ct);
+            embedStage.Dispose();
 
             // Negation is applied BEFORE the cut, not after it — and it is HARD. Titles that
             // contradict what the user ruled out never appear as ordinary picks: with enough clean
@@ -381,8 +418,13 @@ public sealed class LiveSearchExpansionService(
             var returned = ranked.Concat(outside).ToList();
             await emit("phase", new { stage = "scoring", found = returned.Count, scored = 0 });
             var sliceIds = returned.Select(x => x.Title.Id).ToList();
-            await HydrateAsync(sliceIds, ct);
-            var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+            IReadOnlyDictionary<Guid, decimal> scores;
+            using (timings.Stage(AskStageTimings.Score))
+            {
+                await HydrateAsync(sliceIds, ct);
+                scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+            }
+
             foreach (var id in sliceIds)
             {
                 await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
@@ -406,8 +448,13 @@ public sealed class LiveSearchExpansionService(
             var rerankQuery = referenceNames.Count > 0
                 ? $"{trimmed}\nThe user wants something like: {string.Join(", ", referenceNames)}"
                 : trimmed;
-            var fitById = await RerankStreamAsync(
-                accountId, rerankQuery, persona, ranked, scores, rerankPurpose, emit, ct);
+            Dictionary<Guid, RerankResult> fitById;
+            using (timings.Stage(AskStageTimings.Rerank))
+            {
+                fitById = await RerankStreamAsync(
+                    accountId, rerankQuery, persona, ranked, scores, rerankPurpose, emit, ct);
+            }
+
             foreach (var (title, _) in outside)
             {
                 await emit("candidate-reranked", new
@@ -436,6 +483,7 @@ public sealed class LiveSearchExpansionService(
                 .ThenBy(x => x.Title.Id)
                 .ToList();
 
+            using var blendStage = timings.Stage(AskStageTimings.Blend);
             var blended = BlendPool(ranked);
             var blendedOutside = BlendPool(outside);
 
@@ -470,6 +518,9 @@ public sealed class LiveSearchExpansionService(
                     why: OutsideWhy(NegationMatches(x.Title, intent)),
                     outsideRequest: true)))
                 .ToList();
+            blendStage.Dispose();
+
+            using var emitStage = timings.Stage(AskStageTimings.Emit);
 
             // Report what was RETURNED, not what was pulled. The old wording was derived purely
             // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —
@@ -485,6 +536,12 @@ public sealed class LiveSearchExpansionService(
                         : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
                             + (relaxation > 0 ? " (widened to find enough)" : "")
                             + (floorRelaxed ? $" (nothing cleared your {floor.ToString("0.#", CultureInfo.InvariantCulture)} rating floor, so it was relaxed)" : "") + ".",
+                // Founder-only, and only when asked for: the per-stage millisecond breakdown of this
+                // turn. Always PRESENT as a key so the client has one shape to render, null when the
+                // caller is not entitled to it. `emit` is absent here and only here — a payload
+                // cannot carry the duration of its own transmission, and a zero would be a claim
+                // rather than a rounding. The end-of-turn log line carries all eight.
+                timingsMs = debug ? timings.Snapshot() : null,
             });
             // The turn's answer, recorded. Ranked by the SAME blend the user is looking at, clean
             // picks first and outside ones trailing, so Rank is the position on screen. Written
@@ -521,9 +578,12 @@ public sealed class LiveSearchExpansionService(
 
             // Logs `final` too: the count the user actually sees is the one worth alerting on, and
             // its absence is what let an empty result set look healthy in the logs.
+            emitStage.Dispose();
+
             logger.LogInformation(
-                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible, {Scored} scored, {Reranked} reranked, {Returned} returned.",
-                trimmed, discovered.Count, relaxation, eligible.Count, sliceIds.Count, fitById.Count, final.Count);
+                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible, "
+                + "{Scored} scored, {Reranked} reranked, {Returned} returned. {StageTimings}",
+                trimmed, discovered.Count, relaxation, eligible.Count, sliceIds.Count, fitById.Count, final.Count, timings);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1146,7 +1206,7 @@ public sealed class LiveSearchExpansionService(
     /// </summary>
     private async Task StreamFilmographyAsync(
         Guid accountId, SearchIntent intent, List<Title> eligible,
-        FeatureVectorBuilder.TasteState taste, DateTime now, Emit emit, CancellationToken ct)
+        FeatureVectorBuilder.TasteState taste, DateTime now, AskStageTimings timings, Emit emit, CancellationToken ct)
     {
         var ordered = eligible
             .OrderByDescending(t => t.ReleasedAt ?? t.FirstAiredAt ?? DateTime.MinValue)
@@ -1161,8 +1221,13 @@ public sealed class LiveSearchExpansionService(
 
         // Score the top slice for the badge (no re-rank — the order is the filmography).
         var sliceIds = ordered.Take(HydrateScoreSlice).Select(t => t.Id).ToList();
-        await HydrateAsync(sliceIds, ct);
-        var scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+        IReadOnlyDictionary<Guid, decimal> scores;
+        using (timings.Stage(AskStageTimings.Score))
+        {
+            await HydrateAsync(sliceIds, ct);
+            scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
+        }
+
         foreach (var id in sliceIds)
         {
             await emit("candidate-scored", new { titleId = id, predictedRating = scores.TryGetValue(id, out var p) ? (decimal?)p : null });
@@ -1179,8 +1244,14 @@ public sealed class LiveSearchExpansionService(
         var reason = who is null
             ? $"{ordered.Count} titles in this filmography."
             : $"{ordered.Count} titles {verb} {who.Name}.";
-        await emit("done", new { results, reason });
-        logger.LogInformation("Ask Reel filmography: {Count} titles for {Person}.", ordered.Count, who?.Name ?? "?");
+        using (timings.Stage(AskStageTimings.Emit))
+        {
+            await emit("done", new { results, reason });
+        }
+
+        logger.LogInformation(
+            "Ask Reel filmography: {Count} titles for {Person}. {StageTimings}",
+            ordered.Count, who?.Name ?? "?", timings);
     }
 
     /// <summary>The subset of the given title ids the account has watched or rated (for "seen" badges).</summary>

@@ -160,7 +160,18 @@ public static class SearchEndpoints
             http.Response.Headers["X-Accel-Buffering"] = "no";
             await http.Response.Body.FlushAsync(ct);
 
-            var region = await db.Accounts.Where(a => a.Id == accountId).Select(a => a.Region).FirstOrDefaultAsync(ct);
+            var profile = await db.Accounts
+                .Where(a => a.Id == accountId)
+                .Select(a => new { a.Region, a.Tier })
+                .FirstOrDefaultAsync(ct);
+            var region = profile?.Region;
+
+            // Founder-only diagnostics, opt-in per request. The tier is read off the row rather than
+            // a claim (billing changes it without reissuing the session cookie), and the check is
+            // inline rather than the RequireFounder group filter because this route is not
+            // founder-only — only this one FIELD of its answer is.
+            var debug = http.Request.Query["debug"] == "1"
+                && profile?.Tier == FrostAura.Reel.Domain.Tenancy.AccountTier.Founder;
             var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
 
             string? assistantText = null;
@@ -260,7 +271,7 @@ public static class SearchEndpoints
                     .Select(m => m!.Value)
                     .Distinct()
                     .ToList();
-                await expansion.StreamAsync(message, history, shown, region, mediaFilter, emit, ct);
+                await expansion.StreamAsync(message, history, shown, region, mediaFilter, emit, ct, debug);
             }
             catch (OperationCanceledException)
             {
