@@ -53,8 +53,106 @@ public class AskReelReasonCopyTests
             AskReelReason.Build(picks: 6, outsideShown: 0, droppedByFloor: 4, discovered: 40, widened: false, floorRelaxed: false, floor: 6m));
 
         Assert.Equal(
-            "10 picks ranked for you, from 40 pulled · nothing cleared your 6.0 bar, so it was relaxed",
-            AskReelReason.Build(picks: 10, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true, floor: 6m));
+            "10 picks ranked for you, from 40 pulled · nothing cleared your 6.0 bar, so it was relaxed "
+            + "· 10 picks shown below your 6.0 bar",
+            AskReelReason.Build(
+                picks: 10, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
+                floor: 6m, aboveFloor: 0));
+    }
+
+    /// <summary>
+    /// THE DEFECT three independent finders reported, one round apart, from three different
+    /// browsers. Relaxation triggers on a THRESHOLD (fewer than six cards clear), and the copy
+    /// asserted ZERO. On six of seven billed turns the user was shown cards badged 6.2 under a
+    /// sentence saying nothing had cleared their 6.0 bar. The predicate and the sentence were never
+    /// the same claim; now the sentence is built from the count rather than inferred from the flag.
+    /// </summary>
+    [Fact]
+    public void A_relaxed_turn_says_how_many_actually_cleared()
+    {
+        Assert.Equal(
+            "24 picks ranked for you, from 80 pulled · only 2 picks cleared your 6.0 bar, so it was relaxed "
+            + "· 22 picks shown below your 6.0 bar",
+            AskReelReason.Build(
+                picks: 24, outsideShown: 0, droppedByFloor: 0, discovered: 80, widened: false, floorRelaxed: true,
+                floor: 6m, aboveFloor: 2));
+    }
+
+    /// <summary>
+    /// Zero really is zero, and it still has to account for the grid: the old line stopped at
+    /// "so it was relaxed" and left every sub-floor card on screen unexplained, because on a
+    /// relaxed turn <c>droppedByFloor</c> is 0 and the tray is empty.
+    /// </summary>
+    [Fact]
+    public void A_relaxed_turn_where_nothing_cleared_still_counts_the_grid()
+    {
+        Assert.Equal(
+            "9 picks ranked for you, from 40 pulled · nothing cleared your 6.0 bar, so it was relaxed "
+            + "· 9 picks shown below your 6.0 bar",
+            AskReelReason.Build(
+                picks: 9, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
+                floor: 6m, aboveFloor: 0));
+    }
+
+    /// <summary>
+    /// The third branch, and the one that reads worst if the copy is written from the flag: a thin
+    /// turn where every card DID clear still relaxes, because the threshold is about how much is
+    /// left on the screen. "So it was relaxed" would be true and useless — the relaxation changed
+    /// nothing — and it would send the reader hunting for below-bar cards that do not exist.
+    /// </summary>
+    [Fact]
+    public void A_relaxed_turn_where_every_pick_cleared_does_not_claim_a_drop()
+    {
+        Assert.Equal(
+            "3 picks ranked for you, from 40 pulled · every pick cleared your 6.0 bar",
+            AskReelReason.Build(
+                picks: 3, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
+                floor: 6m, aboveFloor: 3));
+    }
+
+    /// <summary>
+    /// Both new counts pluralise. "1 picks cleared" beside a real number is the same trust leak as
+    /// the "1 picks" that shipped once already, and both sides of this clause pair can be 1.
+    /// </summary>
+    [Fact]
+    public void The_relaxed_clauses_pluralise_on_both_sides()
+    {
+        Assert.Equal(
+            "2 picks ranked for you, from 40 pulled · only 1 pick cleared your 6.0 bar, so it was relaxed "
+            + "· 1 pick shown below your 6.0 bar",
+            AskReelReason.Build(
+                picks: 2, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
+                floor: 6m, aboveFloor: 1));
+    }
+
+    /// <summary>
+    /// The outside channel counts towards both halves — it is on the screen, so it is under the bar
+    /// or over it like anything else, and the relaxed clause pair must not quietly ignore it.
+    /// </summary>
+    [Fact]
+    public void The_outside_channel_is_counted_by_the_relaxed_clauses()
+    {
+        Assert.Equal(
+            "4 picks matched everything you asked · 3 closest-but-outside shown separately "
+            + "· only 2 picks cleared your 6.0 bar, so it was relaxed · 5 picks shown below your 6.0 bar",
+            AskReelReason.Build(
+                picks: 4, outsideShown: 3, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
+                floor: 6m, aboveFloor: 2));
+    }
+
+    /// <summary>
+    /// A caller that has not wired the count through yet gets a clause that is true of every
+    /// branch. It states nothing it cannot know — which is the whole point of the fix, and is why
+    /// the sentinel is not allowed to fall back to the old absolute.
+    /// </summary>
+    [Fact]
+    public void An_unwired_caller_gets_a_clause_that_claims_no_count()
+    {
+        Assert.Equal(
+            "24 picks ranked for you, from 80 pulled · your 6.0 bar was relaxed to fill the screen",
+            AskReelReason.Build(
+                picks: 24, outsideShown: 0, droppedByFloor: 0, discovered: 80, widened: false, floorRelaxed: true,
+                floor: 6m));
     }
 
     [Fact]
