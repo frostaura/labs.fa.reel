@@ -1,8 +1,8 @@
 ---
 name: fa-reel-state
-description: "QA remediation shipped 2026-08-10; the whole remediation is unpushed on main (4095762..fe29c06), a clean ahead-only fast-forward, still awaiting founder; M2 still NOT beating baseline (iter 7: 0% lift); kill clock past due with zero external users"
+description: "757 backend tests green locally with zero flaky (2026-09-10); QA remediation shipped 2026-08-10; the whole remediation is unpushed on main (4095762..fe29c06), a clean ahead-only fast-forward, still awaiting founder; M2 still NOT beating baseline (iter 7: 0% lift); kill clock past due with zero external users"
 type: state
-last_verified: 2026-08-21
+last_verified: 2026-09-10
 ---
 
 # Current state
@@ -22,6 +22,6 @@ _Git state re-inspected 2026-08-21: `main` at `fe29c06`, tree clean, `rev-list -
 
 **Dean actively used the app during 2026-08-08→10** (conditions now: 8 excluded genres, min ratings 6/6, min year 2000 — his own settings, not QA residue; feed-build burst on 08-10 pre-deploy). Weekend usage ran on the P1-fixed image, so no show-rating history corruption occurred.
 
-Backend tests: 397 passing + 6 known-flaky local integration failures (CandidateRetriever ×2, old LiveSearchExpansion ×2, LexicalSearch, EnrichCatalog — pre-existing, identical on old HEADs, CI's pgvector service is authoritative). Frontend: 181 unit + 19 e2e green. All 4 new migrations applied on the running stack.
+Backend tests: **757 passing, zero flaky, zero skipped** on the dev Mac as of 2026-09-10 (branch `hygiene/culture-affinity`, verified with AND without `REEL_SKIP_LOCAL_FLAKY=1`) — the `[LocalFlakyFact]` quarantine is now empty; see `decisions.md` for why every row in it was a real defect rather than a machine difference. Frontend: 181 unit + 19 e2e green (last measured 2026-08-10, not re-run since). All 4 new migrations applied on the running stack.
 
 M4 multi-tenant remains code-complete with **zero external users**, and the app is not deployed. The ≥5-external-users kill clock (~2026-08-11/18) has now **passed** on either anchor. The 2026-07-24 deploy decision was never executed, so the criterion has been neither met nor honestly evaluated — see `questions.md`.
