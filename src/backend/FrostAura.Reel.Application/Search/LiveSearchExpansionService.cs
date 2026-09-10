@@ -616,7 +616,7 @@ public sealed class LiveSearchExpansionService(
                 belowFloor,
                 reason = AskReelReason.Build(
                     blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
-                    widened: relaxation > 0, floorRelaxed, floor),
+                    widened: relaxation > 0, floorRelaxed, floor, verdict.AboveFloorCount),
                 // Founder-only, and only when asked for: the per-stage millisecond breakdown of this
                 // turn. Always PRESENT as a key so the client has one shape to render, null when the
                 // caller is not entitled to it. `emit` is absent here and only here — a payload
