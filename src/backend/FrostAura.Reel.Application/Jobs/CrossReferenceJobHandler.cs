@@ -22,10 +22,12 @@ namespace FrostAura.Reel.Application.Jobs;
 /// batches of sixty, each candidate shown beside the k nearest titles the viewer has ACTUALLY
 /// rated, and persists one closed-enum verdict per candidate.
 ///
-/// <para><b>Nothing it writes changes a pick yet.</b> PR2 fills the table and reports honestly;
-/// the feed does not read a verdict until PR3, and no verdict may bar a hero until the offline
-/// backtest has earned that right. That ordering is the whole point of the four-PR split: a
-/// negative result costs one table, not a re-ranked feed.</para>
+/// <para><b>What it writes is KEEP-ONLY at the ranking layer.</b> Since 2026-09-11 the feed reads
+/// these verdicts, and a Keep lifts a title's rank key by at most a fifth. An <c>out</c> still
+/// demotes nothing and bars nothing: on the founder's own holdout at prompt v2 it caught 16.2%
+/// [Wilson 12.3, 21.0] of the titles he went on to rate 8 or higher against 22.8% of the ones he
+/// rated 4 or lower. The rule and its measurements live on <c>VerdictAggregator</c>; this handler
+/// only writes the evidence.</para>
 ///
 /// <para><b>Why it is a job at all.</b> A ten-minute pass inside <c>BuildFeedJobHandler</c> takes
 /// the feed down — the same reasoning <c>PersonaliseTitlesJobHandler</c> is built on, one order of
@@ -219,9 +221,8 @@ public sealed class CrossReferenceJobHandler(
             // request, and forcing Fresh would reinstate the hero churn the stable-tonight contract
             // exists to prevent.
             //
-            // As of PR2 the rebuild does NOT read a single verdict: nothing in the ranking layer
-            // looks at this table yet. The request is here so the wiring is exercised and the
-            // ordering is settled before PR3 gives it teeth.
+            // The next Fresh build reads these verdicts; a Preserve rebuild keeps tonight's seats
+            // by contract, which is why this asks for a rebuild rather than promising a change now.
             await feedRefresh.RequestRebuildAsync(accountId, CrossReferenceRebuildReason, ct);
         }
 
@@ -399,9 +400,11 @@ public sealed class CrossReferenceJobHandler(
     /// <summary>
     /// The completion frame.
     ///
-    /// <para><c>picksChanged</c> is a literal zero rather than an omission: as of PR2 no verdict
-    /// reaches the ranking layer, so the honest answer is "none", and a missing field would leave
-    /// the post-run copy waiting for a number that is never coming.</para>
+    /// <para><c>picksChanged</c> is a literal zero rather than an omission, and it is honest: the
+    /// completion rebuild is a PRESERVE rebuild, so tonight's seats do not move — the verdicts
+    /// shape the page at the next Fresh build, which this run cannot count. A missing field would
+    /// leave the post-run copy waiting for a number that is never coming; a guessed one would
+    /// promise a change the user could go and fail to find.</para>
     ///
     /// <para><c>gating</c> comes from the most recent backtest this account has actually run — the
     /// pooled mean row, never a per-origin one — and is <c>unmeasured</c> when none exists. The

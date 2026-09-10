@@ -8,6 +8,7 @@ using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -24,6 +25,14 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 public class ExposureLogIntegrationTests(PostgresFixture fixture)
 {
     private static readonly DateTime Now = new(2026, 9, 10, 19, 17, 30, DateTimeKind.Utc);
+
+    /// <summary>
+    /// The only thing <see cref="AccuracyQuery"/> asks a judge: which prompt generation is being
+    /// served, so the cross-reference block can mark the backtest row that governs today's feed.
+    /// Pinned here rather than taken from the adapter so a version bump does not silently rewrite
+    /// what these tests assert.
+    /// </summary>
+    private static readonly FixedVersionCrossReferenceJudge CurrentJudge = new(2);
 
     [Fact]
     public async Task A_refetch_inside_the_same_minute_is_one_exposure_and_the_next_minute_is_another()
@@ -549,7 +558,7 @@ public class ExposureLogIntegrationTests(PostgresFixture fixture)
 
         await using var db = fixture.CreateContext(new AccountContext());
         var unscoped = new AccountContext();
-        var query = new AccuracyQuery(db, unscoped, new RetroLoopQuery(db, unscoped), new ModelLearnedQuery(db));
+        var query = new AccuracyQuery(db, unscoped, new RetroLoopQuery(db, unscoped), new ModelLearnedQuery(db), CurrentJudge);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => query.ComputeAsync("90d", Now, CancellationToken.None));
@@ -566,17 +575,174 @@ public class ExposureLogIntegrationTests(PostgresFixture fixture)
         var (accountId, _, _, _) = await SeedAsync("window");
         var context = Scoped(accountId);
         await using var db = fixture.CreateContext(context);
-        var query = new AccuracyQuery(db, context, new RetroLoopQuery(db, context), new ModelLearnedQuery(db));
+        var query = new AccuracyQuery(db, context, new RetroLoopQuery(db, context), new ModelLearnedQuery(db), CurrentJudge);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => query.ComputeAsync("1y", Now, CancellationToken.None));
+    }
+
+    // ── The cross-reference block ───────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task The_cross_reference_standing_is_written_only_when_both_halves_are_present()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The verdict and its confidence travel as a pair, exactly as the interleaving attribution
+        // does: a confidence with no verdict is a number with no claim attached, and a verdict with
+        // no confidence cannot be read back against the backtest that judges it.
+        var (accountId, titleId, artifactId, snapshotId) = await SeedAsync("xrefpair");
+        var other = NewTitle("xrefpair-half");
+        var third = NewTitle("xrefpair-none");
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            seed.Titles.AddRange(other, third);
+            await seed.SaveChangesAsync();
+        }
+
+        var log = LogFor(accountId, out var db);
+        await using (db)
+        {
+            await log.RecordAsync(
+                accountId, ExposureSurface.FeedHero, snapshotId, artifactId, Now,
+                [
+                    new ExposureCard(titleId, 0, 8.42m, XrefVerdict: "ProvisionalKeep", XrefConfidence: 0.8123m),
+                    // Half a pair, from either side. Both record nothing rather than half a fact.
+                    new ExposureCard(other.Id, 1, 7.10m, XrefVerdict: "Out"),
+                    new ExposureCard(third.Id, 2, 6.40m, XrefConfidence: 0.9m),
+                ],
+                CancellationToken.None);
+        }
+
+        await using var verify = fixture.CreateContext(Scoped(accountId));
+        var rows = await verify.ExposureEvents.OrderBy(e => e.Rank).ToListAsync();
+
+        Assert.Equal("ProvisionalKeep", rows[0].XrefVerdict);
+        // Rounded to the column's three decimals, here and nowhere else.
+        Assert.Equal(0.812m, rows[0].XrefConfidence);
+        Assert.Null(rows[1].XrefVerdict);
+        Assert.Null(rows[1].XrefConfidence);
+        Assert.Null(rows[2].XrefVerdict);
+        Assert.Null(rows[2].XrefConfidence);
+    }
+
+    [Fact]
+    public async Task The_cross_reference_block_answers_per_standing_and_refuses_below_the_threshold()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Two standings with deliberately different sample sizes: one over the threshold, one far
+        // under it. The under-sampled one must still report its count — the page says "not yet
+        // answerable — N outcomes so far" off exactly this — rather than disappearing or, worse,
+        // rendering a mean over three titles beside a mean over thirty.
+        var (accountId, _, artifactId, snapshotId) = await SeedAsync("xrefblock");
+        var keepRatings = new short[] { 9, 9, 8, 8, 7, 7, 6, 6, 5, 4, 9, 8, 8, 7, 7, 6, 6, 5, 9, 8 };
+        var outRatings = new short[] { 3, 4, 9 };
+
+        await SeedJudgedExposuresAsync(accountId, artifactId, snapshotId, "ProvisionalKeep", 0.8m, keepRatings);
+        await SeedJudgedExposuresAsync(accountId, artifactId, snapshotId, "Out", 0.9m, outRatings);
+        // A card served before anything had judged it. NULL is not a standing and must not become
+        // one — it is by far the larger set mid-pass, and folding it in would put thousands of
+        // unjudged serves behind a number describing a judgement.
+        await SeedJudgedExposuresAsync(accountId, artifactId, snapshotId, verdict: null, null, [10, 10, 2]);
+
+        var report = await ComputeAccuracyAsync(accountId, "all");
+        var online = report.CrossReference.Online.ToDictionary(o => o.Verdict, o => o);
+
+        Assert.Equal(2, online.Count);
+        Assert.Equal(20, report.CrossReference.MinimumOutcomes);
+
+        var keep = online["ProvisionalKeep"];
+        Assert.Equal(keepRatings.Length, keep.Count);
+        Assert.True(keep.Answerable);
+        Assert.Equal(keepRatings.Average(r => (double)r), keep.MeanLaterRating!.Value, 6);
+        Assert.Equal(keepRatings.Count(r => r >= 8) / (double)keepRatings.Length, keep.LovedRate!.Value, 6);
+        Assert.Equal(keepRatings.Count(r => r <= 4) / (double)keepRatings.Length, keep.DislikedRate!.Value, 6);
+
+        var ruledOut = online["Out"];
+        Assert.Equal(outRatings.Length, ruledOut.Count);
+        Assert.False(ruledOut.Answerable);
+        // The numbers are still computed — the page decides what to say about them, and it needs
+        // the count to say it.
+        Assert.Equal(outRatings.Average(r => (double)r), ruledOut.MeanLaterRating!.Value, 6);
+    }
+
+    [Fact]
+    public async Task A_rating_that_predates_the_serve_is_not_an_outcome_of_it()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The causal guard, on the cross-reference join specifically. FirstRatedAt is used rather
+        // than RatedAt because RatedAt is rewritten by every Trakt ratings walk, which would drift
+        // an old opinion forward past a serve that came after it.
+        var (accountId, titleId, artifactId, snapshotId) = await SeedAsync("xrefcausal");
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            seed.UserRatings.Add(Rating(accountId, titleId, 10, Now.AddDays(-30)));
+            await seed.SaveChangesAsync();
+        }
+
+        var log = LogFor(accountId, out var db);
+        await using (db)
+        {
+            await log.RecordAsync(
+                accountId, ExposureSurface.FeedHero, snapshotId, artifactId, Now,
+                [new ExposureCard(titleId, 0, 8.0m, XrefVerdict: "ProvisionalKeep", XrefConfidence: 0.9m)],
+                CancellationToken.None);
+        }
+
+        var report = await ComputeAccuracyAsync(accountId, "all");
+        Assert.Empty(report.CrossReference.Online);
+    }
+
+    /// <summary>
+    /// One exposure per rating, each on its own title, all under one standing — the shape the online
+    /// half aggregates. A null <paramref name="verdict"/> seeds serves nothing had judged.
+    /// </summary>
+    private async Task SeedJudgedExposuresAsync(
+        Guid accountId, Guid artifactId, Guid snapshotId, string? verdict, decimal? confidence,
+        IReadOnlyList<short> laterRatings)
+    {
+        var titles = laterRatings.Select((_, i) => NewTitle($"xref-{verdict ?? "none"}-{i}")).ToList();
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            seed.Titles.AddRange(titles);
+            for (var i = 0; i < titles.Count; i++)
+            {
+                // Rated AFTER the serve, which is what makes it an outcome of it.
+                seed.UserRatings.Add(Rating(accountId, titles[i].Id, laterRatings[i], Now.AddDays(2)));
+            }
+
+            await seed.SaveChangesAsync();
+        }
+
+        var log = LogFor(accountId, out var db);
+        await using (db)
+        {
+            await log.RecordAsync(
+                accountId, ExposureSurface.FeedRow, snapshotId, artifactId, Now,
+                titles
+                    .Select((t, i) => new ExposureCard(
+                        t.Id, i, 7.0m, XrefVerdict: verdict, XrefConfidence: verdict is null ? null : confidence))
+                    .ToList(),
+                CancellationToken.None);
+        }
     }
 
     private async Task<AccuracyReport> ComputeAccuracyAsync(Guid accountId, string window)
     {
         var context = Scoped(accountId);
         await using var db = fixture.CreateContext(context);
-        return await new AccuracyQuery(db, context, new RetroLoopQuery(db, context), new ModelLearnedQuery(db))
+        return await new AccuracyQuery(db, context, new RetroLoopQuery(db, context), new ModelLearnedQuery(db), CurrentJudge)
             .ComputeAsync(window, Now.AddDays(3), CancellationToken.None);
     }
 

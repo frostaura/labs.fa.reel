@@ -24,6 +24,12 @@ import {
   signed,
   sourceNote,
 } from "../lib/trackRecordCopy";
+import {
+  xrefBacktestCaveat,
+  xrefBacktestSentence,
+  xrefOnlineNote,
+  xrefVerdictLabel,
+} from "../lib/xrefCopy";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -283,6 +289,64 @@ export default function TrackRecord() {
           </div>
         </section>
       )}
+
+      {/* The deep pass, and what it has earned the right to do. Every figure comes from the API —
+          there is not one number typed into this panel, because the whole argument for showing it
+          is that it is the account's own measurement rather than a claim about the feature. */}
+      {/* Optional-chained deliberately: a tab left open across a deploy holds a payload from
+          before this block existed, and a hard crash on the honesty page is the worst possible
+          place to discover that. */}
+      {(data.crossReference?.backtests.length || data.crossReference?.online.length) ? (
+        <section className="fa-card p-5" data-testid="cross-reference">
+          <h2 className="fa-section-title mb-1">Cross-reference</h2>
+          <p className="fa-caption text-fa-frost-dim mb-3">
+            A second pass reads every eligible title beside the ones you have actually rated, and
+            says keep, rule out, or not sure. What that verdict is allowed to do to your page was
+            decided by testing it against your own history — below.
+          </p>
+
+          {data.crossReference.backtests.map((b) => (
+            <div key={b.promptVersion} className="mb-3 last:mb-0" data-testid="cross-reference-backtest">
+              <p className="fa-body text-fa-frost">
+                {xrefBacktestSentence(b)}
+                {b.current && (
+                  <span className="fa-caption text-fa-frost-dim"> (this is the version running now)</span>
+                )}
+              </p>
+              <p className="fa-caption text-fa-frost-dim mt-1">{xrefBacktestCaveat(b)}</p>
+              {b.auc != null && (
+                <p className="fa-caption text-fa-frost-dim mt-1">
+                  Separation between what you loved and what you disliked: {num(b.auc, 3)} — 0.500 would
+                  be no separation at all.
+                </p>
+              )}
+            </div>
+          ))}
+
+          {/* The online half. It cannot reach significance and says so per verdict rather than
+              once at the bottom: a demoted title is served less, and only ~2% of ratings are made
+              in the app, so this corroborates the backtest and never replaces it. */}
+          <div className="mt-4">
+            <p className="fa-overline text-fa-frost-dim">since it went live</p>
+            {data.crossReference.online.length === 0 ? (
+              <p className="fa-caption text-fa-frost-dim mt-1" data-testid="cross-reference-online-empty">
+                Nothing it has judged has reached you and come back with a rating yet.
+              </p>
+            ) : (
+              <div className="space-y-1 mt-1">
+                {data.crossReference.online.map((o) => (
+                  <p key={o.verdict} className="fa-body" data-testid="cross-reference-online-row">
+                    <span className="text-fa-frost-dim">{xrefVerdictLabel(o.verdict)}:</span>{" "}
+                    <span className={o.answerable ? "text-fa-frost" : "text-fa-frost-dim"}>
+                      {xrefOnlineNote(o)}
+                    </span>
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      ) : null}
 
       {/* What changed since last time — the "and what I'm doing about it" half. */}
       {data.learnedThisWeek && (

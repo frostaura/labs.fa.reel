@@ -11,8 +11,11 @@ public enum AggregateVerdict
     /// <summary>One keep, no out. A single opinion — worth a nudge, not a promotion.</summary>
     ProvisionalKeep,
 
-    /// <summary>An out at ≥ 0.70 confidence. The only state that demotes, and the only one that may
-    /// ever bar a hero — and then only once the backtest has earned it.</summary>
+    /// <summary>
+    /// An out at ≥ 0.70 confidence. <b>Recorded, and deliberately without a ranking consequence.</b>
+    /// It is kept as a state — it is written to the exposure log and counted on the track record —
+    /// so the closed loop can go on measuring an opinion the product does not yet act on.
+    /// </summary>
     Out,
 
     /// <summary>Everything else, including keep-and-out disagreement and a low-confidence out.</summary>
@@ -31,9 +34,11 @@ public enum AggregateVerdict
 /// uninterpretable, because the calibration curve would then be measuring the judge.
 /// </param>
 /// <param name="HeroAllowed">
-/// False only for a fresh <see cref="AggregateVerdict.Out"/>. A bar is honest where a multiplier is
-/// a hope: rails order by <c>RankKey</c>, so a title demoted only in the hero key sits atop every
-/// rail regardless.
+/// <b>Always true, as of 2026-09-11.</b> The field survives because the shape of the decision is
+/// worth keeping visible — a bar is honest where a multiplier is a hope — but no verdict has earned
+/// one: on the founder's own holdout the <c>out</c> verdict under prompt v2 caught 16.2% [Wilson
+/// 12.3, 21.0] of the titles he went on to rate 8 or higher, against 22.8% of the ones he rated 4
+/// or lower. Barring on that would hide roughly one future love in six for a fifth of a dislike.
 /// </param>
 /// <param name="Confidence">The confidence the factor was computed from, 0–1.</param>
 /// <param name="Stale">True when the strongest evidence was judged at a superseded taste fingerprint.</param>
@@ -43,6 +48,18 @@ public readonly record struct VerdictFactor(
     /// <summary>The answer for a title nothing has ever judged: ordered exactly as today.</summary>
     public static readonly VerdictFactor Neutral =
         new(AggregateVerdict.None, 1.0d, HeroAllowed: true, Confidence: 0d, Stale: false);
+
+    /// <summary>
+    /// What the exposure row records in <c>ExposureEvent.XrefVerdict</c>, or null when nothing was
+    /// ever judged.
+    ///
+    /// <para>NULL and <c>"Unsure"</c> are different facts and the column keeps them apart: null
+    /// means the pass had not reached this title when the card was served, <c>Unsure</c> means it
+    /// looked and could not say. Collapsing the two would make every accuracy denominator on the
+    /// track record wrong in the flattering direction, because "never judged" is by far the larger
+    /// set on any account the pass has not finished.</para>
+    /// </summary>
+    public string? ExposureLabel => Verdict == AggregateVerdict.None ? null : Verdict.ToString();
 }
 
 /// <summary>
@@ -61,30 +78,56 @@ public readonly record struct VerdictObservation(
 /// <summary>
 /// The pure aggregation rule — several rounds of judging into one standing and one multiplier.
 ///
+/// <para><b>This is a KEEP-ONLY instrument, and the numbers that made it one are below.</b>
+/// Measured on the founder's own holdout on 2026-09-11 (five split origins pooled, real provider
+/// calls, base rates among judged titles: loved ≈ 23%, disliked ≈ 15%):</para>
+///
+/// <list type="bullet">
+/// <item><b>prompt v1</b>, 1,307 judged — AUC 0.611, Spearman 0.128; later ratings averaged 6.53
+/// for keeps against 6.21 for outs; keep → loved 28.4%, keep → disliked 13.0%; false-rule-out 9.1%
+/// [Wilson 6.4, 12.7] against true-rule-out 11.5%; 36% unsure.</item>
+/// <item><b>prompt v2</b>, 1,194 judged — AUC 0.655, Spearman 0.190; keeps averaged 6.83 against
+/// 6.16 for outs; keep → loved 33.2%, keep → disliked 8.1%; false-rule-out 16.2% [Wilson 12.3,
+/// 21.0] against true-rule-out 22.8%; 46% unsure.</item>
+/// </list>
+///
+/// <para>Read together: under v2 a KEEP is loved at about 1.4× the base rate and disliked at about
+/// half of it, which is a real, bounded ordering signal. An OUT is not the mirror image of that —
+/// it catches 16% of future loves to catch 23% of future dislikes, so acting on it would cost
+/// roughly one love hidden for every one-and-a-half dislikes demoted, against a base rate that
+/// already makes loves the commoner class. Both runs recorded
+/// <c>GatingDecision = demote-only</c> under the pre-registered rule, and demote-only now means
+/// exactly what it says: <b>Out and Unsure are 1.0, to three decimal places, with the hero
+/// allowed.</b> The verdict is still recorded, still logged on the exposure row and still counted
+/// on the track record — it simply does not move a pick.</para>
+///
 /// <para><b>The rules, and why each is what it is.</b></para>
 /// <list type="bullet">
-/// <item><b>Out beats everything, at ≥ 0.70.</b> Ruling out is the judge's actual job; the prompt
-/// is written to make <c>out</c> the confident answer and <c>unsure</c> the default. A single
-/// confident out therefore carries more information than two keeps, and the threshold is what
-/// separates "confident" from "answered".</item>
+/// <item><b>Out is classified at ≥ 0.70 and then does nothing.</b> The threshold still separates
+/// "confident" from "answered", because that is the population the backtest measures and the
+/// closed loop observes; what changed is that the classification no longer carries a factor.</item>
+/// <item><b>Out still outranks a keep as a LABEL.</b> A title the judge said no to at high
+/// confidence is not recorded as a keep because a later pass also said yes — the honest standing
+/// is the negative one, and it is the standing, not the factor, that reaches the exposure log.</item>
 /// <item><b>Confirmed Keep needs TWO keeps and no out.</b> One keep is one prompt's opinion at one
 /// position in one batch; two keeps across rounds with different neighbours is the closest thing
-/// this design has to independent corroboration.</item>
+/// this design has to independent corroboration. Round 2 does not exist yet, so today every keep
+/// that survives is Provisional — which is the honest reading of one opinion.</item>
 /// <item><b>Keep-and-out disagreement is Unsure, not a tie-break.</b> A contradiction between two
 /// passes is evidence about the JUDGE, not about the title, and resolving it by picking the
 /// stronger confidence would quietly convert judge noise into ranking signal.</item>
 /// <item><b>A low-confidence out is Unsure, not a weak Out.</b> Anything else puts a continuum
 /// under a decision the product presents as binary.</item>
-/// <item><b>Everything is bounded at ±0.2 around 1.0 except the Out.</b> A Keep must never
-/// outweigh a rating point of model opinion — the model is trained on this person's own labels and
-/// the judge is not.</item>
+/// <item><b>Everything is bounded at +0.2 around 1.0, and nothing is ever below it.</b> A Keep
+/// must never outweigh a rating point of model opinion — the model is trained on this person's own
+/// labels and the judge is not.</item>
 /// </list>
 ///
-/// <para><b>Stale halves the strength, it never flips the sign.</b> An Out at a superseded
-/// fingerprint demotes at 0.75 rather than 0.5 and stops barring the hero, because the taste it
-/// was judged against is no longer the taste being served. A stale Keep is likewise halved. This
-/// is the same ladder the lens uses and the same reason: the alternative is re-judging the whole
-/// pool every time the fingerprint moves.</para>
+/// <para><b>Stale halves the strength, it never flips the sign.</b> A Keep judged at a superseded
+/// fingerprint lifts at half strength, because the taste it was judged against is no longer the
+/// taste being served. This is the same ladder the lens uses and the same reason: the alternative
+/// is re-judging the whole pool every time the fingerprint moves. A stale Out is 1.0, like a fresh
+/// one — halving nothing is still nothing.</para>
 /// </summary>
 public static class VerdictAggregator
 {
@@ -94,11 +137,14 @@ public static class VerdictAggregator
     /// <summary>Keeps needed for a Confirmed Keep.</summary>
     public const int ConfirmingKeeps = 2;
 
-    /// <summary>The Out multiplier at the current fingerprint. Halves the title's rank key.</summary>
-    public const double OutFactor = 0.5d;
-
-    /// <summary>The Out multiplier at a superseded fingerprint — half the demotion, no hero bar.</summary>
-    public const double StaleOutFactor = 0.75d;
+    /// <summary>
+    /// The Out multiplier — <b>exactly 1.0, fresh or stale</b>. Not a tunable: it is the measured
+    /// conclusion that the <c>out</c> verdict has not earned a ranking consequence on this history
+    /// (v2: 16.2% of future loves ruled out, against 22.8% of future dislikes). Named rather than
+    /// inlined so the tests can assert against the concept rather than a literal, and so the day it
+    /// changes it changes in one place with a measurement beside it.
+    /// </summary>
+    public const double OutFactor = 1.0d;
 
     /// <summary>Confidence coefficient on a Confirmed Keep: at most +0.2.</summary>
     public const double ConfirmedKeepCoefficient = 0.2d;
@@ -129,13 +175,17 @@ public static class VerdictAggregator
         {
             // A fresh out is the operative one wherever both exist: the current fingerprint is the
             // taste being served, so evidence gathered against it outranks evidence against a taste
-            // the account has since moved off.
+            // the account has since moved off. That choice survives the keep-only decision because
+            // it still decides which CONFIDENCE is recorded on the exposure row, even though both
+            // branches now carry the same factor.
             var fresh = outs.Where(o => o.Fresh).ToList();
             var operative = fresh.Count > 0 ? fresh : outs;
-            var confidence = operative.Max(o => o.Confidence);
-            return fresh.Count > 0
-                ? new VerdictFactor(AggregateVerdict.Out, OutFactor, HeroAllowed: false, confidence, Stale: false)
-                : new VerdictFactor(AggregateVerdict.Out, StaleOutFactor, HeroAllowed: true, confidence, Stale: true);
+            return new VerdictFactor(
+                AggregateVerdict.Out,
+                OutFactor,
+                HeroAllowed: true,
+                operative.Max(o => o.Confidence),
+                Stale: fresh.Count == 0);
         }
 
         // Any out at all, even below the threshold, blocks a keep from being promoted: two passes
@@ -175,15 +225,22 @@ public static class VerdictAggregator
     }
 
     /// <summary>
-    /// The round-3 fit stand-in for a Confirmed Keep that never reached the LLM fit pass:
-    /// <c>0.5 + confidence</c>, clamped to the fit scale. A confirmed keep with no fit score would
-    /// otherwise fall back to the deterministic stub fit and lose the only independent evidence
-    /// anything had gathered about it.
+    /// The hero-key fit multiplier a Keep supplies where the round-3 LLM fit pass judged nothing:
+    /// <c>0.5 + confidence</c>. Returns null for every other standing.
+    ///
+    /// <para><b>This is the multiplier, not a raw fit.</b> The hero key multiplies by
+    /// <c>NeutralFit + fit</c> = <c>0.5 + fit</c> for a title the fit pass DID judge, so returning
+    /// the finished multiplier here puts a keep on exactly the same scale as a fit verdict: a keep
+    /// at confidence 0.5 is worth precisely as much to the hero as a judged fit of 0.5, and an
+    /// unjudged, unkept title stays at 1.0. Anything else would silently value a keep against a
+    /// different yardstick than the pass it stands in for.</para>
+    ///
+    /// <para><b>Out supplies nothing</b> — deliberately null rather than a number below 1.0. The
+    /// hero is the one place a wrong demotion is most expensive, and the <c>out</c> verdict has not
+    /// earned one; see the measurements on this class.</para>
     /// </summary>
-    public static double FitFor(VerdictFactor factor) =>
-        factor.Verdict == AggregateVerdict.ConfirmedKeep
-            ? Math.Clamp(0.5d + factor.Confidence, 0d, 1d)
-            : throw new ArgumentException(
-                "A fit stand-in exists only for a Confirmed Keep; every other state keeps its own fit.",
-                nameof(factor));
+    public static double? HeroFitFactorFor(VerdictFactor factor) =>
+        factor.Verdict is AggregateVerdict.ConfirmedKeep or AggregateVerdict.ProvisionalKeep
+            ? 0.5d + factor.Confidence
+            : null;
 }

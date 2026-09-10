@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.CrossReference;
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
@@ -72,7 +73,7 @@ public static class FeedEndpoints
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, CrossReferenceFactors crossReference, LensService lens, TasteFactsBuilder tasteFacts, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -335,6 +336,23 @@ public static class FeedEndpoints
                     return;
                 }
 
+                // The cross-reference standing at the moment of the serve, stamped here rather than
+                // where the card was built: a refill happens minutes or hours after the snapshot,
+                // and the pass may well have judged the title in between. What the exposure row has
+                // to record is what was known WHEN THE CARD WAS SHOWN, which is now.
+                var verdicts = await crossReference.ForAsync(
+                    account.Id, rendered.Select(c => c.TitleId).ToList(), ct);
+                rendered = rendered
+                    .Select(c => verdicts.TryGetValue(c.TitleId, out var v) && v.ExposureLabel is { } label
+                        ? c with
+                        {
+                            XrefVerdict = label,
+                            XrefConfidence = Math.Round(
+                                (decimal)v.Confidence, 3, MidpointRounding.AwayFromZero),
+                        }
+                        : c)
+                    .ToList();
+
                 await exposures.RecordAsync(
                     account.Id, ExposureSurface.FeedRefill, snapshot.Id, snapshot.ModelArtifactId,
                     DateTime.UtcNow, rendered, ct);
@@ -481,6 +499,37 @@ public static class FeedEndpoints
             });
         });
 
+        // ── The cross-reference band's payload ──────────────────────────────────────────────
+        // 204 whenever there is nothing honest to say — no active model, or a pool nothing has ever
+        // judged and nothing is judging right now. The band renders null on a 204, which is the
+        // right output for "no news": a band that said "cross-referenced 0 titles" would be the
+        // product padding, and the whole reason this surface may quote numbers at all is that it
+        // only ever quotes real ones.
+        //
+        // Free for every tier, on the same reasoning as the track record: a scorecard behind a
+        // paywall reads as a scorecard being hidden.
+        group.MapGet("/cross-reference", async (
+            CrossReferenceStatusQuery status, IAccountContext accountContext, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            if (await status.GetAsync(accountId, ct) is not { } result)
+            {
+                return Results.NoContent();
+            }
+
+            return Results.Ok(new
+            {
+                running = result.Running,
+                judged = result.Judged,
+                total = result.Total,
+                kept = result.Kept,
+                ruledOut = result.RuledOut,
+                unsure = result.Unsure,
+                noSignal = result.NoSignal,
+                gating = result.Gating,
+            });
+        });
+
         group.MapPost("/rebuild", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -517,7 +566,7 @@ public static class FeedEndpoints
         // the row context + the title ids it has already shown, and gets the next best, never-seen
         // slice — scored live, deepened from TMDB when a lane runs thin. Rows are the paid surface,
         // so the free tier (3-pick hero shortlist) gets nothing here.
-        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, ExposureLog exposures, HttpContext http, CancellationToken ct) =>
+        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, ExposureLog exposures, CrossReferenceFactors crossReference, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -577,6 +626,13 @@ public static class FeedEndpoints
                             _ => context.ToString().ToLowerInvariant(),
                         };
 
+                    // What the cross-reference said about these titles at the moment they were
+                    // served. A paginated card is scored live, so this is the only place the
+                    // standing behind it is ever recorded — and null here honestly means the pass
+                    // had not reached the title yet, not that it had nothing to say.
+                    var verdicts = await crossReference.ForAsync(
+                        account.Id, cards.Select(c => c.TitleId).ToList(), ct);
+
                     await exposures.RecordAsync(
                         account.Id,
                         SurfaceFor(context),
@@ -594,7 +650,14 @@ public static class FeedEndpoints
                             WhySentence: c.WhyThis,
                             WhySource: ExposureWhySource.Unknown,
                             RowKey: rowKey,
-                            PageIndex: pageIndex)).ToList(),
+                            PageIndex: pageIndex,
+                            XrefVerdict: verdicts.TryGetValue(c.TitleId, out var verdict)
+                                ? verdict.ExposureLabel
+                                : null,
+                            XrefConfidence: verdicts.TryGetValue(c.TitleId, out var scored)
+                                    && scored.ExposureLabel is not null
+                                ? Math.Round((decimal)scored.Confidence, 3, MidpointRounding.AwayFromZero)
+                                : null)).ToList(),
                         ct);
                 }
             }

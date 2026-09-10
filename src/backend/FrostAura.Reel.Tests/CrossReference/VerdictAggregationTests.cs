@@ -5,8 +5,15 @@ namespace FrostAura.Reel.Tests.CrossReference;
 
 /// <summary>
 /// The aggregation rule, as arithmetic. Pure by construction, so every clause below is a statement
-/// about the DESIGN rather than about a database — which matters because PR1 ships this rule
-/// without a feed that reads it, and a later PR must not be able to change it by accident.
+/// about the DESIGN rather than about a database.
+///
+/// <para><b>The rule is keep-only as of 2026-09-11, and these tests are where that is pinned.</b>
+/// On the founder's own holdout, five split origins pooled: prompt v2 ruled out 16.2% [Wilson 12.3,
+/// 21.0] of the titles he went on to rate 8 or higher against 22.8% of the ones he rated 4 or lower
+/// — so an Out demotes nothing and bars nothing, while a Keep (loved at 33.2% against a 23% base
+/// rate, disliked at 8.1% against 15%) lifts by at most a fifth. The assertions that Out and Unsure
+/// are exactly 1.0 are therefore not defaults waiting to be filled in; they ARE the measured
+/// decision, and changing one is a claim about new evidence.</para>
 /// </summary>
 public class VerdictAggregationTests
 {
@@ -43,15 +50,22 @@ public class VerdictAggregationTests
     }
 
     [Fact]
-    public void A_confident_out_halves_the_rank_key_and_bars_the_hero()
+    public void A_confident_out_is_recorded_and_changes_nothing_at_all()
     {
         var factor = VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.70d)]);
 
+        // Still CLASSIFIED at the 0.70 threshold — that population is what the backtest measures
+        // and what the exposure log records, so the closed loop keeps observing an opinion the
+        // product does not act on.
         Assert.Equal(AggregateVerdict.Out, factor.Verdict);
-        Assert.Equal(0.5d, factor.Factor);
-        // A bar is honest where a multiplier is a hope: rails order by RankKey, so a title demoted
-        // only in the hero key would sit atop every rail regardless.
-        Assert.False(factor.HeroAllowed);
+        // Exactly 1.0, to the last bit. The out verdict caught 16.2% of the founder's future loves
+        // against 22.8% of his future dislikes; demoting on that trades roughly one hidden love for
+        // one-and-a-half demoted dislikes, against a base rate where loves are the commoner class.
+        Assert.Equal(1.0d, factor.Factor);
+        Assert.Equal(VerdictAggregator.OutFactor, factor.Factor);
+        Assert.True(factor.HeroAllowed);
+        // The confidence still travels, because the exposure row records it.
+        Assert.Equal(0.70d, factor.Confidence, 6);
     }
 
     [Fact]
@@ -75,9 +89,12 @@ public class VerdictAggregationTests
         ]);
 
         // Ruling out is the judge's actual job and the prompt makes `out` the confident answer, so
-        // one confident out carries more information than two keeps.
+        // one confident out is the honest STANDING even beside two keeps — and the standing is what
+        // the exposure log records. What it no longer does is lift the title the way the keeps
+        // would have: a contradicted keep is not a keep.
         Assert.Equal(AggregateVerdict.Out, factor.Verdict);
-        Assert.False(factor.HeroAllowed);
+        Assert.Equal(1.0d, factor.Factor);
+        Assert.True(factor.HeroAllowed);
     }
 
     [Fact]
@@ -97,18 +114,20 @@ public class VerdictAggregationTests
     }
 
     [Fact]
-    public void A_stale_out_demotes_at_three_quarters_and_stops_barring_the_hero()
+    public void A_stale_out_is_1_0_exactly_like_a_fresh_one()
     {
         var factor = VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.95d, fresh: false)]);
 
         Assert.Equal(AggregateVerdict.Out, factor.Verdict);
-        Assert.Equal(0.75d, factor.Factor);
+        // Halving nothing is still nothing. The staleness is recorded because it describes the
+        // evidence; it has nothing to halve.
+        Assert.Equal(1.0d, factor.Factor);
         Assert.True(factor.HeroAllowed);
         Assert.True(factor.Stale);
     }
 
     [Fact]
-    public void A_fresh_out_outranks_a_stale_one()
+    public void A_fresh_out_still_supplies_the_recorded_confidence_over_a_stale_one()
     {
         var factor = VerdictAggregator.Aggregate(
         [
@@ -116,10 +135,13 @@ public class VerdictAggregationTests
             Out(CrossReferenceRound.Second, 0.75d, fresh: true),
         ]);
 
-        // The current fingerprint is the taste being served.
-        Assert.Equal(0.5d, factor.Factor);
-        Assert.False(factor.HeroAllowed);
+        // The current fingerprint is the taste being served, so the FRESH out's confidence is the
+        // one written to the exposure row — the 0.99 judged against a taste the account has moved
+        // off is not the stronger claim, it is the older one.
+        Assert.Equal(0.75d, factor.Confidence, 6);
         Assert.False(factor.Stale);
+        Assert.Equal(1.0d, factor.Factor);
+        Assert.True(factor.HeroAllowed);
     }
 
     [Fact]
@@ -164,23 +186,81 @@ public class VerdictAggregationTests
     }
 
     [Fact]
-    public void The_fit_stand_in_exists_only_for_a_confirmed_keep()
+    public void The_hero_fit_stand_in_exists_only_for_a_keep()
     {
         var confirmed = VerdictAggregator.Aggregate([Keep(CrossReferenceRound.First, 0.4d), Keep(CrossReferenceRound.Second, 0.4d)]);
-        Assert.Equal(0.9d, VerdictAggregator.FitFor(confirmed), 6);
+        Assert.Equal(0.9d, VerdictAggregator.HeroFitFactorFor(confirmed));
 
-        // Every other state keeps whatever fit it already had; asking for a stand-in is a bug, not
-        // a default.
-        Assert.Throws<ArgumentException>(() => VerdictAggregator.FitFor(VerdictFactor.Neutral));
-        Assert.Throws<ArgumentException>(
-            () => VerdictAggregator.FitFor(VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.9d)])));
+        // A single keep is a keep too: round 2 does not exist yet, so a rule that only served
+        // Confirmed Keeps would be dead code on every account alive today.
+        var provisional = VerdictAggregator.Aggregate([Keep(CrossReferenceRound.First, 0.4d)]);
+        Assert.Equal(0.9d, VerdictAggregator.HeroFitFactorFor(provisional));
+
+        // Nothing else stands in — and an Out supplies null rather than a number below 1.0, because
+        // the hero is where a wrong demotion costs most and the out verdict has not earned one.
+        Assert.Null(VerdictAggregator.HeroFitFactorFor(VerdictFactor.Neutral));
+        Assert.Null(VerdictAggregator.HeroFitFactorFor(
+            VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.9d)])));
+        Assert.Null(VerdictAggregator.HeroFitFactorFor(
+            VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.2d)])));
     }
 
     [Fact]
-    public void The_fit_stand_in_stays_on_the_fit_scale()
+    public void The_hero_fit_stand_in_is_on_the_same_scale_as_a_judged_fit()
     {
+        // The hero key multiplies by NeutralFit + fit = 0.5 + fit, so a keep at confidence c has to
+        // arrive as 0.5 + c to be worth exactly what a judged fit of c is worth. Anything else
+        // values a keep against a different yardstick than the pass it stands in for.
         var confirmed = VerdictAggregator.Aggregate([Keep(CrossReferenceRound.First, 1.0d), Keep(CrossReferenceRound.Second, 1.0d)]);
-        Assert.Equal(1.0d, VerdictAggregator.FitFor(confirmed), 6);
+        Assert.Equal(1.5d, VerdictAggregator.HeroFitFactorFor(confirmed));
+
+        var lukewarm = VerdictAggregator.Aggregate([Keep(CrossReferenceRound.First, 0.0d)]);
+        Assert.Equal(0.5d, VerdictAggregator.HeroFitFactorFor(lukewarm));
+    }
+
+    [Fact]
+    public void Every_non_keep_standing_orders_exactly_as_it_did_before_any_of_this_existed()
+    {
+        // The one assertion the whole keep-only decision rests on: nothing the judge says can push
+        // a title DOWN. Enumerated rather than spot-checked, so a future edit that reintroduces a
+        // demotion has to delete a test that says why it should not.
+        VerdictFactor[] states =
+        [
+            VerdictFactor.Neutral,
+            VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 1.0d)]),
+            VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.70d)]),
+            VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.95d, fresh: false)]),
+            VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.69d)]),
+            VerdictAggregator.Aggregate([Keep(CrossReferenceRound.First, 0.9d), Out(CrossReferenceRound.Second, 0.4d)]),
+            VerdictAggregator.Aggregate([Unsure(CrossReferenceRound.First, 0.9d)]),
+        ];
+
+        foreach (var state in states)
+        {
+            Assert.Equal(1.0d, state.Factor);
+            Assert.True(state.HeroAllowed);
+            Assert.Null(VerdictAggregator.HeroFitFactorFor(state));
+        }
+    }
+
+    [Fact]
+    public void The_exposure_label_separates_never_judged_from_judged_and_unsure()
+    {
+        // NULL and "Unsure" are different facts, and the accuracy denominators on the track record
+        // are wrong in the flattering direction if they are conflated: "never judged" is the far
+        // larger set on any account the pass has not finished.
+        Assert.Null(VerdictFactor.Neutral.ExposureLabel);
+        Assert.Equal(
+            "Unsure", VerdictAggregator.Aggregate([Unsure(CrossReferenceRound.First, 0.5d)]).ExposureLabel);
+        Assert.Equal(
+            "Out", VerdictAggregator.Aggregate([Out(CrossReferenceRound.First, 0.9d)]).ExposureLabel);
+        Assert.Equal(
+            "ProvisionalKeep", VerdictAggregator.Aggregate([Keep(CrossReferenceRound.First, 0.9d)]).ExposureLabel);
+        Assert.Equal(
+            "ConfirmedKeep",
+            VerdictAggregator
+                .Aggregate([Keep(CrossReferenceRound.First, 0.9d), Keep(CrossReferenceRound.Second, 0.9d)])
+                .ExposureLabel);
     }
 
     private static VerdictObservation Keep(CrossReferenceRound round, double confidence, bool fresh = true) =>
@@ -188,4 +268,7 @@ public class VerdictAggregationTests
 
     private static VerdictObservation Out(CrossReferenceRound round, double confidence, bool fresh = true) =>
         new(round, CrossReferenceVerdict.Out, confidence, fresh);
+
+    private static VerdictObservation Unsure(CrossReferenceRound round, double confidence, bool fresh = true) =>
+        new(round, CrossReferenceVerdict.Unsure, confidence, fresh);
 }
