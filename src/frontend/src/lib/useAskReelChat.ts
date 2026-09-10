@@ -10,8 +10,14 @@ import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type DoneDat
  * that had matched plenty — the cards simply were not part of what `/conversations/latest`
  * returned. Callers that want "there is a conversation here" should test `turns.length`, not the
  * status.
+ *
+ * `stopped` is a fifth, for the same reason: the user abandoned the turn, so what is on screen is
+ * neither a completed answer nor a failure. It used to collapse into `done` (when something had
+ * streamed) or `idle` (when nothing had) — and `idle` over a transcript renders NOTHING at all, so
+ * pressing Stop before the first card landed the user on a blank page: no message, no retry, and
+ * no way back to the answer the new turn had already cleared.
  */
-export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "error";
+export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "stopped" | "error";
 
 /** Why the stream ended badly, where the client can tell. `null` = an unclassified failure. */
 export type ErrorReason = "session" | "timeout" | null;
@@ -79,6 +85,19 @@ export function nextBootstrap(seed: string, handled: string | null): { action: B
   return { action: handled === null ? "resume" : "none", handled: "" };
 }
 
+/**
+ * The plural of `word` for `n` — the noun only, so call sites read `${n} ${plural(n, "pick")}`.
+ *
+ * One helper rather than a ternary per site: the count copy on this page is written in four
+ * places and only some of them agreed, so the live region announced "1 picks ready." to a screen
+ * reader while the server's own sentence beside it was correctly singular. Regular -s plurals are
+ * all this page has; anything irregular gets written out longhand rather than taught to a helper
+ * that would then be trusted with words it cannot handle.
+ */
+export function plural(n: number, word: string): string {
+  return n === 1 ? word : `${word}s`;
+}
+
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
 export function lastUserQuery(turns: ChatTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -119,6 +138,22 @@ interface State {
   droppedByFloor: number | null;
   /** Set alongside `status: "error"` when the client can name the cause. */
   errorReason: ErrorReason;
+  /**
+   * True while the cards on screen belong to the PREVIOUS answer and the current turn has not yet
+   * produced one of its own. A new question used to blank the grid the instant it was asked, so the
+   * screen went empty for the fifteen-odd seconds a turn takes — and pressing Stop inside that
+   * window destroyed an answer the user was still reading, for a question they had not replaced.
+   * The previous answer is now held until the first `candidate` of the new turn arrives, which is
+   * the first moment there is anything to put in its place.
+   */
+  holdingPrevious: boolean;
+  /**
+   * Cards this turn has streamed so far, reset at the start of every turn and every page. It is
+   * NOT `order.length`: a page appends to the previous answer, and while `holdingPrevious` is set
+   * `order` belongs to the previous turn entirely. The stopped state quotes this number, so it has
+   * to mean "arrived before you stopped" rather than "on screen".
+   */
+  arrived: number;
 }
 
 type Action =
@@ -141,6 +176,7 @@ export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false,
   conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
+  holdingPrevious: false, arrived: 0,
 };
 
 /**
@@ -184,35 +220,50 @@ export function chatReducer(state: State, action: Action): State {
   switch (action.type) {
     case "userTurn": {
       const turn: ChatTurn = { role: "user", text: action.message };
+      // A FRESH turn is a new conversation — the transcript goes with it, so there is no previous
+      // answer left to hold: cards under a blank transcript belong to a question no longer on
+      // screen. A follow-up in the same thread is the opposite case, and it keeps its answer up.
       return action.fresh
         ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message }
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
-            byId: {}, order: [], reason: null, appending: false, lastQuery: action.message, exhausted: false,
+            reason: null, appending: false, lastQuery: action.message, exhausted: false,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
             conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
+            // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
+            // by the first candidate of this turn, not by the act of asking.
+            holdingPrevious: state.order.length > 0, arrived: 0,
           };
     }
     case "moreTurn":
-      // A page, not a turn: no transcript entry, and the existing cards stay put.
-      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null };
+      // A page, not a turn: no transcript entry, and the existing cards stay put. It is explicitly
+      // NOT a hold — a page ADDS to what is on screen, so the first candidate must append rather
+      // than replace the answer it is extending.
+      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, holdingPrevious: false, arrived: 0 };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
       // page it adds no transcript entry (the user said it once; echoing their bubble on every
-      // toggle click was the bug), but unlike a page it REPLACES the answer, so the stale reply is
-      // dropped and the cards are cleared for the incoming set.
+      // toggle click was the bug), and like a follow-up it REPLACES the answer — but not until the
+      // replacement exists. Toggling to Movies used to blank the grid for the whole turn, so a
+      // Stop, a timeout or a failed re-ask cost the user the answer they were reading.
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null,
-        byId: {}, order: [], reason: null, appending: false, exhausted: false,
+        reason: null, appending: false, exhausted: false,
         belowFloor: [], droppedByFloor: null, errorReason: null,
+        holdingPrevious: state.order.length > 0, arrived: 0,
       };
     }
     case "phase":
       // A phase boundary is the ONLY mid-stream moment the rows may re-order (see
-      // partitionedOrder) — a settle-then-shuffle rhythm instead of jumping on every event.
-      return { ...state, status: "streaming", phase: action.data, order: partitionedOrder(state.order, state.byId) };
+      // partitionedOrder) — a settle-then-shuffle rhythm instead of jumping on every event. A held
+      // previous answer is exempt: it is finished work, and reshuffling it while a new turn runs
+      // would animate the OLD answer in response to the NEW one's progress.
+      return {
+        ...state, status: "streaming", phase: action.data,
+        order: state.holdingPrevious ? state.order : partitionedOrder(state.order, state.byId),
+      };
     case "conversation":
       return { ...state, conversationId: action.data.id };
     case "resume":
@@ -235,8 +286,17 @@ export function chatReducer(state: State, action: Action): State {
         : { ...state, turns: [...state.turns, { role: "assistant", text: action.data.text }] };
     case "candidate": {
       const c = action.data;
+      // The swap. The previous answer stayed up while this turn was thinking; this is the first
+      // moment there is something to put in its place, so it is replaced now rather than having
+      // been blanked when the question was asked.
+      if (state.holdingPrevious) {
+        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1 };
+      }
       if (state.byId[c.titleId]) return state;
-      return { ...state, byId: { ...state.byId, [c.titleId]: c }, order: [...state.order, c.titleId] };
+      return {
+        ...state, byId: { ...state.byId, [c.titleId]: c }, order: [...state.order, c.titleId],
+        arrived: state.arrived + 1,
+      };
     }
     case "scored": {
       const e = state.byId[action.data.titleId];
@@ -273,6 +333,8 @@ export function chatReducer(state: State, action: Action): State {
       const gained = order.length - state.order.length;
       return {
         ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
+        // The answer landed, so there is nothing left being held: `order` above is this turn's.
+        holdingPrevious: false,
         reason: state.appending && gained === 0 ? state.reason : action.data.reason,
         exhausted: state.appending ? gained === 0 : false,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
@@ -286,11 +348,13 @@ export function chatReducer(state: State, action: Action): State {
       };
     }
     case "stop":
-      // The user pressed Stop. Whatever streamed so far is the answer if there is one; otherwise
-      // this is a cold page again. Never an error — they asked for this.
-      return {
-        ...state, status: state.order.length > 0 ? "done" : "idle", phase: null, appending: false,
-      };
+      // The user pressed Stop. Everything that streamed stays — including a previous answer still
+      // being held, which is the whole point: stopping a turn must never cost the user the answer
+      // they were already looking at. Its own status, not `done` and never `idle`: `done` would
+      // claim a complete answer and print "N picks ranked for you" over a partial one, and `idle`
+      // over a transcript rendered literally nothing — no cards, no message, no retry, no way back.
+      // Never an error either; they asked for this.
+      return { ...state, status: "stopped", phase: null, appending: false };
     case "error":
       // `appending` and `phase` are cleared deliberately. A failed page used to leave `appending`
       // latched true, so the next `done` appended to a grid the user had been told was broken, and
@@ -540,5 +604,13 @@ export function useAskReelChat() {
     errorReason: state.errorReason,
     /** True once the last question has been asked, so a retry has something to replay. */
     canRetry: state.lastQuery.length > 0,
+    /**
+     * True while the cards above belong to the PREVIOUS question — the current turn is still
+     * working and has produced nothing yet. The page seams and dims them rather than pretending
+     * they answer what was just asked.
+     */
+    holdingPrevious: state.holdingPrevious,
+    /** Cards this turn streamed before it ended. What the stopped state counts. */
+    arrived: state.arrived,
   };
 }
