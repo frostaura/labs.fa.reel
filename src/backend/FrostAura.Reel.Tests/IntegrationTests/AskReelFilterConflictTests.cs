@@ -34,13 +34,20 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// <para>Rungs 1 and 2 of the ladder: TELL the model, and NAME what survives. Rung 3 — a per-turn
 /// override — is deliberately not built, so there is no test here for one.</para>
 /// </summary>
+/// <remarks>
+/// Inherits <see cref="EmbeddedCatalogTestBase"/> even though it never writes a
+/// <c>TitleEmbedding</c> itself: a real Ask Reel turn embeds whatever it discovered, so this class
+/// leaves vectors in the shared HNSW index exactly as a hand-seeding fixture does. The source guard
+/// matches the literal seeding shapes and cannot see that, which makes remembering it the author's
+/// job — and forgetting costs some other class its determinism, not this one.
+/// </remarks>
 [Collection("postgres")]
-public class AskReelFilterConflictTests(PostgresFixture fixture)
+public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     [Fact]
     public async Task A_turn_that_asks_for_an_excluded_genre_is_told_so_before_the_results()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -77,7 +84,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
     [Fact]
     public async Task No_collision_means_no_frame()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -97,7 +104,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
     [Fact]
     public async Task The_standing_rules_reach_the_model_before_it_answers()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -124,7 +131,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
     [Fact]
     public async Task An_account_with_no_rules_sends_the_model_nothing()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -149,7 +156,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
     [Fact]
     public async Task The_eligible_pool_size_is_logged_on_every_turn()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -225,7 +232,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
 
     private async Task AddFilterAsync(Guid accountId, FilterKind kind, string value)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.ContentFilters.Add(new ContentFilter
         {
             Id = Guid.NewGuid(),
@@ -243,7 +250,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -282,7 +289,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -298,7 +305,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture)
 
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
         {
             db.WatchedTitles.Add(new WatchedTitle

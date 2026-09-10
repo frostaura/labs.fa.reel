@@ -30,13 +30,20 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// what it DID and nothing else. A stage list that always contains eight entries is a checklist,
 /// not a measurement, and the first person to optimise against it would be optimising a constant.</para>
 /// </summary>
+/// <remarks>
+/// Inherits <see cref="EmbeddedCatalogTestBase"/> even though it never writes a
+/// <c>TitleEmbedding</c> itself: a real Ask Reel turn embeds whatever it discovered, so this class
+/// leaves vectors in the shared HNSW index exactly as a hand-seeding fixture does. The source guard
+/// matches the literal seeding shapes and cannot see that, which makes remembering it the author's
+/// job — and forgetting costs some other class its determinism, not this one.
+/// </remarks>
 [Collection("postgres")]
-public class AskReelTimingsTests(PostgresFixture fixture)
+public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     [Fact]
     public async Task A_full_turn_records_every_stage_exactly_once_and_within_its_own_duration()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -93,7 +100,7 @@ public class AskReelTimingsTests(PostgresFixture fixture)
     [Fact]
     public async Task The_lexical_fallback_records_only_the_work_it_actually_did()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -123,7 +130,7 @@ public class AskReelTimingsTests(PostgresFixture fixture)
     [Fact]
     public async Task Timings_are_withheld_unless_the_turn_asked_for_them()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -189,7 +196,7 @@ public class AskReelTimingsTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -228,7 +235,7 @@ public class AskReelTimingsTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -244,7 +251,7 @@ public class AskReelTimingsTests(PostgresFixture fixture)
 
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
         {
             db.WatchedTitles.Add(new WatchedTitle

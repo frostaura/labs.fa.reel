@@ -31,8 +31,15 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// per handler is how a diagnostic surface ends up open by a typo. The CONTENT is decided by the
 /// service, which never sees a tier and cannot accidentally widen the audience.</para>
 /// </summary>
+/// <remarks>
+/// Inherits <see cref="EmbeddedCatalogTestBase"/> even though it never writes a
+/// <c>TitleEmbedding</c> itself: a real Ask Reel turn embeds whatever it discovered, so this class
+/// leaves vectors in the shared HNSW index exactly as a hand-seeding fixture does. The source guard
+/// matches the literal seeding shapes and cannot see that, which makes remembering it the author's
+/// job — and forgetting costs some other class its determinism, not this one.
+/// </remarks>
 [Collection("postgres")]
-public class AskReelDebugModeTests(PostgresFixture fixture)
+public class AskReelDebugModeTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>The probe: the same request, with only the tier moved.</summary>
     [Theory]
@@ -59,7 +66,7 @@ public class AskReelDebugModeTests(PostgresFixture fixture)
     [Fact]
     public async Task An_entitled_turn_carries_the_whole_diagnostic_block()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -102,7 +109,7 @@ public class AskReelDebugModeTests(PostgresFixture fixture)
     [Fact]
     public async Task An_unentitled_turn_carries_none_of_it()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -140,7 +147,7 @@ public class AskReelDebugModeTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -184,7 +191,7 @@ public class AskReelDebugModeTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -200,7 +207,7 @@ public class AskReelDebugModeTests(PostgresFixture fixture)
 
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
         {
             db.WatchedTitles.Add(new WatchedTitle

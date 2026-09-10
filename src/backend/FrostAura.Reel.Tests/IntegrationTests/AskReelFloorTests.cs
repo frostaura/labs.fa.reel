@@ -36,8 +36,15 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// checks the WIRING and the wire shape: the counts a client renders, and the invariant that ties
 /// them together.</para>
 /// </summary>
+/// <remarks>
+/// Inherits <see cref="EmbeddedCatalogTestBase"/> even though it never writes a
+/// <c>TitleEmbedding</c> itself: a real Ask Reel turn embeds whatever it discovered, so this class
+/// leaves vectors in the shared HNSW index exactly as a hand-seeding fixture does. The source guard
+/// matches the literal seeding shapes and cannot see that, which makes remembering it the author's
+/// job — and forgetting costs some other class its determinism, not this one.
+/// </remarks>
 [Collection("postgres")]
-public class AskReelFloorTests(PostgresFixture fixture)
+public class AskReelFloorTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     private sealed record Pick(string Name, decimal? Predicted);
 
@@ -167,7 +174,7 @@ public class AskReelFloorTests(PostgresFixture fixture)
     [Fact]
     public async Task A_turn_accounts_for_every_card_it_streamed()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -208,7 +215,7 @@ public class AskReelFloorTests(PostgresFixture fixture)
 
     private async Task SetRatingFloorAsync(Guid accountId, string value)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.ContentFilters.Add(new ContentFilter
         {
             Id = Guid.NewGuid(),
@@ -225,7 +232,7 @@ public class AskReelFloorTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -264,7 +271,7 @@ public class AskReelFloorTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -280,7 +287,7 @@ public class AskReelFloorTests(PostgresFixture fixture)
 
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
         {
             db.WatchedTitles.Add(new WatchedTitle
