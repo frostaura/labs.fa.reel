@@ -217,12 +217,22 @@ public sealed class LiveSearchExpansionService(
                 ? $"{persona.Taste}. {declined}"
                 : persona.Taste;
 
+            // The account's standing content rules, read ONCE per turn and used three times: to tell
+            // the model what it is allowed to promise, to name any collision that survives anyway,
+            // and to apply the rating floor at the end. They used to be read only at the floor, so
+            // the interpret prompt answered in total ignorance of the exclusions the pipeline was
+            // about to apply — the model said yes to a permanently-excluded genre and the turn came
+            // back empty with a reply that had just promised it.
+            var filterRows = await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync(ct);
+            var standingRules = FilterRuleSet.FromRows(filterRows);
+            var standingSummary = AskReelStandingFilters.Describe(standingRules);
+
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
             var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
             AgentReply agentReply;
             using (timings.Stage(AskStageTimings.Interpret))
             {
-                agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct);
+                agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct, standingSummary);
             }
 
             await emit("assistant-message", new { text = agentReply.Reply });
@@ -348,8 +358,17 @@ public sealed class LiveSearchExpansionService(
                 relaxation = MaxRelaxations;
             }
 
+            // The account's WHOLE eligible catalogue, not this turn's slice. It is the number that
+            // explains a starved turn — 40 discovered out of 400 eligible is a discovery problem, out
+            // of 12 eligible it is a filter problem — and nothing logged it, so the two were
+            // indistinguishable in production. One count per turn, ~16 ms on the live catalogue.
+            var eligiblePoolSize = await baseQuery.CountAsync(ct);
+
             if (eligible.Count == 0)
             {
+                logger.LogInformation(
+                    "Ask Reel '{Query}': nothing survived discovery. {EligiblePool} titles are eligible for this account overall.",
+                    trimmed, eligiblePoolSize);
                 await emit("done", new { results = Array.Empty<object>(), reason = AskReelReason.Empty });
                 return;
             }
@@ -444,6 +463,24 @@ public sealed class LiveSearchExpansionService(
             // Their caption is the deterministic statement of which exclusion they trip, streamed
             // as a candidate-reranked frame so live cards pick it up the same way clean cards pick
             // up their LLM why.
+            // Rungs 1 and 2 of the filter-collision ladder: NAME the collision and show the
+            // conditions. Rung 3 — a per-turn "ignore my filters" override — is deliberately not
+            // built; an exclusion stays airtight and reopening that is the founder's call.
+            var collidingGenres = AskReelStandingFilters.CollidingGenres(standingRules, intent);
+            var yearCollides = AskReelStandingFilters.YearWindowCollides(standingRules, intent);
+            if (collidingGenres.Count > 0 || yearCollides)
+            {
+                await emit("conflict", new
+                {
+                    excludedGenres = collidingGenres,
+                    poolSize = eligiblePoolSize,
+                    catalogueSize = await db.Titles.CountAsync(ct),
+                    // The only prose in the frame. Every number the client renders travels beside it
+                    // as raw JSON so the copy is the client's to shape, not the server's to format.
+                    message = AskReelStandingFilters.Message(collidingGenres, yearCollides, standingRules),
+                });
+            }
+
             await emit("phase", new { stage = "ranking", found = returned.Count, scored = sliceIds.Count });
 
             // When the turn named comparison titles, tell the rerank model so the why-lines can
@@ -496,7 +533,7 @@ public sealed class LiveSearchExpansionService(
             // The account's minimum-predicted-rating filter is an explicit instruction and has to
             // reach THIS surface too. It only ever lived in the (now removed) /semantic endpoint,
             // so a user who set a rating floor had it silently ignored by every Ask Reel turn.
-            var floor = await MinPredictedFloorAsync(accountId, ct);
+            var floor = MinPredictedFloor(filterRows);
 
             // A card with no prediction CLEARS the floor, so an unscored card is an unannounced
             // exemption from the user's own bar. Before judging anything, make one more attempt on
@@ -586,6 +623,22 @@ public sealed class LiveSearchExpansionService(
                 // cannot carry the duration of its own transmission, and a zero would be a claim
                 // rather than a rounding. The end-of-turn log line carries all eight.
                 timingsMs = debug ? timings.Snapshot() : null,
+                // The founder's own view of the turn. Same entitlement as timingsMs, same
+                // present-but-null shape, and deliberately a superset: what the model understood,
+                // how hard discovery had to work, and what happened to every card.
+                debug = debug
+                    ? (object?)new
+                    {
+                        intent,
+                        relaxation,
+                        eligibleCount = eligible.Count,
+                        eligiblePoolSize,
+                        streamed = ranked.Count + outside.Count,
+                        kept = final.Count,
+                        droppedByFloor = belowFloor.Count,
+                        timingsMs = timings.Snapshot(),
+                    }
+                    : null,
             });
             // The turn's answer, recorded. Ranked by the SAME blend the user is looking at, clean
             // picks first and outside ones trailing, so Rank is the position on screen. Written
@@ -625,9 +678,11 @@ public sealed class LiveSearchExpansionService(
             emitStage.Dispose();
 
             logger.LogInformation(
-                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible, "
-                + "{Scored} scored, {Reranked} reranked, {Returned} returned. {StageTimings}",
-                trimmed, discovered.Count, relaxation, eligible.Count, sliceIds.Count, fitById.Count, final.Count, timings);
+                "Ask Reel '{Query}': {Discovered} discovered at relaxation {Relaxation}, {Eligible} eligible "
+                + "of {EligiblePool} in the account's pool, {Scored} scored, {Reranked} reranked, {Returned} returned. "
+                + "{StageTimings}",
+                trimmed, discovered.Count, relaxation, eligible.Count, eligiblePoolSize, sliceIds.Count,
+                fitById.Count, final.Count, timings);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1018,15 +1073,16 @@ public sealed class LiveSearchExpansionService(
     };
 
     /// <summary>
-    /// The account's minimum-predicted-rating content filter, clamped to 0-10. Zero means "no
-    /// floor set", which is also what a malformed stored value degrades to.
+    /// The account's minimum-predicted-rating content filter, clamped to 0-10. Zero means "no floor
+    /// set", which is also what a malformed stored value degrades to.
+    ///
+    /// <para>Reads rows the turn has ALREADY loaded rather than issuing its own query: the standing
+    /// rules are needed before the interpret call anyway, and two reads of the same table one turn
+    /// apart could disagree if the user edits their conditions mid-turn.</para>
     /// </summary>
-    private async Task<decimal> MinPredictedFloorAsync(Guid accountId, CancellationToken ct)
+    private static decimal MinPredictedFloor(IReadOnlyList<ContentFilter> rows)
     {
-        var raw = await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
-            .Select(f => f.Value)
-            .FirstOrDefaultAsync(ct);
+        var raw = rows.FirstOrDefault(f => f.Kind == FilterKind.MinPredictedRating)?.Value;
         return raw is not null && decimal.TryParse(raw, CultureInfo.InvariantCulture, out var value)
             ? Math.Clamp(value, 0m, 10m)
             : 0m;

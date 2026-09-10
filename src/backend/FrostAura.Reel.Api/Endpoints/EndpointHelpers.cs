@@ -62,6 +62,23 @@ public static class EndpointHelpers
     public static RouteGroupBuilder RequireFounder(this RouteGroupBuilder group) =>
         group.RequireTier(AccountTier.Founder);
 
+    /// <summary>
+    /// Whether a request may see founder-only diagnostics on an endpoint that is NOT itself
+    /// founder-only — <c>?debug=1</c> from a Founder-tier account, and nothing else.
+    ///
+    /// <para>Separate from <see cref="RequireFounder"/> on purpose: that filter gates a whole route,
+    /// and these routes are open to every paying account. Only one FIELD of the answer is
+    /// privileged, so the decision has to be taken inside the handler. Kept here, as a pure
+    /// function of the two inputs, so the rule is one line in one place and can be pinned without a
+    /// host — the alternative was an inline comparison on every such handler, which is how a
+    /// diagnostic surface ends up open by a typo.</para>
+    ///
+    /// <para>The tier must be read from the account ROW rather than a claim: billing changes it
+    /// without reissuing the session cookie.</para>
+    /// </summary>
+    public static bool AllowsFounderDebug(string? debugFlag, AccountTier? tier) =>
+        debugFlag == "1" && tier == AccountTier.Founder;
+
     public static async Task<Account?> GetCurrentAccountAsync(this HttpContext httpContext, IReelDbContext db, CancellationToken ct)
     {
         var accountContext = httpContext.RequestServices.GetRequiredService<IAccountContext>();

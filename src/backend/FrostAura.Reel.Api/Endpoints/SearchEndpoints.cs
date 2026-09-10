@@ -166,12 +166,9 @@ public static class SearchEndpoints
                 .FirstOrDefaultAsync(ct);
             var region = profile?.Region;
 
-            // Founder-only diagnostics, opt-in per request. The tier is read off the row rather than
-            // a claim (billing changes it without reissuing the session cookie), and the check is
-            // inline rather than the RequireFounder group filter because this route is not
-            // founder-only — only this one FIELD of its answer is.
-            var debug = http.Request.Query["debug"] == "1"
-                && profile?.Tier == FrostAura.Reel.Domain.Tenancy.AccountTier.Founder;
+            // Founder-only diagnostics, opt-in per request. Not the RequireFounder group filter,
+            // because this route is not founder-only — only one FIELD of its answer is.
+            var debug = EndpointHelpers.AllowsFounderDebug(http.Request.Query["debug"], profile?.Tier);
             var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
 
             string? assistantText = null;
