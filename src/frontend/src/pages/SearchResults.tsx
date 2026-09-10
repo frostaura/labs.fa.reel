@@ -12,7 +12,7 @@ import { useGetFiltersQuery } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import { nextBootstrap, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
+import { floorHeldBack, formatFloor, nextBootstrap, plural, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
 
@@ -42,16 +42,18 @@ function mediaTypesFor(filter: BrowseFilter): string[] {
   return [];
 }
 
+// Every counted noun goes through `plural`. A narrow first turn genuinely does reach "Found 1
+// titles" and "Scoring 1 picks for you", and the live region reads these out loud.
 function narrate(phase: PhaseData | null): string {
   switch (phase?.stage) {
     case "searching":
       return "Scanning the catalogue…";
     case "discovered":
-      return `Found ${phase.found} titles — matching them to your taste…`;
+      return `Found ${phase.found} ${plural(phase.found, "title")} — matching them to your taste…`;
     case "embedding":
-      return `Reading ${phase.found} plots…`;
+      return `Reading ${phase.found} ${plural(phase.found, "plot")}…`;
     case "scoring":
-      return `Scoring ${phase.found} picks for you…`;
+      return `Scoring ${phase.found} ${plural(phase.found, "pick")} for you…`;
     case "ranking":
       return "Ranking your picks…";
     default:
@@ -82,6 +84,7 @@ function AskReel() {
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, stop,
     setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor, droppedByFloor,
+    holdingPrevious, arrived,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -146,20 +149,12 @@ function AskReel() {
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
   // and was, until now, invisible: the picks simply never existed as far as the screen was
-  // concerned. Two independent sources, and each degrades on its own: `droppedByFloor` rides the
-  // `done` frame and is null against an older server (fall back to counting the cards we were
-  // handed), and the bar comes from the account's saved conditions and is null when the user has
-  // set none (fall back to the unnumbered wording). Neither absence blanks the tray.
+  // concerned. The count is the tray's OWN contents wherever it has any (see `floorHeldBack`), and
+  // the bar comes from the account's saved conditions — null when the user has set none, which
+  // falls back to the unnumbered wording rather than blanking the tray.
   const belowFloorVisible = belowFloor.filter((c) => !removedSet.has(c.titleId));
-  const floorHeldBack =
-    typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : belowFloorVisible.length;
-  // Localised deliberately, and this is the one place in Reel where that is the right answer: the
-  // label is chrome the user reads and nothing else — it is never sent to the server, never a cache
-  // key, never a filter row. (The invariant-culture rule that governs everything the BACKEND
-  // formats is about strings that get compared or parsed; this one only gets read.)
-  const floor = accountFilters?.minPredictedRating ?? null;
-  const floorLabel =
-    typeof floor === "number" ? floor.toLocaleString(undefined, { maximumFractionDigits: 1 }) : null;
+  const heldBack = floorHeldBack(belowFloorVisible.length, droppedByFloor);
+  const floorLabel = formatFloor(accountFilters?.minPredictedRating);
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
@@ -179,15 +174,25 @@ function AskReel() {
 
   // The settled outcome, announced once the stream stops. Kept separate from the streaming
   // narration below so the two live regions never talk over each other.
+  const settledCount = visible.length + outsideVisible.length;
+  // What a stopped turn says, in one place: the sr-only live region and the on-screen card must
+  // not be able to disagree, and the count is the turn's OWN — cards held over from the previous
+  // answer are still on screen and are explicitly not what arrived before the user stopped.
+  const stoppedMessage =
+    arrived === 0
+      ? "Stopped before any picks arrived."
+      : `Stopped — ${arrived} ${plural(arrived, "pick")} arrived before you stopped.`;
   const settled = streaming
     ? ""
     : status === "error"
       ? "Search hit a snag."
-      : status === "done"
-        ? visible.length + outsideVisible.length === 0
-          ? "No matches for that one."
-          : `${visible.length + outsideVisible.length} picks ready.`
-        : "";
+      : status === "stopped"
+        ? stoppedMessage
+        : status === "done"
+          ? settledCount === 0
+            ? "No matches for that one."
+            : `${settledCount} ${plural(settledCount, "pick")} ready.`
+          : "";
 
   return (
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise
@@ -345,6 +350,22 @@ function AskReel() {
         </div>
       )}
 
+      {/* A stopped turn is a state, not an absence. Pressing Stop before the first card used to
+          leave `status: "idle"` over a transcript, which every branch below reads as "nothing to
+          say" — so the page rendered a void: no cards, no message, no retry, and no way back to
+          the answer that asking the question had already cleared. This card is the way back, and
+          it sits ABOVE the results so that whatever did arrive (and whatever is being held from
+          the previous answer) stays where it is instead of being replaced by an explanation. */}
+      {status === "stopped" && (
+        <div
+          className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center"
+          data-testid="askreel-stopped"
+        >
+          <p className="fa-caption text-fa-frost-dim">{stoppedMessage}</p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+        </div>
+      )}
+
       {/* One message, never two. A caught server exception arrives as a `done` frame with no
           results, which used to render the empty state AND the failure reason side by side —
           "try a different angle" next to "search hit a snag". The hook now classifies that frame
@@ -378,7 +399,21 @@ function AskReel() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4" data-testid="semantic-results">
+          {/* The seam. While a new turn is working, the previous answer stays up rather than the
+              page going blank for fifteen seconds — but it must never read as an answer to the
+              question just asked, so it is labelled and dimmed until the first card of the new
+              turn replaces it. */}
+          {holdingPrevious && (visible.length > 0 || outsideVisible.length > 0) && (
+            <p className="fa-caption text-fa-frost-dim" data-testid="askreel-previous-answer">
+              {streaming
+                ? "Previous answer — held until the new one arrives."
+                : "Previous answer — the last question never replaced it."}
+            </p>
+          )}
+          <div
+            className={`grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+            data-testid="semantic-results"
+          >
             {visible.map((card) => (
               <ResultCard key={card.titleId} card={card} />
             ))}
@@ -389,7 +424,10 @@ function AskReel() {
               header, each captioned server-side with which exclusion it trips, never mixed into
               the grid above. */}
           {outsideVisible.length > 0 && (
-            <div className="space-y-3 border-t border-fa-frost/10 pt-5" data-testid="askreel-outside">
+            <div
+              className={`space-y-3 border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+              data-testid="askreel-outside"
+            >
               <div>
                 <p className="fa-body text-fa-frost-dim">Outside your request — closest we could get</p>
                 <p className="fa-caption text-fa-frost-dim/70">These match the vibe but hit something you excluded.</p>
@@ -404,16 +442,18 @@ function AskReel() {
 
           {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
               collapsed: these picks are not being recommended, they are being accounted for. The
-              count comes from the server (`droppedByFloor`) so the tray is honest even on a turn
-              where the cards themselves were not sent down, and the bar comes from the account's
-              own conditions — naming it is what turns "Reel held some back" into a sentence the
-              user can act on, because the number in it is one they chose and can change. */}
-          {floorHeldBack > 0 && !streaming && (
+              count is what the tray actually holds, falling back to the server's own scalar only
+              on a turn where the cards were not sent down (see `floorHeldBack`) — a label the user
+              can count and disprove has to agree with its contents. The bar comes from the
+              account's own conditions, formatted to the one decimal the server's sentence uses:
+              naming it turns "Reel held some back" into something the user can act on, because
+              the number in it is one they chose and can change. */}
+          {heldBack > 0 && !streaming && (
             <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
               <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
                 {floorLabel
-                  ? `Show the ${floorHeldBack} under your ${floorLabel} bar`
-                  : `Show the ${floorHeldBack} pick${floorHeldBack === 1 ? "" : "s"} Reel held back`}
+                  ? `Show the ${heldBack} under your ${floorLabel} bar`
+                  : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
               </summary>
               <p className="fa-caption text-fa-frost-dim/70 mt-1">
                 These matched the request but scored below the bar Reel holds itself to.
