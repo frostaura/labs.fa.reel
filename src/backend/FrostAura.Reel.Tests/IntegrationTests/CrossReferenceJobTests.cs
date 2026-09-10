@@ -826,11 +826,17 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
 
         public int PromptVersion => Version;
 
+        /// <summary>
+        /// The EXPLICIT-generation overload, which is the only abstract member on the port — the
+        /// serving job still calls the five-argument one and arrives here through the interface's
+        /// default implementation, carrying <see cref="PromptVersion"/>.
+        /// </summary>
         public async Task<CrossReferenceBatchResult> JudgeAsync(
             IReadOnlyList<CrossReferenceCandidate> candidates, LensPersona persona, CrossReferenceRound round,
-            string usagePurpose, CancellationToken ct = default)
+            string usagePurpose, CrossReferenceJudgeOptions options, CancellationToken ct = default)
         {
             Assert.Equal(ApiUsagePurpose.CrossReference, usagePurpose);
+            Assert.Equal(Version, options.PromptVersion);
             Calls++;
 
             if (LedgerAccountId is { } accountId && Fixture is { } postgres)

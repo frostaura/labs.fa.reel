@@ -368,6 +368,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
+                    b.Property<decimal?>("AucKeepVsOut")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
                     b.Property<string>("Caveat")
                         .IsRequired()
                         .HasMaxLength(2048)
@@ -397,8 +401,31 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("HoldoutJudged")
                         .HasColumnType("integer");
 
+                    b.Property<int?>("KeepCount")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal?>("KeepDislikedRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<decimal?>("KeepLovedRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
                     b.Property<int>("LovedCount")
                         .HasColumnType("integer");
+
+                    b.Property<decimal?>("MeanLaterRatingKeep")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<decimal?>("MeanLaterRatingOut")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<decimal?>("MeanLaterRatingUnsure")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
 
                     b.Property<string>("ModelId")
                         .IsRequired()
@@ -408,6 +435,17 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("NoEmbeddingCount")
                         .HasColumnType("integer");
 
+                    b.Property<int?>("OutCount")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal?>("OutDislikedRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
+                    b.Property<decimal?>("OutLovedRate")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("numeric(6,4)");
+
                     b.Property<long>("PromptTokens")
                         .HasColumnType("bigint");
 
@@ -416,6 +454,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("RunId")
                         .HasColumnType("uuid");
+
+                    b.Property<decimal?>("SpearmanConfidenceVsRating")
+                        .HasPrecision(7, 4)
+                        .HasColumnType("numeric(7,4)");
 
                     b.Property<DateTime>("SplitAt")
                         .HasColumnType("timestamp with time zone");
@@ -428,6 +470,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("numeric(6,4)");
 
                     b.Property<int>("TrueRuleOuts")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("UnsureCount")
                         .HasColumnType("integer");
 
                     b.Property<decimal>("UnsureRate")
@@ -450,6 +495,55 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.HasIndex("AccountId", "RunId");
 
                     b.ToTable("CrossReferenceEvaluations");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.CrossReference.CrossReferenceEvaluationItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("BatchIndex")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Confidence")
+                        .HasPrecision(4, 3)
+                        .HasColumnType("numeric(4,3)");
+
+                    b.Property<Guid>("EvaluationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<short>("LaterRating")
+                        .HasColumnType("smallint");
+
+                    b.Property<string>("NeighbourIdsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<double>("SplitFraction")
+                        .HasColumnType("double precision");
+
+                    b.Property<Guid>("TitleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Verdict")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "EvaluationId", "TitleId");
+
+                    b.ToTable("CrossReferenceEvaluationItems");
                 });
 
             modelBuilder.Entity("FrostAura.Reel.Domain.CrossReference.TitleCrossReferenceVerdict", b =>

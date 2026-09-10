@@ -72,15 +72,51 @@ public static class CrossReferenceReasons
 
     public const string CraftBelowBar = "craft-below-bar";
 
-    /// <summary>The only legal reason for <see cref="CrossReferenceVerdict.Unsure"/>.</summary>
+    /// <summary>Nothing in the evidence settles it. Legal for <see cref="CrossReferenceVerdict.Unsure"/>.</summary>
     public const string InsufficientSignal = "insufficient-signal";
 
-    /// <summary>Every reason the schema admits, in the order the prompt lists them.</summary>
+    /// <summary>
+    /// The nearest titles this viewer rated point BOTH ways — one they loved and one they disliked,
+    /// both close. Prompt v2 only.
+    ///
+    /// <para>It exists because the 2026-09-10 live run showed the round-1 <c>out</c> verdict was
+    /// uncorrelated with the outcome (false-rule-out 12.0%, true-rule-out 10.1%) while a third of
+    /// the pool came back <c>insufficient-signal</c>. Those two facts together say the judge was
+    /// collapsing two different states — "I was shown nothing" and "I was shown contradictory
+    /// evidence" — into one code, and the second is a fact about the TITLE while the first is a
+    /// fact about the pipeline. A single reason code cannot tell a later reader which one it
+    /// meant.</para>
+    /// </summary>
+    public const string NeighbourMixed = "neighbour-mixed";
+
+    /// <summary>
+    /// Prompt v1's vocabulary, in the order the prompt lists them. <b>Frozen.</b> It is the enum a
+    /// v1 response schema is built from and the set a v1 response is validated against, so adding
+    /// to it would change what a stored v1 verdict could have been — see
+    /// <see cref="ForVersion"/>.
+    /// </summary>
     public static readonly string[] All =
     [
         NeighbourLoved, NeighbourDisliked, ToneMatch, ToneMismatch, PaceMismatch,
         ThemeMatch, ThemeMismatch, GenreMismatch, FormatMismatch, CraftBelowBar, InsufficientSignal,
     ];
+
+    /// <summary>Prompt v2's vocabulary: v1 plus <see cref="NeighbourMixed"/>.</summary>
+    public static readonly string[] AllV2 = [.. All, NeighbourMixed];
+
+    /// <summary>
+    /// The vocabulary a given prompt generation may answer in — the schema enum AND the parser's
+    /// accept-list, which must be the same list or the <c>json_object</c> downgrade path validates
+    /// against a different contract than the strict path.
+    ///
+    /// <para><b>Version-scoped rather than one growing set</b>, because the verdict table is keyed
+    /// on <c>PromptVersion</c> and rows are read back years later: a v1 row carrying a reason v1
+    /// could never have been offered is not a richer row, it is an unexplainable one. Widening
+    /// <see cref="All"/> would have made that possible through the downgrade path, where the
+    /// provider is not enforcing the enum and only the parser stands in the way.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ForVersion(int promptVersion) =>
+        promptVersion >= CrossReferencePromptVersions.Second ? AllV2 : All;
 
     /// <summary>
     /// The verdict × reason legality matrix.
@@ -88,14 +124,19 @@ public static class CrossReferenceReasons
     /// <para><c>keep</c> admits only the three positive reasons: a keep justified by
     /// "tone-mismatch" is not a keep with an odd label on it, it is an entry whose two fields
     /// disagree, and reading either half of it would be inventing which half to believe.
-    /// <c>unsure</c> admits only <see cref="InsufficientSignal"/> — the other reasons are all
-    /// statements the judge would have had to be sure of. <c>out</c> admits every negative reason
-    /// and nothing positive.</para>
+    /// <c>unsure</c> admits only the two reasons that are themselves statements of not-knowing —
+    /// <see cref="InsufficientSignal"/> and <see cref="NeighbourMixed"/>; the rest are all things
+    /// the judge would have had to be sure of. <c>out</c> admits every negative reason and nothing
+    /// positive.</para>
+    ///
+    /// <para><b>This matrix is version-agnostic on purpose.</b> Which reasons a generation may use
+    /// at all is <see cref="ForVersion"/>'s job, and keeping the two separate means the legality
+    /// rule stays one readable table rather than a table per prompt generation.</para>
     /// </summary>
     public static bool IsLegal(CrossReferenceVerdict verdict, string reason) => verdict switch
     {
         CrossReferenceVerdict.Keep => reason is NeighbourLoved or ToneMatch or ThemeMatch,
-        CrossReferenceVerdict.Unsure => reason is InsufficientSignal,
+        CrossReferenceVerdict.Unsure => reason is InsufficientSignal or NeighbourMixed,
         CrossReferenceVerdict.Out => reason is NeighbourDisliked or ToneMismatch or PaceMismatch
             or ThemeMismatch or GenreMismatch or FormatMismatch or CraftBelowBar,
         _ => false,

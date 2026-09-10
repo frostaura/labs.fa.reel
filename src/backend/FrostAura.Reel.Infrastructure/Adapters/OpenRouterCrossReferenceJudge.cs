@@ -65,8 +65,34 @@ public class OpenRouterCrossReferenceJudge(
     /// <para>v1: the first pass. Round 1 rules candidates OUT and is told in as many words that
     /// <c>unsure</c> is the correct answer far more often than it is comfortable; round 2 looks
     /// only for reasons to say no. Bump when a change alters what a stored verdict MEANS.</para>
+    ///
+    /// <para><b>Still 1, deliberately, with <see cref="SecondPromptVersion"/> written and
+    /// selectable.</b> A generation becomes current by being MEASURED against the one it replaces,
+    /// not by being written — that is the entire ordering this PR exists to defend. The serving job
+    /// rides this constant; only the backtest may name a version, and only through
+    /// <c>POST /api/dev/cross-reference-eval?promptVersion=2</c>.</para>
     /// </summary>
-    public const int CurrentPromptVersion = 1;
+    public const int CurrentPromptVersion = CrossReferencePromptVersions.First;
+
+    /// <summary>
+    /// The second prompt generation — an experiment, selectable by the backtest and by nothing
+    /// else.
+    ///
+    /// <para><b>Every difference from v1 answers something the 2026-09-10 live run measured</b>
+    /// (five origins, 1,305 judged: false-rule-out 12.0%, true-rule-out 10.1%, unsure 33%). A
+    /// false-rule-out rate that matches the true-rule-out rate is a verdict uncorrelated with the
+    /// outcome, and a third of the pool answering "insufficient signal" says the judge frequently
+    /// had nothing it could use. So v2 (a) leads each candidate line with the neighbour evidence,
+    /// the viewer's own score first, and shows five neighbours rather than three — including up to
+    /// two low-rated ones, so a negative comparison is visible whenever one exists rather than only
+    /// when it happens to be among the three nearest; (b) states the account's genre affinities with
+    /// the pool each rests on, so genre-level evidence is explicit instead of implied by a
+    /// twenty-token taste line; (c) anchors confidence on the viewer's own base rates and says an
+    /// <c>out</c> should be rarer than their dislike share; and (d) asks for a neighbour reason
+    /// where the verdict is neighbour-based, adding <c>neighbour-mixed</c> so "the evidence
+    /// disagrees with itself" stops being recorded as "I was shown nothing".</para>
+    /// </summary>
+    public const int SecondPromptVersion = CrossReferencePromptVersions.Second;
 
     /// <summary>Completion tokens allowed per candidate. A closed-enum entry is ~45.</summary>
     private const int TokensPerCandidate = 64;
@@ -173,6 +199,139 @@ public class OpenRouterCrossReferenceJudge(
         Return EXACTLY ONE entry per candidate id you were given, and no prose.
         """;
 
+    // ── Prompts, v2 ────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Round 1, generation 2. Everything v1 says, plus the four changes the live result asked for:
+    /// read the neighbours FIRST, use the genre lines, name a neighbour reason when the verdict is
+    /// neighbour-based, and treat confidence as a probability anchored on this viewer's own base
+    /// rates.
+    ///
+    /// <para>The base-rate sentence is appended by <see cref="BuildSystemPrompt"/> rather than
+    /// living here, because it carries two of the viewer's own numbers and is OMITTED entirely when
+    /// they are unknown — a "you dislike about 0% of what you finish" is a claim, not a default.</para>
+    /// </summary>
+    internal const string RoundOneSystemPromptV2 =
+        """
+        You are cross-referencing a list of candidate films and shows against ONE viewer.
+
+        Your only job is to rule candidates OUT. You are not recommending anything and you are not
+        ranking anything.
+
+        Each candidate line LEADS with the strongest evidence there is: the titles this viewer has
+        actually rated that sit nearest it, with the viewer's own score first. Read those before
+        anything else on the line. The GENRES lines above the candidates give this viewer's own
+        average score per genre and the number of titles each average rests on.
+
+        Answer "out" when: the nearest titles they rated are ones they scored low; the tone, pace or
+        theme runs against the viewer description; or the format is one they do not watch.
+
+        Answer "keep" only on the evidence given — a nearest title they scored highly, a tone that
+        matches what the description says they seek out, or a theme they return to. Never keep
+        something because it is acclaimed, popular or well made.
+
+        Answer "unsure" for everything else. Unsure is the correct answer far more often than it is
+        comfortable. A judge that is never unsure is guessing.
+
+        Where your verdict rests on the nearby rated titles rather than on the description, say so
+        in the reason: "neighbour-loved" where those titles are ones this viewer scored highly,
+        "neighbour-disliked" where they scored them low, and "neighbour-mixed" where the nearest
+        ones point both ways. "insufficient-signal" means you were shown nothing usable at all, and
+        is not the same answer as "the evidence disagrees with itself".
+
+        Schedule-filler formats — long-running panel shows, daytime talk, competition-reality strips
+        and similar — are "out" with reason "format-mismatch" unless the viewer description says
+        otherwise.
+
+        Never rule something out for being obscure, old, or in another language. None of those is a
+        reason.
+
+        Your confidence is a probability, not an emphasis: 0.9 means you expect to be right nine
+        times in ten. Spread your confidence across the range, and reserve the top of it for
+        candidates whose nearby rated titles agree with each other.
+
+        Return EXACTLY ONE entry per candidate id you were given, and no prose.
+        """;
+
+    /// <summary>
+    /// Round 2, generation 2. The v2 instructions with v1's adversarial round-2 framing: different
+    /// neighbours, and a second keep that has to be earned.
+    /// </summary>
+    internal const string RoundTwoSystemPromptV2 =
+        """
+        You are cross-referencing a list of candidate films and shows against ONE viewer.
+
+        These candidates already survived a first pass, and you are looking at DIFFERENT nearby
+        titles this viewer rated than that pass did. You are now looking specifically for reasons
+        this viewer would NOT enjoy them.
+
+        Each candidate line LEADS with the strongest evidence there is: the titles this viewer has
+        actually rated that sit nearest it, with the viewer's own score first. Read those before
+        anything else on the line. The GENRES lines above the candidates give this viewer's own
+        average score per genre and the number of titles each average rests on.
+
+        Answer "out" when: the nearest titles they rated are ones they scored low; the tone, pace or
+        theme runs against the viewer description; or the format is one they do not watch.
+
+        Answer "keep" only where the new evidence independently supports it. A second keep is a real
+        endorsement and should be rare.
+
+        Answer "unsure" for everything else. Unsure is the correct answer far more often than it is
+        comfortable.
+
+        Where your verdict rests on the nearby rated titles rather than on the description, say so
+        in the reason: "neighbour-loved" where those titles are ones this viewer scored highly,
+        "neighbour-disliked" where they scored them low, and "neighbour-mixed" where the nearest
+        ones point both ways. "insufficient-signal" means you were shown nothing usable at all, and
+        is not the same answer as "the evidence disagrees with itself".
+
+        Schedule-filler formats — long-running panel shows, daytime talk, competition-reality strips
+        and similar — are "out" with reason "format-mismatch" unless the viewer description says
+        otherwise.
+
+        Never rule something out for being obscure, old, or in another language. None of those is a
+        reason.
+
+        Your confidence is a probability, not an emphasis: 0.9 means you expect to be right nine
+        times in ten. Spread your confidence across the range, and reserve the top of it for
+        candidates whose nearby rated titles agree with each other.
+
+        Return EXACTLY ONE entry per candidate id you were given, and no prose.
+        """;
+
+    /// <summary>
+    /// The system message for a round at a prompt generation.
+    ///
+    /// <para><b>v1 is returned byte-identical</b> — the constants, untouched, with nothing appended.
+    /// Its stored verdicts are keyed on version 1 and a v1 row has to keep meaning what it meant, so
+    /// the golden test that pins those two strings must never need editing to accommodate a later
+    /// generation.</para>
+    ///
+    /// <para>v2 appends the base-rate sentence when, and only when, both shares are known. The house
+    /// rule about omission over zero-filling applies to a system prompt exactly as it applies to a
+    /// candidate line: an unknown base rate rendered as 0% is a statement about the viewer that
+    /// nobody measured.</para>
+    /// </summary>
+    internal static string BuildSystemPrompt(CrossReferenceRound round, CrossReferenceJudgeOptions options)
+    {
+        if (options.PromptVersion < SecondPromptVersion)
+        {
+            return round == CrossReferenceRound.First ? RoundOneSystemPrompt : RoundTwoSystemPrompt;
+        }
+
+        var body = round == CrossReferenceRound.First ? RoundOneSystemPromptV2 : RoundTwoSystemPromptV2;
+        if (options.LovedShare is not { } loved || options.DislikedShare is not { } disliked)
+        {
+            return body;
+        }
+
+        return body + "\n\n" + string.Create(
+            CultureInfo.InvariantCulture,
+            $"This viewer rates about {loved * 100m:0}% of what they finish 8 or higher and "
+            + $"{disliked * 100m:0}% 4 or lower. An \"out\" should be rarer than that dislike share "
+            + $"unless the evidence is strong.");
+    }
+
     /// <summary>
     /// The user message: the viewer, then one line per candidate.
     ///
@@ -188,6 +347,24 @@ public class OpenRouterCrossReferenceJudge(
     /// </summary>
     internal static string BuildUserPrompt(
         IReadOnlyList<CrossReferenceCandidate> candidates, LensPersona persona, CrossReferenceRound round)
+        => BuildUserPrompt(candidates, persona, round, new CrossReferenceJudgeOptions(CurrentPromptVersion));
+
+    /// <summary>
+    /// The user message at an explicit prompt generation.
+    ///
+    /// <para><b>v2's two differences.</b> The viewer block carries the genre affinity line — the
+    /// account's own average per genre with the pool size beside it, omitted entirely when there is
+    /// nothing nameable. And each candidate line LEADS with the neighbour evidence rather than
+    /// ending with it, the viewer's own score first: the 2026-09-10 run put that clause last, after
+    /// seven scalars and a cast list, and produced an <c>out</c> verdict uncorrelated with the
+    /// outcome while a third of the pool came back "insufficient signal". Position is not a subtle
+    /// lever on a sixty-line prompt.</para>
+    /// </summary>
+    internal static string BuildUserPrompt(
+        IReadOnlyList<CrossReferenceCandidate> candidates,
+        LensPersona persona,
+        CrossReferenceRound round,
+        CrossReferenceJudgeOptions options)
     {
         var sb = new StringBuilder();
         sb.Append("THE VIEWER\n").Append(persona.Taste.Trim()).Append('\n');
@@ -196,10 +373,15 @@ public class OpenRouterCrossReferenceJudge(
             sb.Append(persona.Declined.Trim()).Append('\n');
         }
 
+        if (options.PromptVersion >= SecondPromptVersion && !string.IsNullOrWhiteSpace(options.GenreAffinity))
+        {
+            sb.Append(options.GenreAffinity.Trim()).Append('\n');
+        }
+
         sb.Append("\nCANDIDATES\n");
         foreach (var candidate in Order(candidates, round))
         {
-            AppendCandidate(sb, candidate);
+            AppendCandidate(sb, candidate, options.PromptVersion);
         }
 
         return sb.ToString();
@@ -222,9 +404,19 @@ public class OpenRouterCrossReferenceJudge(
             .ToList();
     }
 
-    private static void AppendCandidate(StringBuilder sb, CrossReferenceCandidate c)
+    private static void AppendCandidate(StringBuilder sb, CrossReferenceCandidate c, int promptVersion)
     {
-        sb.Append(c.TitleId.ToString("D", CultureInfo.InvariantCulture)).Append(" | ").Append(c.Name);
+        var neighbourFirst = promptVersion >= SecondPromptVersion;
+        sb.Append(c.TitleId.ToString("D", CultureInfo.InvariantCulture));
+        if (neighbourFirst)
+        {
+            // The id stays first because it is the key the model has to echo back, and a line whose
+            // first field moved between generations would make every parser rule version-dependent
+            // for nothing. The evidence comes immediately after it, ahead of the name.
+            AppendNeighbours(sb, c, neighbourFirst: true);
+        }
+
+        sb.Append(" | ").Append(c.Name);
         if (c.Year is { } year)
         {
             sb.Append(' ').Append(string.Create(CultureInfo.InvariantCulture, $"({year})"));
@@ -296,14 +488,9 @@ public class OpenRouterCrossReferenceJudge(
             sb.Append(" | ").Append(string.Join(" · ", people));
         }
 
-        if (c.Neighbours.Count > 0)
+        if (!neighbourFirst)
         {
-            // Rating AND similarity, both. "you 9" alone cannot distinguish a neighbour at 0.82
-            // from one at 0.31, and those are different claims — the v5 knownPeopleFraction lesson.
-            var clause = c.Neighbours.Select(n => string.Create(
-                CultureInfo.InvariantCulture,
-                $"{n.Name}{(n.Year is { } y ? $" ({y})" : string.Empty)} you {n.Rating} · sim {n.Similarity:0.00}"));
-            sb.Append(" | nearest you rated: ").Append(string.Join("; ", clause));
+            AppendNeighbours(sb, c, neighbourFirst: false);
         }
 
         if (!string.IsNullOrWhiteSpace(c.Overview))
@@ -313,6 +500,40 @@ public class OpenRouterCrossReferenceJudge(
         }
 
         sb.Append('\n');
+    }
+
+    /// <summary>
+    /// The neighbour clause. <b>Rating AND similarity, both</b> — "you 9" alone cannot distinguish a
+    /// neighbour at 0.82 from one at 0.31, and those are different claims (the v5
+    /// <c>knownPeopleFraction</c> lesson).
+    ///
+    /// <para>v2 puts the viewer's own SCORE first inside each item — "you 3/10 · Argylle (2024) ·
+    /// sim 0.64" — because the score is the thing being reasoned from and the title is only how it
+    /// is identified. v1's ordering is preserved exactly.</para>
+    ///
+    /// <para>Absent, not empty, when there are no neighbours: an empty clause with a label on it is
+    /// a claim that the model looked and found nothing.</para>
+    /// </summary>
+    private static void AppendNeighbours(StringBuilder sb, CrossReferenceCandidate c, bool neighbourFirst)
+    {
+        if (c.Neighbours.Count == 0)
+        {
+            return;
+        }
+
+        var clause = c.Neighbours.Select(n =>
+        {
+            var year = n.Year is { } y ? string.Create(CultureInfo.InvariantCulture, $" ({y})") : string.Empty;
+            return neighbourFirst
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"you {n.Rating}/10 · {n.Name}{year} · sim {n.Similarity:0.00}")
+                : string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{n.Name}{year} you {n.Rating} · sim {n.Similarity:0.00}");
+        });
+
+        sb.Append(" | nearest you rated: ").Append(string.Join("; ", clause));
     }
 
     private static void Scalar(List<string> into, string name, decimal? value)
@@ -335,7 +556,15 @@ public class OpenRouterCrossReferenceJudge(
     /// discarded batch every time. The reason vocabulary is closed for cost, and the cost is the
     /// reason the whole eligible pool can be judged at all.</para>
     /// </summary>
-    internal static object ResultsSchema(int batchSize) => new
+    internal static object ResultsSchema(int batchSize) => ResultsSchema(batchSize, CurrentPromptVersion);
+
+    /// <summary>
+    /// The schema for a prompt generation. The reason enum is
+    /// <c>CrossReferenceReasons.ForVersion</c>'s list and NOT one growing set: the verdict table is
+    /// keyed on prompt version and rows are read back long after, so a v1 row carrying a reason v1
+    /// was never offered would be unexplainable rather than richer.
+    /// </summary>
+    internal static object ResultsSchema(int batchSize, int promptVersion) => new
     {
         type = "json_schema",
         json_schema = new
@@ -362,7 +591,11 @@ public class OpenRouterCrossReferenceJudge(
                             {
                                 ["titleId"] = new { type = "string", minLength = 36, maxLength = 36 },
                                 ["verdict"] = new { type = "string", @enum = new[] { "keep", "out", "unsure" } },
-                                ["reason"] = new { type = "string", @enum = CrossReferenceReasons.All },
+                                ["reason"] = new
+                                {
+                                    type = "string",
+                                    @enum = CrossReferenceReasons.ForVersion(promptVersion),
+                                },
                                 ["confidence"] = new { type = "number", minimum = 0, maximum = 1 },
                             },
                         },
@@ -379,6 +612,7 @@ public class OpenRouterCrossReferenceJudge(
         LensPersona persona,
         CrossReferenceRound round,
         string usagePurpose,
+        CrossReferenceJudgeOptions options,
         CancellationToken ct = default)
     {
         if (candidates.Count == 0)
@@ -392,12 +626,12 @@ public class OpenRouterCrossReferenceJudge(
                 candidates.Select(StubVerdict).ToList(), Succeeded: true, null, null, 0);
         }
 
-        var system = round == CrossReferenceRound.First ? RoundOneSystemPrompt : RoundTwoSystemPrompt;
-        var user = BuildUserPrompt(candidates, persona, round);
+        var system = BuildSystemPrompt(round, options);
+        var user = BuildUserPrompt(candidates, persona, round, options);
         var maxTokens = (TokensPerCandidate * candidates.Count) + TokenOverhead;
 
         var outcome = await ChatAsync(
-            system, user, maxTokens, ResultsSchema(candidates.Count), usagePurpose, ct);
+            system, user, maxTokens, ResultsSchema(candidates.Count, options.PromptVersion), usagePurpose, ct);
         if (outcome.Content is null)
         {
             // No rows, not Failed rows. Absence is the retry signal; a Failed row would look like a
@@ -406,7 +640,8 @@ public class OpenRouterCrossReferenceJudge(
                 [], Succeeded: false, outcome.Usage?.PromptTokens, outcome.Usage?.CompletionTokens, 0);
         }
 
-        var (entries, rejected) = ParseResults(outcome.Content, candidates.Select(c => c.TitleId).ToHashSet());
+        var (entries, rejected) = ParseResults(
+            outcome.Content, candidates.Select(c => c.TitleId).ToHashSet(), options.PromptVersion);
         if (rejected > 0)
         {
             logger.LogWarning(
@@ -436,7 +671,13 @@ public class OpenRouterCrossReferenceJudge(
     /// </summary>
     internal static (IReadOnlyList<CrossReferenceEntry> Entries, int Rejected) ParseResults(
         string content, IReadOnlySet<Guid> batchIds)
+        => ParseResults(content, batchIds, CurrentPromptVersion);
+
+    /// <inheritdoc cref="ParseResults(string, IReadOnlySet{Guid})"/>
+    internal static (IReadOnlyList<CrossReferenceEntry> Entries, int Rejected) ParseResults(
+        string content, IReadOnlySet<Guid> batchIds, int promptVersion)
     {
+        var vocabulary = CrossReferenceReasons.ForVersion(promptVersion);
         var accepted = new Dictionary<Guid, CrossReferenceEntry>();
         var rejected = 0;
 
@@ -452,7 +693,7 @@ public class OpenRouterCrossReferenceJudge(
 
             foreach (var el in arr.EnumerateArray())
             {
-                if (!TryReadEntry(el, batchIds, accepted.Keys.ToHashSet(), out var entry))
+                if (!TryReadEntry(el, batchIds, accepted.Keys.ToHashSet(), vocabulary, out var entry))
                 {
                     rejected++;
                     continue;
@@ -470,7 +711,11 @@ public class OpenRouterCrossReferenceJudge(
     }
 
     private static bool TryReadEntry(
-        JsonElement el, IReadOnlySet<Guid> batchIds, IReadOnlySet<Guid> already, out CrossReferenceEntry entry)
+        JsonElement el,
+        IReadOnlySet<Guid> batchIds,
+        IReadOnlySet<Guid> already,
+        IReadOnlyList<string> vocabulary,
+        out CrossReferenceEntry entry)
     {
         entry = default!;
         try
@@ -498,7 +743,7 @@ public class OpenRouterCrossReferenceJudge(
 
             if (!el.TryGetProperty("reason", out var rEl) || rEl.ValueKind != JsonValueKind.String
                 || rEl.GetString() is not { Length: > 0 } reason
-                || !CrossReferenceReasons.All.Contains(reason, StringComparer.Ordinal)
+                || !vocabulary.Contains(reason, StringComparer.Ordinal)
                 || !CrossReferenceReasons.IsLegal(verdict, reason))
             {
                 return false;
