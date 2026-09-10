@@ -8,6 +8,7 @@ import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
+import { useGetFiltersQuery } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
@@ -39,31 +40,6 @@ function mediaTypesFor(filter: BrowseFilter): string[] {
   if (filter.media === "movie") return ["movie"];
   if (filter.media === "show") return ["tv"];
   return [];
-}
-
-/**
- * The one member of the floor tray that `useAskReelChat` does not (yet) forward: the server's own
- * count of what it cut, and the bar it cut at. Both ride on the `done` frame; when the hook passes
- * them through, the tray labels itself with the server's numbers, and until then it falls back to
- * counting the cards it was actually given. Optional and runtime-guarded either way, so this page
- * renders correctly against the hook as it stands today.
- */
-interface PendingFloorApi {
-  droppedByFloor?: number | null;
-  floor?: number | string | null;
-}
-
-/**
- * Reads {@link PendingFloorApi} off the hook and validates it here, so the call site never sees a
- * value the server did not actually send. Takes `object` deliberately: the whole point is that
- * these members may not be on the hook's type at all.
- */
-function pendingFloorApi(chat: object): PendingFloorApi {
-  const c = chat as PendingFloorApi;
-  return {
-    droppedByFloor: typeof c.droppedByFloor === "number" && c.droppedByFloor > 0 ? c.droppedByFloor : null,
-    floor: typeof c.floor === "number" || typeof c.floor === "string" ? c.floor : null,
-  };
 }
 
 function narrate(phase: PhaseData | null): string {
@@ -103,12 +79,15 @@ function AskReel() {
   const seed = params.get("q") ?? "";
   const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
-  const chat = useAskReelChat();
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, stop,
-    setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor,
-  } = chat;
-  const { droppedByFloor, floor } = pendingFloorApi(chat);
+    setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor, droppedByFloor,
+  } = useAskReelChat();
+  // The bar itself is not on the wire and should not be: it is the account's own standing
+  // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
+  // Reading it from the one source keeps the tray's number and the conditions summary from ever
+  // disagreeing about what the user set.
+  const { data: accountFilters } = useGetFiltersQuery();
   const speech = useSpeech((text) => send(text, false));
 
   // The media toggle is per-device and persists across visits, so a resumed thread starts with a
@@ -167,14 +146,20 @@ function AskReel() {
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
   // and was, until now, invisible: the picks simply never existed as far as the screen was
-  // concerned. Both fields are optional (they arrive with A3's `done` frame) and both are
-  // runtime-guarded, so the tray stays dark rather than half-rendering against an older server.
+  // concerned. Two independent sources, and each degrades on its own: `droppedByFloor` rides the
+  // `done` frame and is null against an older server (fall back to counting the cards we were
+  // handed), and the bar comes from the account's saved conditions and is null when the user has
+  // set none (fall back to the unnumbered wording). Neither absence blanks the tray.
   const belowFloorVisible = belowFloor.filter((c) => !removedSet.has(c.titleId));
   const floorHeldBack =
     typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : belowFloorVisible.length;
-  // `toFixed` rather than `toLocaleString`: this is a threshold the server sent, and a comma
-  // decimal separator would print a number the account's settings never contained.
-  const floorLabel = typeof floor === "number" ? floor.toFixed(1) : floor ? String(floor) : null;
+  // Localised deliberately, and this is the one place in Reel where that is the right answer: the
+  // label is chrome the user reads and nothing else — it is never sent to the server, never a cache
+  // key, never a filter row. (The invariant-culture rule that governs everything the BACKEND
+  // formats is about strings that get compared or parsed; this one only gets read.)
+  const floor = accountFilters?.minPredictedRating ?? null;
+  const floorLabel =
+    typeof floor === "number" ? floor.toLocaleString(undefined, { maximumFractionDigits: 1 }) : null;
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
@@ -420,7 +405,9 @@ function AskReel() {
           {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
               collapsed: these picks are not being recommended, they are being accounted for. The
               count comes from the server (`droppedByFloor`) so the tray is honest even on a turn
-              where the cards themselves were not sent down. */}
+              where the cards themselves were not sent down, and the bar comes from the account's
+              own conditions — naming it is what turns "Reel held some back" into a sentence the
+              user can act on, because the number in it is one they chose and can change. */}
           {floorHeldBack > 0 && !streaming && (
             <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
               <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
