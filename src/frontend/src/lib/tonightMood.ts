@@ -55,10 +55,13 @@ export function textureScore(card: FeedCard, mood: TonightMood): number | null {
     // Heavy: dark and emotionally weighty; complexity is not the point here, darkness is.
     case "heavy":
       return t.darkness * 0.7 + t.complexity * 0.3;
-    // Switch off: undemanding above all, and it must not be bleak — nothing switches your brain
-    // off less reliably than something quietly devastating.
+    // Switch off: undemanding ABOVE ALL, with bleakness as a modifier rather than a rival term —
+    // nothing switches your brain off less reliably than something quietly devastating, but a
+    // demanding film is disqualifying however cheerful it is. An earlier weighting split this
+    // 0.5/0.3 and let a 0.95-complexity film outrank a 0.8 one for being less dark, which is
+    // exactly backwards for the one chip whose whole request is "do not make me think".
     case "switch-off":
-      return (1 - t.complexity) * 0.5 + (1 - t.darkness) * 0.3 + t.pacing * 0.2;
+      return (1 - t.complexity) * 0.7 + (1 - t.darkness) * 0.2 + t.pacing * 0.1;
     // Cerebral: demanding, and slower rather than frenetic.
     case "cerebral":
       return t.complexity * 0.7 + (1 - t.pacing) * 0.3;
