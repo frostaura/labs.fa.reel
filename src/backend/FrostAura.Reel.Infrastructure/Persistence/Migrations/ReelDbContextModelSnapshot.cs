@@ -775,6 +775,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
 
+                    b.Property<string>("ProfileFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
                     b.Property<string>("ProfileHash")
                         .IsRequired()
                         .HasMaxLength(16)

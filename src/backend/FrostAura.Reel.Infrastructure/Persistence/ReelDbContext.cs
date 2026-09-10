@@ -395,6 +395,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // stays readable.
             e.HasIndex(n => new { n.AccountId, n.Version }).IsUnique();
             e.Property(n => n.ProfileHash).HasMaxLength(16);
+            e.Property(n => n.ProfileFingerprint).HasMaxLength(2048);
             e.Property(n => n.ModelId).HasMaxLength(128);
             e.Property(n => n.FactsJson).HasColumnType("jsonb");
         });

@@ -41,6 +41,15 @@ public class AccountTasteNarrative : IAccountScoped
     /// </summary>
     public string ProfileHash { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The canonical component string behind <see cref="ProfileHash"/>. Stored rather than
+    /// recomputed because it is the ANCHOR for the fingerprint's hysteresis: each numeric component
+    /// keeps the value recorded here until the live number has moved a full quantisation step away
+    /// from it, which is what stops a component sitting near a step edge from flipping back and
+    /// forth on ordinary weekly ratings and emptying the lens cache for no reason.
+    /// </summary>
+    public string ProfileFingerprint { get; set; } = string.Empty;
+
     /// <summary>The generated narrative, sentences joined by a single space. Second person throughout.</summary>
     public string Text { get; set; } = string.Empty;
 

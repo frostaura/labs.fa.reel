@@ -34,10 +34,13 @@ public static class RerankOrder
             return items;
         }
 
+        // Seeded on the SET of ids, sorted — not on the order they arrived in. Seeding on the
+        // caller's order would make the shuffle a function of the model's ranking, which is the one
+        // thing it exists to break the dependence on.
         var seed = new StringBuilder(query).Append('|').Append(anchorName ?? string.Empty);
-        foreach (var item in items)
+        foreach (var id in items.Select(i => i.TitleId).OrderBy(id => id))
         {
-            seed.Append('|').Append(item.TitleId.ToString("N"));
+            seed.Append('|').Append(id.ToString("N"));
         }
 
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(seed.ToString()));

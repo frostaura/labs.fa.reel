@@ -13,7 +13,7 @@ using Pgvector;
 namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(ReelDbContext))]
-    [Migration("20260909234002_Phase3ProfileLens")]
+    [Migration("20260910001439_Phase3ProfileLens")]
     partial class Phase3ProfileLens
     {
         /// <inheritdoc />
@@ -777,6 +777,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
+
+                    b.Property<string>("ProfileFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
 
                     b.Property<string>("ProfileHash")
                         .IsRequired()

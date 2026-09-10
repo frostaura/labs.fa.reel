@@ -145,7 +145,12 @@ public sealed class LlmBudgetLoop : IDisposable
             {
                 return LlmBudgetStop.HardCeiling;
             }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            // TaskCanceledException derives from OperationCanceledException, so this clause has to
+            // exclude the case where the CALLER went away — that is the request being abandoned,
+            // not a provider failure, and swallowing it would let the loop keep spending on work
+            // nobody is waiting for.
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
+                && !_outer.IsCancellationRequested)
             {
                 return LlmBudgetStop.Failed;
             }

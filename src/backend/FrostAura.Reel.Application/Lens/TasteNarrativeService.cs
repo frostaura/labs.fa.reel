@@ -101,6 +101,7 @@ public sealed class TasteNarrativeService(
             AccountId = accountId,
             Version = (current?.Version ?? 0) + 1,
             ProfileHash = built.ProfileHash,
+            ProfileFingerprint = built.ProfileFingerprint,
             Text = text,
             // Carried forward, not dropped: a correction the user made once keeps winning until
             // they explicitly ask for a rewrite, which is what `force` means.

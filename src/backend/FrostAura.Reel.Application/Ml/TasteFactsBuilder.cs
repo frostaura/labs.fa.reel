@@ -44,8 +44,9 @@ public sealed class TasteFactsBuilder(IReelDbContext db, DislikeSignal dislikes)
     /// <summary>"Loved" for the texture aggregate — the same "loved, not tolerated" bar the eval harness uses.</summary>
     private const short LovedRatingFloor = 8;
 
-    /// <summary>The facts, plus the two extra values the profile hash needs that are not in them.</summary>
-    public sealed record Result(TasteFacts Facts, string ProfileHash, IReadOnlyList<Guid> TopLovedTitleIds);
+    /// <summary>The facts, plus the fingerprint they hash to and the loved ids that fed it.</summary>
+    public sealed record Result(
+        TasteFacts Facts, string ProfileHash, string ProfileFingerprint, IReadOnlyList<Guid> TopLovedTitleIds);
 
     public async Task<Result> BuildAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, DateTime asOf, CancellationToken ct)
@@ -138,10 +139,20 @@ public sealed class TasteFactsBuilder(IReelDbContext db, DislikeSignal dislikes)
             contrarian,
             preferenceTags);
 
-        return new Result(
-            facts,
-            TasteProfileHash.Compute(facts, taste.TopLovedTitleIds, dislikeProfile.Version),
-            taste.TopLovedTitleIds);
+        // The account's last stored fingerprint is the hysteresis anchor — see TasteProfileHash.
+        // Read here, once, so every caller (the feed build, the endpoints, both jobs) computes the
+        // SAME hash. Two callers anchoring differently would key the same taste two ways and halve
+        // the cache hit rate silently.
+        var previous = await db.AccountTasteNarratives
+            .Where(n => n.AccountId == accountId)
+            .OrderByDescending(n => n.Version)
+            .Select(n => n.ProfileFingerprint)
+            .FirstOrDefaultAsync(ct);
+
+        var fingerprint = TasteProfileHash.Compute(
+            facts, taste.TopLovedTitleIds, dislikeProfile.Version, previous);
+
+        return new Result(facts, fingerprint.Hash, fingerprint.Components, taste.TopLovedTitleIds);
     }
 
     /// <summary>

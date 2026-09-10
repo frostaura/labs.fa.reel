@@ -19,6 +19,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
                     Version = table.Column<int>(type: "integer", nullable: false),
                     ProfileHash = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
+                    ProfileFingerprint = table.Column<string>(type: "character varying(2048)", maxLength: 2048, nullable: false),
                     Text = table.Column<string>(type: "text", nullable: false),
                     EditedText = table.Column<string>(type: "text", nullable: true),
                     FactsJson = table.Column<string>(type: "jsonb", nullable: false),
