@@ -274,3 +274,22 @@ body {
   background: var(--fa-frost-bright); border: 2px solid var(--fa-ink);
   box-shadow: 0 0 0 1px var(--fa-frost-bright), 0 0 12px rgba(212, 236, 255, 0.55);
 }
+
+/* Motion, once, for the whole stylesheet.
+ *
+ * Every animation above is decorative — the progress sweep, the card rise, the skeleton shimmer,
+ * the status orbs, the frost melt — and each one is an independent thing to forget. A user who has
+ * asked their OS for less motion is asking about all of them, so the preference is honoured in one
+ * place rather than per component. Animations are collapsed to an instant rather than removed:
+ * `animation: none` cancels `both`/`forwards` fill modes, which would leave anything animating IN
+ * (reel-rise, reel-melt) stuck at its starting opacity — invisible. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
