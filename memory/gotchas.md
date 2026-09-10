@@ -46,7 +46,6 @@ last_verified: 2026-09-11
 - **TMDB's TV genre taxonomy has NO horror genre** — American Horror Story arrives as drama/mystery/sci-fi. Anything matching genre terms against `Title.Genres` alone is blind to TV horror; `Subgenres`/`Keywords` carry the truth. The same blind spot applies to any genre-driven feature for TV.
 - **Trakt paginated the watched endpoints and changed the `extended` defaults after 2026-06-30** ([trakt-api#775](https://github.com/trakt/trakt-api/discussions/775)). It broke ingest silently: `sync/watched/movies|shows` returned 200 OK with only the first 100 items and no seasons, while ratings came through in full — which is what made it look like a display bug. Fixed by walking `X-Pagination-Page-Count` and requesting `extended=progress` on shows. Two traps: **`extended=full` is now ignored**, and **`extended=progress` is capped at 100 per page** while other watched calls allow 250.
 - **`pg_trgm` was installed and declared in every migration but never queried.** Typeahead was `ILIKE '%term%'`, i.e. exact-spelling-only. Titles and people now match on substring OR trigram similarity, exact substring still winning the ordering (threshold 0.3). Half the reason this project deviates to `pgvector/pgvector:pg16` is trigram search — and it had never been used.
-- Trakt and TMDB sit behind Cloudflare, which 403s UA-less requests — the explicit User-Agent on the typed clients is load-bearing.
 
 ## Front end, search and the stack
 
