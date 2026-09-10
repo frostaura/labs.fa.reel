@@ -23,6 +23,18 @@ public static class FeedEndpoints
     public record CardProvider(string Name, string? LogoPath);
 
     /// <summary>
+    /// The four extracted scalars the tonight-mood chips re-sort over, 0–1. Sent WITH the card so
+    /// the re-sort is instant and entirely client-side: the chips reorder the snapshot the browser
+    /// already has, they never trigger a rebuild — tonight's picks are a contract, and a mood is a
+    /// way of reading them, not a reason to deal new ones.
+    ///
+    /// <para>Null on a title that has not been enriched, which is honest: a chip should decline to
+    /// rank what it cannot see rather than treat missing data as a neutral 0.5 and shuffle it into
+    /// the middle of every mood.</para>
+    /// </summary>
+    public record CardTexture(decimal Darkness, decimal Pacing, decimal Complexity, decimal Humor);
+
+    /// <summary>
     /// The card contract. <c>PredictedRating</c> is "for you"; <c>CrowdRating</c> / <c>CrowdVotes</c>
     /// are the community number it is compared against, resolved once in
     /// <see cref="Domain.Catalog.CrowdRating"/> (TMDB, then Trakt, then null) so every surface agrees.
@@ -41,9 +53,11 @@ public static class FeedEndpoints
     /// </param>
     /// <param name="LensClause">The first clause of the lens, for the card's two-line why.</param>
     /// <param name="Mood">
-    /// The lens's closed-vocabulary mood, which is what the tonight-mood chips re-sort over. Sent
-    /// with the card so the re-sort is instant and client-side rather than a rebuild.
+    /// The lens's closed-vocabulary mood, the strongest signal the chips re-sort over — but only
+    /// present where copy has been written, which is why <paramref name="Texture"/> rides alongside
+    /// it as the signal every enriched title has.
     /// </param>
+    /// <param name="Texture">The extracted scalars the chips fall back to. See <see cref="CardTexture"/>.</param>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
@@ -52,7 +66,7 @@ public static class FeedEndpoints
         // Optional and trailing on purpose: every other producer of this record — the digest, the
         // paginated lane — is serving a non-hero surface and has no bar to report.
         string? Confidence = null, decimal? FloorUsed = null,
-        string? Hook = null, string? LensClause = null, string? Mood = null);
+        string? Hook = null, string? LensClause = null, string? Mood = null, CardTexture? Texture = null);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
@@ -260,6 +274,17 @@ public static class FeedEndpoints
             var lensByTitle = await lens.ResolveManyAsync(
                 account.Id, items.Select(x => x.Title.Id).ToList(), lensProfile.ProfileHash, ct);
 
+            // The scalars behind the tonight-mood chips. One query for the page; the chips then
+            // re-sort in the browser with no further round trip and no rebuild.
+            var pageTitleIds = items.Select(x => x.Title.Id).ToList();
+            var textures = await db.TitleAttributes
+                .Where(a => pageTitleIds.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)
+                .Select(a => new { a.TitleId, a.Darkness, a.Pacing, a.Complexity, a.Humor })
+                .ToDictionaryAsync(
+                    a => a.TitleId,
+                    a => new CardTexture(a.Darkness, a.Pacing, a.Complexity, a.Humor),
+                    ct);
+
             FeedCard ToCard(FeedItem item, Title title, bool hero = false)
             {
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
@@ -277,7 +302,8 @@ public static class FeedEndpoints
                     hero ? heroBar : null,
                     note?.Hook,
                     note?.FirstClause(),
-                    note?.Mood);
+                    note?.Mood,
+                    textures.GetValueOrDefault(title.Id));
             }
 
             var hero = items.Where(x => x.Item.Row == FeedRowKind.Hero)

@@ -5,6 +5,8 @@ import type {
   BlendPreview,
   ContinueEntry,
   DigestPayload,
+  LensPayload,
+  NarrativePayload,
   FeedCard,
   FeedPayload,
   GenreRail,
@@ -504,7 +506,7 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy"],
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy", "Narrative", "Lens"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -859,6 +861,41 @@ export const api = createApi({
       query: () => "taste",
       providesTags: ["TasteDna"],
     }),
+    // The taste narrative — what Reel believes about you, in words you can correct.
+    getNarrative: b.query<NarrativePayload, void>({
+      query: () => "taste/narrative",
+      providesTags: ["Narrative"],
+    }),
+    // Your own rewrite. It wins everywhere and survives regeneration; only the regenerate action
+    // clears it. Invalidates Feed too, because the narrative IS the personalisation context every
+    // downstream call rides on — an edit changes what the next build is told about you.
+    saveNarrative: b.mutation<NarrativePayload, { text: string | null }>({
+      query: (body) => ({ url: "taste/narrative", method: "PUT", body }),
+      invalidatesTags: ["Narrative"],
+    }),
+    regenerateNarrative: b.mutation<{ queued: boolean }, void>({
+      query: () => ({ url: "taste/narrative/regenerate", method: "POST" }),
+      invalidatesTags: ["Narrative"],
+    }),
+    // On-demand lens for one title. Generates when nothing usable is cached, behind a 5s server
+    // ceiling, and ALWAYS answers with a `source` — so the modal renders the ladder (fresh, stale,
+    // or the templater fallback it already had) rather than a spinner that resolves to nothing.
+    getLens: b.query<LensPayload, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => `titles/${mediaType}/${tmdbId}/lens`,
+      providesTags: (_r, _e, arg) => [{ type: "Lens" as const, id: `${arg.mediaType}:${arg.tmdbId}` }],
+    }),
+    // "This spoiled it." Withdraws every note for the title so the surface falls back at once.
+    reportLensSpoiler: b.mutation<{ withdrawn: number }, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => ({
+        url: `titles/${mediaType}/${tmdbId}/lens/spoiled`,
+        method: "POST",
+      }),
+      invalidatesTags: (_r, _e, arg) => [
+        { type: "Lens" as const, id: `${arg.mediaType}:${arg.tmdbId}` },
+        "Title",
+        "Feed",
+      ],
+    }),
     getFilters: b.query<FiltersPayload, void>({
       query: () => "settings/filters",
       providesTags: ["Prefs"],
@@ -1010,6 +1047,11 @@ export const {
   useGetSavedQuery,
   useGetRecentlyWatchedQuery,
   useGetTasteDnaQuery,
+  useGetNarrativeQuery,
+  useSaveNarrativeMutation,
+  useRegenerateNarrativeMutation,
+  useGetLensQuery,
+  useReportLensSpoilerMutation,
   useSearchTypeaheadQuery,
   useSearchTypeaheadGlobalQuery,
   useGetFiltersQuery,

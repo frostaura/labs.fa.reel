@@ -25,6 +25,8 @@ import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
 import PostWatchStrip from "../components/saved/PostWatchStrip";
 import TrackRecordStrip from "../components/rec/TrackRecordStrip";
+import TonightMoodChips from "../components/rec/TonightMoodChips";
+import type { TonightMood } from "../lib/tonightMood";
 import { pipelineStageCopy } from "../lib/syncCopy";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
@@ -63,6 +65,12 @@ export default function Home() {
   // even when the server hands back the same `generatedAt` and the seed keys would not otherwise
   // change. Bumped only on a successful save, so nothing resets while the dialog is merely open.
   const [conditionsVersion, setConditionsVersion] = useState(0);
+
+  // The tonight mood, held in component state and nowhere else. Deliberately NOT persisted and
+  // deliberately NOT part of `resetKey`: it re-sorts the snapshot the browser already has, so it
+  // must not remount the rows and lose the user's scroll, and it must not survive into tomorrow as
+  // a standing preference nobody remembers setting.
+  const [mood, setMood] = useState<TonightMood | null>(null);
 
   const resetKey = `${adoptedKey}#${conditionsVersion}`;
   const hasFresherPicks = latestKey !== "" && adoptedKey !== "" && latestKey !== adoptedKey;
@@ -152,7 +160,10 @@ export default function Home() {
               this snapshot, so a row remount must not take it with it. */}
           <ModelLearnedBand />
 
-          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} />
+          {/* Above the hero, because it is a question about tonight rather than about the model. */}
+          <TonightMoodChips value={mood} onChange={setMood} />
+
+          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} />
 
           <ContinueWatchingRow entries={continueFiltered} />
 
@@ -171,6 +182,7 @@ export default function Home() {
               context={{ row: row.kind, anchorTitleId: row.anchorTitleId, genre: null }}
               seed={row.items}
               filter={filter}
+              mood={mood}
             />
           ))}
 

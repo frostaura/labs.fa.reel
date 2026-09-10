@@ -106,7 +106,25 @@ export default function RecCardHero({ cards, loadMore, loading }: HeroProps) {
                     .filter(Boolean)
                     .join(" · ")}
                 </p>
-                <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug">{card.whyThis}</p>
+                {/* The hook first — the one line written to make you press play tonight — with the
+                    lens's opening clause beneath it. Falls back to the single templated why-line
+                    when no copy exists, which is the shape the hero has always had. */}
+                {card.hook ? (
+                  <>
+                    <p className="fa-body sm:text-base text-fa-frost-bright max-w-2xl leading-snug" data-testid="hero-hook">
+                      {card.hook}
+                    </p>
+                    {card.lensClause && (
+                      <p className="fa-caption text-fa-frost max-w-2xl leading-snug" data-testid="hero-lens-clause">
+                        {card.lensClause}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug" data-testid="hero-why">
+                    {card.whyThis}
+                  </p>
+                )}
                 {/* Quiet on purpose: an admission, not an alarm. It sits under the why-line so the
                     pick is still the headline and the caveat is attached to it, not to the row. */}
                 {reachingLabel(card) && (

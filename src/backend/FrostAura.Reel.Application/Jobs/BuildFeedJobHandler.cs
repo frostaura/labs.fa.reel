@@ -1431,7 +1431,13 @@ public class BuildFeedJobHandler(
 
                 foreach (var raw in results)
                 {
-                    debiased.Observe(raw);
+                    // The deterministic half of the prompt's "judge fit against who they are, not
+                    // against reach" instruction — see UnscriptedFormats for why it is conditional
+                    // on the account's own narrative and therefore revocable by editing it.
+                    var adjusted = byTitleId.TryGetValue(raw.TitleId, out var candidate)
+                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, candidate.Candidate.Title.Genres, persona.Taste) }
+                        : raw;
+                    debiased.Observe(adjusted);
                     var result = debiased.For(raw.TitleId)!;
                     cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
                     if (isHeroRail)

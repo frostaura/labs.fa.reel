@@ -49,7 +49,13 @@ export default function RecCard({ card }: { card: FeedCard }) {
         <p className="fa-caption text-fa-frost-dim">
           {[card.year, formatRuntime(card.runtimeMinutes)].filter(Boolean).join(" · ")}
         </p>
-        <p className="fa-caption text-fa-frost/80 line-clamp-2 leading-snug">{card.whyThis}</p>
+        {/* The lens's own first clause when copy has been written for this account and title;
+            the templated why-line otherwise. Same two-line clamp either way, so a card that has
+            copy and one that does not are the same shape — the budget, the provider and the output
+            guards can each withhold it, and the row must not visibly change when they do. */}
+        <p className="fa-caption text-fa-frost/80 line-clamp-2 leading-snug" data-testid="card-why">
+          {card.lensClause ?? card.whyThis}
+        </p>
       </div>
     </Link>
   );
