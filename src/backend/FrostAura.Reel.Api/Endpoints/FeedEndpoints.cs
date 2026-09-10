@@ -537,7 +537,7 @@ public static class FeedEndpoints
             // can force a regeneration (reactive rebuilds cover the rest automatically).
             if (account is null || account.Tier is not (AccountTier.Paid or AccountTier.Founder))
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("paid plan required");
             }
 
             var inFlight = await db.SyncJobs.AnyAsync(

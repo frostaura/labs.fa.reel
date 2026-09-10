@@ -131,7 +131,7 @@ public static class MetricsEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             var inFlight = await db.SyncJobs.AnyAsync(
@@ -166,7 +166,7 @@ public static class MetricsEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             var summary = await summaries.ComputeAsync(account.Id, DateTime.UtcNow, ct);
