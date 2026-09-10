@@ -82,47 +82,32 @@ public class FeatureLeakageMathTests
     }
 
     [Fact]
-    public void Schema_version_six_appends_the_watched_history_scalars_and_keeps_the_head_of_the_vector_put()
+    public void Schema_version_five_appends_the_presence_flags_and_keeps_the_head_of_the_vector_put()
     {
         // v2 added the crowd-presence flags; v3 made dislike reasons learnable; v4 closed the
-        // train/serve skew on certification, subgenres, tone and era; v5 closed the gap between
-        // "credit rows exist" and "we know these people"; v6 is the first bump to read a WATCH
-        // history at all. Each bump APPENDS to the scalars, so a stored artifact can only ever be
-        // wrong loudly (width mismatch), never silently — see the ONE exception any bump has taken,
-        // pinned separately below.
-        Assert.Equal(6, FeatureSchema.Version);
+        // train/serve skew on certification, subgenres, tone and era; v5 closes the last one — the
+        // gap between "credit rows exist" and "we know these people". Each bump APPENDS to the
+        // scalars, so a stored artifact can only ever be wrong loudly (width mismatch), never
+        // silently — see the ONE exception any bump has taken, pinned separately below.
+        Assert.Equal(5, FeatureSchema.Version);
 
         var names = FeatureSchema.Scalars;
-        Assert.Equal("simWatchedCentroid", names[^5]);
-        Assert.Equal("hasWatchedCentroid", names[^4]);
-        Assert.Equal("simRewatchCentroid", names[^3]);
-        Assert.Equal("hasRewatchCentroid", names[^2]);
-        Assert.Equal("watchedGenreShare", names[^1]);
+        Assert.Equal("knownPeopleFraction", names[^3]);
+        Assert.Equal("knownDirectorOrWriter", names[^2]);
+        Assert.Equal("isUnscripted", names[^1]);
 
-        // The kNN pair the v6 plan also scoped is NOT here. It was built, leave-one-out'd and then
-        // dropped on a measured cost gate (2.3 s → 12.6 s on a full harness run against a copy of the
-        // live database, against a 2× ceiling); the version history carries the numbers. Pinned by
-        // name so re-adding it is a deliberate act with its own measurement, not a merge artefact.
-        Assert.DoesNotContain("nearestRatedNeighbourRating", names);
-        Assert.DoesNotContain("nearestRatedNeighbourSim", names);
+        // v4's tail is now the four slots immediately BEFORE v5's — appended, not interleaved.
+        Assert.Equal("hasCertification", names[^7]);
+        Assert.Equal("hasSubgenres", names[^6]);
+        Assert.Equal("hasAttributesTone", names[^5]);
+        Assert.Equal("hasAttributesEra", names[^4]);
 
-        // v5's tail is now the three slots immediately BEFORE v6's — appended, not interleaved.
-        Assert.Equal("knownPeopleFraction", names[^8]);
-        Assert.Equal("knownDirectorOrWriter", names[^7]);
-        Assert.Equal("isUnscripted", names[^6]);
-
-        // …and v4's before that, still where v5 left them.
-        Assert.Equal("hasCertification", names[^12]);
-        Assert.Equal("hasSubgenres", names[^11]);
-        Assert.Equal("hasAttributesTone", names[^10]);
-        Assert.Equal("hasAttributesEra", names[^9]);
-
-        // …and v3's before that.
-        Assert.Equal("hasRuntime", names[^17]);
-        Assert.Equal("hasTraktRating", names[^16]);
-        Assert.Equal("hasPopularity", names[^15]);
-        Assert.Equal("simNotInterestedCentroid", names[^14]);
-        Assert.Equal("dislikedGenreOverlap", names[^13]);
+        // …and v3's before that, still where v4 left them.
+        Assert.Equal("hasRuntime", names[^12]);
+        Assert.Equal("hasTraktRating", names[^11]);
+        Assert.Equal("hasPopularity", names[^10]);
+        Assert.Equal("simNotInterestedCentroid", names[^9]);
+        Assert.Equal("dislikedGenreOverlap", names[^8]);
 
         // Every scalar ahead of the deleted slot keeps its v3 index.
         Assert.Equal(0, Array.IndexOf(names, "releaseAgeLog"));
@@ -131,164 +116,6 @@ public class FeatureLeakageMathTests
         Assert.Equal(5, Array.IndexOf(names, "tmdbPopularityLog"));
         Assert.Equal(6, Array.IndexOf(names, "certificationOrdinal"));
         Assert.Equal(15, Array.IndexOf(names, "contrarianAdjustedRating"));
-    }
-
-    [Fact]
-    public void Leaving_one_member_out_of_a_centroid_equals_never_having_had_it()
-    {
-        // The embedding-side twin of Leaving_one_rating_out_equals_never_having_had_it, and the
-        // arithmetic behind simLovedCentroid, simRecentCentroid and — since v6 — simWatchedCentroid.
-        // Subtracting a member from (mean, n) must give the mean of a pool that never held it, or a
-        // training row keeps seeing a shadow of its own embedding in the vector describing it.
-        float[] a = [1f, 0f, 0f];
-        float[] b = [0f, 1f, 0f];
-        float[] c = [0f, 0f, 1f];
-
-        var all = Mean([a, b, c]);
-        var looped = FeatureVectorBuilder.CentroidExcluding(all, 3, a);
-        var never = Mean([b, c]);
-
-        Assert.NotNull(looped);
-        for (var i = 0; i < never.Length; i++)
-        {
-            Assert.Equal(never[i], looped![i], 5);
-        }
-
-        // The member that WAS the whole centroid leaves nothing behind, and null is how Cosine is
-        // told "no similarity known" rather than "similarity zero".
-        Assert.Null(FeatureVectorBuilder.CentroidExcluding(a, 1, a));
-        Assert.Null(FeatureVectorBuilder.CentroidExcluding(null, 5, a));
-    }
-
-    [Fact]
-    public void Leaving_one_member_out_of_a_weighted_centroid_uses_that_members_own_weight()
-    {
-        // simRewatchCentroid is weighted by min(plays, 3), so the unweighted subtraction is not
-        // merely imprecise here — it is wrong by a different amount for every title, and wrong in the
-        // direction of whichever title was watched most. This is why SelfExclusion carries the
-        // per-title rewatch weights and not just their total.
-        float[] a = [1f, 0f, 0f];
-        float[] b = [0f, 1f, 0f];
-        float[] c = [0f, 0f, 1f];
-        double wa = 3d, wb = 2d, wc = 2d;
-
-        var all = WeightedMean([(a, wa), (b, wb), (c, wc)]);
-        var looped = FeatureVectorBuilder.CentroidExcludingWeighted(all, wa + wb + wc, wa, a);
-        var never = WeightedMean([(b, wb), (c, wc)]);
-
-        Assert.NotNull(looped);
-        for (var i = 0; i < never.Length; i++)
-        {
-            Assert.Equal(never[i], looped![i], 5);
-        }
-
-        // Subtracting the member's weight with the UNWEIGHTED formula gets a visibly different answer
-        // — the test exists so the two can never be confused at a call site.
-        var wrong = FeatureVectorBuilder.CentroidExcluding(all, 3, a);
-        Assert.NotNull(wrong);
-        Assert.NotEqual(never[0], wrong![0], 3);
-
-        // The whole centroid taken back out leaves nothing, exactly as the unweighted form does.
-        Assert.Null(FeatureVectorBuilder.CentroidExcludingWeighted(a, 3d, 3d, a));
-    }
-
-    [Fact]
-    public void Watched_genre_share_is_a_union_over_the_pool_and_never_counts_the_candidate_itself()
-    {
-        // The definition, as arithmetic: |{pool titles sharing ≥1 genre}| / |pool|, with the
-        // candidate removed from BOTH halves when it is itself a pool member. A title is counted ONCE
-        // however many of the candidate's genres it shares, which is why the pool is held as masks
-        // rather than per-genre counts — summing per-genre counts double-counts every multi-genre
-        // title and can exceed the pool size outright.
-        const ulong drama = 1UL << 0;
-        const ulong thriller = 1UL << 1;
-        const ulong western = 1UL << 2;
-
-        // Six drama, two drama+thriller, two western.
-        List<ulong> pool =
-        [
-            drama, drama, drama, drama, drama, drama,
-            drama | thriller, drama | thriller,
-            western, western,
-        ];
-
-        // A drama candidate that is NOT in the pool reaches eight of the ten.
-        Assert.Equal(0.8d, FeatureVectorBuilder.WatchedGenreShare(pool, drama, candidateIsPoolMember: false), 6);
-
-        // A drama+thriller candidate reaches the same eight — the union counts each title once, and a
-        // per-genre sum would have claimed (8 + 2) / 10 = 1.0 here.
-        Assert.Equal(0.8d, FeatureVectorBuilder.WatchedGenreShare(pool, drama | thriller, candidateIsPoolMember: false), 6);
-
-        // The same candidate WHEN IT IS ONE OF THE POOL ROWS: it always matches itself, so it comes
-        // out of both halves — 7/9, not 8/10.
-        Assert.Equal(7d / 9d, FeatureVectorBuilder.WatchedGenreShare(pool, drama, candidateIsPoolMember: true), 6);
-
-        // A rare genre reads low rather than absent, which is the spread the feature exists for.
-        Assert.Equal(0.2d, FeatureVectorBuilder.WatchedGenreShare(pool, western, candidateIsPoolMember: false), 6);
-
-        // No pool, no genres in common with anything the schema knows, or a pool of one that IS the
-        // candidate: all 0, never a divide by zero.
-        Assert.Equal(0d, FeatureVectorBuilder.WatchedGenreShare([], drama, false));
-        Assert.Equal(0d, FeatureVectorBuilder.WatchedGenreShare(pool, 0UL, false));
-        Assert.Equal(0d, FeatureVectorBuilder.WatchedGenreShare([drama], drama, candidateIsPoolMember: true));
-    }
-
-    [Fact]
-    public void A_genre_mask_only_lights_bits_the_pool_actually_taught_it()
-    {
-        // The mask is built from the WATCHED pool's own genre vocabulary, so a candidate genre nobody
-        // in the pool carries contributes no bit and therefore no match — which is the correct answer
-        // (nothing watched shares it), not a bug.
-        var bits = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["drama"] = 0,
-            ["western"] = 1,
-        };
-
-        Assert.Equal(1UL, FeatureVectorBuilder.GenreMask(["drama"], bits));
-        Assert.Equal(3UL, FeatureVectorBuilder.GenreMask(["drama", "western"], bits));
-        Assert.Equal(1UL, FeatureVectorBuilder.GenreMask(["DRAMA"], bits));
-        Assert.Equal(0UL, FeatureVectorBuilder.GenreMask(["holiday"], bits));
-        Assert.Equal(0UL, FeatureVectorBuilder.GenreMask([], bits));
-    }
-
-    private static float[] Mean(IReadOnlyList<float[]> vectors)
-    {
-        var result = new float[vectors[0].Length];
-        foreach (var vector in vectors)
-        {
-            for (var i = 0; i < result.Length; i++)
-            {
-                result[i] += vector[i];
-            }
-        }
-
-        for (var i = 0; i < result.Length; i++)
-        {
-            result[i] /= vectors.Count;
-        }
-
-        return result;
-    }
-
-    private static float[] WeightedMean(IReadOnlyList<(float[] Vector, double Weight)> members)
-    {
-        var result = new float[members[0].Vector.Length];
-        var total = members.Sum(m => m.Weight);
-        foreach (var (vector, weight) in members)
-        {
-            for (var i = 0; i < result.Length; i++)
-            {
-                result[i] += (float)(weight * vector[i]);
-            }
-        }
-
-        for (var i = 0; i < result.Length; i++)
-        {
-            result[i] = (float)(result[i] / total);
-        }
-
-        return result;
     }
 
     [Fact]
@@ -306,7 +133,7 @@ public class FeatureLeakageMathTests
     }
 
     [Fact]
-    public void Schema_version_six_keeps_every_block_in_order_and_appends_within_them()
+    public void Schema_version_five_keeps_every_block_in_order_and_appends_within_them()
     {
         // Block-level form of the append rule: the scalar, genre and subgenre blocks keep their
         // internal order and their relative order, and the two new blocks land after all of them.
@@ -316,26 +143,13 @@ public class FeatureLeakageMathTests
 
         Assert.Equal(expectedWidth, FeatureSchema.VectorLength);
         Assert.Equal(expectedWidth, all.Length);
-        Assert.Equal(46, FeatureSchema.Scalars.Length);
+        Assert.Equal(41, FeatureSchema.Scalars.Length);
         Assert.Equal(30, FeatureSchema.Genres.Length);
+        Assert.Equal(132, FeatureSchema.VectorLength);
 
-        // 137, and 41 + 5 is where it comes from. The v6 plan said "132 → 138" in prose; 132 + 5 is
-        // 137 and 132 + the 7 it originally scoped would have been 139, so the planned number was
-        // never reachable either way. That is the FOURTH time a hand-typed width has been wrong in
-        // this project's prose, which is exactly why nothing interpolates a literal and why this
-        // assertion is derived above before it is pinned below.
-        Assert.Equal(137, FeatureSchema.VectorLength);
-
-        // v6 is a pure APPEND: five scalars on the end of the scalar block, nothing anywhere else.
-        // Every index that existed in v5 is unmoved — the width alone changed, which is the loud
-        // failure mode a stored artifact needs.
-        Assert.Equal("isUnscripted", FeatureSchema.Scalars[40]);
-        Assert.Equal(
-            ["simWatchedCentroid", "hasWatchedCentroid", "simRewatchCentroid", "hasRewatchCentroid", "watchedGenreShare"],
-            FeatureSchema.Scalars[41..]);
-
-        // v5's own append is still where v5 left it: three scalars on the end of the scalar block,
-        // five slugs on the end of the genre block.
+        // v5 is a pure APPEND at both levels: three scalars on the end of the scalar block, five
+        // slugs on the end of the genre block. Every index that existed in v4 is unmoved — the
+        // width alone changed, which is the loud failure mode a stored artifact needs.
         Assert.Equal("western", FeatureSchema.Genres[24]);
         Assert.Equal(["reality", "soap", "talk-show", "news", "game-show"], FeatureSchema.Genres[25..]);
         Assert.Equal("genre:action", all[FeatureSchema.Scalars.Length]);
