@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_HISTORY_TURNS,
   MAX_SHOWN_IDS,
@@ -8,8 +8,11 @@ import {
   createMountGuard,
   initialChatState,
   lastUserQuery,
+  CONVERSATION_ID_KEY,
   floorHeldBack,
   formatFloor,
+  readStoredConversationId,
+  storeConversationId,
   nextBootstrap,
   plural,
   showMoodPresets,
@@ -684,6 +687,63 @@ describe("formatFloor", () => {
     // No saved bar is not a bar of zero — the tray falls back to wording rather than "0.0".
     expect(formatFloor(null)).toBeNull();
     expect(formatFloor(undefined)).toBeNull();
+  });
+});
+
+/**
+ * The client persisted no conversation id at all, so a reload could only ask for the ACCOUNT's
+ * newest thread — two tabs, or a phone and a laptop, silently converged onto whichever wrote last
+ * and the thread you were reading vanished from the UI. This is the plumbing for the per-tab
+ * resume: the id is remembered, and every failure to remember it is swallowed, because a
+ * convenience must never be able to take a turn down with it.
+ */
+describe("conversation id persistence", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function fakeStorage(initial: Record<string, string> = {}) {
+    const map = new Map(Object.entries(initial));
+    return {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+      removeItem: (k: string) => void map.delete(k),
+      read: () => map.get(CONVERSATION_ID_KEY) ?? null,
+    };
+  }
+
+  it("round-trips an id and clears it on null", () => {
+    const store = fakeStorage();
+    vi.stubGlobal("localStorage", store);
+
+    storeConversationId("c1e0e3a2-0000-0000-0000-000000000001");
+    expect(store.read()).toBe("c1e0e3a2-0000-0000-0000-000000000001");
+    expect(readStoredConversationId()).toBe("c1e0e3a2-0000-0000-0000-000000000001");
+
+    storeConversationId(null);
+    expect(store.read()).toBeNull();
+    expect(readStoredConversationId()).toBeNull();
+  });
+
+  it("survives every way storage can fail, and reads an empty value as nothing", () => {
+    // Fixture variation across the three failures that are real in a browser and one that is real
+    // in a test runner: no localStorage at all (this very suite runs in node), a setItem that
+    // throws (a full quota, or Safari's private mode), a getItem that throws (a blocked origin),
+    // and a stored empty string (a previous write that half-landed).
+    vi.unstubAllGlobals();
+    expect(() => storeConversationId("c1")).not.toThrow();
+    expect(readStoredConversationId()).toBeNull();
+
+    vi.stubGlobal("localStorage", {
+      getItem: () => { throw new Error("blocked"); },
+      setItem: () => { throw new Error("quota"); },
+      removeItem: () => { throw new Error("quota"); },
+    });
+    expect(() => storeConversationId("c1")).not.toThrow();
+    expect(readStoredConversationId()).toBeNull();
+
+    vi.stubGlobal("localStorage", fakeStorage({ [CONVERSATION_ID_KEY]: "" }));
+    expect(readStoredConversationId()).toBeNull();
   });
 });
 

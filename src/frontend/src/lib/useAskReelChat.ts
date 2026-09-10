@@ -39,6 +39,55 @@ export interface ChatTurn {
 export const MAX_HISTORY_TURNS = 12;
 export const MAX_SHOWN_IDS = 300;
 
+/**
+ * Where this tab remembers which Ask Reel thread it is on.
+ *
+ * A reload resumes `/conversations/latest`, which is the account's newest thread and not
+ * necessarily this tab's: two tabs, or a phone and a laptop, silently converge — reloading tab A
+ * drops you into tab B's conversation and the thread you were reading is gone from the UI. The
+ * client persisted no id at all, so it could not even tell that had happened. Writing it here is
+ * the plumbing for the fix; the read side stays on `/latest` until the server can serve a
+ * conversation by id.
+ */
+export const CONVERSATION_ID_KEY = "reel.ask.conversationId";
+
+/** `localStorage`, or null wherever it is absent or throws (SSR, private mode, blocked origins). */
+function storage(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remembers (or forgets) this tab's conversation id. Every failure is swallowed on purpose: a
+ * remembered id is a convenience, never a precondition, and a full quota or a blocked origin must
+ * not take the turn down with it.
+ */
+export function storeConversationId(id: string | null): void {
+  const store = storage();
+  if (!store) return;
+  try {
+    if (id) store.setItem(CONVERSATION_ID_KEY, id);
+    else store.removeItem(CONVERSATION_ID_KEY);
+  } catch {
+    // See above — writing this is best-effort.
+  }
+}
+
+/** The conversation id this tab last saw, or null. */
+export function readStoredConversationId(): string | null {
+  const store = storage();
+  if (!store) return null;
+  try {
+    const id = store.getItem(CONVERSATION_ID_KEY);
+    return id && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Inter-frame silence that means the stream is dead rather than thinking, in milliseconds. */
 export const STREAM_IDLE_TIMEOUT_MS = 30_000;
 
@@ -510,7 +559,12 @@ export function useAskReelChat() {
       armWatchdog();
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data }); break;
-        case "conversation": dispatch({ type: "conversation", data: ev.data }); break;
+        case "conversation":
+          // Remembered as it arrives, not at the end of the turn: an abandoned or failed stream
+          // still happened, and the thread it opened is still this tab's.
+          storeConversationId(ev.data.id);
+          dispatch({ type: "conversation", data: ev.data });
+          break;
         case "assistant-message": dispatch({ type: "assistant", data: ev.data }); break;
         case "candidate": dispatch({ type: "candidate", data: ev.data }); break;
         case "candidate-scored": dispatch({ type: "scored", data: ev.data }); break;
@@ -572,7 +626,11 @@ export function useAskReelChat() {
   }, [clearWatchdog]);
 
   const resume = useCallback((turns: ChatTurn[], conversationId: string, shown?: number[]) => {
-    if (turns.length > 0) dispatch({ type: "resume", turns, conversationId, shown });
+    if (turns.length === 0) return;
+    // A resumed thread is this tab's thread from now on, so it is remembered on the same terms as
+    // one started here — otherwise a cold visit that resumed would still have nothing stored.
+    storeConversationId(conversationId);
+    dispatch({ type: "resume", turns, conversationId, shown });
   }, []);
 
   useEffect(() => {
@@ -646,5 +704,11 @@ export function useAskReelChat() {
     holdingPrevious: state.holdingPrevious,
     /** Cards this turn streamed before it ended. What the stopped state counts. */
     arrived: state.arrived,
+    /**
+     * The thread this hook is on, mirrored into `localStorage` as it changes. Nothing reads it back
+     * yet — `/conversations/latest` is still the only way in — but it is what a per-tab resume and
+     * a conversation list will both be built on.
+     */
+    conversationId: state.conversationId,
   };
 }
