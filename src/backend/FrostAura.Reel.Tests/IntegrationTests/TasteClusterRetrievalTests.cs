@@ -297,15 +297,25 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : EmbeddedCatal
 
         var accountId = await SeedAccountAsync();
         await SeedPocketsAsync(accountId);
-        var now = DateTime.UtcNow;
+
+        // Both instants are pinned to a fixed hour of TODAY's UTC day rather than read off the wall
+        // clock. `DateTime.UtcNow` plus an hour is only "the same day" for 23 hours out of 24: run
+        // during the 23:00 UTC hour and the second write lands on the NEXT UTC day, where the
+        // provider CORRECTLY appends a second partition instead of replacing — and this test then
+        // fails for a reason that has nothing to do with its own claim. It did exactly that on
+        // 2026-09-10 at 23:08 UTC (expected 2, actual 4). The claim under test is about two writes
+        // inside one day, so the fixture must guarantee one day rather than hope for it.
+        var utcDay = DateTime.UtcNow.Date;
+        var morning = utcDay.AddHours(9);
+        var anHourLater = utcDay.AddHours(10);
 
         int Count() => Fixture.CreateContext(Scoped(accountId)).TasteClusters.Count();
 
         await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var provider = ProviderFor(db);
-            var partition = await provider.GetAsync(accountId, now, CancellationToken.None);
-            await provider.PersistAsync(accountId, now, partition, CancellationToken.None);
+            var partition = await provider.GetAsync(accountId, morning, CancellationToken.None);
+            await provider.PersistAsync(accountId, morning, partition, CancellationToken.None);
         }
 
         var after = Count();
@@ -313,11 +323,88 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : EmbeddedCatal
         await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var provider = ProviderFor(db);
-            var partition = await provider.GetAsync(accountId, now.AddHours(1), CancellationToken.None);
-            await provider.PersistAsync(accountId, now.AddHours(1), partition, CancellationToken.None);
+            var partition = await provider.GetAsync(accountId, anHourLater, CancellationToken.None);
+            await provider.PersistAsync(accountId, anHourLater, partition, CancellationToken.None);
         }
 
         Assert.Equal(after, Count());
+    }
+
+    /// <summary>
+    /// The day a partition is filed under is the UTC day of the instant, never the machine's LOCAL
+    /// day — pinned to 21:30 and 23:30 UTC, which on the founder's SAST (UTC+2) machine read 23:30
+    /// and 01:30 local and therefore straddle local midnight while sharing one UTC date. Both writes
+    /// must key to that one UTC date, and the second must replace the first.
+    ///
+    /// <para><b>What it defends.</b> A <c>DateOnly.FromDateTime(asOf.ToLocalTime())</c> anywhere in
+    /// <see cref="TasteClusterProvider"/> — in <see cref="TasteClusterProvider.PersistAsync"/>, in
+    /// <see cref="TasteClusterProvider.CacheKey"/> or in <see cref="TasteClusterProvider.PruneAsync"/>
+    /// — splits these two writes into two partitions here. Live, the same slip would give every
+    /// rebuild between local midnight and 02:00 a different day key from the rebuilds that preceded
+    /// it, which is precisely the drift the day-granular key exists to prevent: the stable-tonight
+    /// no-op suppression compares an assembled feed against the Active snapshot, so a partition that
+    /// moves mid-night makes every rebuild look like a change.</para>
+    ///
+    /// <para><b>On a UTC runner</b> local and UTC dates coincide and this degrades to a second
+    /// same-day replacement check — still true, still worth running, but the founder's UTC+2 machine
+    /// is where it actually bites. Stated rather than hidden, because a test that is weaker in CI
+    /// than on the dev box should say so.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_partition_day_is_the_UTC_day_and_not_the_local_day()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedPocketsAsync(accountId);
+
+        var utcDay = DateTime.UtcNow.Date;
+        var beforeLocalMidnight = utcDay.AddHours(21.5); // 23:30 SAST — local day D
+        var afterLocalMidnight = utcDay.AddHours(23.5);  // 01:30 SAST — local day D + 1
+
+        // The premise, asserted rather than assumed: one UTC day, two instants an hour apart.
+        Assert.Equal(DateOnly.FromDateTime(beforeLocalMidnight), DateOnly.FromDateTime(afterLocalMidnight));
+
+        async Task PersistAtAsync(DateTime asOf)
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            var provider = ProviderFor(db);
+            var partition = await provider.GetAsync(accountId, asOf, CancellationToken.None);
+            Assert.NotEmpty(partition);
+            await provider.PersistAsync(accountId, asOf, partition, CancellationToken.None);
+        }
+
+        await PersistAtAsync(beforeLocalMidnight);
+
+        int Count() => Fixture.CreateContext(Scoped(accountId)).TasteClusters.Count();
+        var afterFirst = Count();
+
+        await PersistAtAsync(afterLocalMidnight);
+
+        // Replaced, not appended — the assertion a local-day key fails.
+        Assert.Equal(afterFirst, Count());
+
+        await using (var scoped = Fixture.CreateContext(Scoped(accountId)))
+        {
+            var days = await scoped.TasteClusters
+                .Select(c => c.ComputedForDate)
+                .Distinct()
+                .ToListAsync();
+            Assert.Equal([DateOnly.FromDateTime(utcDay)], days);
+        }
+
+        // And the read path keys the same way the write path files: one day-granular cache key
+        // across local midnight, so the rebuilds either side of it share a partition.
+        Assert.Equal(
+            TasteClusterProvider.CacheKey(accountId, beforeLocalMidnight),
+            TasteClusterProvider.CacheKey(accountId, afterLocalMidnight));
+        Assert.EndsWith(
+            utcDay.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture),
+            TasteClusterProvider.CacheKey(accountId, afterLocalMidnight),
+            StringComparison.Ordinal);
     }
 
     /// <summary>
