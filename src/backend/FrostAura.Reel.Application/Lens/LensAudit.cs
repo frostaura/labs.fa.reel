@@ -38,6 +38,11 @@ public sealed record LensAuditRow(
     double? SpoilerFreeness,
     double? Voice,
     double? Overall,
+    /// <summary>
+    /// The judge's quoted POV slips — copy that made the viewer a character in the plot — or null.
+    /// Deliberately not folded into any mean; the phrase is the evidence.
+    /// </summary>
+    string? PovSlips,
     string? Comment);
 
 /// <summary>The audit as a whole — per-prompt-version means, and the rows behind them.</summary>
@@ -154,6 +159,7 @@ public sealed class LensAudit(
                 verdict?.SpoilerFreeness,
                 verdict?.Voice,
                 verdict?.Overall,
+                verdict?.PovSlips,
                 verdict?.Comment));
         }
 

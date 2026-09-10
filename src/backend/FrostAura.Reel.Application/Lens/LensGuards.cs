@@ -25,6 +25,21 @@ public static class LensRejectionReasons
     public const string UserReportedSpoiler = "user-reported-spoiler";
 
     /// <summary>
+    /// <c>lens</c> or <c>hook</c> used a banned marketing adjective. Carries the word — the audit
+    /// reads "marketing:unmissable" as a prompt defect, and "marketing" alone as a shrug.
+    /// </summary>
+    public const string Marketing = "marketing";
+
+    /// <summary>
+    /// The hook is a third-person tagline rather than something said to the viewer.
+    ///
+    /// <para><b>No token, because there is nothing to name.</b> Every other reason here points at an
+    /// offending word; this one is the ABSENCE of the viewer from a line that exists to address
+    /// them, and the evidence is the whole hook.</para>
+    /// </summary>
+    public const string HookVoice = "hook-voice";
+
+    /// <summary>
     /// A reason plus the token that caused it — "invented-anchor:Frontera". Stored on the row so a
     /// prompt iteration can be read as evidence rather than as a tally: knowing that eleven notes
     /// were refused for an invented anchor is a number, and knowing that nine of them named the
@@ -65,6 +80,17 @@ public static class LensRejectionReasons
 /// runaway-length rule is calibrated for a ≤160-char why-line and a <c>lens</c> is allowed 420. The
 /// two rules that do transfer — third-person leak and the banned opener — are applied field by
 /// field, and length is enforced by the parser against each field's own limit.</para>
+///
+/// <para><b>There is deliberately no deterministic POV-slip guard, and the reason is worth keeping.</b>
+/// Prompt v4 added the rule that "you" is the viewer and never a character, after live copy read
+/// "the city that failed you" about a city that failed HER. The obvious guard — a second-person
+/// pronoun as the object of a verb inside a plot clause — cannot be written reliably at this cost.
+/// "the city that failed you" and "the pacing that suited you" are the same shape, and only the
+/// first is wrong; separating them needs to know that "the city" is a story entity, which this
+/// class does not have and the regex cannot infer. A guard tuned to catch the first would refuse the
+/// second, and honest second-person address is the entire product. So the slip is handled where it
+/// can be judged rather than matched: the prompt states the rule with an example, and the audit's
+/// <c>povSlips</c> note quotes every occurrence for the next prompt iteration to read.</para>
 /// </summary>
 public static partial class LensGuards
 {
@@ -84,6 +110,42 @@ public static partial class LensGuards
     /// </summary>
     [GeneratedRegex(@"\b[A-Z][\p{L}'’\-]+(?:\s+(?:van|von|de|del|della|di|da|der|den)\s+|\s+)[A-Z][\p{L}'’\-]+(?:\s+[A-Z][\p{L}'’\-]+)?")]
     private static partial Regex ProperNounRegex();
+
+    /// <summary>
+    /// The marketing register, as a closed list. Deliberately short and literal: these nine are the
+    /// phrases prompt v4 bans by name, so the guard and the prompt can never disagree about what is
+    /// forbidden. A long list of "salesy-sounding" words would refuse honest copy — "tense" and
+    /// "relentless" are marketing words in the wrong sentence and accurate ones in the right sentence
+    /// — and the judgement about a word that is only sometimes wrong belongs to the audit's
+    /// <c>voice</c> score, not to a regex.
+    ///
+    /// <para>Applied to <c>lens</c> and <c>hook</c> only. <c>caution</c> is exempt on the same
+    /// asymmetry that exempts it from the anti-recommendation rule: a reservation quoting the pitch
+    /// it is arguing against — "it is not the gripping thing the trailer sold" — is doing its job.</para>
+    /// </summary>
+    [GeneratedRegex(
+        @"\b(?:gripping|unmissable|masterful|stunning|unforgettable"
+        + @"|must[\s\-]+see|thrilling\s+ride|edge[\s\-]+of[\s\-]+your[\s\-]+seat|tour\s+de\s+force)\b",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex MarketingRegex();
+
+    /// <summary>
+    /// The viewer, addressed. "you", "your", "yours" and every contraction of them — <c>\b</c>
+    /// closes "you'll" on the apostrophe, so the bare alternative covers the lot.
+    /// </summary>
+    [GeneratedRegex(@"\byou(?:rs?)?\b", RegexOptions.IgnoreCase)]
+    private static partial Regex SecondPersonRegex();
+
+    /// <summary>
+    /// The imperatives a hook may open on instead of naming the viewer — "Expect a slow hour",
+    /// "Give this an evening if you have one". Small and closed on purpose: an open-ended
+    /// "starts with a verb" test passes "Turns grief into a revenge chase", which is the exact
+    /// poster line this guard exists to refuse.
+    /// </summary>
+    [GeneratedRegex(
+        @"^[\s""'“‘]*(?:expect|give|watch|save|start|press|put|take|queue|try)\b",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex HookImperativeRegex();
 
     /// <summary>
     /// Characters that may trail the last real word of a field: whitespace, and the punctuation a
@@ -268,8 +330,53 @@ public static partial class LensGuards
             return LensRejectionReasons.AntiRecommendation;
         }
 
+        // The two register rules, LAST — this method is ordered worst-first so the reason on the row
+        // is the most serious one, and a hook that both argues against its own card and forgets the
+        // viewer should be filed under the first of those, not the second.
+        if ((FirstMarketingWord(note.Lens) ?? FirstMarketingWord(note.Hook)) is { } marketing)
+        {
+            return LensRejectionReasons.WithToken(LensRejectionReasons.Marketing, marketing);
+        }
+
+        if (!IsAddressedToTheViewer(note.Hook))
+        {
+            return LensRejectionReasons.HookVoice;
+        }
+
         return null;
     }
+
+    /// <summary>
+    /// The first banned marketing phrase in a field, normalised for the rejection token — collapsed
+    /// whitespace, lowercased — or null. Normalising matters because the token is what the audit
+    /// GROUPS by: "Must-See" and "must see" are one prompt defect and must count as one.
+    /// </summary>
+    internal static string? FirstMarketingWord(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var match = MarketingRegex().Match(text);
+        return match.Success
+            ? WhitespaceRegex().Replace(match.Value, " ").ToLowerInvariant()
+            : null;
+    }
+
+    /// <summary>
+    /// Whether the hook is said TO the viewer: it names them, or it opens on one of the imperatives
+    /// aimed at them.
+    ///
+    /// <para><b>This one is a refusal and never a repair.</b> Every other guard here judges copy
+    /// that could in principle be edited into shape; turning "Jodie Foster turns grief into a tight
+    /// revenge chase" into a second-person hook means writing a different sentence, which is the
+    /// model's job and not a guard's. So the note is rejected and the surface falls back, rather
+    /// than rendering a poster line with a pronoun bolted on.</para>
+    /// </summary>
+    public static bool IsAddressedToTheViewer(string? hook) =>
+        !string.IsNullOrWhiteSpace(hook)
+        && (SecondPersonRegex().IsMatch(hook) || HookImperativeRegex().IsMatch(hook));
 
     /// <summary>
     /// Every proper noun the note mentions — the candidate set the provenance lookup resolves
