@@ -190,7 +190,7 @@ public static class TitleEndpoints
                 {
                     contributions.Add(new ContributionEntry(
                         ContributionDetails.DislikedSimilarityFeature, -Math.Round((decimal)demotion, 1)));
-                    contributionDetails = [.. contributionDetails, ContributionDetails.DislikedSimilarity()];
+                    contributionDetails = [.. contributionDetails, ContributionDetails.DislikedSimilarity(title.Genres, profile)];
                 }
             }
 

@@ -17,6 +17,28 @@ namespace FrostAura.Reel.Application.Ranking;
 /// reaction decays with <c>exp(-ageDays/90)</c>, so a dislike from last week outweighs one from
 /// five months ago.
 ///
+/// <b>The genre component answers to the user's own ratings (v5).</b> A <c>Reason = Genre</c>
+/// dismissal used to add its recency weight to a genre and stop there, so on an account with a
+/// large library the genre map simply saturated: the founder's 44 genre-reason dismissals put
+/// drama, comedy, romance, action and science-fiction — the five genres he rates MOST, all at or
+/// above his overall mean — at the full 0.6 cap, while unscripted television, which he had barely
+/// reacted to, paid nothing, and the feed filled with reality shows. Two bounds now sit on that
+/// component, both in <see cref="GenreDemotion"/>: each dismissal is damped by the user's rating
+/// volume in that genre (<see cref="VolumeDamping"/>), and a genre their own shrunken affinity
+/// SUPPORTS is held to <see cref="SupportedGenreCap"/> rather than <see cref="GenreCap"/>. The
+/// per-title components — seen-enough, tone, centroid — are untouched: a dismissal that is about
+/// THIS title should keep its full force, and that was never the failure.
+///
+/// <para><b>The centroid term was checked for the same failure and does not have it</b> (measured
+/// on the live account, 2026-09-10, over its 174 embedded not-interested titles against 4,265
+/// catalogue candidates). Its mean cosine is 0.505 and its maximum 0.713, so only 10% of candidates
+/// clear the 0.6 gate at all and the worst penalty it can levy is 0.21, a third of the genre term's
+/// ceiling. Crucially it does not track dismissal VOLUME: the centroid is a weighted MEAN, so 44
+/// drama dismissals make it a more coherent drama centroid rather than a larger penalty, and the
+/// per-genre gate rates it produces run horror 31% / thriller 27% / drama 11% / comedy 4% — highest
+/// on the two genres the founder actually rates below his mean. It is discriminating within genres,
+/// which is what it was built to do. Left alone.</para>
+///
 /// <see cref="DemotionFor"/> turns a candidate's genres / tone / embedding into a 0–1.5
 /// rating-point penalty that serving subtracts AFTER base + residual — it works immediately,
 /// without retraining, on every surface that scores through <c>OnDemandScorer</c>, the feed build,
@@ -39,9 +61,10 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
     public const double TotalCap = 1.5;
 
     // Component scales and caps. Genre: 0.3 rating points per unit of matched recency-weighted
-    // dislike (two fresh same-genre dislikes reach the 0.6 cap). Tone: a flat 0.3, recency-weighted.
-    // Seen-enough: up to 0.9 for a near-identical plot, gated so unrelated titles pay nothing.
-    // General centroid: a mild 0.3, gated high because the centroid of mixed dislikes is diffuse.
+    // dislike, VOLUME-NORMALISED and AFFINITY-CAPPED (see GenreDemotion). Tone: a flat 0.3,
+    // recency-weighted. Seen-enough: up to 0.9 for a near-identical plot, gated so unrelated titles
+    // pay nothing. General centroid: a mild 0.3, gated high because the centroid of mixed dislikes
+    // is diffuse.
     private const double GenreScale = 0.3;
     private const double GenreCap = 0.6;
     private const double TonePenalty = 0.3;
@@ -50,7 +73,64 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
     private const double GeneralScale = 0.3;
     private const double GeneralGate = 0.6;
 
+    /// <summary>
+    /// The ceiling on a genre-reason demotion for a genre the user's OWN ratings support — a genre
+    /// whose shrunken affinity sits at or above their overall mean. A quarter of the unsupported
+    /// cap, which is the point: it can still break a tie, and it can no longer decide a page.
+    /// </summary>
+    public const double SupportedGenreCap = 0.15;
+
+    /// <summary>
+    /// The rating count at which volume normalisation reaches its first e-fold — the "20" in
+    /// <c>weight / (1 + log(1 + N/20))</c>. See <see cref="VolumeDamping"/>.
+    /// </summary>
+    public const double GenreVolumeScale = 20d;
+
+    /// <summary>
+    /// The shrinkage constant for the per-genre affinity the supported cap is decided on. The same
+    /// k the feature layer uses (<c>TasteMath.ShrinkageK</c>), restated here rather than referenced
+    /// because <c>Ranking</c> must not take a dependency on <c>Ml</c> in this direction; the two are
+    /// pinned equal by test.
+    /// </summary>
+    public const double GenreAffinityShrinkageK = 3d;
+
     private static readonly TimeSpan ProfileTtl = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// One genre, as the user's OWN ratings describe it: how many titles in it they have rated, and
+    /// their shrunken mean rating for it. This is the evidence the genre demotion is measured
+    /// against — a "wrong genre" dismissal is a claim about a genre, and a claim about a genre the
+    /// user has rated 744 times has to answer to those 744 ratings.
+    /// </summary>
+    public readonly record struct GenreEvidence(int RatingCount, double Affinity);
+
+    /// <summary>
+    /// The account's per-genre rating evidence, plus their overall mean. <see cref="None"/> is the
+    /// honest empty state — no ratings at all, so no genre is "supported" and the demotion falls
+    /// back to its unsupported cap, which is exactly the pre-v5 behaviour for a brand new account.
+    /// </summary>
+    public sealed record GenreTaste(IReadOnlyDictionary<string, GenreEvidence> ByGenre, double UserMean)
+    {
+        public static GenreTaste None { get; } = new(
+            new Dictionary<string, GenreEvidence>(StringComparer.OrdinalIgnoreCase), 0d);
+
+        /// <summary>
+        /// The user's evidence for one genre. A genre they have never rated returns zero ratings —
+        /// NOT their mean affinity — because "no evidence" must never read as "supported".
+        /// </summary>
+        public GenreEvidence For(string genre) =>
+            ByGenre.TryGetValue(genre, out var evidence) ? evidence : new GenreEvidence(0, 0d);
+
+        /// <summary>
+        /// True when the user's own ratings in this genre argue AGAINST demoting it: they have rated
+        /// it at all, and their shrunken affinity for it sits at or above their overall mean.
+        /// </summary>
+        public bool Supports(string genre)
+        {
+            var evidence = For(genre);
+            return evidence.RatingCount > 0 && evidence.Affinity >= UserMean;
+        }
+    }
 
     /// <summary>One recent dislike, for the prompt line and diagnostics. Weight is the recency decay.</summary>
     public sealed record DislikedTitle(
@@ -73,7 +153,13 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
         /// grounded in these reactions, so a note written before a dismissal must not survive it,
         /// while the decay drifting by a percent overnight must not invalidate anything.
         /// </summary>
-        string Version = "none")
+        string Version = "none",
+        /// <summary>
+        /// The account's own per-genre rating evidence, which the genre-reason demotion is bounded
+        /// by (see <see cref="GenreDemotion"/>). Defaults to <see cref="GenreTaste.None"/> so a
+        /// profile built without it behaves exactly as it did before v5.
+        /// </summary>
+        GenreTaste? UserGenres = null)
     {
         /// <summary>
         /// The version of a profile with nothing in it — a real value, not a placeholder. The
@@ -243,7 +329,78 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
             toneWeights,
             seenEnough,
             centroid,
-            ComputeVersion(newestPerTitle.Select(r => (r.TitleId, r.Kind, r.Reason))));
+            ComputeVersion(newestPerTitle.Select(r => (r.TitleId, r.Kind, r.Reason))),
+            await BuildGenreTasteAsync(accountId, genreWeights.Keys, ct));
+    }
+
+    /// <summary>
+    /// The account's own rating evidence for the genres their dismissals touch — count and shrunken
+    /// affinity per genre, plus their overall mean. Loaded ONLY for the genres that actually carry a
+    /// dislike weight, because those are the only ones <see cref="GenreDemotion"/> can consult, and
+    /// an account with no genre-reason dismissals should not pay for a scan of its whole library.
+    ///
+    /// <para>The mean is over ALL movie/show-level ratings, not just the genres in question — it is
+    /// the same "your overall mean" the affinity is shrunk toward and compared against, so shrinking
+    /// toward a partial mean would make the comparison circular.</para>
+    /// </summary>
+    private async Task<GenreTaste> BuildGenreTasteAsync(
+        Guid accountId, IEnumerable<string> genres, CancellationToken ct)
+    {
+        var wanted = genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (wanted.Count == 0)
+        {
+            return GenreTaste.None;
+        }
+
+        // One row per rated title (the unique index allows one movie/show-level rating per title,
+        // but a defensive max keeps a duplicate from double-counting into the genre pools).
+        var rated = await db.UserRatings
+            .Where(r => r.AccountId == accountId
+                && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
+            .Select(r => new { r.TitleId, r.Rating })
+            .ToListAsync(ct);
+        if (rated.Count == 0)
+        {
+            return GenreTaste.None;
+        }
+
+        var perTitle = rated
+            .GroupBy(r => r.TitleId)
+            .ToDictionary(g => g.Key, g => (double)g.Max(r => r.Rating));
+        var userMean = perTitle.Values.Average();
+
+        var ratedIds = perTitle.Keys.ToList();
+        var titleGenres = await db.Titles
+            .Where(t => ratedIds.Contains(t.Id))
+            .Select(t => new { t.Id, t.Genres })
+            .ToListAsync(ct);
+
+        var pools = new Dictionary<string, (int Count, double Sum)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var title in titleGenres)
+        {
+            if (!perTitle.TryGetValue(title.Id, out var rating))
+            {
+                continue;
+            }
+
+            foreach (var genre in title.Genres)
+            {
+                if (!wanted.Contains(genre))
+                {
+                    continue;
+                }
+
+                var pool = pools.GetValueOrDefault(genre);
+                pools[genre] = (pool.Count + 1, pool.Sum + rating);
+            }
+        }
+
+        var byGenre = pools.ToDictionary(
+            kv => kv.Key,
+            kv => new GenreEvidence(kv.Value.Count, ShrunkenGenreAffinity(kv.Value.Sum, kv.Value.Count, userMean)),
+            StringComparer.OrdinalIgnoreCase);
+
+        return new GenreTaste(byGenre, userMean);
     }
 
     /// <summary>
@@ -261,7 +418,7 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
             return 0d;
         }
 
-        var total = Math.Min(GenreCap, GenreOverlap(genres, profile.GenreWeights) * GenreScale);
+        var total = GenreDemotion(genres, profile);
 
         if (tone is not null
             && AttributeVocabulary.IsClosedVocabTone(tone)
@@ -375,6 +532,93 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
 
         return total;
     }
+
+    /// <summary>
+    /// Volume damping for a genre-reason dismissal: <c>1 / (1 + log(1 + N / 20))</c>, where N is how
+    /// many titles in that genre the user has rated. The shape, and why this one:
+    ///
+    /// <list type="bullet">
+    /// <item>It is <b>1.0 at N = 0</b> — an account that has never rated the genre is not damped at
+    /// all, so a new user's dismissals still steer their feed at full strength. This is the case the
+    /// original design was built for and it is left exactly as it was.</item>
+    /// <item>It is <b>logarithmic, not linear</b>: 1/1.69 at N = 20, 1/2.40 at N = 100, 1/3.31 at
+    /// N = 300, 1/4.64 at N = 744. Volume never cancels a dismissal outright — it cannot reach zero
+    /// — it only makes each one worth less against a larger body of evidence, which is the same
+    /// arithmetic as the empirical-Bayes shrinkage every affinity in this system already uses.</item>
+    /// <item>The <b>20</b> is the first e-fold: below about twenty ratings in a genre the user has
+    /// not really told us anything about it, so the damping stays near 1 and their dismissals are
+    /// taken at face value.</item>
+    /// </list>
+    ///
+    /// <para><b>Why it exists.</b> On the founder's live account, 44 Genre-reason dismissals put
+    /// drama at a recency-weighted dislike weight of 13.6 — against 744 drama ratings averaging
+    /// 6.83, above his overall mean of 6.74. Comedy, romance, action and science-fiction were the
+    /// same story. Every scripted title therefore carried the full 0.6 genre demotion while
+    /// unscripted television, which he has barely reacted to, carried nothing at all — and the feed
+    /// filled with reality shows. A "wrong genre" dismissal on a drama, from someone with 744 drama
+    /// ratings, is evidence about that TITLE, not about drama.</para>
+    /// </summary>
+    public static double VolumeDamping(int genreRatingCount) =>
+        1d / (1d + Math.Log(1d + (Math.Max(0, genreRatingCount) / GenreVolumeScale)));
+
+    /// <summary>
+    /// The genre-reason component of the demotion: per-genre, volume-damped, capped by what the
+    /// user's OWN affinity in that genre supports, then summed and held under the global
+    /// <see cref="GenreCap"/>.
+    ///
+    /// <para>The per-genre cap is the half that fixes the founder's page. Volume damping alone does
+    /// not: 13.6 damped by 744 drama ratings is still 2.9, and 2.9 × 0.3 is still over the 0.6 cap.
+    /// So the demotion for a genre the user's ratings SUPPORT — they have rated it, and their
+    /// shrunken affinity for it is at or above their overall mean — is additionally held to
+    /// <see cref="SupportedGenreCap"/>. It can nudge; it can no longer decide a page.</para>
+    ///
+    /// <para><b>The cap is per-genre, not per-title, and that is deliberate.</b> A title tagged
+    /// [drama, horror] for a user who loves drama and dislikes horror pays the supported cap on
+    /// drama and the full cap on horror. Taking the title-level minimum would let one loved genre
+    /// launder a genuinely disliked one; taking the maximum would mean a loved genre never protects
+    /// anything. Each genre answers for itself, and the sum is bounded as it always was.</para>
+    ///
+    /// <para><b>This deliberately differs from <see cref="GenreOverlap"/> now,</b> which is still
+    /// the raw unbounded sum and still feeds the schema-v3 <c>dislikedGenreOverlap</c> FEATURE. The
+    /// feature is raw evidence the model weights for itself — and since schema v5 it can condition
+    /// that weight on <c>userGenreAffinity</c> and the genre one-hots, which is a better instrument
+    /// than any constant here. This function is a hand-set serving rule, and a hand-set rule is
+    /// exactly the thing that must not out-shout the user's own ratings.</para>
+    /// </summary>
+    public static double GenreDemotion(IReadOnlyList<string> genres, Profile profile)
+    {
+        if (genres.Count == 0 || profile.GenreWeights.Count == 0)
+        {
+            return 0d;
+        }
+
+        var taste = profile.UserGenres ?? GenreTaste.None;
+        var total = 0d;
+        foreach (var genre in genres)
+        {
+            var weight = profile.GenreWeights.GetValueOrDefault(genre);
+            if (weight <= 0d)
+            {
+                continue;
+            }
+
+            var evidence = taste.For(genre);
+            var damped = weight * VolumeDamping(evidence.RatingCount) * GenreScale;
+            total += Math.Min(taste.Supports(genre) ? SupportedGenreCap : GenreCap, damped);
+        }
+
+        return Math.Min(GenreCap, total);
+    }
+
+    /// <summary>
+    /// Shrunken per-genre affinity, the quantity <see cref="GenreTaste.Supports"/> compares against
+    /// the user's mean: <c>(Σr + k·mean) / (n + k)</c>. The same empirical-Bayes form — and the same
+    /// k — as the feature layer, so "his affinity for drama" means one thing across the system.
+    /// </summary>
+    public static double ShrunkenGenreAffinity(double ratingSum, int ratingCount, double userMean) =>
+        ratingCount <= 0
+            ? userMean
+            : (ratingSum + (GenreAffinityShrinkageK * userMean)) / (ratingCount + GenreAffinityShrinkageK);
 
     /// <summary>The recency decay: <c>exp(-ageDays / 90)</c>, clamped so future timestamps read as fresh.</summary>
     public static double RecencyWeight(DateTime createdAt, DateTime asOf) =>

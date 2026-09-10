@@ -27,9 +27,52 @@ public static class ContributionDetails
     /// <summary>Demotions below this stay silent — a barely-there penalty isn't worth a bar.</summary>
     public const double DislikeNoteThreshold = 0.3;
 
-    /// <summary>The synthetic entry appended when the demotion clears the threshold.</summary>
-    public static Detail DislikedSimilarity() =>
-        new(DislikedSimilarityFeature, People: [], Note: "you passed on similar titles recently");
+    /// <summary>
+    /// The synthetic entry appended when the demotion clears the threshold.
+    ///
+    /// <para>When the title's genres are given and the account's own ratings <b>support</b> one of
+    /// them (<see cref="DislikeSignal.GenreTaste.Supports"/>), the note says so out loud. That is
+    /// the visible half of the v5 genre rule: the user is being shown a lowered score on a title in
+    /// a genre they demonstrably like, and the honest explanation is that the penalty is coming from
+    /// the individual titles they passed on, held deliberately small BECAUSE of their own record in
+    /// that genre — not from a verdict on the genre. Without the clause the bar reads as "we think
+    /// you dislike drama" to someone with 744 drama ratings, which is the exact misreading the rule
+    /// exists to stop.</para>
+    /// </summary>
+    public static Detail DislikedSimilarity(
+        IReadOnlyList<string>? genres = null, DislikeSignal.Profile? profile = null)
+    {
+        var supported = SupportedGenre(genres, profile);
+        return new Detail(
+            DislikedSimilarityFeature,
+            People: [],
+            Note: supported is null
+                ? "you passed on similar titles recently"
+                : $"you passed on similar titles recently — kept small because you rate {supported} highly");
+    }
+
+    /// <summary>
+    /// The first of the title's genres the user's own ratings argue FOR, or null when none of them
+    /// do. Pure and null-tolerant: a caller without a profile or a genre list gets the plain note.
+    /// </summary>
+    private static string? SupportedGenre(IReadOnlyList<string>? genres, DislikeSignal.Profile? profile)
+    {
+        if (genres is null || profile?.UserGenres is not { } taste)
+        {
+            return null;
+        }
+
+        foreach (var genre in genres)
+        {
+            // Only a genre the demotion actually charged for is worth explaining away.
+            if (profile.GenreWeights.GetValueOrDefault(genre) > 0d && taste.Supports(genre))
+            {
+                return genre.Replace('-', ' ');
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>One verified person behind a person-affinity bar. Averages are 1dp at the response edge.</summary>
     public sealed record PersonDetail(Guid PersonId, string Name, decimal YourAverage, int TitleCount);
