@@ -69,7 +69,15 @@ public sealed class LiveSearchExpansionService(
     /// <summary>How many progressively-wider discovery passes a turn may make before giving up.</summary>
     private const int MaxRelaxations = 3;
 
-    /// <summary>How many picks survive when the account's rating floor would otherwise return none.</summary>
+    /// <summary>
+    /// How many cards must clear the account's rating floor for the floor to BIND at all. Fewer
+    /// than this and the floor is dropped for the turn, because a bar honoured strictly enough to
+    /// leave three cards on screen has stopped being a preference and become an empty result.
+    ///
+    /// <para>It is a threshold, never a take. It used to be both — the relaxed branch also
+    /// truncated to it — so "your rating floor was relaxed" silently meant "and most of your
+    /// results were discarded".</para>
+    /// </summary>
     private const int MinFloorRelaxedCount = 6;
 
     /// <summary>
@@ -342,7 +350,7 @@ public sealed class LiveSearchExpansionService(
 
             if (eligible.Count == 0)
             {
-                await emit("done", new { results = Array.Empty<object>(), reason = "no fresh matches — try another angle" });
+                await emit("done", new { results = Array.Empty<object>(), reason = AskReelReason.Empty });
                 return;
             }
 
@@ -484,39 +492,73 @@ public sealed class LiveSearchExpansionService(
                 .ToList();
 
             using var blendStage = timings.Stage(AskStageTimings.Blend);
-            var blended = BlendPool(ranked);
-            var blendedOutside = BlendPool(outside);
 
             // The account's minimum-predicted-rating filter is an explicit instruction and has to
             // reach THIS surface too. It only ever lived in the (now removed) /semantic endpoint,
             // so a user who set a rating floor had it silently ignored by every Ask Reel turn.
             var floor = await MinPredictedFloorAsync(accountId, ct);
-            var floorRelaxed = false;
+
+            // A card with no prediction CLEARS the floor, so an unscored card is an unannounced
+            // exemption from the user's own bar. Before judging anything, make one more attempt on
+            // exactly the cards that came back without a number — the first pass can miss a title
+            // whose feature vector was not buildable at the time. Only what is still unscored after
+            // this is genuinely unscorable, and only then does the exemption apply.
             if (floor > 0m)
             {
-                var abovefloor = blended.Where(x => x.Predicted is null || x.Predicted >= floor).ToList();
-                if (abovefloor.Count > 0)
+                var unscored = returned.Select(x => x.Title.Id).Where(id => !scores.ContainsKey(id)).ToList();
+                if (unscored.Count > 0)
                 {
-                    blended = abovefloor;
-                }
-                else
-                {
-                    // Honouring the floor strictly would empty the screen. Keep the best of what
-                    // there is and SAY the floor was relaxed, rather than silently ignoring the
-                    // setting (the old behaviour) or silently returning nothing.
-                    blended = blended.Take(MinFloorRelaxedCount).ToList();
-                    floorRelaxed = true;
+                    var late = await scorer.ScoreAsync(accountId, unscored, now, ct, taste);
+                    if (late.Count > 0)
+                    {
+                        var merged = scores.ToDictionary(kv => kv.Key, kv => kv.Value);
+                        foreach (var (id, predicted) in late)
+                        {
+                            merged[id] = predicted;
+                        }
+
+                        scores = merged;
+                        logger.LogInformation(
+                            "Ask Reel: {Late} of {Unscored} unscored cards were scored on the second pass, before the {Floor} rating floor.",
+                            late.Count, unscored.Count, floor);
+                    }
                 }
             }
+
+            var blended = BlendPool(ranked);
+            var blendedOutside = BlendPool(outside);
+
+            // Captured before the floor prunes the channel: a below-floor card still has to render
+            // with its outside-request flag, and the flag is a property of WHICH channel it came
+            // from, not of whether it survived.
+            var blendedOutsideIds = blendedOutside.Select(x => x.Title.Id).ToHashSet();
+
+            // MinFloorRelaxedCount is a THRESHOLD here, not a take: fewer than that many cards
+            // clearing the bar relaxes the floor for this turn and truncates nothing, and otherwise
+            // the cards that miss it are handed back to be shown in a tray and counted out loud.
+            var verdict = AskReelFloor.Apply(
+                blended, blendedOutside, x => x.Predicted, floor, MinFloorRelaxedCount);
+            var floorRelaxed = verdict.Relaxed;
+            blended = [.. verdict.Kept];
+            blendedOutside = [.. verdict.KeptOutside];
 
             // Outside cards ALWAYS trail every clean pick, each block ordered by its own blend,
             // and each outside card carries the flag plus its honest deterministic caption.
             var final = blended
-                .Select(x => Card(x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why))
+                .Select(x => Card(x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why, blend: x.Blend))
                 .Concat(blendedOutside.Select(x => Card(
                     x.Title, x.Sim, x.Predicted, fit: null,
                     why: OutsideWhy(NegationMatches(x.Title, intent)),
-                    outsideRequest: true)))
+                    outsideRequest: true, blend: x.Blend)))
+                .ToList();
+
+            // The tray. A card the floor removed is still a card the pipeline chose, and the user is
+            // owed the chance to look at it — a silent drop and a bug are indistinguishable from the
+            // outside. Rendered under a fence, never mixed into the picks.
+            var belowFloor = verdict.BelowFloor
+                .Select(x => Card(
+                    x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why,
+                    outsideRequest: blendedOutsideIds.Contains(x.Title.Id), blend: x.Blend))
                 .ToList();
             blendStage.Dispose();
 
@@ -529,13 +571,15 @@ public sealed class LiveSearchExpansionService(
             await emit("done", new
             {
                 results = final,
-                reason = final.Count == 0
-                    ? "no fresh matches — try another angle"
-                    : blendedOutside.Count > 0
-                        ? $"{blended.Count} picks matched everything you asked; {blendedOutside.Count} closest-but-outside shown separately."
-                        : $"{final.Count} picks ranked for you, from {discovered.Count} pulled"
-                            + (relaxation > 0 ? " (widened to find enough)" : "")
-                            + (floorRelaxed ? $" (nothing cleared your {floor.ToString("0.#", CultureInfo.InvariantCulture)} rating floor, so it was relaxed)" : "") + ".",
+                // The turn's own accounting, so no card can vanish unexplained: everything streamed
+                // is either kept or in the tray, and streamed == kept + droppedByFloor always holds.
+                streamed = ranked.Count + outside.Count,
+                kept = final.Count,
+                droppedByFloor = belowFloor.Count,
+                belowFloor,
+                reason = AskReelReason.Build(
+                    blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
+                    widened: relaxation > 0, floorRelaxed, floor),
                 // Founder-only, and only when asked for: the per-stage millisecond breakdown of this
                 // turn. Always PRESENT as a key so the client has one shape to render, null when the
                 // caller is not entitled to it. `emit` is absent here and only here — a payload
@@ -1547,9 +1591,19 @@ public sealed class LiveSearchExpansionService(
         await emit("done", new { results = cards, reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords" });
     }
 
-    private static object Card(
+    /// <summary>
+    /// One card on the wire.
+    ///
+    /// <para><paramref name="similarity"/> and <paramref name="fit"/> are rounded to 2 dp because
+    /// they are RENDERED, and a cosine printed to seventeen significant figures reads as precision
+    /// the number does not have. <paramref name="blend"/> is the server's own ranking value, carried
+    /// so the client can show why one card sits above another — but the ARRAY ORDER is authoritative
+    /// and a client must never re-sort by it: blend is rounded for display and the server's ordering
+    /// has a stable tiebreak this number cannot reproduce.</para>
+    /// </summary>
+    internal static object Card(
         Title t, double? similarity, decimal? predicted, double? fit = null, string? why = null,
-        bool seen = false, bool outsideRequest = false) => new
+        bool seen = false, bool outsideRequest = false, double? blend = null) => new
         {
             titleId = t.Id,
             mediaType = t.MediaType.ToString(),
@@ -1558,15 +1612,18 @@ public sealed class LiveSearchExpansionService(
             year = t.Year,
             posterPath = t.PosterPath,
             genres = t.Genres,
-            similarity,
+            similarity = similarity is { } s ? Math.Round(s, 2) : (double?)null,
             predictedRating = predicted,
             // The community number the personal prediction is read against — same resolver as the feed
             // cards, so a title's badge cannot say 7.4 here and 6.9 on the home page.
             crowdRating = CrowdRating.For(t),
             crowdVotes = CrowdRating.VotesFor(t),
-            fit,
+            fit = fit is { } f ? Math.Round(f, 2) : (double?)null,
             why,
             seen,
+            // The server's ranking value for this card. Display only — the array order is the
+            // contract, and it carries a tiebreak this rounded number cannot express.
+            blend = blend is { } b ? Math.Round(b, 4) : (double?)null,
             // True only for the closest-but-outside reserve — a card that trips one of the user's
             // exclusions and is shown, flagged, solely because the clean picks could not fill the
             // floor. Additive: old clients simply ignore it.

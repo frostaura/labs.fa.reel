@@ -250,9 +250,17 @@ public class LiveSearchExpansionTests(AskReelSearchPostgresFixture fixture)
                 r.GetProperty("why").GetString());
         }
 
+        // The reason is a CLAUSE LIST now, not a sentence with optional tails — see AskReelReason for
+        // why (the old nesting made the rating-floor clause unreachable in one of its two branches).
         Assert.Equal(
-            "5 picks matched everything you asked; 7 closest-but-outside shown separately.",
+            "5 picks matched everything you asked · 7 closest-but-outside shown separately",
             done.Data.GetProperty("reason").GetString());
+
+        // Nothing vanishes unexplained: everything streamed is either kept or in the tray.
+        Assert.Equal(12, done.Data.GetProperty("streamed").GetInt32());
+        Assert.Equal(12, done.Data.GetProperty("kept").GetInt32());
+        Assert.Equal(0, done.Data.GetProperty("droppedByFloor").GetInt32());
+        Assert.Empty(done.Data.GetProperty("belowFloor").EnumerateArray());
     }
 
     /// <summary>A canned agent that wants thrillers and explicitly rules horror out.</summary>
