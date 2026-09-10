@@ -256,7 +256,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         public string ModelId => "fake-exclusion-agent";
 
         public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 "Tense thrillers, steering clear of horror.",
                 new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
@@ -274,7 +274,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         public string ModelId => "fake-vibe-agent";
 
         public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 "Fantastically futuristic, tense, high-energy science fiction.",
                 new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null, null)));
@@ -334,7 +334,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         public string ModelId => "fake-person-agent";
 
         public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 $"Here are films {person.Role} {person.Name}.",
                 new SearchIntent([], [], [], message, null, null, [person])));

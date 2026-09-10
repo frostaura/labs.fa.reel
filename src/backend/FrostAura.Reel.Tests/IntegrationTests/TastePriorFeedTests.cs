@@ -559,7 +559,7 @@ public class TastePriorFeedTests(PostgresFixture fixture)
 
         public Task<AgentReply> InterpretAsync(
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary,
-            IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
@@ -628,7 +628,7 @@ public class TastePriorFeedTests(PostgresFixture fixture)
 
         public Task<AgentReply> InterpretAsync(
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary,
-            IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(

@@ -52,8 +52,15 @@ public class OpenRouterSearchAgent(
         : "openai/gpt-5.4-mini";
 
     public async Task<AgentReply> InterpretAsync(
-        IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default)
+        IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
+        CancellationToken ct = default, string? standingFilters = null)
     {
+        // standingFilters is accepted and deliberately unused here: the prompt half is a separate
+        // change (A2 injects this into both the interpret and rerank user messages). Threading the
+        // port first means the caller that computes the summary and the prompt that consumes it can
+        // land independently without a signature churn in between.
+        _ = standingFilters;
+
         // The interpreter's FREE deterministic reading, not a second billable round-trip. This
         // value is only ever a fallback — SearchIntentParser consumes it solely when the model's
         // own answer carries no usable signal, and StubReply only when the reply line is missing —
