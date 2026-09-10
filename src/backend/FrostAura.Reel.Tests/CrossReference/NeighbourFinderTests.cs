@@ -16,6 +16,36 @@ namespace FrostAura.Reel.Tests.CrossReference;
 [Collection("postgres")]
 public class NeighbourFinderTests(PostgresFixture fixture)
 {
+    /// <summary>
+    /// A language nothing else in the postgres collection uses.
+    ///
+    /// <para>The catalogue is GLOBAL and shared by every class in this collection, and the
+    /// eligibility layer's language allow-list defaults to English-only when an account configures
+    /// no <c>Language</c> filter. Seeding this file's synthetic titles as English therefore put a
+    /// hundred rows into every sibling test's eligible pool and displaced their fixtures — which is
+    /// exactly the contamination class <c>CandidateRetrieverTests</c> already documents. A
+    /// non-English language makes them invisible to every account but the ones seeded here, which
+    /// opt into it explicitly.</para>
+    /// </summary>
+    /// <summary>
+    /// The base dimension every embedding in this file is placed on.
+    ///
+    /// <para>The catalogue and its embeddings are GLOBAL and shared by every class in the postgres
+    /// collection, and retrieval takes a fixed-size nearest-neighbour window BEFORE eligibility is
+    /// applied — so a title seeded here that happens to sit near another test's query vector
+    /// displaces that test's own fixture from the window, and the eligibility filter then removes it
+    /// again, leaving the sibling short. Sibling fixtures use single-digit and low double-digit
+    /// dimensions; reserving a block far above them makes every title seeded here exactly orthogonal
+    /// to every query they issue, which is the smallest similarity there is.</para>
+    ///
+    /// <para>It must also be DETERMINISTIC. An earlier version derived the dimension from
+    /// <c>string.GetHashCode</c>, which .NET randomises per process — so the fixture landed on a
+    /// different set of dimensions on every run and the contamination came and went.</para>
+    /// </summary>
+    private const int EmbeddingDimensionBase = 1200;
+
+    private const string TestLanguage = "zz";
+
     [Fact]
     public async Task Neighbours_come_back_in_descending_similarity_with_the_viewers_own_rating()
     {
@@ -180,13 +210,14 @@ public class NeighbourFinderTests(PostgresFixture fixture)
         Assert.Equal(closeDisliked, withDisliked[closeCandidate][^1].TitleId);
         Assert.True(withDisliked[closeCandidate][^1].Similarity >= NeighbourFinder.DislikedMinimumSimilarity);
 
-        // …and a disliked title on the far side of the space is a coincidence, not a comparison.
+        // …and a disliked title on the far side of the space is a coincidence, not a comparison, so
+        // nothing is appended: exactly K neighbours come back. (It may still appear among the K
+        // ranked ones — every rated title is orthogonal to this candidate, so the ranking is
+        // arbitrary; what is asserted is that no EXTRA clause was added.)
         var farCandidate = await SeedTitleAsync("Far Case", UnitVector(5));
         var farOnly = await FindAsync(
             accountId, [farCandidate], new NeighbourFinder.Options(K: 3, IncludeNearestDisliked: true));
-        Assert.DoesNotContain(
-            farOnly.GetValueOrDefault(farCandidate, []),
-            n => n.TitleId == closeDisliked && n.Similarity < NeighbourFinder.DislikedMinimumSimilarity);
+        Assert.Equal(3, farOnly[farCandidate].Count);
     }
 
     [Fact]
@@ -211,14 +242,14 @@ public class NeighbourFinderTests(PostgresFixture fixture)
     private static float[] UnitVector(int index)
     {
         var v = new float[1536];
-        v[index] = 1f;
+        v[EmbeddingDimensionBase + index] = 1f;
         return v;
     }
 
     private static float[] NearUnit(int index, float noise)
     {
         var v = UnitVector(index);
-        v[(index + 1) % v.Length] = noise;
+        v[EmbeddingDimensionBase + index + 1] = noise;
         return v;
     }
 
@@ -248,7 +279,7 @@ public class NeighbourFinderTests(PostgresFixture fixture)
             TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
             TraktSlug = string.Empty,
             Name = name,
-            Language = "en",
+            Language = TestLanguage,
             PosterPath = "/p.jpg",
             Genres = ["drama"],
             TmdbPopularity = 1m,

@@ -28,6 +28,43 @@ namespace FrostAura.Reel.Tests.CrossReference;
 [Collection("postgres")]
 public class CrossReferenceBacktestTests(PostgresFixture fixture)
 {
+    /// <summary>
+    /// A language nothing else in the postgres collection uses.
+    ///
+    /// <para>The catalogue is GLOBAL and shared by every class in this collection, and the
+    /// eligibility layer's language allow-list defaults to English-only when an account configures
+    /// no <c>Language</c> filter. Seeding this file's synthetic titles as English therefore put a
+    /// hundred rows into every sibling test's eligible pool and displaced their fixtures — which is
+    /// exactly the contamination class <c>CandidateRetrieverTests</c> already documents. A
+    /// non-English language makes them invisible to every account but the ones seeded here, which
+    /// opt into it explicitly.</para>
+    /// </summary>
+    /// <summary>
+    /// The base dimension every embedding in this file is placed on.
+    ///
+    /// <para>The catalogue and its embeddings are GLOBAL and shared by every class in the postgres
+    /// collection, and retrieval takes a fixed-size nearest-neighbour window BEFORE eligibility is
+    /// applied — so a title seeded here that happens to sit near another test's query vector
+    /// displaces that test's own fixture from the window, and the eligibility filter then removes it
+    /// again, leaving the sibling short. Sibling fixtures use single-digit and low double-digit
+    /// dimensions; reserving a block far above them makes every title seeded here exactly orthogonal
+    /// to every query they issue, which is the smallest similarity there is.</para>
+    ///
+    /// <para>It must also be DETERMINISTIC. An earlier version derived the dimension from
+    /// <c>string.GetHashCode</c>, which .NET randomises per process — so the fixture landed on a
+    /// different set of dimensions on every run and the contamination came and went.</para>
+    /// </summary>
+    private const int EmbeddingDimensionBase = 1200;
+
+    private const string TestLanguage = "zz";
+
+    /// <summary>Guards the one-time seed; xUnit builds a new instance per test.</summary>
+    private static readonly SemaphoreSlim HistoryLock = new(1, 1);
+
+    private static Guid? _sharedHistoryAccountId;
+
+    private static int _seeded;
+
     private readonly string _scope = $"xrefbt{Guid.NewGuid():N}";
 
     [Fact]
@@ -193,31 +230,57 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
     }
 
     /// <summary>
-    /// Enough history to split, with a holdout that carries both loved and disliked titles.
+    /// Enough history to split, with a holdout that carries both loved and disliked titles —
+    /// seeded ONCE for the whole class and reused.
+    ///
+    /// <para><b>The sharing is not an optimisation.</b> xUnit builds a fresh instance per test, so
+    /// a per-test fixture put a hundred titles and their embeddings into the GLOBAL catalogue six
+    /// times over, and five hundred extra rows was enough to change what an unrelated class's
+    /// retrieval window contained — the contamination class <c>CandidateRetrieverTests</c>
+    /// documents, arriving here as volume rather than as similarity. The backtest is read-only over
+    /// this history (it writes only its own evaluation rows, under a fresh RunId each time), so one
+    /// account serves every test in the class without them observing each other.</para>
     ///
     /// <para>The ratings are laid down oldest-first on <c>FirstRatedAt</c> so the split origins land
     /// inside the range; the later half deliberately alternates loved and disliked so every origin
-    /// has both denominators.</para>
+    /// has both denominators. Only the HOLDOUT half carries an embedding: those are the titles the
+    /// judge is asked about, and an embedding on a train title would be forty more rows in the
+    /// shared catalogue buying nothing.</para>
     /// </summary>
     private async Task<Guid> SeedHistoryAsync()
     {
-        var accountId = await SeedAccountAsync();
-        var start = DateTime.UtcNow.AddDays(-400);
-
-        // The train half: 60 middling ratings on titles the account has seen.
-        for (var i = 0; i < 60; i++)
+        await HistoryLock.WaitAsync();
+        try
         {
-            await SeedRatedAsync(accountId, $"Train {i}", (short)(6 + (i % 3)), start.AddDays(i));
-        }
+            if (_sharedHistoryAccountId is { } existing)
+            {
+                return existing;
+            }
 
-        // The holdout half: 40 alternating loves and dislikes, all still ELIGIBLE as-of every split
-        // (no watch footprint, no reaction) so they reach the judge.
-        for (var i = 0; i < 40; i++)
+            var accountId = await SeedAccountAsync();
+            var start = DateTime.UtcNow.AddDays(-400);
+
+            // The train half: 60 middling ratings, no embeddings needed.
+            for (var i = 0; i < 60; i++)
+            {
+                await SeedRatedAsync(accountId, $"Train {i}", (short)(6 + (i % 3)), start.AddDays(i), embedded: false);
+            }
+
+            // The holdout half: 40 alternating loves and dislikes, all still ELIGIBLE as-of every
+            // split (no watch footprint, no reaction) so they reach the judge.
+            for (var i = 0; i < 40; i++)
+            {
+                await SeedRatedAsync(
+                    accountId, $"Holdout {i}", i % 2 == 0 ? (short)9 : (short)3, start.AddDays(100 + i));
+            }
+
+            _sharedHistoryAccountId = accountId;
+            return accountId;
+        }
+        finally
         {
-            await SeedRatedAsync(accountId, $"Holdout {i}", i % 2 == 0 ? (short)9 : (short)3, start.AddDays(100 + i));
+            HistoryLock.Release();
         }
-
-        return accountId;
     }
 
     private async Task<Guid> SeedAccountAsync()
@@ -242,11 +305,22 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
             Value = _scope,
             CreatedAt = DateTime.UtcNow,
         });
+        // …and opts into the language those rows carry. Without this the account's own pool would be
+        // empty, because no Language filter means English-only.
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            Kind = FilterKind.Language,
+            Value = TestLanguage,
+            CreatedAt = DateTime.UtcNow,
+        });
         await db.SaveChangesAsync();
         return account.Id;
     }
 
-    private async Task<Guid> SeedRatedAsync(Guid accountId, string name, short rating, DateTime at)
+    private async Task<Guid> SeedRatedAsync(
+        Guid accountId, string name, short rating, DateTime at, bool embedded = true)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -256,7 +330,7 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
             TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
             TraktSlug = string.Empty,
             Name = name,
-            Language = "en",
+            Language = TestLanguage,
             PosterPath = "/p.jpg",
             Genres = ["drama", _scope],
             TmdbPopularity = 1m,
@@ -264,16 +338,19 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture)
             CreatedAt = DateTime.UtcNow,
         };
         db.Add(title);
-        var embedding = new float[1536];
-        embedding[Math.Abs(name.GetHashCode(StringComparison.Ordinal)) % 1536] = 1f;
-        db.TitleEmbeddings.Add(new TitleEmbedding
+        if (embedded)
         {
-            TitleId = title.Id,
-            Embedding = new Vector(embedding),
-            EmbeddingModel = "test",
-            SourceTextHash = Guid.NewGuid().ToString("N"),
-            CreatedAt = DateTime.UtcNow,
-        });
+            var embedding = new float[1536];
+            embedding[EmbeddingDimensionBase + (Interlocked.Increment(ref _seeded) % 300)] = 1f;
+            db.TitleEmbeddings.Add(new TitleEmbedding
+            {
+                TitleId = title.Id,
+                Embedding = new Vector(embedding),
+                EmbeddingModel = "test",
+                SourceTextHash = Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTime.UtcNow,
+            });
+        }
         db.UserRatings.Add(new UserRating
         {
             Id = Guid.NewGuid(),

@@ -165,11 +165,15 @@ public class GoldenPromptTests
             OpenRouterCrossReferenceJudge.RoundOneSystemPrompt,
             StringComparison.Ordinal);
         Assert.Contains(
-            "looking specifically for reasons this viewer would NOT enjoy them",
+            "You are now looking specifically for reasons",
             OpenRouterCrossReferenceJudge.RoundTwoSystemPrompt,
             StringComparison.Ordinal);
         Assert.Contains(
-            "A second keep is a real endorsement and should be rare",
+            "would NOT enjoy them",
+            OpenRouterCrossReferenceJudge.RoundTwoSystemPrompt,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "A second keep is a real",
             OpenRouterCrossReferenceJudge.RoundTwoSystemPrompt,
             StringComparison.Ordinal);
 

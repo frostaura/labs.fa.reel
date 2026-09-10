@@ -20,11 +20,23 @@ namespace FrostAura.Reel.Application.CrossReference;
 /// construction holds HERE only because the predicate is in the text. Never remove it, and never
 /// let a caller pass an account id it did not get from the session or the job.</para>
 ///
-/// <para><b>HNSW cannot serve this.</b> The inner set is the account's own rated titles — ~6% of
-/// the catalogue — and an approximate index over the whole catalogue cannot answer a nearest-
-/// neighbour question restricted to a small filtered subset without either scanning past its
-/// candidate list or returning fewer rows than asked for. It is an exact scan by design: 60 × ~2,000
-/// × 1,536 ≈ 188M multiply-adds per batch, which is small against the model call it feeds.</para>
+/// <para><b>The rated set is MATERIALIZED, and that is what forces the scan to be exact.</b> The
+/// inner set is the account's own rated titles — ~6% of the catalogue — and an approximate index
+/// over the whole catalogue cannot answer a nearest-neighbour question restricted to a small
+/// filtered subset. Left to itself Postgres will happily use the HNSW index and apply the rating
+/// join as a FILTER, which is faster and silently wrong at the margin: pgvector's index scan yields
+/// a bounded number of tuples and then ends, so a candidate whose nearest rated titles all fall
+/// outside that window comes back with fewer neighbours than asked for — or none — and nothing
+/// anywhere reports it. Materialising the rated rows puts them out of the index's reach and makes
+/// the LIMIT mean what it says.</para>
+///
+/// <para><b>Measured on the founder's dev database, 2026-09-10</b> (2,040 rated-and-embedded
+/// titles, 35,704 titles, 5,208 embedded), one 60-candidate batch at k=3: <b>665 ms exact</b>
+/// against 76 ms for the index-scan plan this replaces. 665 ms sits against a 20–35 second provider
+/// call, which is why the plan's in-process <c>System.Numerics.Vector&lt;float&gt;</c> fallback —
+/// gated on "&gt; 2 s" — is deliberately NOT implemented: it would be a second copy of this maths
+/// carrying a third of a second of benefit. Re-measure before assuming it stays true at ten times
+/// the rated history; the cost is linear in the rated set.</para>
 ///
 /// <para><b><see cref="Options.AsOf"/> is the leakage axis.</b> When it is set, only ratings whose
 /// immutable <c>FirstRatedAt</c> is at or before the split may be neighbours — otherwise a backtest
@@ -91,6 +103,19 @@ public sealed class NeighbourFinder(IReelDbContext db)
         // the predicate, and the serving path and the backtest cannot drift apart.
         var rows = await db.Database.SqlQuery<NeighbourRow>(
             $"""
+             WITH rated AS MATERIALIZED (
+                 SELECT r."TitleId" AS "TitleId",
+                        r."Rating"  AS "Rating",
+                        t."Name"    AS "Name",
+                        t."Year"    AS "Year",
+                        te."Embedding" AS "Embedding"
+                 FROM "UserRatings" r
+                 JOIN "TitleEmbeddings" te ON te."TitleId" = r."TitleId"
+                 JOIN "Titles" t ON t."Id" = r."TitleId"
+                 WHERE r."AccountId" = {accountId}
+                   AND r."SubjectType" IN ('Movie', 'Show')
+                   AND ({asOf}::timestamptz IS NULL OR r."FirstRatedAt" <= {asOf}::timestamptz)
+             )
              SELECT c."CandidateId" AS "CandidateId",
                     n."TitleId"     AS "TitleId",
                     n."Name"        AS "Name",
@@ -100,19 +125,14 @@ public sealed class NeighbourFinder(IReelDbContext db)
              FROM unnest({ids}) AS c("CandidateId")
              JOIN "TitleEmbeddings" ce ON ce."TitleId" = c."CandidateId"
              CROSS JOIN LATERAL (
-                 SELECT t."Id" AS "TitleId",
-                        t."Name" AS "Name",
-                        t."Year" AS "Year",
-                        r."Rating" AS "Rating",
-                        (1 - (te."Embedding" <=> ce."Embedding"))::double precision AS "Similarity"
-                 FROM "UserRatings" r
-                 JOIN "TitleEmbeddings" te ON te."TitleId" = r."TitleId"
-                 JOIN "Titles" t ON t."Id" = r."TitleId"
-                 WHERE r."AccountId" = {accountId}
-                   AND r."SubjectType" IN ('Movie', 'Show')
-                   AND r."TitleId" <> c."CandidateId"
-                   AND ({asOf}::timestamptz IS NULL OR r."FirstRatedAt" <= {asOf}::timestamptz)
-                 ORDER BY te."Embedding" <=> ce."Embedding"
+                 SELECT rt."TitleId" AS "TitleId",
+                        rt."Name"    AS "Name",
+                        rt."Year"    AS "Year",
+                        rt."Rating"  AS "Rating",
+                        (1 - (rt."Embedding" <=> ce."Embedding"))::double precision AS "Similarity"
+                 FROM rated rt
+                 WHERE rt."TitleId" <> c."CandidateId"
+                 ORDER BY rt."Embedding" <=> ce."Embedding"
                  LIMIT {take}
              ) n
              """).ToListAsync(ct);
@@ -145,6 +165,20 @@ public sealed class NeighbourFinder(IReelDbContext db)
         // this viewer rated ≤ 4, which is nearest, and is it near enough to mean anything.
         var dislikedRows = await db.Database.SqlQuery<NeighbourRow>(
             $"""
+             WITH rated AS MATERIALIZED (
+                 SELECT r."TitleId" AS "TitleId",
+                        r."Rating"  AS "Rating",
+                        t."Name"    AS "Name",
+                        t."Year"    AS "Year",
+                        te."Embedding" AS "Embedding"
+                 FROM "UserRatings" r
+                 JOIN "TitleEmbeddings" te ON te."TitleId" = r."TitleId"
+                 JOIN "Titles" t ON t."Id" = r."TitleId"
+                 WHERE r."AccountId" = {accountId}
+                   AND r."SubjectType" IN ('Movie', 'Show')
+                   AND r."Rating" <= {DislikedCeiling}
+                   AND ({asOf}::timestamptz IS NULL OR r."FirstRatedAt" <= {asOf}::timestamptz)
+             )
              SELECT c."CandidateId" AS "CandidateId",
                     n."TitleId"     AS "TitleId",
                     n."Name"        AS "Name",
@@ -154,20 +188,14 @@ public sealed class NeighbourFinder(IReelDbContext db)
              FROM unnest({ids}) AS c("CandidateId")
              JOIN "TitleEmbeddings" ce ON ce."TitleId" = c."CandidateId"
              CROSS JOIN LATERAL (
-                 SELECT t."Id" AS "TitleId",
-                        t."Name" AS "Name",
-                        t."Year" AS "Year",
-                        r."Rating" AS "Rating",
-                        (1 - (te."Embedding" <=> ce."Embedding"))::double precision AS "Similarity"
-                 FROM "UserRatings" r
-                 JOIN "TitleEmbeddings" te ON te."TitleId" = r."TitleId"
-                 JOIN "Titles" t ON t."Id" = r."TitleId"
-                 WHERE r."AccountId" = {accountId}
-                   AND r."SubjectType" IN ('Movie', 'Show')
-                   AND r."TitleId" <> c."CandidateId"
-                   AND r."Rating" <= {DislikedCeiling}
-                   AND ({asOf}::timestamptz IS NULL OR r."FirstRatedAt" <= {asOf}::timestamptz)
-                 ORDER BY te."Embedding" <=> ce."Embedding"
+                 SELECT rt."TitleId" AS "TitleId",
+                        rt."Name"    AS "Name",
+                        rt."Year"    AS "Year",
+                        rt."Rating"  AS "Rating",
+                        (1 - (rt."Embedding" <=> ce."Embedding"))::double precision AS "Similarity"
+                 FROM rated rt
+                 WHERE rt."TitleId" <> c."CandidateId"
+                 ORDER BY rt."Embedding" <=> ce."Embedding"
                  LIMIT 1
              ) n
              WHERE n."Similarity" >= {DislikedMinimumSimilarity}
