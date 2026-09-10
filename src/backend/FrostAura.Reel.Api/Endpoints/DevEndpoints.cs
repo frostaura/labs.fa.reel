@@ -207,5 +207,68 @@ public static class DevEndpoints
                 ct);
             return Results.Ok(report);
         });
+
+        // ── The offline retrieval-recall test ───────────────────────────────────────────────
+        // Read-only, persists nothing, and answers the one question every modelling iteration so
+        // far has been unable to see past: of the titles this account went on to LOVE, how many
+        // would the first-pass pool have even contained on the day before they were rated?
+        //
+        //   curl -s 'localhost:5080/api/dev/retrieval-recall?window=180' | jq
+        //
+        // How to read the answer — and the order matters, because two different failures wear the
+        // same "we missed it" shirt and want opposite fixes:
+        //
+        //   1. `loved.rates.inCatalogue` is the SUPPLY ceiling. Titles below it were not in the
+        //      catalogue that day, so no retrieval budget on earth would have returned them; that
+        //      is a discovery problem. `notReachable[].reason` names it per title.
+        //   2. `loved.recallGivenReachable` is the RETRIEVAL number — of the titles that existed
+        //      and were eligible, what share the arms returned. This is the only one a bigger pool
+        //      or a new arm can move, and it is the one the plan's decision rule reads: a
+        //      public-corpus collaborative arm is worth its licensing cost only if THIS is low.
+        //   3. `disliked` is the same computation over titles rated <= 4 — the false-positive side.
+        //      A high union there is a RANKING problem, not a supply one.
+        //
+        // `popCount` / `annCount` default to the feed's own first-pass budgets; raise them and
+        // re-run to answer "would a bigger pool have caught these?" without shipping anything.
+        // `budget.exhausted` true means the rates describe a SAMPLE of the window, not the window.
+        //
+        // Optional ?slug= picks an account when more than one is linked; otherwise TRAKT_DEV_PROFILE
+        // and then "the only account" are tried, in that order — same resolution as the replay above.
+        app.MapGet("/api/dev/retrieval-recall", async (
+            string? slug,
+            int? window,
+            int? popCount,
+            int? annCount,
+            int? seconds,
+            IReelDbContext db,
+            Application.Ranking.RetrievalRecallProbe probe,
+            IConfiguration configuration,
+            CancellationToken ct) =>
+        {
+            var wanted = slug ?? configuration["TRAKT_DEV_PROFILE"];
+            var accounts = db.Accounts.IgnoreQueryFilters();
+            var account = wanted is null
+                ? await accounts.OrderBy(a => a.CreatedAt).FirstOrDefaultAsync(ct)
+                : await accounts.FirstOrDefaultAsync(a => a.TraktUserSlug == wanted || a.TraktUsername == wanted, ct);
+            if (account is null)
+            {
+                return Results.NotFound(new { error = "No account to measure." });
+            }
+
+            // Clamped rather than validated-and-rejected: this is a diagnostic run by hand, and a
+            // fat-fingered window=100000 should give a long window, not a 400. The 60s cap is the
+            // one that is NOT negotiable upward — the probe rebuilds a full taste state per distinct
+            // rating day, and an unbounded run against a live database is a self-inflicted outage.
+            var report = await probe.RunAsync(
+                account.Id,
+                Math.Clamp(window ?? 180, 1, 3650),
+                Math.Clamp(popCount ?? Application.Ranking.RetrievalRecallProbe.DefaultPopCount, 0, 5000),
+                Math.Clamp(annCount ?? Application.Ranking.RetrievalRecallProbe.DefaultAnnCount, 0, 5000),
+                TimeSpan.FromSeconds(Math.Clamp(seconds ?? 60, 1, 60)),
+                DateTime.UtcNow,
+                ct);
+
+            return Results.Ok(new { account = account.TraktUserSlug, recall = report });
+        });
     }
 }

@@ -62,6 +62,49 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     }
 
     /// <summary>
+    /// <see cref="EligibleTitles(Guid, bool, IReadOnlySet{FilterKind})"/> rewound to a past instant:
+    /// the interaction footprint is evaluated as it stood at <paramref name="asOf"/>, so a title the
+    /// user watched, rated, saved or declined AFTER that moment counts as eligible then, exactly as
+    /// it did on the day.
+    ///
+    /// <para><b>OFFLINE MEASUREMENT ONLY.</b> Nothing that serves titles may call this — it is
+    /// deliberately a separate method rather than an optional parameter on the serving overload,
+    /// because a nullable date threaded through the live predicate would change the SQL every
+    /// surface in the product emits in order to serve a diagnostic that runs by hand. The serving
+    /// path is byte-for-byte what it was.</para>
+    ///
+    /// <para>The CONTENT rules are read as they stand today, not as-of, and that is the honest call
+    /// rather than a shortcut: <c>ContentFilter</c> rows carry a <c>CreatedAt</c> but are mutated
+    /// and deleted in place, so there is no history to rewind to. A recall figure computed here
+    /// therefore answers "under today's rules, would the arms have reached this title" — which is
+    /// the question worth asking, since today's rules are the ones the next build will use.</para>
+    ///
+    /// <para>Two dating calls, both stated because they bound the answer. A watch counts as-of only
+    /// when <c>LastWatchedAt</c> is known and falls on or before <paramref name="asOf"/>: an
+    /// undated watch row reads as NOT-yet-watched, matching the year filter's "absence of a date is
+    /// not evidence of the wrong date". And a rating counts by <see cref="UserRating.FirstRatedAt"/>
+    /// rather than <c>RatedAt</c>, for the same reason <c>EvalHarness</c> splits on it — <c>RatedAt</c>
+    /// is overwritten by every Trakt ratings walk, so a re-rate would drag a title backwards across
+    /// the as-of line.</para>
+    /// </summary>
+    public IQueryable<Title> EligibleTitlesAsOf(Guid accountId, DateTime asOf, bool ignoreGenreFilters = false)
+    {
+        return ContentFilteredTitles(accountId, ignoreGenreFilters).Where(t =>
+            !db.WatchedTitles.Any(w =>
+                w.AccountId == accountId && w.TitleId == t.Id
+                && w.LastWatchedAt != null && w.LastWatchedAt <= asOf)
+            && !db.UserRatings.Any(r =>
+                r.AccountId == accountId && r.TitleId == t.Id && r.FirstRatedAt <= asOf)
+            && !db.UserTitleReactions.Any(r =>
+                r.AccountId == accountId && r.TitleId == t.Id
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
+                && r.CreatedAt <= asOf
+                && (r.RevokedAt == null || r.RevokedAt > asOf)));
+    }
+
+    /// <summary>
     /// The eligible title-id set for <paramref name="accountId"/> computed WITHOUT the row-level
     /// tenancy filters, so a session pinned to one account can evaluate another account's
     /// eligibility (Blend needs both participants' sets). This is an EXCLUSION primitive only:
