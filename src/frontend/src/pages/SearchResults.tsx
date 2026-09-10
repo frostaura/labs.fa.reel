@@ -7,6 +7,7 @@ import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
+import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
@@ -93,7 +94,7 @@ export default function SearchResults() {
     turns, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
     exhausted, appending, canRetry,
   } = chat;
-  const { status, droppedByFloor, belowFloor, floor } = pendingApi(chat);
+  const { status, conflict, droppedByFloor, belowFloor, floor } = pendingApi(chat);
   const speech = useSpeech((text) => send(text, false));
 
   // The media toggle is per-device and persists across visits, so a resumed thread starts with a
@@ -146,6 +147,10 @@ export default function SearchResults() {
   const outsideVisible = outsideCards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
 
+  // Optional, and typed only as far as this page needs it — A6's parser surfaces the frame and
+  // A3's service writes the sentence. Anything that is not a non-empty string is no conflict.
+  const conflictMessage = typeof conflict?.message === "string" && conflict.message.trim() ? conflict.message : null;
+
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
   // and was, until now, invisible: the picks simply never existed as far as the screen was
@@ -192,9 +197,16 @@ export default function SearchResults() {
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise
     // the last row of cards and the "Show me more" button sit permanently behind the composer.
     <div className="space-y-5 pb-44 md:pb-32">
-      <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
-        <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
-      </h1>
+      <div>
+        <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
+          <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
+        </h1>
+        {/* The same summary the feed carries, for the same reason: every standing condition
+            applies to search too, and a thread that quietly obeys a "no documentary" saved on
+            another screen is a thread the user cannot reason about. The browse toggle rides along
+            and stays dismissible from here. */}
+        <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={changeFilter} />
+      </div>
 
       {/* Always mounted so it is a live region by the time it has something to say. Announces the
           settled outcome only; the phase narration has its own live region inside the banner. */}
@@ -295,6 +307,20 @@ export default function SearchResults() {
           <div className="ml-auto">
             <BrowseFilters value={filter} onChange={changeFilter} showAvailability={false} />
           </div>
+        </div>
+      )}
+
+      {/* What the request and the account's standing conditions cannot both have. Named out loud,
+          above the results, because the alternative is a thin answer with no explanation — the
+          user asked for something their own saved exclusions rule out, and only the server can see
+          both halves. Server-written and server-formatted; the page only places it. */}
+      {conflictMessage && (
+        <div
+          className="fa-card border-fa-warning/30 p-4 flex items-start gap-3"
+          data-testid="askreel-conflict"
+        >
+          <AlertTriangle className="h-4 w-4 text-fa-warning shrink-0 mt-0.5" />
+          <p className="fa-caption text-fa-frost-bright">{conflictMessage}</p>
         </div>
       )}
 
