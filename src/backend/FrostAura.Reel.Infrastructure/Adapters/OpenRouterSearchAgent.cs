@@ -273,12 +273,20 @@ public class OpenRouterSearchAgent(
         return $"Here are some {lens} picks for “{message}” — leaning into what you tend to love.";
     }
 
+    /// <summary>
+    /// The hash-derived fit, masked rather than <c>Math.Abs</c>-ed. <c>Math.Abs(int.MinValue)</c>
+    /// THROWS OverflowException — and this is the fallback path, reached from inside a batch loop
+    /// whose whole purpose is to survive a bad response, so one unluckily-hashed title name would
+    /// have taken down every other title's fit with it. Masking the sign bit is total.
+    /// </summary>
+    internal static double StableFit(int hash) => (hash & int.MaxValue) % 1000 / 1000d;
+
     private static RerankResult StubRerank(RerankInput t)
     {
         // Deterministic: anchor fit on the personal prediction when present, else a stable hash.
         var fit = t.Predicted is { } p
             ? Math.Clamp((double)p / 10d, 0d, 1d)
-            : Math.Abs(t.Name.GetHashCode()) % 1000 / 1000d;
+            : StableFit(t.Name.GetHashCode());
         var genre = t.Genres.Count > 0 ? t.Genres[0] : "this";
         return new RerankResult(t.TitleId, fit, $"A {genre} pick aligned with your taste.");
     }

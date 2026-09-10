@@ -273,6 +273,18 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.Equal(["quiet space films"], reply.Intent.Keywords);
     }
 
+    [Fact]
+    public void The_stub_fit_survives_the_one_hash_Math_Abs_cannot_negate()
+    {
+        // Math.Abs(int.MinValue) throws OverflowException. String hash codes are randomised per
+        // process, so the name that lands there is unpredictable rather than impossible — and the
+        // throw would come from inside the batch loop that exists to survive a bad response,
+        // costing every OTHER title in the batch its fit.
+        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MinValue), 0d, 0.999d);
+        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MaxValue), 0d, 0.999d);
+        Assert.InRange(OpenRouterSearchAgent.StableFit(-1), 0d, 0.999d);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private static OpenRouterSearchAgent Agent(CannedHandler handler) => Agent(handler, new HeuristicInterpreter());
