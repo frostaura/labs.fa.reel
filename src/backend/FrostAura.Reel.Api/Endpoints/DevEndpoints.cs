@@ -404,5 +404,119 @@ public static class DevEndpoints
                 },
             });
         });
+
+        // ── The cross-reference backtest ────────────────────────────────────────────────────
+        // The only thing that may promote a cross-reference verdict from "demotes a title" to
+        // "hides a title", and the reason the instrument ships before the job does.
+        //
+        //   curl -s -X POST localhost:5080/api/dev/cross-reference-eval | jq
+        //   curl -s localhost:5080/api/dev/cross-reference-eval | jq
+        //
+        // How to read the answer, and the ORDER matters:
+        //
+        //   1. `gatingDecision` on the `mean` row is the verdict. "gating" means an Out may bar a
+        //      hero card; "demote-only" means an Out still halves the rank key so the closed loop
+        //      can observe it, but hides nothing — and the band on the feed has to say so in words,
+        //      with the real false-rule-out rate in it.
+        //   2. `wilsonHigh`, not `falseRuleOutRate`, is what the gate reads. At n around 55 an
+        //      observed 9% has a 95% upper bound near 20%; reading the point estimate as "under
+        //      15%" is reading sampling noise as a result.
+        //   3. `unsureRate` is the useless-but-honest check. A judge that answers "unsure" to 90% of
+        //      the pool has a perfect false-rule-out rate and no value — the same failure mode the
+        //      calibrator collapse guard exists for.
+        //   4. `noEmbeddingCount` is coverage. Those titles are in NO denominator on this row, so
+        //      any public claim about how much of the pool was cross-referenced has to subtract it.
+        //
+        // POST runs it (~35 provider calls under `cross-reference-eval`, deliberately a different
+        // purpose from `cross-reference` so measuring the judge cannot eat the budget the judge runs
+        // on). GET is free and returns the newest run.
+        app.MapPost("/api/dev/cross-reference-eval", async (
+            IReelDbContext db,
+            HttpContext http,
+            Application.CrossReference.CrossReferenceBacktest backtest,
+            CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return Results.Forbid();
+            }
+
+            var report = await backtest.RunAsync(account.Id, ct);
+            return report is null
+                ? Results.BadRequest(new { error = "Not enough rating history to split — the backtest needs a holdout." })
+                : Results.Ok(new
+                {
+                    runId = report.RunId,
+                    mean = Describe(report.Mean),
+                    origins = report.Origins.Select(Describe).ToList(),
+                });
+        });
+
+        app.MapGet("/api/dev/cross-reference-eval", async (
+            IReelDbContext db,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return Results.Forbid();
+            }
+
+            // The newest RUN, not the newest rows: a run is five origins plus a mean, and a naive
+            // "last six rows" would splice two runs together the moment one origin produced no
+            // evaluable holdout.
+            var latestRunId = await db.CrossReferenceEvaluations
+                .Where(e => e.AccountId == account.Id)
+                .OrderByDescending(e => e.EvaluatedAt)
+                .Select(e => (Guid?)e.RunId)
+                .FirstOrDefaultAsync(ct);
+            if (latestRunId is not { } runId)
+            {
+                return Results.Ok(new { runId = (Guid?)null, mean = (object?)null, origins = Array.Empty<object>() });
+            }
+
+            var rows = await db.CrossReferenceEvaluations
+                .Where(e => e.AccountId == account.Id && e.RunId == runId)
+                .OrderBy(e => e.SplitFraction)
+                .ToListAsync(ct);
+
+            return Results.Ok(new
+            {
+                runId,
+                mean = rows.Where(r => r.SplitFraction is null).Select(Describe).FirstOrDefault(),
+                origins = rows.Where(r => r.SplitFraction is not null).Select(Describe).ToList(),
+            });
+        });
     }
+
+    /// <summary>
+    /// One evaluation row as JSON. Every number is rendered as stored — no rounding up, no
+    /// prettifying — because the whole value of this surface is that the founder can compare what
+    /// it says with what the band on the feed will say.
+    /// </summary>
+    private static object Describe(Domain.CrossReference.CrossReferenceEvaluation e) => new
+    {
+        splitFraction = e.SplitFraction,
+        splitAt = e.SplitFraction is null ? (DateTime?)null : e.SplitAt,
+        judged = e.HoldoutJudged,
+        loved = e.LovedCount,
+        disliked = e.DislikedCount,
+        falseRuleOuts = e.FalseRuleOuts,
+        trueRuleOuts = e.TrueRuleOuts,
+        falseRuleOutRate = e.FalseRuleOutRate,
+        trueRuleOutRate = e.TrueRuleOutRate,
+        wilsonLow = e.WilsonLow,
+        wilsonHigh = e.WilsonHigh,
+        unsureRate = e.UnsureRate,
+        noEmbedding = e.NoEmbeddingCount,
+        gatingDecision = e.GatingDecision,
+        caveat = e.Caveat,
+        model = e.ModelId,
+        promptVersion = e.PromptVersion,
+        promptTokens = e.PromptTokens,
+        completionTokens = e.CompletionTokens,
+        evaluatedAt = e.EvaluatedAt,
+    };
 }

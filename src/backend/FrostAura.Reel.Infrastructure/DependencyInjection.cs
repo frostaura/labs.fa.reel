@@ -122,6 +122,17 @@ public static class DependencyInjection
             client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
         }).AddStandardResilienceHandler();
 
+        // The cross-reference judge runs a 60-title batch against a strict schema — the longest
+        // single chat call in the product at 20-35s observed, so it gets the lens writer's ceiling
+        // rather than the 60s the smaller calls use.
+        services.AddHttpClient<Domain.Ports.ICrossReferenceJudge, OpenRouterCrossReferenceJudge>(client =>
+        {
+            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(90);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        }).AddStandardResilienceHandler();
+
         // The lens writer runs longer than the other chat calls: a narrative is ~10 sentences and a
         // lens is five to ten times a why-line's output tokens, so the transport cap has to sit
         // above the callers' own budgets rather than pre-empting them.
@@ -164,6 +175,20 @@ public static class DependencyInjection
         services.AddScoped<Application.Lens.LensService>();
         services.AddScoped<Application.Lens.TasteNarrativeService>();
         services.AddScoped<Application.Lens.LensAudit>();
+
+        // ── Cross-reference rounds ─────────────────────────────────────────────────────────
+        // Scoped like the lens set, and for the same reason: every one of these reads the ledger or
+        // the catalogue through the request/job DbContext. RerankBudget lives here rather than under
+        // the serving pipeline because it is the same kind of object as the other two — a ceiling
+        // read off the token ledger — and keeping the three together is what stops a fourth being
+        // written somewhere else.
+        services.AddScoped<Application.CrossReference.CrossReferenceBudget>();
+        services.AddScoped<Application.CrossReference.RerankBudget>();
+        services.AddScoped<Application.CrossReference.NeighbourFinder>();
+        services.AddScoped<Application.CrossReference.CrossReferenceCandidateBuilder>();
+        services.AddScoped<Application.CrossReference.CrossReferenceService>();
+        // Offline only, reached through the founder-only /api/dev surface.
+        services.AddScoped<Application.CrossReference.CrossReferenceBacktest>();
 
         // ── Serving pipeline ─────────────────────────────────────────────────────────────
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();

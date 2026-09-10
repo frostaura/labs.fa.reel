@@ -61,7 +61,11 @@ public class BuildFeedJobHandler(
     // Optional for the same reason as the options above: the three integration tests that construct
     // this handler by hand keep compiling and keep describing the pre-B1 feed, which is exactly the
     // single-centroid path a cold account still takes.
-    TasteClusterProvider? tasteClusters = null) : IJobHandler
+    TasteClusterProvider? tasteClusters = null,
+    // Also optional, and for the same reason: the hand-built integration handlers predate the
+    // ceiling. A null budget means "no ceiling", which is exactly the behaviour those tests were
+    // written against — the gate is opt-in per construction site, and DI always supplies it.
+    CrossReference.RerankBudget? rerankBudget = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -1696,6 +1700,15 @@ public class BuildFeedJobHandler(
             return fits;
         }
 
+        // The re-rank family ceiling. This is BACKGROUND work — nobody is waiting on a feed build —
+        // so it stops at the background fraction and leaves the rest of the day's allowance for the
+        // founder's own chat turns. Losing the pass costs a slightly worse hero, never a build,
+        // exactly as the agent-unavailable path already does.
+        if (!await HasBackgroundRerankHeadroomAsync(accountId, "pre-assembly fit pass", ct))
+        {
+            return fits;
+        }
+
         try
         {
             var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
@@ -1709,7 +1722,8 @@ public class BuildFeedJobHandler(
             {
                 var inputs = batch.Select(c => RerankInputFor(c, contexts)).ToList();
                 var results = await agent.RerankBatchAsync(
-                    inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null, batchCt);
+                    inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null,
+                    ApiUsagePurpose.RerankFeed, batchCt);
 
                 foreach (var raw in results)
                 {
@@ -1830,7 +1844,11 @@ public class BuildFeedJobHandler(
         // paginator, Ask Reel and lens generation.
         using var loop = new LlmBudgetLoop(new LlmBudgetOptions(WhyPassBudget, WhyPassCeiling, RerankBatch), ct);
 
-        if (uncached.Count > 0 && agent.IsAvailable)
+        // Same ceiling, same background fraction, and deliberately checked once for the pass AND the
+        // swap that shares its budget: two checks would let a build that just failed the gate spend
+        // on the swap anyway.
+        if (uncached.Count > 0 && agent.IsAvailable
+            && await HasBackgroundRerankHeadroomAsync(accountId, "why + curation pass", ct))
         {
             var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
             var contexts = await RerankContextsAsync([.. planned.Select(i => i.Candidate)], ct);
@@ -1870,6 +1888,38 @@ public class BuildFeedJobHandler(
     /// Three queries for the whole page — the prompt was previously handed genres and 300
     /// characters of overview and asked to judge personal fit from that.
     /// </summary>
+    /// <summary>
+    /// Whether a BACKGROUND re-rank pass may spend today.
+    ///
+    /// <para>The feed build is the re-rank family's heaviest spender and the only one nobody is
+    /// waiting on, so it stops at <c>RerankBudget.BackgroundFraction</c> of both ceilings rather
+    /// than at the ceiling itself. Ask Reel and the paginator keep the full allowance: a person
+    /// mid-conversation being told the model is out of budget because a 3 a.m. build spent it is
+    /// the exact failure the ceiling exists to prevent.</para>
+    ///
+    /// <para>A null budget — the hand-built test handlers — means no ceiling, which is the
+    /// behaviour those tests were written against.</para>
+    /// </summary>
+    private async Task<bool> HasBackgroundRerankHeadroomAsync(Guid accountId, string pass, CancellationToken ct)
+    {
+        if (rerankBudget is null)
+        {
+            return true;
+        }
+
+        var allowance = await rerankBudget.AllowanceAsync(accountId, ct);
+        if (allowance.HasBackgroundHeadroom)
+        {
+            return true;
+        }
+
+        logger.LogInformation(
+            "Feed build for {AccountId} skipped its {Pass}: background re-rank is capped at {Fraction:P0} of the "
+            + "family ceiling and today stands at {Allowance}. The build ships on model order.",
+            accountId, pass, CrossReference.RerankBudget.BackgroundFraction, allowance.Describe());
+        return false;
+    }
+
     private async Task<IReadOnlyDictionary<Guid, RerankTitleContext>> RerankContextsAsync(
         IReadOnlyList<Candidate> scored, CancellationToken ct)
     {
@@ -1993,7 +2043,8 @@ public class BuildFeedJobHandler(
         var stop = await loop.RunAsync(batch, async (inputs, batchCt) =>
         {
             var results = await agent.RerankBatchAsync(
-                inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null, batchCt);
+                inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null,
+                ApiUsagePurpose.RerankFeed, batchCt);
             foreach (var result in results)
             {
                 debiased.Observe(result);
@@ -2066,7 +2117,8 @@ public class BuildFeedJobHandler(
             {
                 var inputs = batch.Select(p => RerankInputFor(p.Candidate, contexts)).ToList();
                 var results = await agent.RerankBatchAsync(
-                    inputs, FeedPaginator.QueryForRow(rail.Key.Row), persona, anchorName, batchCt);
+                    inputs, FeedPaginator.QueryForRow(rail.Key.Row), persona, anchorName,
+                    ApiUsagePurpose.RerankFeed, batchCt);
 
                 foreach (var raw in results)
                 {

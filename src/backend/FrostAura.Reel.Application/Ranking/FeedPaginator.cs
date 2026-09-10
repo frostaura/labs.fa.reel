@@ -8,6 +8,7 @@ using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -69,6 +70,7 @@ public sealed class FeedPaginator(
     ITmdbClient tmdb,
     ISearchAgent agent,
     PersonalisationContext personalisation,
+    CrossReference.RerankBudget rerankBudget,
     IMemoryCache cache,
     ILogger<FeedPaginator> logger)
 {
@@ -318,6 +320,23 @@ public sealed class FeedPaginator(
             }
         }
 
+        // The family ceiling. Curation SHARPENS an order the model has already personalised, so a
+        // page that ships without it is a slightly worse order and not a wrong one — the same way
+        // the agent-unavailable and rerank-failed paths already behave. This is a request path, so
+        // it gets the full ceiling rather than the background fraction.
+        if (uncached.Count > 0)
+        {
+            var allowance = await rerankBudget.AllowanceAsync(account.Id, ct);
+            if (!allowance.HasHeadroom)
+            {
+                logger.LogInformation(
+                    "Feed curation for {Row} skipped: the re-rank family ceiling is spent ({Allowance}). "
+                    + "The page serves model order and is curated on a later day.",
+                    rowKey, allowance.Describe());
+                uncached.Clear();
+            }
+        }
+
         if (uncached.Count > 0)
         {
             // Time-boxed for the same reason deepening is: this is an LLM round-trip on the critical
@@ -352,7 +371,8 @@ public sealed class FeedPaginator(
             {
                 var stop = await loop.RunAsync(uncached, async (batch, batchCt) =>
                 {
-                    var results = await agent.RerankBatchAsync(batch, query, narrative, anchorName, batchCt);
+                    var results = await agent.RerankBatchAsync(
+                        batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
                     foreach (var r in results)
                     {
                         fitById[r.TitleId] = r;

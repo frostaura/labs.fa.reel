@@ -84,6 +84,113 @@ public sealed class PersonalisationContext(IReelDbContext db, DislikeSignal disl
     }
 
     /// <summary>
+    /// The persona as it stood at <paramref name="asOf"/> — the OFFLINE-ONLY sibling of
+    /// <see cref="PersonaForAsync"/>, and the reason a cross-reference backtest can be believed.
+    ///
+    /// <para><b>Mirrors <c>EligibilityQueryBuilder.EligibleTitlesAsOf</c>, deliberately.</b> That
+    /// method exists because the eligibility rule has to be re-askable at a past instant without
+    /// present-day interactions leaking in; this one exists for exactly the same reason on the
+    /// description side, and follows the same axis: the immutable <c>UserRating.FirstRatedAt</c>,
+    /// never <c>RatedAt</c> and never the wall clock.</para>
+    ///
+    /// <para><b>It never reads the stored narrative.</b> <see cref="PersonaForAsync"/> prefers
+    /// <c>AccountTasteNarratives.Effective</c>, which was written LAST WEEK from every rating the
+    /// account has ever made — including the holdout ratings a backtest is about to score the judge
+    /// against. Handing that text to the judge is not a subtle leak, it is the answer key. So the
+    /// as-of persona is always built from <see cref="TasteSummary.BuildAsync"/> over the as-of taste
+    /// state the caller passes in, and the caller is responsible for having built that state as-of
+    /// too.</para>
+    ///
+    /// <para><b>The declined line and the anchors are cut at the same instant.</b> A reaction
+    /// created after the split, or a rating first seen after it, would each hand the judge a fact
+    /// from the future in a different costume. <c>CrossReferenceLeakageTests</c> asserts all three
+    /// surfaces — persona text, anchors, neighbours — carry nothing newer than the split.</para>
+    ///
+    /// <para><b>Not for serving.</b> Nothing on a request path may call this: it is strictly more
+    /// expensive and strictly less personal than the live persona, and its whole point is to be
+    /// wrong about the present on purpose.</para>
+    /// </summary>
+    public async Task<LensPersona> PersonaAsOfAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, DateTime asOf, CancellationToken ct)
+    {
+        var summary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
+        var anchors = await AnchorCandidatesAsOfAsync(accountId, asOf, ct);
+        var declined = await DeclinedLineAsOfAsync(accountId, asOf, ct);
+        return new LensPersona(summary, declined, anchors);
+    }
+
+    /// <summary>
+    /// The anchor list as it stood at <paramref name="asOf"/>: the same ordering as
+    /// <see cref="AnchorCandidatesAsync"/>, cut on <c>FirstRatedAt</c>.
+    ///
+    /// <para>Declined titles are deliberately absent here rather than filtered. The live anchor
+    /// list draws them from <c>DislikeSignal.Profile</c>, which is a cached, recency-decayed
+    /// aggregate with no as-of mode at all — re-deriving one would be a second implementation of a
+    /// decay rule, and two implementations of a decay rule is how they drift. The backtest's
+    /// persona therefore names only titles the account had rated by the split, which understates
+    /// what the live judge sees and never overstates it.</para>
+    /// </summary>
+    internal async Task<IReadOnlyList<LensAnchorCandidate>> AnchorCandidatesAsOfAsync(
+        Guid accountId, DateTime asOf, CancellationToken ct)
+    {
+        var rated = await db.UserRatings
+            .Where(r => r.AccountId == accountId
+                && r.FirstRatedAt <= asOf
+                && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)
+                && (r.Rating >= LovedFloor || r.Rating <= DislikedCeiling))
+            .Join(
+                db.Titles,
+                r => r.TitleId,
+                t => t.Id,
+                (r, t) => new { t.Name, t.Year, r.Rating, r.RatedAt })
+            .Where(x => x.Name != null && x.Name != "")
+            .ToListAsync(ct);
+
+        var loved = rated
+            .Where(x => x.Rating >= LovedFloor)
+            .OrderByDescending(x => x.Rating)
+            .ThenByDescending(x => x.RatedAt)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(LovedCandidates)
+            .Select(x => new LensAnchorCandidate(x.Name, x.Year, x.Rating, AnchorStance.Loved));
+
+        var disliked = rated
+            .Where(x => x.Rating <= DislikedCeiling)
+            .OrderBy(x => x.Rating)
+            .ThenByDescending(x => x.RatedAt)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(DislikedCandidates)
+            .Select(x => new LensAnchorCandidate(x.Name, x.Year, x.Rating, AnchorStance.Disliked));
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return loved.Concat(disliked).Where(c => seen.Add(c.Name)).ToList();
+    }
+
+    /// <summary>
+    /// The declined line as it stood at <paramref name="asOf"/>, straight off the reaction rows —
+    /// created at or before the split and not revoked by then. Deliberately NOT
+    /// <c>DislikeSignal.DeclinedLine</c>, whose profile is cached, decayed and always current.
+    /// Null when the account had declined nothing yet, exactly as the live line is.
+    /// </summary>
+    internal async Task<string?> DeclinedLineAsOfAsync(Guid accountId, DateTime asOf, CancellationToken ct)
+    {
+        var declined = await db.UserTitleReactions
+            .Where(r => r.AccountId == accountId
+                && r.Kind == ReactionKind.NotInterested
+                && r.CreatedAt <= asOf
+                && (r.RevokedAt == null || r.RevokedAt > asOf))
+            .OrderByDescending(r => r.CreatedAt)
+            .Take(DislikeSignal.PromptCount)
+            .Join(db.Titles, r => r.TitleId, t => t.Id, (r, t) => t.Name)
+            .ToListAsync(ct);
+
+        var names = declined.Where(n => !string.IsNullOrWhiteSpace(n)).ToList();
+        return names.Count == 0
+            ? null
+            : "Recently declined, do not recommend anything too similar: " + string.Join(", ", names);
+    }
+
+    /// <summary>
     /// The titles a lens note is permitted to name as an anchor: what this account loved, what it
     /// disliked, and what it declined — each with the year and the account's own verdict, so the
     /// model can write a true relation clause without guessing at one.

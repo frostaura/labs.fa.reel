@@ -535,6 +535,8 @@ public class TastePriorFeedTests(PostgresFixture fixture)
             tmdb,
             new UnavailableSearchAgent(),
             new PersonalisationContext(db, new DislikeSignal(db, cache)),
+            new FrostAura.Reel.Application.CrossReference.RerankBudget(
+                db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
             cache,
             NullLogger<FeedPaginator>.Instance);
 
@@ -562,7 +564,7 @@ public class TastePriorFeedTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona,
-            string? anchorName = null, CancellationToken ct = default)
+            string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             Interlocked.Increment(ref RerankCalls);
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
@@ -631,7 +633,7 @@ public class TastePriorFeedTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona,
-            string? anchorName = null, CancellationToken ct = default) =>
+            string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 

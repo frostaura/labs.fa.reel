@@ -59,7 +59,16 @@ public interface ISearchAgent
     /// "because you loved" / "more like this" rail) — the agent is then asked to name the concrete
     /// connection between each candidate and that anchor. Null for un-anchored rows and Ask Reel,
     /// whose anchor is the user's request itself.
+    ///
+    /// <para><paramref name="usagePurpose"/> is which member of the re-rank family this call bills
+    /// to — one of <c>ApiUsagePurpose.RerankFeed / RerankPage / RerankAsk / RerankExpand</c>. It
+    /// exists because a single <c>rerank</c> string written by four callers made "what does a turn
+    /// cost" unanswerable on a day-grained ledger, and every per-surface figure derived from it was
+    /// wrong. It defaults to the LEGACY <c>rerank</c> so a caller that forgets degrades to
+    /// "counted, unattributed" rather than to "free" — the family ceiling counts that string
+    /// too.</para>
     /// </summary>
     Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-        IReadOnlyList<RerankInput> titles, string query, Lens.LensPersona persona, string? anchorName = null, CancellationToken ct = default);
+        IReadOnlyList<RerankInput> titles, string query, Lens.LensPersona persona, string? anchorName = null,
+        string usagePurpose = Sync.ApiUsagePurpose.Rerank, CancellationToken ct = default);
 }
