@@ -30,8 +30,15 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// a concept query pulls unseen matching titles from TMDB, streams them, and excludes anything
 /// the user has already seen — and a repeat query reuses the cache instead of re-hitting TMDB.
 /// </summary>
-[Collection("postgres")]
-public class LiveSearchExpansionTests(PostgresFixture fixture)
+/// <remarks>
+/// This class runs on its OWN database (see <see cref="AskReelSearchPostgresFixture"/>). Its
+/// assertions count exactly what it seeded, which it achieves by marking every other title watched
+/// — and a tiny eligible pool over a large HNSW-indexed embedding table is the one query shape that
+/// silently returns too few rows. On the shared database those counts therefore drifted with the
+/// size of the rest of the suite rather than with anything this file does.
+/// </remarks>
+[Collection("askreel-postgres")]
+public class LiveSearchExpansionTests(AskReelSearchPostgresFixture fixture)
 {
     // Was quarantined as a "local-only flake" until 2026-09-10. The cause was in the fake TMDB
     // client below, not the environment: its list rows carried OriginalLanguage = null, so every
