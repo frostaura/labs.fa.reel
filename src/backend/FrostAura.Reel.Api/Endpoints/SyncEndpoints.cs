@@ -162,7 +162,7 @@ public static class SyncEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             var title = await TitleEndpoints.ResolveTitleAsync(db, request.MediaType, request.TmdbId, ct);
