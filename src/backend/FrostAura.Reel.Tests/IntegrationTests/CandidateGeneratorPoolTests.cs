@@ -646,6 +646,12 @@ public class CandidateGeneratorPoolTests(PostgresFixture fixture)
 
         public int TotalCalls { get; private set; }
 
+        // The bulk-seed walk is not exercised by this fixture; SeedCatalogJobHandlerTests owns its own
+        // scripted TMDB client. An empty page reads as "this partition is exhausted", which is the
+        // only honest answer a fake that was never given a corpus can give.
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
+
         public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
         {
             TotalCalls++;

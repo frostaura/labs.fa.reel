@@ -39,9 +39,19 @@ namespace FrostAura.Reel.Application.Jobs;
 ///
 /// <para>
 /// <b>Account is optional.</b> A null <c>AccountId</c> is a global sweep — catalogue rows belong to
-/// no tenant, and the weekly growth pass discovers titles on behalf of nobody. A global run skips the
-/// priority tiers (there is no account to prioritise for), publishes no SSE (no one is watching) and
-/// chains no Train (there is no model to retrain).
+/// no tenant, and the weekly growth pass and the catalogue bulk seed both discover titles on behalf
+/// of nobody. A global run takes the catalogue in supply order rather than an account's priority
+/// tiers (there is no account to prioritise for), publishes no SSE (no one is watching) and chains
+/// no Train (there is no model to retrain).
+/// </para>
+///
+/// <para>
+/// <b>Two ceilings, not one.</b> <c>ENRICH_MAX_TITLES_PER_RUN</c> bounds a RUN;
+/// <c>EXTRACT_DAILY_TOKENS</c> and <c>EMBED_DAILY_TOKENS</c> bound a DAY, system-wide, against the
+/// token ledger. The per-run cap alone was sufficient while enrichment ran a few times a day over a
+/// 5,000-title catalogue; once the bulk seed made the backlog tens of thousands deep and the
+/// follow-through scheduler started queueing runs continuously, a per-run cap bounds nothing at all.
+/// See <see cref="CatalogEnrichmentBudget"/> for the cost arithmetic behind the numbers.
 /// </para>
 /// </summary>
 public class EnrichCatalogJobHandler(
@@ -50,6 +60,7 @@ public class EnrichCatalogJobHandler(
     ITitleAttributeExtractor extractor,
     IPipelineEventHub events,
     IConfiguration configuration,
+    CatalogEnrichmentBudget budget,
     ILogger<EnrichCatalogJobHandler> logger) : IJobHandler
 {
     public JobKind Kind => JobKind.EnrichCatalog;
@@ -159,8 +170,14 @@ public class EnrichCatalogJobHandler(
     /// whatever else happened to be in a shared database.
     /// </para>
     /// <para>
-    /// A GLOBAL run has no account to prioritise for and falls back to id order, which is stable and
-    /// therefore still deterministic.
+    /// A GLOBAL run has no account to prioritise for, and takes the catalogue in SUPPLY order
+    /// instead: highest <c>TmdbVoteCount</c> first, then most recent, with id as the tiebreak that
+    /// keeps it deterministic. It used to be plain id order, which was fine while a global run meant
+    /// the handful of rows a weekly growth sweep had just added, and became wrong the moment the
+    /// catalogue bulk seed made the global backlog tens of thousands of rows deep: a capped run over
+    /// that in id order enriches a uniformly random sample, so the titles an account is actually
+    /// likely to be shown wait behind the ones nobody will ever see. Vote count then recency is the
+    /// same axis the seed walks, and close to the order in which discovery would surface a title.
     /// </para>
     /// </summary>
     private IQueryable<Title> InPriorityOrder(IQueryable<Title> titles, Guid? accountId) =>
@@ -173,7 +190,10 @@ public class EnrichCatalogJobHandler(
                         || db.WatchedTitles.Any(w => w.AccountId == id && w.TitleId == t.Id) ? 2
                     : 3)
                 .ThenBy(t => t.Id)
-            : titles.OrderBy(t => t.Id);
+            : titles
+                .OrderByDescending(t => t.TmdbVoteCount)
+                .ThenByDescending(t => t.Year ?? 0)
+                .ThenBy(t => t.Id);
 
     private async Task<int> EmbedAsync(
         SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
@@ -198,6 +218,20 @@ public class EnrichCatalogJobHandler(
         {
             if (ct.IsCancellationRequested)
             {
+                break;
+            }
+
+            // Re-read per batch, not once per run: the ledger's own in-flight counters move as this
+            // loop spends, so a run that starts inside the ceiling stops the moment it crosses it
+            // rather than finishing whatever it had already selected.
+            var allowance = await budget.EmbedAllowanceAsync(DateTime.UtcNow, ct);
+            if (!allowance.HasHeadroom)
+            {
+                logger.LogInformation(
+                    "Embedding stopped at the daily token ceiling ({Used}/{Limit}) after {Processed}/{Total} title(s).",
+                    allowance.Used, allowance.Limit, processed, total);
+                job.ProgressMessage = "Learning plots · paused for today's token ceiling";
+                await db.SaveChangesAsync(ct);
                 break;
             }
 
@@ -264,7 +298,9 @@ public class EnrichCatalogJobHandler(
             Publish(accountId, job);
         }
 
-        return total;
+        // processed, not total: a run that stopped at a daily ceiling must not report the work it
+        // selected as work it did.
+        return processed;
     }
 
     private async Task<int> ExtractAsync(
@@ -293,6 +329,22 @@ public class EnrichCatalogJobHandler(
         {
             if (ct.IsCancellationRequested)
             {
+                break;
+            }
+
+            // The money gate. Extraction is the only stage whose cost scales with the catalogue at a
+            // price worth arguing about, so this is the number that decides how fast a 35,000-title
+            // seed becomes usable — and the one that must never be crossed silently. Checked per
+            // batch for the same reason as embedding: a run that started inside the budget can spend
+            // past it in a single window.
+            var allowance = await budget.ExtractAllowanceAsync(DateTime.UtcNow, ct);
+            if (!allowance.HasHeadroom)
+            {
+                logger.LogInformation(
+                    "Attribute extraction stopped at the daily token ceiling ({Used}/{Limit}) after {Processed}/{Total} title(s).",
+                    allowance.Used, allowance.Limit, processed, total);
+                job.ProgressMessage = "Reading the mood · paused for today's token ceiling";
+                await db.SaveChangesAsync(ct);
                 break;
             }
 
@@ -369,7 +421,9 @@ public class EnrichCatalogJobHandler(
             Publish(accountId, job);
         }
 
-        return total;
+        // processed, not total: a run that stopped at a daily ceiling must not report the work it
+        // selected as work it did.
+        return processed;
     }
 
     /// <summary>Progress SSE, skipped for a global run — there is no account subscribed to it.</summary>

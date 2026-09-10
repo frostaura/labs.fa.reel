@@ -192,6 +192,19 @@ public static class TitleEndpoints
                         ContributionDetails.DislikedSimilarityFeature, -Math.Round((decimal)demotion, 1)));
                     contributionDetails = [.. contributionDetails, ContributionDetails.DislikedSimilarity(title.Genres, profile)];
                 }
+
+                // The account-level taste prior behind where this title RANKS — as opposed to the
+                // demotion above, which is already inside the number. Both are honest and they are
+                // different claims, so they get different bars: the prediction is what the model
+                // believes about the title, the prior is what the account's own history says about
+                // the kind of thing it is.
+                if (taste is not null)
+                {
+                    var (priorBars, priorDetails) = ContributionDetails.TastePriorBreakdown(
+                        TastePrior.From(taste), title);
+                    contributions.AddRange(priorBars.Select(b => new ContributionEntry(b.Feature, b.Value)));
+                    contributionDetails = [.. contributionDetails, .. priorDetails];
+                }
             }
 
             var watched = await db.WatchedTitles.FirstOrDefaultAsync(w => w.AccountId == accountId && w.TitleId == title.Id, ct);

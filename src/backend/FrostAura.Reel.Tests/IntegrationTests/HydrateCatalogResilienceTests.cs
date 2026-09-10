@@ -10,6 +10,7 @@ using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -125,10 +126,13 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         await using var db = fixture.CreateContext(scoped);
+        var configuration = new ConfigurationBuilder().Build();
         var handler = new HydrateCatalogJobHandler(
             db,
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             new NoopHub(),
+            new CatalogHydrationBudget(db, configuration),
+            configuration,
             NullLogger<HydrateCatalogJobHandler>.Instance);
 
         var job = new SyncJob
@@ -239,6 +243,12 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
         }
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => GetMovieAsync(tmdbId, ct);
+
+        // The bulk-seed walk is not exercised by this fixture; SeedCatalogJobHandlerTests owns its own
+        // scripted TMDB client. An empty page reads as "this partition is exhausted", which is the
+        // only honest answer a fake that was never given a corpus can give.
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
             throw new NotSupportedException();

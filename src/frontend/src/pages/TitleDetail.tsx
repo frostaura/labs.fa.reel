@@ -104,6 +104,10 @@ function featureLabel(feature: string): string {
     hasAttributesEra: "setting data",
     // synthetic serving-time entries (not model features)
     dislikedSimilarity: "similar to titles you passed on",
+    // Ranking-time entries: these explain where the title SAT, not what the model predicted.
+    tastePriorNoHistoryGenre: "a genre you don't watch",
+    tastePriorGenreAffinity: "how you rate this genre",
+    tastePriorMedia: "films vs. series",
   };
   if (map[feature]) return map[feature];
   // camelCase → spaced words, lower-cased (e.g. "simTopLovedMax" → "sim top loved max").
@@ -111,13 +115,22 @@ function featureLabel(feature: string): string {
 }
 
 /**
- * The top-5 breakdown bars, plus the dislike-demotion row whenever the server sent one — that row
- * is the explanation for a visibly lowered score, so it must never be crowded out by the slice.
+ * The top-5 breakdown bars, plus every synthetic serving-time row the server sent — the dislike
+ * demotion and the taste-prior factors. Those rows are the explanation for a card sitting lower
+ * than its number suggests, so they must never be crowded out by the slice: the server appends them
+ * after the model's own contributions, which is exactly where a top-5 cut would drop them.
  */
+const SYNTHETIC_FEATURES = [
+  "dislikedSimilarity",
+  "tastePriorNoHistoryGenre",
+  "tastePriorGenreAffinity",
+  "tastePriorMedia",
+];
+
 function visibleContributions(all: { feature: string; value: number }[]) {
   const top = all.slice(0, 5);
-  const disliked = all.find((c) => c.feature === "dislikedSimilarity");
-  return disliked && !top.includes(disliked) ? [...top, disliked] : top;
+  const synthetic = all.filter((c) => SYNTHETIC_FEATURES.includes(c.feature) && !top.includes(c));
+  return [...top, ...synthetic];
 }
 
 /**

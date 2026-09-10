@@ -18,6 +18,31 @@ public interface ITmdbClient
     Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
         bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default);
 
+    /// <summary>
+    /// One page of the catalogue bulk seed's walk: discover ordered by <c>vote_count.desc</c>,
+    /// constrained to a SINGLE release year and a vote-count floor, on the
+    /// <see cref="RatePriority.Backfill"/> lane and billed to purpose <c>seed</c>.
+    ///
+    /// <para>
+    /// It is a separate method rather than another parameter on <see cref="DiscoverAsync"/> for
+    /// three reasons, each of which is a defect if it is fudged. The sort order is
+    /// <c>vote_count.desc</c>, not <c>popularity.desc</c>: popularity is a present-day trailing
+    /// metric that reshuffles daily, so a multi-day resumable walk over it revisits and misses rows
+    /// unpredictably, while vote count is monotone enough to walk once. The year window is CLOSED
+    /// at both ends, because TMDB caps discover at page 500 (10,000 results) for any one query and
+    /// the unpartitioned corpus is an order of magnitude past that — the partition is what keeps
+    /// every query under the wall. And the caller needs <c>total_pages</c> back, which the list
+    /// helpers discard.
+    /// </para>
+    ///
+    /// <para>
+    /// Deliberately UNFILTERED by language. The rows are global; an account's language rule is
+    /// applied at eligibility, where it can be relaxed per account without re-acquiring supply.
+    /// </para>
+    /// </summary>
+    Task<TmdbDiscoverPage> DiscoverSeedPageAsync(
+        bool movies, int year, int minVoteCount, int page, CancellationToken ct = default);
+
     /// <summary>This week's trending titles (movie or tv).</summary>
     Task<IReadOnlyList<TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default);
 

@@ -65,7 +65,15 @@ public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<
     }
 
     /// <inheritdoc />
-    public (long Calls, long Tokens) PendingToday(ApiProvider provider, Guid? accountId, string purpose)
+    public (long Calls, long Tokens) PendingToday(ApiProvider provider, Guid? accountId, string purpose) =>
+        SumPending(provider, purpose, key => key.AccountId == accountId);
+
+    /// <inheritdoc />
+    public (long Calls, long Tokens) PendingTodayAllAccounts(ApiProvider provider, string purpose) =>
+        SumPending(provider, purpose, static _ => true);
+
+    private (long Calls, long Tokens) SumPending(
+        ApiProvider provider, string purpose, Func<UsageKey, bool> accountMatches)
     {
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         long calls = 0, tokens = 0;
@@ -75,7 +83,7 @@ public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<
         // (provider, day, account, model, purpose) within a 15s window — this is a handful of rows.
         foreach (var (key, counters) in _pending)
         {
-            if (key.Provider != provider || key.Day != today || key.AccountId != accountId
+            if (key.Provider != provider || key.Day != today || !accountMatches(key)
                 || !string.Equals(key.Purpose, purpose, StringComparison.Ordinal))
             {
                 continue;
