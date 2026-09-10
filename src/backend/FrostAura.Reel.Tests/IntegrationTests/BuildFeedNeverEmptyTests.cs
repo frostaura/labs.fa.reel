@@ -477,13 +477,25 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         // (seen-enough) title's, the rest are mutually orthogonal. Whatever base score the model
         // hands the victim, the dislike demotion (~1.2 for an identical plot) must keep it out of
         // the hero while its seven clean twins fill the slots.
+        //
+        // ISOLATION, and why it is not optional: this database is shared with every other
+        // integration test, so in a full run the catalogue reaches ~3,700 titles while the shortlist
+        // cut is 220. Without isolation these nine compete for a slot against unrelated fixtures,
+        // and whether they get one is a property of the synthetic model's random splits rather than
+        // of the behaviour under test — it passed for as long as it did by luck, and it went red the
+        // moment FeatureSchema v4 renumbered the vector and moved those splits. Worse, the failure
+        // mode was silent: with the victim never scored at all, "the victim is not in the hero"
+        // passes vacuously. An IncludeGenre allow-list is the product's OWN mechanism for "only
+        // these titles are eligible", so the test borrows it instead of inventing something.
+        const string fixtureGenre = "dislike-demotion-fixture";
         var accountId = await SeedAccountAsync();
+        await AddContentFilterAsync(accountId, FilterKind.IncludeGenre, fixtureGenre);
         await SeedLovedTitlesAsync(accountId, 12);
 
         Guid victimId;
         await using (var db = fixture.CreateContext(new AccountContext()))
         {
-            var disliked = NewTitle("declined saturation", popularity: 1.5m);
+            var disliked = NewTitle("declined saturation", popularity: 1.5m, genre: fixtureGenre);
             db.Add(disliked);
             db.TitleEmbeddings.Add(NewEmbedding(disliked.Id, axis: 0));
             db.UserTitleReactions.Add(new UserTitleReaction
@@ -496,14 +508,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
                 CreatedAt = DateTime.UtcNow,
             });
 
-            var victim = NewTitle("victim candidate", popularity: 2.5m);
+            var victim = NewTitle("victim candidate", popularity: 2.5m, genre: fixtureGenre);
             victimId = victim.Id;
             db.Add(victim);
             db.TitleEmbeddings.Add(NewEmbedding(victim.Id, axis: 0)); // cosine 1 to the disliked plot
 
             for (var i = 1; i <= 7; i++)
             {
-                var clean = NewTitle($"clean candidate {i}", popularity: 2m + (i * 0.001m));
+                var clean = NewTitle($"clean candidate {i}", popularity: 2m + (i * 0.001m), genre: fixtureGenre);
                 db.Add(clean);
                 db.TitleEmbeddings.Add(NewEmbedding(clean.Id, axis: i)); // orthogonal to everything
             }
@@ -520,14 +532,20 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         var heroIds = items.Where(i => i.Row == FeedRowKind.Hero).Select(i => i.TitleId).ToList();
 
         Assert.NotEmpty(heroIds);
+
+        // The victim must have been SCORED before "not in the hero" means anything: a title that
+        // never reached the 220-title shortlist is absent from the hero for a reason that has
+        // nothing to do with the dislike demotion this test exists to prove.
+        var victimScores = await verify.TitleScores
+            .Where(s => s.AccountId == accountId && s.TitleId == victimId)
+            .Select(s => s.PredictedRating)
+            .ToListAsync();
+        Assert.True(victimScores.Count == 1, "the victim must reach the shortlist for this test to mean anything");
         Assert.DoesNotContain(victimId, heroIds);
 
         // And the demotion is visible in the persisted scores: the victim sits clearly below every
         // hero pick, not coincidentally just past the cut line.
-        var victimScore = await verify.TitleScores
-            .Where(s => s.AccountId == accountId && s.TitleId == victimId)
-            .Select(s => s.PredictedRating)
-            .FirstAsync();
+        var victimScore = victimScores[0];
         var heroFloor = await verify.TitleScores
             .Where(s => s.AccountId == accountId && heroIds.Contains(s.TitleId))
             .MinAsync(s => s.PredictedRating);

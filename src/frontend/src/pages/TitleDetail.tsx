@@ -55,6 +55,9 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
 function featureLabel(feature: string): string {
   if (feature.startsWith("genre:")) return feature.slice(6).replace(/-/g, " ");
   if (feature.startsWith("subgenreBucket:")) return "theme match";
+  // FeatureSchema v4 one-hot blocks — the vocabulary value is already the human word.
+  if (feature.startsWith("tone:")) return `${feature.slice(5).replace(/-/g, " ")} tone`;
+  if (feature.startsWith("era:")) return `${feature.slice(4).replace(/-/g, " ")} setting`;
   const map: Record<string, string> = {
     // cast & crew
     castAffinity: "cast you rate highly",
@@ -76,7 +79,6 @@ function featureLabel(feature: string): string {
     runtimeMinutes: "runtime",
     certificationOrdinal: "maturity rating",
     isShow: "series format",
-    showEngagement: "your episode ratings",
     // LLM tone attributes
     attrDarkness: "tone (darkness)",
     attrPacing: "pacing",
@@ -92,6 +94,14 @@ function featureLabel(feature: string): string {
     simTopLovedMax: "very close to a favourite",
     simTopLovedMean: "feels like your favourites",
     hasEmbedding: "story similarity",
+    // presence flags (FeatureSchema v4) — "we know this about the title", not the value itself
+    hasRuntime: "runtime data",
+    hasTraktRating: "crowd-rating data",
+    hasPopularity: "popularity data",
+    hasCertification: "maturity-rating data",
+    hasSubgenres: "subgenre data",
+    hasAttributesTone: "tone data",
+    hasAttributesEra: "setting data",
     // synthetic serving-time entries (not model features)
     dislikedSimilarity: "similar to titles you passed on",
   };

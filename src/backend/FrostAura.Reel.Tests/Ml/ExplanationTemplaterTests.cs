@@ -191,8 +191,8 @@ public class ExplanationTemplaterTests
         [
             "castAffinity", "lovedCastCount", "directorAffinity", "writerAffinity",
             "userGenreAffinity", "genreDrift", "decadeAffinity", "traktRating",
-            "tmdbPopularityLog", "showEngagement", "releaseAgeLog", "contrarianAdjustedRating",
-            "simLovedCentroid", "simRecentCentroid", "genre:drama",
+            "tmdbPopularityLog", "releaseAgeLog", "contrarianAdjustedRating",
+            "simLovedCentroid", "simRecentCentroid", "genre:drama", "tone:brooding",
         ];
         var persons = new Dictionary<CreditRole, ExplanationTemplater.PersonAffinity>
         {
