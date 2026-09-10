@@ -264,8 +264,12 @@ public sealed class FeedPaginator(
                 genericUsed = true;
             }
 
+            // 2 dp, matching BuildFeedJobHandler.DisplayRating and the exposure log. Page 2+ is the
+            // same feed as page 1, so it must not be the one surface that quantises coarser: a
+            // calibration join across FeedItem, TitleScore and ExposureLog would inherit the floor
+            // from whichever side is coarsest. Invisible to users — the badge is toFixed(1).
             items.Add(new ScoredFeedItem(
-                c.Scored.Title, Math.Round(c.Scored.Predicted, 1), why, IsReleased(c.Scored.Title, now)));
+                c.Scored.Title, Math.Round(c.Scored.Predicted, 2), why, IsReleased(c.Scored.Title, now)));
         }
 
         return items;
