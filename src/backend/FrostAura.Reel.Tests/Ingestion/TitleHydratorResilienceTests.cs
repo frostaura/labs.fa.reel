@@ -232,6 +232,7 @@ public class TitleHydratorResilienceTests
         public DbSet<EvaluationResult> EvaluationResults => throw Unexpected();
         public DbSet<TitleScore> TitleScores => throw Unexpected();
         public DbSet<OnlineModelState> OnlineModelStates => throw Unexpected();
+        public DbSet<TasteCluster> TasteClusters => throw Unexpected();
         public DbSet<FeedSnapshot> FeedSnapshots => throw Unexpected();
         public DbSet<FeedItem> FeedItems => throw Unexpected();
 

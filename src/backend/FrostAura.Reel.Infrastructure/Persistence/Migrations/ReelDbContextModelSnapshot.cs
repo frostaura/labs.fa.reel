@@ -555,10 +555,16 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AnnPerClusterJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<DateTime>("BuiltAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("CandidateCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ClustersUsed")
                         .HasColumnType("integer");
 
                     b.Property<string>("DegradedReason")
@@ -587,7 +593,16 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("NewCandidatesUpserted")
                         .HasColumnType("integer");
 
+                    b.Property<string>("NewlyEligiblePerArmJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<int>("RailsDropped")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SeedPoolSize")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SeedsUsed")
                         .HasColumnType("integer");
 
                     b.Property<int>("ShortlistCount")
@@ -1351,6 +1366,54 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("PersonAffinities");
+                });
+
+            modelBuilder.Entity("FrostAura.Reel.Domain.Ml.TasteCluster", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Vector>("Centroid")
+                        .IsRequired()
+                        .HasColumnType("vector(1536)");
+
+                    b.Property<DateTime>("ComputedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateOnly>("ComputedForDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("ExemplarTitleIdsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("MemberCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Ordinal")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Weight")
+                        .HasPrecision(12, 4)
+                        .HasColumnType("numeric(12,4)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "ComputedForDate")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("AccountId", "ComputedForDate", "Ordinal")
+                        .IsUnique();
+
+                    b.ToTable("TasteClusters");
                 });
 
             modelBuilder.Entity("FrostAura.Reel.Domain.Ml.TitleScore", b =>

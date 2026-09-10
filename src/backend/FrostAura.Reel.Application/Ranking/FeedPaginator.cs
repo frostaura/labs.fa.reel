@@ -76,6 +76,12 @@ public sealed class FeedPaginator(
     // personalized pgvector ANN slice, so paging no longer re-ranks only the popular head.
     private const int WindowPopCount = 100;
     private const int WindowAnnCount = 90;
+
+    /// <summary>
+    /// Taste clusters a PAGINATED window may pull from. See the call site for why this is not the
+    /// full k: the paginator's p95 is a number a user is watching.
+    /// </summary>
+    private const int WindowMaxClusters = 3;
     private const int DeepenThreshold = 40; // usable window thinner than this → pull more from TMDB
 
     /// <summary>
@@ -496,7 +502,14 @@ public sealed class FeedPaginator(
             annCount: WindowAnnCount,
             maturityCeiling: account.Settings.MaturityCeiling,
             ct,
-            ignoreGenreFilters: IgnoresGenreFilters(req));
+            ignoreGenreFilters: IgnoresGenreFilters(req),
+            // Three clusters, not the full k. This is a REQUEST path and a home load fires every
+            // rail at once: at k = 9 that is six rails × nine exact pgvector scans over a
+            // lane-restricted id set, which HNSW cannot serve. Three keeps the account's heaviest
+            // pockets represented on page 2 — a rail that ranked by one taste on page 1 and another
+            // on page 2 is not a rail — at a cost the browser is willing to wait for. The feed BUILD,
+            // which is a background job with a minute's box, passes the full k.
+            maxClusters: WindowMaxClusters);
     }
 
     /// <summary>

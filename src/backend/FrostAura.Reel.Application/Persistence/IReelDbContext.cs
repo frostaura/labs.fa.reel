@@ -48,6 +48,12 @@ public interface IReelDbContext
     DbSet<TitleScore> TitleScores { get; }
     DbSet<OnlineModelState> OnlineModelStates { get; }
 
+    /// <summary>
+    /// The day's taste partition per account — a RETRIEVAL budget, never a feature. Written by the
+    /// feed build only and pruned to a fortnight; nothing in the feature builder reads it.
+    /// </summary>
+    DbSet<TasteCluster> TasteClusters { get; }
+
     DbSet<FeedSnapshot> FeedSnapshots { get; }
     DbSet<FeedItem> FeedItems { get; }
     DbSet<FeedBuildStat> FeedBuildStats { get; }

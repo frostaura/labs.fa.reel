@@ -57,7 +57,11 @@ public class BuildFeedJobHandler(
     // the configured instance, and every construction site that predates the harness — the three
     // integration tests that build this handler by hand — keeps compiling and keeps describing the
     // shipped behaviour, which is the feed exactly as it was.
-    InterleaveOptions? interleaveOptions = null) : IJobHandler
+    InterleaveOptions? interleaveOptions = null,
+    // Optional for the same reason as the options above: the three integration tests that construct
+    // this handler by hand keep compiling and keep describing the pre-B1 feed, which is exactly the
+    // single-centroid path a cold account still takes.
+    TasteClusterProvider? tasteClusters = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -198,14 +202,29 @@ public class BuildFeedJobHandler(
         // enters scoring — then the FastTree model re-ranks the union exactly as before. The
         // retriever applies the same eligibility rule, the poster/tmdbId lane, and the maturity gate.
         ReportProgress(job, accountId, 30, "Scoring the field");
-        var pool = (await candidateRetriever.RetrieveAsync(
+
+        var retrieval = await candidateRetriever.RetrieveWithArmsAsync(
             accountId,
             taste,
             lane: q => q.Where(t => t.TmdbId != null && t.PosterPath != null),
             popCount: FirstPassPopPool,
             annCount: FirstPassAnnPool,
             maturityCeiling: account.Settings.MaturityCeiling,
-            ct)).ToList();
+            ct,
+            // The full k. This is a background job with a minute's box, so it can afford the k exact
+            // pgvector scans the request path cannot — see FeedPaginator.WindowMaxClusters.
+            maxClusters: CandidateRetriever.AllClusters);
+        var pool = retrieval.Hits.Select(hit => hit.Title).ToList();
+
+        // Persisted from THIS path and no other: a page load is not evidence about taste, and the
+        // eval harness builds five taste states per run. It is the partition the retrieval REPORTS
+        // rather than one fetched separately, so the stored row can never describe a partition
+        // different from the one that chose the pool. Best-effort by contract — it is already in
+        // hand, so a failed write costs a diagnostic row and never a feed.
+        if (tasteClusters is not null && retrieval.Clusters.Count > 0)
+        {
+            await tasteClusters.PersistAsync(accountId, now, retrieval.Clusters, ct);
+        }
 
         var poolVectors = await featureBuilder.BuildAsync(taste, pool.Select(t => t.Id).ToList(), now, ct);
         var poolIds = pool.Where(t => poolVectors.ContainsKey(t.Id)).Select(t => t.Id).ToList();
@@ -285,6 +304,23 @@ public class BuildFeedJobHandler(
             ShortlistP90 = Percentile(candidates, 0.90d),
             RailsDropped = capture.RailsDropped,
             DegradedReason = capture.DegradedReason,
+            ClustersUsed = retrieval.ClusterPulls.Count,
+            AnnPerClusterJson = JsonSerializer.Serialize(retrieval.ClusterPulls.Select(p => new
+            {
+                ordinal = p.Ordinal,
+                weight = Math.Round(p.Weight, 4),
+                target = p.Target,
+                returned = p.Returned,
+            })),
+            SeedPoolSize = poolRefresh.SeedPoolSize,
+            SeedsUsed = poolRefresh.SeedsUsed,
+            NewlyEligiblePerArmJson = JsonSerializer.Serialize(poolRefresh.PerArm.Select(a => new
+            {
+                arm = a.Arm,
+                discovered = a.Discovered,
+                upserted = a.Upserted,
+                newlyEligible = a.NewlyEligible,
+            })),
             DurationMs = (int)stopwatch.ElapsedMilliseconds,
         });
 
@@ -467,6 +503,14 @@ public class BuildFeedJobHandler(
             BuiltAt = now,
             Mode = FeedBuildOutcome.Skipped,
             DegradedReason = job.ProgressMessage,
+            // Written EXPLICITLY rather than left to the defaults. A skipped build retrieved nothing
+            // and discovered nothing, and an empty JSON array says that; a NULL would be read months
+            // later as "this build predates the column", which is a different and wrong story.
+            ClustersUsed = 0,
+            AnnPerClusterJson = "[]",
+            SeedPoolSize = 0,
+            SeedsUsed = 0,
+            NewlyEligiblePerArmJson = "[]",
             DurationMs = (int)stopwatch.ElapsedMilliseconds,
         });
 

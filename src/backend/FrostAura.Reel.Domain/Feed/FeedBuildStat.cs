@@ -87,5 +87,42 @@ public class FeedBuildStat : IAccountScoped
     /// <summary>The snapshot's degraded reason, copied here so it survives the snapshot prune.</summary>
     public string? DegradedReason { get; set; }
 
+    /// <summary>
+    /// Taste clusters the ANN arm actually split its budget across this build. Zero means the
+    /// account took the single-centroid path — either its history is below
+    /// <c>TasteClusterProvider.MinClusterInputs</c>, or nothing it loved carries an embedding.
+    /// </summary>
+    public int ClustersUsed { get; set; }
+
+    /// <summary>
+    /// Per-cluster ANN accounting: <c>[{ordinal, weight, target, returned}]</c>.
+    ///
+    /// <para><b>This is the column that decides whether multi-centroid retrieval worked.</b>
+    /// <c>returned &lt; target</c> is not a retrieval failure — it says the catalogue holds nothing
+    /// near that pocket, which is a per-cluster SUPPLY answer and the first per-pocket supply signal
+    /// this product has ever had. And a recall rise spread evenly across every cluster means the
+    /// gain was bought with budget rather than with the partition, in which case the honest response
+    /// is to raise <c>FirstPassAnnPool</c> and delete the clusterer.</para>
+    /// </summary>
+    public string? AnnPerClusterJson { get; set; }
+
+    /// <summary>
+    /// Candidates the seed arm could have drawn from — the whole loved/rewatched anchor pool, not
+    /// the handful it used. Read against <see cref="SeedsUsed"/> it is the coverage question B2 is
+    /// gated on: twelve seeds against a thousand anchors is a ninety-week rotation.
+    /// </summary>
+    public int SeedPoolSize { get; set; }
+
+    /// <summary>Seeds this build actually spent a TMDB call on.</summary>
+    public int SeedsUsed { get; set; }
+
+    /// <summary>
+    /// Newly-eligible titles attributed to the discovery arm that first returned them:
+    /// <c>[{arm, discovered, upserted, newlyEligible}]</c>. Attribution is FIRST-CLAIM, matching the
+    /// item dedup — an arm that would also have found a title another arm returned first gets no
+    /// credit for it, so these are statements about the pool as assembled.
+    /// </summary>
+    public string? NewlyEligiblePerArmJson { get; set; }
+
     public int DurationMs { get; set; }
 }

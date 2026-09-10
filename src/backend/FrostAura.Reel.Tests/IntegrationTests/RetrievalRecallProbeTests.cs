@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
@@ -251,6 +252,75 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
         Assert.False(report.Budget.Exhausted);
     }
 
+    /// <summary>
+    /// The <c>perCluster</c> block — <b>the table that decides whether B1 worked</b> — is populated,
+    /// partitions the loved targets, and reports the multi-centroid arm rather than the single one.
+    ///
+    /// <para>Two properties are asserted and both are what make the block readable. The
+    /// <c>targetsNear</c> counts must SUM to the embedded loved targets, because each target is
+    /// assigned to exactly one nearest centroid — without that the per-ordinal recalls would be
+    /// rates over overlapping denominators and could not be compared. And <c>annLoved</c> must be
+    /// zero while <c>annCluster</c> carries the reach: the single-centroid arm only fires when there
+    /// is no partition, so a non-zero <c>annLoved</c> beside a populated <c>perCluster</c> would mean
+    /// the two arms were both running and the recall was being double-counted.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_per_cluster_block_partitions_the_loved_targets_and_reports_the_cluster_arm()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var planted = new List<Guid>();
+
+        // History OUTSIDE the window: it is what the partition is built from on every as-of day, and
+        // being outside the window keeps it out of the target set. Two directions, 60 titles, so the
+        // k rule (min(3, 60/20) = 3) has something real to find.
+        for (var i = 0; i < 60; i++)
+        {
+            var id = await SeedTitleAsync($"history {i}", popularity: 2m, createdAt: Now.AddYears(-3));
+            await SeedRatingAsync(accountId, id, rating: 9, firstRatedAt: Now.AddDays(-400 - i));
+            await SeedEmbeddingAsync(id, i % 4 == 3 ? 7 : 0);
+            planted.Add(id);
+        }
+
+        // Targets INSIDE the window, spread over both pockets.
+        for (var i = 0; i < 6; i++)
+        {
+            var id = await SeedTitleAsync($"target {i}", popularity: 3m, createdAt: Now.AddDays(-90));
+            await SeedRatingAsync(accountId, id, rating: 9, firstRatedAt: Now.AddDays(-10 - i));
+            await SeedEmbeddingAsync(id, i % 3 == 2 ? 7 : 0);
+            planted.Add(id);
+        }
+
+        try
+        {
+            var report = await RunAsync(accountId);
+
+            Assert.Equal(6, report.Loved.Targets);
+            Assert.NotEmpty(report.PerCluster);
+            Assert.Equal(6, report.PerCluster.Sum(c => c.TargetsNear));
+            Assert.All(report.PerCluster, c => Assert.True(c.Weight > 0d));
+            Assert.All(report.PerCluster, c => Assert.True(c.MemberCount >= TasteClusterer.MinClusterMembers));
+            Assert.Equal(report.PerCluster.Sum(c => c.Hits), report.PerCluster.Where(c => c.Recall is not null).Sum(c => c.Hits));
+
+            // The cluster arm replaced the single-centroid one outright; it did not run beside it.
+            Assert.Equal(0, report.Loved.Hits.AnnLoved);
+            Assert.True(report.Loved.Hits.AnnCluster > 0);
+        }
+        finally
+        {
+            // 66 embedded vectors in a shared HNSW index perturb unrelated semantic-search tests —
+            // see TasteClusterRetrievalTests.DisposeAsync for the measurement behind this.
+            await using var db = fixture.CreateContext(new AccountContext());
+            await db.UserRatings.Where(r => planted.Contains(r.TitleId)).ExecuteDeleteAsync();
+            await db.TitleEmbeddings.Where(e => planted.Contains(e.TitleId)).ExecuteDeleteAsync();
+            await db.Titles.Where(t => planted.Contains(t.Id)).ExecuteDeleteAsync();
+        }
+    }
+
     private async Task<RetrievalRecallReport> RunAsync(
         Guid accountId, int windowDays = 180, int popCount = 700, int annCount = 500)
     {
@@ -258,11 +328,17 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
         scoped.SetAccount(accountId);
         await using var db = fixture.CreateContext(scoped);
         var eligibility = new EligibilityQueryBuilder(db);
+        var clusters = new TasteClusterProvider(
+            db,
+            new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TasteClusterProvider>.Instance);
         var probe = new RetrievalRecallProbe(
             db,
             new Application.Ml.FeatureVectorBuilder(db),
-            new CandidateRetriever(db, eligibility),
-            eligibility);
+            new CandidateRetriever(db, eligibility, clusters),
+            eligibility,
+            clusters);
 
         return await probe.RunAsync(
             accountId, windowDays, popCount, annCount, TimeSpan.FromSeconds(60), Now, CancellationToken.None);
