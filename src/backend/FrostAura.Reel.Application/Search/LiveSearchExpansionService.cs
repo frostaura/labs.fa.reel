@@ -564,7 +564,7 @@ public sealed class LiveSearchExpansionService(
             var uncached = new List<RerankInput>();
             foreach (var (title, _) in batch)
             {
-                if (cache.TryGetValue<RerankResult>(FitKey(accountId, title.Id, qnorm), out var cached) && cached is not null)
+                if (cache.TryGetValue<RerankResult>(FitKey(accountId, title.Id, qnorm, agent.ModelId), out var cached) && cached is not null)
                 {
                     fitById[title.Id] = cached;
                 }
@@ -587,7 +587,7 @@ public sealed class LiveSearchExpansionService(
                     debiased.Observe(raw);
                     var res = debiased.For(raw.TitleId)!;
                     fitById[res.TitleId] = res;
-                    cache.Set(FitKey(accountId, res.TitleId, qnorm), res, FitTtl);
+                    cache.Set(FitKey(accountId, res.TitleId, qnorm, agent.ModelId), res, FitTtl);
                 }
             }
 
@@ -614,8 +614,8 @@ public sealed class LiveSearchExpansionService(
     /// </summary>
     private async Task<List<Guid>> DiscoverCandidateIdsAsync(SearchIntent intent, string? region, CancellationToken ct)
     {
-        var key = IntentKey(intent);
-        if (cache.TryGetValue<List<Guid>>(CacheKey(key), out var cached) && cached is { Count: > 0 })
+        var key = IntentKey(intent, region);
+        if (cache.TryGetValue<List<Guid>>(CacheKey(key, agent.ModelId), out var cached) && cached is { Count: > 0 })
         {
             return cached;
         }
@@ -634,7 +634,7 @@ public sealed class LiveSearchExpansionService(
             }
 
             var ids = await UpsertAndCollectIdsAsync(items, ct);
-            cache.Set(CacheKey(key), ids, DiscoveryTtl);
+            cache.Set(CacheKey(key, agent.ModelId), ids, DiscoveryTtl);
             return ids;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1514,15 +1514,50 @@ public sealed class LiveSearchExpansionService(
     private static string NormalizeQuery(string query) =>
         string.Join(' ', query.ToLowerInvariant().Split([' ', '\t', '\n'], StringSplitOptions.RemoveEmptyEntries));
 
-    // MaxYear and MaxRuntimeMinutes are part of the key because both change the TMDB discover
-    // query — omitting them would serve "under 90 minutes" a cached unconstrained pull.
-    private static string IntentKey(SearchIntent intent) =>
-        $"{string.Join(',', intent.Genres.OrderBy(g => g))}|{string.Join(',', intent.Keywords.OrderBy(k => k))}|" +
-        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m))}|{intent.MinYear}|{intent.MaxYear}|" +
-        $"{intent.MaxRuntimeMinutes}|{NormalizeQuery(intent.FreeText)}|" +
-        $"{string.Join(',', (intent.People ?? []).Select(p => $"{p.Name}:{p.Role}").OrderBy(p => p))}";
+    /// <summary>
+    /// The identity of a TMDB discovery pull: every field that changes the query TMDB is asked, and
+    /// nothing else.
+    ///
+    /// <para><b>Every argument of the discover call has to appear here</b>, positive and negative
+    /// alike. The exclusions do not merely re-order a pull — they ride as <c>without_genres</c> /
+    /// <c>without_keywords</c> and change which rows come back, so a key that omitted them served
+    /// "a tense thriller, no horror" the cached, unexcluded answer to "a tense thriller". Region is
+    /// here for a second reason on top of that: the single-flight key is derived from this string,
+    /// so two accounts in different regions asking the same thing at the same moment would share one
+    /// fetch and one of them would get the other's catalogue.</para>
+    ///
+    /// <para><see cref="ReferenceTitles"/> is deliberately absent, and it is the only field that is:
+    /// references are resolved separately and blended into the RANKING vector, never handed to
+    /// discovery, so two turns differing only in what they name as a comparison genuinely do share a
+    /// pull. <c>AskReelCacheKeyTests</c> holds that reasoning to account by reflection.</para>
+    /// </summary>
+    internal static string IntentKey(SearchIntent intent, string? region) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"{string.Join(',', intent.Genres.OrderBy(g => g, StringComparer.Ordinal))}|" +
+        $"{string.Join(',', intent.Keywords.OrderBy(k => k, StringComparer.Ordinal))}|" +
+        $"{string.Join(',', intent.MediaTypes.Select(m => m.ToString()).OrderBy(m => m, StringComparer.Ordinal))}|" +
+        $"{intent.MinYear}|{intent.MaxYear}|{intent.MaxRuntimeMinutes}|{NormalizeQuery(intent.FreeText)}|" +
+        $"{string.Join(',', (intent.People ?? []).Select(p => string.Create(CultureInfo.InvariantCulture, $"{p.Name}:{p.Role}")).OrderBy(p => p, StringComparer.Ordinal))}|" +
+        $"-{string.Join(',', (intent.ExcludeGenres ?? []).OrderBy(g => g, StringComparer.Ordinal))}|" +
+        $"-{string.Join(',', (intent.ExcludeKeywords ?? []).OrderBy(k => k, StringComparer.Ordinal))}|" +
+        $"@{region}");
 
-    private static string CacheKey(string intentKey) => $"askreel:ids:{intentKey}";
+    /// <summary>
+    /// The discovered-id cache key. Carries the prompt generation and the model id because the ids
+    /// cached under it are the ids a PARTICULAR interpretation of the turn produced — edit the
+    /// prompt or change the model and the same sentence resolves to a different intent, which is
+    /// precisely the case the author will re-test with and the one a version-less key would answer
+    /// from cache for the next six hours. Same lever as <c>TitleLensCopy</c>'s prompt version.
+    /// </summary>
+    internal static string CacheKey(string intentKey, string modelId) => string.Create(
+        CultureInfo.InvariantCulture, $"askreel:ids:{AskReelPromptVersion.Current}:{modelId}:{intentKey}");
 
-    private static string FitKey(Guid accountId, Guid titleId, string qnorm) => $"rerank:{accountId}:{titleId}:{qnorm}";
+    /// <summary>
+    /// The per-(account, title, query) re-rank verdict cache key, versioned for the same reason
+    /// <see cref="CacheKey"/> is: a fit and a why-line are the output of one prompt against one
+    /// model, and serving a six-hour-old verdict from the previous prompt is how a prompt fix looks
+    /// like it did nothing.
+    /// </summary>
+    internal static string FitKey(Guid accountId, Guid titleId, string qnorm, string modelId) => string.Create(
+        CultureInfo.InvariantCulture, $"rerank:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{titleId}:{qnorm}");
 }
