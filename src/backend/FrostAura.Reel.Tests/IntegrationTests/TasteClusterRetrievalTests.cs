@@ -30,31 +30,26 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// catalogue is GLOBAL and shared by every class in the postgres collection.</para>
 /// </summary>
 [Collection("postgres")]
-public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetime
+public class TasteClusterRetrievalTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
-    public Task InitializeAsync() => Task.CompletedTask;
-
     /// <summary>
-    /// Removes this instance's titles, embeddings and interactions when the test ends.
+    /// Removes this instance's titles and interactions when the test ends; the base class removes
+    /// the embeddings, for every fixture rather than only this one.
     ///
-    /// <para>Every other class in the postgres collection leaves its rows behind, and that is
-    /// normally harmless. It is not harmless here: this fixture plants ~150 EMBEDDED titles per
-    /// test, tightly clustered in two directions, into the catalogue's SHARED HNSW index. That
-    /// index is approximate — a graph traversal with a bounded candidate list — so a few hundred
-    /// near-identical vectors change which neighbours an UNRELATED test's semantic search finds,
-    /// even though every one of those titles is ineligible for its account. Measured:
-    /// <c>LiveSearchExpansionTests</c> lost one of its five clean candidates and started showing
-    /// contradicting ones. Eligibility isolation (the scope genre and language) cannot fix that,
-    /// because the interference happens inside the index before eligibility is applied.</para>
+    /// <para>The embedding half is why <see cref="EmbeddedCatalogTestBase"/> exists — read it
+    /// before assuming a leftover row here is harmless. The rest is local: this fixture plants
+    /// ~150 titles per test with ratings and watch rows behind them, and a sibling class that
+    /// counts an account's library has no reason to be paying for that.</para>
     /// </summary>
-    public async Task DisposeAsync()
+    public override async Task DisposeAsync()
     {
-        if (!fixture.Available)
+        await base.DisposeAsync();
+        if (!Fixture.Available)
         {
             return;
         }
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var titleIds = await db.Titles.Where(t => t.Language == _scope).Select(t => t.Id).ToListAsync();
         if (titleIds.Count == 0)
         {
@@ -116,7 +111,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task A_minority_pocket_candidate_is_retrieved_with_clusters_and_missed_without_them()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -164,7 +159,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task Two_identical_retrievals_return_the_identical_pool_in_the_identical_order()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -195,7 +190,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task A_cold_account_retrieves_the_identical_pool_with_and_without_clusters()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -223,7 +218,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task An_account_whose_history_has_no_embeddings_falls_back_to_popularity_only()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -253,7 +248,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task A_persisted_partition_is_invisible_to_another_account()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -263,7 +258,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
         await SeedPocketsAsync(mine);
 
         var now = DateTime.UtcNow;
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var provider = ProviderFor(db);
             var partition = await provider.GetAsync(mine, now, CancellationToken.None);
@@ -271,12 +266,12 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
             await provider.PersistAsync(mine, now, partition, CancellationToken.None);
         }
 
-        await using (var pinnedToThem = fixture.CreateContext(Scoped(theirs)))
+        await using (var pinnedToThem = Fixture.CreateContext(Scoped(theirs)))
         {
             Assert.Empty(await pinnedToThem.TasteClusters.ToListAsync());
         }
 
-        await using (var pinnedToMe = fixture.CreateContext(Scoped(mine)))
+        await using (var pinnedToMe = Fixture.CreateContext(Scoped(mine)))
         {
             var rows = await pinnedToMe.TasteClusters.OrderBy(c => c.Ordinal).ToListAsync();
             Assert.NotEmpty(rows);
@@ -295,7 +290,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task Persisting_twice_on_one_day_replaces_that_days_partition()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -304,9 +299,9 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
         await SeedPocketsAsync(accountId);
         var now = DateTime.UtcNow;
 
-        int Count() => fixture.CreateContext(Scoped(accountId)).TasteClusters.Count();
+        int Count() => Fixture.CreateContext(Scoped(accountId)).TasteClusters.Count();
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var provider = ProviderFor(db);
             var partition = await provider.GetAsync(accountId, now, CancellationToken.None);
@@ -315,7 +310,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
 
         var after = Count();
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var provider = ProviderFor(db);
             var partition = await provider.GetAsync(accountId, now.AddHours(1), CancellationToken.None);
@@ -332,7 +327,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task The_prune_keeps_a_fortnight_and_drops_what_is_older()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -340,7 +335,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
         var accountId = await SeedAccountAsync();
         var now = DateTime.UtcNow;
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             foreach (var age in new[] { 0, 13, 15, 60 })
             {
@@ -361,12 +356,12 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
             await db.SaveChangesAsync();
         }
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             Assert.Equal(2, await ProviderFor(db).PruneAsync(accountId, now, CancellationToken.None));
         }
 
-        await using (var db = fixture.CreateContext(Scoped(accountId)))
+        await using (var db = Fixture.CreateContext(Scoped(accountId)))
         {
             Assert.Equal(2, await db.TasteClusters.CountAsync());
         }
@@ -387,7 +382,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     [Fact]
     public async Task With_k_forced_to_one_the_cluster_arm_reaches_exactly_what_the_loved_arm_reaches()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -406,7 +401,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
             await SeedTitleAsync($"Unseen {i}", popularity: 1m + i, NearUnit(i % 2 == 0 ? 0 : 5, 0.02f));
         }
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var provider = ProviderFor(db);
         Assert.Single(await provider.GetAsync(accountId, DateTime.UtcNow, CancellationToken.None));
 
@@ -457,7 +452,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     private async Task<RetrievalResult> RetrieveAsync(
         Guid accountId, int popCount, int annCount, bool useClusters, MemoryCache? cache = null)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var eligibility = new EligibilityQueryBuilder(db);
         var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, DateTime.UtcNow, CancellationToken.None);
         var retriever = useClusters
@@ -481,7 +476,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -513,7 +508,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
 
     private async Task<Guid> SeedTitleAsync(string name, decimal popularity, float[]? embedding)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -554,7 +549,7 @@ public class TasteClusterRetrievalTests(PostgresFixture fixture) : IAsyncLifetim
     /// </summary>
     private async Task SeedRatingAsync(Guid accountId, Guid titleId, short rating)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserRatings.Add(new UserRating
         {
             Id = Guid.NewGuid(),

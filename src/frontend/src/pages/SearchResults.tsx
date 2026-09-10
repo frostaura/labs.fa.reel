@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Mic, RotateCcw, Send, Sparkles } from "lucide-react";
+import { AlertTriangle, Mic, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
+import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
+import { useGetFiltersQuery } from "../store/api";
+import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import { nextBootstrap, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
@@ -19,7 +22,10 @@ import type { AskCard, PhaseData } from "../lib/askReelStream";
  * re-orders them as hyper-personal LLM fit lands, and refines across turns ("only movies",
  * "less intense", "more like the first one") — never repeating a title.
  */
-const REFINE_CHIPS = ["Only movies", "Only TV", "Something lighter", "More intense", "More like the first one"];
+// No "Only movies" / "Only TV" here: the media segment in `BrowseFilters` sits in this same row
+// and is the control that actually narrows discovery server-side. The chips only phrased the same
+// request as free text, so tapping one and the toggle beside it could disagree on screen.
+const REFINE_CHIPS = ["Something lighter", "More intense", "More like the first one"];
 
 /** Cold-start mood presets — one tap seeds a whole first turn on an otherwise empty page. */
 const MOOD_PRESETS = [
@@ -53,17 +59,44 @@ function narrate(phase: PhaseData | null): string {
   }
 }
 
+/**
+ * The route. The page body is wrapped rather than the route element itself, so a render failure
+ * inside the transcript or the grid is contained on the page instead of blanking the shell —
+ * see {@link ChatErrorBoundary}. The `key` bump remounts the whole conversation on "Start again",
+ * which is what makes the retry a real recovery and not a re-throw.
+ */
 export default function SearchResults() {
+  const [crashKey, setCrashKey] = useState(0);
+  return (
+    <ChatErrorBoundary onReset={() => setCrashKey((k) => k + 1)}>
+      <AskReel key={crashKey} />
+    </ChatErrorBoundary>
+  );
+}
+
+function AskReel() {
   const [params, setParams] = useSearchParams();
   const seed = params.get("q") ?? "";
   const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
   const {
-    turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
-    exhausted, appending, canRetry,
+    turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, stop,
+    setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor, droppedByFloor,
   } = useAskReelChat();
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  // The bar itself is not on the wire and should not be: it is the account's own standing
+  // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
+  // Reading it from the one source keeps the tray's number and the conditions summary from ever
+  // disagreeing about what the user set.
+  const { data: accountFilters } = useGetFiltersQuery();
   const speech = useSpeech((text) => send(text, false));
+
+  // The media toggle is per-device and persists across visits, so a resumed thread starts with a
+  // filter the server has never been told about — and `reask` (the retry, and the toggle itself)
+  // would then re-ask under the wrong constraint. Pushed on mount, and declared ABOVE the
+  // bootstrap effect so it lands before the seeded turn goes out.
+  useEffect(() => {
+    setMediaTypes(mediaTypesFor(filter));
+  }, [filter, setMediaTypes]);
 
   // A search from the header box (?q=) starts a fresh conversation; landing on /search with no
   // query resumes the most recent one. The seed is CONSUMED — cleared from the URL the moment it
@@ -107,6 +140,27 @@ export default function SearchResults() {
   const outsideVisible = outsideCards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
 
+  // The hook carries the server's sentence verbatim; the page only decides where it goes.
+  const conflictMessage = conflict?.trim() ? conflict : null;
+
+  // The score floor's other half. The server ranks everything it found and then holds back what
+  // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
+  // and was, until now, invisible: the picks simply never existed as far as the screen was
+  // concerned. Two independent sources, and each degrades on its own: `droppedByFloor` rides the
+  // `done` frame and is null against an older server (fall back to counting the cards we were
+  // handed), and the bar comes from the account's saved conditions and is null when the user has
+  // set none (fall back to the unnumbered wording). Neither absence blanks the tray.
+  const belowFloorVisible = belowFloor.filter((c) => !removedSet.has(c.titleId));
+  const floorHeldBack =
+    typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : belowFloorVisible.length;
+  // Localised deliberately, and this is the one place in Reel where that is the right answer: the
+  // label is chrome the user reads and nothing else — it is never sent to the server, never a cache
+  // key, never a filter row. (The invariant-culture rule that governs everything the BACKEND
+  // formats is about strings that get compared or parsed; this one only gets read.)
+  const floor = accountFilters?.minPredictedRating ?? null;
+  const floorLabel =
+    typeof floor === "number" ? floor.toLocaleString(undefined, { maximumFractionDigits: 1 }) : null;
+
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
   // question once: replaying it through `send` stamped another copy of their bubble into the
@@ -116,21 +170,6 @@ export default function SearchResults() {
     setMediaTypes(mediaTypesFor(next));
     reask();
   };
-
-  // Infinite scroll: a sentinel below the grid asks for the next page of the same question.
-  useEffect(() => {
-    const el = sentinelRef.current;
-    // `status === "error"` matters: a page that fails leaves the sentinel in view with nothing
-    // latched, so re-observing would hammer a failing server on a loop. The retry below is the
-    // way back in — deliberately a decision the user makes.
-    if (!el || exhausted || streaming || status === "error" || cards.length === 0) return;
-    const io = new IntersectionObserver(
-      (entries) => { if (entries.some((e) => e.isIntersecting)) loadMore(); },
-      { rootMargin: "600px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [exhausted, streaming, status, cards.length, loadMore]);
 
   const submit = (text: string) => {
     if (!text.trim()) return;
@@ -151,28 +190,46 @@ export default function SearchResults() {
         : "";
 
   return (
-    <div className="space-y-5 pb-32">
-      <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
-        <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
-      </h1>
+    // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise
+    // the last row of cards and the "Show me more" button sit permanently behind the composer.
+    <div className="space-y-5 pb-44 md:pb-32">
+      <div>
+        <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
+          <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
+        </h1>
+        {/* The same summary the feed carries, for the same reason: every standing condition
+            applies to search too, and a thread that quietly obeys a "no documentary" saved on
+            another screen is a thread the user cannot reason about. The browse toggle rides along
+            and stays dismissible from here. */}
+        <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={changeFilter} />
+      </div>
 
       {/* Always mounted so it is a live region by the time it has something to say. Announces the
           settled outcome only; the phase narration has its own live region inside the banner. */}
       <p className="sr-only" role="status" aria-live="polite" data-testid="askreel-status">{settled}</p>
 
-      {/* Transcript */}
-      <div className="space-y-3">
+      {/* Transcript.
+          A `log` landmark, announced politely: Reel's replies arrive whenever the model finishes,
+          so a screen-reader user is told about them only if the region says it updates. The
+          speaker labels are sr-only because sighted users read the bubble alignment and the
+          sparkle for the same information — without them the whole thread is announced as one
+          undifferentiated run of sentences with no way to tell question from answer. */}
+      <div className="space-y-3" data-testid="askreel-transcript" role="log" aria-live="polite">
         {turns.map((turn, i) =>
           turn.role === "user" ? (
             <div key={i} className="flex justify-end">
               <p className="fa-body bg-fa-frost/15 text-fa-frost-bright rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]">
+                <span className="sr-only">You said</span>
                 {turn.text}
               </p>
             </div>
           ) : (
             <div key={i} className="flex items-start gap-3 max-w-[85%]" data-testid="askreel-reply">
               <Sparkles className="h-5 w-5 text-fa-frost shrink-0 mt-1" />
-              <p className="fa-body text-fa-frost-bright">{turn.text}</p>
+              <p className="fa-body text-fa-frost-bright">
+                <span className="sr-only">Reel said</span>
+                {turn.text}
+              </p>
             </div>
           ),
         )}
@@ -195,8 +252,13 @@ export default function SearchResults() {
             >
               {narrate(phase)}
             </p>
-            <div className="mt-2 h-1 w-full overflow-hidden rounded bg-fa-frost/10">
-              <div className="h-full w-1/3 rounded bg-fa-frost/60" style={{ animation: "fa-progress-slide 1.2s ease-in-out infinite" }} />
+            {/* The sweep only moves if the track is a positioning context: `fa-progress-slide`
+                animates `left` from -40% to 100%, and on a statically-positioned child that
+                animation applies to nothing at all — the bar sat frozen at one third for the whole
+                turn, which reads as a hang exactly when the page is claiming to be working. Same
+                markup as the onboarding build-up, which had it right. */}
+            <div className="relative mt-2 h-1 w-full overflow-hidden rounded bg-fa-frost/10">
+              <div className="absolute inset-y-0 rounded bg-fa-frost/60 fa-progress-slide" />
             </div>
           </div>
           {phase && phase.found > 0 && (
@@ -204,6 +266,17 @@ export default function SearchResults() {
               {phase.scored > 0 ? `${phase.scored} scored` : `${phase.found} found`}
             </span>
           )}
+          {/* A turn can run for tens of seconds against a slow model, and until now the only way
+              out was to navigate away — the stream kept running and kept billing. */}
+          <button
+            type="button"
+            onClick={stop}
+            data-testid="askreel-stop"
+            aria-label="Stop searching"
+            className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 text-fa-frost-dim shrink-0 hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
+          >
+            <Square className="h-3 w-3" /> Stop
+          </button>
         </div>
       )}
 
@@ -232,8 +305,10 @@ export default function SearchResults() {
         </div>
       )}
 
-      {/* Refine chips + media filter */}
-      {cards.length > 0 && (
+      {/* Refine chips + media filter. Gated on the TRANSCRIPT, not on cards: a resumed thread has
+          a conversation but no cards until it is asked again, and hiding the refine controls there
+          left the user with a transcript they could not act on. */}
+      {turns.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           {REFINE_CHIPS.map((chip) => (
             <button
@@ -256,6 +331,20 @@ export default function SearchResults() {
         </div>
       )}
 
+      {/* What the request and the account's standing conditions cannot both have. Named out loud,
+          above the results, because the alternative is a thin answer with no explanation — the
+          user asked for something their own saved exclusions rule out, and only the server can see
+          both halves. Server-written and server-formatted; the page only places it. */}
+      {conflictMessage && (
+        <div
+          className="fa-card border-fa-warning/30 p-4 flex items-start gap-3"
+          data-testid="askreel-conflict"
+        >
+          <AlertTriangle className="h-4 w-4 text-fa-warning shrink-0 mt-0.5" />
+          <p className="fa-caption text-fa-frost-bright">{conflictMessage}</p>
+        </div>
+      )}
+
       {/* One message, never two. A caught server exception arrives as a `done` frame with no
           results, which used to render the empty state AND the failure reason side by side —
           "try a different angle" next to "search hit a snag". The hook now classifies that frame
@@ -267,6 +356,18 @@ export default function SearchResults() {
           <p className="fa-body text-fa-frost-bright">Search hit a snag</p>
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
+        </div>
+      ) : status === "resumed" && visible.length === 0 && outsideVisible.length === 0 ? (
+        // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
+        // "No matches for that one" under the user's own question — the page reporting a verdict
+        // on a search it never ran. Threads from before picks were stored simply have no cards,
+        // and saying so is the honest version.
+        <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-transcript-only">
+          <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
+          <p className="fa-caption text-fa-frost-dim">
+            Transcript only — this thread predates saved picks. Ask again to bring it back.
+          </p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
       ) : status === "done" && visible.length === 0 && outsideVisible.length === 0 ? (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="semantic-empty">
@@ -300,25 +401,60 @@ export default function SearchResults() {
               </div>
             </div>
           )}
+
+          {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
+              collapsed: these picks are not being recommended, they are being accounted for. The
+              count comes from the server (`droppedByFloor`) so the tray is honest even on a turn
+              where the cards themselves were not sent down, and the bar comes from the account's
+              own conditions — naming it is what turns "Reel held some back" into a sentence the
+              user can act on, because the number in it is one they chose and can change. */}
+          {floorHeldBack > 0 && !streaming && (
+            <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
+              <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
+                {floorLabel
+                  ? `Show the ${floorHeldBack} under your ${floorLabel} bar`
+                  : `Show the ${floorHeldBack} pick${floorHeldBack === 1 ? "" : "s"} Reel held back`}
+              </summary>
+              <p className="fa-caption text-fa-frost-dim/70 mt-1">
+                These matched the request but scored below the bar Reel holds itself to.
+              </p>
+              {belowFloorVisible.length > 0 && (
+                <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+                  {belowFloorVisible.map((card) => (
+                    <ResultCard key={card.titleId} card={card} />
+                  ))}
+                </div>
+              )}
+            </details>
+          )}
         </>
       )}
 
-      {/* Infinite scroll: the sentinel sits below the grid and pulls the next page of the same
-          question as it comes into view. */}
+      {/* Paging is a decision the user makes, not a scroll position.
+          This used to be an IntersectionObserver sentinel with `rootMargin: 600px`, which was
+          inside the viewport on first paint — so every single message fired a SECOND full-price
+          /ask turn, whose interpret reply was generated, billed and then discarded. An explicit
+          button costs one request per message and reads honestly ("there is more if you want
+          it") instead of silently spending. */}
       {visible.length > 0 && (
-        <>
-          <div ref={sentinelRef} aria-hidden className="h-1" />
-          {appending && (
-            <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-more">
-              Finding more like these…
-            </p>
+        <div className="flex flex-col items-center gap-2">
+          {!exhausted && (
+            <button
+              type="button"
+              data-testid="askreel-more"
+              onClick={loadMore}
+              disabled={streaming || appending}
+              className="fa-caption rounded-full border border-fa-frost/30 px-4 py-1.5 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+            >
+              {appending ? "Finding more like these…" : "Show me more"}
+            </button>
           )}
           {exhausted && (
             <p className="fa-caption text-fa-frost-dim text-center">
               That&apos;s everything on this thread — refine it above for a different angle.
             </p>
           )}
-        </>
+        </div>
       )}
 
       {/* The provenance footnote ("12 picks ranked for you, from 50 pulled"). Only ever shown
@@ -343,16 +479,24 @@ export default function SearchResults() {
         </p>
       )}
 
-      {/* Composer */}
+      {/* Composer.
+          It sits ABOVE the mobile tab bar, not under it. Both are `fixed` at `bottom-0` and the
+          tab bar is `z-40`, so on every phone width Send and the input were behind it and a tap
+          on Send navigated to /dna — invisible to any visibility assertion, since the composer
+          renders perfectly, just covered. `3.5rem` is the tab bar's height and the safe-area
+          inset is added on top of it (the bar pads itself by the same inset). From `md` up the
+          tab bar is gone, so the composer returns to the very bottom. `askreel-mobile.spec.ts`
+          hit-tests this with `elementFromPoint` at three widths. */}
       <form
         onSubmit={(e) => { e.preventDefault(); submit(draft); }}
-        className="fixed bottom-0 inset-x-0 z-20 border-t border-fa-frost/10 bg-background/95 backdrop-blur px-4 py-3"
+        className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0 inset-x-0 z-30 border-t border-fa-frost/10 bg-background/95 backdrop-blur px-4 py-3"
       >
         <div className="max-w-3xl mx-auto flex items-center gap-2">
           <input
             data-testid="askreel-composer"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            aria-label="Ask Reel"
             placeholder="Ask for more, or refine — “something funnier”, “more like the second one”…"
             className="flex-1 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
           />
@@ -373,6 +517,7 @@ export default function SearchResults() {
           <button
             type="submit"
             disabled={!draft.trim() || streaming}
+            data-testid="askreel-send"
             className="rounded-full bg-fa-frost/20 p-2.5 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
             aria-label="Send"
           >
@@ -396,7 +541,11 @@ function ResultCard({ card }: { card: AskCard }) {
       state={{ backgroundLocation: location }}
       className="group block focus:outline-none reel-rise"
     >
-      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
+      {/* The focus ring lives here, not on the <a>: the link sets `focus:outline-none` so the
+          browser default does not cut across the poster, which left keyboard navigation with NO
+          visible focus at all. `group-focus-visible` puts it back, on the card, and only for
+          keyboard focus. */}
+      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-focus-visible:ring-2 group-focus-visible:ring-fa-frost/60 group-focus-visible:ring-offset-2">
         <PosterImage path={card.posterPath} alt={card.name} size="w185" />
         {/* The shared stack: prediction over crowd, no-overlap, scrimmed — and it owns the
             null/NaN guards, so a title with no community score shows one badge, never a dash. */}

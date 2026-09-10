@@ -1,0 +1,113 @@
+using System.Text.RegularExpressions;
+
+namespace FrostAura.Reel.Tests.Harness;
+
+/// <summary>
+/// A source-level guard: a class in the <c>postgres</c> collection that seeds
+/// <c>TitleEmbeddings</c> must inherit <c>IntegrationTests.EmbeddedCatalogTestBase</c>, which
+/// removes those rows again when the test ends.
+///
+/// <para><b>Why this needs a guard rather than a convention.</b> Leaving embedding rows behind is
+/// harmless to the class that leaves them and harmful only to some other class, on some other run,
+/// through a mechanism neither file mentions: the vectors share one HNSW index, an HNSW scan
+/// filters a bounded window of graph candidates, and so a sibling's rows change which titles an
+/// unrelated account's search ever gets to consider. The author of the offending fixture sees a
+/// green test; the bill lands on whoever owns the flakiest file in the suite. Three fixtures had
+/// each independently diagnosed and patched their own half of this before it was written down —
+/// <c>CandidateRetrieverTests</c>, <c>CrossReferenceBacktestTests</c>,
+/// <c>CrossReferenceJobTests</c> — and <c>LiveSearchExpansionTests</c> broke again the moment a
+/// fourth embedded fixture landed. Per-fixture care demonstrably does not compose.</para>
+///
+/// <para>It is a ratchet, not a verdict: <see cref="Exempt"/> holds files that seed embeddings and
+/// legitimately do not inherit the base, each with the reason. A row without a reason is a
+/// suppression, and the reason is the point.</para>
+/// </summary>
+public class EmbeddedFixtureIsolationTests
+{
+    /// <summary>The shapes that put a row into <c>TitleEmbeddings</c>.</summary>
+    private static readonly Regex Seeds = new(
+        @"TitleEmbeddings\s*\.\s*Add|new\s+TitleEmbedding\b", RegexOptions.Compiled);
+
+    private static readonly Regex InPostgresCollection = new(
+        @"\[Collection\(""postgres""\)\]", RegexOptions.Compiled);
+
+    private static readonly Regex InheritsBase = new(
+        @":\s*EmbeddedCatalogTestBase\b", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Files that seed embeddings in the postgres collection and are deliberately not on the base,
+    /// keyed by path relative to the test project. Empty is the intended state.
+    /// </summary>
+    private static readonly Dictionary<string, string> Exempt = new(StringComparer.Ordinal);
+
+    [Fact]
+    public void Every_embedded_fixture_cleans_up_after_itself()
+    {
+        var root = TestProjectRoot();
+        var findings = new List<string>();
+
+        foreach (var file in Directory
+            .EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
+            if (relative is "IntegrationTests/EmbeddedCatalogTestBase.cs" or "Harness/EmbeddedFixtureIsolationTests.cs")
+            {
+                continue;
+            }
+
+            var source = File.ReadAllText(file);
+            if (!Seeds.IsMatch(source)
+                || !InPostgresCollection.IsMatch(source)
+                || InheritsBase.IsMatch(source)
+                || Exempt.ContainsKey(relative))
+            {
+                continue;
+            }
+
+            findings.Add(relative);
+        }
+
+        Assert.True(
+            findings.Count == 0,
+            "These classes seed TitleEmbeddings into the shared postgres catalogue without "
+            + "inheriting EmbeddedCatalogTestBase, so their vectors stay in the HNSW index for every "
+            + "test that runs afterwards and change what an unrelated account's semantic search "
+            + "finds. Inherit the base — it removes exactly the rows the test added — or add the "
+            + "file to EmbeddedFixtureIsolationTests.Exempt WITH THE REASON.\n\n"
+            + string.Join("\n", findings));
+    }
+
+    /// <summary>Stale exemptions are worse than none: they read as a considered decision about a
+    /// file that no longer exists or no longer seeds anything.</summary>
+    [Fact]
+    public void No_exemption_outlives_the_file_it_names()
+    {
+        var root = TestProjectRoot();
+        var stale = Exempt.Keys
+            .Where(k =>
+            {
+                var path = Path.Combine(root, k.Replace('/', Path.DirectorySeparatorChar));
+                return !File.Exists(path) || !Seeds.IsMatch(File.ReadAllText(path));
+            })
+            .ToList();
+
+        Assert.True(
+            stale.Count == 0,
+            "EmbeddedFixtureIsolationTests.Exempt names files that no longer exist or no longer "
+            + "seed TitleEmbeddings. Delete the rows:\n" + string.Join("\n", stale));
+    }
+
+    private static string TestProjectRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "FrostAura.Reel.Tests.csproj")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new InvalidOperationException("Could not locate the test project root.");
+    }
+}

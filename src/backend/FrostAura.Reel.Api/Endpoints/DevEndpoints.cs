@@ -410,7 +410,9 @@ public static class DevEndpoints
         // "hides a title", and the reason the instrument ships before the job does.
         //
         //   curl -s -X POST localhost:5080/api/dev/cross-reference-eval | jq
+        //   curl -s -X POST 'localhost:5080/api/dev/cross-reference-eval?promptVersion=2' | jq
         //   curl -s localhost:5080/api/dev/cross-reference-eval | jq
+        //   curl -s 'localhost:5080/api/dev/cross-reference-eval?runId=<id>&skip=0&take=200' | jq
         //
         // How to read the answer, and the ORDER matters:
         //
@@ -427,13 +429,24 @@ public static class DevEndpoints
         //   4. `noEmbeddingCount` is coverage. Those titles are in NO denominator on this row, so
         //      any public claim about how much of the pool was cross-referenced has to subtract it.
         //
+        //   5. The DISCRIMINATION block — `keepLovedRate` against `outLovedRate`, and `auc` — is
+        //      what the first live run could not report and needed most. A false-rule-out rate of
+        //      12.0% reads as a cautious instrument right up until you put it beside a true-rule-out
+        //      rate of 10.1%, at which point it reads as a coin. `auc` says the same thing on a
+        //      scale that does not move with the Out threshold: 0.5 is chance.
+        //
         // POST runs it (~35 provider calls under `cross-reference-eval`, deliberately a different
         // purpose from `cross-reference` so measuring the judge cannot eat the budget the judge runs
-        // on). GET is free and returns the newest run.
+        // on). `?promptVersion=2` runs the EXPERIMENT rather than the generation the job serves —
+        // the default stays 1, and a generation becomes current by being measured against the one it
+        // replaces, never by a caller selecting it here. GET is free: with no query it returns the
+        // newest run PER prompt version, so v1 and v2 sit side by side; with `?runId=` it returns
+        // that run's per-title items so a human can read the actual misses.
         app.MapPost("/api/dev/cross-reference-eval", async (
             IReelDbContext db,
             HttpContext http,
             Application.CrossReference.CrossReferenceBacktest backtest,
+            int? promptVersion,
             CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -442,7 +455,15 @@ public static class DevEndpoints
                 return Results.Forbid();
             }
 
-            var report = await backtest.RunAsync(account.Id, ct);
+            // Exactly the two generations that exist. An unbounded int here would write rows under a
+            // version nothing can render and nothing will ever judge against again.
+            var version = promptVersion ?? Domain.CrossReference.CrossReferencePromptVersions.First;
+            if (!Domain.CrossReference.CrossReferencePromptVersions.IsKnown(version))
+            {
+                return Results.BadRequest(new { error = "promptVersion must be 1 or 2." });
+            }
+
+            var report = await backtest.RunAsync(account.Id, version, ct);
             return report is null
                 ? Results.BadRequest(new { error = "Not enough rating history to split — the backtest needs a holdout." })
                 : Results.Ok(new
@@ -456,6 +477,9 @@ public static class DevEndpoints
         app.MapGet("/api/dev/cross-reference-eval", async (
             IReelDbContext db,
             HttpContext http,
+            Guid? runId,
+            int? skip,
+            int? take,
             CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -464,30 +488,131 @@ public static class DevEndpoints
                 return Results.Forbid();
             }
 
-            // The newest RUN, not the newest rows: a run is five origins plus a mean, and a naive
-            // "last six rows" would splice two runs together the moment one origin produced no
-            // evaluable holdout.
-            var latestRunId = await db.CrossReferenceEvaluations
-                .Where(e => e.AccountId == account.Id)
-                .OrderByDescending(e => e.EvaluatedAt)
-                .Select(e => (Guid?)e.RunId)
-                .FirstOrDefaultAsync(ct);
-            if (latestRunId is not { } runId)
-            {
-                return Results.Ok(new { runId = (Guid?)null, mean = (object?)null, origins = Array.Empty<object>() });
-            }
+            return runId is { } requested
+                ? await ItemsAsync(db, account.Id, requested, skip ?? 0, take ?? MaxEvaluationItemsPerPage, ct)
+                : await LatestRunsAsync(db, account.Id, ct);
+        });
+    }
 
-            var rows = await db.CrossReferenceEvaluations
-                .Where(e => e.AccountId == account.Id && e.RunId == runId)
-                .OrderBy(e => e.SplitFraction)
-                .ToListAsync(ct);
+    /// <summary>Per-title items returned in one page. A page is for reading, not for exporting.</summary>
+    private const int MaxEvaluationItemsPerPage = 200;
 
-            return Results.Ok(new
+    /// <summary>
+    /// The newest run PER prompt version — so a v1 baseline and a v2 experiment on the same account
+    /// sit beside each other and the comparison is a read rather than a spreadsheet.
+    ///
+    /// <para>The newest RUN, never the newest rows: a run is up to five origins plus a mean, and a
+    /// naive "last six rows" splices two runs together the moment one origin produces no evaluable
+    /// holdout.</para>
+    /// </summary>
+    private static async Task<IResult> LatestRunsAsync(
+        IReelDbContext db, Guid accountId, CancellationToken ct)
+    {
+        var latestPerVersion = await db.CrossReferenceEvaluations
+            .Where(e => e.AccountId == accountId)
+            .GroupBy(e => e.PromptVersion)
+            .Select(g => new { PromptVersion = g.Key, EvaluatedAt = g.Max(e => e.EvaluatedAt) })
+            .ToListAsync(ct);
+        if (latestPerVersion.Count == 0)
+        {
+            return Results.Ok(new { runs = Array.Empty<object>() });
+        }
+
+        var stamps = latestPerVersion.Select(v => v.EvaluatedAt).ToList();
+        var rows = await db.CrossReferenceEvaluations
+            .Where(e => e.AccountId == accountId && stamps.Contains(e.EvaluatedAt))
+            .ToListAsync(ct);
+
+        var runs = latestPerVersion
+            .OrderBy(v => v.PromptVersion)
+            .Select(v =>
             {
-                runId,
-                mean = rows.Where(r => r.SplitFraction is null).Select(Describe).FirstOrDefault(),
-                origins = rows.Where(r => r.SplitFraction is not null).Select(Describe).ToList(),
-            });
+                var runRows = rows
+                    .Where(r => r.PromptVersion == v.PromptVersion && r.EvaluatedAt == v.EvaluatedAt)
+                    .ToList();
+                return new
+                {
+                    promptVersion = v.PromptVersion,
+                    runId = runRows.Select(r => (Guid?)r.RunId).FirstOrDefault(),
+                    mean = runRows.Where(r => r.SplitFraction is null).Select(Describe).FirstOrDefault(),
+                    origins = runRows
+                        .Where(r => r.SplitFraction is not null)
+                        .OrderBy(r => r.SplitFraction)
+                        .Select(Describe)
+                        .ToList(),
+                };
+            })
+            .ToList();
+
+        return Results.Ok(new { runs });
+    }
+
+    /// <summary>
+    /// One run's per-title items — the verdict, the confidence, the evidence it was shown and what
+    /// the account went on to rate it.
+    ///
+    /// <para>This is the surface the whole items table exists for: a rule-out rate says how often
+    /// the judge was wrong and cannot say what it was wrong ABOUT. Ordered by origin then title so
+    /// paging is stable, and capped at 200 a page because it is for reading.</para>
+    /// </summary>
+    private static async Task<IResult> ItemsAsync(
+        IReelDbContext db, Guid accountId, Guid runId, int skip, int take, CancellationToken ct)
+    {
+        var evaluationIds = await db.CrossReferenceEvaluations
+            .Where(e => e.AccountId == accountId && e.RunId == runId && e.SplitFraction != null)
+            .Select(e => e.Id)
+            .ToListAsync(ct);
+        if (evaluationIds.Count == 0)
+        {
+            return Results.NotFound(new { error = "No cross-reference evaluation run with that id on this account." });
+        }
+
+        var query = db.CrossReferenceEvaluationItems
+            .Where(i => i.AccountId == accountId && evaluationIds.Contains(i.EvaluationId));
+        var total = await query.CountAsync(ct);
+
+        var page = await query
+            .OrderBy(i => i.SplitFraction).ThenBy(i => i.TitleId)
+            .Skip(Math.Max(0, skip))
+            .Take(Math.Clamp(take, 1, MaxEvaluationItemsPerPage))
+            .Join(
+                db.Titles,
+                i => i.TitleId,
+                t => t.Id,
+                (i, t) => new
+                {
+                    i.TitleId,
+                    t.Name,
+                    t.Year,
+                    i.SplitFraction,
+                    i.Verdict,
+                    i.ReasonCode,
+                    i.Confidence,
+                    i.LaterRating,
+                    i.NeighbourIdsJson,
+                    i.BatchIndex,
+                })
+            .ToListAsync(ct);
+
+        return Results.Ok(new
+        {
+            runId,
+            total,
+            skip = Math.Max(0, skip),
+            take = Math.Clamp(take, 1, MaxEvaluationItemsPerPage),
+            items = page.Select(i => new
+            {
+                titleId = i.TitleId,
+                name = i.Name,
+                year = i.Year,
+                splitFraction = i.SplitFraction,
+                verdict = i.Verdict.ToString(),
+                reason = i.ReasonCode,
+                confidence = i.Confidence,
+                laterRating = i.LaterRating,
+                neighbourIds = i.NeighbourIdsJson,
+                batchIndex = i.BatchIndex,
+            }).ToList(),
         });
     }
 
@@ -511,6 +636,23 @@ public static class DevEndpoints
         wilsonHigh = e.WilsonHigh,
         unsureRate = e.UnsureRate,
         noEmbedding = e.NoEmbeddingCount,
+        // Does the answer carry information? `keepLovedRate` beside `outLovedRate` is the pair to
+        // read first, and `auc` is the one number that does not move with the Out threshold.
+        discrimination = new
+        {
+            keepCount = e.KeepCount,
+            outCount = e.OutCount,
+            unsureCount = e.UnsureCount,
+            meanLaterRatingKeep = e.MeanLaterRatingKeep,
+            meanLaterRatingOut = e.MeanLaterRatingOut,
+            meanLaterRatingUnsure = e.MeanLaterRatingUnsure,
+            keepLovedRate = e.KeepLovedRate,
+            keepDislikedRate = e.KeepDislikedRate,
+            outLovedRate = e.OutLovedRate,
+            outDislikedRate = e.OutDislikedRate,
+            spearmanConfidenceVsRating = e.SpearmanConfidenceVsRating,
+            auc = e.AucKeepVsOut,
+        },
         gatingDecision = e.GatingDecision,
         caveat = e.Caveat,
         model = e.ModelId,

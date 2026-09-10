@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
@@ -31,19 +32,42 @@ internal static class SearchIntentParser
         var media = StrArray("mediaTypes")
             .Select(m => m.StartsWith("movie") ? MediaType.Movie : m is "tv" or "show" or "series" ? MediaType.Show : (MediaType?)null)
             .Where(m => m is not null).Select(m => m!.Value).Distinct().ToArray();
-        int? minYear = root.TryGetProperty("minYear", out var y) && y.ValueKind == JsonValueKind.Number && y.TryGetInt32(out var yr) && yr > 1870
+        // Both ends are gated, not just the lower one. A bound outside (1870, 2100] is a model
+        // misfire rather than a constraint: minYear used to accept anything above 1870, so a
+        // model answering 99999 reached `new DateTime(99999, …)` downstream and threw
+        // ArgumentOutOfRangeException out of a live turn. Dropping the bound degrades the answer;
+        // passing it through ends the turn.
+        int? minYear = root.TryGetProperty("minYear", out var y) && y.ValueKind == JsonValueKind.Number && y.TryGetInt32(out var yr) && yr is > 1870 and <= 2100
             ? yr : null;
-        int? maxYear = root.TryGetProperty("maxYear", out var my) && my.ValueKind == JsonValueKind.Number && my.TryGetInt32(out var myr) && myr > 1870
+        int? maxYear = root.TryGetProperty("maxYear", out var my) && my.ValueKind == JsonValueKind.Number && my.TryGetInt32(out var myr) && myr is > 1870 and <= 2100
             ? myr : null;
 
         // A model that inverts the bounds ("80s" → min 1989, max 1980) would otherwise produce a
         // window that can never match. Swapping is strictly better than dropping the constraint.
+        // Done BEFORE the clamp, so an inverted pair is repaired on the values the model meant.
         if (minYear is { } lo && maxYear is { } hi && lo > hi)
         {
             (minYear, maxYear) = (hi, lo);
         }
-        var freeText = root.TryGetProperty("freeText", out var f) && f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } s
-            ? s : fallbackText;
+
+        // An upper bound past the release calendar is narrowed rather than dropped — the user
+        // asked for "recent", and now+5 is the furthest a real release date runs ahead. The lower
+        // bound follows the clamped ceiling down when it would otherwise sit above it, because a
+        // min > max window matches nothing at all, which is worse than an over-tight one.
+        var ceiling = DateTime.UtcNow.Year + 5;
+        if (maxYear is { } cap && cap > ceiling)
+        {
+            maxYear = ceiling;
+        }
+
+        if (minYear is { } floor && maxYear is { } capped && floor > capped)
+        {
+            minYear = capped;
+        }
+
+        var freeText = CapFreeText(
+            root.TryGetProperty("freeText", out var f) && f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } s
+                ? s : fallbackText);
         var people = ParsePeople(root);
         var referenceTitles = ParseReferenceTitles(root);
 
@@ -75,6 +99,41 @@ internal static class SearchIntentParser
         return new SearchIntent(
             genres, keywords, media, freeText, minYear, maxYear, people, excludeGenres, excludeKeywords,
             referenceTitles, maxRuntime);
+    }
+
+    /// <summary>
+    /// The literal-title search string, bounded. It reaches TMDB's <c>query=</c> and the lexical
+    /// arm verbatim, so an unbounded value is both a request-size risk and a useless query.
+    ///
+    /// <para>Cut on a TEXT-ELEMENT boundary, not a char index: <c>value[..120]</c> lands inside a
+    /// surrogate pair whenever an emoji straddles the cut and leaves a lone high surrogate, which
+    /// is not a character — it is transcoded to U+FFFD on the wire and silently changes the
+    /// search. The cap is counted in UTF-16 chars so the result is genuinely ≤ 120 regardless of
+    /// how wide each element is.</para>
+    /// </summary>
+    private const int MaxFreeTextChars = 120;
+
+    private static string CapFreeText(string value)
+    {
+        if (value.Length <= MaxFreeTextChars)
+        {
+            return value;
+        }
+
+        var elements = StringInfo.GetTextElementEnumerator(value);
+        var cut = 0;
+        while (elements.MoveNext())
+        {
+            var end = elements.ElementIndex + ((string)elements.Current).Length;
+            if (end > MaxFreeTextChars)
+            {
+                break;
+            }
+
+            cut = end;
+        }
+
+        return value[..cut];
     }
 
     /// <summary>

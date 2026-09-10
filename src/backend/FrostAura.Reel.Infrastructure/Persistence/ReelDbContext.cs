@@ -95,6 +95,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<Domain.CrossReference.CrossReferenceEvaluation> CrossReferenceEvaluations =>
         Set<Domain.CrossReference.CrossReferenceEvaluation>();
 
+    public DbSet<Domain.CrossReference.CrossReferenceEvaluationItem> CrossReferenceEvaluationItems =>
+        Set<Domain.CrossReference.CrossReferenceEvaluationItem>();
+
     // ── The closed loop ────────────────────────────────────────────────────────────────
     // ExposureEvents is append-only and is never touched by the feed builder's prune.
     // The other two are read-only SQL views created in the Phase2ExposureLog migration.
@@ -126,6 +129,19 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         // Npgsql rejects non-UTC DateTimes for timestamptz; external date-only payloads arrive
         // Kind=Unspecified, so normalize model-wide instead of policing every assignment.
         configurationBuilder.Properties<DateTime>().HaveConversion<UtcDateTimeConverter>();
+    }
+
+    /// <summary>
+    /// Attaches <see cref="HnswFilteredSearchInterceptor"/> here rather than at DI registration, so
+    /// that EVERY context — the API's, a job's, and the one the integration fixture constructs by
+    /// hand — opens its connections with the same filtered-ANN contract. Read that interceptor's
+    /// remarks before removing this: without it, filtered vector searches silently return a
+    /// fraction of the rows they ask for.
+    /// </summary>
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder.AddInterceptors(HnswFilteredSearchInterceptor.Instance);
+        base.OnConfiguring(optionsBuilder);
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -490,6 +506,30 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(x => x.WilsonLow).HasPrecision(6, 4);
             e.Property(x => x.WilsonHigh).HasPrecision(6, 4);
             e.Property(x => x.UnsureRate).HasPrecision(6, 4);
+
+            // The discrimination block. All nullable — a row written before these existed measured
+            // no AUC, which is a different fact from an AUC of zero.
+            e.Property(x => x.MeanLaterRatingKeep).HasPrecision(6, 4);
+            e.Property(x => x.MeanLaterRatingOut).HasPrecision(6, 4);
+            e.Property(x => x.MeanLaterRatingUnsure).HasPrecision(6, 4);
+            e.Property(x => x.KeepLovedRate).HasPrecision(6, 4);
+            e.Property(x => x.KeepDislikedRate).HasPrecision(6, 4);
+            e.Property(x => x.OutLovedRate).HasPrecision(6, 4);
+            e.Property(x => x.OutDislikedRate).HasPrecision(6, 4);
+            // Signed, and the only column here that can legitimately be negative: a Spearman of
+            // −0.2 says the judge orders titles backwards, which is a finding rather than an error.
+            e.Property(x => x.SpearmanConfidenceVsRating).HasPrecision(7, 4);
+            e.Property(x => x.AucKeepVsOut).HasPrecision(6, 4);
+        });
+
+        modelBuilder.Entity<Domain.CrossReference.CrossReferenceEvaluationItem>(e =>
+        {
+            // The dev surface's only read: one origin's items, paged, in a stable order. TitleId is
+            // in the index so the page boundary cannot move between two requests for the same page.
+            e.HasIndex(x => new { x.AccountId, x.EvaluationId, x.TitleId });
+            e.Property(x => x.ReasonCode).HasMaxLength(32);
+            e.Property(x => x.Confidence).HasPrecision(4, 3);
+            e.Property(x => x.NeighbourIdsJson).HasColumnType("jsonb");
         });
 
         // ── The closed loop ────────────────────────────────────────────────────────────────

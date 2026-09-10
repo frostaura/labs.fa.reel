@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
@@ -62,6 +63,8 @@ public sealed class CrossReferenceBacktest(
     /// <summary>And it must answer at all: more unsure than this is honest and useless.</summary>
     public const decimal UnsureCeiling = 0.60m;
 
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     /// <summary>One completed run: the five origins plus the mean row that summarises them.</summary>
     public sealed record Report(
         Guid RunId,
@@ -69,10 +72,23 @@ public sealed class CrossReferenceBacktest(
         CrossReferenceEvaluation Mean);
 
     /// <summary>
-    /// Runs the backtest and persists one <see cref="CrossReferenceEvaluation"/> per split origin
-    /// plus a mean row. Returns null when the account has too little history to split.
+    /// Runs the backtest at the judge's CURRENT prompt generation.
     /// </summary>
-    public async Task<Report?> RunAsync(Guid accountId, CancellationToken ct)
+    public Task<Report?> RunAsync(Guid accountId, CancellationToken ct) =>
+        RunAsync(accountId, judge.PromptVersion, ct);
+
+    /// <summary>
+    /// Runs the backtest at an explicit prompt generation and persists one
+    /// <see cref="CrossReferenceEvaluation"/> per split origin plus a mean row, with one
+    /// <see cref="CrossReferenceEvaluationItem"/> per judged title. Returns null when the account
+    /// has too little history to split.
+    ///
+    /// <para><b>The version is a parameter here and nowhere else.</b> A prompt generation reaches
+    /// the feed by being measured against the one it replaces, not by a caller selecting it —
+    /// which is why the serving job rides <c>ICrossReferenceJudge.PromptVersion</c> and only this
+    /// method, reached only from the founder-only dev endpoint, can name one.</para>
+    /// </summary>
+    public async Task<Report?> RunAsync(Guid accountId, int promptVersion, CancellationToken ct)
     {
         var labels = await db.UserRatings
             .Where(r => r.AccountId == accountId
@@ -93,9 +109,16 @@ public sealed class CrossReferenceBacktest(
         var now = DateTime.UtcNow;
         var origins = new List<CrossReferenceEvaluation>();
 
+        // Every origin's items, pooled for the mean row. The five origins overlap heavily, so a
+        // title judged at three of them contributes three observations — which is the same pooling
+        // the false- and true-rule-out counts already use, for the reason recorded on MeanRow:
+        // averaging five per-origin answers lets a small origin outvote a large one, and the
+        // interval and the AUC are only valid readings of the pooled evidence.
+        var pooled = new List<(CrossReferenceVerdict Verdict, double Confidence, short LaterRating)>();
+
         foreach (var fraction in EvalHarness.SplitOrigins)
         {
-            var row = await EvaluateOriginAsync(accountId, runId, labels, fraction, now, ct);
+            var row = await EvaluateOriginAsync(accountId, runId, labels, fraction, promptVersion, now, pooled, ct);
             if (row is not null)
             {
                 origins.Add(row);
@@ -110,7 +133,7 @@ public sealed class CrossReferenceBacktest(
             return null;
         }
 
-        var mean = MeanRow(accountId, runId, origins, judge.ModelId, judge.PromptVersion, now);
+        var mean = MeanRow(accountId, runId, origins, pooled, judge.ModelId, promptVersion, now);
         db.CrossReferenceEvaluations.Add(mean);
         await db.SaveChangesAsync(ct);
 
@@ -125,7 +148,9 @@ public sealed class CrossReferenceBacktest(
 
     private async Task<CrossReferenceEvaluation?> EvaluateOriginAsync(
         Guid accountId, Guid runId, IReadOnlyList<EvalHarness.SplitLabel> labels, double fraction,
-        DateTime now, CancellationToken ct)
+        int promptVersion, DateTime now,
+        List<(CrossReferenceVerdict Verdict, double Confidence, short LaterRating)> pooled,
+        CancellationToken ct)
     {
         // The split point, on the same axis and by the same index rule the M2 harness uses, so a
         // cross-reference origin and an NDCG origin describe the same instant.
@@ -166,10 +191,26 @@ public sealed class CrossReferenceBacktest(
         // leak in a different costume — the judge sees the catalogue evidence and the viewer's own
         // neighbours, and nothing that knows the answer.
         var noPredictions = new Dictionary<Guid, decimal>();
-        var neighbourOptions = new NeighbourFinder.Options(
-            NeighbourFinder.DefaultK, Skip: 0, AsOf: splitAt, IncludeNearestDisliked: false);
+        // The evidence this generation is shown, from the ONE place that mapping lives.
+        var neighbourOptions = NeighbourFinder.ForPromptVersion(promptVersion, splitAt);
+
+        // The genre affinity line and the base rates: both from state cut at the split, and the
+        // affinity from the as-of TASTE STATE rather than the stored fact sheet, which is cached,
+        // current and built partly from the holdout. v1 renders neither.
+        // …and computed only where a generation renders them. The adapter would ignore them at v1
+        // anyway, but a v1 options record carrying v2's inputs invites the next reader to render
+        // them "since they are already there", and the byte-identity of a v1 prompt is the thing
+        // that keeps a stored v1 verdict meaning what it meant.
+        var renderable = promptVersion >= CrossReferencePromptVersions.Second;
+        var (lovedShare, dislikedShare) = renderable
+            ? GenreAffinityLine.BaseRates(labels.Where(l => l.Axis <= splitAt).Select(l => l.Rating).ToList())
+            : (null, null);
+        var judgeOptions = new CrossReferenceJudgeOptions(
+            promptVersion, renderable ? GenreAffinityLine.Build(taste) : null, lovedShare, dislikedShare);
 
         var verdicts = new Dictionary<Guid, CrossReferenceEntry>();
+        var neighboursShown = new Dictionary<Guid, IReadOnlyList<CrossReferenceNeighbour>>();
+        var batchOf = new Dictionary<Guid, int>();
         var noEmbedding = 0;
         long promptTokens = 0;
         long completionTokens = 0;
@@ -177,7 +218,8 @@ public sealed class CrossReferenceBacktest(
         // Deterministic order in, deterministic batches: the judge shuffles WITHIN a batch, so the
         // batching itself must not depend on Postgres row order or two runs disagree.
         var ordered = pool.Select(p => p.TitleId).OrderBy(id => id).ToList();
-        for (var offset = 0; offset < ordered.Count; offset += BatchSize)
+        var batchIndex = 0;
+        for (var offset = 0; offset < ordered.Count; offset += BatchSize, batchIndex++)
         {
             var slice = ordered.Skip(offset).Take(BatchSize).ToList();
             var batch = await candidates.BuildAsync(accountId, slice, noPredictions, neighbourOptions, ct);
@@ -188,12 +230,15 @@ public sealed class CrossReferenceBacktest(
             }
 
             var result = await judge.JudgeAsync(
-                batch.Candidates, persona, CrossReferenceRound.First, ApiUsagePurpose.CrossReferenceEval, ct);
+                batch.Candidates, persona, CrossReferenceRound.First, ApiUsagePurpose.CrossReferenceEval,
+                judgeOptions, ct);
             promptTokens += result.PromptTokens ?? 0;
             completionTokens += result.CompletionTokens ?? 0;
             foreach (var entry in result.Entries)
             {
                 verdicts[entry.TitleId] = entry;
+                neighboursShown[entry.TitleId] = batch.Neighbours.GetValueOrDefault(entry.TitleId) ?? [];
+                batchOf[entry.TitleId] = batchIndex;
             }
         }
 
@@ -216,9 +261,43 @@ public sealed class CrossReferenceBacktest(
         var unsureRate = Rate(unsure, judged);
         var decision = Decide(high, trueRate, unsureRate, loved.Count);
 
+        // Does the answer carry information? The three clauses of the gate each read one rate in
+        // isolation, and "12% is under the 15% ceiling" is a true sentence about an instrument whose
+        // true-rule-out rate is 10.1% — i.e. about a coin. These compare the two sides to each other.
+        var observations = verdicts.Values
+            .Select(v => (v.Verdict, v.Confidence, LaterRating: ratingById[v.TitleId]))
+            .ToList();
+        pooled.AddRange(observations);
+        var discrimination = DiscriminationMetrics.Summarise(observations);
+
+        var evaluationId = Guid.NewGuid();
+
+        // One row per judged title, written in the same SaveChanges as the aggregate they roll into.
+        // The whole reason this PR exists: an aggregate cannot be re-interrogated, so the first live
+        // run's obvious follow-up ("does `keep` carry signal even though `out` does not?") needed
+        // the entire paid run repeated to ask.
+        foreach (var (titleId, entry) in verdicts.OrderBy(v => v.Key))
+        {
+            db.CrossReferenceEvaluationItems.Add(new CrossReferenceEvaluationItem
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                EvaluationId = evaluationId,
+                TitleId = titleId,
+                SplitFraction = fraction,
+                Verdict = entry.Verdict,
+                ReasonCode = entry.Reason,
+                Confidence = Math.Round((decimal)entry.Confidence, 3, MidpointRounding.AwayFromZero),
+                LaterRating = ratingById[titleId],
+                NeighbourIdsJson = JsonSerializer.Serialize(
+                    (neighboursShown.GetValueOrDefault(titleId) ?? []).Select(n => n.TitleId), JsonOptions),
+                BatchIndex = batchOf.GetValueOrDefault(titleId),
+            });
+        }
+
         return new CrossReferenceEvaluation
         {
-            Id = Guid.NewGuid(),
+            Id = evaluationId,
             AccountId = accountId,
             RunId = runId,
             SplitFraction = fraction,
@@ -234,10 +313,24 @@ public sealed class CrossReferenceBacktest(
             WilsonHigh = high,
             UnsureRate = unsureRate,
             NoEmbeddingCount = noEmbedding,
+            KeepCount = discrimination.KeepCount,
+            OutCount = discrimination.OutCount,
+            UnsureCount = discrimination.UnsureCount,
+            MeanLaterRatingKeep = discrimination.MeanLaterRatingKeep,
+            MeanLaterRatingOut = discrimination.MeanLaterRatingOut,
+            MeanLaterRatingUnsure = discrimination.MeanLaterRatingUnsure,
+            KeepLovedRate = discrimination.KeepLovedRate,
+            KeepDislikedRate = discrimination.KeepDislikedRate,
+            OutLovedRate = discrimination.OutLovedRate,
+            OutDislikedRate = discrimination.OutDislikedRate,
+            SpearmanConfidenceVsRating = discrimination.Spearman,
+            AucKeepVsOut = discrimination.Auc,
             GatingDecision = decision,
-            Caveat = BuildCaveat(loved.Count, disliked.Count, judged, falseRate, low, high, noEmbedding),
+            Caveat = BuildCaveat(
+                loved.Count, disliked.Count, judged, falseRate, low, high, noEmbedding,
+                trueRate, discrimination.Auc),
             ModelId = judge.ModelId,
-            PromptVersion = judge.PromptVersion,
+            PromptVersion = promptVersion,
             PromptTokens = promptTokens,
             CompletionTokens = completionTokens,
             EvaluatedAt = now,
@@ -254,6 +347,7 @@ public sealed class CrossReferenceBacktest(
     /// </summary>
     private static CrossReferenceEvaluation MeanRow(
         Guid accountId, Guid runId, IReadOnlyList<CrossReferenceEvaluation> origins,
+        IReadOnlyList<(CrossReferenceVerdict Verdict, double Confidence, short LaterRating)> pooled,
         string modelId, int promptVersion, DateTime now)
     {
         var judged = origins.Sum(o => o.HoldoutJudged);
@@ -269,6 +363,7 @@ public sealed class CrossReferenceBacktest(
         // Unsure is the one figure that is a mean of the origins rather than a pooled count: each
         // origin's denominator is its own judged set, and those sets overlap heavily.
         var unsureRate = origins.Count == 0 ? 0m : origins.Average(o => o.UnsureRate);
+        var discrimination = DiscriminationMetrics.Summarise(pooled);
 
         return new CrossReferenceEvaluation
         {
@@ -288,8 +383,21 @@ public sealed class CrossReferenceBacktest(
             WilsonHigh = high,
             UnsureRate = unsureRate,
             NoEmbeddingCount = noEmbedding,
+            KeepCount = discrimination.KeepCount,
+            OutCount = discrimination.OutCount,
+            UnsureCount = discrimination.UnsureCount,
+            MeanLaterRatingKeep = discrimination.MeanLaterRatingKeep,
+            MeanLaterRatingOut = discrimination.MeanLaterRatingOut,
+            MeanLaterRatingUnsure = discrimination.MeanLaterRatingUnsure,
+            KeepLovedRate = discrimination.KeepLovedRate,
+            KeepDislikedRate = discrimination.KeepDislikedRate,
+            OutLovedRate = discrimination.OutLovedRate,
+            OutDislikedRate = discrimination.OutDislikedRate,
+            SpearmanConfidenceVsRating = discrimination.Spearman,
+            AucKeepVsOut = discrimination.Auc,
             GatingDecision = Decide(high, trueRate, unsureRate, loved),
-            Caveat = BuildCaveat(loved, disliked, judged, falseRate, low, high, noEmbedding),
+            Caveat = BuildCaveat(
+                loved, disliked, judged, falseRate, low, high, noEmbedding, trueRate, discrimination.Auc),
             ModelId = modelId,
             PromptVersion = promptVersion,
             PromptTokens = origins.Sum(o => o.PromptTokens),
@@ -356,10 +464,18 @@ public sealed class CrossReferenceBacktest(
     /// <para>Persisted rather than rendered for the same reason <c>EvaluationResult</c> persists
     /// its popularity caveat: a number and the reason to be careful with it must travel together,
     /// or the number gets quoted alone six weeks later.</para>
+    ///
+    /// <para><b>It ends with whether the verdicts discriminate at all</b>, whenever the two rule-out
+    /// rates are within five points of each other. That is not a significance test and does not
+    /// pretend to be one — at these sample sizes the intervals are ten times wider than the gap —
+    /// but it stops "it caught 10% of the duds" being quoted without the clause that says the 10%
+    /// was free.</para>
     /// </summary>
     internal static string BuildCaveat(
-        int loved, int disliked, int judged, decimal falseRate, decimal low, decimal high, int noEmbedding) =>
-        string.Create(
+        int loved, int disliked, int judged, decimal falseRate, decimal low, decimal high, int noEmbedding,
+        decimal trueRate, decimal? auc)
+    {
+        var caveat = string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
             $"Measured on {loved} holdout title(s) this account went on to rate 8 or higher and {disliked} it "
             + $"rated 4 or lower, out of {judged} judged. The false-rule-out rate is {falseRate:0.000} with a "
@@ -367,4 +483,12 @@ public sealed class CrossReferenceBacktest(
             + $"this sample size the point estimate alone cannot distinguish a good judge from a lucky one. "
             + $"{noEmbedding} eligible holdout title(s) were skipped for having no plot embedding and no "
             + $"extracted attributes, and are not in any denominator here.");
+
+        // The sentence the first live run needed and did not have. A false-rule-out rate of 12.0%
+        // reads as a cautious instrument until you put it beside a true-rule-out rate of 10.1%, at
+        // which point it reads as a coin — and the gate's three clauses, each of which looks at one
+        // rate alone, would never have said so.
+        var discrimination = DiscriminationMetrics.DiscriminationCaveat(falseRate, trueRate, auc);
+        return discrimination is null ? caveat : caveat + " " + discrimination;
+    }
 }

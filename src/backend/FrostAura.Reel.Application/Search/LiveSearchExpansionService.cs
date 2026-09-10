@@ -818,10 +818,18 @@ public sealed class LiveSearchExpansionService(
     /// genre/keyword/title search whiffs on "fantastically futuristic, tense", and a heavy watcher
     /// has already seen most of the little it does return, so discovery starves. Embedding the
     /// agent's concept text and pulling the nearest-by-meaning UNSEEN titles surfaces matches we
-    /// already hold that no keyword names. Restricts to eligible ids BEFORE ordering by cosine
-    /// (mirrors <see cref="CandidateRetriever"/>'s AnnPullAsync) — the catalogue is dominated by the
-    /// user's seen library, so a global-nearest-then-filter query returns almost nothing. Returns
-    /// empty on any failure ⇒ the TMDB arm carries the turn alone (no regression).
+    /// already hold that no keyword names. Returns empty on any failure ⇒ the TMDB arm carries the
+    /// turn alone (no regression).
+    ///
+    /// <para><b>The eligibility predicate below is not what makes this correct, and believing it was
+    /// cost this surface real recall.</b> Postgres pushes <c>ORDER BY … &lt;=&gt; … LIMIT</c> into the
+    /// HNSW index whatever order the LINQ is written in, and an HNSW scan post-filters its bounded
+    /// candidate window — so with pgvector's default settings this asked for 40 eligible neighbours
+    /// and got back only the eligible members of the 40 nearest titles OVERALL. Measured at 10 of a
+    /// 20-row eligible set. What actually makes the pull whole is
+    /// <c>hnsw.iterative_scan</c>, set on every connection by
+    /// <c>HnswFilteredSearchInterceptor</c>; read that before touching either side of this query.
+    /// The predicate stays because it is still the cheapest way to keep ineligible rows out.</para>
     /// </summary>
     private async Task<List<Guid>> SemanticNeighbourIdsAsync(
         Guid accountId, AgentReply agentReply, IReadOnlyList<float[]> referenceVectors, CancellationToken ct)

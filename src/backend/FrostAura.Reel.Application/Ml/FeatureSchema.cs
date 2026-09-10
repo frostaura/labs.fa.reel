@@ -73,6 +73,36 @@ namespace FrostAura.Reel.Application.Ml;
 /// pre-existing genre index is unmoved relative to the start of the block.</item>
 /// </list>
 /// </item>
+/// <item><b>6</b> — the WATCHED-HISTORY bump. <b>Built, measured and REVERTED. Version 6 is burned:
+/// the next bump is 7.</b> It appended five scalars (132 → 137) — <c>simWatchedCentroid</c> /
+/// <c>hasWatchedCentroid</c> (cosine to the centroid of titles WATCHED but not RATED as-of),
+/// <c>simRewatchCentroid</c> / <c>hasRewatchCentroid</c> (<c>min(plays, 3)</c>-weighted centroid of
+/// <c>Plays &gt;= 2</c> titles, rated or not) and <c>watchedGenreShare</c> — on the argument that
+/// every user-side feature up to v5 reads RATED titles alone, so on the founder's account 1,363
+/// watched-and-never-scored titles fed nothing.
+/// <para><b>Why it is not here.</b> Iteration 17 was run under a rule pre-registered before the
+/// numbers existed (recorded in <c>memory/decisions.md</c>): ship only if the mean relative NDCG
+/// lift improves on iteration 16 <i>and</i> <c>NdcgLiftCiLow</c> does not move further negative.
+/// Iteration 17 at v6 measured NDCG@10 <b>0.053</b> against a popularity baseline of 0.198, CI
+/// <b>[−0.356, +0.026]</b>, Spearman 0.116, holdout 209. Iteration 16 at v5 measured <b>0.056</b>
+/// against the same 0.198 baseline, CI [−0.43, +0.08]. No lift; the bump was reverted per the rule
+/// rather than renegotiated once the number was on screen.</para>
+/// <para><b>What the revert does NOT establish.</b> It does not say these features carry no signal.
+/// The instrument is noise-dominated at this holdout size — two v5 runs over identical data returned
+/// 0.000 and 0.056 — so an effect the size of the one being looked for is not resolvable here. The
+/// honest reading is "unmeasurable with a 209-row holdout", not "absent". Re-proposing this idea is
+/// legitimate; re-proposing it against <i>this</i> instrument is not, and it would land as v7 with a
+/// wider vector, never by reusing 6.</para>
+/// <para>Two further scalars scoped into the same bump — <c>nearestRatedNeighbourRating</c> and
+/// <c>nearestRatedNeighbourSim</c>, a k = 3 distance-weighted kNN over the account's own rated
+/// titles — were written in full and dropped BEFORE the iteration ran, on a separate pre-registered
+/// cost gate of 2×. A warm <c>EvalHarness</c> run over a copy of the live database: <b>2.8–2.9 s at
+/// v5</b>, <b>3.8–4.2 s with the five scalars above</b> (1.3–1.5×), <b>12.6–12.8 s with the kNN pair
+/// added</b> (4.4–5.5×). The cost was not the scan — building the search index alone moved
+/// <c>BuildTasteStateAsync</c> from ~100 ms to ~1,036 ms, and the harness pays that five times a
+/// run. If they ever return it is behind a materialised, incrementally-maintained neighbour index,
+/// on their own bump with their own measurement, never inside the per-build recompute.</para>
+/// </item>
 /// </list>
 /// A version bump makes every stored artifact unreadable by construction — the vector width and
 /// column meanings move. <c>ModelArtifact.FeatureSchemaJson</c> records the version an artifact was
@@ -81,6 +111,12 @@ namespace FrostAura.Reel.Application.Ml;
 /// </remarks>
 public static class FeatureSchema
 {
+    /// <summary>
+    /// The live schema version. <b>The next bump is 7, not 6</b> — 6 was built, measured against the
+    /// iteration-17 pre-registered rule and reverted; the version history above records what it held
+    /// and why it went. Re-using a burned number would make two different 137-wide vectors answer to
+    /// the same integer in stored <c>ModelArtifact.FeatureSchemaJson</c> rows.
+    /// </summary>
     public const int Version = 5;
 
     /// <summary>

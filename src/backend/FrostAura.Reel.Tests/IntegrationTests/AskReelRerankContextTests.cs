@@ -36,12 +36,12 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// Pending row in the same batch.</para>
 /// </summary>
 [Collection("postgres")]
-public class AskReelRerankContextTests(PostgresFixture fixture)
+public class AskReelRerankContextTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     [Fact]
     public async Task An_enriched_title_carries_its_tone_era_and_credits_and_an_unenriched_one_carries_nulls()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -108,7 +108,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
     [Fact]
     public async Task A_tone_outside_the_closed_vocabulary_never_reaches_the_judge()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -133,7 +133,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(long tmdbId, string name, int seed)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -162,7 +162,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
 
     private async Task EnrichAsync(Guid titleId, string tone, string era, string[] themes)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.TitleAttributes.Add(new TitleAttributes
         {
             TitleId = titleId,
@@ -197,7 +197,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
     /// </summary>
     private async Task LeaveExtractionPendingAsync(Guid titleId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.TitleAttributes.Add(new TitleAttributes
         {
             TitleId = titleId,
@@ -251,7 +251,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -290,7 +290,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -306,7 +306,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture)
 
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
         {
             db.WatchedTitles.Add(new WatchedTitle

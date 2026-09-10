@@ -29,7 +29,7 @@ namespace FrostAura.Reel.Tests.CrossReference;
 /// set. Each seeds one fact strictly after the split that would be unmissable if it leaked.</para>
 /// </summary>
 [Collection("postgres")]
-public class LeakageTests(PostgresFixture fixture)
+public class LeakageTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>
     /// A language nothing else in the postgres collection uses.
@@ -73,7 +73,7 @@ public class LeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task As_of_persona_never_names_a_title_rated_after_the_split()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -89,7 +89,7 @@ public class LeakageTests(PostgresFixture fixture)
         var afterId = await SeedTitleAsync("Anchor After Split", UnitVector(1));
         await SeedRatingAsync(accountId, afterId, 10, AfterSplit);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var personalisation = new PersonalisationContext(db, Dislikes(db));
         var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, SplitAt, CancellationToken.None);
         var persona = await personalisation.PersonaAsOfAsync(accountId, taste, SplitAt, CancellationToken.None);
@@ -101,7 +101,7 @@ public class LeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task As_of_anchor_candidates_never_carry_a_rating_first_seen_after_the_split()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -115,7 +115,7 @@ public class LeakageTests(PostgresFixture fixture)
         var hatedAfterId = await SeedTitleAsync("Hated After", UnitVector(2));
         await SeedRatingAsync(accountId, hatedAfterId, 2, AfterSplit);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var personalisation = new PersonalisationContext(db, Dislikes(db));
         var anchors = await personalisation.AnchorCandidatesAsOfAsync(accountId, SplitAt, CancellationToken.None);
         var names = anchors.Select(a => a.Name).ToList();
@@ -134,7 +134,7 @@ public class LeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task As_of_neighbours_never_include_a_title_rated_after_the_split()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -149,7 +149,7 @@ public class LeakageTests(PostgresFixture fixture)
         var afterId = await SeedTitleAsync("Neighbour After", NearUnit(0, 0.02f));
         await SeedRatingAsync(accountId, afterId, 3, AfterSplit);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var finder = new NeighbourFinder(db);
 
         var asOf = await finder.FindAsync(
@@ -169,7 +169,7 @@ public class LeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task As_of_declined_line_never_carries_a_reaction_created_after_the_split()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -180,7 +180,7 @@ public class LeakageTests(PostgresFixture fixture)
         await SeedReactionAsync(accountId, beforeId, BeforeSplit);
         await SeedReactionAsync(accountId, afterId, AfterSplit);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var personalisation = new PersonalisationContext(db, Dislikes(db));
         var line = await personalisation.DeclinedLineAsOfAsync(accountId, SplitAt, CancellationToken.None);
 
@@ -192,7 +192,7 @@ public class LeakageTests(PostgresFixture fixture)
     [Fact]
     public async Task A_revoked_reaction_is_still_declined_as_of_a_point_before_the_revocation()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -201,7 +201,7 @@ public class LeakageTests(PostgresFixture fixture)
         // wrong: a reaction created before the split and revoked AFTER it was live at the split, so
         // the as-of line must still carry it. Cutting on CreatedAt alone would be right here by
         // accident; cutting on RevokedAt <= asOf would be wrong.
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -210,7 +210,7 @@ public class LeakageTests(PostgresFixture fixture)
         var titleId = await SeedTitleAsync("Declined Then Revoked", UnitVector(0));
         await SeedReactionAsync(accountId, titleId, BeforeSplit, revokedAt: AfterSplit);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var personalisation = new PersonalisationContext(db, Dislikes(db));
         var line = await personalisation.DeclinedLineAsOfAsync(accountId, SplitAt, CancellationToken.None);
 
@@ -237,7 +237,7 @@ public class LeakageTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -261,7 +261,7 @@ public class LeakageTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(string name, float[] embedding)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -290,7 +290,7 @@ public class LeakageTests(PostgresFixture fixture)
 
     private async Task SeedRatingAsync(Guid accountId, Guid titleId, short rating, DateTime at)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserRatings.Add(new UserRating
         {
             Id = Guid.NewGuid(),
@@ -308,7 +308,7 @@ public class LeakageTests(PostgresFixture fixture)
 
     private async Task SeedReactionAsync(Guid accountId, Guid titleId, DateTime at, DateTime? revokedAt = null)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserTitleReactions.Add(new UserTitleReaction
         {
             Id = Guid.NewGuid(),

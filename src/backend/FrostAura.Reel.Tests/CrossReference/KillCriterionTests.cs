@@ -102,8 +102,11 @@ public class KillCriterionTests
     [Fact]
     public void The_caveat_names_n_and_the_interval()
     {
+        // A true-rule-out rate far above the false one, so the discrimination sentence stays off and
+        // this test keeps testing exactly what it says it does.
         var caveat = CrossReferenceBacktest.BuildCaveat(
-            loved: 55, disliked: 40, judged: 300, falseRate: 0.0909m, low: 0.0394m, high: 0.1990m, noEmbedding: 402);
+            loved: 55, disliked: 40, judged: 300, falseRate: 0.0909m, low: 0.0394m, high: 0.1990m,
+            noEmbedding: 402, trueRate: 0.55m, auc: 0.78m);
 
         Assert.Contains("55 holdout title(s)", caveat, StringComparison.Ordinal);
         Assert.Contains("40 it", caveat, StringComparison.Ordinal);
@@ -121,7 +124,7 @@ public class KillCriterionTests
         try
         {
             System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
-            var caveat = CrossReferenceBacktest.BuildCaveat(55, 40, 300, 0.0909m, 0.0394m, 0.1990m, 402);
+            var caveat = CrossReferenceBacktest.BuildCaveat(55, 40, 300, 0.0909m, 0.0394m, 0.1990m, 402, 0.55m, 0.78m);
 
             Assert.Contains("0.091", caveat, StringComparison.Ordinal);
             Assert.DoesNotContain("0,091", caveat, StringComparison.Ordinal);

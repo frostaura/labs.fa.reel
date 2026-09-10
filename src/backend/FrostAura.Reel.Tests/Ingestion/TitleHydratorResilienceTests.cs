@@ -242,6 +242,8 @@ public class TitleHydratorResilienceTests
         public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => throw Unexpected();
         public DbSet<Domain.CrossReference.TitleCrossReferenceVerdict> TitleCrossReferenceVerdicts => throw Unexpected();
         public DbSet<Domain.CrossReference.CrossReferenceEvaluation> CrossReferenceEvaluations => throw Unexpected();
+
+        public DbSet<Domain.CrossReference.CrossReferenceEvaluationItem> CrossReferenceEvaluationItems => throw Unexpected();
         public Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade Database => throw Unexpected();
         public DbSet<ExposureEvent> ExposureEvents => throw Unexpected();
         public DbSet<ExposureOutcome> ExposureOutcomes => throw Unexpected();

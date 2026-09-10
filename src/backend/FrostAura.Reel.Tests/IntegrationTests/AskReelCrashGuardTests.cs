@@ -33,7 +33,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// user has to initiate.</para>
 /// </summary>
 [Collection("postgres")]
-public class AskReelCrashGuardTests(PostgresFixture fixture)
+public class AskReelCrashGuardTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>
     /// "Movies from the year 99999" — a plausible thing to type and a trivially plausible thing for
@@ -50,7 +50,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     [InlineData(99999, 99999)]
     public async Task Year_99999_returns_a_normal_turn(int? minYear, int? maxYear)
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -74,7 +74,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     [Fact]
     public async Task Year_99999_returns_a_normal_turn_on_the_person_arm()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -107,7 +107,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     [Fact]
     public async Task Truncated_embedding_response_degrades_instead_of_throwing()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -136,7 +136,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     [Fact]
     public async Task An_empty_ranking_seed_degrades_instead_of_throwing()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -167,21 +167,23 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     /// they are separate calls and only one of them failing would not prove the wrapper covers the
     /// set. Anything in the result set therefore came from the semantic arm, and could only have.
     ///
-    /// <para>The eligible pool is deliberately NOT narrowed to this test's own seeds. The embedding
-    /// column carries an HNSW index, and a post-filter kNN over a pool that is tiny relative to the
-    /// index silently comes back empty rather than slow — see <c>memory/gotchas.md</c>. Asserting
-    /// "the semantic arm returned SOMETHING while TMDB was down" is the claim this test is actually
-    /// making, and it is the one that does not depend on index recall.</para>
+    /// <para>The eligible pool is narrowed to this test's own three seeds, which is the shape that
+    /// used to make the semantic arm come back empty for reasons that had nothing to do with the
+    /// arm: a post-filtered kNN over an HNSW index returns only what survives a bounded window of
+    /// graph candidates. <c>HnswFilteredSearchInterceptor</c> closes that, and
+    /// <see cref="EmbeddedCatalogTestBase"/> keeps sibling fixtures' vectors out of the index — so
+    /// this test can name the titles it expects instead of settling for "something came back".</para>
     /// </summary>
     [Fact]
     public async Task Tmdb_arm_failure_still_returns_the_semantic_arm()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
 
         var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
         await SeedEmbeddedUnseenTitleAsync(32001, "Neighbour One", seed: 81);
         await SeedEmbeddedUnseenTitleAsync(32002, "Neighbour Two", seed: 82);
         await SeedEmbeddedUnseenTitleAsync(32003, "Neighbour Three", seed: 83);
@@ -195,7 +197,10 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
         var done = Assert.Single(events, e => e.Event == "done");
         var trace = string.Join(" | ", events.Select(e => e.Event + ":" + e.Data.GetRawText()));
         Assert.False(Failed(done.Data), trace);
-        Assert.NotEmpty(done.Data.GetProperty("results").EnumerateArray());
+        var names = done.Data.GetProperty("results").EnumerateArray()
+            .Select(r => r.GetProperty("name").GetString()!)
+            .ToList();
+        Assert.True(names.Any(n => n.StartsWith("Neighbour", StringComparison.Ordinal)), trace);
     }
 
     /// <summary>
@@ -253,7 +258,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        var db = fixture.CreateContext(scoped);
+        var db = Fixture.CreateContext(scoped);
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -292,7 +297,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -309,7 +314,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     /// <summary>A global, English, already-hydrated, UNSEEN title carrying a normalized embedding.</summary>
     private async Task SeedEmbeddedUnseenTitleAsync(long tmdbId, string name, int seed)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -356,7 +361,7 @@ public class AskReelCrashGuardTests(PostgresFixture fixture)
     /// </summary>
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
         {
             db.WatchedTitles.Add(new WatchedTitle
