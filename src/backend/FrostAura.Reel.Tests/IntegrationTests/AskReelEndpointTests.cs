@@ -37,6 +37,50 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 public class AskReelEndpointTests(PostgresFixture fixture, ReelApiFactory api)
     : EmbeddedCatalogTestBase(fixture), IClassFixture<ReelApiFactory>
 {
+    /// <summary>The first of this class's scripted TMDB ids — see <see cref="DisposeAsync"/>.</summary>
+    private const long ScriptedTmdbIdFirst = 771001;
+
+    /// <summary>How many scripted rows the discovery client can hand back.</summary>
+    private const int ScriptedTmdbIdCount = 10;
+
+    /// <summary>
+    /// Removes this class's catalogue rows, not just its vectors.
+    ///
+    /// <para><see cref="EmbeddedCatalogTestBase"/> takes the embeddings, which is what it is for. It
+    /// is not enough here, and the difference is measurable: leaving ten <c>Title</c> rows behind
+    /// turned <c>LiveSearchExpansionTests</c>' documented one-in-four flake into a near-certain
+    /// failure in the full suite, because a later class's enrichment sweep embeds whatever Pending
+    /// rows it finds — including these — and those vectors then sit in the shared HNSW index while
+    /// the semantic-arm tests run. A filtered HNSW scan collects a bounded window of graph
+    /// candidates BEFORE the query's predicate is applied, so a sibling's rows change which titles
+    /// an unrelated account's search ever gets to consider, and no amount of eligibility isolation
+    /// in the victim can reach it.</para>
+    ///
+    /// <para>Exposure rows are deliberately not touched: they are append-only, and this class
+    /// writes none anyway — its accounts have no Active artifact, so the turn logs nothing.</para>
+    /// </summary>
+    public override async Task DisposeAsync()
+    {
+        await base.DisposeAsync();
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var titleIds = await db.Titles
+            .Where(t => t.TmdbId >= ScriptedTmdbIdFirst && t.TmdbId < ScriptedTmdbIdFirst + ScriptedTmdbIdCount)
+            .Select(t => t.Id)
+            .ToListAsync();
+        if (titleIds.Count == 0)
+        {
+            return;
+        }
+
+        await db.SearchTurnCards.Where(c => titleIds.Contains(c.TitleId)).ExecuteDeleteAsync();
+        await db.Titles.Where(t => titleIds.Contains(t.Id)).ExecuteDeleteAsync();
+    }
+
     /// <summary>
     /// A retry is not a second turn. The client mints one <c>clientTurnId</c> per user message and
     /// resends it on a dropped connection, a StrictMode double-invoke or an impatient tap; the
@@ -128,7 +172,7 @@ public class AskReelEndpointTests(PostgresFixture fixture, ReelApiFactory api)
             return;
         }
 
-        var scripted = new ScriptedDiscoveryTmdbClient(Discoverable(firstTmdbId: 771001, count: 10));
+        var scripted = new ScriptedDiscoveryTmdbClient(Discoverable(ScriptedTmdbIdFirst, ScriptedTmdbIdCount));
         using var factory = api.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
         {
             services.RemoveAll<ITmdbClient>();
