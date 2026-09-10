@@ -345,9 +345,12 @@ public class GoldenPromptV2Tests
         Assert.False(CrossReferencePromptVersions.IsKnown(3));
         Assert.False(CrossReferencePromptVersions.IsKnown(-1));
 
-        // The serving default has NOT moved. v2 becomes current by being measured against v1, not
-        // by being written — the ordering this whole PR exists to defend.
-        Assert.Equal(CrossReferencePromptVersions.First, OpenRouterCrossReferenceJudge.CurrentPromptVersion);
+        // The serving default moved to v2 on 2026-09-11, and only because it was MEASURED against
+        // v1 on the founder's holdout: AUC 0.655 vs 0.611, Spearman 0.190 vs 0.128, keeps later
+        // averaging 6.83 vs 6.53, keep -> loved 33.2% vs 28.4% and keep -> disliked 8.1% vs 13.0%.
+        // The ordering this test defends is that a generation becomes current by being measured,
+        // not by being written — not that the answer is for ever 1.
+        Assert.Equal(CrossReferencePromptVersions.Second, OpenRouterCrossReferenceJudge.CurrentPromptVersion);
     }
 
     private static string CandidateLine(string prompt) => prompt

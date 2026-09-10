@@ -120,11 +120,16 @@ public class CrossReferenceServiceTests(PostgresFixture fixture)
         var ladder = await service.StaleFirstAsync(accountId, work, NewHash, CancellationToken.None);
         Assert.Equal(moved, ladder[0]);
 
-        // …and still there, still shaping the order at half strength until something replaces it.
+        // …and still there, still readable, still recorded on the exposure row — and, since the
+        // keep-only decision of 2026-09-11, still not moving the title an inch. The row survives a
+        // fingerprint move because deleting it would cost a re-judgement of the whole pool every
+        // time the account's taste ticks over.
         var factors = await service.VerdictFactorsAsync(
             accountId, [moved], NewHash, PromptVersion, CancellationToken.None);
         Assert.Equal(AggregateVerdict.Out, factors[moved].Verdict);
-        Assert.Equal(VerdictAggregator.StaleOutFactor, factors[moved].Factor);
+        Assert.Equal(VerdictAggregator.OutFactor, factors[moved].Factor);
+        Assert.Equal(1.0d, factors[moved].Factor);
+        Assert.True(factors[moved].Stale);
         Assert.True(factors[moved].HeroAllowed);
     }
 
