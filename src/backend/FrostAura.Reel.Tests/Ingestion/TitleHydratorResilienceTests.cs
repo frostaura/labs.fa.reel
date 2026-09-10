@@ -226,6 +226,8 @@ public class TitleHydratorResilienceTests
         public DbSet<UserPreferenceTag> UserPreferenceTags => throw Unexpected();
         public DbSet<Domain.Search.SearchConversation> SearchConversations => throw Unexpected();
         public DbSet<Domain.Search.SearchTurn> SearchTurns => throw Unexpected();
+
+        public DbSet<Domain.Search.SearchTurnCard> SearchTurnCards => throw Unexpected();
         public DbSet<PersonAffinity> PersonAffinities => throw Unexpected();
         public DbSet<TrainingRun> TrainingRuns => throw Unexpected();
         public DbSet<ModelArtifact> ModelArtifacts => throw Unexpected();
