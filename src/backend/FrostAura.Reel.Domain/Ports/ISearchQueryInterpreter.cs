@@ -60,8 +60,18 @@ public interface ISearchQueryInterpreter
 
     string ModelId { get; }
 
-    /// <summary>Parse a free-text query into a discovery spec. Never throws — degrades to a keyword-only intent.</summary>
-    Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default);
+    /// <summary>
+    /// Parse a free-text query into a discovery spec. Never throws — degrades to a keyword-only
+    /// intent.
+    ///
+    /// <para><paramref name="standingFilters"/> is the account's own content rules, already
+    /// summarised. It sits AFTER <c>ct</c> for the same reason it does on
+    /// <see cref="ISearchAgent.InterpretAsync"/>: a caller passes the token positionally. This
+    /// interpreter is the FALLBACK half of Ask Reel's two prompt/parser pairs, and the pair has
+    /// drifted before — a spec field added to one prompt and not the other is simply always absent
+    /// from that path's answers, silently. Passing null means "no standing rules".</para>
+    /// </summary>
+    Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default, string? standingFilters = null);
 
     /// <summary>
     /// The deterministic, offline, FREE reading of the query — the same fallback

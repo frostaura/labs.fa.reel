@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
@@ -273,11 +274,239 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.Equal(["quiet space films"], reply.Intent.Keywords);
     }
 
+    // ── Standing filters ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Standing_filters_appear_in_the_user_message_of_both_prompts()
+    {
+        // Ask Reel has TWO prompt/parser pairs: this agent's, which the live turn uses, and
+        // OpenRouterSearchInterpreter's, which the RECOVERY path uses when the live call fails.
+        // A rule that reaches one and not the other is invisible — the fallback quietly answers
+        // outside the account's own filters, and only a user who is offered an excluded title
+        // ever finds out. So both are asserted here, in one test, carrying the IDENTICAL line.
+        const string filters = "never horror; nothing before 1990";
+
+        var agentHandler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
+        await Agent(agentHandler).InterpretAsync(
+            [], "something scary", "likes sci-fi", [], standingFilters: filters);
+
+        var interpreterHandler = new InterpreterHandler(Envelope("""{"genres":["science-fiction"]}"""));
+        await Interpreter(interpreterHandler).InterpretAsync("something scary", default, filters);
+
+        var expected = OpenRouterSearchAgent.StandingFiltersLine(filters).TrimEnd('\n');
+        Assert.Contains(expected, UserMessageOf(agentHandler.Bodies[0]), StringComparison.Ordinal);
+        Assert.Contains(expected, UserMessageOf(interpreterHandler.Bodies[0]), StringComparison.Ordinal);
+
+        // Both SYSTEM prompts state what to do about a collision, or the data above is inert.
+        Assert.Contains("STANDING FILTERS", SystemMessageOf(agentHandler.Bodies[0]), StringComparison.Ordinal);
+        Assert.Contains("STANDING FILTERS", SystemMessageOf(interpreterHandler.Bodies[0]), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task No_standing_filters_leaves_both_user_messages_exactly_as_they_were()
+    {
+        // The probe on the other side of the branch. Most accounts have no content rules at all,
+        // and a prompt that grows an empty "Standing filters: " header for them is spend and noise.
+        var agentHandler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
+        await Agent(agentHandler).InterpretAsync([], "something scary", "likes sci-fi", []);
+
+        var interpreterHandler = new InterpreterHandler(Envelope("""{"genres":["science-fiction"]}"""));
+        await Interpreter(interpreterHandler).InterpretAsync("something scary");
+
+        Assert.DoesNotContain("Standing filters", UserMessageOf(agentHandler.Bodies[0]), StringComparison.Ordinal);
+        // The fallback's message is the bare query when there are no rules — byte-identical to
+        // every request it made before this change.
+        Assert.Equal("something scary", UserMessageOf(interpreterHandler.Bodies[0]));
+    }
+
+    [Fact]
+    public async Task The_recovery_path_hands_the_standing_filters_down_to_the_fallback()
+    {
+        // The wiring, not the wording: a live call that fails routes through the interpreter, and
+        // that hop is where the summary was most likely to be dropped on the floor.
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.InternalServerError, "{}"));
+        var interpreter = new HeuristicInterpreter();
+
+        await Agent(handler, interpreter).InterpretAsync(
+            [], "something scary", "likes sci-fi", [], standingFilters: "never horror");
+
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.Equal("never horror", interpreter.LastStandingFilters);
+    }
+
+    // ── Ceilings ────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Interpret_sends_max_tokens_400()
+    {
+        var handler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
+
+        await Agent(handler).InterpretAsync([], "80s sci-fi movies", "likes sci-fi", []);
+
+        Assert.Equal(400, MaxTokensOf(handler.Bodies[0]));
+    }
+
+    [Fact]
+    public async Task Rerank_sends_max_tokens_900()
+    {
+        // Deliberately a DIFFERENT number from interpret's: a single shared constant would have
+        // passed a test that asserted only "max_tokens is present", while starving one of the two
+        // callers. The re-rank answer is per-title and an order of magnitude wider.
+        var handler = new CannedHandler(Ok("""{"results":[]}"""));
+
+        await Agent(handler).RerankBatchAsync(Titles(), "q", "taste");
+
+        Assert.Equal(900, MaxTokensOf(handler.Bodies[0]));
+    }
+
+    [Fact]
+    public async Task A_length_finish_is_treated_as_a_failure()
+    {
+        // The payload PARSES — it is a complete JSON object that simply stops early, which is what
+        // a truncated discovery spec actually looks like: the trailing fields are absent rather
+        // than malformed, so the negation the user asked for silently never existed. Accepting it
+        // would look like a working turn.
+        var truncated = """{"reply":"Sure, here you go.","genres":["horror"]}""";
+        var handler = new CannedHandler(
+            new CannedResponse(HttpStatusCode.OK, Envelope(truncated, finishReason: "length")));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync(
+            [], "horror but no ghosts", "likes horror", []);
+
+        // Discarded: the interpreter was consulted, and the intent is the recovered one — NOT the
+        // half-answer's "horror" genre, which is the thing that would have looked fine.
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.Equal(["horror but no ghosts"], reply.Intent.Keywords);
+        Assert.DoesNotContain("horror", reply.Intent.Genres);
+
+        // And the same finish on the re-rank path costs the batch its model fits, not a partial
+        // set of them — every title lands on its deterministic, prediction-anchored stub.
+        var rerankHandler = new CannedHandler(new CannedResponse(
+            HttpStatusCode.OK,
+            Envelope($$"""{"results":[{"titleId":"{{TitleA}}","fit":0.91,"why":"a"}]}""", finishReason: "length")));
+
+        var results = await Agent(rerankHandler).RerankBatchAsync(Titles(), "q", "taste");
+
+        Assert.Equal(0.9d, results[0].Fit, 3); // stub = predicted 9.0 / 10, not the truncated 0.91
+    }
+
+    [Fact]
+    public async Task A_strict_schema_rejection_downgrades_once()
+    {
+        // The re-rank request carries a strict json_schema. A provider that cannot honour it
+        // answers 400 naming response_format; the adapter retires strict mode for the PROCESS and
+        // re-sends as json_object. Per-INSTANCE would be useless — the adapter rides a transient
+        // typed HttpClient and is rebuilt every scope, so it would re-pay the rejected request on
+        // literally every call.
+        var handler = new CannedHandler(
+            new CannedResponse(HttpStatusCode.BadRequest, """{"error":{"message":"response_format json_schema is not supported"}}"""),
+            Ok($$"""{"results":[{"titleId":"{{TitleA}}","fit":0.42,"why":"still answered"}]}"""));
+        var recorder = Recorder();
+
+        var results = await Agent(handler, recorder).RerankBatchAsync(
+            Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+
+        Assert.Equal(2, handler.Bodies.Count);
+        Assert.Equal("json_schema", ResponseFormatTypeOf(handler.Bodies[0]));
+        Assert.Equal("json_object", ResponseFormatTypeOf(handler.Bodies[1]));
+        Assert.Equal(0.42d, results[0].Fit, 3); // the retry's answer is the one that lands
+
+        // ONCE: a fresh adapter — a new scope, a new HttpClient — never probes strict mode again.
+        // The probe here also varies the PURPOSE, because the retry recurses through the transport
+        // while the ledger is written by the caller: a record moved inside ChatAsync would bill the
+        // downgrade twice, and a record keyed off the wrong variable would bill it to the wrong
+        // surface. Both buckets are asserted, because one absorbing the other is the failure that
+        // leaves every per-surface cost figure wrong without looking wrong.
+        var feedHandler = new CannedHandler(Ok("""{"results":[]}"""));
+        await Agent(feedHandler, recorder).RerankBatchAsync(
+            Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
+
+        Assert.Single(feedHandler.Bodies);
+        Assert.Equal("json_object", ResponseFormatTypeOf(feedHandler.Bodies[0]));
+        Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankFeed).Calls);
+        Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankAsk).Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_long_reply_is_cut_at_a_sentence_boundary(bool endsOnAnEmoji)
+    {
+        // Two shapes, because the fallback is where the subtle break lives. With a sentence
+        // boundary in range the cut is clean; with none, the hard cut must not sever a surrogate
+        // pair and leave half an emoji on the wire.
+        var reply = endsOnAnEmoji
+            ? new string('a', 399) + "\U0001F600" + new string('b', 200)
+            : new string('a', 200) + ". " + new string('b', 400);
+
+        var capped = OpenRouterSearchAgent.CapReply(reply);
+
+        Assert.True(capped.Length <= 401, $"length was {capped.Length}"); // 400 plus the ellipsis
+        Assert.DoesNotContain(capped, char.IsSurrogate);
+        if (!endsOnAnEmoji)
+        {
+            Assert.EndsWith(".", capped, StringComparison.Ordinal);
+            Assert.Equal(201, capped.Length);
+        }
+    }
+
+    [Fact]
+    public async Task A_model_reply_past_the_bound_is_capped_on_the_way_out_of_the_agent()
+    {
+        // CapReply is also unit-tested above, and that alone is NOT enough: a version of this
+        // adapter that never calls it passes every direct test of the helper. This asserts the
+        // WIRING — the caller receives the bounded string, not the model's 600-char essay.
+        var essay = new string('a', 220) + ". " + new string('b', 380);
+        var handler = new CannedHandler(Ok(
+            JsonSerializer.Serialize(new { reply = essay, genres = new[] { "thriller" } })));
+
+        var reply = await Agent(handler).InterpretAsync([], "something tense", "likes thrillers", []);
+
+        Assert.True(reply.Reply.Length <= 401, $"length was {reply.Reply.Length}");
+        Assert.EndsWith(".", reply.Reply, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_reply_within_the_bound_is_returned_untouched()
+    {
+        var handler = new CannedHandler(Ok("""{"reply":"Three tense ones coming up.","genres":["thriller"]}"""));
+
+        var reply = await Agent(handler).InterpretAsync([], "something tense", "likes thrillers", []);
+
+        Assert.Equal("Three tense ones coming up.", reply.Reply);
+    }
+
+    [Fact]
+    public void The_stub_fit_survives_the_one_hash_Math_Abs_cannot_negate()
+    {
+        // Math.Abs(int.MinValue) throws OverflowException. String hash codes are randomised per
+        // process, so the name that lands there is unpredictable rather than impossible — and the
+        // throw would come from inside the batch loop that exists to survive a bad response,
+        // costing every OTHER title in the batch its fit.
+        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MinValue), 0d, 0.999d);
+        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MaxValue), 0d, 0.999d);
+        Assert.InRange(OpenRouterSearchAgent.StableFit(-1), 0d, 0.999d);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private static OpenRouterSearchAgent Agent(CannedHandler handler) => Agent(handler, new HeuristicInterpreter());
 
-    private static OpenRouterSearchAgent Agent(CannedHandler handler, HeuristicInterpreter interpreter)
+    private static OpenRouterSearchAgent Agent(CannedHandler handler, ApiUsageRecorder recorder) =>
+        Agent(handler, new HeuristicInterpreter(), recorder);
+
+    private static OpenRouterSearchAgent Agent(CannedHandler handler, HeuristicInterpreter interpreter) =>
+        Agent(handler, interpreter, Recorder());
+
+    private static ApiUsageRecorder Recorder()
+    {
+        var scopeFactory = new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+        return new ApiUsageRecorder(scopeFactory, NullLogger<ApiUsageRecorder>.Instance);
+    }
+
+    private static OpenRouterSearchAgent Agent(
+        CannedHandler handler, HeuristicInterpreter interpreter, ApiUsageRecorder recorder)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -286,8 +515,6 @@ public class OpenRouterSearchAgentLiveModeTests
                 ["TestHelpers:ModelStubMode"] = "false",
             })
             .Build();
-        var scopeFactory = new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
-        var recorder = new ApiUsageRecorder(scopeFactory, NullLogger<ApiUsageRecorder>.Instance);
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterSearchAgent(
             client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
@@ -302,11 +529,45 @@ public class OpenRouterSearchAgentLiveModeTests
 
     private static CannedResponse Ok(string content) => new(HttpStatusCode.OK, Envelope(content));
 
-    private static string Envelope(string content) =>
+    private static string Envelope(string content, string finishReason = "stop") =>
         JsonSerializer.Serialize(new
         {
-            choices = new[] { new { message = new { role = "assistant", content }, finish_reason = "stop" } },
+            choices = new[] { new { message = new { role = "assistant", content }, finish_reason = finishReason } },
         });
+
+    private static int MaxTokensOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("max_tokens").GetInt32();
+    }
+
+    private static string ResponseFormatTypeOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("response_format").GetProperty("type").GetString()!;
+    }
+
+    private static OpenRouterSearchInterpreter Interpreter(InterpreterHandler handler)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OPENROUTER_API_KEY"] = "test-key-not-a-real-one",
+                ["TestHelpers:ModelStubMode"] = "false",
+            })
+            .Build();
+        var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
+        return new OpenRouterSearchInterpreter(
+            client, Recorder(), config, NullLogger<OpenRouterSearchInterpreter>.Instance);
+    }
+
+    private static string UserMessageOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("messages").EnumerateArray()
+            .First(m => m.GetProperty("role").GetString() == "user")
+            .GetProperty("content").GetString()!;
+    }
 
     private static string SystemMessageOf(string body)
     {
@@ -328,13 +589,18 @@ public class OpenRouterSearchAgentLiveModeTests
 
         public int HeuristicCalls { get; private set; }
 
+        /// <summary>What the RECOVERY path handed down — the half the two-prompt gotcha is about.</summary>
+        public string? LastStandingFilters { get; private set; }
+
         public bool IsAvailable => true;
 
         public string ModelId => "fake/heuristic";
 
-        public Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default)
+        public Task<SearchIntent> InterpretAsync(
+            string query, CancellationToken ct = default, string? standingFilters = null)
         {
             InterpretCalls++;
+            LastStandingFilters = standingFilters;
             return Task.FromResult(Intent(query));
         }
 
@@ -346,6 +612,21 @@ public class OpenRouterSearchAgentLiveModeTests
 
         private static SearchIntent Intent(string query) =>
             new([], [query], Array.Empty<MediaType>(), query, null, null);
+    }
+
+    /// <summary>The fallback interpreter's transport — same shape, its own capture list.</summary>
+    private sealed class InterpreterHandler(string body) : HttpMessageHandler
+    {
+        public List<string> Bodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Bodies.Add(await request.Content!.ReadAsStringAsync(ct));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+        }
     }
 
     private sealed record CannedResponse(HttpStatusCode Status, string Body);
