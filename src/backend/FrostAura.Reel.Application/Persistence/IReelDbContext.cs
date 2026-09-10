@@ -57,6 +57,13 @@ public interface IReelDbContext
     DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives { get; }
     DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies { get; }
 
+    // The cross-reference rounds. Verdicts are additive evidence keyed on (account, title, profile
+    // hash, prompt version, round); the evaluations table is the offline backtest's own ledger and
+    // is deliberately NOT EvaluationResult, which is the M2 modelling record.
+    DbSet<Domain.CrossReference.TitleCrossReferenceVerdict> TitleCrossReferenceVerdicts { get; }
+
+    DbSet<Domain.CrossReference.CrossReferenceEvaluation> CrossReferenceEvaluations { get; }
+
     // The closed loop. ExposureEvents is append-only; the other two are read-only SQL views.
     DbSet<ExposureEvent> ExposureEvents { get; }
     DbSet<ExposureOutcome> ExposureOutcomes { get; }
@@ -71,4 +78,18 @@ public interface IReelDbContext
     DbSet<ExternalApiUsage> ExternalApiUsages { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The raw-SQL escape hatch, for the one query shape EF cannot express: a
+    /// <c>CROSS JOIN LATERAL</c> nearest-neighbour scan (see
+    /// <c>Application.CrossReference.NeighbourFinder</c>). Deliberately the LAST thing on this
+    /// port, and deliberately narrow in practice — the DbSet/LINQ surface above IS the abstraction.
+    ///
+    /// <para><b>Raw SQL bypasses the global query filters.</b> Every tenancy guarantee this codebase
+    /// holds by construction is, inside a string handed to this property, held only by whoever wrote
+    /// the string. Any query reaching an account-owned table through here MUST write its own
+    /// <c>"AccountId" = {accountId}</c> predicate, and must interpolate rather than concatenate so
+    /// the value is a parameter.</para>
+    /// </summary>
+    Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade Database { get; }
 }

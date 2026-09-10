@@ -261,7 +261,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -279,7 +279,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null, null)));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -339,7 +339,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent([], [], [], message, null, null, [person])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 

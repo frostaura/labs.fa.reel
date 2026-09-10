@@ -18,7 +18,50 @@ public static class ApiUsagePurpose
     public const string ExtractAttributes = "extract-attributes";
     public const string SearchInterpret = "search-interpret";
     public const string SearchAgent = "search-agent";
+
+    /// <summary>
+    /// The LEGACY re-rank purpose, written by every re-rank caller before the family was split.
+    ///
+    /// <para>It is kept, and is still the default on the port, for one reason: the family ceiling
+    /// counts it. Historical rows carry this string, so a ceiling that summed only the four new
+    /// members would read a day with real spend on it as empty. Nothing new should be written under
+    /// it — pass one of <see cref="RerankFeed"/>, <see cref="RerankPage"/>, <see cref="RerankAsk"/>
+    /// or <see cref="RerankExpand"/> — but a caller that forgets degrades to "counted, unattributed"
+    /// rather than to "free".</para>
+    /// </summary>
     public const string Rerank = "rerank";
+
+    /// <summary>
+    /// The feed build's own re-rank passes — the pre-assembly hero fit judgement, the low-fit hero
+    /// swap, and the rail curation. Background work with nobody waiting on it, which is why this is
+    /// the one member of the family that stops at a fraction of the ceiling: a feed build must
+    /// never be able to starve the founder's own chat turn later the same day.
+    /// </summary>
+    public const string RerankFeed = "rerank-feed";
+
+    /// <summary>The paginator's curation pass on <c>/feed/more</c> and rail pagination. Request path.</summary>
+    public const string RerankPage = "rerank-page";
+
+    /// <summary>An Ask Reel conversational turn's candidate re-rank. Request path, and the reason
+    /// the family ceiling exists at all: it gets the full ceiling, never a fraction.</summary>
+    public const string RerankAsk = "rerank-ask";
+
+    /// <summary>
+    /// A single-turn live-search expansion — the same service as <see cref="RerankAsk"/> entered
+    /// without conversation history, i.e. a query expanded rather than a conversation continued.
+    /// Split out because the two have different shapes: one is a person waiting mid-conversation,
+    /// the other is a one-shot lookup, and a ceiling that could not tell them apart could not later
+    /// be tuned for either.
+    /// </summary>
+    public const string RerankExpand = "rerank-expand";
+
+    /// <summary>
+    /// Every string the re-rank family ceiling sums, legacy included. Written out rather than
+    /// prefix-matched on <c>"rerank"</c>, because a prefix rule would silently absorb any future
+    /// purpose someone names <c>rerank-something</c> into a budget written before it existed.
+    /// </summary>
+    public static readonly string[] RerankFamily = [Rerank, RerankFeed, RerankPage, RerankAsk, RerankExpand];
+
     public const string Embed = "embed";
 
     /// <summary>Writing an account's second-person taste narrative. Weekly, one call per account.</summary>
@@ -33,6 +76,20 @@ public static class ApiUsagePurpose
     /// <summary>The founder-only LLM-judge pass over generated lens copy. Deliberately NOT
     /// <see cref="Lens"/>, so auditing a prompt version cannot eat the budget it is auditing.</summary>
     public const string LensAudit = "lens-audit";
+
+    /// <summary>
+    /// Judging the eligible pool against the viewer's own rated neighbours — the cross-reference
+    /// rounds. The purpose the per-account daily call and token ceilings
+    /// (<c>LLM_XREF_DAILY_CALLS</c> / <c>LLM_XREF_DAILY_TOKENS</c>) are enforced against, so
+    /// nothing else may borrow the string. It never shares the re-rank family's ceiling: a cold
+    /// pass over ten thousand titles would eat every other surface's allowance in an afternoon.
+    /// </summary>
+    public const string CrossReference = "cross-reference";
+
+    /// <summary>The offline backtest of the cross-reference judge. Deliberately NOT
+    /// <see cref="CrossReference"/> — the same rule as <see cref="LensAudit"/>: measuring the
+    /// instrument must not be able to consume the budget the instrument runs on.</summary>
+    public const string CrossReferenceEval = "cross-reference-eval";
 
     /// <summary>
     /// TMDB discover pages fetched by the catalogue bulk seed — the first non-LLM purpose on this

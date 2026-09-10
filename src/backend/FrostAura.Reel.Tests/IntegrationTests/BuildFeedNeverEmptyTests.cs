@@ -591,7 +591,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             Interlocked.Increment(ref RerankCalls);
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
@@ -614,7 +614,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             Interlocked.Increment(ref RerankCalls);
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
@@ -644,7 +644,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             if (query == HeroQuery && Interlocked.Increment(ref heroCalls) == 1)
             {
@@ -906,7 +906,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture)
         public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 

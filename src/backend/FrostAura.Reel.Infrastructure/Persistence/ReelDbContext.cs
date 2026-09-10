@@ -83,6 +83,14 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives => Set<Domain.Lens.AccountTasteNarrative>();
     public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => Set<Domain.Lens.TitleLensCopy>();
 
+    // The cross-reference rounds — see TitleCrossReferenceVerdict for why Round is in the key and
+    // ModelArtifactId is not.
+    public DbSet<Domain.CrossReference.TitleCrossReferenceVerdict> TitleCrossReferenceVerdicts =>
+        Set<Domain.CrossReference.TitleCrossReferenceVerdict>();
+
+    public DbSet<Domain.CrossReference.CrossReferenceEvaluation> CrossReferenceEvaluations =>
+        Set<Domain.CrossReference.CrossReferenceEvaluation>();
+
     // ── The closed loop ────────────────────────────────────────────────────────────────
     // ExposureEvents is append-only and is never touched by the feed builder's prune.
     // The other two are read-only SQL views created in the Phase2ExposureLog migration.
@@ -414,6 +422,53 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(c => c.LensJson).HasColumnType("jsonb");
         });
 
+        // ── Cross-reference rounds ─────────────────────────────────────────────────────────
+        modelBuilder.Entity<Domain.CrossReference.TitleCrossReferenceVerdict>(e =>
+        {
+            // The verdict key. Round is IN it: the aggregation rule counts observations ("two keeps
+            // and no out"), so a round-agnostic key would make round 2 an overwrite of round 1 and
+            // leave nothing to count. ModelArtifactId is deliberately absent for the same reason it
+            // is absent from the lens key — see TasteProfileHash: an artifact in the key empties the
+            // whole store every retrain night.
+            e.HasIndex(v => new { v.AccountId, v.TitleId, v.ProfileHash, v.PromptVersion, v.Round })
+                .IsUnique()
+                .HasDatabaseName("IX_TitleCrossReferenceVerdicts_Key");
+
+            // THE JOB'S RESUME STATE. There is no cursor: "what is still unjudged at the current
+            // key" is an anti-join over this index, which is correct after a crash, after a budget
+            // stop, after a partial batch and after a concurrent run — none of which a stored cursor
+            // survives. Do not add a cursor column; add work to this index instead.
+            e.HasIndex(v => new { v.AccountId, v.ProfileHash, v.PromptVersion, v.Round, v.Verdict })
+                .HasDatabaseName("IX_TitleCrossReferenceVerdicts_Sweep");
+
+            // The stale ladder's read: the newest verdict per title regardless of fingerprint.
+            e.HasIndex(v => new { v.AccountId, v.TitleId, v.GeneratedAt }).IsDescending(false, false, true);
+
+            e.Property(v => v.ProfileHash).HasMaxLength(16);
+            e.Property(v => v.ReasonCode).HasMaxLength(32);
+            e.Property(v => v.ModelId).HasMaxLength(128);
+            // Three decimals: the Out threshold is 0.70 and a coarser column puts a quantisation
+            // step across the decision boundary.
+            e.Property(v => v.Confidence).HasPrecision(4, 3);
+            e.Property(v => v.NeighbourIdsJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<Domain.CrossReference.CrossReferenceEvaluation>(e =>
+        {
+            // "The latest run, newest first" — the dev endpoint's only read.
+            e.HasIndex(x => new { x.AccountId, x.EvaluatedAt }).IsDescending(false, true);
+            // One run's five origins plus its mean row, joined.
+            e.HasIndex(x => new { x.AccountId, x.RunId });
+            e.Property(x => x.GatingDecision).HasMaxLength(32);
+            e.Property(x => x.ModelId).HasMaxLength(128);
+            e.Property(x => x.Caveat).HasMaxLength(2048);
+            e.Property(x => x.FalseRuleOutRate).HasPrecision(6, 4);
+            e.Property(x => x.TrueRuleOutRate).HasPrecision(6, 4);
+            e.Property(x => x.WilsonLow).HasPrecision(6, 4);
+            e.Property(x => x.WilsonHigh).HasPrecision(6, 4);
+            e.Property(x => x.UnsureRate).HasPrecision(6, 4);
+        });
+
         // ── The closed loop ────────────────────────────────────────────────────────────────
         modelBuilder.Entity<ExposureEvent>(e =>
         {
@@ -446,6 +501,10 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(x => x.RowKey).HasMaxLength(128);
             e.Property(x => x.WhySource).HasMaxLength(32);
             e.Property(x => x.PolicyId).HasMaxLength(64);
+            // Nullable on purpose: NULL is "no verdict existed when this card was served", which is
+            // a different fact from Unsure. Never back-filled — see the property doc-comments.
+            e.Property(x => x.XrefVerdict).HasMaxLength(32);
+            e.Property(x => x.XrefConfidence).HasPrecision(4, 3);
 
             // The interleaving read: every drafted card, grouped by slate, in time order. Filtered
             // so the index costs nothing on the overwhelming majority of rows, which carry no

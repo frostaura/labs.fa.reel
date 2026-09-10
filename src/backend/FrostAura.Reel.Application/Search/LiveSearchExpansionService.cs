@@ -13,6 +13,7 @@ using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -84,18 +85,40 @@ public sealed class LiveSearchExpansionService(
     /// <summary>An SSE event emitter — (eventName, payload). The endpoint writes it to the stream.</summary>
     public delegate Task Emit(string eventName, object payload);
 
-    /// <summary>Single-turn convenience overload (no conversation history / shown set).</summary>
+    /// <summary>
+    /// Single-turn convenience overload (no conversation history / shown set) — a query EXPANDED
+    /// rather than a conversation continued, and billed as <c>rerank-expand</c> for that reason.
+    /// The two shapes cost differently and are wanted separately on the ledger: one is a person
+    /// waiting mid-conversation, the other is a one-shot lookup.
+    /// </summary>
     public Task StreamAsync(string message, string? region, Emit emit, CancellationToken ct) =>
-        StreamAsync(message, [], [], region, emit, ct);
+        StreamAsync(message, [], [], region, [], ApiUsagePurpose.RerankExpand, emit, ct);
 
     /// <summary>Overload without an explicit media filter — the intent's own inference applies.</summary>
     public Task StreamAsync(
         string message, IReadOnlyList<ChatTurn> history, IReadOnlyList<long> shownTmdbIds, string? region, Emit emit, CancellationToken ct) =>
-        StreamAsync(message, history, shownTmdbIds, region, [], emit, ct);
+        StreamAsync(message, history, shownTmdbIds, region, [], ApiUsagePurpose.RerankAsk, emit, ct);
+
+    /// <summary>An Ask Reel conversational turn — the shape <c>/api/search/ask</c> uses.</summary>
+    public Task StreamAsync(
+        string message,
+        IReadOnlyList<ChatTurn> history,
+        IReadOnlyList<long> shownTmdbIds,
+        string? region,
+        IReadOnlyList<MediaType> mediaFilter,
+        Emit emit,
+        CancellationToken ct) =>
+        StreamAsync(message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct);
 
     /// <summary>
     /// Runs a conversational turn end-to-end, emitting the SSE event stream. Never throws for an
     /// ordinary failure — emits a graceful done with a reason instead.
+    ///
+    /// <para><paramref name="rerankPurpose"/> decides which member of the re-rank family this
+    /// turn's candidate judging bills to. Both members it can take are INTERACTIVE and therefore
+    /// get the family's full ceiling — a person mid-conversation being told the model is out of
+    /// budget because a 3 a.m. feed build spent it is precisely what the ceiling exists to
+    /// prevent.</para>
     /// </summary>
     public async Task StreamAsync(
         string message,
@@ -103,6 +126,7 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyList<long> shownTmdbIds,
         string? region,
         IReadOnlyList<MediaType> mediaFilter,
+        string rerankPurpose,
         Emit emit,
         CancellationToken ct)
     {
@@ -364,7 +388,8 @@ public sealed class LiveSearchExpansionService(
             var rerankQuery = referenceNames.Count > 0
                 ? $"{trimmed}\nThe user wants something like: {string.Join(", ", referenceNames)}"
                 : trimmed;
-            var fitById = await RerankStreamAsync(accountId, rerankQuery, persona, ranked, scores, emit, ct);
+            var fitById = await RerankStreamAsync(
+                accountId, rerankQuery, persona, ranked, scores, rerankPurpose, emit, ct);
             foreach (var (title, _) in outside)
             {
                 await emit("candidate-reranked", new
@@ -506,7 +531,7 @@ public sealed class LiveSearchExpansionService(
     private async Task<Dictionary<Guid, RerankResult>> RerankStreamAsync(
         Guid accountId, string query, LensPersona persona,
         IReadOnlyList<(Title Title, double Sim)> ranked,
-        IReadOnlyDictionary<Guid, decimal> scores, Emit emit, CancellationToken ct)
+        IReadOnlyDictionary<Guid, decimal> scores, string rerankPurpose, Emit emit, CancellationToken ct)
     {
         var qnorm = NormalizeQuery(query);
         var fitById = new Dictionary<Guid, RerankResult>();
@@ -537,7 +562,8 @@ public sealed class LiveSearchExpansionService(
             {
                 // No anchor title here: Ask Reel's "anchor" is the user's request itself, which
                 // already rides the query — behaviour deliberately unchanged.
-                var results = await agent.RerankBatchAsync(uncached, query, persona, anchorName: null, batchCt);
+                var results = await agent.RerankBatchAsync(
+                    uncached, query, persona, anchorName: null, rerankPurpose, batchCt);
                 foreach (var raw in results)
                 {
                     debiased.Observe(raw);

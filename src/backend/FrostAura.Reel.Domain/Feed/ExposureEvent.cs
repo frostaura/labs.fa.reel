@@ -149,6 +149,24 @@ public class ExposureEvent : IAccountScoped
     public Guid? InterleaveGroup { get; set; }
 
     /// <summary>
+    /// The cross-reference standing this card carried when it was served — one of
+    /// <c>AggregateVerdict</c>, as a string.
+    ///
+    /// <para><b>NULL means no verdict existed</b>, which is a different fact from
+    /// <c>Unsure</c>: one is "nothing had judged this yet", the other is "something judged it and
+    /// could not tell". The online precision panel divides by the wrong denominator if those two
+    /// are conflated, and the difference is invisible after the fact.</para>
+    ///
+    /// <para>Append-only like every other column here: never back-filled onto rows served before
+    /// the verdict existed. A back-fill would make the exposure log claim the product knew
+    /// something at a moment when it did not, which is the one thing this table is for.</para>
+    /// </summary>
+    public string? XrefVerdict { get; set; }
+
+    /// <summary>The confidence behind <see cref="XrefVerdict"/>. Null wherever that is null.</summary>
+    public decimal? XrefConfidence { get; set; }
+
+    /// <summary>
     /// <see cref="OccurredAt"/> truncated to the minute, computed by Postgres itself (a stored
     /// generated column) so it can never disagree with the timestamp it comes from. It exists only
     /// to carry the idempotency index: RTK Query refetches the feed on tag invalidation and on

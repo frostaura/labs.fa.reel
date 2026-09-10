@@ -97,7 +97,8 @@ public class OpenRouterSearchAgent(
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-        IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default)
+        IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
+        string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
     {
         if (titles.Count == 0)
         {
@@ -113,7 +114,7 @@ public class OpenRouterSearchAgent(
         {
             var user = BuildRerankPrompt(titles, query, persona, anchorName);
             var (content, usage) = await ChatAsync(RerankSystemPrompt, user, ct);
-            RecordCall(ApiUsagePurpose.Rerank, usage);
+            RecordCall(usagePurpose, usage);
             if (string.IsNullOrWhiteSpace(content))
             {
                 return titles.Select(StubRerank).ToList();
