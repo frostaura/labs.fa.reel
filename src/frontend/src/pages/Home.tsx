@@ -13,6 +13,7 @@ import { removalsCleared } from "../store/removedTitlesSlice";
 import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
 import ModelLearnedBand from "../components/rec/ModelLearnedBand";
+import CrossReferenceBand from "../components/rec/CrossReferenceBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import RecRow from "../components/rows/RecRow";
 import GenreRow from "../components/rows/GenreRow";
@@ -171,6 +172,11 @@ export default function Home() {
           {/* Above the hero, and outside its re-key: the band is news about the MODEL, not about
               this snapshot, so a row remount must not take it with it. */}
           <ModelLearnedBand />
+
+          {/* Beside the retrain band and outside the hero's re-key for the same reason: this is
+              news about the deep pass, not about tonight's snapshot, so a row remount must not
+              take it with it. Below the model band because a retrain is the larger event. */}
+          <CrossReferenceBand />
 
           {/* Above the hero, because it is a question about tonight rather than about the model. */}
           <TonightMoodChips value={mood} onChange={setMood} />

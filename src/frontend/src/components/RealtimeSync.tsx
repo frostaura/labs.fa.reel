@@ -89,6 +89,14 @@ export default function RealtimeSync() {
           dispatch(api.util.invalidateTags(["Lab"]));
         }
 
+        // A finished cross-reference pass changes the band's numbers and the track record's online
+        // half, neither of which is covered by the Sync/Feed refetch above. Invalidated off the
+        // frame rather than polled: the pass runs for minutes and then lands all at once, so a poll
+        // fast enough to catch it would spend the whole pass asking a question with no new answer.
+        if (data?.kind === "xref") {
+          dispatch(api.util.invalidateTags(["CrossReference", "Accuracy"]));
+        }
+
         // The post-sync moment. A delta/reconcile now says what it actually did — new ratings,
         // re-rates, new watches, and whether a retrain is coming — so the pill can answer "the sync
         // happened and nothing changed" with the specifics instead of a timestamp.
