@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Experiments;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
@@ -270,6 +271,128 @@ public class InterleavingIntegrationTests(PostgresFixture fixture)
         Assert.All(withDisabled.Policies, Assert.Null);
         Assert.All(withNothing.Policies, Assert.Null);
     }
+
+    [Fact]
+    public async Task The_summary_counts_slates_the_way_the_test_needs_them_counted()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedEligibleTitlesAsync(24);
+
+        // Eight hand-built slates of two cards each: five where A's card earned a save, two where
+        // B's did, one where both did. The arithmetic is the point — five/two decided, one tie —
+        // because everything downstream of it (the p-value, the CI, the estimate) is a pure
+        // function of those three numbers and would look perfectly plausible if they were wrong.
+        List<Guid> titles;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            titles = await db.Titles.OrderBy(t => t.Id).Select(t => t.Id).Take(24).ToListAsync();
+        }
+
+        var served = new DateTime(2026, 8, 1, 12, 0, 0, DateTimeKind.Utc);
+        var outcomes = new[] { "A", "A", "A", "A", "A", "B", "B", "both" };
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            for (var slate = 0; slate < outcomes.Length; slate++)
+            {
+                var group = Guid.NewGuid();
+                var at = served.AddDays(slate);
+                var cardA = titles[slate * 2];
+                var cardB = titles[(slate * 2) + 1];
+                db.ExposureEvents.Add(NewExposure(accountId, cardA, group, CalibratedModelPolicy.Id, at, 0));
+                db.ExposureEvents.Add(NewExposure(accountId, cardB, group, PopularityBaselinePolicy.Id, at, 1));
+
+                if (outcomes[slate] is "A" or "both")
+                {
+                    db.UserTitleReactions.Add(NewSave(accountId, cardA, at.AddHours(1)));
+                }
+
+                if (outcomes[slate] is "B" or "both")
+                {
+                    db.UserTitleReactions.Add(NewSave(accountId, cardB, at.AddHours(1)));
+                }
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var summary = await new InterleaveSummaryQuery(db, On)
+                .ComputeAsync(accountId, served.AddDays(9), CancellationToken.None);
+
+            Assert.Equal(8, summary.Slates);
+            Assert.Equal(7, summary.DecidedSlates);
+            Assert.Equal(1, summary.Ties);
+            Assert.Equal(5, summary.WinsA);
+            Assert.Equal(2, summary.WinsB);
+            Assert.Equal(5d / 7d, summary.PreferenceRateA!.Value, 6);
+
+            // Seven decided slates at 5–2 is nowhere near a verdict, and the panel must say so.
+            Assert.InRange(summary.AlwaysValidP, 0.05d, 1d);
+            Assert.False(summary.Significant);
+            Assert.True(summary.CiLow < summary.PreferenceRateA);
+            Assert.True(summary.CiHigh > summary.PreferenceRateA);
+
+            // One decided slate a day, and the projection says months — the honest cadence, derived
+            // from the observed rate rather than from a hoped-for one.
+            Assert.Equal(1d, summary.DecidedSlatesPerDay!.Value, 1);
+            Assert.InRange(summary.SlatesToDecisionAt65, 60, 200);
+            Assert.InRange(summary.EstimatedDaysToDecision!.Value, 50d, 200d);
+
+            var standingA = summary.Standings.Single(s => s.PolicyId == CalibratedModelPolicy.Id);
+            Assert.Equal("A", standingA.Team);
+            Assert.Equal(8, standingA.Cards);
+            Assert.Equal(6, standingA.Credits);
+            Assert.Equal(5, standingA.SlateWins);
+        }
+
+        // Re-pointing an arm must not silently blend two experiments: slates drafted between the old
+        // pair stop entering the p-value and fall back to the standings.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var reconfigured = await new InterleaveSummaryQuery(
+                    db,
+                    new InterleaveOptions { Enabled = true, PolicyA = ProfileRerankPolicy.Id, PolicyB = PopularityBaselinePolicy.Id })
+                .ComputeAsync(accountId, served.AddDays(9), CancellationToken.None);
+
+            Assert.Equal(0, reconfigured.Slates);
+            Assert.Equal(0, reconfigured.DecidedSlates);
+            Assert.Equal(1d, reconfigured.AlwaysValidP);
+            Assert.Contains(reconfigured.Standings, s => s.PolicyId == CalibratedModelPolicy.Id && s.Team is null);
+        }
+    }
+
+    private static ExposureEvent NewExposure(
+        Guid accountId, Guid titleId, Guid group, string policyId, DateTime at, int rank) => new()
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            TitleId = titleId,
+            OccurredAt = at,
+            Surface = ExposureSurface.FeedRow,
+            RowKey = "deepcuts",
+            Rank = rank,
+            FeedSnapshotId = null,
+            ModelArtifactId = Guid.NewGuid(),
+            PredictedRating = 7.1m,
+            WhySource = ExposureWhySource.Templater,
+            PolicyId = policyId,
+            InterleaveGroup = group,
+        };
+
+    private static UserTitleReaction NewSave(Guid accountId, Guid titleId, DateTime at) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountId = accountId,
+        TitleId = titleId,
+        Kind = ReactionKind.SaveForLater,
+        CreatedAt = at,
+    };
 
     private async Task<(List<Guid> Titles, List<string?> Policies)> FeedShapeAsync(Guid accountId)
     {
