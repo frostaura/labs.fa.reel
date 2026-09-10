@@ -122,4 +122,35 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await askPush(page, "done", { results: [], reason: null });
     await askEnd(page);
   });
+
+  test("one message produces exactly one ask request", async ({ page }) => {
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("tense small-town thriller, no horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    await askPush(page, "candidate", ALPHA);
+    await askPush(page, "candidate", BORDER);
+    await askPush(page, "done", { results: [ALPHA, BORDER], reason: "2 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+
+    // The scroll sentinel that used to sit here had `rootMargin: 600px`, so it was already inside
+    // the viewport when the first page painted: every message cost two full-price /ask turns, the
+    // second one's interpret reply generated, billed and thrown away. Paging is now a button, so
+    // settling on the results must issue nothing at all.
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+    await page.waitForTimeout(750);
+    expect(await askRequests(page)).toHaveLength(1);
+
+    // …and the button still pages, so the capability was moved rather than dropped.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    const requests = (await askRequests(page)) as { query: string; continuation?: boolean }[];
+    expect(requests).toHaveLength(2);
+    expect(requests[1].query).toBe("tense small-town thriller, no horror");
+    expect(requests[1].continuation).toBe(true);
+    await askPush(page, "done", { results: [], reason: null });
+    await askEnd(page);
+  });
 });

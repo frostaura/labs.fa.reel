@@ -62,7 +62,6 @@ export default function SearchResults() {
     turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
     exhausted, appending, canRetry,
   } = useAskReelChat();
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const speech = useSpeech((text) => send(text, false));
 
   // A search from the header box (?q=) starts a fresh conversation; landing on /search with no
@@ -116,21 +115,6 @@ export default function SearchResults() {
     setMediaTypes(mediaTypesFor(next));
     reask();
   };
-
-  // Infinite scroll: a sentinel below the grid asks for the next page of the same question.
-  useEffect(() => {
-    const el = sentinelRef.current;
-    // `status === "error"` matters: a page that fails leaves the sentinel in view with nothing
-    // latched, so re-observing would hammer a failing server on a loop. The retry below is the
-    // way back in — deliberately a decision the user makes.
-    if (!el || exhausted || streaming || status === "error" || cards.length === 0) return;
-    const io = new IntersectionObserver(
-      (entries) => { if (entries.some((e) => e.isIntersecting)) loadMore(); },
-      { rootMargin: "600px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [exhausted, streaming, status, cards.length, loadMore]);
 
   const submit = (text: string) => {
     if (!text.trim()) return;
@@ -305,22 +289,31 @@ export default function SearchResults() {
         </>
       )}
 
-      {/* Infinite scroll: the sentinel sits below the grid and pulls the next page of the same
-          question as it comes into view. */}
+      {/* Paging is a decision the user makes, not a scroll position.
+          This used to be an IntersectionObserver sentinel with `rootMargin: 600px`, which was
+          inside the viewport on first paint — so every single message fired a SECOND full-price
+          /ask turn, whose interpret reply was generated, billed and then discarded. An explicit
+          button costs one request per message and reads honestly ("there is more if you want
+          it") instead of silently spending. */}
       {visible.length > 0 && (
-        <>
-          <div ref={sentinelRef} aria-hidden className="h-1" />
-          {appending && (
-            <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-more">
-              Finding more like these…
-            </p>
+        <div className="flex flex-col items-center gap-2">
+          {!exhausted && (
+            <button
+              type="button"
+              data-testid="askreel-more"
+              onClick={loadMore}
+              disabled={streaming || appending}
+              className="fa-caption rounded-full border border-fa-frost/30 px-4 py-1.5 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+            >
+              {appending ? "Finding more like these…" : "Show me more"}
+            </button>
           )}
           {exhausted && (
             <p className="fa-caption text-fa-frost-dim text-center">
               That&apos;s everything on this thread — refine it above for a different angle.
             </p>
           )}
-        </>
+        </div>
       )}
 
       {/* The provenance footnote ("12 picks ranked for you, from 50 pulled"). Only ever shown
