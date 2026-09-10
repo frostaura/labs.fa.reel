@@ -37,9 +37,23 @@ const BORDER = card("b2", "Border Town", 0.9);
 const CEDAR = card("c3", "Cedar Falls", 0.5);
 const XCLUDED = card("d4", "Xcluded Manor", 0.95, true);
 
-async function bootSearch(page: Page) {
+/**
+ * The account's saved conditions, as `/settings/filters` returns them. `minPredictedRating` is the
+ * bar the floor tray names, and it is read from here rather than from the stream on purpose: it is
+ * the user's own standing setting, the same one `PickConditionsSummary` renders at the top of the
+ * page, so the two can never quote different numbers.
+ */
+const FILTERS_WITH_FLOOR = {
+  excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+  minPredictedRating: 6, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+};
+
+async function bootSearch(page: Page, filters?: unknown) {
   await stubEventSource(page);
   await stubAskReel(page);
+  // Registered only when a test cares: without it the query fails and the page must still render
+  // the tray with its unnumbered fallback, which is what the collision test above exercises.
+  if (filters !== undefined) await mockJson(page, "**/api/settings/filters", filters);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
     pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
@@ -193,5 +207,32 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
       return !!grid && !!t && !!(grid.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING);
     });
     expect(gridPrecedesTray).toBe(true);
+    // No saved bar was mocked, so the label cannot name one and says so in words instead of
+    // printing "under your null bar".
+    await expect(tray.locator("summary")).toHaveText("Show the 1 pick Reel held back");
+  });
+
+  test("the floor tray names the account's own bar when there is one", async ({ page }) => {
+    // Same tray, one field different from the test above: the account has a saved
+    // `minPredictedRating`. That single field is what turns "Reel held some back" into a sentence
+    // naming a number the user chose and can go and change.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+
+    await page.getByTestId("askreel-composer").fill("small-town horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Three cut, one card sent down: the label must quote the SERVER's count, not the tray's.
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER],
+      reason: "2 picks ranked for you, from 40 pulled.",
+      belowFloor: [CEDAR],
+      droppedByFloor: 3,
+    });
+    await askEnd(page);
+
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray).toBeVisible();
+    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6 bar");
   });
 });

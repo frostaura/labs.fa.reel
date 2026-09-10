@@ -420,6 +420,46 @@ describe("chatReducer — belowFloor", () => {
     const without = chatReducer(reasked, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
     expect(without.belowFloor).toEqual([]);
   });
+
+  it("done_exposes_droppedByFloor_and_a_new_turn_clears_it", () => {
+    // Fixture variation, one field: the SAME done frame with `droppedByFloor` present and absent.
+    // That single field is the whole probe — the tray's label reads the server's count when it has
+    // one and falls back to counting cards when it does not, and the two branches are otherwise
+    // indistinguishable from state.
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true });
+    expect(asked.droppedByFloor).toBeNull();
+
+    const counted = chatReducer(asked, {
+      type: "done",
+      data: { results: [card(1)], reason: "1 pick", droppedByFloor: 3 },
+    });
+    expect(counted.droppedByFloor).toBe(3);
+
+    // Absent is NOT zero: an older server that never sends the field must leave the tray free to
+    // count the cards it was handed, which a 0 would suppress.
+    const silent = chatReducer(asked, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
+    expect(silent.droppedByFloor).toBeNull();
+
+    // A genuine zero survives as a zero — the server saying "I cut nothing" is information.
+    const zero = chatReducer(asked, {
+      type: "done",
+      data: { results: [card(1)], reason: "1 pick", droppedByFloor: 0 },
+    });
+    expect(zero.droppedByFloor).toBe(0);
+
+    // Every route into a new turn clears it, or last question's count labels this question's tray.
+    expect(chatReducer(counted, { type: "userTurn", message: "horror", fresh: false }).droppedByFloor).toBeNull();
+    expect(chatReducer(counted, { type: "userTurn", message: "horror", fresh: true }).droppedByFloor).toBeNull();
+    expect(chatReducer(counted, { type: "reaskTurn" }).droppedByFloor).toBeNull();
+
+    // A page is not a new turn: it adds its own cut to the running total, exactly as the tray it
+    // labels appends its cards.
+    const paged = chatReducer(chatReducer(counted, { type: "moreTurn" }), {
+      type: "done",
+      data: { results: [card(2)], reason: "1 more", droppedByFloor: 2 },
+    });
+    expect(paged.droppedByFloor).toBe(5);
+  });
 });
 
 /**

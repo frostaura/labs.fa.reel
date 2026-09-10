@@ -110,6 +110,13 @@ interface State {
   conflict: string | null;
   /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
   belowFloor: AskCard[];
+  /**
+   * The server's own count of what the quality floor cut on the last completed turn. Distinct from
+   * `belowFloor.length` on purpose: a turn can report a cut without sending the cards down, and the
+   * tray has to be able to say "3 held back" when it was handed none of them. `null` = the server
+   * said nothing, which is not the same as zero.
+   */
+  droppedByFloor: number | null;
   /** Set alongside `status: "error"` when the client can name the cause. */
   errorReason: ErrorReason;
 }
@@ -133,7 +140,7 @@ type Action =
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false,
-  conflict: null, belowFloor: [], errorReason: null,
+  conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
 };
 
 /**
@@ -164,6 +171,15 @@ export function partitionedOrder(order: string[], byId: Record<string, AskCard>)
   ];
 }
 
+/**
+ * The running floor count across a paged answer. Silence on both sides stays silence: `null` means
+ * "the server never told us", which the tray treats differently from a genuine zero.
+ */
+function sumDropped(carried: number | null, incoming: number | undefined): number | null {
+  if (carried == null && incoming == null) return null;
+  return (carried ?? 0) + (incoming ?? 0);
+}
+
 export function chatReducer(state: State, action: Action): State {
   switch (action.type) {
     case "userTurn": {
@@ -175,7 +191,7 @@ export function chatReducer(state: State, action: Action): State {
             byId: {}, order: [], reason: null, appending: false, lastQuery: action.message, exhausted: false,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, belowFloor: [], errorReason: null,
+            conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
           };
     }
     case "moreTurn":
@@ -190,7 +206,7 @@ export function chatReducer(state: State, action: Action): State {
       return {
         ...state, turns, status: "streaming", phase: null,
         byId: {}, order: [], reason: null, appending: false, exhausted: false,
-        belowFloor: [], errorReason: null,
+        belowFloor: [], droppedByFloor: null, errorReason: null,
       };
     }
     case "phase":
@@ -262,6 +278,11 @@ export function chatReducer(state: State, action: Action): State {
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
+        // Same rule as the tray it labels: a page ADDS its cut to the running total, a fresh answer
+        // replaces it. `null` rather than `0` where neither side said anything — a server that never
+        // sent the field has not told us it cut nothing, and the tray falls back to counting the
+        // cards it was handed in that case, which zero would silently suppress.
+        droppedByFloor: sumDropped(state.appending ? state.droppedByFloor : null, action.data.droppedByFloor),
       };
     }
     case "stop":
@@ -509,6 +530,12 @@ export function useAskReelChat() {
     conflict: state.conflict,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
     belowFloor,
+    /**
+     * How many the quality floor cut on the last turn, as the SERVER counted them. Cleared on a new
+     * user turn, a re-ask and a fresh conversation, so last question's number never labels this
+     * question's tray. `null` when the server said nothing at all.
+     */
+    droppedByFloor: state.droppedByFloor,
     /** Why the last failure happened, where the client can name it. */
     errorReason: state.errorReason,
     /** True once the last question has been asked, so a retry has something to replay. */
