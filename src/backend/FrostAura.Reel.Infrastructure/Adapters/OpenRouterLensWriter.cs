@@ -54,11 +54,22 @@ public class OpenRouterLensWriter(
     /// <summary>
     /// The narrative prompt generation. Bump when a change alters what a stored narrative MEANS —
     /// never for a retry strategy or a transport fix.
+    ///
+    /// <para>v2: the fact sheet leads with what the account WATCHES rather than what it rates
+    /// highest, carries recent loves and dislikes, and labels sparse genres as sparse. A stored v1
+    /// narrative was written from a fact sheet that could not distinguish twenty-six holiday films
+    /// from eight hundred thrillers, so it means something different and must not be reused.</para>
     /// </summary>
-    public const int CurrentNarrativePromptVersion = 1;
+    public const int CurrentNarrativePromptVersion = 2;
 
-    /// <summary>The lens prompt generation, and half the lens cache key. Same bump rule.</summary>
-    public const int CurrentLensPromptVersion = 1;
+    /// <summary>
+    /// The lens prompt generation, and half the lens cache key. Same bump rule.
+    ///
+    /// <para>v2: the prompt now NAMES the titles a note may anchor against. v1 told the model to
+    /// take anchors "verbatim from the lists below" and supplied no lists, so its anchors were
+    /// guesses and every note carrying one was refused. A v1 row is not a v2 row.</para>
+    /// </summary>
+    public const int CurrentLensPromptVersion = 2;
 
     /// <summary>Sentence bounds for a narrative — fewer reads as a stub, more reads as a list.</summary>
     private const int MinSentences = 6;
@@ -649,6 +660,16 @@ public class OpenRouterLensWriter(
         + "including the awkward parts: what you avoid, where you disagree with the crowd, what you "
         + "have gone off lately.\n"
         + "  6. Each sentence carries its own idea. Do not open two sentences the same way.\n"
+        + "  7. OPEN WITH VOLUME. The first sentence describes what they actually watch most — the "
+        + "\"Mostly watches\" line — and how they rate it. What a person reaches for again and again "
+        + "IS their taste; a high average over a handful of titles is not.\n"
+        + "  8. A genre on the \"Watches rarely but rates well\" line may ONLY be described as "
+        + "something they rate well WHEN they do watch it. Never call it a favourite, never let it "
+        + "into the opening sentence, and never imply they seek it out.\n"
+        + "  9. Name two or three of the recently loved titles, as recent. That is the sentence that "
+        + "makes a profile recognisable rather than merely accurate.\n"
+        + "  10. Never assert a preference the facts do not state. If the facts do not say it, you "
+        + "do not know it — say less instead.\n"
         + "Output strictly valid JSON.";
 
     private static readonly string LensSystemPrompt =
@@ -663,16 +684,20 @@ public class OpenRouterLensWriter(
         + "thing about this title that might genuinely not land for this viewer. This is the one field "
         + "allowed to argue against the recommendation, and a real reservation is worth more than a "
         + "polite one. Use null only when you genuinely have none.\n"
-        + "  anchors     up to 3 objects {title, relation}. The title MUST be one the viewer has "
-        + "actually rated, taken verbatim from the lists below. relation is one clause saying how this "
-        + "title sits against it. Omit rather than invent.\n"
+        + "  anchors     up to 3 objects {title, relation}. Every title MUST be copied verbatim "
+        + "from the ANCHORS list below — the exact characters, no year, no article added or removed. "
+        + "relation is one clause saying how this title sits against it, and it must match the "
+        + "viewer's stated verdict on that anchor. An empty array is a correct answer; an anchor "
+        + "that is not on the list is not.\n"
         + "  mood        EXACTLY ONE of: " + string.Join(", ", LensVocabulary.Moods) + ".\n"
         + "  whenToWatch EXACTLY ONE of: " + string.Join(", ", LensVocabulary.WhenToWatch) + ".\n"
         + "HARD RULES:\n"
         + "  1. SPOILERS: first act only. Never describe an ending, a finale, a twist, a reveal, a "
         + "death, or anything that happens late. Every plot fact must come from the overview and "
         + "keywords given below and nothing else. If the overview does not say it, you do not know it.\n"
-        + "  2. Never name a person who is not listed in this title's credits below.\n"
+        + "  2. Never name a person who is not listed in this title's credits below, and never "
+        + "name a film or show anywhere in the prose that is not this title or an entry on the "
+        + "ANCHORS list.\n"
         + "  3. Second person throughout. Never \"they\", \"their\", \"them\", or \"the user\".\n"
         + "  4. NO NUMBERS ANYWHERE IN THE PROSE. A predicted rating may be given to you as context "
         + "so you know how confidently to pitch — never restate it, never allude to a score, a "
@@ -704,11 +729,38 @@ public class OpenRouterLensWriter(
         sb.Append("Split between films and series: ")
             .Append((facts.MovieRatedShare * 100m).ToString("0", c)).Append("% films.\n");
 
+        // VOLUME FIRST, and it is first in the prompt for the same reason rule 7 puts it first in
+        // the prose: the previous ordering opened on affinity alone, and an account that had rated
+        // twenty-six holiday films among two thousand was told holiday sat "especially high".
+        if (facts.MostWatchedGenres.Count > 0)
+        {
+            sb.Append("Mostly watches (by volume — this is what their taste actually is): ");
+            sb.AppendJoin(" · ", facts.MostWatchedGenres.Select(g => string.Format(
+                c,
+                "{0}, {1} titles ({2:0}% of everything rated), rated {3:0.0}",
+                g.Genre,
+                g.Count,
+                g.Share * 100m,
+                g.Affinity)));
+            sb.Append('\n');
+        }
+
         if (facts.TopGenres.Count > 0)
         {
-            sb.Append("Rates highest: ");
+            sb.Append("Rates highest, among genres rated often enough to mean something: ");
             sb.AppendJoin(" · ", facts.TopGenres.Select(g =>
                 string.Format(c, "{0} {1:0.0} over {2} titles", g.Genre, g.Affinity, g.Count)));
+            sb.Append('\n');
+        }
+
+        // Named separately and labelled, because the model cannot infer "rarely" from a count it
+        // has been told not to restate. Rule 8 is enforceable only because this line exists.
+        if (facts.SparseButWellRated() is { Count: > 0 } sparse)
+        {
+            sb.Append("Watches rarely but rates well — say only \"when you do watch X you rate it "
+                + "well\", never that they favour it: ");
+            sb.AppendJoin(" · ", sparse.Select(g =>
+                string.Format(c, "{0} ({1} titles)", g.Genre, g.Count)));
             sb.Append('\n');
         }
 
@@ -725,6 +777,22 @@ public class OpenRouterLensWriter(
             sb.Append("Loves: ");
             sb.AppendJoin(", ", facts.LovedAnchors.Select(l =>
                 l.Year is { } y ? string.Format(c, "{0} ({1})", l.Name, y) : l.Name));
+            sb.Append('\n');
+        }
+
+        if (facts.RecentLoves.Count > 0)
+        {
+            sb.Append("Loved lately (name two or three of these): ");
+            sb.AppendJoin(", ", facts.RecentLoves.Select(l =>
+                l.Year is { } ry ? string.Format(c, "{0} ({1})", l.Name, ry) : l.Name));
+            sb.Append('\n');
+        }
+
+        if (facts.RecentDislikes.Count > 0)
+        {
+            sb.Append("Rated badly lately: ");
+            sb.AppendJoin(", ", facts.RecentDislikes.Select(l =>
+                l.Year is { } dy ? string.Format(c, "{0} ({1})", l.Name, dy) : l.Name));
             sb.Append('\n');
         }
 
@@ -780,7 +848,57 @@ public class OpenRouterLensWriter(
             sb.Append(declined).Append('\n');
         }
 
+        sb.Append(AnchorBlock(persona.AnchorCandidates));
         sb.Append("\nTHIS TITLE\n").Append(TitleBlock(title));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The titles this note may anchor against, by name, year and the viewer's own verdict.
+    ///
+    /// <para><b>This block is the fix for a hundred-percent rejection rate.</b> The system prompt
+    /// has always instructed the model to take anchor titles "verbatim from the lists below", and
+    /// before this there were no lists — the only title names anywhere in a lens prompt were the
+    /// ones inside the declined line. The model anchored on those, because they were the only
+    /// names it had, and the guard refused every note for it. Naming the permitted anchors is the
+    /// policy; the guard downstream is the backstop.</para>
+    ///
+    /// <para>The verdict rides each line because a relation clause has to know it. "You said this
+    /// was not for you" and "you rated this as highly as anything" are both true anchors and the
+    /// model cannot tell which applies from a bare name.</para>
+    /// </summary>
+    private static string AnchorBlock(IReadOnlyList<LensAnchorCandidate> candidates)
+    {
+        if (candidates.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var c = CultureInfo.InvariantCulture;
+        var sb = new StringBuilder();
+        sb.Append("\nANCHORS YOU MAY USE — these titles and NO OTHERS. Copy a name EXACTLY as written\n");
+        sb.Append("here, with no year and no re-wording. If none of them genuinely relates to this\n");
+        sb.Append("title, return an empty anchors array; an omitted anchor costs nothing and an\n");
+        sb.Append("invented one is a memory the viewer never had.\n");
+        sb.Append("The scores below are CONTEXT so you know how warmly to compare — like the\n");
+        sb.Append("prediction, never restate one and never allude to it.\n");
+        foreach (var candidate in candidates)
+        {
+            sb.Append("  ").Append(candidate.Name);
+            if (candidate.Year is { } year)
+            {
+                sb.Append(" (").Append(year.ToString(c)).Append(')');
+            }
+
+            sb.Append(" — ").Append(candidate.Stance switch
+            {
+                AnchorStance.Loved => string.Format(c, "you rated it {0} out of ten", candidate.Rating ?? 0),
+                AnchorStance.Disliked => string.Format(c, "you rated it only {0} out of ten", candidate.Rating ?? 0),
+                _ => "you declined it from your feed without rating it",
+            });
+            sb.Append('\n');
+        }
+
         return sb.ToString();
     }
 
@@ -891,14 +1009,19 @@ public class OpenRouterLensWriter(
     internal static IReadOnlyList<string> StubNarrative(TasteFacts facts)
     {
         var c = CultureInfo.InvariantCulture;
-        var top = facts.TopGenres.Take(3).Select(g => g.Genre).ToList();
+
+        // Volume first, exactly as rule 7 requires of the live model — a stub that opens on
+        // affinity would let the ordering defect back in through every test that uses it.
+        var watched = facts.MostWatchedGenres.Take(3).Select(g => g.Genre).ToList();
+        var sparse = facts.SparseButWellRated().Take(2).Select(g => g.Genre).ToList();
         var loved = facts.LovedAnchors.Take(2).Select(l => l.Name).ToList();
+        var recent = facts.RecentLoves.Take(2).Select(l => l.Name).ToList();
         var people = facts.VerifiedPeople.Take(2).Select(p => p.Name).ToList();
 
         var sentences = new List<string>
         {
-            top.Count > 0
-                ? $"You reach for {string.Join(" and ", top)} more readily than anything else."
+            watched.Count > 0
+                ? $"You watch {string.Join(" and ", watched)} more than anything else, and you rate them steadily."
                 : "You have not rated enough yet for a clear pattern to show.",
             loved.Count > 0
                 ? $"When something lands for you it tends to look like {string.Join(" or ", loved)}."
@@ -928,6 +1051,17 @@ public class OpenRouterLensWriter(
         else
         {
             sentences.Add("You split your attention fairly evenly between films and series.");
+        }
+
+        if (recent.Count > 0)
+        {
+            sentences.Add($"Lately {string.Join(" and ", recent)} landed for you.");
+        }
+
+        if (sparse.Count > 0)
+        {
+            // Phrased as the qualified claim the prompt's rule 8 permits, and never as a favourite.
+            sentences.Add($"When you do watch {string.Join(" or ", sparse)}, you rate it well.");
         }
 
         if (facts.DriftingToward.Count > 0)
@@ -960,11 +1094,25 @@ public class OpenRouterLensWriter(
         var hook = $"The {tone} {genre} you have been circling.";
         var caution = seed[2] % 3 == 0 ? null : $"It takes its time before it commits to being {tone}.";
 
+        // Anchors are drawn from the candidates the persona actually offers, which is what the live
+        // path is now instructed to do. A stub that returned no anchors left the entire anchor
+        // chain — prompt, verifier, strip, persist — unexercised by every test in the suite, and
+        // that is precisely the chain that failed in production.
+        var anchors = persona.AnchorCandidates
+            .Take(LensNote.MaxAnchors)
+            .Select(a => new LensAnchor(a.Name, a.Stance switch
+            {
+                AnchorStance.Loved => "sits in the same register as this, and you went for it",
+                AnchorStance.Disliked => "shares a lane with this, and it did not land for you",
+                _ => "you passed on this one, and this is a gentler version of the same idea",
+            }))
+            .ToList();
+
         return new LensNote(
             lens.Length > LensNote.MaxLensChars ? lens[..LensNote.MaxLensChars] : lens,
             hook.Length > LensNote.MaxHookChars ? hook[..LensNote.MaxHookChars] : hook,
             caution,
-            [],
+            anchors,
             mood,
             when);
     }

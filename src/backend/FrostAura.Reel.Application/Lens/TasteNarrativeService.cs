@@ -172,14 +172,28 @@ public sealed class TasteNarrativeService(
     }
 
     /// <summary>
-    /// Capitalised multi-word phrases, minus the ones that open a sentence — "You" and "Lately"
-    /// are grammar, not evidence. Single capitalised words are deliberately not candidates: the
-    /// false-positive rate at one word is high enough to refuse every honest narrative.
+    /// Capitalised multi-word phrases, minus the word that OPENS each sentence — "You" and
+    /// "Lately" are grammar, not evidence. Single capitalised words are deliberately not
+    /// candidates: the false-positive rate at one word is high enough to refuse every honest
+    /// narrative.
+    ///
+    /// <para><b>The sentence-opener removal is load-bearing, not tidiness.</b> Without it,
+    /// "Lately The Zone of Interest landed for you" extracts as the phrase "Lately The Zone",
+    /// which matches no fact sheet in either direction and refuses the whole narrative — a
+    /// sentence that did exactly what the prompt asked for. The prompt now instructs the model to
+    /// name recent loves by name, so the opener case is not a curiosity; it is the common
+    /// case.</para>
     /// </summary>
     private static IEnumerable<string> ProperNouns(string text)
     {
         foreach (var candidate in LensGuards.CandidateNames(
-                     new LensNote(text, string.Empty, null, [], LensVocabulary.Moods[0], LensVocabulary.WhenToWatch[0])))
+                     new LensNote(
+                         MaskSentenceOpeners(text),
+                         string.Empty,
+                         null,
+                         [],
+                         LensVocabulary.Moods[0],
+                         LensVocabulary.WhenToWatch[0])))
         {
             var trimmed = candidate.Trim();
             if (trimmed.Length > 0)
@@ -187,5 +201,45 @@ public sealed class TasteNarrativeService(
                 yield return trimmed;
             }
         }
+    }
+
+    /// <summary>
+    /// Lowercases the first letter of every sentence, so the extractor cannot fuse a capitalised
+    /// opening adverb onto the title that follows it. Lowercasing rather than deleting keeps every
+    /// other offset intact, so the rest of the sentence extracts exactly as it would have.
+    /// </summary>
+    internal static string MaskSentenceOpeners(string text)
+    {
+        var chars = text.ToCharArray();
+        var atSentenceStart = true;
+        for (var i = 0; i < chars.Length; i++)
+        {
+            var ch = chars[i];
+            if (ch is '.' or '!' or '?')
+            {
+                atSentenceStart = true;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(ch))
+            {
+                continue;
+            }
+
+            if (atSentenceStart)
+            {
+                chars[i] = char.ToLowerInvariant(ch);
+                // Only the FIRST word is grammar. Anything later in the sentence is evidence, and
+                // a title in second position must stay capitalised to be seen at all.
+                while (i < chars.Length && !char.IsWhiteSpace(chars[i]))
+                {
+                    i++;
+                }
+
+                atSentenceStart = false;
+            }
+        }
+
+        return new string(chars);
     }
 }

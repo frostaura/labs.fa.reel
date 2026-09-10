@@ -46,6 +46,24 @@ public sealed class TasteFactsBuilder(
     /// <summary>The affinity list length. Matches <see cref="TasteProfileHash.TopN"/> — the hash reads the same list.</summary>
     public const int TopGenres = TasteProfileHash.TopN;
 
+    /// <summary>Genres named by VOLUME. Six is the whole shape of a library without becoming a list.</summary>
+    public const int MostWatchedGenres = 6;
+
+    /// <summary>
+    /// The floor on how many ratings a genre needs before its affinity may be called a preference,
+    /// as an absolute count. See <see cref="MinGenreRatings"/> for why there is also a relative one.
+    /// </summary>
+    public const int MinGenreRatingsFloor = 15;
+
+    /// <summary>Recent loves named to the writer. Enough for the prose to pick two or three from.</summary>
+    public const int RecentLoves = 6;
+
+    /// <summary>Recent dislikes named to the writer. Fewer — one is usually the whole point.</summary>
+    public const int RecentDislikes = 4;
+
+    /// <summary>How far back "recently" reaches for the recent-loves and recent-dislikes facts.</summary>
+    public static readonly TimeSpan RecentWindow = TimeSpan.FromDays(120);
+
     /// <summary>Loved anchors named to the writer. More than this and the prose starts listing.</summary>
     public const int LovedAnchors = 8;
 
@@ -61,9 +79,80 @@ public sealed class TasteFactsBuilder(
     /// <summary>"Loved" for the texture aggregate — the same "loved, not tolerated" bar the eval harness uses.</summary>
     private const short LovedRatingFloor = 8;
 
+    /// <summary>"Disliked" for the recent-dislikes fact.</summary>
+    private const short DislikedRatingCeiling = 4;
+
+    /// <summary>
+    /// The minimum ratings a genre needs before its affinity is allowed to be called a preference:
+    /// <see cref="MinGenreRatingsFloor"/>, or one percent of the account's whole-title ratings,
+    /// whichever is larger.
+    ///
+    /// <para><b>Why a bar exists at all.</b> The affinity is a shrunken mean, and shrinkage bounds
+    /// how far a small pool can stray from the user's own average — it does not stop a pool of
+    /// twenty-six from outranking a pool of eight hundred. On the founder's account that produced a
+    /// narrative opening on "adventure, family, superhero, fantasy and science-fiction", with
+    /// holiday and family "especially high", for a library that is thriller, action, drama, comedy
+    /// and crime by a factor of thirty. Every number in it was correct and the sentence was false,
+    /// which is the worst kind of generated copy: unfalsifiable-looking and wrong.</para>
+    ///
+    /// <para><b>Why the bar is relative as well as absolute.</b> Fifteen ratings is a meaningful
+    /// pool at two hundred ratings and noise at ten thousand. Integer division is deliberate: it
+    /// makes the bar a whole number of ratings, so the boundary cannot sit between two counts.</para>
+    /// </summary>
+    public static int MinGenreRatings(int ratingsCount) => Math.Max(MinGenreRatingsFloor, ratingsCount / 100);
+
     /// <summary>The facts, plus the fingerprint they hash to and the loved ids that fed it.</summary>
     public sealed record Result(
         TasteFacts Facts, string ProfileHash, string ProfileFingerprint, IReadOnlyList<Guid> TopLovedTitleIds);
+
+    /// <summary>One genre's shrunken affinity over one genre's rating count. The input to the ranking.</summary>
+    public sealed record GenreStat(string Genre, decimal Affinity, int Count);
+
+    /// <summary>The two genre views the fact sheet carries: by affinity, and by volume.</summary>
+    public sealed record GenreRanking(
+        IReadOnlyList<GenreFact> TopGenres, IReadOnlyList<GenreVolumeFact> MostWatchedGenres);
+
+    /// <summary>
+    /// The genre ranking, pure, so the ORDER can be asserted against a synthetic distribution
+    /// without a database. <paramref name="stats"/> must already be affinity-ordered, which is
+    /// what <see cref="BuildAsync"/> hands it.
+    ///
+    /// <para><b>Two lists, because there are two questions.</b> <c>TopGenres</c> answers "which
+    /// genres does this account rate highest", restricted to genres it has rated often enough for
+    /// a mean to carry information, and it is the list the profile fingerprint reads.
+    /// <c>MostWatchedGenres</c> answers "what does this account actually watch", which is the
+    /// question the opening sentence of a narrative is about and which nothing here could answer
+    /// before.</para>
+    /// </summary>
+    public static GenreRanking RankGenres(IReadOnlyList<GenreStat> stats, int ratingsCount)
+    {
+        // `stats` arrives affinity-ordered, so filtering preserves that order.
+        var minRatings = MinGenreRatings(ratingsCount);
+        var qualified = stats.Where(g => g.Count >= minRatings).ToList();
+
+        // A young account can have nothing clear the bar. An empty affinity list is worse than a
+        // thin one — it strips the fingerprint of every genre component and leaves the narrative
+        // with nothing to say — so the unfiltered ranking stands in until the library is big enough
+        // for the bar to mean anything.
+        var top = (qualified.Count > 0 ? qualified : stats)
+            .Take(TopGenres)
+            .Select(g => new GenreFact(g.Genre, Math.Round(g.Affinity, 2), g.Count))
+            .ToList();
+
+        var watched = stats
+            .OrderByDescending(g => g.Count)
+            .ThenByDescending(g => g.Affinity)
+            .ThenBy(g => g.Genre, StringComparer.Ordinal)
+            .Take(MostWatchedGenres)
+            .Select(g => new GenreVolumeFact(
+                g.Genre,
+                Math.Round(g.Affinity, 2),
+                g.Count,
+                ratingsCount > 0 ? Math.Round((decimal)g.Count / ratingsCount, 3) : 0m))
+            .ToList();
+
+        return new GenreRanking(top, watched);
+    }
 
     /// <summary>
     /// The account's current profile hash, cached briefly — what a RENDER path needs and all it
@@ -111,10 +200,12 @@ public sealed class TasteFactsBuilder(
             .ThenBy(g => g.Genre, StringComparer.Ordinal)
             .ToList();
 
-        var topGenres = genreStats
-            .Take(TopGenres)
-            .Select(g => new GenreFact(g.Genre, Math.Round(g.Affinity, 2), g.Count))
-            .ToList();
+        var ratingsCount = await db.UserRatings
+            .CountAsync(r => r.AccountId == accountId
+                && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show), ct);
+
+        var (topGenres, mostWatchedGenres) = RankGenres(
+            genreStats.Select(g => new GenreStat(g.Genre, g.Affinity, g.Count)).ToList(), ratingsCount);
 
         var drifting = genreStats
             .Where(g => g.Count >= MinDriftObservations && Math.Abs(g.Recent - g.Affinity) >= MinDriftDelta)
@@ -158,17 +249,18 @@ public sealed class TasteFactsBuilder(
             .Select(t => t.Text)
             .ToListAsync(ct);
 
-        var ratingsCount = await db.UserRatings
-            .CountAsync(r => r.AccountId == accountId
-                && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show), ct);
+        var (recentLoves, recentDislikes) = await RecentAsync(accountId, asOf, ct);
 
         var facts = new TasteFacts(
             Math.Round(taste.UserMean, 2),
             ratingsCount,
             Math.Round(taste.MovieRatedShare, 2),
             topGenres,
+            mostWatchedGenres,
             drifting,
             loved,
+            recentLoves,
+            recentDislikes,
             DislikeSignal.DeclinedLine(dislikeProfile),
             people,
             texture,
@@ -189,6 +281,54 @@ public sealed class TasteFactsBuilder(
             facts, taste.TopLovedTitleIds, dislikeProfile.Version, previous);
 
         return new Result(facts, fingerprint.Hash, fingerprint.Components, taste.TopLovedTitleIds);
+    }
+
+    /// <summary>
+    /// What this account has loved and disliked inside <see cref="RecentWindow"/>, by name and year.
+    ///
+    /// <para>The loved anchors are all-time and change on the order of months; these are the
+    /// evidence for a sentence about NOW. Without them a narrative can only describe a person's
+    /// average, and an average is the one thing nobody recognises themselves in.</para>
+    ///
+    /// <para>Ordered rating-then-recency-then-name, deterministically, so the fact sheet — which is
+    /// persisted beside the narrative as the evidence it was checked against — is reproducible.</para>
+    /// </summary>
+    private async Task<(List<LovedFact> Loves, List<LovedFact> Dislikes)> RecentAsync(
+        Guid accountId, DateTime asOf, CancellationToken ct)
+    {
+        var since = asOf - RecentWindow;
+        var rows = await db.UserRatings
+            .Where(r => r.AccountId == accountId
+                && r.RatedAt >= since
+                && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show)
+                && (r.Rating >= LovedRatingFloor || r.Rating <= DislikedRatingCeiling))
+            .Join(
+                db.Titles,
+                r => r.TitleId,
+                t => t.Id,
+                (r, t) => new { t.Name, t.Year, r.Rating, r.RatedAt })
+            .Where(x => x.Name != null && x.Name != "")
+            .ToListAsync(ct);
+
+        var loves = rows
+            .Where(x => x.Rating >= LovedRatingFloor)
+            .OrderByDescending(x => x.Rating)
+            .ThenByDescending(x => x.RatedAt)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(RecentLoves)
+            .Select(x => new LovedFact(x.Name, x.Year, x.Rating))
+            .ToList();
+
+        var dislikes_ = rows
+            .Where(x => x.Rating <= DislikedRatingCeiling)
+            .OrderBy(x => x.Rating)
+            .ThenByDescending(x => x.RatedAt)
+            .ThenBy(x => x.Name, StringComparer.Ordinal)
+            .Take(RecentDislikes)
+            .Select(x => new LovedFact(x.Name, x.Year, x.Rating))
+            .ToList();
+
+        return (loves, dislikes_);
     }
 
     /// <summary>

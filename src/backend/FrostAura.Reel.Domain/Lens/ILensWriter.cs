@@ -1,16 +1,54 @@
 namespace FrostAura.Reel.Domain.Lens;
 
+/// <summary>Where an anchor candidate sits in the account's opinion. Rendered into the prompt verbatim.</summary>
+public static class AnchorStance
+{
+    /// <summary>Rated highly.</summary>
+    public const string Loved = "loved";
+
+    /// <summary>Rated badly. An anchor may be something you disliked — that is still a comparison.</summary>
+    public const string Disliked = "disliked";
+
+    /// <summary>Declined from the feed without a rating. An opinion, and part of the library.</summary>
+    public const string Declined = "declined";
+}
+
+/// <summary>
+/// One title the lens is ALLOWED to name as an anchor, with the account's own verdict on it.
+///
+/// <para>The list of these is the anchor equivalent of the credits list: the model is shown
+/// exactly the names it may use, so the downstream check verifies a promise rather than performs
+/// a rescue. <see cref="Rating"/> is null for a declined title, which was never rated —
+/// <see cref="Stance"/> carries the opinion instead.</para>
+/// </summary>
+public sealed record LensAnchorCandidate(string Name, int? Year, short? Rating, string Stance);
+
 /// <summary>
 /// The personalisation context every lens is written against: the account's effective taste
-/// narrative (or, before one exists, the compact fallback line) plus the recently-declined list.
-/// The two are separate fields rather than one blob because the declined line changes on every
-/// reaction while the narrative changes on the order of weeks, and the prompts frame them
-/// differently — one is who you are, the other is what you just said no to.
+/// narrative (or, before one exists, the compact fallback line), the recently-declined list, and
+/// the titles the copy may anchor against. The first three are separate fields rather than one
+/// blob because the declined line changes on every reaction while the narrative changes on the
+/// order of weeks, and the prompts frame them differently — one is who you are, the other is what
+/// you just said no to.
+///
+/// <para><b><see cref="AnchorCandidates"/> exists because its absence was a hundred-percent
+/// rejection rate.</b> The lens system prompt has always told the model to take anchor titles
+/// "verbatim from the lists below" — and until this field there were no lists. The only titles in
+/// the prompt were the ones inside <see cref="Declined"/>, so the model dutifully anchored on
+/// those, and the verifier, which accepted only RATED titles, refused every note. A prompt that
+/// names the permitted anchors is the fix; the guard is the backstop, not the policy.</para>
 /// </summary>
-public sealed record LensPersona(string Taste, string? Declined)
+public sealed record LensPersona(
+    string Taste, string? Declined, IReadOnlyList<LensAnchorCandidate> AnchorCandidates)
 {
+    /// <summary>The two-field shape, for callers that have no anchor set to offer.</summary>
+    public LensPersona(string taste, string? declined)
+        : this(taste, declined, [])
+    {
+    }
+
     /// <summary>The compact-line shape the rerank prompts used before narratives existed.</summary>
-    public static implicit operator LensPersona(string taste) => new(taste, null);
+    public static implicit operator LensPersona(string taste) => new(taste, null, []);
 }
 
 /// <summary>

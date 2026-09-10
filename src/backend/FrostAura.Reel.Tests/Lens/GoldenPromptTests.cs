@@ -28,6 +28,15 @@ public class GoldenPromptTests
             new GenreFact("thriller", 8.6m, 214),
             new GenreFact("crime", 8.4m, 180),
             new GenreFact("science-fiction", 8.2m, 96),
+            // Rated well, rarely watched, and absent from MostWatchedGenres — the "when you do
+            // watch X" bucket the narrative must never promote to a favourite.
+            new GenreFact("holiday", 8.1m, 26),
+        ],
+        MostWatchedGenres:
+        [
+            new GenreVolumeFact("thriller", 8.6m, 214, 0.104m),
+            new GenreVolumeFact("crime", 8.4m, 180, 0.088m),
+            new GenreVolumeFact("science-fiction", 8.2m, 96, 0.047m),
         ],
         DriftingToward: [new DriftFact("drama", 0.42m)],
         LovedAnchors:
@@ -36,6 +45,8 @@ public class GoldenPromptTests
             new LovedFact("Sicario", 2015, 10),
             new LovedFact("Arrival", 2016, 9),
         ],
+        RecentLoves: [new LovedFact("The Zone of Interest", 2023, 9)],
+        RecentDislikes: [new LovedFact("Argylle", 2024, 3)],
         DeclinedLine: "Recently declined, do not recommend anything too similar: Emily in Paris (wrong tone)",
         VerifiedPeople:
         [
@@ -285,9 +296,152 @@ public class GoldenPromptTests
         var first = OpenRouterLensWriter.StubLens(Title, persona);
         var second = OpenRouterLensWriter.StubLens(Title, persona);
 
-        Assert.Equal(first, second);
+        // Field by field: LensNote holds a list, and a record's synthesised equality compares that
+        // list by reference, so Assert.Equal on the notes would fail for two identical answers.
+        Assert.Equal(first.Lens, second.Lens);
+        Assert.Equal(first.Hook, second.Hook);
+        Assert.Equal(first.Caution, second.Caution);
+        Assert.Equal(first.Mood, second.Mood);
+        Assert.Equal(first.WhenToWatch, second.WhenToWatch);
+        Assert.Equal(first.Anchors, second.Anchors);
+
         Assert.Null(LensGuards.Inspect(first, Title.Name));
         Assert.Contains(first.Mood, LensVocabulary.Moods);
         Assert.Contains(first.WhenToWatch, LensVocabulary.WhenToWatch);
+    }
+
+    [Fact]
+    public void The_stub_lens_anchors_only_on_titles_the_persona_offered()
+    {
+        // The stub used to return no anchors at all, which left the entire anchor chain — prompt,
+        // verifier, strip, persist — unexercised by every test in the suite. That chain is exactly
+        // what failed in production.
+        var persona = new LensPersona(
+            "You reach for bleak, procedural crime.",
+            null,
+            [
+                new LensAnchorCandidate("Sicario", 2015, 10, AnchorStance.Loved),
+                new LensAnchorCandidate("Frontera", 2014, null, AnchorStance.Declined),
+            ]);
+        var note = OpenRouterLensWriter.StubLens(Title, persona);
+
+        Assert.Equal(["Sicario", "Frontera"], note.Anchors.Select(a => a.Title));
+        Assert.Null(LensGuards.Inspect(note, Title.Name));
+    }
+
+    [Fact]
+    public void The_lens_prompt_names_the_anchors_it_permits_with_their_verdicts()
+    {
+        // The defect this closes: the system prompt has always said "verbatim from the lists
+        // below", and there were no lists. The only title names in a lens prompt were the ones in
+        // the declined line, so the model anchored on those and the guard refused every note.
+        var persona = new LensPersona(
+            "You reach for bleak, procedural crime.",
+            "Recently declined, do not recommend anything too similar: Frontera (not for me)",
+            [
+                new LensAnchorCandidate("Sicario", 2015, 10, AnchorStance.Loved),
+                new LensAnchorCandidate("Argylle", 2024, 3, AnchorStance.Disliked),
+                new LensAnchorCandidate("Frontera", 2014, null, AnchorStance.Declined),
+            ]);
+        var prompt = OpenRouterLensWriter.LensPrompt(Title, persona);
+
+        Assert.Contains("ANCHORS YOU MAY USE", prompt, StringComparison.Ordinal);
+        Assert.Contains("Sicario (2015) — you rated it 10 out of ten", prompt, StringComparison.Ordinal);
+        Assert.Contains("Argylle (2024) — you rated it only 3 out of ten", prompt, StringComparison.Ordinal);
+        Assert.Contains(
+            "Frontera (2014) — you declined it from your feed without rating it",
+            prompt,
+            StringComparison.Ordinal);
+        // The scores in the block are context, exactly as the prediction is.
+        Assert.Contains("never restate one", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_persona_with_no_anchor_candidates_omits_the_block_entirely()
+    {
+        // An empty heading is worse than no heading: it tells the model a list exists and then
+        // shows it nothing, which is the shape that produced invented anchors in the first place.
+        var prompt = OpenRouterLensWriter.LensPrompt(Title, new LensPersona("You like crime.", null));
+
+        Assert.DoesNotContain("ANCHORS YOU MAY USE", prompt, StringComparison.Ordinal);
+    }
+
+    // ── The narrative fact sheet: volume before affinity ─────────────────────────────────────
+
+    [Fact]
+    public void The_narrative_prompt_leads_with_what_the_account_actually_watches()
+    {
+        var prompt = OpenRouterLensWriter.NarrativePrompt(Facts);
+
+        var watched = prompt.IndexOf("Mostly watches", StringComparison.Ordinal);
+        var highest = prompt.IndexOf("Rates highest", StringComparison.Ordinal);
+
+        Assert.True(watched >= 0, "The fact sheet must state what the account watches most.");
+        Assert.True(
+            watched < highest,
+            "Volume must precede affinity in the fact sheet — the opening sentence of a profile is "
+            + "the one sentence that has to be about what the person actually watches.");
+        Assert.Contains("thriller, 214 titles (10% of everything rated), rated 8.6", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_sparse_but_well_rated_genre_is_labelled_as_sparse_rather_than_as_a_favourite()
+    {
+        // "Holiday stories sit especially high" for twenty-six holiday films in two thousand
+        // ratings is the exact sentence this line exists to make impossible.
+        var prompt = OpenRouterLensWriter.NarrativePrompt(Facts);
+
+        Assert.Contains("Watches rarely but rates well", prompt, StringComparison.Ordinal);
+        Assert.Contains("holiday (26 titles)", prompt, StringComparison.Ordinal);
+
+        // And it must not be in the volume line, which is what the opening sentence is drawn from.
+        var watchedLine = prompt
+            .Split('\n')
+            .Single(l => l.StartsWith("Mostly watches", StringComparison.Ordinal));
+        Assert.DoesNotContain("holiday", watchedLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_narrative_prompt_names_recent_loves_and_recent_dislikes()
+    {
+        var prompt = OpenRouterLensWriter.NarrativePrompt(Facts);
+
+        Assert.Contains("Loved lately", prompt, StringComparison.Ordinal);
+        Assert.Contains("The Zone of Interest (2023)", prompt, StringComparison.Ordinal);
+        Assert.Contains("Rated badly lately: Argylle (2024)", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Every_title_the_fact_sheet_names_is_one_the_grounding_guard_accepts()
+    {
+        // A fact added to the prompt and forgotten in GroundedNames does not produce a lenient
+        // guard — it produces a guard that refuses every narrative that OBEYS the prompt.
+        var grounded = Facts.GroundedNames();
+
+        Assert.Contains("The Zone of Interest", grounded);
+        Assert.Contains("Argylle", grounded);
+        Assert.Contains("Heat", grounded);
+    }
+
+    [Fact]
+    public void A_recent_love_named_at_the_start_of_a_sentence_is_not_read_as_an_invention()
+    {
+        // "Lately" fusing onto the title that follows it extracts as "Lately The Zone", which
+        // matches no fact sheet in either direction. With the prompt now REQUIRING recent titles by
+        // name, this is the common sentence shape, not an edge case.
+        Assert.Null(TasteNarrativeService.Ungrounded(
+            "You watch thriller and crime more than anything else. "
+            + "Lately The Zone of Interest landed hard for you.",
+            Facts));
+    }
+
+    [Fact]
+    public void A_title_the_facts_do_not_contain_is_still_an_invention_wherever_it_sits()
+    {
+        // The opener fix must not become a hole: masking the first WORD of a sentence cannot be
+        // allowed to excuse the rest of it.
+        Assert.NotNull(TasteNarrativeService.Ungrounded(
+            "You watch crime more than anything. Lately Blade Runner landed hard for you.",
+            Facts));
     }
 }
