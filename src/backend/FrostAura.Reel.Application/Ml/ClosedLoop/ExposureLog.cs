@@ -23,6 +23,8 @@ namespace FrostAura.Reel.Application.Ml.ClosedLoop;
 /// <param name="WhySource">How that sentence was produced.</param>
 /// <param name="RowKey">The rail's identity, anchor-qualified; null on hero/digest/search surfaces.</param>
 /// <param name="PageIndex">Pagination depth; 0 on the first page and every non-paginated surface.</param>
+/// <param name="PolicyId">The ranking policy that drafted this card, when a slate was interleaved.</param>
+/// <param name="InterleaveGroup">The slate the draft belonged to. Null wherever PolicyId is null.</param>
 public readonly record struct ExposureCard(
     Guid TitleId,
     int Rank,
@@ -35,7 +37,9 @@ public readonly record struct ExposureCard(
     string? WhySentence = null,
     string WhySource = ExposureWhySource.Unknown,
     string? RowKey = null,
-    int PageIndex = 0);
+    int PageIndex = 0,
+    string? PolicyId = null,
+    Guid? InterleaveGroup = null);
 
 /// <summary>
 /// The closed vocabulary for <see cref="ExposureEvent.WhySource"/>. Strings rather than an enum
@@ -152,6 +156,12 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
                 LlmFit = card.LlmFit is { } fit ? Math.Round(fit, 3, MidpointRounding.AwayFromZero) : null,
                 WhySentence = string.IsNullOrWhiteSpace(card.WhySentence) ? null : card.WhySentence,
                 WhySource = card.WhySource,
+                // Attribution is written only where it was actually established. The two travel as
+                // a pair — a policy with no slate, or a slate with no policy, would be an exposure
+                // the sequential test could neither count nor attribute — so a card missing either
+                // records neither.
+                PolicyId = card.InterleaveGroup is null ? null : card.PolicyId,
+                InterleaveGroup = card.PolicyId is null ? null : card.InterleaveGroup,
             }));
         }
 

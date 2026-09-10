@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Ranking.Interleaving;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
@@ -51,7 +52,12 @@ public class BuildFeedJobHandler(
     IMemoryCache cache,
     IPipelineEventHub events,
     ExposureLog exposures,
-    ILogger<BuildFeedJobHandler> logger) : IJobHandler
+    ILogger<BuildFeedJobHandler> logger,
+    // Optional with a disabled default so the switch is opt-in at every level at once: DI supplies
+    // the configured instance, and every construction site that predates the harness — the three
+    // integration tests that build this handler by hand — keeps compiling and keeps describing the
+    // shipped behaviour, which is the feed exactly as it was.
+    InterleaveOptions? interleaveOptions = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -86,6 +92,13 @@ public class BuildFeedJobHandler(
     // such a hero for the next spare candidate (see SwapLowFitHeroesAsync) rather than captioning
     // the headline slot with a reason to skip it.
     private const double HeroFitFloor = 0.3;
+
+    /// <summary>
+    /// The interleaving posture for this process. Resolved once here rather than per build so a
+    /// mid-experiment configuration change cannot split one account's slates across two definitions
+    /// of what the experiment is.
+    /// </summary>
+    private readonly InterleaveOptions _interleave = interleaveOptions ?? InterleaveOptions.Disabled;
 
     public JobKind Kind => JobKind.BuildFeed;
 
@@ -721,6 +734,68 @@ public class BuildFeedJobHandler(
             return ageDays > 365 ? 1m : 1m + (decimal)(0.10 * Math.Exp(-ageDays / 180d));
         }
 
+        // ── Team-draft interleaving ─────────────────────────────────────────────────────────
+        // Off unless INTERLEAVE_ENABLED says otherwise, and Fresh-only: a Preserve rebuild's whole
+        // contract is that tonight's seats do not move, so re-drafting them would be a different
+        // page under the same GeneratedAt. Preserve instead CARRIES the attribution forward from
+        // the snapshot it preserves (below), which keeps a kept card counting for the ranker that
+        // actually put it there.
+        //
+        // `interleaver` being null is the single branch that decides this. Every `else` below is
+        // the code that shipped before this harness existed, unchanged.
+        var interleaver = mode == FeedBuildMode.Fresh ? SlateInterleaver.For(_interleave) : null;
+
+        // Minted here rather than at the write below because a slate's seed and its InterleaveGroup
+        // are both derived from it. Harmlessly discarded on the Preserve no-op path, which returns
+        // before any of it is used.
+        var snapshotId = Guid.NewGuid();
+
+        // Which ranker contributed each title, filled by the drafts and read by AddItem. Keyed by
+        // title and not by (row, rank) because the shared `used` set already guarantees a title
+        // appears at most once on the whole feed.
+        var attribution = new Dictionary<Guid, (string PolicyId, Guid Group)>();
+
+        // One slate, drafted between the two policies. `phases` are admissibility predicates tried
+        // in order: the hero passes three of them (diversity + confidence floor, then the floor
+        // alone, then anything) so the draft reproduces the same three-stage selection the
+        // non-interleaved hero has always done, with the alternation carrying across the stages so
+        // relaxing never costs balance. A rail passes none and takes the pool as it stands.
+        List<Candidate> DraftSlate(
+            FeedRowKind row,
+            Guid? anchorId,
+            IReadOnlyList<(Candidate Candidate, decimal Fresh, double Affinity)> pool,
+            int size,
+            params Func<Candidate, IReadOnlyList<Candidate>, bool>[] phases)
+        {
+            var byId = pool.ToDictionary(x => x.Candidate.Title.Id);
+            var draft = interleaver!.Begin(
+                snapshotId,
+                FeedPaginator.RowKeyFor(row, anchorId),
+                [.. pool.Select(x => new PolicyCandidate(
+                    x.Candidate.Title.Id,
+                    x.Candidate.Predicted,
+                    x.Fresh,
+                    PreferenceBoost(x.Candidate.Title),
+                    x.Candidate.Title.TmdbPopularity ?? 0m,
+                    x.Affinity))]);
+
+            List<Candidate> Selected() => [.. draft.Selected.Select(id => byId[id].Candidate)];
+            var stages = phases.Length > 0
+                ? phases
+                : [(Func<Candidate, IReadOnlyList<Candidate>, bool>)((_, _) => true)];
+            foreach (var phase in stages)
+            {
+                draft.Fill(size, id => phase(byId[id].Candidate, Selected()));
+            }
+
+            foreach (var (titleId, policyId) in draft.Picks)
+            {
+                attribution[titleId] = (policyId, draft.GroupId);
+            }
+
+            return Selected();
+        }
+
         // Hero: greedy pick with genre-diversity shaping (MMR with Jaccard until embeddings land).
         var heroPool = candidates
             .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
@@ -731,7 +806,28 @@ public class BuildFeedJobHandler(
         capture.HeroEligibleCount = heroPool.Count;
         var candidatesById = candidates.ToDictionary(c => c.Title.Id);
         var hero = new List<Candidate>();
-        if (mode == FeedBuildMode.Preserve)
+        if (interleaver is not null)
+        {
+            // The interleaved hero. The pool is the WIDE one — the never-open-blank set — and the
+            // confidence floor is applied as an admissibility phase rather than as a filter, so the
+            // three stages the hero has always had (diversity inside the floor → the floor alone →
+            // anything with a poster) become three phases of one draft. Every seat therefore has a
+            // contributing ranker, including the ones the floor had to be relaxed to fill, which is
+            // what makes "PolicyId on every item" a property rather than a hope.
+            var heroFloor = Math.Max(HeroConfidenceFloor, effectiveFloor);
+            hero = DraftSlate(
+                FeedRowKind.Hero,
+                null,
+                [.. candidates
+                    .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                    .Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
+                HeroSize,
+                (c, chosen) => c.Predicted >= heroFloor
+                    && (chosen.Count == 0 || chosen.Max(h => Similarity(h.Title, c.Title)) < 0.8d),
+                (c, _) => c.Predicted >= heroFloor,
+                (_, _) => true);
+        }
+        else if (mode == FeedBuildMode.Preserve)
         {
             // Hero continuity: last build's picks in their order, minus anything that left the
             // candidate set — a rated or not-interested title falls out of eligibility upstream, so
@@ -744,35 +840,38 @@ public class BuildFeedJobHandler(
                 .Take(HeroSize));
         }
 
-        foreach (var candidate in heroPool)
+        if (interleaver is null)
         {
-            if (hero.Count >= HeroSize)
+            foreach (var candidate in heroPool)
             {
-                break;
+                if (hero.Count >= HeroSize)
+                {
+                    break;
+                }
+
+                if (hero.Contains(candidate))
+                {
+                    continue; // already kept from the previous build
+                }
+
+                var maxSim = hero.Count == 0 ? 0d : hero.Max(h => Similarity(h.Title, candidate.Title));
+                if (maxSim < 0.8d)
+                {
+                    hero.Add(candidate);
+                }
             }
 
-            if (hero.Contains(candidate))
+            if (hero.Count < HeroSize)
             {
-                continue; // already kept from the previous build
+                hero.AddRange(heroPool.Except(hero).Take(HeroSize - hero.Count));
             }
-
-            var maxSim = hero.Count == 0 ? 0d : hero.Max(h => Similarity(h.Title, candidate.Title));
-            if (maxSim < 0.8d)
-            {
-                hero.Add(candidate);
-            }
-        }
-
-        if (hero.Count < HeroSize)
-        {
-            hero.AddRange(heroPool.Except(hero).Take(HeroSize - hero.Count));
         }
 
         // Never open blank: if the 7.5 confidence floor left the hero short — a sparse-history user
         // whose best predictions all sit below it — backfill from the top remaining scored candidates
         // (poster + min-predicted only, floor dropped). The free-tier home is the hero alone, so an
         // empty hero is an empty product. These are honest model rankings, just lower-confidence.
-        if (hero.Count < HeroSize)
+        if (interleaver is null && hero.Count < HeroSize)
         {
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
@@ -786,8 +885,17 @@ public class BuildFeedJobHandler(
         // is superseded until a genuinely different feed is in hand.
         var planned = new List<PlannedItem>();
 
-        void AddItem(FeedRowKind row, Title? anchor, int rank, Candidate candidate) =>
-            planned.Add(new PlannedItem(row, anchor?.Id, rank, candidate, WhyContext(candidate, anchor)));
+        void AddItem(FeedRowKind row, Title? anchor, int rank, Candidate candidate)
+        {
+            var item = new PlannedItem(row, anchor?.Id, rank, candidate, WhyContext(candidate, anchor));
+            if (attribution.TryGetValue(candidate.Title.Id, out var drafted))
+            {
+                item.PolicyId = drafted.PolicyId;
+                item.InterleaveGroup = drafted.Group;
+            }
+
+            planned.Add(item);
+        }
 
         for (var i = 0; i < hero.Count; i++)
         {
@@ -871,14 +979,26 @@ public class BuildFeedJobHandler(
             if (members.Count < RowSize)
             {
                 var keptIds = members.Select(m => m.Title.Id).ToHashSet();
-                members.AddRange(candidates
+                var railPool = candidates
                     .Where(c => !used.Contains(c.Title.Id) && !keptIds.Contains(c.Title.Id)
                         && !reserved.Contains(c.Title.Id) && c.Predicted >= effectiveFloor)
                     .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
                     .Where(x => x.Sim > 0.15d)
-                    .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
-                    .Take(RowSize - members.Count)
-                    .Select(x => x.Candidate));
+                    .ToList();
+
+                // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
+                // the calibrated policy reproduces this row's historical comparator exactly rather
+                // than substituting the hero's.
+                members.AddRange(interleaver is not null
+                    ? DraftSlate(
+                        FeedRowKind.BecauseYouLoved,
+                        anchor.Id,
+                        [.. railPool.Select(x => (x.Candidate, Fresh: 1m, Affinity: 0.5d + x.Sim))],
+                        RowSize - members.Count)
+                    : railPool
+                        .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
+                        .Take(RowSize - members.Count)
+                        .Select(x => x.Candidate));
             }
 
             if (members.Count < RowMinMembers)
@@ -897,11 +1017,17 @@ public class BuildFeedJobHandler(
         // ── v1.1 rows: Deep cuts (high predicted × low popularity) + New & for you ──────────
         // Reserved quotas above guarantee these rows can still reach their floor even after the
         // loved fill; the greedy top-slice selection is otherwise unchanged.
-        var deepCuts = candidates
-            .Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c))
-            .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
-            .Take(RowSize)
-            .ToList();
+        var deepCutPool = candidates.Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c)).ToList();
+        var deepCuts = interleaver is not null
+            ? DraftSlate(
+                FeedRowKind.DeepCuts,
+                null,
+                [.. deepCutPool.Select(c => (Candidate: c, Fresh: 1m, Affinity: 1d))],
+                RowSize)
+            : deepCutPool
+                .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
+                .Take(RowSize)
+                .ToList();
         if (deepCuts.Count >= RowMinMembers)
         {
             for (var i = 0; i < deepCuts.Count; i++)
@@ -915,11 +1041,17 @@ public class BuildFeedJobHandler(
             capture.RailsDropped++;
         }
 
-        var newForYou = candidates
-            .Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c))
-            .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
-            .Take(RowSize)
-            .ToList();
+        var newForYouPool = candidates.Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c)).ToList();
+        var newForYou = interleaver is not null
+            ? DraftSlate(
+                FeedRowKind.NewForYou,
+                null,
+                [.. newForYouPool.Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
+                RowSize)
+            : newForYouPool
+                .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
+                .Take(RowSize)
+                .ToList();
         if (newForYou.Count >= RowMinMembers)
         {
             for (var i = 0; i < newForYou.Count; i++)
@@ -986,7 +1118,7 @@ public class BuildFeedJobHandler(
 
         var snapshot = new FeedSnapshot
         {
-            Id = Guid.NewGuid(),
+            Id = snapshotId,
             AccountId = account.Id,
             ModelArtifactId = artifact.Id,
             GeneratedAt = now,
@@ -1017,6 +1149,37 @@ public class BuildFeedJobHandler(
                 WhyThisSentence = item.WhyThis,
                 ExplanationJson = ExplanationOf(item.Candidate),
             });
+        }
+
+        // ── Interleaving attribution carried across a Preserve rebuild ──────────────────────
+        // A Preserve rebuild keeps tonight's seats, so the cards it re-stages are the SAME cards
+        // the interleaved Fresh build drafted — and an exposure row for them with no PolicyId would
+        // quietly drop them out of the experiment while they are still on screen. The attribution
+        // is read back from the snapshot being preserved rather than stored a second time on
+        // FeedItem: it is already durable on the append-only log, and one nullable-column pair is
+        // enough schema for this.
+        //
+        // Runs whether or not the switch is currently on. Turning the experiment off must stop new
+        // slates from being drafted; it must not orphan the ones already in flight.
+        if (mode == FeedBuildMode.Preserve && previousSnapshot is not null)
+        {
+            var carried = (await db.ExposureEvents
+                    .Where(e => e.AccountId == account.Id
+                        && e.FeedSnapshotId == previousSnapshot.Id
+                        && e.InterleaveGroup != null)
+                    .Select(e => new { e.TitleId, e.PolicyId, e.InterleaveGroup })
+                    .ToListAsync(ct))
+                .GroupBy(e => e.TitleId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            foreach (var item in planned.Where(i => i.PolicyId is null))
+            {
+                if (carried.TryGetValue(item.Candidate.Title.Id, out var previous))
+                {
+                    item.PolicyId = previous.PolicyId;
+                    item.InterleaveGroup = previous.InterleaveGroup;
+                }
+            }
         }
 
         // ── Exposure log ────────────────────────────────────────────────────────────────────
@@ -1088,6 +1251,15 @@ public class BuildFeedJobHandler(
         public decimal? LlmFit { get; set; }
 
         /// <summary>
+        /// The ranking policy that drafted this seat, on an interleaved Fresh build. Null on every
+        /// other path — including a card the why pass swapped in, which neither ranker chose.
+        /// </summary>
+        public string? PolicyId { get; set; }
+
+        /// <summary>The slate the draft belonged to. Travels with <see cref="PolicyId"/> or not at all.</summary>
+        public Guid? InterleaveGroup { get; set; }
+
+        /// <summary>
         /// The low-fit hero swap: this slot now carries a different candidate. The why resets to
         /// the replacement's deterministic templater sentence; the caller upgrades it to an agent
         /// line when one is earned within budget.
@@ -1099,6 +1271,12 @@ public class BuildFeedJobHandler(
             WhyThis = ExplanationTemplater.BuildSentence(whyContext);
             WhySource = ExposureWhySource.Templater;
             LlmFit = null;
+            // The interleaving attribution goes with it. A low-fit hero swap is a PRODUCT guard, not
+            // a ranking decision: the replacement was drafted by nobody, and crediting the team
+            // whose seat it took would feed the sequential test an outcome neither ranker earned.
+            // The slate loses that seat instead — a small, stated cost, paid on the honest side.
+            PolicyId = null;
+            InterleaveGroup = null;
         }
     }
 
@@ -1499,7 +1677,10 @@ public class BuildFeedJobHandler(
         item.LlmFit,
         item.WhyThis,
         item.WhySource,
-        FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId));
+        FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId),
+        0,
+        item.PolicyId,
+        item.InterleaveGroup);
 
     /// <summary>
     /// What the card shows. Rounded here, once, so the write path and the drift path agree.
