@@ -16,6 +16,12 @@ namespace FrostAura.Reel.Tests.Ml;
 /// MinPredictedRating filter could no longer be satisfied at any value the UI let the user pick —
 /// the feed built to zero cards while hundreds of perfectly good candidates sat in the pool.
 ///
+/// The v2 rule extends the same discipline to the BIAS, which v1 left on the raw update. That is
+/// what the last two tests here are for: a free bias beside normalised weights is a level-only
+/// learner with a ~100x larger step than anything next to it, and on the founder's live account it
+/// duly converged to a constant −1.68 offset that became, by accident, the only calibration in the
+/// product. Level is now <c>RatingCalibrator</c>'s job; the head must keep its hands off it.
+///
 /// These are pure arithmetic over the real feature schema — no database, no model artifact.
 /// </summary>
 public class OnlineResidualSaturationTests
@@ -99,6 +105,84 @@ public class OnlineResidualSaturationTests
         var a = OnlineResidualModel.Residual(weights, bias, disliked);
         var b = OnlineResidualModel.Residual(weights, bias, other);
         Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void Twenty_mixed_events_do_not_accumulate_a_level_offset()
+    {
+        // A realistic mixed stream that is NET NEGATIVE: the user's ratings average about a point
+        // and a half below what the base model said. Under the v1 rule the free bias integrated
+        // exactly this into a large constant offset — the −1.68 found in production. Under v2 the
+        // bias is a constant-1 feature taking the same normalised step as every weight, so the head
+        // absorbs the correction into SHAPE and leaves LEVEL to the calibrator.
+        double[] targets = [8, 3, 7, 2, 9, 4, 6, 3, 8, 5, 7, 2, 9, 4, 6, 3, 8, 5, 7, 4];
+        var weights = new float[FeatureSchema.VectorLength];
+        var bias = 0d;
+
+        for (var i = 0; i < targets.Length; i++)
+        {
+            var vector = StandardizedVector(seed: i);
+            (weights, bias) = ApplyStep(weights, bias, vector, targets[i], sampleWeight: 1.0, baseScore: 7d);
+        }
+
+        Assert.True(Math.Abs(bias) < 0.15d,
+            $"the head must not accumulate a level offset from mixed feedback (bias {bias}).");
+    }
+
+    [Fact]
+    public void A_single_step_cannot_move_the_observed_vectors_own_prediction_beyond_lr_times_error()
+    {
+        // The defining property of a normalised step, and the one that makes the head safe whatever
+        // the features' units are: one event moves THIS vector's own prediction by at most
+        // lr·sw·|err|. The tiny slack is the L2 decay, which shrinks an existing dot product by
+        // lr·λ per step independently of the error.
+        var warm = new float[FeatureSchema.VectorLength];
+        var warmBias = 0d;
+        for (var i = 0; i < 15; i++)
+        {
+            (warm, warmBias) = ApplyStep(warm, warmBias, StandardizedVector(seed: i), target: 4d, sampleWeight: 1.0, baseScore: 7d);
+        }
+
+        foreach (var (weights, bias) in new[] { (new float[FeatureSchema.VectorLength], 0d), (warm, warmBias) })
+        {
+            foreach (var target in new[] { 1d, 5d, 10d })
+            {
+                foreach (var sampleWeight in new[] { 0.2d, 1.0d })
+                {
+                    foreach (var vector in new[] { StandardizedVector(seed: 99), RealisticVector() })
+                    {
+                        const double baseScore = 7d;
+                        var before = OnlineResidualModel.Residual(weights, bias, vector);
+                        var error = target - (baseScore + before);
+                        var (stepped, steppedBias) = OnlineResidualModel.Step(weights, bias, vector, error, sampleWeight);
+                        var after = OnlineResidualModel.Residual(stepped, steppedBias, vector);
+
+                        var bound = (OnlineResidualModel.LearningRate * sampleWeight * Math.Abs(error)) + 1e-4;
+                        Assert.True(Math.Abs(after - before) <= bound,
+                            $"one step moved the observed vector's prediction by {after - before}, over the {bound} bound.");
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A vector on the scale the production path actually feeds the head: standardised by the
+    /// artifact's per-feature μ/σ, so every slot sits around zero mean and unit variance.
+    /// </summary>
+    private static float[] StandardizedVector(int seed)
+    {
+        var random = new Random(seed);
+        var v = new float[FeatureSchema.VectorLength];
+        for (var i = 0; i < v.Length; i++)
+        {
+            // Box–Muller, so the spread is genuinely unit-ish rather than a flat ±0.5.
+            var u1 = 1d - random.NextDouble();
+            var u2 = random.NextDouble();
+            v[i] = (float)(Math.Sqrt(-2d * Math.Log(u1)) * Math.Cos(2d * Math.PI * u2));
+        }
+
+        return v;
     }
 
     /// <summary>

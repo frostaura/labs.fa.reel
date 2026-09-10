@@ -62,19 +62,48 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
         CancellationToken ct,
         bool ignoreGenreFilters = false)
     {
+        var attributed = await RetrieveWithArmsAsync(
+            accountId, taste, lane, popCount, annCount, maturityCeiling, ct, ignoreGenreFilters);
+        return attributed.Select(hit => hit.Title).ToList();
+    }
+
+    /// <summary>
+    /// <see cref="RetrieveAsync"/>, plus WHICH arm claimed each title — and the single
+    /// implementation both share, so the attribution can never describe a retrieval that differs
+    /// from the one the feed actually runs. That mattered enough to restructure for: the offline
+    /// retrieval-recall probe exists to answer "is the pool recall-limited, and by which arm", and a
+    /// second copy of this composition would answer it about a pool nothing serves.
+    ///
+    /// <para><paramref name="asOf"/> rewinds the interaction footprint to a past instant
+    /// (<see cref="EligibilityQueryBuilder.EligibleTitlesAsOf"/>) — OFFLINE MEASUREMENT ONLY. Null,
+    /// which is every serving call, takes the live predicate unchanged.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<RetrievedTitle>> RetrieveWithArmsAsync(
+        Guid accountId,
+        FeatureVectorBuilder.TasteState taste,
+        Func<IQueryable<Title>, IQueryable<Title>>? lane,
+        int popCount,
+        int annCount,
+        string? maturityCeiling,
+        CancellationToken ct,
+        bool ignoreGenreFilters = false,
+        DateTime? asOf = null)
+    {
         IQueryable<Title> Lane()
         {
-            var q = eligibility.EligibleTitles(accountId, ignoreGenreFilters);
+            var q = asOf is { } instant
+                ? eligibility.EligibleTitlesAsOf(accountId, instant, ignoreGenreFilters)
+                : eligibility.EligibleTitles(accountId, ignoreGenreFilters);
             return lane is null ? q : lane(q);
         }
 
-        var ordered = new List<Title>(popCount + annCount);
+        var ordered = new List<RetrievedTitle>(popCount + annCount);
         var seen = new HashSet<Guid>();
 
         // Add up to `target` not-yet-seen, maturity-passing titles from an arm. Cross-arm dedup lands
         // here: a title already taken by an earlier arm is skipped and does NOT consume this arm's
         // budget, so overlap between popular and ANN never shrinks the personalized contribution.
-        void AddArm(IEnumerable<Title> arm, int target)
+        void AddArm(IEnumerable<Title> arm, int target, RetrievalArm which)
         {
             var added = 0;
             foreach (var title in arm)
@@ -90,7 +119,7 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
                 }
 
                 seen.Add(title.Id);
-                ordered.Add(title);
+                ordered.Add(new RetrievedTitle(title, which));
                 added++;
             }
         }
@@ -105,7 +134,7 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
             .ThenBy(t => t.Id)
             .Take(OverFetch(popCount))
             .ToListAsync(ct);
-        AddArm(popular, popCount);
+        AddArm(popular, popCount, RetrievalArm.Popularity);
 
         // ── ANN arm: personalized cosine kNN over plot embeddings ───────────────────────────
         // Null LovedCentroid ⇒ cold start (no loved title carries an embedding): skip the ANN arm
@@ -120,11 +149,11 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
             var driftTarget = taste.RecentCentroid is null ? 0 : (int)Math.Ceiling(annCount * DriftFraction);
             var lovedTarget = annCount - driftTarget;
 
-            AddArm(await AnnPullAsync(laneIds, new Vector(loved), OverFetch(lovedTarget), ct), lovedTarget);
+            AddArm(await AnnPullAsync(laneIds, new Vector(loved), OverFetch(lovedTarget), ct), lovedTarget, RetrievalArm.AnnLoved);
 
             if (taste.RecentCentroid is { } recent && driftTarget > 0)
             {
-                AddArm(await AnnPullAsync(laneIds, new Vector(recent), OverFetch(driftTarget), ct), driftTarget);
+                AddArm(await AnnPullAsync(laneIds, new Vector(recent), OverFetch(driftTarget), ct), driftTarget, RetrievalArm.AnnRecent);
             }
         }
 
@@ -186,3 +215,24 @@ public sealed class CandidateRetriever(IReelDbContext db, EligibilityQueryBuilde
 
     private static int OverFetch(int target) => (int)Math.Ceiling(target * MaturityOverFetch);
 }
+
+/// <summary>Which retrieval arm put a title into the first-pass pool.</summary>
+public enum RetrievalArm
+{
+    /// <summary>The coverage slice — eligible catalogue by TMDB popularity.</summary>
+    Popularity,
+
+    /// <summary>pgvector kNN against the all-time loved centroid.</summary>
+    AnnLoved,
+
+    /// <summary>pgvector kNN against the 365-day recent-loved centroid (the drift pull).</summary>
+    AnnRecent,
+}
+
+/// <summary>
+/// One retrieved title and the arm that claimed it. Arms are attributed on a FIRST-CLAIM basis,
+/// matching the cross-arm dedup: a title the popularity slice already took is not re-counted for
+/// ANN even when ANN would also have found it. Any recall figure derived from this is therefore a
+/// statement about the pool as assembled, not about what each arm could reach in isolation.
+/// </summary>
+public readonly record struct RetrievedTitle(Title Title, RetrievalArm Arm);

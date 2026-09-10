@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Lock, Minus, Plus, X } from "lucide-react";
 import {
+  useFilterCostQuery,
   useGetFiltersQuery,
   useGetSessionQuery,
   useUpdateFiltersMutation,
@@ -9,10 +10,21 @@ import {
 } from "../../store/api";
 import { clearUnlockToken, storeUnlockToken, useUnlockToken } from "../../lib/settingsPin";
 import {
+  applySuggestion,
+  costLine,
+  formatMarginal,
+  languageRuleValue,
+  marginalFor,
+  marginalNote,
+  ratingRuleValue,
+  suggestionLabel,
+} from "../../lib/filterCost";
+import {
   ALL_LANGUAGES,
   cycleGenre,
   genreState,
   GENRES,
+  DEFAULT_FILTERS,
   isInvertedYearRange,
   LANGUAGES,
   MATURITY_LEVELS,
@@ -39,6 +51,12 @@ interface Props {
   testIds?: { editor?: string; locked?: string; loading?: string };
 }
 
+/**
+ * How long the editor waits before costing a draft. Long enough that a chip-tapping burst is one
+ * request, short enough that the number feels attached to the tap that changed it.
+ */
+const COST_DEBOUNCE_MS = 350;
+
 const GENRE_TONE: Record<GenreState, string> = {
   neutral: "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40",
   include: "border-fa-success/50 bg-fa-success/15 text-fa-success",
@@ -54,6 +72,12 @@ const GENRE_ARIA: Record<GenreState, string> = {
 /**
  * The conditions behind tonight's picks — genres (three-state), the two rating floors, release
  * years, languages, maturity and keyword exclusions — in one editor.
+ *
+ * It also costs itself as you edit. The founder's rules leave roughly 421 of 5,319 titles eligible
+ * and this editor used to say nothing at all about that, so "why do my picks keep getting worse"
+ * was unanswerable in the one place the trade is actually made. The counts are shown and NOTHING is
+ * changed on their account — the founder decision is explicit that the app names the cost and the
+ * user decides. Suggestions are one-tap and land in the DRAFT, never in the saved conditions.
  *
  * There is exactly ONE of these. It renders inside Settings and inside the dialog on the feed;
  * two copies of a filter form is how a "minimum rating" quietly comes to mean two different things
@@ -88,6 +112,22 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
   const pinConfigured = session?.pinConfigured ?? false;
   const locked = pinConfigured && unlockToken === null;
   const shell = bare ? "space-y-5" : "fa-card p-5 space-y-5";
+
+  // The costed draft trails the edited one. Serialising it is what makes the effect stable: a fresh
+  // object identity on every keystroke would re-arm the timer for ever and the request would never
+  // fire, and RTK Query keys its cache on the serialised arg anyway.
+  const [costDraft, setCostDraft] = useState<FiltersPayload | null>(null);
+  const draftKey = draft ? JSON.stringify(draft) : "";
+  useEffect(() => {
+    if (draftKey === "") return;
+    const handle = window.setTimeout(() => setCostDraft(JSON.parse(draftKey) as FiltersPayload), COST_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [draftKey]);
+  // Errors are swallowed on purpose: the meter is an aid, and an editor that refuses to render
+  // because a count failed would be a worse screen than one that quietly shows no counts.
+  const { data: cost } = useFilterCostQuery(costDraft ?? DEFAULT_FILTERS, {
+    skip: costDraft === null || locked,
+  });
 
   const unlock = async () => {
     const result = await verifyPin({ pin: pinEntry }).unwrap().catch(() => null);
@@ -206,6 +246,34 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       <div className="space-y-1.5">
         <p className="fa-overline text-fa-frost-dim">active now</p>
         <ConditionSummary filters={draft} />
+        {/* What the draft costs, live. "Leave" rather than "exclude": the gap between the catalogue
+            total and the eligible count is partly these rules and partly titles already watched,
+            rated or dismissed, and the per-rule numbers below are the honest attribution. */}
+        {costLine(cost) && (
+          <p className="fa-caption text-fa-frost mt-1" data-testid="filter-cost-line">
+            {costLine(cost)}
+          </p>
+        )}
+        {(cost?.suggestions.length ?? 0) > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-1" data-testid="filter-cost-suggestions">
+            <span className="fa-caption text-fa-frost-dim">Widest options:</span>
+            {cost!.suggestions.map((suggestion) => (
+              <button
+                key={`${suggestion.kind}:${suggestion.value}`}
+                type="button"
+                onClick={() => setDraft(applySuggestion(draft, suggestion))}
+                data-testid="cost-suggestion"
+                data-kind={suggestion.kind}
+                data-value={suggestion.value}
+                title="Applies to this draft — nothing is saved until you save"
+                className="inline-flex items-center gap-1.5 rounded-full border border-fa-frost/40 bg-fa-glass px-2.5 py-1 fa-caption text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+              >
+                {suggestionLabel(suggestion)}
+                <span className="tabular-nums text-fa-success">{formatMarginal(suggestion.gain)}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* ── Genres ──────────────────────────────────────────────────────────────────────────
@@ -233,12 +301,19 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
         <div className="flex flex-wrap gap-1.5">
           {GENRES.map((genre) => {
             const state = genreState(draft, genre);
+            // Only excluded chips carry a number, and only a positive one: the badge answers "what
+            // is this chip costing me", which is a question an inactive chip does not raise.
+            const marginal = state === "exclude" ? formatMarginal(marginalFor(cost, "ExcludeGenre", genre)) : null;
             return (
               <button
                 key={genre}
                 type="button"
                 onClick={() => setDraft(cycleGenre(draft, genre))}
-                aria-label={`${genre.replace("-", " ")} — ${GENRE_ARIA[state]}`}
+                aria-label={
+                  marginal
+                    ? `${genre.replace("-", " ")} — ${GENRE_ARIA[state]}, ${marginal} titles if allowed`
+                    : `${genre.replace("-", " ")} — ${GENRE_ARIA[state]}`
+                }
                 className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 fa-caption capitalize transition ${GENRE_TONE[state]}`}
                 data-testid={`genre-${genre}`}
                 data-state={state}
@@ -246,6 +321,11 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
                 {state === "include" && <Plus className="h-3 w-3" />}
                 {state === "exclude" && <Minus className="h-3 w-3" />}
                 {genre.replace("-", " ")}
+                {marginal && (
+                  <span className="tabular-nums normal-case opacity-80" data-testid={`genre-marginal-${genre}`}>
+                    {marginal}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -261,6 +341,15 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
           value={draft.minCrowdRating}
           onChange={(minCrowdRating) => setDraft({ ...draft, minCrowdRating })}
           accent="text-fa-warning"
+          note={
+            draft.minCrowdRating != null
+              ? marginalNote(
+                  marginalFor(cost, "MinCrowdRating", ratingRuleValue(draft.minCrowdRating)),
+                  "turn this floor off",
+                )
+              : null
+          }
+          noteTestId="crowd-rating-marginal"
         />
         <RatingFloor
           testId="min-rating-slider"
@@ -269,6 +358,14 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
           value={draft.minPredictedRating}
           onChange={(minPredictedRating) => setDraft({ ...draft, minPredictedRating })}
           accent="text-fa-frost-bright"
+          // Said plainly rather than left as a conspicuous blank beside the crowd floor's number:
+          // this floor is applied per title by the model, so it has no catalogue-wide count to give.
+          note={
+            draft.minPredictedRating != null
+              ? "Not in the counts above — this one is applied per title by the model, after scoring."
+              : null
+          }
+          noteTestId="min-rating-note"
         />
       </div>
 
@@ -323,6 +420,24 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
             </button>
           )}
         </div>
+        {/* What each bound is holding back, counted separately — they are two controls, and a user
+            who would happily reach back to 1990 may not want anything after 2020. */}
+        {marginalNote(
+          draft.minYear != null ? marginalFor(cost, "MinYear", String(draft.minYear)) : null,
+          `allow titles before ${draft.minYear}`,
+        ) && (
+          <p className="fa-caption text-fa-frost-dim" data-testid="min-year-marginal">
+            {marginalNote(marginalFor(cost, "MinYear", String(draft.minYear)), `allow titles before ${draft.minYear}`)}
+          </p>
+        )}
+        {marginalNote(
+          draft.maxYear != null ? marginalFor(cost, "MaxYear", String(draft.maxYear)) : null,
+          `allow titles after ${draft.maxYear}`,
+        ) && (
+          <p className="fa-caption text-fa-frost-dim" data-testid="max-year-marginal">
+            {marginalNote(marginalFor(cost, "MaxYear", String(draft.maxYear)), `allow titles after ${draft.maxYear}`)}
+          </p>
+        )}
         {/* Said out loud rather than silently corrected mid-typing: an inverted range matches
             nothing, so a blank feed would otherwise have no visible cause. It is swapped on blur. */}
         {inverted && (
@@ -370,6 +485,13 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
             );
           })}
         </div>
+        {/* One number for the whole allow-list, because there is one control for it — and the
+            counterfactual is "every language", which is what the All chip beside it does. */}
+        {!allLanguages && marginalNote(marginalFor(cost, "Language", languageRuleValue(languages)), "allow every language") && (
+          <p className="fa-caption text-fa-frost-dim" data-testid="language-marginal">
+            {marginalNote(marginalFor(cost, "Language", languageRuleValue(languages)), "allow every language")}
+          </p>
+        )}
       </div>
 
       {/* ── Maturity ────────────────────────────────────────────────────────────────────────── */}
@@ -416,6 +538,8 @@ function RatingFloor({
   onChange,
   testId,
   accent,
+  note,
+  noteTestId,
 }: {
   label: string;
   hint: string;
@@ -423,6 +547,9 @@ function RatingFloor({
   onChange: (next: number | null) => void;
   testId: string;
   accent: string;
+  /** What this floor is costing, or why it has no count. Absent while the meter is in flight. */
+  note?: string | null;
+  noteTestId?: string;
 }) {
   const current = value ?? 0;
   return (
@@ -446,6 +573,11 @@ function RatingFloor({
           {current > 0 ? current.toFixed(1) : "off"}
         </span>
       </div>
+      {note && (
+        <p className="fa-caption text-fa-frost-dim" data-testid={noteTestId}>
+          {note}
+        </p>
+      )}
     </div>
   );
 }

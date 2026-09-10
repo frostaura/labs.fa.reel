@@ -1,12 +1,16 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Ranking.Interleaving;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
@@ -35,15 +39,25 @@ public class BuildFeedJobHandler(
     FeatureVectorBuilder featureBuilder,
     CandidateGenerator candidateGenerator,
     CandidateRetriever candidateRetriever,
+    EligibilityQueryBuilder eligibility,
     FeedStarvationDiagnostic starvation,
     TitleHydrator hydrator,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    RatingCalibrationService calibration,
     DislikeSignal dislikes,
     ISearchAgent agent,
+    TasteFactsBuilder tasteFacts,
+    PersonalisationContext personalisation,
     IMemoryCache cache,
     IPipelineEventHub events,
-    ILogger<BuildFeedJobHandler> logger) : IJobHandler
+    ExposureLog exposures,
+    ILogger<BuildFeedJobHandler> logger,
+    // Optional with a disabled default so the switch is opt-in at every level at once: DI supplies
+    // the configured instance, and every construction site that predates the harness — the three
+    // integration tests that build this handler by hand — keeps compiling and keeps describing the
+    // shipped behaviour, which is the feed exactly as it was.
+    InterleaveOptions? interleaveOptions = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -52,7 +66,9 @@ public class BuildFeedJobHandler(
     private const int FirstPassAnnPool = 500;
     private const int ShortlistSize = 220;
     private const int HeroSize = 5;
-    private const decimal HeroConfidenceFloor = 7.5m;
+    // Single-sourced with the serve path: FeedEndpoints derives each hero card's confidence label
+    // from this same bar, so a card can never be labelled against a threshold the build did not use.
+    private const decimal HeroConfidenceFloor = Domain.Feed.HeroConfidence.Floor;
     private const int AnchorRowCount = 3;
     private const int RowSize = 10;
     private const int RowMinMembers = 4; // a row below this reads worse than no row, so it's dropped
@@ -77,11 +93,23 @@ public class BuildFeedJobHandler(
     // the headline slot with a reason to skip it.
     private const double HeroFitFloor = 0.3;
 
+    /// <summary>
+    /// The interleaving posture for this process. Resolved once here rather than per build so a
+    /// mid-experiment configuration change cannot split one account's slates across two definitions
+    /// of what the experiment is.
+    /// </summary>
+    private readonly InterleaveOptions _interleave = interleaveOptions ?? InterleaveOptions.Disabled;
+
     public JobKind Kind => JobKind.BuildFeed;
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildFeed requires an account.");
+        // Build instrumentation (FeedBuildStat) is captured from here to the end of the method,
+        // including the no-op path — a build that changed nothing is exactly the observation worth
+        // keeping, and it was the one the old log line never made.
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var capture = new BuildCapture();
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var artifact = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
@@ -103,7 +131,13 @@ public class BuildFeedJobHandler(
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         // The online residual head for this Active artifact, loaded once and folded into every score
         // (first-pass ranking + final predicted rating). Zero head ⇒ no change from the base model.
-        var residual = await residualModel.LoadAsync(accountId, artifact.Id, ct);
+        var residual = await residualModel.LoadAsync(accountId, artifact, ct);
+
+        // The monotone predicted→actual map, fit on this account's own closed loop. Applied to BOTH
+        // scoring passes: it cannot reorder the shortlist (it is monotone by construction), but a
+        // first pass on one scale and a final pass on another would be two different numbers for the
+        // same title, and the shortlist cut-off would be taken on a scale nothing else uses.
+        var calibrator = await calibration.GetAsync(accountId, ct);
         var minPredictedRaw = await db.ContentFilters
             .Where(f => f.AccountId == accountId && f.Kind == Domain.Filters.FilterKind.MinPredictedRating)
             .Select(f => f.Value)
@@ -114,7 +148,9 @@ public class BuildFeedJobHandler(
 
         // ── Phase 1: widen the pool ─────────────────────────────────────────────────────
         ReportProgress(job, accountId, 10, "Scouting fresh candidates");
-        await candidateGenerator.RefreshPoolAsync(taste, account.Region, ct);
+        // `now` is threaded in so the seed rotation is a pure function of the build's own timestamp —
+        // the same replayability contract the row anchors hold.
+        var poolRefresh = await candidateGenerator.RefreshPoolAsync(accountId, taste, account.Region, now, ct);
 
         // ── Phase 2: first-pass score every eligible candidate ─────────────────────────
         // Hybrid retrieval: the popularity coverage slice UNIONED with a personalized pgvector ANN
@@ -135,7 +171,7 @@ public class BuildFeedJobHandler(
         var poolIds = pool.Where(t => poolVectors.ContainsKey(t.Id)).Select(t => t.Id).ToList();
         var firstPass = engine.Score(artifact.ArtifactBytes, poolIds.Select(id => poolVectors[id]).ToArray());
         var shortlistIds = poolIds.Zip(firstPass, (id, score) =>
-                (id, score: score + (float)OnlineResidualModel.Residual(residual.Weights, residual.Bias, poolVectors[id])))
+                (id, score: calibrator.Calibrate(score + OnlineResidualModel.Residual(residual, poolVectors[id]))))
             .OrderByDescending(x => x.score)
             .Take(ShortlistSize)
             .Select(x => x.id)
@@ -171,28 +207,99 @@ public class BuildFeedJobHandler(
             dislikeProfile, ordered.Select(t => t.Id).ToList(), ct);
         var candidates = ordered.Zip(scored, (title, row) =>
         {
-            var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, finalVectors[title.Id]);
+            // base + residual, then the calibrator, then the demotion — the fixed order every
+            // scoring surface uses. The pre-calibration value and the map's delta are carried on the
+            // candidate so the exposure log (Phase 2) can persist what the model said before the
+            // calibrator touched it, without re-deriving it from a number that has already moved.
+            var adjusted = row.Score + OnlineResidualModel.Residual(residual, finalVectors[title.Id]);
+            var calibrated = calibrator.Calibrate(adjusted);
             var predicted = DislikeSignal.ApplyDemotion(
-                Math.Clamp((decimal)adjusted, 0m, 10m), demotions.GetValueOrDefault(title.Id));
-            return new Candidate(title, row, predicted);
+                (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
+            return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
         }).ToList();
         await PersistScoresAsync(accountId, artifact.Id, candidates, now, ct);
 
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
         ReportProgress(job, accountId, 85, "Assembling tonight's picks");
-        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, ct);
+        var snapshot = await AssembleAsync(account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, capture, ct);
+
+        // Written on the tracked context before either exit below commits, so the no-op path records
+        // its no-op. The eligible-pool count is the supply ceiling: when retrieval asks for more
+        // slots than this, ranking is not the problem.
+        db.FeedBuildStats.Add(new FeedBuildStat
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = snapshot?.Id,
+            ModelArtifactId = artifact.Id,
+            BuiltAt = now,
+            Mode = snapshot is null
+                ? FeedBuildOutcome.NoOp
+                : capture.Mode == FeedBuildMode.Preserve ? FeedBuildOutcome.Preserve : FeedBuildOutcome.Fresh,
+            CandidateCount = poolRefresh.Discovered,
+            NewCandidatesUpserted = poolRefresh.NewlyUpserted,
+            EligiblePoolCount = await eligibility.EligibleTitles(accountId).CountAsync(ct),
+            ShortlistCount = candidates.Count,
+            HeroEligibleCount = capture.HeroEligibleCount,
+            ShortlistP50 = Percentile(candidates, 0.50d),
+            ShortlistP90 = Percentile(candidates, 0.90d),
+            RailsDropped = capture.RailsDropped,
+            DegradedReason = capture.DegradedReason,
+            DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        });
+
+        // Supply just moved, so enrichment has work. A title that is brand new to the catalogue has
+        // no embedding and no attributes: it is invisible to the ANN retrieval arm and to rail
+        // similarity, and 13 of its 92 feature slots read zero while every training row's read live.
+        // Enrichment used to be enqueued from the onboarding chain and nowhere else, which is why
+        // ~1,360 discovered titles had never been embedded. Enqueued on BOTH exits below — a
+        // Preserve/no-op build discovers candidates exactly like a fresh one does, and suppressing
+        // the enqueue with the snapshot would starve enrichment precisely on the quiet nights.
+        if (poolRefresh.NewlyUpserted > 0)
+        {
+            await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct);
+        }
 
         if (snapshot is null)
         {
-            // Preserve-mode no-op: the assembled feed is item-for-item what the Active snapshot
-            // already serves, so nothing is written and no feed-ready reseed is announced — the
-            // whole point of the stable "tonight" contract is that a background delta-sync poll
-            // cannot churn the page the user is reading. TitleScores were persisted above, so
-            // score freshness is not lost; the page itself stays put.
-            job.ProgressMessage = "feed unchanged — kept tonight's picks";
-            await db.SaveChangesAsync(ct);
-            events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
-            logger.LogInformation("Feed unchanged for {AccountId} — snapshot suppressed.", accountId);
+            // Preserve-mode: the assembled feed is item-for-item what the Active snapshot already
+            // serves, so no new snapshot is minted and no feed-ready reseed is announced — the whole
+            // point of the stable "tonight" contract is that a background delta-sync poll cannot
+            // churn the page the user is reading.
+            //
+            // The scores are a separate question. AssembleAsync has already written any moved
+            // ratings onto the EXISTING rows (see ApplyScoreDrift); all that is left here is to say
+            // so, on a frame that carries the snapshot's unchanged GeneratedAt precisely so the
+            // client can patch in place instead of remounting. When nothing moved, this is the true
+            // no-op it always was.
+            var scoreUpdates = capture.ScoreUpdates;
+            job.ProgressMessage = scoreUpdates.Count > 0
+                ? $"kept tonight's picks — {scoreUpdates.Count} score{(scoreUpdates.Count == 1 ? "" : "s")} recalibrated"
+                : "feed unchanged — kept tonight's picks";
+            // Absorbing, not plain: the enqueues above are check-then-insert against the partial
+            // unique index, and losing that race means the work is already scheduled. The build's
+            // own writes — the stat row, the scores, the in-place rating updates — must not roll
+            // back over a coalesced job.
+            await db.SaveAbsorbingRebuildRaceAsync(ct);
+            if (scoreUpdates.Count > 0 && capture.PreservedGeneratedAt is { } preservedAt)
+            {
+                events.Publish(
+                    accountId,
+                    PipelineEventTypes.FeedScoresUpdated,
+                    FeedScoreDrift.Payload(preservedAt, scoreUpdates));
+            }
+
+            events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
+            {
+                ["kind"] = "feed",
+                // Items did not move, so nothing changed pick-wise — stated rather than omitted, so
+                // the post-sync copy can say "0 picks changed" instead of waiting for a number that
+                // is never coming.
+                ["picksChanged"] = 0,
+            });
+            logger.LogInformation(
+                "Feed unchanged for {AccountId} — snapshot suppressed ({Recalibrated} score(s) updated in place).",
+                accountId, scoreUpdates.Count);
             return;
         }
 
@@ -216,20 +323,161 @@ public class BuildFeedJobHandler(
             });
         }
 
-        await db.SaveChangesAsync(ct);
+        // A NEW snapshot exists, so the titles that carry the day have changed and their lens copy
+        // is owed. Enqueued here and only here — deliberately not on the Preserve path, because
+        // that page is unchanged and its copy is already written. This is what "per FRESH build"
+        // means for the lens volume basis: eight builds in nine minutes produce one of these, not
+        // eight. Priority 3 puts it behind the feed it decorates; it never blocks the build, whose
+        // why pass is already time-boxed and would turn into a timeout if generation joined it.
+        await EnqueueOnceAsync(accountId, JobKind.PersonaliseTitles, priority: 3, cursor: null, now, ct);
+
+        // And the narrative itself, when the account's taste has actually moved. The comparison is
+        // against the stored fingerprint, not a clock, so an ordinary week of ratings costs nothing
+        // and a genuine shift is picked up the same night rather than waiting for Sunday.
+        await EnqueueNarrativeIfProfileMovedAsync(accountId, taste, now, ct);
+
+        // See the no-op path above: the availability and enrichment enqueues both race the index.
+        await db.SaveAbsorbingRebuildRaceAsync(ct);
 
         events.Publish(accountId, PipelineEventTypes.StageChanged, new Dictionary<string, object?> { ["stage"] = "FeedReady" });
         events.Publish(accountId, PipelineEventTypes.FeedReady, new Dictionary<string, object?>
         {
             ["snapshotId"] = snapshot.Id,
             ["generatedAt"] = snapshot.GeneratedAt,
+            // The delta sync that triggered this rebuild finished minutes ago and could not know
+            // this number — the coordinator enqueues the build asynchronously and must never block
+            // on it. So the sync reports what it ingested, and the follow-up frame reports what that
+            // did to the page. The client joins the two.
+            ["picksChanged"] = capture.PicksChanged,
+            ["triggerReason"] = job.TriggerReason,
         });
-        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "feed" });
+        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
+        {
+            ["kind"] = "feed",
+            ["picksChanged"] = capture.PicksChanged,
+        });
         logger.LogInformation("Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored).",
             snapshot.Id, accountId, candidates.Count);
     }
 
-    private sealed record Candidate(Title Title, ScoredRow Row, decimal Predicted);
+    /// <summary>
+    /// The in-flight guard every enqueue in this codebase uses: check the partial unique index's
+    /// own predicate, then insert. Losing the race is normal and is absorbed by
+    /// <c>SaveAbsorbingRebuildRaceAsync</c> at the call site — the point of the check is to avoid
+    /// provoking it, not to make it impossible.
+    /// </summary>
+    private async Task EnqueueOnceAsync(
+        Guid accountId, JobKind kind, short priority, string? cursor, DateTime now, CancellationToken ct)
+    {
+        var inFlight = await db.SyncJobs.AnyAsync(
+            j => j.AccountId == accountId && j.Kind == kind
+                && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
+        if (inFlight)
+        {
+            return;
+        }
+
+        db.SyncJobs.Add(new SyncJob
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            Priority = priority,
+            EnqueuedAt = now,
+            CursorJson = cursor,
+        });
+    }
+
+    /// <summary>
+    /// Queues a narrative rewrite when the account's taste fingerprint no longer matches the one
+    /// its current narrative was written from. Computing the fingerprint costs a handful of
+    /// aggregate queries and no LLM spend, so it is cheap to ask every Fresh build; writing the
+    /// narrative is what costs, and that only happens when the answer is yes.
+    /// </summary>
+    private async Task EnqueueNarrativeIfProfileMovedAsync(
+        Guid accountId, FeatureVectorBuilder.TasteState taste, DateTime now, CancellationToken ct)
+    {
+        try
+        {
+            var built = await tasteFacts.BuildAsync(accountId, taste, now, ct);
+            var current = await db.AccountTasteNarratives
+                .Where(n => n.AccountId == accountId)
+                .OrderByDescending(n => n.Version)
+                .Select(n => n.ProfileHash)
+                .FirstOrDefaultAsync(ct);
+            if (string.Equals(current, built.ProfileHash, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await EnqueueOnceAsync(accountId, JobKind.BuildTasteNarrative, priority: 4, cursor: null, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A narrative is a decoration on a feed that has already been built and is already
+            // being served. Nothing here is worth failing the build over.
+            logger.LogWarning(ex, "Could not evaluate the taste fingerprint for {AccountId}; narrative not queued.", accountId);
+        }
+    }
+
+    /// <summary>
+    /// One scored candidate. <paramref name="Predicted"/> is what the user sees;
+    /// <paramref name="BaseScore"/> is the pre-calibration value (base model + online residual) and
+    /// <paramref name="CalibrationDelta"/> is how far the calibrator moved it. The latter two are
+    /// carried for the exposure log the closed-loop work lands next — deliberately NOT persisted as
+    /// columns on <c>TitleScore</c>, which stays the write-only serving cache it is documented to be.
+    /// </summary>
+    private sealed record Candidate(
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
+
+    /// <summary>
+    /// The counts assembly knows and the caller needs for <see cref="FeedBuildStat"/>. A mutable
+    /// bag rather than a wider return type, so instrumentation never changes what assembly RETURNS —
+    /// the null-means-no-op contract is load-bearing and stays exactly as it was.
+    /// </summary>
+    private sealed class BuildCapture
+    {
+        public FeedBuildMode Mode { get; set; }
+
+        public int HeroEligibleCount { get; set; }
+
+        public int RailsDropped { get; set; }
+
+        public string? DegradedReason { get; set; }
+
+        /// <summary>
+        /// How many of this feed's cards are titles the previous Active snapshot did not show. The
+        /// post-sync moment's "3 picks changed" — computed here because assembly is the only place
+        /// that holds both feeds at once, and reported over SSE rather than persisted, so the whole
+        /// visible-recalibration change stays migration-free.
+        /// </summary>
+        public int PicksChanged { get; set; }
+
+        /// <summary>
+        /// Set on the score-only Preserve path: the UNCHANGED GeneratedAt of the snapshot whose rows
+        /// were updated in place. Null on every other path, including a true no-op.
+        /// </summary>
+        public DateTime? PreservedGeneratedAt { get; set; }
+
+        /// <summary>Cards whose displayed rating moved on the score-only Preserve path.</summary>
+        public IReadOnlyList<FeedScoreUpdate> ScoreUpdates { get; set; } = [];
+    }
+
+    /// <summary>
+    /// Nearest-rank percentile over the shortlist's predicted ratings — no interpolation, so every
+    /// reported value is a number the model actually produced for a real title.
+    /// </summary>
+    private static decimal? Percentile(IReadOnlyList<Candidate> candidates, double quantile)
+    {
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        var sorted = candidates.Select(c => c.Predicted).OrderBy(p => p).ToList();
+        var index = Math.Clamp((int)Math.Ceiling(quantile * sorted.Count) - 1, 0, sorted.Count - 1);
+        return sorted[index];
+    }
 
     private async Task PersistScoresAsync(Guid accountId, Guid artifactId, IReadOnlyList<Candidate> candidates, DateTime now, CancellationToken ct)
     {
@@ -268,7 +516,8 @@ public class BuildFeedJobHandler(
     /// </summary>
     private async Task<FeedSnapshot?> AssembleAsync(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now, CancellationToken ct)
+        IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now,
+        BuildCapture capture, CancellationToken ct)
     {
         // ── The floor is soft; the content rules are not ────────────────────────────────────
         // Content filters are the user's statement about CONTENT — they bind absolutely and are
@@ -306,6 +555,7 @@ public class BuildFeedJobHandler(
                 ?? "No candidates survived this build. Try relaxing a filter.";
         }
 
+        capture.DegradedReason = degradedReason;
         if (degradedReason is not null)
         {
             logger.LogWarning("Feed build degraded for {AccountId}: {Reason}", account.Id, degradedReason);
@@ -382,6 +632,7 @@ public class BuildFeedJobHandler(
 
         var mode = FeedBuildPolicy.Decide(
             previousSnapshot?.GeneratedAt, previousSnapshot?.ModelArtifactId, artifact.Id, triggerReason, now);
+        capture.Mode = mode;
 
         // The drift pick: the loved title whose plot embedding sits nearest the user's RECENT-taste
         // centroid, so one row always reflects where taste is NOW. Null when there is no recent
@@ -483,14 +734,100 @@ public class BuildFeedJobHandler(
             return ageDays > 365 ? 1m : 1m + (decimal)(0.10 * Math.Exp(-ageDays / 180d));
         }
 
+        // ── Team-draft interleaving ─────────────────────────────────────────────────────────
+        // Off unless INTERLEAVE_ENABLED says otherwise, and Fresh-only: a Preserve rebuild's whole
+        // contract is that tonight's seats do not move, so re-drafting them would be a different
+        // page under the same GeneratedAt. Preserve instead CARRIES the attribution forward from
+        // the snapshot it preserves (below), which keeps a kept card counting for the ranker that
+        // actually put it there.
+        //
+        // `interleaver` being null is the single branch that decides this. Every `else` below is
+        // the code that shipped before this harness existed, unchanged.
+        var interleaver = mode == FeedBuildMode.Fresh ? SlateInterleaver.For(_interleave) : null;
+
+        // Minted here rather than at the write below because a slate's seed and its InterleaveGroup
+        // are both derived from it. Harmlessly discarded on the Preserve no-op path, which returns
+        // before any of it is used.
+        var snapshotId = Guid.NewGuid();
+
+        // Which ranker contributed each title, filled by the drafts and read by AddItem. Keyed by
+        // title and not by (row, rank) because the shared `used` set already guarantees a title
+        // appears at most once on the whole feed.
+        var attribution = new Dictionary<Guid, (string PolicyId, Guid Group)>();
+
+        // One slate, drafted between the two policies. `phases` are admissibility predicates tried
+        // in order: the hero passes three of them (diversity + confidence floor, then the floor
+        // alone, then anything) so the draft reproduces the same three-stage selection the
+        // non-interleaved hero has always done, with the alternation carrying across the stages so
+        // relaxing never costs balance. A rail passes none and takes the pool as it stands.
+        List<Candidate> DraftSlate(
+            FeedRowKind row,
+            Guid? anchorId,
+            IReadOnlyList<(Candidate Candidate, decimal Fresh, double Affinity)> pool,
+            int size,
+            params Func<Candidate, IReadOnlyList<Candidate>, bool>[] phases)
+        {
+            var byId = pool.ToDictionary(x => x.Candidate.Title.Id);
+            var draft = interleaver!.Begin(
+                snapshotId,
+                FeedPaginator.RowKeyFor(row, anchorId),
+                [.. pool.Select(x => new PolicyCandidate(
+                    x.Candidate.Title.Id,
+                    x.Candidate.Predicted,
+                    x.Fresh,
+                    PreferenceBoost(x.Candidate.Title),
+                    x.Candidate.Title.TmdbPopularity ?? 0m,
+                    x.Affinity))]);
+
+            List<Candidate> Selected() => [.. draft.Selected.Select(id => byId[id].Candidate)];
+            var stages = phases.Length > 0
+                ? phases
+                : [(Func<Candidate, IReadOnlyList<Candidate>, bool>)((_, _) => true)];
+            foreach (var phase in stages)
+            {
+                draft.Fill(size, id => phase(byId[id].Candidate, Selected()));
+            }
+
+            foreach (var (titleId, policyId) in draft.Picks)
+            {
+                attribution[titleId] = (policyId, draft.GroupId);
+            }
+
+            return Selected();
+        }
+
         // Hero: greedy pick with genre-diversity shaping (MMR with Jaccard until embeddings land).
         var heroPool = candidates
             .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
             .OrderByDescending(c => c.Predicted * Freshness(c.Title) * (decimal)PreferenceBoost(c.Title))
             .ToList();
+        // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
+        // means the headline row is silently reaching, which is the founder's complaint in his words.
+        capture.HeroEligibleCount = heroPool.Count;
         var candidatesById = candidates.ToDictionary(c => c.Title.Id);
         var hero = new List<Candidate>();
-        if (mode == FeedBuildMode.Preserve)
+        if (interleaver is not null)
+        {
+            // The interleaved hero. The pool is the WIDE one — the never-open-blank set — and the
+            // confidence floor is applied as an admissibility phase rather than as a filter, so the
+            // three stages the hero has always had (diversity inside the floor → the floor alone →
+            // anything with a poster) become three phases of one draft. Every seat therefore has a
+            // contributing ranker, including the ones the floor had to be relaxed to fill, which is
+            // what makes "PolicyId on every item" a property rather than a hope.
+            var heroFloor = Math.Max(HeroConfidenceFloor, effectiveFloor);
+            hero = DraftSlate(
+                FeedRowKind.Hero,
+                null,
+                [.. candidates
+                    .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
+                    .Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
+                HeroSize,
+                (c, chosen) => c.Predicted >= heroFloor
+                    && (chosen.Count == 0 || chosen.Max(h => Similarity(h.Title, c.Title)) < 0.8d),
+                (c, _) => c.Predicted >= heroFloor,
+                (_, _) => true);
+        }
+        else if (mode == FeedBuildMode.Preserve)
         {
             // Hero continuity: last build's picks in their order, minus anything that left the
             // candidate set — a rated or not-interested title falls out of eligibility upstream, so
@@ -503,35 +840,38 @@ public class BuildFeedJobHandler(
                 .Take(HeroSize));
         }
 
-        foreach (var candidate in heroPool)
+        if (interleaver is null)
         {
-            if (hero.Count >= HeroSize)
+            foreach (var candidate in heroPool)
             {
-                break;
+                if (hero.Count >= HeroSize)
+                {
+                    break;
+                }
+
+                if (hero.Contains(candidate))
+                {
+                    continue; // already kept from the previous build
+                }
+
+                var maxSim = hero.Count == 0 ? 0d : hero.Max(h => Similarity(h.Title, candidate.Title));
+                if (maxSim < 0.8d)
+                {
+                    hero.Add(candidate);
+                }
             }
 
-            if (hero.Contains(candidate))
+            if (hero.Count < HeroSize)
             {
-                continue; // already kept from the previous build
+                hero.AddRange(heroPool.Except(hero).Take(HeroSize - hero.Count));
             }
-
-            var maxSim = hero.Count == 0 ? 0d : hero.Max(h => Similarity(h.Title, candidate.Title));
-            if (maxSim < 0.8d)
-            {
-                hero.Add(candidate);
-            }
-        }
-
-        if (hero.Count < HeroSize)
-        {
-            hero.AddRange(heroPool.Except(hero).Take(HeroSize - hero.Count));
         }
 
         // Never open blank: if the 7.5 confidence floor left the hero short — a sparse-history user
         // whose best predictions all sit below it — backfill from the top remaining scored candidates
         // (poster + min-predicted only, floor dropped). The free-tier home is the hero alone, so an
         // empty hero is an empty product. These are honest model rankings, just lower-confidence.
-        if (hero.Count < HeroSize)
+        if (interleaver is null && hero.Count < HeroSize)
         {
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
@@ -545,8 +885,17 @@ public class BuildFeedJobHandler(
         // is superseded until a genuinely different feed is in hand.
         var planned = new List<PlannedItem>();
 
-        void AddItem(FeedRowKind row, Title? anchor, int rank, Candidate candidate) =>
-            planned.Add(new PlannedItem(row, anchor?.Id, rank, candidate, WhyContext(candidate, anchor)));
+        void AddItem(FeedRowKind row, Title? anchor, int rank, Candidate candidate)
+        {
+            var item = new PlannedItem(row, anchor?.Id, rank, candidate, WhyContext(candidate, anchor));
+            if (attribution.TryGetValue(candidate.Title.Id, out var drafted))
+            {
+                item.PolicyId = drafted.PolicyId;
+                item.InterleaveGroup = drafted.Group;
+            }
+
+            planned.Add(item);
+        }
 
         for (var i = 0; i < hero.Count; i++)
         {
@@ -630,18 +979,31 @@ public class BuildFeedJobHandler(
             if (members.Count < RowSize)
             {
                 var keptIds = members.Select(m => m.Title.Id).ToHashSet();
-                members.AddRange(candidates
+                var railPool = candidates
                     .Where(c => !used.Contains(c.Title.Id) && !keptIds.Contains(c.Title.Id)
                         && !reserved.Contains(c.Title.Id) && c.Predicted >= effectiveFloor)
                     .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
                     .Where(x => x.Sim > 0.15d)
-                    .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
-                    .Take(RowSize - members.Count)
-                    .Select(x => x.Candidate));
+                    .ToList();
+
+                // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
+                // the calibrated policy reproduces this row's historical comparator exactly rather
+                // than substituting the hero's.
+                members.AddRange(interleaver is not null
+                    ? DraftSlate(
+                        FeedRowKind.BecauseYouLoved,
+                        anchor.Id,
+                        [.. railPool.Select(x => (x.Candidate, Fresh: 1m, Affinity: 0.5d + x.Sim))],
+                        RowSize - members.Count)
+                    : railPool
+                        .OrderByDescending(x => (double)x.Candidate.Predicted * (0.5 + x.Sim) * PreferenceBoost(x.Candidate.Title))
+                        .Take(RowSize - members.Count)
+                        .Select(x => x.Candidate));
             }
 
             if (members.Count < RowMinMembers)
             {
+                capture.RailsDropped++;
                 continue; // a thin row reads worse than no row
             }
 
@@ -655,11 +1017,17 @@ public class BuildFeedJobHandler(
         // ── v1.1 rows: Deep cuts (high predicted × low popularity) + New & for you ──────────
         // Reserved quotas above guarantee these rows can still reach their floor even after the
         // loved fill; the greedy top-slice selection is otherwise unchanged.
-        var deepCuts = candidates
-            .Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c))
-            .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
-            .Take(RowSize)
-            .ToList();
+        var deepCutPool = candidates.Where(c => !used.Contains(c.Title.Id) && IsDeepCut(c)).ToList();
+        var deepCuts = interleaver is not null
+            ? DraftSlate(
+                FeedRowKind.DeepCuts,
+                null,
+                [.. deepCutPool.Select(c => (Candidate: c, Fresh: 1m, Affinity: 1d))],
+                RowSize)
+            : deepCutPool
+                .OrderByDescending(c => (double)c.Predicted * PreferenceBoost(c.Title))
+                .Take(RowSize)
+                .ToList();
         if (deepCuts.Count >= RowMinMembers)
         {
             for (var i = 0; i < deepCuts.Count; i++)
@@ -668,12 +1036,22 @@ public class BuildFeedJobHandler(
                 AddItem(FeedRowKind.DeepCuts, null, i, deepCuts[i]);
             }
         }
+        else
+        {
+            capture.RailsDropped++;
+        }
 
-        var newForYou = candidates
-            .Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c))
-            .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
-            .Take(RowSize)
-            .ToList();
+        var newForYouPool = candidates.Where(c => !used.Contains(c.Title.Id) && IsNewForYou(c)).ToList();
+        var newForYou = interleaver is not null
+            ? DraftSlate(
+                FeedRowKind.NewForYou,
+                null,
+                [.. newForYouPool.Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
+                RowSize)
+            : newForYouPool
+                .OrderByDescending(c => (double)c.Predicted * (double)Freshness(c.Title) * PreferenceBoost(c.Title))
+                .Take(RowSize)
+                .ToList();
         if (newForYou.Count >= RowMinMembers)
         {
             for (var i = 0; i < newForYou.Count; i++)
@@ -682,17 +1060,29 @@ public class BuildFeedJobHandler(
                 AddItem(FeedRowKind.NewForYou, null, i, newForYou[i]);
             }
         }
+        else
+        {
+            capture.RailsDropped++;
+        }
 
         // ── No-op suppression (Preserve only) ───────────────────────────────────────────────
-        // A background rebuild that assembled exactly what is already Active writes nothing: no new
-        // snapshot, no supersede, no feed-ready event — the caller sees null and skips the reseed.
+        // A background rebuild that assembled exactly what is already Active mints no new snapshot:
+        // no supersede, no feed-ready event — the caller sees null and skips the reseed.
         // DegradedReason participates in the comparison so a build that changed only the page's
         // explanation banner still ships.
+        //
+        // "No new snapshot" is NOT the same as "write nothing", and conflating the two is what made
+        // recalibration invisible. If the model's opinion of a kept card has genuinely moved, the
+        // EXISTING snapshot's rows are updated in place — same snapshot id, same GeneratedAt — and
+        // the caller announces it on its own SSE frame. See FeedScoreDrift for why the two decisions
+        // are separate. When nothing moved, this stays the true no-op it has always been.
         if (mode == FeedBuildMode.Preserve
             && previousSnapshot is not null
             && string.Equals(previousSnapshot.DegradedReason, degradedReason, StringComparison.Ordinal)
             && SameFeed(previousItems, planned))
         {
+            capture.PreservedGeneratedAt = previousSnapshot.GeneratedAt;
+            capture.ScoreUpdates = ApplyScoreDrift(previousItems, planned, Freshness);
             return null;
         }
 
@@ -728,7 +1118,7 @@ public class BuildFeedJobHandler(
 
         var snapshot = new FeedSnapshot
         {
-            Id = Guid.NewGuid(),
+            Id = snapshotId,
             AccountId = account.Id,
             ModelArtifactId = artifact.Id,
             GeneratedAt = now,
@@ -736,6 +1126,12 @@ public class BuildFeedJobHandler(
             DegradedReason = degradedReason,
         };
         db.FeedSnapshots.Add(snapshot);
+
+        // How much of the page is genuinely different from what it replaces — the "3 picks changed"
+        // the post-sync moment reports. Counted before the write so it reads the OLD snapshot's
+        // titles, and by title rather than by slot: a card that merely moved rank is the same pick.
+        var previousTitleIds = previousItems.Select(i => i.TitleId).ToHashSet();
+        capture.PicksChanged = planned.Count(i => !previousTitleIds.Contains(i.Candidate.Title.Id));
 
         foreach (var item in planned)
         {
@@ -748,26 +1144,78 @@ public class BuildFeedJobHandler(
                 AnchorTitleId = item.AnchorTitleId,
                 Rank = item.Rank,
                 TitleId = item.Candidate.Title.Id,
-                PredictedRating = Math.Round(item.Candidate.Predicted, 1),
-                FinalScore = Math.Round(item.Candidate.Predicted * Freshness(item.Candidate.Title), 3),
+                PredictedRating = DisplayRating(item.Candidate),
+                FinalScore = FinalScoreOf(item.Candidate, Freshness),
                 WhyThisSentence = item.WhyThis,
-                ExplanationJson = JsonSerializer.Serialize(
-                    item.Candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })),
+                ExplanationJson = ExplanationOf(item.Candidate),
             });
         }
 
-        // Prune snapshot history beyond the last 7.
-        var staleIds = await db.FeedSnapshots
-            .Where(s => s.AccountId == account.Id)
-            .OrderByDescending(s => s.GeneratedAt)
-            .Skip(7)
-            .Select(s => s.Id)
-            .ToListAsync(ct);
-        if (staleIds.Count > 0)
+        // ── Interleaving attribution carried across a Preserve rebuild ──────────────────────
+        // A Preserve rebuild keeps tonight's seats, so the cards it re-stages are the SAME cards
+        // the interleaved Fresh build drafted — and an exposure row for them with no PolicyId would
+        // quietly drop them out of the experiment while they are still on screen. The attribution
+        // is read back from the snapshot being preserved rather than stored a second time on
+        // FeedItem: it is already durable on the append-only log, and one nullable-column pair is
+        // enough schema for this.
+        //
+        // Runs whether or not the switch is currently on. Turning the experiment off must stop new
+        // slates from being drafted; it must not orphan the ones already in flight.
+        if (mode == FeedBuildMode.Preserve && previousSnapshot is not null)
         {
-            await db.FeedItems.Where(i => staleIds.Contains(i.FeedSnapshotId)).ExecuteDeleteAsync(ct);
-            await db.FeedSnapshots.Where(s => staleIds.Contains(s.Id)).ExecuteDeleteAsync(ct);
+            var carried = (await db.ExposureEvents
+                    .Where(e => e.AccountId == account.Id
+                        && e.FeedSnapshotId == previousSnapshot.Id
+                        && e.InterleaveGroup != null)
+                    .Select(e => new { e.TitleId, e.PolicyId, e.InterleaveGroup })
+                    .ToListAsync(ct))
+                .GroupBy(e => e.TitleId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            foreach (var item in planned.Where(i => i.PolicyId is null))
+            {
+                if (carried.TryGetValue(item.Candidate.Title.Id, out var previous))
+                {
+                    item.PolicyId = previous.PolicyId;
+                    item.InterleaveGroup = previous.InterleaveGroup;
+                }
+            }
         }
+
+        // ── Exposure log ────────────────────────────────────────────────────────────────────
+        // Staged on the SAME tracked context as the snapshot rows above, so the exposures and the
+        // cards they describe commit or roll back together — one round trip, no new transaction.
+        // Staged, never saved here: this method's contract is that AssembleAsync writes nothing to
+        // the database on its own, and the caller's SaveChanges is what makes any of it real.
+        //
+        // Collision is structurally impossible on this path: the snapshot id was minted eight lines
+        // ago, so no row can already carry it. The Preserve no-op path returns above without ever
+        // reaching here, which is correct — it renders nothing new, and the exposure that matters
+        // for a preserved page is the FeedRefill/serve row the endpoint writes when it is actually
+        // fetched.
+        await exposures.Stage(
+            account.Id,
+            ExposureSurface.FeedHero,
+            snapshot.Id,
+            artifact.Id,
+            now,
+            planned.Where(i => i.Row == FeedRowKind.Hero).Select(CardOf).ToList(),
+            ct);
+        await exposures.Stage(
+            account.Id,
+            ExposureSurface.FeedRow,
+            snapshot.Id,
+            artifact.Id,
+            now,
+            planned.Where(i => i.Row != FeedRowKind.Hero).Select(CardOf).ToList(),
+            ct);
+
+        // Prune snapshot history beyond the last 7 (see FeedSnapshotRetention — same behaviour,
+        // extracted so the policy is testable without driving a whole feed build). This is now
+        // SAFE in a way it was not before: the durable record of what was served has moved out of
+        // FeedItem, so evicting a snapshot no longer destroys history — ExposureEvent carries no
+        // foreign key to it.
+        await FeedSnapshotRetention.PruneAsync(db, account.Id, ct);
 
         return snapshot;
     }
@@ -794,6 +1242,24 @@ public class BuildFeedJobHandler(
         public string WhyThis { get; set; } = ExplanationTemplater.BuildSentence(whyContext);
 
         /// <summary>
+        /// Where <see cref="WhyThis"/> came from, for the exposure log. Defaults to the templater
+        /// because that is what the constructor just wrote; every upgrade path re-stamps it.
+        /// </summary>
+        public string WhySource { get; set; } = ExposureWhySource.Templater;
+
+        /// <summary>The agent's fit verdict for this card where one was observed — otherwise discarded.</summary>
+        public decimal? LlmFit { get; set; }
+
+        /// <summary>
+        /// The ranking policy that drafted this seat, on an interleaved Fresh build. Null on every
+        /// other path — including a card the why pass swapped in, which neither ranker chose.
+        /// </summary>
+        public string? PolicyId { get; set; }
+
+        /// <summary>The slate the draft belonged to. Travels with <see cref="PolicyId"/> or not at all.</summary>
+        public Guid? InterleaveGroup { get; set; }
+
+        /// <summary>
         /// The low-fit hero swap: this slot now carries a different candidate. The why resets to
         /// the replacement's deterministic templater sentence; the caller upgrades it to an agent
         /// line when one is earned within budget.
@@ -803,6 +1269,14 @@ public class BuildFeedJobHandler(
             Candidate = candidate;
             WhyContext = whyContext;
             WhyThis = ExplanationTemplater.BuildSentence(whyContext);
+            WhySource = ExposureWhySource.Templater;
+            LlmFit = null;
+            // The interleaving attribution goes with it. A low-fit hero swap is a PRODUCT guard, not
+            // a ranking decision: the replacement was drafted by nobody, and crediting the team
+            // whose seat it took would feed the sequential test an outcome neither ranker earned.
+            // The slate loses that seat instead — a small, stated cost, paid on the honest side.
+            PolicyId = null;
+            InterleaveGroup = null;
         }
     }
 
@@ -840,6 +1314,7 @@ public class BuildFeedJobHandler(
                 previousWhys[(item.Row, item.AnchorTitleId, item.TitleId)] = item.WhyThisSentence;
             }
         }
+
         var pending = new List<PlannedItem>(planned.Count);
         foreach (var item in planned)
         {
@@ -847,6 +1322,7 @@ public class BuildFeedJobHandler(
                 && AcceptsWhy(kept))
             {
                 item.WhyThis = kept;
+                item.WhySource = ExposureWhySource.Preserved;
             }
             else
             {
@@ -871,9 +1347,15 @@ public class BuildFeedJobHandler(
                 heroFits[item.Candidate.Title.Id] = hit!.Fit;
             }
 
+            if (cachedHit)
+            {
+                item.LlmFit = (decimal)hit!.Fit;
+            }
+
             if (cachedHit && AcceptsWhy(hit!.Why))
             {
                 item.WhyThis = hit.Why;
+                item.WhySource = ExposureWhySource.Cache;
             }
             else
             {
@@ -881,20 +1363,28 @@ public class BuildFeedJobHandler(
             }
         }
 
-        // Budget and ceiling are owned here so the hero swap pass below draws on the SAME clock —
-        // a swap is part of this why pass, never a second budget.
-        using var whyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        whyCts.CancelAfter(WhyPassCeiling);
-        var started = System.Diagnostics.Stopwatch.StartNew();
+        // ONE budget for the whole why pass, including the hero swap that follows it — a swap is
+        // part of this pass, never a second budget. The mechanics (first batch always runs, soft
+        // budget between batches, hard ceiling inside one) live in LlmBudgetLoop, shared with the
+        // paginator, Ask Reel and lens generation.
+        using var loop = new LlmBudgetLoop(new LlmBudgetOptions(WhyPassBudget, WhyPassCeiling, RerankBatch), ct);
 
         if (uncached.Count > 0 && agent.IsAvailable)
         {
-            await CurateWhysAsync(accountId, taste, uncached, anchorNames, heroFits, started, whyCts, ct);
-        }
+            var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
+            var contexts = await RerankContextsAsync(planned, ct);
 
-        if (agent.IsAvailable && heroFits.Count > 0)
-        {
-            await SwapLowFitHeroesAsync(accountId, taste, planned, heroFits, heroSpares, heroContext, started, whyCts, ct);
+            // A title can sit on two rails, so it is judged twice at two different prompt
+            // positions. Averaging the verdicts is the caller's half of the position-bias
+            // mitigation — see PositionDebiasedFit.
+            var debiased = new PositionDebiasedFit();
+            await CurateWhysAsync(accountId, persona, uncached, anchorNames, heroFits, contexts, debiased, loop, ct);
+
+            if (heroFits.Count > 0)
+            {
+                await SwapLowFitHeroesAsync(
+                    accountId, persona, planned, heroFits, heroSpares, heroContext, contexts, debiased, loop, ct);
+            }
         }
 
         // No-repeat guard, per rail: two cards rendering IDENTICAL text is exactly the founder's
@@ -907,10 +1397,88 @@ public class BuildFeedJobHandler(
                 if (!seen.Add(item.WhyThis))
                 {
                     item.WhyThis = ExplanationTemplater.BuildDistinctSentence(item.WhyContext, seen);
+                    item.WhySource = ExposureWhySource.Templater;
                 }
             }
         }
     }
+
+    /// <summary>
+    /// The enrichment the rerank prompt used to leave on the floor: tone, era, themes, the seven
+    /// scalars, the credited people and the model's own top contributions, for every planned card.
+    /// Three queries for the whole page — the prompt was previously handed genres and 300
+    /// characters of overview and asked to judge personal fit from that.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, RerankTitleContext>> RerankContextsAsync(
+        List<PlannedItem> planned, CancellationToken ct)
+    {
+        var ids = planned.Select(i => i.Candidate.Title.Id).Distinct().ToList();
+        if (ids.Count == 0)
+        {
+            return new Dictionary<Guid, RerankTitleContext>();
+        }
+
+        var attributes = await db.TitleAttributes
+            .Where(a => ids.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)
+            .ToDictionaryAsync(a => a.TitleId, ct);
+
+        var credits = (await db.TitleCredits
+                .Where(c => ids.Contains(c.TitleId))
+                .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.Role, c.CastOrder, p.Name })
+                .ToListAsync(ct))
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .GroupBy(c => c.TitleId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var contributionsByTitle = planned
+            .GroupBy(i => i.Candidate.Title.Id)
+            .ToDictionary(
+                g => g.Key,
+                g => g.First().Candidate.Row.TopContributions
+                    .OrderByDescending(c => Math.Abs(c.Contribution))
+                    .Take(3)
+                    .Select(c => c.Feature)
+                    .ToList());
+
+        var contexts = new Dictionary<Guid, RerankTitleContext>();
+        foreach (var id in ids)
+        {
+            attributes.TryGetValue(id, out var attrs);
+            var titleCredits = credits.GetValueOrDefault(id) ?? [];
+            contexts[id] = new RerankTitleContext(
+                // Only a closed-vocabulary tone is trusted: rows written before enforcement carry
+                // polluted free-text labels (see AttributeVocabulary).
+                AttributeVocabulary.IsClosedVocabTone(attrs?.Tone) ? attrs!.Tone : null,
+                attrs?.Era,
+                attrs?.Themes ?? [],
+                attrs?.Darkness,
+                attrs?.Pacing,
+                attrs?.Complexity,
+                attrs?.EmotionalIntensity,
+                attrs?.Humor,
+                attrs?.Optimism,
+                attrs?.EnsembleVsSolo,
+                titleCredits.Where(c => c.Role == CreditRole.Director)
+                    .OrderBy(c => c.Name, StringComparer.Ordinal).Select(c => c.Name).FirstOrDefault(),
+                titleCredits.Where(c => c.Role == CreditRole.Writer)
+                    .OrderBy(c => c.Name, StringComparer.Ordinal).Select(c => c.Name).FirstOrDefault(),
+                titleCredits.Where(c => c.Role == CreditRole.Actor)
+                    .OrderBy(c => c.CastOrder ?? int.MaxValue).ThenBy(c => c.Name, StringComparer.Ordinal)
+                    .Select(c => c.Name).Take(3).ToList(),
+                contributionsByTitle.GetValueOrDefault(id) ?? []);
+        }
+
+        return contexts;
+    }
+
+    /// <summary>One candidate in the shape the agent judges, with everything the catalogue knows about it.</summary>
+    private static RerankInput RerankInputFor(
+        Candidate candidate, IReadOnlyDictionary<Guid, RerankTitleContext> contexts) =>
+        new(
+            candidate.Title.Id, candidate.Title.Name, candidate.Title.Year,
+            candidate.Title.MediaType.ToString(), candidate.Title.Genres,
+            candidate.Title.Overview, candidate.Predicted,
+            contexts.GetValueOrDefault(candidate.Title.Id));
 
     /// <summary>
     /// The hero coherence floor. A hero card whose agent fit came in at or below
@@ -923,10 +1491,11 @@ public class BuildFeedJobHandler(
     /// Deterministic: low-fit heroes are handled in rank order, spares in their ranking order.
     /// </summary>
     private async Task SwapLowFitHeroesAsync(
-        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> planned,
+        Guid accountId, LensPersona persona, List<PlannedItem> planned,
         IReadOnlyDictionary<Guid, double> heroFits, IReadOnlyList<Candidate> heroSpares,
         Func<Candidate, ExplanationTemplater.Context> heroContext,
-        System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
+        IReadOnlyDictionary<Guid, RerankTitleContext> contexts, PositionDebiasedFit debiased,
+        LlmBudgetLoop loop, CancellationToken ct)
     {
         var lowFit = planned
             .Where(i => i.Row == FeedRowKind.Hero
@@ -942,7 +1511,7 @@ public class BuildFeedJobHandler(
         var swaps = new List<(PlannedItem Item, Candidate Replacement, double OldFit)>();
         foreach (var item in lowFit)
         {
-            if (spares.Count == 0 || started.Elapsed > WhyPassBudget)
+            if (spares.Count == 0 || loop.BudgetExhausted)
             {
                 // No spare, or no budget to earn the replacement a why: the pick stays, but its
                 // caption must not argue against it — fall back to the templater sentence.
@@ -958,29 +1527,26 @@ public class BuildFeedJobHandler(
             return;
         }
 
-        var batch = swaps
-            .Select(s => new RerankInput(
-                s.Replacement.Title.Id, s.Replacement.Title.Name, s.Replacement.Title.Year,
-                s.Replacement.Title.MediaType.ToString(), s.Replacement.Title.Genres,
-                s.Replacement.Title.Overview, s.Replacement.Predicted))
-            .ToList();
-
-        IReadOnlyList<RerankResult> results;
-        try
+        var batch = swaps.Select(s => RerankInputFor(s.Replacement, contexts)).ToList();
+        var resultByTitle = new Dictionary<Guid, RerankResult>();
+        var stop = await loop.RunAsync(batch, async (inputs, batchCt) =>
         {
-            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
-            results = await agent.RerankBatchAsync(
-                batch, FeedPaginator.QueryForRow(FeedRowKind.Hero), tasteSummary, anchorName: null, whyCts.Token);
-        }
-        catch (Exception ex) when (
-            (ex is OperationCanceledException && whyCts.IsCancellationRequested && !ct.IsCancellationRequested)
-            || ex is HttpRequestException or TaskCanceledException)
+            var results = await agent.RerankBatchAsync(
+                inputs, FeedPaginator.QueryForRow(FeedRowKind.Hero), persona, anchorName: null, batchCt);
+            foreach (var result in results)
+            {
+                debiased.Observe(result);
+                resultByTitle[result.TitleId] = debiased.For(result.TitleId)!;
+            }
+        });
+
+        if (resultByTitle.Count == 0)
         {
             // The replacement could not be judged, so nothing is swapped — but the low-fit LLM
             // captions still go: each original hero keeps its slot with its templater sentence.
-            logger.LogInformation(ex,
-                "Hero swap pass could not judge replacements; {Count} low-fit heroes keep their slots with templater whys.",
-                swaps.Count);
+            logger.LogInformation(
+                "Hero swap pass could not judge replacements ({Stop}); {Count} low-fit heroes keep their slots with templater whys.",
+                stop, swaps.Count);
             foreach (var (item, _, _) in swaps)
             {
                 item.WhyThis = ExplanationTemplater.BuildSentence(item.WhyContext);
@@ -989,7 +1555,6 @@ public class BuildFeedJobHandler(
             return;
         }
 
-        var resultByTitle = results.ToDictionary(r => r.TitleId);
         var rowKey = FeedPaginator.RowKeyFor(FeedRowKind.Hero, null);
         foreach (var (item, replacement, oldFit) in swaps)
         {
@@ -998,33 +1563,34 @@ public class BuildFeedJobHandler(
             if (resultByTitle.TryGetValue(replacement.Title.Id, out var verdict))
             {
                 cache.Set(FeedPaginator.FitKey(accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
+                item.LlmFit = (decimal)verdict.Fit;
                 if (AcceptsWhy(verdict.Why))
                 {
                     item.WhyThis = verdict.Why;
+                    item.WhySource = ExposureWhySource.Llm;
                 }
             }
 
             logger.LogInformation(
-                "Hero swap for {AccountId}: '{Replaced}' (fit {Fit:0.00} ≤ {Floor}) swapped for '{Replacement}'.",
+                "Hero swap for {AccountId}: '{Replaced}' (fit {Fit:0.00} <= {Floor}) swapped for '{Replacement}'.",
                 accountId, replacedName, oldFit, HeroFitFloor, replacement.Title.Name);
         }
     }
 
     /// <summary>
     /// The agent leg of the why pass: rail by rail (so the anchor name rides the prompt and the
-    /// cache key stays per-rail), batched, first batch always allowed to finish, soft budget
-    /// checked BETWEEN batches, hard ceiling backstop — the same mechanics as the paginator's
-    /// curation pass. Accepted lines are cached for both this build and the serve path. The
-    /// stopwatch and ceiling are the caller's, shared with the hero swap pass; every hero fit
-    /// verdict is recorded into <paramref name="heroFits"/> whether or not its why was accepted.
+    /// cache key stays per-rail), batched through the shared budget loop. Accepted lines are cached
+    /// for both this build and the serve path. Every hero fit verdict is recorded into
+    /// <paramref name="heroFits"/> whether or not its why was accepted, and every verdict goes
+    /// through <paramref name="debiased"/> first, so a title judged on two rails is scored on the
+    /// average of its two prompt positions rather than on whichever landed last.
     /// </summary>
     private async Task CurateWhysAsync(
-        Guid accountId, FeatureVectorBuilder.TasteState taste, List<PlannedItem> uncached,
+        Guid accountId, LensPersona persona, List<PlannedItem> uncached,
         IReadOnlyDictionary<Guid, string> anchorNames, Dictionary<Guid, double> heroFits,
-        System.Diagnostics.Stopwatch started, CancellationTokenSource whyCts, CancellationToken ct)
+        IReadOnlyDictionary<Guid, RerankTitleContext> contexts, PositionDebiasedFit debiased,
+        LlmBudgetLoop loop, CancellationToken ct)
     {
-        var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
-        var batchesDone = 0;
         var curated = 0;
 
         foreach (var rail in uncached.GroupBy(i => (i.Row, i.AnchorTitleId)))
@@ -1033,84 +1599,52 @@ public class BuildFeedJobHandler(
             var anchorName = rail.Key.AnchorTitleId is { } anchorId ? anchorNames.GetValueOrDefault(anchorId) : null;
             var items = rail.OrderBy(i => i.Rank).ToList();
             var byTitleId = items.ToDictionary(i => i.Candidate.Title.Id);
+            var isHeroRail = rail.Key.Row == FeedRowKind.Hero;
 
-            for (var i = 0; i < items.Count; i += RerankBatch)
+            var stop = await loop.RunAsync(items, async (batch, batchCt) =>
             {
-                // Checked BEFORE starting a batch, never during one — a cancelled batch caches
-                // nothing, so the work would simply be lost and the next build would repeat it.
-                if (batchesDone > 0 && started.Elapsed > WhyPassBudget)
-                {
-                    logger.LogInformation(
-                        "Feed why pass stopped after {Elapsed:0.0}s with {Done} of {Total} cards curated; the rest keep templater sentences.",
-                        started.Elapsed.TotalSeconds, curated, uncached.Count);
-                    return;
-                }
+                var inputs = batch.Select(p => RerankInputFor(p.Candidate, contexts)).ToList();
+                var results = await agent.RerankBatchAsync(
+                    inputs, FeedPaginator.QueryForRow(rail.Key.Row), persona, anchorName, batchCt);
 
-                var batch = items.Skip(i).Take(RerankBatch)
-                    .Select(p => new RerankInput(
-                        p.Candidate.Title.Id, p.Candidate.Title.Name, p.Candidate.Title.Year,
-                        p.Candidate.Title.MediaType.ToString(), p.Candidate.Title.Genres,
-                        p.Candidate.Title.Overview, p.Candidate.Predicted))
-                    .ToList();
-
-                IReadOnlyList<RerankResult> results;
-                try
+                foreach (var raw in results)
                 {
-                    results = await agent.RerankBatchAsync(
-                        batch, FeedPaginator.QueryForRow(rail.Key.Row), tasteSummary, anchorName, whyCts.Token);
-                }
-                catch (OperationCanceledException) when (whyCts.IsCancellationRequested && !ct.IsCancellationRequested)
-                {
-                    logger.LogInformation(
-                        "Feed why pass exceeded its {Ceiling}s ceiling after {Done} of {Total} cards; the rest keep templater sentences.",
-                        WhyPassCeiling.TotalSeconds, curated, uncached.Count);
-                    return;
-                }
-                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-                {
-                    logger.LogWarning(ex, "Feed why pass rerank failed; remaining cards keep templater sentences.");
-                    return;
-                }
-
-                batchesDone++;
-                foreach (var result in results)
-                {
+                    // The deterministic half of the prompt's "judge fit against who they are, not
+                    // against reach" instruction — see UnscriptedFormats for why it is conditional
+                    // on the account's own narrative and therefore revocable by editing it.
+                    var adjusted = byTitleId.TryGetValue(raw.TitleId, out var candidate)
+                        ? raw with { Fit = UnscriptedFormats.Adjust(raw.Fit, candidate.Candidate.Title.Genres, persona.Taste) }
+                        : raw;
+                    debiased.Observe(adjusted);
+                    var result = debiased.For(raw.TitleId)!;
                     cache.Set(FeedPaginator.FitKey(accountId, result.TitleId, rowKey), result, FitTtl);
-                    if (rail.Key.Row == FeedRowKind.Hero)
+                    if (isHeroRail)
                     {
                         heroFits[result.TitleId] = result.Fit;
+                    }
+
+                    if (byTitleId.TryGetValue(result.TitleId, out var scored))
+                    {
+                        scored.LlmFit = (decimal)result.Fit;
                     }
 
                     if (AcceptsWhy(result.Why) && byTitleId.TryGetValue(result.TitleId, out var item))
                     {
                         item.WhyThis = result.Why;
+                        item.WhySource = ExposureWhySource.Llm;
                         curated++;
                     }
                 }
+            });
+
+            if (stop != LlmBudgetStop.Completed)
+            {
+                logger.LogInformation(
+                    "Feed why pass stopped ({Stop}) after {Elapsed:0.0}s with {Done} of {Total} cards curated; the rest keep templater sentences.",
+                    stop, loop.Elapsed.TotalSeconds, curated, uncached.Count);
+                return;
             }
         }
-    }
-
-    /// <summary>The compact taste summary the rerank prompt rides on — mirrors the paginator's.</summary>
-    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
-    {
-        var topGenres = taste.GenreRatings
-            .OrderByDescending(kv => kv.Value.Count).Take(4).Select(kv => kv.Key).ToList();
-        var loved = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id)).Select(t => t.Name).Take(4).ToListAsync(ct);
-
-        var parts = new List<string>();
-        if (topGenres.Count > 0)
-        {
-            parts.Add("favours " + string.Join(", ", topGenres));
-        }
-
-        if (loved.Count > 0)
-        {
-            parts.Add("loves " + string.Join(", ", loved));
-        }
-
-        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
     }
 
     /// <summary>
@@ -1119,6 +1653,109 @@ public class BuildFeedJobHandler(
     /// not count as change. Scores and why-sentences are deliberately excluded — they drift by
     /// epsilon on every rebuild and would defeat the suppression that keeps tonight's page still.
     /// </summary>
+    /// <summary>
+    /// A planned card in the shape the exposure log takes. The residual and the demotion are
+    /// recovered by arithmetic rather than carried as extra fields on <c>Candidate</c>: the scoring
+    /// order is fixed and documented (base + residual → calibrator → demotion), so
+    /// <c>BaseScore − rawScore</c> is the residual and <c>(BaseScore + CalibrationDelta) − Predicted</c>
+    /// is the demotion, exactly. Widening the record for two derivable numbers would be a change to
+    /// the type every scoring surface passes around, for nothing.
+    ///
+    /// <para><c>PredictedRating</c> is the FULL-precision prediction; <c>ExposureLog</c> chooses the
+    /// stored resolution (2 dp) for every surface. <see cref="DisplayRating"/> now also stores 2 dp
+    /// on <c>FeedItem</c>, so a calibration join across <c>FeedItem</c>, <c>TitleScore</c> and the
+    /// exposure log no longer inherits a quantisation floor from whichever side is coarsest.</para>
+    /// </summary>
+    private static ExposureCard CardOf(PlannedItem item) => new(
+        item.Candidate.Title.Id,
+        item.Rank,
+        item.Candidate.Predicted,
+        item.Candidate.BaseScore,
+        item.Candidate.CalibrationDelta,
+        item.Candidate.BaseScore - (decimal)item.Candidate.Row.Score,
+        item.Candidate.BaseScore + item.Candidate.CalibrationDelta - item.Candidate.Predicted,
+        item.LlmFit,
+        item.WhyThis,
+        item.WhySource,
+        FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId),
+        0,
+        item.PolicyId,
+        item.InterleaveGroup);
+
+    /// <summary>
+    /// What the card shows. Rounded here, once, so the write path and the drift path agree.
+    /// <para>
+    /// TWO decimals, matching <c>TitleScore.PredictedRating</c> and the exposure log. It was one
+    /// until 2026-09-10, and the odd resolution out is what mattered: a calibration or accuracy
+    /// join that spans <c>FeedItem</c> and <c>TitleScore</c> inherits the COARSER of the two, so a
+    /// 1 dp column put a 0.05 quantisation floor under every residual measured across that join —
+    /// which is the same order as the calibration deltas being measured. The card is unaffected:
+    /// the frontend badge renders <c>toFixed(1)</c> and always has, so this changes what is
+    /// measurable without changing what is shown. The column is unconstrained <c>numeric</c>, so
+    /// no migration.
+    /// </para>
+    /// </summary>
+    private static decimal DisplayRating(Candidate candidate) => Math.Round(candidate.Predicted, 2);
+
+    /// <inheritdoc cref="DisplayRating"/>
+    private static decimal FinalScoreOf(Candidate candidate, Func<Title, decimal> freshness) =>
+        Math.Round(candidate.Predicted * freshness(candidate.Title), 3);
+
+    /// <inheritdoc cref="DisplayRating"/>
+    private static string ExplanationOf(Candidate candidate) =>
+        JsonSerializer.Serialize(
+            candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) }));
+
+    /// <summary>
+    /// The score-only Preserve write. Called ONLY once <see cref="SameFeed"/> has proved the two
+    /// feeds are item-for-item identical, so previous and planned align exactly under the same
+    /// ordering key — which is what lets this pair them up without a second identity check.
+    ///
+    /// <para>Updates <c>PredictedRating</c>, <c>FinalScore</c> and <c>ExplanationJson</c> on the
+    /// EXISTING rows (tracked entities of the Active snapshot — no new snapshot, no new
+    /// <c>GeneratedAt</c>, no supersede). <c>WhyThisSentence</c> is deliberately untouched: the why
+    /// pass runs after the no-op decision and never fires on this path, so there is no regenerated
+    /// sentence to write, and overwriting a kept card's persisted why would break the stable-tonight
+    /// contract for no gain.</para>
+    ///
+    /// <para>Returns only the cards whose displayed RATING moved — a contributions-only change is
+    /// persisted but has no number on screen to patch, so it is not broadcast.</para>
+    /// </summary>
+    private static IReadOnlyList<FeedScoreUpdate> ApplyScoreDrift(
+        IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned, Func<Title, decimal> freshness)
+    {
+        var before = previous
+            .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
+            .ToList();
+        var after = planned
+            .OrderBy(i => i.Row).ThenBy(i => i.AnchorTitleId).ThenBy(i => i.Rank)
+            .ToList();
+
+        var moved = new List<FeedScoreUpdate>();
+        for (var i = 0; i < before.Count; i++)
+        {
+            var row = before[i];
+            var candidate = after[i].Candidate;
+            var rating = DisplayRating(candidate);
+            var explanation = ExplanationOf(candidate);
+            if (!FeedScoreDrift.Changed(row.PredictedRating, rating, row.ExplanationJson, explanation))
+            {
+                continue;
+            }
+
+            if (FeedScoreDrift.RatingMoved(row.PredictedRating, rating))
+            {
+                moved.Add(new FeedScoreUpdate(row.TitleId, rating));
+            }
+
+            row.PredictedRating = rating;
+            row.FinalScore = FinalScoreOf(candidate, freshness);
+            row.ExplanationJson = explanation;
+        }
+
+        return moved;
+    }
+
     private static bool SameFeed(IReadOnlyList<FeedItem> previous, IReadOnlyList<PlannedItem> planned)
     {
         if (previous.Count != planned.Count)

@@ -120,16 +120,21 @@ public static class AnchorRotation
     /// </summary>
     private const int RotationStride = 7;
 
-    /// <summary>The list read starting at a strided <paramref name="offset"/> and wrapping once.</summary>
-    private static List<Guid> Rotate(IReadOnlyList<Guid> source, int offset)
+    /// <summary>
+    /// The list read starting at a strided <paramref name="offset"/> and wrapping once. Public
+    /// because the discovery seeds rotate on exactly the same contract as the anchors do — same
+    /// day-granular offset, same prime stride — and two independent copies of "rotate a taste-ordered
+    /// list" would drift into two different definitions of "fresh".
+    /// </summary>
+    public static List<T> Rotate<T>(IReadOnlyList<T> source, int offset)
     {
         if (source.Count == 0)
         {
             return [];
         }
 
-        var start = (int)((long)offset * RotationStride % source.Count);
-        var rotated = new List<Guid>(source.Count);
+        var start = (int)(Math.Abs((long)offset) * RotationStride % source.Count);
+        var rotated = new List<T>(source.Count);
         for (var i = 0; i < source.Count; i++)
         {
             rotated.Add(source[(start + i) % source.Count]);

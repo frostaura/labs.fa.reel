@@ -1,7 +1,12 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Experiments;
+using FrostAura.Reel.Application.Jobs;
+using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
@@ -18,7 +23,12 @@ public static class MetricsEndpoints
     {
         var group = app.MapGroup("/api/metrics").RequireAccount();
 
-        group.MapGet("/model", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+        group.MapGet("/model", async (
+            IReelDbContext db,
+            IAccountContext accountContext,
+            RetroLoopQuery retroLoop,
+            IConfiguration configuration,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
 
@@ -39,16 +49,38 @@ public static class MetricsEndpoints
                 .Select(r => evals.GetValueOrDefault(r.Id))
                 .FirstOrDefault(e => e is not null);
 
+            // The kill criterion is a founder decision, not a constant: it was hard-coded to 3 while
+            // the ledger ran past 12, so the page kept rendering "iteration 12 of 3" without ever
+            // saying the criterion had been blown. Read it from config, and state the breach.
+            var killCriterionAt = configuration.GetValue("KILL_CRITERION_ITERATIONS", 3);
+            var iterationsUsed = runs.Select(r => r.Iteration).DefaultIfEmpty(0).Max();
+
+            var retro = await retroLoop.ComputeAsync(DateTime.UtcNow, ct);
+
             return Results.Ok(new
             {
                 gate = new
                 {
-                    threshold = 0.20m,
+                    // The gate is NDCG@10: the bootstrap 95% CI on the paired model-minus-baseline
+                    // lift must exclude zero, AND the mean relative lift across the five rolling
+                    // split origins must clear 20%. `threshold` is that second clause; the CI
+                    // bounds are reported so the page can say which clause failed.
+                    threshold = EvalHarness.NdcgLiftGateThreshold,
                     passed = latestEval?.PassedGate ?? false,
                     latestLift = latestEval?.RelativeImprovement,
-                    iterationsUsed = runs.Select(r => r.Iteration).DefaultIfEmpty(0).Max(),
-                    killCriterionAt = 3,
+                    ndcgModel = latestEval?.NdcgAt10Model,
+                    ndcgBaseline = latestEval?.NdcgAt10Baseline,
+                    ndcgLiftCiLow = latestEval?.NdcgLiftCiLow,
+                    ndcgLiftCiHigh = latestEval?.NdcgLiftCiHigh,
+                    ciExcludesZero = latestEval?.NdcgLiftCiLow > 0m,
+                    // The retired precision@10 gate, carried so the ledger stays continuous.
+                    legacyThreshold = EvalHarness.LegacyGateThreshold,
+                    legacyPassed = latestEval?.PassedLegacyGate ?? false,
+                    iterationsUsed,
+                    killCriterionAt,
+                    criterionExceeded = iterationsUsed > killCriterionAt,
                 },
+                efficiency = Efficiency(retro),
                 activeArtifact,
                 runs = runs.Select(r =>
                 {
@@ -73,9 +105,20 @@ public static class MetricsEndpoints
                             rmse = eval.Rmse,
                             mae = eval.Mae,
                             spearmanRho = eval.SpearmanRho,
+                            spearmanSe = eval.SpearmanSe,
+                            ndcgAt10Model = eval.NdcgAt10Model,
+                            ndcgAt10Baseline = eval.NdcgAt10Baseline,
+                            ndcgLiftCiLow = eval.NdcgLiftCiLow,
+                            ndcgLiftCiHigh = eval.NdcgLiftCiHigh,
+                            calibrationBias = eval.CalibrationBias,
+                            ece = eval.Ece,
+                            eligibleHoldoutCount = eval.EligibleHoldoutCount,
+                            unfilteredHoldoutCount = eval.UnfilteredHoldoutCount,
                             eval.HoldoutPositiveCount,
                             eval.LowSample,
                             eval.PassedGate,
+                            eval.PassedLegacyGate,
+                            origins = eval.OriginsJson is null ? null : (JsonElement?)JsonSerializer.Deserialize<JsonElement>(eval.OriginsJson),
                             detail = JsonSerializer.Deserialize<JsonElement>(eval.DetailJson),
                         },
                     };
@@ -111,7 +154,66 @@ public static class MetricsEndpoints
             return Results.Accepted();
         });
 
-        group.MapGet("/pipeline", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+        // The interleaving instrument. Founder-only, like the training trigger: it is the readout of
+        // a live experiment on this account's own feed, and the honest cadence attached to it
+        // (months, not days) is a founder conversation rather than a product surface.
+        group.MapGet("/interleave", async (
+            IReelDbContext db,
+            HttpContext http,
+            InterleaveSummaryQuery summaries,
+            CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return Results.Forbid();
+            }
+
+            var summary = await summaries.ComputeAsync(account.Id, DateTime.UtcNow, ct);
+            return Results.Ok(new
+            {
+                computedAt = summary.ComputedAt,
+                enabled = summary.Enabled,
+                policyA = summary.PolicyA,
+                policyB = summary.PolicyB,
+                tau = summary.Tau,
+                alpha = summary.Alpha,
+                slates = summary.Slates,
+                decidedSlates = summary.DecidedSlates,
+                ties = summary.Ties,
+                winsA = summary.WinsA,
+                winsB = summary.WinsB,
+                // Four decimals, un-softened: an always-valid p of 0.41 is the answer, and rounding
+                // it toward a story is exactly the failure the harness exists to prevent.
+                alwaysValidP = Round(summary.AlwaysValidP, 4),
+                significant = summary.Significant,
+                preferenceRateA = Round(summary.PreferenceRateA, 4),
+                ciLow = Round(summary.CiLow, 4),
+                ciHigh = Round(summary.CiHigh, 4),
+                signTestP = Round(summary.SignTestP, 4),
+                firstSlateAt = summary.FirstSlateAt,
+                lastSlateAt = summary.LastSlateAt,
+                decidedSlatesPerDay = Round(summary.DecidedSlatesPerDay, 3),
+                slatesToDecisionAt65 = summary.SlatesToDecisionAt65,
+                estimatedDaysToDecision = Round(summary.EstimatedDaysToDecision, 1),
+                standings = summary.Standings.Select(s => new
+                {
+                    policyId = s.PolicyId,
+                    description = s.Description,
+                    team = s.Team,
+                    slates = s.Slates,
+                    cards = s.Cards,
+                    credits = s.Credits,
+                    slateWins = s.SlateWins,
+                }),
+            });
+        });
+
+        group.MapGet("/pipeline", async (
+            IReelDbContext db,
+            IAccountContext accountContext,
+            ITitleAttributeExtractor extractor,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var jobs = await db.SyncJobs
@@ -144,7 +246,115 @@ public static class MetricsEndpoints
                 .Select(u => new { provider = u.Provider.ToString(), u.Day, u.CallCount })
                 .ToListAsync(ct);
 
-            return Results.Ok(new { jobs, outbox, apiUsage = usage });
+            // Build quality, per build. Every number here used to be computed and thrown into a log
+            // line; without them "the picks get weaker each round" is an argument rather than a chart.
+            var builds = await db.FeedBuildStats
+                .Where(s => s.AccountId == accountId)
+                .OrderByDescending(s => s.BuiltAt)
+                .Take(30)
+                .Select(s => new
+                {
+                    s.BuiltAt,
+                    mode = s.Mode.ToString(),
+                    s.CandidateCount,
+                    s.NewCandidatesUpserted,
+                    s.EligiblePoolCount,
+                    s.ShortlistCount,
+                    s.HeroEligibleCount,
+                    s.ShortlistP50,
+                    s.ShortlistP90,
+                    s.RailsDropped,
+                    s.DegradedReason,
+                    s.DurationMs,
+                })
+                .ToListAsync(ct);
+
+            // How far behind LLM enrichment is. Global, not per-account: catalog rows are
+            // tenant-shared, so one enrichment serves everyone and the gap is one number for the
+            // whole system. This is the drain gauge for the 2026-09-09 finding that EnrichCatalog
+            // was enqueued only from the onboarding chain — ~1,360 hydrated titles with no embedding
+            // and ~1,400 with no Done attributes. staleExtractorVersion counts rows that are present
+            // and Done and still wrong: written by a prompt generation whose values mean something
+            // else now (the pre-2026-08-07 free-text Tone/Era rows).
+            var enrichment = await EnrichmentScheduler.BacklogAsync(db, extractor.Version, ct);
+
+            return Results.Ok(new
+            {
+                jobs,
+                outbox,
+                apiUsage = usage,
+                builds,
+                enrichment = new
+                {
+                    missingEmbedding = enrichment.MissingEmbedding,
+                    missingAttributes = enrichment.MissingAttributes,
+                    staleExtractorVersion = enrichment.StaleExtractorVersion,
+                    lastRunAt = enrichment.LastRunAt,
+                },
+            });
         });
     }
+
+    /// <summary>
+    /// The founder-visible track record. Rounding happens HERE and nowhere else — the query itself
+    /// keeps full precision so the numbers can be re-derived, and the page gets the digits a human
+    /// can read. Nothing is softened: a negative delta or a near-zero correlation renders as-is.
+    /// </summary>
+    private static object Efficiency(RetroLoopReport retro) => new
+    {
+        computedAt = retro.ComputedAt,
+        conversions = new
+        {
+            count = retro.Conversions.Count,
+            ratedCount = retro.Conversions.RatedCount,
+            scoredCount = retro.Conversions.ScoredCount,
+            accuracy = Accuracy(retro.Conversions.Accuracy),
+            ratingDistribution = retro.Conversions.RatingDistribution
+                .Select(kv => new { rating = kv.Key, count = kv.Value }),
+            worstMisses = retro.Conversions.WorstMisses.Select(Miss),
+        },
+        predictedVsActual = new
+        {
+            pairs = retro.PredictedVsActualPairs,
+            accuracy = Accuracy(retro.PredictedVsActual),
+            worstMisses = retro.PredictedVsActualWorstMisses.Select(Miss),
+        },
+        counterfactual = retro.Counterfactual.Select(w => new
+        {
+            window = w.Window,
+            days = w.Days,
+            viaReelCount = w.ViaReelCount,
+            viaReelMeanRating = Round(w.ViaReelMeanRating, 2),
+            otherCount = w.OtherCount,
+            otherMeanRating = Round(w.OtherMeanRating, 2),
+            delta = Round(w.Delta, 2),
+        }),
+    };
+
+    private static object Accuracy(PredictionAccuracy accuracy) => new
+    {
+        count = accuracy.Count,
+        meanPredicted = Round(accuracy.MeanPredicted, 2),
+        meanActual = Round(accuracy.MeanActual, 2),
+        meanAbsoluteError = Round(accuracy.MeanAbsoluteError, 2),
+        bias = Round(accuracy.Bias, 2),
+        withinOnePointRate = Round(accuracy.WithinOnePointRate, 4),
+        pearsonCorrelation = Round(accuracy.PearsonCorrelation, 4),
+    };
+
+    private static object Miss(RetroMiss miss) => new
+    {
+        titleId = miss.TitleId,
+        name = miss.Name,
+        year = miss.Year,
+        predicted = Round(miss.Predicted, 2),
+        actual = miss.Actual,
+        gap = Round(miss.Gap, 2),
+    };
+
+    private static double? Round(double? value, int digits) =>
+        value is null ? null : Math.Round(value.Value, digits, MidpointRounding.AwayFromZero);
+
+    private static double Round(double value, int digits) =>
+        Math.Round(value, digits, MidpointRounding.AwayFromZero);
 }

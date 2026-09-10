@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
@@ -102,6 +103,172 @@ public static class DevEndpoints
             });
 
             return Results.Ok(account.ToSessionPayload());
+        });
+
+        // ── Residual-head dry run ───────────────────────────────────────────────────────
+        // The offline replay the plan requires BEFORE RESIDUAL_OBSERVE_TRAKT_RATINGS is turned on:
+        // it runs the account's whole rating history through the v2 head in order, writing nothing,
+        // and reports where the head lands. Read `residual.finalBias` and `residual.weightsAtClamp`
+        // first — a bias near zero with nothing on the clamp means the head is learning shape rather
+        // than level, which is the only condition under which bulk-teaching it is safe. The same
+        // response carries the fitted calibrator, so the two mechanisms can be compared on one page:
+        //
+        //   curl -s localhost:5080/api/dev/residual-replay | jq
+        //
+        // Optional ?slug= picks an account when more than one is linked; otherwise TRAKT_DEV_PROFILE
+        // and then "the only account" are tried, in that order.
+        app.MapGet("/api/dev/residual-replay", async (
+            string? slug,
+            IReelDbContext db,
+            ResidualReplay replay,
+            RatingCalibrationService calibration,
+            IConfiguration configuration,
+            CancellationToken ct) =>
+        {
+            var wanted = slug ?? configuration["TRAKT_DEV_PROFILE"];
+            var accounts = db.Accounts.IgnoreQueryFilters();
+            var account = wanted is null
+                ? await accounts.OrderBy(a => a.CreatedAt).FirstOrDefaultAsync(ct)
+                : await accounts.FirstOrDefaultAsync(a => a.TraktUserSlug == wanted || a.TraktUsername == wanted, ct);
+            if (account is null)
+            {
+                return Results.NotFound(new { error = "No account to replay." });
+            }
+
+            var report = await replay.RunAsync(account.Id, sampleWeight: 1.0, ct);
+            var pairs = await calibration.LoadPairsAsync(account.Id, ct);
+            var calibrator = await calibration.FitAsync(account.Id, ct);
+
+            return Results.Ok(new
+            {
+                account = account.TraktUserSlug,
+                residual = report,
+                calibration = new
+                {
+                    kind = calibrator.Kind.ToString(),
+                    // What the selection rule was allowed to choose from, and what it turned on.
+                    mode = calibration.Mode.ToString(),
+                    correlation = calibrator.Correlation,
+                    activeArtifactId = await calibration.ActiveArtifactIdAsync(account.Id, ct),
+                    // `pairs` is every closed-loop pair on record; `fittedPairs` is what survived
+                    // artifact selection, and is the set every metric below is measured over.
+                    pairs = pairs.Count,
+                    fittedPairs = calibrator.PairCount,
+                    // The plan's Phase 0 gate: MAE over the closed-loop pairs must fall toward ≤ 1.2.
+                    maeBefore = calibrator.MaeBefore,
+                    maeAfter = calibrator.MaeAfter,
+                    // The band the UI renders beside a prediction — "7.4, ±1.9".
+                    expectedAbsoluteError = calibrator.ExpectedAbsoluteError,
+                    biasBefore = pairs.Count == 0 ? 0d : pairs.Average(p => p.Predicted - p.Actual),
+                    biasAfter = pairs.Count == 0 ? 0d : pairs.Average(p => calibrator.Calibrate(p.Predicted) - p.Actual),
+                    // A quick look at the map itself, so the shape is legible without a chart. The
+                    // spread across it is what the minimum-slope guard exists to keep off the floor.
+                    curve = Enumerable.Range(0, 11)
+                        .Select(i => 5d + (i * 0.5d))
+                        .Select(x => new { predicted = x, calibrated = Math.Round(calibrator.Calibrate(x), 3) }),
+                    curveRange = Math.Round(
+                        calibrator.Calibrate(RatingCalibrator.RangeProbeHigh) - calibrator.Calibrate(RatingCalibrator.RangeProbeLow), 3),
+                },
+            });
+        });
+
+        // ── The lens audit ──────────────────────────────────────────────────────────────────
+        // Founder-only, and the reason it is founder-only is that it SPENDS: it re-reads the last
+        // N generated notes and asks the same model family to score each against a frozen rubric.
+        //
+        // How to read it: compare MEANS between prompt versions, never absolute values — the judge
+        // shares the writer's blind spots, so a level is close to meaningless and a difference is
+        // not. `rejectedByGuards` is worth more than any mean, because it counts notes that were
+        // actually refused rather than opinions about them. The failure mode to watch for is
+        // specificity rising while grounding falls: that is what "more confident and less true"
+        // looks like, and it is exactly what a prompt tweak aimed at livelier copy tends to buy.
+        //
+        // ?score=false returns the same rows without paying for a judgement, which is the right
+        // call when you only want to read fifty generations yourself.
+        app.MapGet("/api/dev/lens-audit", async (
+            Application.Lens.LensAudit audit,
+            Application.Tenancy.IAccountContext accountContext,
+            FeatureVectorBuilder featureBuilder,
+            int? sample,
+            bool? score,
+            CancellationToken ct) =>
+        {
+            if (accountContext.AccountId is not { } accountId)
+            {
+                return Results.Unauthorized();
+            }
+
+            var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
+            var report = await audit.RunAsync(
+                accountId,
+                taste,
+                sample ?? Application.Lens.LensAudit.DefaultSampleSize,
+                score ?? true,
+                ct);
+            return Results.Ok(report);
+        });
+
+        // ── The offline retrieval-recall test ───────────────────────────────────────────────
+        // Read-only, persists nothing, and answers the one question every modelling iteration so
+        // far has been unable to see past: of the titles this account went on to LOVE, how many
+        // would the first-pass pool have even contained on the day before they were rated?
+        //
+        //   curl -s 'localhost:5080/api/dev/retrieval-recall?window=180' | jq
+        //
+        // How to read the answer — and the order matters, because two different failures wear the
+        // same "we missed it" shirt and want opposite fixes:
+        //
+        //   1. `loved.rates.inCatalogue` is the SUPPLY ceiling. Titles below it were not in the
+        //      catalogue that day, so no retrieval budget on earth would have returned them; that
+        //      is a discovery problem. `notReachable[].reason` names it per title.
+        //   2. `loved.recallGivenReachable` is the RETRIEVAL number — of the titles that existed
+        //      and were eligible, what share the arms returned. This is the only one a bigger pool
+        //      or a new arm can move, and it is the one the plan's decision rule reads: a
+        //      public-corpus collaborative arm is worth its licensing cost only if THIS is low.
+        //   3. `disliked` is the same computation over titles rated <= 4 — the false-positive side.
+        //      A high union there is a RANKING problem, not a supply one.
+        //
+        // `popCount` / `annCount` default to the feed's own first-pass budgets; raise them and
+        // re-run to answer "would a bigger pool have caught these?" without shipping anything.
+        // `budget.exhausted` true means the rates describe a SAMPLE of the window, not the window.
+        //
+        // Optional ?slug= picks an account when more than one is linked; otherwise TRAKT_DEV_PROFILE
+        // and then "the only account" are tried, in that order — same resolution as the replay above.
+        app.MapGet("/api/dev/retrieval-recall", async (
+            string? slug,
+            int? window,
+            int? popCount,
+            int? annCount,
+            int? seconds,
+            IReelDbContext db,
+            Application.Ranking.RetrievalRecallProbe probe,
+            IConfiguration configuration,
+            CancellationToken ct) =>
+        {
+            var wanted = slug ?? configuration["TRAKT_DEV_PROFILE"];
+            var accounts = db.Accounts.IgnoreQueryFilters();
+            var account = wanted is null
+                ? await accounts.OrderBy(a => a.CreatedAt).FirstOrDefaultAsync(ct)
+                : await accounts.FirstOrDefaultAsync(a => a.TraktUserSlug == wanted || a.TraktUsername == wanted, ct);
+            if (account is null)
+            {
+                return Results.NotFound(new { error = "No account to measure." });
+            }
+
+            // Clamped rather than validated-and-rejected: this is a diagnostic run by hand, and a
+            // fat-fingered window=100000 should give a long window, not a 400. The 60s cap is the
+            // one that is NOT negotiable upward — the probe rebuilds a full taste state per distinct
+            // rating day, and an unbounded run against a live database is a self-inflicted outage.
+            var report = await probe.RunAsync(
+                account.Id,
+                Math.Clamp(window ?? 180, 1, 3650),
+                Math.Clamp(popCount ?? Application.Ranking.RetrievalRecallProbe.DefaultPopCount, 0, 5000),
+                Math.Clamp(annCount ?? Application.Ranking.RetrievalRecallProbe.DefaultAnnCount, 0, 5000),
+                TimeSpan.FromSeconds(Math.Clamp(seconds ?? 60, 1, 60)),
+                DateTime.UtcNow,
+                ct);
+
+            return Results.Ok(new { account = account.TraktUserSlug, recall = report });
         });
     }
 }

@@ -1,4 +1,4 @@
-using System.Text.Json;
+using System.Globalization;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
@@ -6,34 +6,82 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Pgvector;
 
 namespace FrostAura.Reel.Application.Jobs;
 
 /// <summary>
-/// Enriches the account's library titles with the two LLM-derived feature families the model
-/// reads but nothing else produces: plot/tone <see cref="TitleEmbedding"/>s (one vector space
-/// with NL search) and structured <see cref="TitleAttributes"/>. Both are global catalog rows —
-/// one enrichment serves every tenant, so the work compounds across accounts.
+/// Enriches the catalog with the two LLM-derived feature families the model reads but nothing else
+/// produces: plot/tone <see cref="TitleEmbedding"/>s (one vector space with NL search) and structured
+/// <see cref="TitleAttributes"/>. Both are global catalog rows — one enrichment serves every tenant,
+/// so the work compounds across accounts.
 ///
-/// Runs after hydration (needs overview/genres/keywords) and before training (which consumes
-/// the results). When neither provider is configured it is a clean no-op that still chains to
-/// Train — the model trains on metadata + affinity features alone, exactly as it does today,
-/// and these features light up the moment the keys land. Cursor = (phase, lastTitleId) so a
-/// crash resumes mid-enrichment rather than restarting.
+/// <para>
+/// Runs after hydration (needs overview/genres/keywords) and before training (which consumes the
+/// results). When neither provider is configured it is a clean no-op that still chains to Train —
+/// the model trains on metadata + affinity features alone, exactly as it does today, and these
+/// features light up the moment the keys land.
+/// </para>
+///
+/// <para>
+/// <b>Bounded, prioritised, resumable-by-construction.</b> One run touches at most
+/// <c>ENRICH_MAX_TITLES_PER_RUN</c> titles (default 200), taken in an order that puts the requesting
+/// account's own titles first — what it was shown, what it was scored, then its library — and the
+/// rest of the shared catalogue after. Three things follow from that. Scheduling can now be
+/// aggressive (a build, a night, a weekly sweep) without any one run billing for the whole world.
+/// The account that triggered the run gets the features that affect ITS next feed first, rather
+/// than whatever sorted earliest by id. And there is no cursor any more: both selection queries
+/// exclude work that is already done, so an interrupted run simply re-selects what is left, which
+/// is what a cursor was emulating.
+/// </para>
+///
+/// <para>
+/// <b>Account is optional.</b> A null <c>AccountId</c> is a global sweep — catalogue rows belong to
+/// no tenant, and the weekly growth pass discovers titles on behalf of nobody. A global run skips the
+/// priority tiers (there is no account to prioritise for), publishes no SSE (no one is watching) and
+/// chains no Train (there is no model to retrain).
+/// </para>
 /// </summary>
 public class EnrichCatalogJobHandler(
     IReelDbContext db,
     IEmbeddingProvider embeddings,
     ITitleAttributeExtractor extractor,
     IPipelineEventHub events,
+    IConfiguration configuration,
     ILogger<EnrichCatalogJobHandler> logger) : IJobHandler
 {
     public JobKind Kind => JobKind.EnrichCatalog;
 
     private const int EmbedBatch = 64;
     private const int AttributeBatch = 24; // the extractor parallelizes within a batch (bounded by OPENROUTER_MAX_CONCURRENCY)
+
+    /// <summary>
+    /// Ceiling on titles touched per phase per run, and the reason the job can be scheduled from
+    /// three places without any of them being able to spend without limit.
+    /// <para>
+    /// The number is a spend decision, not a performance one: at 200 titles a run and a nightly
+    /// pass, a 1,360-title embedding gap closes in a week, and a prompt-version bump that
+    /// invalidates the whole catalogue drains over days rather than presenting one night's bill for
+    /// every title in the database. Raise it to catch up faster; it is read fresh on every run.
+    /// </para>
+    /// </summary>
+    public const string MaxTitlesPerRunKey = "ENRICH_MAX_TITLES_PER_RUN";
+
+    public const int DefaultMaxTitlesPerRun = 200;
+
+    /// <summary>
+    /// The per-run cap. Read by indexer and parsed here rather than through <c>GetValue&lt;int&gt;</c>
+    /// because this project references Configuration.Abstractions only — the binder is not a
+    /// dependency worth adding for one integer. A missing, unparseable or non-positive value falls
+    /// back to the default: a typo in an env var must not silently disable enrichment.
+    /// </summary>
+    public static int MaxTitlesPerRun(IConfiguration configuration) =>
+        int.TryParse(configuration[MaxTitlesPerRunKey], NumberStyles.Integer, CultureInfo.InvariantCulture, out var cap)
+        && cap > 0
+            ? cap
+            : DefaultMaxTitlesPerRun;
 
     /// <summary>
     /// How many enrich RUNS may spend money on one title before it is left alone.
@@ -47,38 +95,36 @@ public class EnrichCatalogJobHandler(
     /// that is not a prompt problem. The remaining budget here exists solely for genuinely
     /// transient transport failures — a 429, a provider outage — where the useful variable is
     /// elapsed time, and one later run is enough to catch it.
+    ///
+    /// The budget is spent per (title, extractor model, extractor version), not per account: the
+    /// row is global, so an account whose enrich run walks past an exhausted title must not
+    /// re-bill for it on behalf of everyone. Only a model change or a prompt-version bump — both
+    /// of which change what the answer would BE — hands a title a fresh budget.
     /// </summary>
     private const int MaxAttributeAttempts = 2;
 
-    private enum Phase { Embeddings, Attributes }
-
-    private record Cursor(Phase Phase, Guid? LastTitleId);
-
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
-        var accountId = job.AccountId ?? throw new InvalidOperationException("EnrichCatalog requires an account.");
-        var cursor = job.CursorJson is null
-            ? new Cursor(Phase.Embeddings, null)
-            : JsonSerializer.Deserialize<Cursor>(job.CursorJson) ?? new Cursor(Phase.Embeddings, null);
+        var accountId = job.AccountId;
+        var cap = MaxTitlesPerRun(configuration);
 
         // Every hydrated title — both the watched/rated LIBRARY (training label rows + loved
         // centroids) AND the unwatched CANDIDATES that discovery surfaces. Serving needs the
         // candidates embedded/attributed too: semantic search and feed similarity only ever
         // operate on unseen titles, so scoping to the library alone leaves search with nothing.
-        // Catalog rows are global, so this work is shared across every tenant and runs once.
-        var hydratedQuery = db.Titles.Where(t => t.LastMetadataRefreshAt != null);
+        // Catalog rows are global, so this work is shared across every tenant.
+        var hydrated = db.Titles.Where(t => t.LastMetadataRefreshAt != null);
 
-        if (embeddings.IsAvailable && cursor.Phase == Phase.Embeddings)
+        var embedded = 0;
+        if (embeddings.IsAvailable)
         {
-            cursor = await EmbedAsync(job, accountId, hydratedQuery, cursor, ct);
+            embedded = await EmbedAsync(job, accountId, hydrated, cap, ct);
         }
 
-        // Phase gate: advance even if embeddings were unavailable, so attributes still run.
-        cursor = cursor with { Phase = Phase.Attributes, LastTitleId = null };
-
+        var extracted = 0;
         if (extractor.IsAvailable)
         {
-            await ExtractAsync(job, accountId, hydratedQuery, cursor, ct);
+            extracted = await ExtractAsync(job, accountId, hydrated, cap, ct);
         }
 
         if (!embeddings.IsAvailable && !extractor.IsAvailable)
@@ -88,31 +134,69 @@ public class EnrichCatalogJobHandler(
             job.ProgressMessage = "skipped — no LLM provider configured";
         }
 
-        await ChainTrainAsync(accountId, ct);
+        if (accountId is { } owner)
+        {
+            await ChainTrainAsync(owner, ct);
+            events.Publish(owner, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "enrich" });
+        }
 
-        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "enrich" });
-        logger.LogInformation("EnrichCatalog completed for {AccountId}.", accountId);
+        logger.LogInformation(
+            "EnrichCatalog completed for {AccountId}: {Embedded} title(s) embedded, {Extracted} attributed (cap {Cap}).",
+            accountId, embedded, extracted, cap);
     }
 
-    private async Task<Cursor> EmbedAsync(
-        SyncJob job, Guid accountId, IQueryable<Title> scopeQuery, Cursor cursor, CancellationToken ct)
+    /// <summary>
+    /// The order a run works through the catalogue. For an account-scoped run the tiers are, in
+    /// order: titles this account has actually been SHOWN (feed items), titles it has been SCORED
+    /// (the shortlist a build persists), titles in its own LIBRARY (the training rows and loved
+    /// centroids), then everything else in the shared catalogue.
+    /// <para>
+    /// This is what makes a capped run useful rather than arbitrary. Without it a cap of 200 over a
+    /// 5,000-title catalogue ordered by id would enrich, on average, titles that have nothing to do
+    /// with the account that asked — and the account would wait weeks for the features behind its
+    /// own next feed. It is also what makes the sweep deterministic for a caller that knows what it
+    /// seeded, which is the difference between an assertion about attempt budgets and a count of
+    /// whatever else happened to be in a shared database.
+    /// </para>
+    /// <para>
+    /// A GLOBAL run has no account to prioritise for and falls back to id order, which is stable and
+    /// therefore still deterministic.
+    /// </para>
+    /// </summary>
+    private IQueryable<Title> InPriorityOrder(IQueryable<Title> titles, Guid? accountId) =>
+        accountId is { } id
+            ? titles
+                .OrderBy(t =>
+                    db.FeedItems.Any(f => f.AccountId == id && f.TitleId == t.Id) ? 0
+                    : db.TitleScores.Any(s => s.AccountId == id && s.TitleId == t.Id) ? 1
+                    : db.UserRatings.Any(r => r.AccountId == id && r.TitleId == t.Id)
+                        || db.WatchedTitles.Any(w => w.AccountId == id && w.TitleId == t.Id) ? 2
+                    : 3)
+                .ThenBy(t => t.Id)
+            : titles.OrderBy(t => t.Id);
+
+    private async Task<int> EmbedAsync(
+        SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
     {
-        // Scan every hydrated title and embed those MISSING a vector or whose source text / model
-        // has drifted (SourceTextHash mismatch). Re-embedding on change is cheap and stops a title
-        // from being frozen with a stale vector after a metadata refresh — the live search path
-        // writes vectors through the same EmbeddingText helper, so the two never disagree.
-        var ordered = scopeQuery.OrderBy(t => t.Id);
-        var total = await ordered.CountAsync(ct);
+        // Embed those MISSING a vector, plus those whose model moved or whose metadata was refreshed
+        // after the vector was written. The drift test that actually decides whether to spend is the
+        // SourceTextHash comparison below, in C# — EmbeddingText.Build has no SQL translation — so
+        // LastMetadataRefreshAt is the cheap SQL-side proxy that narrows the scan to rows that COULD
+        // have drifted. Re-embedding on real change stops a title being frozen with a stale vector;
+        // the live search path writes through the same helper, so the two never disagree.
+        var model = EmbeddingText.Model;
+        var work = hydrated.Where(t =>
+            !db.TitleEmbeddings.Any(e => e.TitleId == t.Id)
+            || db.TitleEmbeddings.Any(e => e.TitleId == t.Id
+                && (e.EmbeddingModel != model || e.CreatedAt < t.LastMetadataRefreshAt)));
+
+        var titles = await InPriorityOrder(work, accountId).Take(cap).ToListAsync(ct);
+        var total = titles.Count;
         var processed = 0;
 
-        while (!ct.IsCancellationRequested)
+        foreach (var batch in titles.Chunk(EmbedBatch))
         {
-            var lastId = cursor.LastTitleId;
-            var batch = await ordered
-                .Where(t => lastId == null || t.Id > lastId)
-                .Take(EmbedBatch)
-                .ToListAsync(ct);
-            if (batch.Count == 0)
+            if (ct.IsCancellationRequested)
             {
                 break;
             }
@@ -128,9 +212,18 @@ public class EnrichCatalogJobHandler(
                 var text = EmbeddingText.Build(title);
                 var hash = EmbeddingText.Hash(text);
                 var row = existing.GetValueOrDefault(title.Id);
-                if (row is null || row.SourceTextHash != hash || row.EmbeddingModel != EmbeddingText.Model)
+                if (row is null || row.SourceTextHash != hash || row.EmbeddingModel != model)
                 {
                     stale.Add((title, text, hash, row));
+                }
+                else
+                {
+                    // Selected by the SQL proxy — a metadata refresh landed after this vector was
+                    // written — but the embedding TEXT did not actually change, so there is nothing
+                    // to buy. Re-stamp the verification time anyway: without it the row matches the
+                    // proxy on every future run and permanently occupies slots in the per-run cap
+                    // that unenriched titles need.
+                    row.CreatedAt = DateTime.UtcNow;
                 }
             }
 
@@ -146,7 +239,7 @@ public class EnrichCatalogJobHandler(
                         {
                             TitleId = title.Id,
                             Embedding = new Vector(vectors[i]),
-                            EmbeddingModel = EmbeddingText.Model,
+                            EmbeddingModel = model,
                             SourceTextHash = hash,
                             CreatedAt = DateTime.UtcNow,
                         });
@@ -154,58 +247,51 @@ public class EnrichCatalogJobHandler(
                     else
                     {
                         row.Embedding = new Vector(vectors[i]);
-                        row.EmbeddingModel = EmbeddingText.Model;
+                        row.EmbeddingModel = model;
                         row.SourceTextHash = hash;
                         row.CreatedAt = DateTime.UtcNow;
                     }
                 }
             }
 
-            processed += batch.Count;
-            cursor = cursor with { LastTitleId = batch[^1].Id };
-            job.CursorJson = JsonSerializer.Serialize(cursor);
+            processed += batch.Length;
             job.ProgressPct = total == 0 ? 0 : Math.Round(50m * processed / total, 1);
             // Same text on the poll (ProgressMessage) and the live SSE event so the pill never
             // flickers between two phrasings.
             job.ProgressMessage = $"Learning plots · {processed}/{total}";
             await db.SaveChangesAsync(ct);
 
-            events.Publish(accountId, PipelineEventTypes.JobProgress, new Dictionary<string, object?>
-            {
-                ["kind"] = "enrich",
-                ["pct"] = job.ProgressPct,
-                ["message"] = job.ProgressMessage,
-            });
+            Publish(accountId, job);
         }
 
-        return cursor;
+        return total;
     }
 
-    private async Task ExtractAsync(
-        SyncJob job, Guid accountId, IQueryable<Title> scopeQuery, Cursor cursor, CancellationToken ct)
+    private async Task<int> ExtractAsync(
+        SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
     {
-        // Eligible = not already settled BY THE CURRENT MODEL. A row is settled when it is Done
-        // or has exhausted its retries under the same ExtractorModel. Model-scoping is what lets
-        // a switch from the deterministic stub to the real model re-extract every title instead
-        // of leaving stub data frozen in place.
+        // Eligible = not already settled BY THE CURRENT MODEL AT THE CURRENT PROMPT VERSION. A row
+        // is settled when it is Done or has exhausted its retries under both. Model-scoping is what
+        // lets a switch from the deterministic stub to the real model re-extract every title instead
+        // of leaving stub data frozen in place; version-scoping is what lets a prompt change do the
+        // same for values whose MEANING moved (see ITitleAttributeExtractor.Version). Note the
+        // ordering of the two effects: an exhausted row with a stale version is eligible again,
+        // which is deliberate — the reason it failed may be the reason the prompt changed.
         var modelId = extractor.ModelId;
-        var pendingQuery = scopeQuery
-            .Where(t => !db.TitleAttributes.Any(a =>
-                a.TitleId == t.Id
-                && a.ExtractorModel == modelId
-                && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts)))
-            .OrderBy(t => t.Id);
-        var total = await pendingQuery.CountAsync(ct);
+        var version = extractor.Version;
+        var pending = hydrated.Where(t => !db.TitleAttributes.Any(a =>
+            a.TitleId == t.Id
+            && a.ExtractorModel == modelId
+            && a.ExtractorVersion >= version
+            && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts)));
+
+        var titles = await InPriorityOrder(pending, accountId).Take(cap).ToListAsync(ct);
+        var total = titles.Count;
         var processed = 0;
 
-        while (!ct.IsCancellationRequested)
+        foreach (var batch in titles.Chunk(AttributeBatch))
         {
-            var lastId = cursor.LastTitleId;
-            var batch = await pendingQuery
-                .Where(t => lastId == null || t.Id > lastId)
-                .Take(AttributeBatch)
-                .ToListAsync(ct);
-            if (batch.Count == 0)
+            if (ct.IsCancellationRequested)
             {
                 break;
             }
@@ -214,11 +300,12 @@ public class EnrichCatalogJobHandler(
                 t.Id, t.MediaType.ToString(), t.Name, t.Year, t.Overview, t.Genres, t.Keywords)).ToList();
             var extracted = await extractor.ExtractAsync(inputs, ct);
 
+            var batchIds = batch.Select(b => b.Id).ToList();
             var existing = await db.TitleAttributes
-                .Where(a => batch.Select(b => b.Id).Contains(a.TitleId))
+                .Where(a => batchIds.Contains(a.TitleId))
                 .ToDictionaryAsync(a => a.TitleId, ct);
 
-            for (var i = 0; i < batch.Count; i++)
+            for (var i = 0; i < batch.Length; i++)
             {
                 var row = existing.GetValueOrDefault(batch[i].Id);
                 if (row is null)
@@ -226,19 +313,21 @@ public class EnrichCatalogJobHandler(
                     row = new TitleAttributes { TitleId = batch[i].Id };
                     db.TitleAttributes.Add(row);
                 }
-                else if (row.ExtractorModel != modelId)
+                else if (row.ExtractorModel != modelId || row.ExtractorVersion < version)
                 {
-                    row.AttemptCount = 0; // a different model is starting fresh — don't inherit stub retries
+                    // A different model, or a newer prompt, is starting fresh — don't inherit the
+                    // retries spent answering a different question.
+                    row.AttemptCount = 0;
                 }
 
                 row.AttemptCount++;
 
-                // Stamp the model BEFORE the outcome check. The eligibility query above only counts
-                // attempts made by the current ExtractorModel, so a failed row that never recorded
-                // one was re-picked on every single run for ever — the retry cap could not engage
-                // and a permanently unextractable title billed indefinitely.
+                // Stamp model AND version BEFORE the outcome check. The eligibility query above only
+                // counts attempts made at the current model and version, so a failed row that never
+                // recorded one was re-picked on every single run for ever — the retry cap could not
+                // engage and a permanently unextractable title billed indefinitely.
                 row.ExtractorModel = modelId;
-                row.ExtractorVersion = 1;
+                row.ExtractorVersion = version;
 
                 var result = extracted[i];
                 if (result is null)
@@ -251,8 +340,8 @@ public class EnrichCatalogJobHandler(
                     row.Status = AttributeExtractionStatus.Failed;
                     logger.LogWarning(
                         "Attribute extraction produced no usable result for {TitleId} ({Name}) on attempt {Attempt}/{Max} "
-                        + "with {Model}; row left {Status} rather than filled with defaults.",
-                        batch[i].Id, batch[i].Name, row.AttemptCount, MaxAttributeAttempts, modelId,
+                        + "with {Model} v{Version}; row left {Status} rather than filled with defaults.",
+                        batch[i].Id, batch[i].Name, row.AttemptCount, MaxAttributeAttempts, modelId, version,
                         AttributeExtractionStatus.Failed);
                     continue;
                 }
@@ -272,20 +361,31 @@ public class EnrichCatalogJobHandler(
                 row.ExtractedAt = DateTime.UtcNow;
             }
 
-            processed += batch.Count;
-            cursor = cursor with { LastTitleId = batch[^1].Id };
-            job.CursorJson = JsonSerializer.Serialize(cursor);
+            processed += batch.Length;
             job.ProgressPct = total == 0 ? 100 : Math.Round(50m + (50m * processed / total), 1);
             job.ProgressMessage = $"Reading the mood · {processed}/{total}";
             await db.SaveChangesAsync(ct);
 
-            events.Publish(accountId, PipelineEventTypes.JobProgress, new Dictionary<string, object?>
-            {
-                ["kind"] = "enrich",
-                ["pct"] = job.ProgressPct,
-                ["message"] = job.ProgressMessage,
-            });
+            Publish(accountId, job);
         }
+
+        return total;
+    }
+
+    /// <summary>Progress SSE, skipped for a global run — there is no account subscribed to it.</summary>
+    private void Publish(Guid? accountId, SyncJob job)
+    {
+        if (accountId is not { } owner)
+        {
+            return;
+        }
+
+        events.Publish(owner, PipelineEventTypes.JobProgress, new Dictionary<string, object?>
+        {
+            ["kind"] = "enrich",
+            ["pct"] = job.ProgressPct,
+            ["message"] = job.ProgressMessage,
+        });
     }
 
     private async Task ChainTrainAsync(Guid accountId, CancellationToken ct)
@@ -321,5 +421,4 @@ public class EnrichCatalogJobHandler(
             }
         }
     }
-
 }

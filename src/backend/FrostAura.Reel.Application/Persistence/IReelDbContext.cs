@@ -27,14 +27,13 @@ public interface IReelDbContext
     DbSet<TitleAttributes> TitleAttributes { get; }
     DbSet<Person> Persons { get; }
     DbSet<TitleCredit> TitleCredits { get; }
-    DbSet<Episode> Episodes { get; }
     DbSet<StreamingProvider> StreamingProviders { get; }
-    DbSet<ProviderLinkPattern> ProviderLinkPatterns { get; }
     DbSet<TitleAvailability> TitleAvailabilities { get; }
 
     DbSet<WatchedTitle> WatchedTitles { get; }
     DbSet<ShowWatchProgress> ShowWatchProgresses { get; }
     DbSet<UserRating> UserRatings { get; }
+    DbSet<UserRatingEvent> UserRatingEvents { get; }
     DbSet<UserPersonRating> UserPersonRatings { get; }
     DbSet<UserTitleReaction> UserTitleReactions { get; }
     DbSet<ContentFilter> ContentFilters { get; }
@@ -43,7 +42,6 @@ public interface IReelDbContext
     DbSet<Domain.Search.SearchTurn> SearchTurns { get; }
 
     DbSet<PersonAffinity> PersonAffinities { get; }
-    DbSet<AccountTasteProfile> AccountTasteProfiles { get; }
     DbSet<TrainingRun> TrainingRuns { get; }
     DbSet<ModelArtifact> ModelArtifacts { get; }
     DbSet<EvaluationResult> EvaluationResults { get; }
@@ -52,7 +50,17 @@ public interface IReelDbContext
 
     DbSet<FeedSnapshot> FeedSnapshots { get; }
     DbSet<FeedItem> FeedItems { get; }
+    DbSet<FeedBuildStat> FeedBuildStats { get; }
     DbSet<AccountDigest> AccountDigests { get; }
+
+    // "Through your lens": the account's own taste, written out, and titles retold through it.
+    DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives { get; }
+    DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies { get; }
+
+    // The closed loop. ExposureEvents is append-only; the other two are read-only SQL views.
+    DbSet<ExposureEvent> ExposureEvents { get; }
+    DbSet<ExposureOutcome> ExposureOutcomes { get; }
+    DbSet<TitleExposureRollup> TitleExposureRollups { get; }
 
     DbSet<Domain.Notifications.PushSubscription> PushSubscriptions { get; }
     DbSet<Domain.Notifications.AppSecret> AppSecrets { get; }

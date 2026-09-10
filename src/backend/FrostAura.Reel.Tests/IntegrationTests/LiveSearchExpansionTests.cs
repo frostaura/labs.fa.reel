@@ -1,11 +1,13 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
@@ -30,6 +32,11 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class LiveSearchExpansionTests(PostgresFixture fixture)
 {
+    // Was quarantined as a "local-only flake" until 2026-09-10. The cause was in the fake TMDB
+    // client below, not the environment: its list rows carried OriginalLanguage = null, so every
+    // freshly-discovered candidate was upserted with Language = null and then dropped by the
+    // English-only eligibility default added in e790bb2 — "found: 3, scored: 0". Deterministic
+    // everywhere, CI included. The fake now carries "en" the way TMDB's real discover rows do.
     [Fact]
     public async Task Streams_unseen_matches_excludes_seen_and_caches_the_fetch()
     {
@@ -66,6 +73,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
         Assert.Contains(events, e => e.Event == "done");
     }
 
+    // Was quarantined alongside the sibling above and shared its cause exactly: the person-credit
+    // rows carried no OriginalLanguage, so both films were dropped by the English-only default
+    // before they could be badged. See that test's note; the fake now carries "en".
     [Fact]
     public async Task A_director_query_returns_the_filmography_including_watched_titles()
     {
@@ -84,8 +94,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             PersonResult = new TmdbPerson(525, "Christopher Nolan", "Directing"),
             PersonCredits =
             [
-                new(27205, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878]),
-                new(577922, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878]),
+                new(27205, true, "Inception", "/i.jpg", null, "A heist inside dreams.", 80m, 8.3m, 30000, new DateTime(2010, 7, 16, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
+                new(577922, true, "Tenet", "/t.jpg", null, "Time inversion espionage.", 70m, 7.3m, 9000, new DateTime(2020, 8, 26, 0, 0, 0, DateTimeKind.Utc), [28, 878], "en"),
             ],
         };
         var agent = new FakePersonAgent(new PersonQuery("Christopher Nolan", PersonRole.Director));
@@ -251,7 +261,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -269,7 +279,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null, null)));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -329,7 +339,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
                 new SearchIntent([], [], [], message, null, null, [person])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, string tasteSummary, string? anchorName = null, CancellationToken ct = default) =>
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>([]);
     }
 
@@ -362,13 +372,15 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             tmdb,
             new StubEmbeddingProvider(),
             eligibility,
-            new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance),
+            new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             featureBuilder,
+            new PersonalisationContext(db, new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions()))),
             new OnDemandScorer(
                 db, featureBuilder, engine, residualModel,
-                new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions()))),
-            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+                new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+                new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
+            new ExposureLog(db, NullLogger<ExposureLog>.Instance),
             new LexicalSearchService(eligibility),
             new CatalogWorkCoordinator(),
             new MemoryCache(new MemoryCacheOptions()),
@@ -465,9 +477,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
         private static readonly TmdbListItem[] Movies =
         [
-            new(579, true, "Jaws 2", "/jaws2.jpg", null, "A killer shark returns to Amity.", 50m, 6.5m, 900, new DateTime(1978, 6, 16, 0, 0, 0, DateTimeKind.Utc), [27, 53]),
-            new(8914, true, "Deep Blue Sea", "/dbs.jpg", null, "Genetically enhanced sharks fight back.", 40m, 5.9m, 1800, new DateTime(1999, 7, 28, 0, 0, 0, DateTimeKind.Utc), [28, 27]),
-            new(8059, true, "Sharknado", "/sn.jpg", null, "Sharks rain on Los Angeles.", 30m, 3.3m, 1200, new DateTime(2013, 7, 11, 0, 0, 0, DateTimeKind.Utc), [27, 878]),
+            new(579, true, "Jaws 2", "/jaws2.jpg", null, "A killer shark returns to Amity.", 50m, 6.5m, 900, new DateTime(1978, 6, 16, 0, 0, 0, DateTimeKind.Utc), [27, 53], "en"),
+            new(8914, true, "Deep Blue Sea", "/dbs.jpg", null, "Genetically enhanced sharks fight back.", 40m, 5.9m, 1800, new DateTime(1999, 7, 28, 0, 0, 0, DateTimeKind.Utc), [28, 27], "en"),
+            new(8059, true, "Sharknado", "/sn.jpg", null, "Sharks rain on Los Angeles.", 30m, 3.3m, 1200, new DateTime(2013, 7, 11, 0, 0, 0, DateTimeKind.Utc), [27, 878], "en"),
         ];
 
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
@@ -484,7 +496,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
             string? region, DateTime? releasedAfter, int page,
             IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, CancellationToken ct = default)
+            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null, CancellationToken ct = default)
         {
             Interlocked.Increment(ref ConceptFetches);
             if (movies)
@@ -516,7 +528,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
         public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<TmdbTitleDetails?>(new TmdbTitleDetails(
-                tmdbId, "/p.jpg", null, 40m, 6m, 500, 120, "An overview.", null, null, [], [], null, ["shark"]));
+                tmdbId, "/p.jpg", null, 40m, 6m, 500, 120, "An overview.", null, null, [], [], null, ["shark"], "en", ["en"]));
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<TmdbTitleDetails?>(null);
@@ -529,6 +541,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>

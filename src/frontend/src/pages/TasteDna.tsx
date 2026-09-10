@@ -18,6 +18,8 @@ import { useGetSessionQuery, useGetTasteDnaQuery } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";
 import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
 import ShareCard from "../components/dna/ShareCard";
+import DislikePanel from "../components/dna/DislikePanel";
+import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -105,6 +107,11 @@ export default function TasteDna() {
         </div>
       </div>
 
+      {/* What Reel believes about you, in words — and your correction to it. Above the charts on
+          purpose: the charts describe the data, this describes the person the data was read as,
+          and this is the text every downstream model call is actually told. */}
+      <TasteNarrativePanel />
+
       {/* Headline stats */}
       <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="fa-card px-4 py-3">
@@ -184,6 +191,9 @@ export default function TasteDna() {
           </ResponsiveContainer>
         </section>
       </div>
+
+      {/* What you've said no to — the strongest negative signal, made legible and revocable. */}
+      <DislikePanel />
 
       {/* Taste drift */}
       {driftData.length > 1 && (

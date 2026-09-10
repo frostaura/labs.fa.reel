@@ -45,15 +45,14 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<TitleAttributes> TitleAttributes => Set<TitleAttributes>();
     public DbSet<Person> Persons => Set<Person>();
     public DbSet<TitleCredit> TitleCredits => Set<TitleCredit>();
-    public DbSet<Episode> Episodes => Set<Episode>();
     public DbSet<StreamingProvider> StreamingProviders => Set<StreamingProvider>();
-    public DbSet<ProviderLinkPattern> ProviderLinkPatterns => Set<ProviderLinkPattern>();
     public DbSet<TitleAvailability> TitleAvailabilities => Set<TitleAvailability>();
 
     // Account library
     public DbSet<WatchedTitle> WatchedTitles => Set<WatchedTitle>();
     public DbSet<ShowWatchProgress> ShowWatchProgresses => Set<ShowWatchProgress>();
     public DbSet<UserRating> UserRatings => Set<UserRating>();
+    public DbSet<UserRatingEvent> UserRatingEvents => Set<UserRatingEvent>();
     public DbSet<UserPersonRating> UserPersonRatings => Set<UserPersonRating>();
 
     public DbSet<UserPreferenceTag> UserPreferenceTags => Set<UserPreferenceTag>();
@@ -66,7 +65,6 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
     // ML
     public DbSet<PersonAffinity> PersonAffinities => Set<PersonAffinity>();
-    public DbSet<AccountTasteProfile> AccountTasteProfiles => Set<AccountTasteProfile>();
     public DbSet<TrainingRun> TrainingRuns => Set<TrainingRun>();
     public DbSet<ModelArtifact> ModelArtifacts => Set<ModelArtifact>();
     public DbSet<EvaluationResult> EvaluationResults => Set<EvaluationResult>();
@@ -76,7 +74,21 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     // Feed
     public DbSet<FeedSnapshot> FeedSnapshots => Set<FeedSnapshot>();
     public DbSet<FeedItem> FeedItems => Set<FeedItem>();
+    public DbSet<FeedBuildStat> FeedBuildStats => Set<FeedBuildStat>();
     public DbSet<AccountDigest> AccountDigests => Set<AccountDigest>();
+
+    // ── "Through your lens" ────────────────────────────────────────────────────────────
+    // Both are account-owned and therefore filtered; TitleLensCopy is deliberately NOT shared
+    // across tenants the way TitleAttributes is — being per-account is the whole point of it.
+    public DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives => Set<Domain.Lens.AccountTasteNarrative>();
+    public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => Set<Domain.Lens.TitleLensCopy>();
+
+    // ── The closed loop ────────────────────────────────────────────────────────────────
+    // ExposureEvents is append-only and is never touched by the feed builder's prune.
+    // The other two are read-only SQL views created in the Phase2ExposureLog migration.
+    public DbSet<ExposureEvent> ExposureEvents => Set<ExposureEvent>();
+    public DbSet<ExposureOutcome> ExposureOutcomes => Set<ExposureOutcome>();
+    public DbSet<TitleExposureRollup> TitleExposureRollups => Set<TitleExposureRollup>();
 
     // Notifications
     public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => Set<Domain.Notifications.PushSubscription>();
@@ -171,14 +183,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(c => c.PersonId);
         });
 
-        modelBuilder.Entity<Episode>(e =>
-        {
-            e.HasIndex(x => new { x.TitleId, x.SeasonNumber, x.EpisodeNumber }).IsUnique();
-        });
-
         modelBuilder.Entity<StreamingProvider>(e => e.HasIndex(p => p.TmdbProviderId).IsUnique());
-
-        modelBuilder.Entity<ProviderLinkPattern>(e => e.HasIndex(p => new { p.ProviderId, p.Region }));
 
         modelBuilder.Entity<TitleAvailability>(e =>
         {
@@ -199,6 +204,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         {
             e.HasIndex(r => new { r.AccountId, r.SubjectType, r.TitleId, r.SeasonNumber, r.EpisodeNumber }).IsUnique();
             e.HasIndex(r => new { r.AccountId, r.RatedAt });
+            // The eval split axis and the nightly retrain gate both order/count on this.
+            e.HasIndex(r => new { r.AccountId, r.FirstRatedAt });
         });
 
         modelBuilder.Entity<UserPersonRating>(e =>
@@ -225,14 +232,6 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
         // ── ML ─────────────────────────────────────────────────────────────────────────────
         modelBuilder.Entity<PersonAffinity>(e => e.HasIndex(a => new { a.AccountId, a.PersonId, a.Role }).IsUnique());
-
-        modelBuilder.Entity<AccountTasteProfile>(e =>
-        {
-            e.HasIndex(p => p.AccountId).IsUnique();
-            e.Property(p => p.LovedCentroid).HasColumnType("vector(1536)");
-            e.Property(p => p.RecentCentroid).HasColumnType("vector(1536)");
-            e.Property(p => p.ProfileJson).HasColumnType("jsonb");
-        });
 
         modelBuilder.Entity<TrainingRun>(e =>
         {
@@ -284,6 +283,15 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
         // One residual head per account (upserted on every event); unique so the online update
         // has a single row to load-modify-write against.
+        // The online residual head is read-modify-write (load weights → SGD step → save), so two
+        // concurrent observes for one account would otherwise have the loser's step silently
+        // overwritten — the event lost, with nothing to see. The natural fix is a row version on
+        // Postgres's xmin system column (e.Property<uint>("xmin").IsRowVersion()), which needs no
+        // DDL; it is NOT here because it is still a MODEL change, and `ef migrations
+        // has-pending-model-changes` goes dirty the moment it is declared — this branch is not the
+        // one that owns the Phase 0 migration. OnlineResidualModel enforces the same guarantee in
+        // application code instead: it writes through a guarded UPDATE predicated on the UpdateCount
+        // it read, and treats "no rows affected" as the conflict. Move it here when a migration lands.
         modelBuilder.Entity<OnlineModelState>(e => e.HasIndex(s => s.AccountId).IsUnique());
 
         // ── Feed ───────────────────────────────────────────────────────────────────────────
@@ -326,6 +334,23 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(j => new { j.AccountId, j.Kind }).IsUnique().HasFilter("\"Status\" IN ('Pending', 'Running')");
             e.HasIndex(j => new { j.Status, j.Priority, j.EnqueuedAt });
             e.Property(j => j.CursorJson).HasColumnType("jsonb");
+
+            // SyncJob is the one account-bearing entity that is NOT IAccountScoped — its AccountId
+            // is nullable because a global job (catalog refresh) belongs to no tenant — so the
+            // reflective loop below cannot cover it and every reader hand-writes the predicate.
+            // One missed predicate is a cross-tenant leak that no structural test would catch, so
+            // the filter is declared explicitly here instead.
+            //
+            // It mirrors the generic filter's null-context behaviour (unpinned sees everything —
+            // JobRunnerService reads the job BEFORE pinning, and the background schedulers run in
+            // unscoped scopes) and additionally always admits global rows, which is the difference
+            // from the generic predicate and the reason SyncJob cannot simply implement the
+            // interface. The explicit AccountId filters in SyncEndpoints/MetricsEndpoints stay:
+            // they narrow further, to this account's own jobs, excluding global ones.
+            e.HasQueryFilter(j =>
+                _accountContext.AccountId == null
+                || j.AccountId == null
+                || j.AccountId == _accountContext.AccountId);
         });
 
         modelBuilder.Entity<TraktOutboxEntry>(e =>
@@ -341,8 +366,117 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
         modelBuilder.Entity<ExternalApiUsage>(e =>
         {
-            e.HasIndex(u => new { u.Provider, u.Day }).IsUnique();
+            // NULLS NOT DISTINCT is load-bearing, not a nicety: AccountId/Model/Purpose are legitimately
+            // null for Trakt, TMDB and catalogue-wide work, and under the default NULLS DISTINCT the
+            // recorder's ON CONFLICT upsert would never fire for those rows — the 15s flush would
+            // insert a fresh duplicate every tick, forever. See ExternalApiUsage's doc-comment.
+            e.HasIndex(u => new { u.Provider, u.Day, u.AccountId, u.Model, u.Purpose })
+                .IsUnique()
+                .AreNullsDistinct(false);
             e.Property(u => u.Day).HasColumnType("date");
+            e.Property(u => u.Model).HasMaxLength(128);
+            e.Property(u => u.Purpose).HasMaxLength(64);
+        });
+
+        // ── Build instrumentation ──────────────────────────────────────────────────────────
+        // No FK on FeedSnapshotId: snapshots are pruned to the last seven and these rows outlive them.
+        modelBuilder.Entity<FeedBuildStat>(e =>
+        {
+            e.HasIndex(s => new { s.AccountId, s.BuiltAt }).IsDescending(false, true);
+            e.Property(s => s.ShortlistP50).HasPrecision(4, 2);
+            e.Property(s => s.ShortlistP90).HasPrecision(4, 2);
+        });
+
+        // ── "Through your lens" ────────────────────────────────────────────────────────────
+        modelBuilder.Entity<Domain.Lens.AccountTasteNarrative>(e =>
+        {
+            // One live narrative per account per version; regeneration writes a new version rather
+            // than mutating the old one, so the history of what the product believed about someone
+            // stays readable.
+            e.HasIndex(n => new { n.AccountId, n.Version }).IsUnique();
+            e.Property(n => n.ProfileHash).HasMaxLength(16);
+            e.Property(n => n.ProfileFingerprint).HasMaxLength(2048);
+            e.Property(n => n.ModelId).HasMaxLength(128);
+            e.Property(n => n.FactsJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<Domain.Lens.TitleLensCopy>(e =>
+        {
+            // The cache key. ProfileHash carries the taste fingerprint (including the dislike
+            // version) and PromptVersion the manual bump lever; the model artifact is deliberately
+            // absent — see TasteProfileHash for why, and why the prose never states the number.
+            e.HasIndex(c => new { c.AccountId, c.TitleId, c.ProfileHash, c.PromptVersion }).IsUnique();
+            // The lens job's "what is already warm" read, and the stale-note fallback's read.
+            e.HasIndex(c => new { c.AccountId, c.TitleId, c.GeneratedAt }).IsDescending(false, false, true);
+            e.Property(c => c.ProfileHash).HasMaxLength(16);
+            e.Property(c => c.ModelId).HasMaxLength(128);
+            e.Property(c => c.RejectionReason).HasMaxLength(128);
+            e.Property(c => c.LensJson).HasColumnType("jsonb");
+        });
+
+        // ── The closed loop ────────────────────────────────────────────────────────────────
+        modelBuilder.Entity<ExposureEvent>(e =>
+        {
+            // Postgres computes the minute bucket from the timestamp it truncates, so the two can
+            // never disagree. It exists ONLY to carry the idempotency index below.
+            e.Property(x => x.MinuteBucket)
+                .HasComputedColumnSql("date_trunc('minute', \"OccurredAt\", 'UTC')", stored: true);
+
+            // The idempotency key. AreNullsDistinct(false) is load-bearing: FeedSnapshotId is
+            // legitimately null on the digest, Ask Reel and similar surfaces, and under the default
+            // NULLS DISTINCT those rows would never collide — every RTK refetch inside one minute
+            // would insert a fresh duplicate and the calibration denominator would inflate.
+            e.HasIndex(x => new { x.AccountId, x.TitleId, x.Surface, x.FeedSnapshotId, x.MinuteBucket })
+                .IsUnique()
+                .AreNullsDistinct(false);
+
+            // "What did you say about this title, and when" — the toast's and the moments list's read.
+            e.HasIndex(x => new { x.AccountId, x.TitleId, x.OccurredAt }).IsDescending(false, false, true);
+            // The window scan behind every /api/accuracy query.
+            e.HasIndex(x => new { x.AccountId, x.OccurredAt }).IsDescending(false, true);
+            // Per-artifact-era slicing: which model made which promises.
+            e.HasIndex(x => new { x.AccountId, x.ModelArtifactId });
+
+            e.Property(x => x.PredictedRating).HasPrecision(4, 2);
+            e.Property(x => x.BaseScore).HasPrecision(6, 3);
+            e.Property(x => x.CalibrationDelta).HasPrecision(6, 3);
+            e.Property(x => x.ResidualApplied).HasPrecision(6, 3);
+            e.Property(x => x.DemotionApplied).HasPrecision(6, 3);
+            e.Property(x => x.LlmFit).HasPrecision(4, 3);
+            e.Property(x => x.RowKey).HasMaxLength(128);
+            e.Property(x => x.WhySource).HasMaxLength(32);
+            e.Property(x => x.PolicyId).HasMaxLength(64);
+
+            // The interleaving read: every drafted card, grouped by slate, in time order. Filtered
+            // so the index costs nothing on the overwhelming majority of rows, which carry no
+            // policy at all — the experiment is off by default and most surfaces never draft.
+            e.HasIndex(x => new { x.AccountId, x.InterleaveGroup })
+                .HasFilter("\"InterleaveGroup\" IS NOT NULL");
+        });
+
+        modelBuilder.Entity<UserRatingEvent>(e =>
+        {
+            e.HasIndex(x => new { x.AccountId, x.ObservedAt }).IsDescending(false, true);
+            e.HasIndex(x => new { x.AccountId, x.TitleId, x.ObservedAt }).IsDescending(false, false, true);
+        });
+
+        // Read-only views, created by raw SQL in the Phase2ExposureLog migration. ToView keeps the
+        // migration scaffolder from trying to own them as tables while still letting the tenancy
+        // loop below hang a query filter on each — so a caller cannot read another tenant's loop
+        // even though the view's own SQL already names AccountId on every join.
+        modelBuilder.Entity<ExposureOutcome>(e =>
+        {
+            e.HasNoKey();
+            e.ToView("ExposureOutcomes");
+            e.Property(x => x.PredictedRating).HasPrecision(4, 2);
+        });
+
+        modelBuilder.Entity<TitleExposureRollup>(e =>
+        {
+            e.HasNoKey();
+            e.ToView("TitleExposureRollups");
+            e.Property(x => x.MinPredicted).HasPrecision(4, 2);
+            e.Property(x => x.MaxPredicted).HasPrecision(4, 2);
         });
 
         // ── Row-level tenancy, enforced once ───────────────────────────────────────────────

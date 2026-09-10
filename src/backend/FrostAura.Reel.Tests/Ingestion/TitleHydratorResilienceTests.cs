@@ -169,6 +169,9 @@ public class TitleHydratorResilienceTests
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -184,7 +187,7 @@ public class TitleHydratorResilienceTests
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page,
             IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
-            CancellationToken ct = default) =>
+            TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
@@ -205,13 +208,12 @@ public class TitleHydratorResilienceTests
         public DbSet<TitleAttributes> TitleAttributes => throw Unexpected();
         public DbSet<Person> Persons => throw Unexpected();
         public DbSet<TitleCredit> TitleCredits => throw Unexpected();
-        public DbSet<Episode> Episodes => throw Unexpected();
         public DbSet<StreamingProvider> StreamingProviders => throw Unexpected();
-        public DbSet<ProviderLinkPattern> ProviderLinkPatterns => throw Unexpected();
         public DbSet<TitleAvailability> TitleAvailabilities => throw Unexpected();
         public DbSet<WatchedTitle> WatchedTitles => throw Unexpected();
         public DbSet<ShowWatchProgress> ShowWatchProgresses => throw Unexpected();
         public DbSet<UserRating> UserRatings => throw Unexpected();
+        public DbSet<UserRatingEvent> UserRatingEvents => throw Unexpected();
         public DbSet<UserPersonRating> UserPersonRatings => throw Unexpected();
         public DbSet<UserTitleReaction> UserTitleReactions => throw Unexpected();
         public DbSet<ContentFilter> ContentFilters => throw Unexpected();
@@ -219,7 +221,6 @@ public class TitleHydratorResilienceTests
         public DbSet<Domain.Search.SearchConversation> SearchConversations => throw Unexpected();
         public DbSet<Domain.Search.SearchTurn> SearchTurns => throw Unexpected();
         public DbSet<PersonAffinity> PersonAffinities => throw Unexpected();
-        public DbSet<AccountTasteProfile> AccountTasteProfiles => throw Unexpected();
         public DbSet<TrainingRun> TrainingRuns => throw Unexpected();
         public DbSet<ModelArtifact> ModelArtifacts => throw Unexpected();
         public DbSet<EvaluationResult> EvaluationResults => throw Unexpected();
@@ -227,7 +228,14 @@ public class TitleHydratorResilienceTests
         public DbSet<OnlineModelState> OnlineModelStates => throw Unexpected();
         public DbSet<FeedSnapshot> FeedSnapshots => throw Unexpected();
         public DbSet<FeedItem> FeedItems => throw Unexpected();
+
+        public DbSet<FeedBuildStat> FeedBuildStats => throw Unexpected();
         public DbSet<AccountDigest> AccountDigests => throw Unexpected();
+        public DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives => throw Unexpected();
+        public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => throw Unexpected();
+        public DbSet<ExposureEvent> ExposureEvents => throw Unexpected();
+        public DbSet<ExposureOutcome> ExposureOutcomes => throw Unexpected();
+        public DbSet<TitleExposureRollup> TitleExposureRollups => throw Unexpected();
         public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => throw Unexpected();
         public DbSet<Domain.Notifications.AppSecret> AppSecrets => throw Unexpected();
         public DbSet<SyncJob> SyncJobs => throw Unexpected();

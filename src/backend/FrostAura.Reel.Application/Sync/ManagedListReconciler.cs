@@ -19,10 +19,12 @@ public sealed class ManagedListReconciler(IReelDbContext db)
     /// <summary>
     /// Marks every not-yet-removed managed-list item the account has since fully watched as Removed
     /// (reason <see cref="ListRemovalReason.Watched"/>) and enqueues the Trakt ListRemove write-back.
-    /// Returns the number of items removed. Does not call SaveChanges — the caller commits it in its
-    /// own transaction alongside the sync/reconcile that surfaced the watch.
+    /// Returns the ids of the titles removed — not a count: this is the product's only genuine
+    /// "a recommendation was consumed" event, and callers need to know WHICH titles converted, not
+    /// how many. Does not call SaveChanges — the caller commits it in its own transaction alongside
+    /// the sync/reconcile that surfaced the watch.
     /// </summary>
-    public async Task<int> RemoveWatchedAsync(Guid accountId, DateTime now, CancellationToken ct)
+    public async Task<IReadOnlyList<Guid>> RemoveWatchedAsync(Guid accountId, DateTime now, CancellationToken ct)
     {
         var watchedInList = await (
             from m in db.ManagedListItems
@@ -47,6 +49,6 @@ public sealed class ManagedListReconciler(IReelDbContext db)
             });
         }
 
-        return watchedInList.Count;
+        return watchedInList.Select(x => x.Title.Id).ToList();
     }
 }

@@ -23,17 +23,33 @@ public class AccountDigest : IAccountScoped
     public string ItemsJson { get; set; } = "[]";
 }
 
-/// <summary>One entry inside <see cref="AccountDigest.ItemsJson"/>.</summary>
+/// <summary>
+/// One entry inside <see cref="AccountDigest.ItemsJson"/>.
+/// <para>
+/// <paramref name="DegradedReason"/> is a DIGEST-level fact carried per item because
+/// <see cref="AccountDigest"/> has no column for it yet and this branch ships no migration. It is
+/// null on a digest that met the "high for you" bar honestly, and identical across every item of a
+/// relaxed one. Optional and last, so digests written before it deserialise unchanged.
+/// </para>
+/// </summary>
 public sealed record DigestItem(
     [property: System.Text.Json.Serialization.JsonPropertyName("titleId")] Guid TitleId,
     [property: System.Text.Json.Serialization.JsonPropertyName("predictedRating")] decimal PredictedRating,
-    [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string Reason);
+    [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string Reason,
+    [property: System.Text.Json.Serialization.JsonPropertyName("degradedReason")] string? DegradedReason = null);
 
 /// <summary>Digest item reasons — stable strings, persisted inside ItemsJson.</summary>
 public static class DigestReasons
 {
     public const string NewRelease = "new-release";
     public const string NewOnProvider = "new-on-provider";
+
+    /// <summary>
+    /// The user-facing why for a digest item. Single-sourced because the digest rail and the push
+    /// notification are two renderings of the same pick and must not describe it differently.
+    /// </summary>
+    public static string CopyFor(string reason) =>
+        reason == NewOnProvider ? "Just landed on your services" : "New this week";
 }
 
 /// <summary>Week arithmetic shared by the digest job, its scheduler and the API.</summary>

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
@@ -26,7 +27,10 @@ public class OpenRouterSearchInterpreter(
     HttpClient httpClient,
     ApiUsageRecorder usageRecorder,
     IConfiguration configuration,
-    ILogger<OpenRouterSearchInterpreter> logger)
+    ILogger<OpenRouterSearchInterpreter> logger,
+    // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
+    // every real code path, but the adapter must still be `new`-able in tests without a scope.
+    IAccountContext? accountContext = null)
     : ISearchQueryInterpreter
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -35,7 +39,12 @@ public class OpenRouterSearchInterpreter(
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
-    public bool IsAvailable => true; // the stub always answers
+    // Honest availability: a real key, or an explicit test stub — the same gate the agent and the
+    // attribute extractor apply. This used to answer an unconditional "true, the stub always
+    // answers", which is the very bug the agent's own comment says it fixed: a keyless install
+    // reported an LLM capability it did not have. Interpretation still degrades to the free
+    // deterministic Heuristic when this is false; what changes is that callers can now tell.
+    public bool IsAvailable => ApiKey is not null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
@@ -47,19 +56,16 @@ public class OpenRouterSearchInterpreter(
     public async Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default)
     {
         var trimmed = (query ?? string.Empty).Trim();
-        if (trimmed.Length == 0)
-        {
-            return new SearchIntent([], [], [], string.Empty, null, null);
-        }
-
-        if (StubMode)
+        if (trimmed.Length == 0 || StubMode)
         {
             return Heuristic(trimmed);
         }
 
+        // Recorded in a finally, AFTER the response: the token counts are in the body, so the old
+        // record-then-send ordering could never see them. Every HTTP attempt still counts as a call.
+        OpenRouterUsage? usage = null;
         try
         {
-            usageRecorder.Record(ApiProvider.OpenRouter);
             using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
             {
                 Content = JsonContent.Create(new
@@ -79,13 +85,24 @@ public class OpenRouterSearchInterpreter(
             using var response = await httpClient.SendAsync(request, ct);
             response.EnsureSuccessStatusCode();
             var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
+            usage = dto?.Usage;
             var content = dto?.Choices?.FirstOrDefault()?.Message?.Content;
-            return string.IsNullOrWhiteSpace(content) ? Heuristic(trimmed) : Parse(content, trimmed);
+            return string.IsNullOrWhiteSpace(content) ? HeuristicIntent(trimmed) : Parse(content, trimmed);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Query interpretation failed for {Query}; falling back to heuristic.", trimmed);
-            return Heuristic(trimmed);
+            return HeuristicIntent(trimmed);
+        }
+        finally
+        {
+            usageRecorder.Record(
+                ApiProvider.OpenRouter,
+                ApiUsagePurpose.SearchInterpret,
+                ModelId,
+                accountContext?.AccountId,
+                usage?.PromptTokens,
+                usage?.CompletionTokens);
         }
     }
 
@@ -94,12 +111,25 @@ public class OpenRouterSearchInterpreter(
         try
         {
             using var doc = JsonDocument.Parse(json);
-            return SearchIntentParser.FromJson(doc.RootElement, fallbackText, Heuristic(fallbackText));
+            return SearchIntentParser.FromJson(doc.RootElement, fallbackText, HeuristicIntent(fallbackText));
         }
         catch (JsonException)
         {
-            return Heuristic(fallbackText);
+            return HeuristicIntent(fallbackText);
         }
+    }
+
+    /// <summary>
+    /// The port's free, deterministic reading of a query. Public so a collaborator that only needs
+    /// a FALLBACK intent — <c>OpenRouterSearchAgent</c> — can have one without paying for a second
+    /// chat completion it will usually discard.
+    /// </summary>
+    public SearchIntent Heuristic(string query)
+    {
+        var trimmed = (query ?? string.Empty).Trim();
+        return trimmed.Length == 0
+            ? new SearchIntent([], [], [], string.Empty, null, null)
+            : HeuristicIntent(trimmed);
     }
 
     /// <summary>
@@ -107,7 +137,7 @@ public class OpenRouterSearchInterpreter(
     /// genres, the rest into keywords. "shark horrors" → genres:[horror], keywords:[shark]. No
     /// network; same input → same output.
     /// </summary>
-    private static SearchIntent Heuristic(string query)
+    private static SearchIntent HeuristicIntent(string query)
     {
         var lower = query.ToLowerInvariant();
         var tokens = Tokenize(lower);
@@ -442,7 +472,7 @@ public class OpenRouterSearchInterpreter(
         "\"before 2000\" sets only maxYear; \"after 2015\" sets only minYear. Do not infer a year from a title that merely " +
         "looks like one (\"1917\", \"300\", \"2001\"). Output strictly valid JSON.";
 
-    private sealed record ChatResponse(ChatChoice[]? Choices);
+    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 
     private sealed record ChatChoice(ChatMessage? Message);
 

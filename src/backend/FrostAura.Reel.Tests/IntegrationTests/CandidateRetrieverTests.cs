@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Tenancy;
 using Pgvector;
@@ -18,6 +19,22 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class CandidateRetrieverTests(PostgresFixture fixture)
 {
+    /// <summary>
+    /// A synthetic genre stamped on every title this instance seeds, with a matching IncludeGenre
+    /// allowlist row on its account — so the eligibility lane both arms compose sees THIS test's
+    /// rows and nothing else.
+    ///
+    /// <para>This is the fix for the contamination that had two of the three tests here
+    /// quarantined as local-only failures. The catalogue is GLOBAL and shared by every class in the
+    /// postgres collection, so a sibling class seeding a popular title displaced the popularity
+    /// head, and a sibling seeding an embedding became a nearer ANN neighbour than the deep cut
+    /// this file plants. Neither symptom was a defect in the retriever, and neither assertion was
+    /// wrong — the POOL was wrong. Narrowing the pool to this test's own rows fixes the cause;
+    /// nothing about what is asserted has been weakened. xUnit builds one instance per test, so
+    /// the scope is unique per test as well as per class.</para>
+    /// </summary>
+    private readonly string _scope = $"retrieverscope{Guid.NewGuid():N}";
+
     [Fact]
     public async Task Ann_arm_surfaces_a_similar_unseen_title_past_the_popularity_head()
     {
@@ -151,6 +168,14 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
             PipelineStageChangedAt = DateTime.UtcNow,
         };
         db.Add(account);
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            Kind = FilterKind.IncludeGenre,
+            Value = _scope,
+            CreatedAt = DateTime.UtcNow,
+        });
         await db.SaveChangesAsync();
         return account.Id;
     }
@@ -167,7 +192,7 @@ public class CandidateRetrieverTests(PostgresFixture fixture)
             Name = name,
             Language = "en", // eligibility defaults to English-only when no language filter is configured
             PosterPath = "/p.jpg",
-            Genres = ["drama"],
+            Genres = ["drama", _scope],
             TmdbPopularity = popularity,
             CreatedAt = DateTime.UtcNow,
         };

@@ -1,5 +1,7 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
@@ -8,6 +10,7 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
@@ -20,21 +23,56 @@ public static class FeedEndpoints
     public record CardProvider(string Name, string? LogoPath);
 
     /// <summary>
+    /// The four extracted scalars the tonight-mood chips re-sort over, 0–1. Sent WITH the card so
+    /// the re-sort is instant and entirely client-side: the chips reorder the snapshot the browser
+    /// already has, they never trigger a rebuild — tonight's picks are a contract, and a mood is a
+    /// way of reading them, not a reason to deal new ones.
+    ///
+    /// <para>Null on a title that has not been enriched, which is honest: a chip should decline to
+    /// rank what it cannot see rather than treat missing data as a neutral 0.5 and shuffle it into
+    /// the middle of every mood.</para>
+    /// </summary>
+    public record CardTexture(decimal Darkness, decimal Pacing, decimal Complexity, decimal Humor);
+
+    /// <summary>
     /// The card contract. <c>PredictedRating</c> is "for you"; <c>CrowdRating</c> / <c>CrowdVotes</c>
     /// are the community number it is compared against, resolved once in
     /// <see cref="Domain.Catalog.CrowdRating"/> (TMDB, then Trakt, then null) so every surface agrees.
     /// </summary>
+    /// <param name="Confidence">
+    /// Hero cards only (null everywhere else): <c>"confident"</c> when the pick cleared the hero bar
+    /// on its own merits, <c>"reaching"</c> when it is on the headline row only because nothing did.
+    /// Derived at serve time from the persisted prediction — the relaxation is a property of the
+    /// number, so it needs no column and no migration.
+    /// </param>
+    /// <param name="FloorUsed">The bar that card was measured against — <see cref="HeroConfidence.BarFor"/>.</param>
+    /// <param name="Hook">
+    /// The lens's one-line reason to press play tonight, where copy has been written for this
+    /// account and title. Null everywhere it has not — a card must render identically well without
+    /// it, because the budget, the provider and the guards can each withhold it.
+    /// </param>
+    /// <param name="LensClause">The first clause of the lens, for the card's two-line why.</param>
+    /// <param name="Mood">
+    /// The lens's closed-vocabulary mood, the strongest signal the chips re-sort over — but only
+    /// present where copy has been written, which is why <paramref name="Texture"/> rides alongside
+    /// it as the signal every enriched title has.
+    /// </param>
+    /// <param name="Texture">The extracted scalars the chips fall back to. See <see cref="CardTexture"/>.</param>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
         decimal PredictedRating, decimal? CrowdRating, int? CrowdVotes,
-        string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers);
+        string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers,
+        // Optional and trailing on purpose: every other producer of this record — the digest, the
+        // paginated lane — is serving a non-hero surface and has no bar to report.
+        string? Confidence = null, decimal? FloorUsed = null,
+        string? Hook = null, string? LensClause = null, string? Mood = null, CardTexture? Texture = null);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -70,6 +108,13 @@ public static class FeedEndpoints
             // used to be a hand-copied union that omitted Dropped, which is precisely why a dropped
             // title kept its slot on tonight's picks (founder, 2026-08-07).
             var snapshotTitleIds = items.Select(x => x.Title.Id).ToList();
+            // The cards this request backfills live. They are rendered and have NEVER existed as
+            // FeedItem rows, so nothing else in the system records them — and they are precisely
+            // the "next best down the list" picks the decay complaint is about. Collected here and
+            // logged once, after the payload is settled, rather than mid-refill: the refill loop is
+            // the hottest region of this file for concurrent edits, and an append to a list is the
+            // smallest footprint that still captures every refilled card.
+            var refilled = new List<ExposureCard>();
             var excludedTitleIds = await eligibility.InteractedTitleIdsAsync(account.Id, snapshotTitleIds, ct);
             if (excludedTitleIds.Count > 0)
             {
@@ -154,20 +199,33 @@ public static class FeedEndpoints
                         for (var k = 0; k < lost && cursor < pool.Count; k++)
                         {
                             var c = pool[cursor++];
+                            var backfillRank = nextRank++;
+                            var backfillWhy = ExplanationTemplater.BuildDistinctSentence(
+                                backfillContexts[c.Title.Id], takenWhys);
                             items.Add(new
                             {
                                 Item = new FeedItem
                                 {
                                     Row = row,
                                     AnchorTitleId = anchorId,
-                                    Rank = nextRank++,
+                                    Rank = backfillRank,
                                     TitleId = c.Title.Id,
                                     PredictedRating = c.PredictedRating,
-                                    WhyThisSentence = ExplanationTemplater.BuildDistinctSentence(
-                                        backfillContexts[c.Title.Id], takenWhys),
+                                    WhyThisSentence = backfillWhy,
                                 },
                                 Title = c.Title,
                             });
+                            refilled.Add(new ExposureCard(
+                                c.Title.Id,
+                                backfillRank,
+                                c.PredictedRating,
+                                WhySentence: backfillWhy,
+                                // A backfill's number comes straight off a persisted TitleScore, so
+                                // its base/residual/calibration decomposition is not recoverable
+                                // here — it was discarded when the score was written. Left at zero
+                                // rather than guessed at; the prediction itself is exact.
+                                WhySource: ExposureWhySource.Templater,
+                                RowKey: FeedPaginator.RowKeyFor(row, anchorId)));
                         }
                     }
 
@@ -198,21 +256,78 @@ public static class FeedEndpoints
                     g => (IReadOnlyList<CardProvider>)g.DistinctBy(x => x.Name).OrderBy(x => x.DisplayPriority)
                         .Take(3).Select(x => new CardProvider(x.Name, x.LogoPath)).ToList());
 
-            FeedCard ToCard(FeedItem item, Title title)
+            // The bar the build required of the hero, re-derived here from the same shared constant.
+            // The build relaxes it silently when nothing clears it — on live data that is the normal
+            // case, not an edge — so the card has to be able to say which side of it a pick sits on.
+            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
+                .Select(f => f.Value)
+                .FirstOrDefaultAsync(ct));
+            var heroBar = HeroConfidence.BarFor(minPredicted);
+
+            // Lens copy for the whole page in one query. READ ONLY — this path never generates:
+            // a page load must not be able to start an LLM call, which is the job's work and the
+            // on-demand endpoint's. Where nothing has been written the card renders exactly as it
+            // did before, on the templater's sentence.
+            var profileHash = await tasteFacts.CurrentHashAsync(account.Id, nowUtc, ct);
+            var lensByTitle = await lens.ResolveManyAsync(
+                account.Id, items.Select(x => x.Title.Id).ToList(), profileHash, ct);
+
+            // The scalars behind the tonight-mood chips. One query for the page; the chips then
+            // re-sort in the browser with no further round trip and no rebuild.
+            var pageTitleIds = items.Select(x => x.Title.Id).ToList();
+            var textures = await db.TitleAttributes
+                .Where(a => pageTitleIds.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)
+                .Select(a => new { a.TitleId, a.Darkness, a.Pacing, a.Complexity, a.Humor })
+                .ToDictionaryAsync(
+                    a => a.TitleId,
+                    a => new CardTexture(a.Darkness, a.Pacing, a.Complexity, a.Humor),
+                    ct);
+
+            FeedCard ToCard(FeedItem item, Title title, bool hero = false)
             {
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
                 var (crowd, crowdVotes) = Domain.Catalog.CrowdRating.Resolve(title);
+                var note = lensByTitle.GetValueOrDefault(title.Id)?.Note;
                 return new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
                     item.PredictedRating, crowd, crowdVotes, item.WhyThisSentence, isReleased,
-                    providersByTitle.GetValueOrDefault(title.Id, []));
+                    providersByTitle.GetValueOrDefault(title.Id, []),
+                    // Rows carry no label: they are selected against the account's own floor, not the
+                    // hero bar, so "reaching" would be measuring them against a rule they never had.
+                    hero ? HeroConfidence.For(item.PredictedRating, heroBar) : null,
+                    hero ? heroBar : null,
+                    note?.Hook,
+                    note?.FirstClause(),
+                    note?.Mood,
+                    textures.GetValueOrDefault(title.Id));
             }
 
             var hero = items.Where(x => x.Item.Row == FeedRowKind.Hero)
-                .Select(x => ToCard(x.Item, x.Title))
+                .Select(x => ToCard(x.Item, x.Title, hero: true))
                 .ToList();
+
+            // Log ONLY the refilled cards, and only the ones this response actually returns. The
+            // built cards were logged by the job that planned them (Surface FeedHero / FeedRow) —
+            // logging them again here would double every denominator on the track record, and a
+            // feed the user reloads five times is not five exposures.
+            //
+            // Fire-and-forget in effect, never in fact: RecordAsync swallows its own failures, so
+            // this cannot turn a rendered page into a 500.
+            async Task LogRefillAsync(IReadOnlyCollection<Guid> renderedTitleIds)
+            {
+                var rendered = refilled.Where(c => renderedTitleIds.Contains(c.TitleId)).ToList();
+                if (rendered.Count == 0)
+                {
+                    return;
+                }
+
+                await exposures.RecordAsync(
+                    account.Id, ExposureSurface.FeedRefill, snapshot.Id, snapshot.ModelArtifactId,
+                    DateTime.UtcNow, rendered, ct);
+            }
 
             // Free tier: the 3-pick daily shortlist; rows are the paid surface (visible-locked
             // client-side; payloads stripped server-side so the data never leaks).
@@ -225,10 +340,16 @@ public static class FeedEndpoints
                         .Select(x => x.Item.AnchorTitleId).Distinct().Count()
                     + (items.Any(x => x.Item.Row == FeedRowKind.DeepCuts) ? 1 : 0)
                     + (items.Any(x => x.Item.Row == FeedRowKind.NewForYou) ? 1 : 0);
+                // The free tier renders three hero cards and nothing else, so three is the honest
+                // denominator — logging the whole payload would credit the product with cards it
+                // stripped server-side.
+                var freeHero = hero.Take(3).ToList();
+                await LogRefillAsync(freeHero.Select(c => c.TitleId).ToHashSet());
+
                 return Results.Ok(new
                 {
                     generatedAt = (DateTime?)snapshot.GeneratedAt,
-                    hero = hero.Take(3),
+                    hero = freeHero,
                     rows = Array.Empty<object>(),
                     lockedRowCount,
                     // Why this build is not literally what the settings asked for (null when it is).
@@ -267,6 +388,8 @@ public static class FeedEndpoints
 
             AddKindRow(FeedRowKind.DeepCuts, "deep-cuts", "Deep cuts — under-the-radar, high for you");
             AddKindRow(FeedRowKind.NewForYou, "new-for-you", "New & for you");
+
+            await LogRefillAsync(items.Select(x => x.Title.Id).ToHashSet());
 
             return Results.Ok(new
             {
@@ -322,6 +445,31 @@ public static class FeedEndpoints
             }));
         });
 
+        // The "your model just learned" band above the hero. Its own endpoint rather than a field on
+        // GET /api/feed: the feed payload is fetched constantly and this is a retrain-cadence number,
+        // so bolting it on would make every feed read pay for two artifact lookups and a snapshot
+        // diff. Returns 204 when there is nothing honest to say (no predecessor artifact, no
+        // evaluation, no new labels) so the client renders nothing at all rather than an empty band.
+        group.MapGet("/learned", async (ModelLearnedQuery learned, IAccountContext accountContext, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            if (await learned.GetAsync(accountId, ct) is not { } result)
+            {
+                return Results.NoContent();
+            }
+
+            return Results.Ok(new
+            {
+                trainedAt = result.TrainedAt,
+                newRatingsSinceLast = result.NewRatingsSinceLast,
+                calibrationBias = result.CalibrationBias,
+                calibrationMae = result.CalibrationMae,
+                maeImprovement = result.MaeImprovement,
+                spearman = result.Spearman,
+                picksChanged = result.PicksChanged,
+            });
+        });
+
         group.MapPost("/rebuild", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -358,7 +506,7 @@ public static class FeedEndpoints
         // the row context + the title ids it has already shown, and gets the next best, never-seen
         // slice — scored live, deepened from TMDB when a lane runs thin. Rows are the paid surface,
         // so the free tier (3-pick hero shortlist) gets nothing here.
-        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        group.MapPost("/more", async (MoreRequestDto body, FeedPaginator paginator, IReelDbContext db, ExposureLog exposures, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -393,6 +541,52 @@ public static class FeedEndpoints
                 i.Title.PosterPath, i.Title.BackdropPath, i.Title.Genres,
                 i.Predicted, Domain.Catalog.CrowdRating.For(i.Title), Domain.Catalog.CrowdRating.VotesFor(i.Title),
                 i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []))).ToList();
+
+            // Every paginated card is a card the user is about to see and which exists nowhere else
+            // in the record — /feed/more scores live and writes only a TitleScore, which keeps no
+            // rank, no why-line and no timestamp of the serve. PageIndex is derived from how many
+            // titles the client says it has already shown, which is the only depth signal the
+            // request carries.
+            if (cards.Count > 0 && items.Count > 0)
+            {
+                var artifactId = await db.ModelArtifacts
+                    .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
+                    .OrderByDescending(a => a.Version)
+                    .Select(a => (Guid?)a.Id)
+                    .FirstOrDefaultAsync(ct);
+                if (artifactId is { } activeArtifactId)
+                {
+                    var pageIndex = limit > 0 ? excludeIds.Count / limit : 0;
+                    var rowKey = context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(body.Genre)
+                        ? $"genre:{body.Genre}"
+                        : context switch
+                        {
+                            FeedRowContext.BecauseYouLoved => $"loved:{anchor}",
+                            FeedRowContext.Similar => $"similar:{anchor}",
+                            _ => context.ToString().ToLowerInvariant(),
+                        };
+
+                    await exposures.RecordAsync(
+                        account.Id,
+                        SurfaceFor(context),
+                        // No snapshot behind a paginated card — it was scored for this request. The
+                        // idempotency key falls back to (account, title, surface, minute), which is
+                        // the right grain: a double-tap on "load more" inside one minute returning
+                        // the same slice is one exposure.
+                        feedSnapshotId: null,
+                        activeArtifactId,
+                        nowUtc,
+                        cards.Select((c, i) => new ExposureCard(
+                            c.TitleId,
+                            i,
+                            c.PredictedRating,
+                            WhySentence: c.WhyThis,
+                            WhySource: ExposureWhySource.Unknown,
+                            RowKey: rowKey,
+                            PageIndex: pageIndex)).ToList(),
+                        ct);
+                }
+            }
 
             // The paginator already tried to deepen this lane straight from TMDB before returning, so an
             // empty page here means the lane is genuinely dry — an explicit exhaustion signal the client
@@ -450,6 +644,18 @@ public static class FeedEndpoints
     }
 
     public record MoreRequestDto(string Row, string? AnchorTitleId, string? Genre, string[]? ExcludeTitleIds, int? Limit, string? MediaType = null);
+
+    /// <summary>
+    /// Which exposure surface a paginated row belongs to. A genre rail is its own surface because
+    /// "does the genre rail convert" is a different product question from "does tonight's page
+    /// convert"; the detail page's similar rail likewise. Everything else is feed pagination.
+    /// </summary>
+    private static ExposureSurface SurfaceFor(FeedRowContext context) => context switch
+    {
+        FeedRowContext.Genre => ExposureSurface.GenreRail,
+        FeedRowContext.Similar => ExposureSurface.Similar,
+        _ => ExposureSurface.FeedPage,
+    };
 
     private static FeedRowContext? SlugToContext(string? slug) => slug switch
     {

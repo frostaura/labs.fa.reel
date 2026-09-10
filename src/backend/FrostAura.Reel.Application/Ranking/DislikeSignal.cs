@@ -65,8 +65,23 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
         IReadOnlyDictionary<string, double> GenreWeights,
         IReadOnlyDictionary<string, double> ToneWeights,
         IReadOnlyList<(float[] Embedding, double Weight)> SeenEnoughEmbeddings,
-        float[]? DislikeCentroid)
+        float[]? DislikeCentroid,
+        /// <summary>
+        /// The dislike-centroid version — a short deterministic fingerprint of WHICH titles the
+        /// account has declined and why, ignoring the continuous recency decay. It is the part of
+        /// this profile that belongs in a copy cache key: the lens's "what might bug you" line is
+        /// grounded in these reactions, so a note written before a dismissal must not survive it,
+        /// while the decay drifting by a percent overnight must not invalidate anything.
+        /// </summary>
+        string Version = "none")
     {
+        /// <summary>
+        /// The version of a profile with nothing in it — a real value, not a placeholder. The
+        /// literal is repeated in the parameter default above because a primary-constructor
+        /// default cannot reference a member of the type it is declaring.
+        /// </summary>
+        public const string EmptyVersion = "none";
+
         public static Profile Empty { get; } = new(
             [],
             new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase),
@@ -75,6 +90,30 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
             null);
 
         public bool IsEmpty => Recent.Count == 0;
+    }
+
+    /// <summary>
+    /// The dislike-centroid version for a set of live reactions: SHA-256 over the ordered
+    /// (title, kind, reason) triples, truncated to 12 hex characters. Ordered by title id so two
+    /// reads of the same reactions in a different row order agree, and deliberately carrying no
+    /// timestamp so the value is stable until the user actually changes their mind.
+    /// </summary>
+    internal static string ComputeVersion(IEnumerable<(Guid TitleId, ReactionKind Kind, ReactionReason? Reason)> reactions)
+    {
+        var ordered = reactions.OrderBy(r => r.TitleId).ToList();
+        if (ordered.Count == 0)
+        {
+            return Profile.EmptyVersion;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var (titleId, kind, reason) in ordered)
+        {
+            sb.Append(titleId.ToString("N")).Append(':').Append(kind).Append(':').Append(reason?.ToString() ?? "-").Append('|');
+        }
+
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sb.ToString()));
+        return Convert.ToHexStringLower(hash)[..12];
     }
 
     /// <summary>
@@ -203,7 +242,8 @@ public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
             genreWeights,
             toneWeights,
             seenEnough,
-            centroid);
+            centroid,
+            ComputeVersion(newestPerTitle.Select(r => (r.TitleId, r.Kind, r.Reason))));
     }
 
     /// <summary>

@@ -10,7 +10,9 @@ import {
   useGetSessionQuery,
 } from "../store/api";
 import { removalsCleared } from "../store/removedTitlesSlice";
+import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
+import ModelLearnedBand from "../components/rec/ModelLearnedBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import RecRow from "../components/rows/RecRow";
 import GenreRow from "../components/rows/GenreRow";
@@ -21,6 +23,11 @@ import PickConditionsButton, { PickConditionsSummary } from "../components/rec/P
 import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
+import PostWatchStrip from "../components/saved/PostWatchStrip";
+import TrackRecordStrip from "../components/rec/TrackRecordStrip";
+import TonightMoodChips from "../components/rec/TonightMoodChips";
+import type { TonightMood } from "../lib/tonightMood";
+import { pipelineStageCopy } from "../lib/syncCopy";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -59,13 +66,23 @@ export default function Home() {
   // change. Bumped only on a successful save, so nothing resets while the dialog is merely open.
   const [conditionsVersion, setConditionsVersion] = useState(0);
 
+  // The tonight mood, held in component state and nowhere else. Deliberately NOT persisted and
+  // deliberately NOT part of `resetKey`: it re-sorts the snapshot the browser already has, so it
+  // must not remount the rows and lose the user's scroll, and it must not survive into tomorrow as
+  // a standing preference nobody remembers setting.
+  const [mood, setMood] = useState<TonightMood | null>(null);
+
   const resetKey = `${adoptedKey}#${conditionsVersion}`;
   const hasFresherPicks = latestKey !== "" && adoptedKey !== "" && latestKey !== adoptedKey;
 
-  // Adopting re-seeds every row from the server (which already excludes removed titles), so the
-  // session's removal set is now redundant — clear it to avoid masking re-eligible titles.
+  // Adopting re-seeds every row from the server (which already excludes removed titles, and whose
+  // numbers are current by construction), so the session's removal set AND its recalibration
+  // overrides are now redundant — clear both, or an override could mask a fresher server value.
   useEffect(() => {
-    if (adoptedKey) dispatch(removalsCleared());
+    if (adoptedKey) {
+      dispatch(removalsCleared());
+      dispatch(scoreOverridesCleared());
+    }
   }, [adoptedKey, dispatch]);
 
   const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
@@ -117,6 +134,12 @@ export default function Home() {
         )}
       </div>
 
+      <PostWatchStrip />
+
+      {/* The product's own error rate, on its front page. Hides itself when there is no number
+          yet — an absence of evidence is not a bad score. */}
+      <TrackRecordStrip />
+
       {isLoading || building ? (
         <div className="space-y-8">
           <div className="aspect-[16/8.5] rounded-2xl reel-shimmer" />
@@ -127,13 +150,20 @@ export default function Home() {
           </div>
           {building && (
             <p className="fa-body text-fa-frost-dim text-center">
-              Your picks are being assembled ({session?.pipelineStage}) — they&apos;ll appear here the moment they&apos;re ready.
+              Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
             </p>
           )}
         </div>
       ) : (
         <>
-          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} />
+          {/* Above the hero, and outside its re-key: the band is news about the MODEL, not about
+              this snapshot, so a row remount must not take it with it. */}
+          <ModelLearnedBand />
+
+          {/* Above the hero, because it is a question about tonight rather than about the model. */}
+          <TonightMoodChips value={mood} onChange={setMood} />
+
+          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} />
 
           <ContinueWatchingRow entries={continueFiltered} />
 
@@ -152,6 +182,7 @@ export default function Home() {
               context={{ row: row.kind, anchorTitleId: row.anchorTitleId, genre: null }}
               seed={row.items}
               filter={filter}
+              mood={mood}
             />
           ))}
 

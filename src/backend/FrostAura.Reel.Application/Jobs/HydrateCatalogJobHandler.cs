@@ -64,6 +64,11 @@ public class HydrateCatalogJobHandler(
             .Where(t => referenced.Contains(t.Id) && t.TmdbId != null && t.LastMetadataRefreshAt == null)
             .OrderBy(t => t.Id);
 
+        // The account's own region steers which age certification TMDB's per-region block resolves
+        // to; TitleHydrator falls back to US when it is absent or TMDB has no entry for it. The row
+        // itself stays global — this only picks which of several labels the catalogue stores.
+        var region = await db.Accounts.Where(a => a.Id == accountId).Select(a => a.Region).FirstOrDefaultAsync(ct);
+
         var failures = cursor.Failures ?? [];
         var lastTitleId = cursor.LastTitleId;
         var pass = Math.Max(1, cursor.Pass);
@@ -86,7 +91,7 @@ public class HydrateCatalogJobHandler(
                     break;
                 }
 
-                var result = await hydrator.HydrateBatchResilientAsync(batch, ct);
+                var result = await hydrator.HydrateBatchResilientAsync(batch, ct, region);
                 processed += result.Hydrated;
 
                 foreach (var title in result.Failed)

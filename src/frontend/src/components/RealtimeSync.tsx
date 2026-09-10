@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useDispatch } from "react-redux";
 import { api, useGetSyncStatusQuery } from "../store/api";
-import { syncIdle, syncProgress } from "../store/syncSlice";
+import { picksChangedReported, syncCompleted, syncIdle, syncProgress } from "../store/syncSlice";
+import { scoresRecalibrated, type ScoreChange } from "../store/scoreOverridesSlice";
 import { jobKindToSseKind, isBackgroundKind } from "../lib/syncCopy";
 import type { AppDispatch } from "../store";
 
@@ -83,9 +84,27 @@ export default function RealtimeSync() {
       // publish no job-completed frame (the poll-transition above covers them); this listens
       // anyway so a backend that starts emitting them gets the instant refresh for free.
       try {
-        const kind = JSON.parse((ev as MessageEvent).data)?.kind;
-        if (kind === "train" || kind === "evaluate") {
+        const data = JSON.parse((ev as MessageEvent).data);
+        if (data?.kind === "train" || data?.kind === "evaluate") {
           dispatch(api.util.invalidateTags(["Lab"]));
+        }
+
+        // The post-sync moment. A delta/reconcile now says what it actually did — new ratings,
+        // re-rates, new watches, and whether a retrain is coming — so the pill can answer "the sync
+        // happened and nothing changed" with the specifics instead of a timestamp.
+        if ((data?.kind === "delta" || data?.kind === "reconcile") && typeof data.ratingsAdded === "number") {
+          dispatch(
+            syncCompleted({
+              ratingsAdded: data.ratingsAdded,
+              ratingsChanged: typeof data.ratingsChanged === "number" ? data.ratingsChanged : 0,
+              watchedAdded: typeof data.watchedAdded === "number" ? data.watchedAdded : 0,
+              retrainQueued: data.retrainQueued === true,
+              retrainAt: typeof data.retrainAt === "string" ? data.retrainAt : null,
+              // Never knowable at sync time — the rebuild is enqueued, not awaited. feed-ready
+              // fills it in below.
+              picksChanged: typeof data.picksChanged === "number" ? data.picksChanged : null,
+            })
+          );
         }
       } catch {
         // ignore malformed frame
@@ -96,8 +115,52 @@ export default function RealtimeSync() {
     // watches/ratings sync in, or an in-app rating lands) mints a fresh snapshot with a new
     // generatedAt. Invalidating Feed refetches it; the generatedAt-keyed rows in Home then remount
     // and reseed with the new, still-eligible picks — so fresh recommendations lazy-load in live.
-    source.addEventListener("feed-ready", () => {
+    source.addEventListener("feed-ready", (ev) => {
       dispatch(api.util.invalidateTags(["Feed", "TasteDna"]));
+      // The rebuild the last sync enqueued has landed and knows how much of the page moved — the
+      // one number the sync itself could not report, because it must never block on the build.
+      try {
+        const picksChanged = JSON.parse((ev as MessageEvent).data)?.picksChanged;
+        if (typeof picksChanged === "number") {
+          dispatch(picksChangedReported({ picksChanged }));
+        }
+      } catch {
+        // ignore malformed frame
+      }
+    });
+
+    /**
+     * Tonight's picks are unchanged, but the model's opinion of them is not: a Preserve build
+     * updated the Active snapshot's rows in place and is telling us the new numbers.
+     *
+     * The Feed tag is deliberately NOT invalidated. `generatedAt` has not moved (that is the whole
+     * contract), so a refetch would return the same identity while the invalidation itself
+     * remounted every row and discarded the scroll. Instead the RTK cache entry is patched in place
+     * and the same numbers go into the shared override map that the infinite rows and Ask Reel
+     * filter through — those render from local state that no cache tag can reach, and without the
+     * map half the page would update and half would not.
+     */
+    source.addEventListener("feed-scores-updated", (ev) => {
+      try {
+        const data = JSON.parse((ev as MessageEvent).data);
+        const changed: ScoreChange[] = Array.isArray(data?.changed) ? data.changed : [];
+        if (changed.length === 0) return;
+
+        dispatch(scoresRecalibrated({ changed }));
+        dispatch(
+          api.util.updateQueryData("getFeed", undefined, (draft) => {
+            const byId = new Map(changed.map((c) => [c.titleId, c.predictedRating]));
+            const patch = (card: { titleId: string; predictedRating: number }) => {
+              const next = byId.get(card.titleId);
+              if (next !== undefined) card.predictedRating = next;
+            };
+            draft.hero.forEach(patch);
+            draft.rows.forEach((row) => row.items.forEach(patch));
+          })
+        );
+      } catch {
+        // ignore malformed frame
+      }
     });
 
     // Floor against a feed-ready frame missed while the stream was down: the hub keeps no replay

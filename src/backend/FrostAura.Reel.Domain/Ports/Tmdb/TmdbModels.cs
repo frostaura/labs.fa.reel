@@ -41,7 +41,19 @@ public record TmdbTitleDetails(
     /// Genre ids from the details payload's <c>genres[].id</c> — same id space as a list row's
     /// <c>genre_ids</c>, so <see cref="TmdbGenres.MapToSlugs"/> applies unchanged.
     /// </summary>
-    int[]? GenreIds = null);
+    int[]? GenreIds = null,
+    /// <summary>
+    /// Age certification per ISO-3166-1 region, upper-cased keys ("US", "GB", "ZA"), from
+    /// <c>release_dates</c> (movies) or <c>content_ratings</c> (TV) — both folded into the SAME
+    /// hydration call via <c>append_to_response</c>, so certification costs zero extra requests.
+    ///
+    /// <para>It exists because <c>Title.Certification</c> was written only by Trakt ingest, i.e.
+    /// only for titles already in the user's library, so every TMDB-discovered candidate scored
+    /// <c>certificationOrdinal = 0</c> against training rows that had a real value. Empty when TMDB
+    /// has no certification for the title at all; regions whose certification string is blank are
+    /// dropped rather than stored as "".</para>
+    /// </summary>
+    IReadOnlyDictionary<string, string>? CertificationsByRegion = null);
 
 /// <summary>
 /// Resolves the language Reel stores for a title, because TMDB's <c>original_language</c> is not

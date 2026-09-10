@@ -1,0 +1,148 @@
+using FrostAura.Reel.Api.Endpoints;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
+using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.EntityFrameworkCore;
+
+namespace FrostAura.Reel.Tests.IntegrationTests;
+
+/// <summary>
+/// The why-line the title modal carries. The rule under test is "show the sentence this user was
+/// actually shown": the ACTIVE snapshot's persisted line, never a superseded build's, and never
+/// another account's. When the title is outside the current build the endpoint falls back to the
+/// templater — covered by <see cref="Ml.ExplanationTemplaterTests"/> — and when neither can speak,
+/// null, so the modal renders nothing rather than boilerplate.
+/// </summary>
+[Collection("postgres")]
+public class TitleWhyLineTests(PostgresFixture fixture)
+{
+    [Fact]
+    public async Task The_active_snapshots_line_wins_over_a_superseded_one()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync();
+
+        await SeedSnapshotAsync(accountId, titleId, SnapshotStatus.Superseded, "Last week's reason.");
+        await SeedSnapshotAsync(accountId, titleId, SnapshotStatus.Active, "Shares the slow-burn dread you love.");
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Equal(
+            "Shares the slow-burn dread you love.",
+            await TitleEndpoints.SnapshotWhyAsync(db, accountId, titleId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_title_outside_the_active_build_has_no_snapshot_line()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var inBuild = await SeedTitleAsync();
+        var notInBuild = await SeedTitleAsync();
+        await SeedSnapshotAsync(accountId, inBuild, SnapshotStatus.Active, "In the build.");
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Null(await TitleEndpoints.SnapshotWhyAsync(db, accountId, notInBuild, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Another_accounts_line_is_never_borrowed()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var mine = await SeedAccountAsync();
+        var theirs = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync();
+        await SeedSnapshotAsync(theirs, titleId, SnapshotStatus.Active, "Their reason, not mine.");
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Null(await TitleEndpoints.SnapshotWhyAsync(db, mine, titleId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_blank_persisted_line_reads_as_absent()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync();
+        await SeedSnapshotAsync(accountId, titleId, SnapshotStatus.Active, "   ");
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Null(await TitleEndpoints.SnapshotWhyAsync(db, accountId, titleId, CancellationToken.None));
+    }
+
+    private async Task<Guid> SeedAccountAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"why-{Guid.NewGuid():N}",
+            CreatedAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            PipelineStageChangedAt = DateTime.UtcNow,
+        };
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+        return account.Id;
+    }
+
+    private async Task<Guid> SeedTitleAsync()
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = Random.Shared.NextInt64(10_000_000, long.MaxValue),
+            Name = "Quiet Harbor",
+            Year = 2024,
+        };
+        db.Titles.Add(title);
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    private async Task SeedSnapshotAsync(Guid accountId, Guid titleId, SnapshotStatus status, string why)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var snapshot = new FeedSnapshot
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            ModelArtifactId = Guid.NewGuid(),
+            GeneratedAt = DateTime.UtcNow,
+            Status = status,
+        };
+        db.FeedSnapshots.Add(snapshot);
+        db.FeedItems.Add(new FeedItem
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = snapshot.Id,
+            Row = FeedRowKind.Hero,
+            Rank = 0,
+            TitleId = titleId,
+            PredictedRating = 8m,
+            FinalScore = 8m,
+            WhyThisSentence = why,
+        });
+        await db.SaveChangesAsync();
+    }
+}

@@ -18,8 +18,10 @@ import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import WhereToWatch from "../components/title/WhereToWatch";
 import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
+import LensBlock from "../components/title/LensBlock";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
+import { DISLIKE_REASONS } from "../lib/dislikeReasons";
 import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
@@ -53,6 +55,9 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
 function featureLabel(feature: string): string {
   if (feature.startsWith("genre:")) return feature.slice(6).replace(/-/g, " ");
   if (feature.startsWith("subgenreBucket:")) return "theme match";
+  // FeatureSchema v4 one-hot blocks — the vocabulary value is already the human word.
+  if (feature.startsWith("tone:")) return `${feature.slice(5).replace(/-/g, " ")} tone`;
+  if (feature.startsWith("era:")) return `${feature.slice(4).replace(/-/g, " ")} setting`;
   const map: Record<string, string> = {
     // cast & crew
     castAffinity: "cast you rate highly",
@@ -74,7 +79,6 @@ function featureLabel(feature: string): string {
     runtimeMinutes: "runtime",
     certificationOrdinal: "maturity rating",
     isShow: "series format",
-    showEngagement: "your episode ratings",
     // LLM tone attributes
     attrDarkness: "tone (darkness)",
     attrPacing: "pacing",
@@ -90,6 +94,14 @@ function featureLabel(feature: string): string {
     simTopLovedMax: "very close to a favourite",
     simTopLovedMean: "feels like your favourites",
     hasEmbedding: "story similarity",
+    // presence flags (FeatureSchema v4) — "we know this about the title", not the value itself
+    hasRuntime: "runtime data",
+    hasTraktRating: "crowd-rating data",
+    hasPopularity: "popularity data",
+    hasCertification: "maturity-rating data",
+    hasSubgenres: "subgenre data",
+    hasAttributesTone: "tone data",
+    hasAttributesEra: "setting data",
     // synthetic serving-time entries (not model features)
     dislikedSimilarity: "similar to titles you passed on",
   };
@@ -330,10 +342,14 @@ export default function TitleDetail() {
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "not-for-me" })}>Just not for me</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "genre" })}>Not my genre</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "seen-enough" })}>Seen enough like this</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => notInterested({ ...args, titleId: title.titleId, reason: "tone" })}>Wrong tone</DropdownMenuItem>
+                          {DISLIKE_REASONS.map((reason) => (
+                            <DropdownMenuItem
+                              key={reason.value}
+                              onClick={() => notInterested({ ...args, titleId: title.titleId, reason: reason.value })}
+                            >
+                              {reason.label}
+                            </DropdownMenuItem>
+                          ))}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     )}
@@ -351,6 +367,22 @@ export default function TitleDetail() {
                       )
                     )}
                   </div>
+
+                  {/* The why-line — second person, the model's own reason, above the studio's blurb.
+                      Same voice and weight the hero card gives it, so opening a card no longer
+                      REMOVES the one personalised sentence on it. */}
+                  {title.whyThis && (
+                    <p className="fa-body sm:text-base text-fa-frost max-w-2xl leading-snug" data-testid="why-this">
+                      {title.whyThis}
+                    </p>
+                  )}
+
+                  {/* "Through your lens" — the premise retold in your own taste vocabulary, with
+                      the honest reservation behind a tap. Renders nothing at all when no copy has
+                      been written, which leaves the why-line above and the synopsis below exactly
+                      as they were. It sits ABOVE the synopsis and never replaces it: when the lens
+                      is wrong or absent, the page still tells you what the thing is about. */}
+                  <LensBlock mediaType={mediaType} tmdbId={Number(tmdbId)} />
 
                   {/* Synopsis */}
                   {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}

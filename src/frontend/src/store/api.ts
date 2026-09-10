@@ -5,6 +5,8 @@ import type {
   BlendPreview,
   ContinueEntry,
   DigestPayload,
+  LensPayload,
+  NarrativePayload,
   FeedCard,
   FeedPayload,
   GenreRail,
@@ -12,7 +14,25 @@ import type {
   MoreFeedResponse,
 } from "./feedTypes";
 import { titleRemoved, titleRestored } from "./removedTitlesSlice";
-import type { PersonPayload, ProvidersPayload, SavedEntry, TitleDetailPayload } from "./titleTypes";
+import { verdictShown } from "./verdictSlice";
+import type { RatingVerdict } from "../lib/verdictCopy";
+import type { PersonPayload, ProvidersPayload, TitleDetailPayload } from "./titleTypes";
+import type { RecentlyWatchedResponse, SavedQueueResponse } from "./savedTypes";
+
+/**
+ * The "your model just learned" band's payload. Every field is either already in the evaluation
+ * ledger or is a diff of two rows that already exist — nothing here was added to the schema.
+ */
+export interface ModelLearned {
+  trainedAt: string;
+  newRatingsSinceLast: number;
+  calibrationBias: number | null;
+  calibrationMae: number | null;
+  /** Previous MAE minus current: positive means the model runs closer to the user's own scores. */
+  maeImprovement: number | null;
+  spearman: number | null;
+  picksChanged: number;
+}
 
 export interface TypeaheadTitle {
   titleId: string;
@@ -58,6 +78,39 @@ export interface FiltersPayload {
   /** Release-year range; either bound may be null for open-ended. */
   minYear: number | null;
   maxYear: number | null;
+}
+
+/**
+ * What one content rule costs. `marginal` is the eligible count with that ONE rule relaxed minus the
+ * eligible count as drafted — "dropping comedy adds ~180". Marginals deliberately do NOT sum: two
+ * rules can be holding the same title out, so relaxing both returns less than the two numbers
+ * together, which is exactly why the meter reports per rule instead of one grand total.
+ */
+export interface FilterCostRule {
+  /** The server's FilterKind name — "ExcludeGenre", "Language", "MinCrowdRating", "MinYear"… */
+  kind: string;
+  /** The value the user would tap off: a genre slug, a threshold, or the joined language list. */
+  value: string;
+  marginal: number;
+}
+
+/** A rule worth offering as a one-tap relaxation, because relaxing it actually returns titles. */
+export interface FilterCostSuggestion {
+  kind: string;
+  value: string;
+  gain: number;
+}
+
+/**
+ * The cost of a draft rule set. `total` is the whole catalogue (the denominator in "421 of 5,319");
+ * `eligible` is what survives BOTH the rules and the locked zero-footprint rule — the real supply
+ * behind tonight's picks, not a filter-only count.
+ */
+export interface FilterCostReport {
+  total: number;
+  eligible: number;
+  byRule: FilterCostRule[];
+  suggestions: FilterCostSuggestion[];
 }
 
 export interface TasteDnaPayload {
@@ -126,12 +179,81 @@ export interface SyncStatus {
   lastListSyncAt: string | null;
   /** Most recent write-back error text, for the indicator's hover detail. */
   outboxLastError: string | null;
+  /**
+   * Progress toward the next drift retrain, so a screen that asks for ratings can say what they
+   * buy. `newRatingsSinceTrain` counts UserRatings whose immutable `FirstRatedAt` is newer than the
+   * Active artifact's `TrainedAt` — the same two inputs the nightly reconcile's gate reads. Absent
+   * on a response from a backend that predates the field.
+   */
+  retrain?: {
+    minNewRatings: number;
+    newRatingsSinceTrain: number;
+    /** False before the first model exists: the next train is the FIRST, not a drift retrain. */
+    hasActiveModel: boolean;
+    lastTrainedAt: string | null;
+  };
+}
+
+/**
+ * One card on the rate grid. `source` says which half it came from: "watched" is a title the user
+ * has seen and never scored — a memory, the highest-information label the product can ask for —
+ * and "popular" is the cold-start fallback pool behind it.
+ */
+export interface RateSuggestion {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  crowdRating: number | null;
+  crowdVotes: number | null;
+  source: "watched" | "popular";
+}
+
+/**
+ * One live dislike — a NotInterested or Dropped reaction that has not been revoked. `reason` is
+ * null on rows recorded before the card overlay offered a picker (and on Dropped, which has no
+ * reason), which is itself worth showing: it is why the profile below says less than the total.
+ */
+export interface DislikeEntry {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number | null;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  kind: "NotInterested" | "Dropped";
+  reason: "Genre" | "SeenEnough" | "Tone" | "NotForMe" | null;
+  createdAt: string;
+}
+
+/**
+ * The dislike history plus what it currently teaches the model. `total` counts every live dislike;
+ * `profile.activeCount` counts only those inside `profile.windowDays`, which is the set the
+ * recency-decayed demotion is actually built from — the two are reported separately rather than
+ * letting one stand in for the other.
+ */
+export interface DislikesPayload {
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  items: DislikeEntry[];
+  profile: {
+    windowDays: number;
+    activeCount: number;
+    genres: { genre: string; weight: number }[];
+    tones: { tone: string; weight: number }[];
+  };
 }
 
 export interface AccountSettings {
   region: string;
   onboarded: boolean;
   email?: string | null;
+  /** Served RESOLVED (never null): how long an evening is, for the Saved shelf's pinned pick. */
+  eveningBudgetMinutes?: number;
 }
 
 export interface ModelEvalDetail {
@@ -140,16 +262,50 @@ export interface ModelEvalDetail {
   caveats?: string[];
 }
 
+/** One rolling split origin — the harness reports five (60/65/70/75/80% of the rating history). */
+export interface ModelEvalOrigin {
+  fraction: number;
+  splitAt: string;
+  trainRows: number;
+  unfilteredHoldout: number;
+  eligibleHoldout: number;
+  threshold: number;
+  lowSample: boolean;
+  ndcgModel: number;
+  ndcgBaseline: number;
+  ndcgRelativeLift: number;
+  precisionModel: number;
+  precisionBaseline: number;
+}
+
+/**
+ * Nullable everywhere the 2026-09 instrument repair added a column: ledger rows written before it
+ * genuinely have no NDCG, no CI and no calibration, and rendering a zero would claim a measurement
+ * that was never taken.
+ */
 export interface ModelEval {
+  /** Quantised to 0.1 by a ten-slot cut — display only; the gate reads NDCG. */
   modelPrecisionAt10: number;
   baselinePrecisionAt10: number;
+  /** The legacy precision lift, kept so the twelve historical rows stay comparable. */
   relativeImprovement: number;
   rmse: number;
   mae: number;
   spearmanRho: number;
+  spearmanSe: number | null;
+  ndcgAt10Model: number | null;
+  ndcgAt10Baseline: number | null;
+  ndcgLiftCiLow: number | null;
+  ndcgLiftCiHigh: number | null;
+  calibrationBias: number | null;
+  ece: number | null;
+  eligibleHoldoutCount: number | null;
+  unfilteredHoldoutCount: number | null;
   holdoutPositiveCount: number;
   lowSample: boolean;
   passedGate: boolean;
+  passedLegacyGate: boolean;
+  origins: ModelEvalOrigin[] | null;
   detail: ModelEvalDetail;
 }
 
@@ -166,16 +322,193 @@ export interface ModelRun {
   eval: ModelEval | null;
 }
 
+/** Predicted-vs-actual summary. `pearsonCorrelation` is null when it is genuinely undefined. */
+export interface PredictionAccuracy {
+  count: number;
+  meanPredicted: number;
+  meanActual: number;
+  meanAbsoluteError: number;
+  bias: number;
+  withinOnePointRate: number;
+  pearsonCorrelation: number | null;
+}
+
+export interface RetroMiss {
+  titleId: string;
+  name: string;
+  year: number | null;
+  predicted: number;
+  actual: number;
+  gap: number;
+}
+
+/** "Titles you watched because of Reel average X; titles you found yourself average Y." */
+export interface CounterfactualWindow {
+  window: string;
+  days: number | null;
+  viaReelCount: number;
+  viaReelMeanRating: number | null;
+  otherCount: number;
+  otherMeanRating: number | null;
+  delta: number | null;
+}
+
+/**
+ * The retro closed loop: what Reel predicted against what actually happened. Computed live from
+ * the managed list, ratings and stored scores — no new schema, and no smoothing.
+ */
+export interface ModelEfficiency {
+  computedAt: string;
+  conversions: {
+    count: number;
+    ratedCount: number;
+    scoredCount: number;
+    accuracy: PredictionAccuracy;
+    ratingDistribution: { rating: number; count: number }[];
+    worstMisses: RetroMiss[];
+  };
+  predictedVsActual: {
+    pairs: number;
+    accuracy: PredictionAccuracy;
+    worstMisses: RetroMiss[];
+  };
+  counterfactual: CounterfactualWindow[];
+}
+
+/** One ranker's record across the interleaving experiment. */
+export interface PolicyStanding {
+  policyId: string;
+  description: string | null;
+  /** "A", "B", or null for a ranker that is no longer one of the configured arms. */
+  team: string | null;
+  slates: number;
+  cards: number;
+  credits: number;
+  slateWins: number;
+}
+
+/**
+ * The interleaving readout. Every number is computed on read from the exposure log, and the
+ * always-valid p-value may be looked at as often as you like without inflating the error rate —
+ * which is the entire reason the harness uses an mSPRT rather than a test with a sample-size plan.
+ */
+export interface InterleaveSummary {
+  computedAt: string;
+  enabled: boolean;
+  policyA: string;
+  policyB: string;
+  tau: number;
+  alpha: number;
+  slates: number;
+  decidedSlates: number;
+  ties: number;
+  winsA: number;
+  winsB: number;
+  alwaysValidP: number;
+  significant: boolean;
+  preferenceRateA: number | null;
+  ciLow: number;
+  ciHigh: number;
+  signTestP: number;
+  firstSlateAt: string | null;
+  lastSlateAt: string | null;
+  decidedSlatesPerDay: number | null;
+  slatesToDecisionAt65: number;
+  estimatedDaysToDecision: number | null;
+  standings: PolicyStanding[];
+}
+
 export interface ModelMetrics {
   gate: {
+    /** The mean-relative-NDCG-lift clause of the gate (0.20). */
     threshold: number;
     passed: boolean;
     latestLift: number | null;
+    ndcgModel: number | null;
+    ndcgBaseline: number | null;
+    ndcgLiftCiLow: number | null;
+    ndcgLiftCiHigh: number | null;
+    ciExcludesZero: boolean;
+    legacyThreshold: number;
+    legacyPassed: boolean;
     iterationsUsed: number;
     killCriterionAt: number;
+    criterionExceeded: boolean;
   };
+  efficiency: ModelEfficiency;
   activeArtifact: { version: number; algo: string; trainedAt: string } | null;
   runs: ModelRun[];
+}
+
+/** One predicted band on the calibration chart. Null means the band is empty, not that it is zero. */
+export interface CalibrationBucket {
+  bucket: number;
+  low: number;
+  high: number;
+  n: number;
+  meanPredicted: number | null;
+  meanActual: number | null;
+}
+
+/** One specific thing Reel got right or wrong, with enough identity to render its poster. */
+export interface AccuracyMoment {
+  titleId: string;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  mediaType: string;
+  tmdbId: number | null;
+  predicted: number;
+  actual: number;
+  /** Null on the retro fallback — a stored score is not proof the card was ever on screen. */
+  surface: string | null;
+  shownAt: string | null;
+  ratedAt: string;
+  daysToOutcome: number | null;
+}
+
+/**
+ * The track record. `source` is part of the payload rather than an implementation detail: the page
+ * says out loud whether a number came from the exposure log ("we know this was on your screen") or
+ * from the retro join ("a score existed before you rated it"), because the two are different
+ * strengths of evidence and smoothing over the difference is the one thing this surface must not do.
+ */
+export interface AccuracyPayload {
+  window: string;
+  from: string | null;
+  to: string;
+  source: "exposures" | "retro" | "none";
+  headline: {
+    withinOnePoint: number;
+    n: number;
+    meanAbsoluteError: number;
+    bias: number;
+    correlation: number | null;
+    meanPredicted: number;
+    meanActual: number;
+  };
+  calibration: CalibrationBucket[];
+  moments: AccuracyMoment[];
+  conversion: {
+    shown: number;
+    saved: number;
+    watched: number;
+    rated: number;
+    shownToSaved: number | null;
+    savedToWatched: number | null;
+    shownToRated: number | null;
+    medianDaysToWatch: number | null;
+  };
+  counterfactual: CounterfactualWindow[];
+  learnedThisWeek: {
+    trainedAt: string;
+    newRatings: number;
+    calibrationBias: number | null;
+    calibrationMae: number | null;
+    maeImprovement: number | null;
+    spearman: number | null;
+    picksChanged: number;
+  } | null;
 }
 
 /**
@@ -216,7 +549,7 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy", "Narrative", "Lens"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
@@ -284,6 +617,22 @@ export const api = createApi({
       query: () => ({ url: "feed/rebuild", method: "POST" }),
       invalidatesTags: ["Sync"],
     }),
+    /**
+     * What the latest retrain bought the user. Its own endpoint rather than a field on `getFeed`:
+     * the feed payload is fetched constantly and this is a retrain-cadence number. The server
+     * answers 204 whenever the band would be a claim the data cannot support, which arrives here as
+     * an empty body — hence the null.
+     *
+     * Tagged "Lab" alongside the ledger: both go stale on exactly the same event (a train/evaluate
+     * run completing), and RealtimeSync already invalidates that tag when one does.
+     */
+    getModelLearned: b.query<ModelLearned | null, void>({
+      query: () => ({
+        url: "feed/learned",
+        responseHandler: async (response) => (response.status === 204 ? null : await response.json()),
+      }),
+      providesTags: ["Lab"],
+    }),
     getFeedGenres: b.query<GenreRail[], void>({
       query: () => "feed/genres",
       transformResponse: (r: { genres: GenreRail[] }) => r.genres,
@@ -343,7 +692,7 @@ export const api = createApi({
       },
     }),
     rateTitle: b.mutation<
-      { userRating: number; watchedLogged?: boolean },
+      { userRating: number; watchedLogged?: boolean; verdict?: RatingVerdict | null },
       { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }
     >({
       // titleId rides along only to key the local removal set; it must not leak into the POST body.
@@ -356,11 +705,20 @@ export const api = createApi({
           })
         );
         try {
-          await queryFulfilled;
+          const { data } = await queryFulfilled;
           // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
           // Deliberately does NOT invalidate Feed — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+          // A rating is exactly the answer the loop-closing prompt was asking for, so the strip
+          // retires that title on the next read rather than continuing to ask a settled question.
+          // Accuracy moves with every rating, so the track record is stale the moment one lands.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "RecentlyWatched", "Accuracy"]));
+          // The after-rating moment, raised here rather than at the three call sites that can rate:
+          // one dispatch means the title modal, the rate picker, the post-watch strip and whatever
+          // rating surface ships next all get it, and none of them can forget to.
+          if (data?.verdict) {
+            dispatch(verdictShown({ verdict: data.verdict, actual: rating }));
+          }
         } catch {
           patch.undo();
         }
@@ -377,8 +735,9 @@ export const api = createApi({
         try {
           await queryFulfilled;
           // Un-rating changes taste and (for a Reel-logged movie) reverses the play — same
-          // downstream surfaces as rateTitle.
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+          // downstream surfaces as rateTitle, the track record included: a retracted rating is one
+          // fewer verdict against the model.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "Accuracy"]));
         } catch {
           patch.undo();
         }
@@ -390,6 +749,9 @@ export const api = createApi({
         method: "POST",
         body: { reason },
       }),
+      // The dislike history on Taste DNA is a plain list of these rows — safe to invalidate,
+      // unlike Feed (see below), because nothing is scrolled through it.
+      invalidatesTags: ["Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -412,6 +774,7 @@ export const api = createApi({
     }),
     undoNotInterested: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/not_interested`, method: "DELETE" }),
+      invalidatesTags: ["Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -468,7 +831,7 @@ export const api = createApi({
     }),
     undrop: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "DELETE" }),
-      invalidatesTags: ["ContinueWatching"],
+      invalidatesTags: ["ContinueWatching", "Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -523,13 +886,58 @@ export const api = createApi({
         }
       },
     }),
-    getSaved: b.query<{ managedListUrl: string | null; items: SavedEntry[] }, void>({
-      query: () => "saved",
+    // The queue, in the order the user asked for. `sort` is part of the cache key, so switching
+    // orders is a fresh request rather than a client-side re-sort — the server owns the comparator
+    // (and the pinned pick), and two implementations of it would drift within a release.
+    getSaved: b.query<SavedQueueResponse, { sort?: string } | void>({
+      query: (args) => (args && args.sort ? `saved?sort=${encodeURIComponent(args.sort)}` : "saved"),
       providesTags: ["Saved"],
+    }),
+    // Watched-via-Reel titles that are still unrated. Kept under its own tag: rating one of these
+    // must retire that prompt without refetching the whole shelf, and saving a title must not
+    // disturb the strip the user is halfway through answering.
+    getRecentlyWatched: b.query<RecentlyWatchedResponse, void>({
+      query: () => "saved/recently-watched",
+      providesTags: ["RecentlyWatched"],
     }),
     getTasteDna: b.query<TasteDnaPayload, void>({
       query: () => "taste",
       providesTags: ["TasteDna"],
+    }),
+    // The taste narrative — what Reel believes about you, in words you can correct.
+    getNarrative: b.query<NarrativePayload, void>({
+      query: () => "taste/narrative",
+      providesTags: ["Narrative"],
+    }),
+    // Your own rewrite. It wins everywhere and survives regeneration; only the regenerate action
+    // clears it. Invalidates Feed too, because the narrative IS the personalisation context every
+    // downstream call rides on — an edit changes what the next build is told about you.
+    saveNarrative: b.mutation<NarrativePayload, { text: string | null }>({
+      query: (body) => ({ url: "taste/narrative", method: "PUT", body }),
+      invalidatesTags: ["Narrative"],
+    }),
+    regenerateNarrative: b.mutation<{ queued: boolean }, void>({
+      query: () => ({ url: "taste/narrative/regenerate", method: "POST" }),
+      invalidatesTags: ["Narrative"],
+    }),
+    // On-demand lens for one title. Generates when nothing usable is cached, behind a 5s server
+    // ceiling, and ALWAYS answers with a `source` — so the modal renders the ladder (fresh, stale,
+    // or the templater fallback it already had) rather than a spinner that resolves to nothing.
+    getLens: b.query<LensPayload, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => `titles/${mediaType}/${tmdbId}/lens`,
+      providesTags: (_r, _e, arg) => [{ type: "Lens" as const, id: `${arg.mediaType}:${arg.tmdbId}` }],
+    }),
+    // "This spoiled it." Withdraws every note for the title so the surface falls back at once.
+    reportLensSpoiler: b.mutation<{ withdrawn: number }, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => ({
+        url: `titles/${mediaType}/${tmdbId}/lens/spoiled`,
+        method: "POST",
+      }),
+      invalidatesTags: (_r, _e, arg) => [
+        { type: "Lens" as const, id: `${arg.mediaType}:${arg.tmdbId}` },
+        "Title",
+        "Feed",
+      ],
     }),
     getFilters: b.query<FiltersPayload, void>({
       query: () => "settings/filters",
@@ -545,6 +953,14 @@ export const api = createApi({
         headers: unlockToken ? { "X-Settings-Unlock": unlockToken } : undefined,
       }),
       invalidatesTags: ["Prefs", "Feed"],
+    }),
+    // What the DRAFT in the editor costs — a POST because it carries the unsaved rule set, but a
+    // query and not a mutation because it changes nothing: it needs the arg-keyed cache, since the
+    // editor re-costs on every debounced chip tap and slider drag. `keepUnusedDataFor` matches the
+    // server's own 60s window, so a user toggling a chip back and forth pays for it once.
+    filterCost: b.query<FilterCostReport, FiltersPayload>({
+      query: (filters) => ({ url: "settings/filters/cost", method: "POST", body: filters }),
+      keepUnusedDataFor: 60,
     }),
     setPin: b.mutation<{ pinConfigured: boolean }, { pin: string; currentPin?: string }>({
       query: (body) => ({ url: "settings/pin", method: "POST", body }),
@@ -569,8 +985,24 @@ export const api = createApi({
       query: (q) => `search/typeahead?q=${encodeURIComponent(q)}&global=1`,
       keepUnusedDataFor: 30,
     }),
+    /**
+     * The track record. Free for every tier — a paid accuracy report reads as hiding the scorecard.
+     * Polled by nothing: it changes when a rating lands, and the rating mutation invalidates it.
+     */
+    getAccuracy: b.query<AccuracyPayload, { window?: string } | void>({
+      query: (args) => `accuracy?window=${args && args.window ? args.window : "90d"}`,
+      providesTags: ["Accuracy"],
+    }),
     getModelMetrics: b.query<ModelMetrics, void>({
       query: () => "metrics/model",
+      providesTags: ["Lab"],
+    }),
+    /**
+     * The interleaving instrument. Founder-only server-side; polled slowly because the underlying
+     * number moves on the scale of days, and a fast poll would suggest otherwise.
+     */
+    getInterleave: b.query<InterleaveSummary, void>({
+      query: () => "metrics/interleave",
       providesTags: ["Lab"],
     }),
     trainModel: b.mutation<void, void>({
@@ -593,10 +1025,14 @@ export const api = createApi({
       query: () => "billing/status",
       providesTags: ["Session"],
     }),
-    getRateSuggestions: b.query<
-      { titleId: string; mediaType: "Movie" | "Show"; tmdbId: number; name: string; year: number | null; posterPath: string | null }[],
-      void
-    >({
+    getDislikes: b.query<DislikesPayload, { offset?: number; limit?: number } | void>({
+      query: (args) => ({
+        url: "taste/dislikes",
+        params: { offset: args?.offset ?? 0, limit: args?.limit ?? 20 },
+      }),
+      providesTags: ["Dislikes"],
+    }),
+    getRateSuggestions: b.query<RateSuggestion[], void>({
       query: () => "titles/rate-suggestions",
     }),
     createCheckout: b.mutation<{ url?: string; error?: string }, void>({
@@ -638,11 +1074,14 @@ export const {
   useTriggerSyncMutation,
   useUpdateSettingsMutation,
   useGetModelMetricsQuery,
+  useGetInterleaveQuery,
   useTrainModelMutation,
   useGetFeedQuery,
   useGetContinueWatchingQuery,
   useRebuildFeedMutation,
   useGetFeedGenresQuery,
+  useGetModelLearnedQuery,
+  useGetAccuracyQuery,
   useLoadMoreFeedMutation,
   useGetTitleQuery,
   useGetProvidersQuery,
@@ -658,7 +1097,13 @@ export const {
   useSaveForLaterMutation,
   useUnsaveForLaterMutation,
   useGetSavedQuery,
+  useGetRecentlyWatchedQuery,
   useGetTasteDnaQuery,
+  useGetNarrativeQuery,
+  useSaveNarrativeMutation,
+  useRegenerateNarrativeMutation,
+  useGetLensQuery,
+  useReportLensSpoilerMutation,
   useSearchTypeaheadQuery,
   useSearchTypeaheadGlobalQuery,
   useGetFiltersQuery,
@@ -668,8 +1113,10 @@ export const {
   useRemovePreferenceTagMutation,
   useGetBillingStatusQuery,
   useCreateCheckoutMutation,
+  useGetDislikesQuery,
   useGetRateSuggestionsQuery,
   useSetPinMutation,
+  useFilterCostQuery,
   useVerifyPinMutation,
   useRemovePinMutation,
   useGetDigestQuery,

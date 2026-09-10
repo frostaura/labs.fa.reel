@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
@@ -62,10 +63,12 @@ public sealed class FeedPaginator(
     CandidateRetriever candidateRetriever,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    RatingCalibrationService calibration,
     DislikeSignal dislikes,
     CandidateGenerator candidateGenerator,
     ITmdbClient tmdb,
     ISearchAgent agent,
+    PersonalisationContext personalisation,
     IMemoryCache cache,
     ILogger<FeedPaginator> logger)
 {
@@ -139,10 +142,13 @@ public sealed class FeedPaginator(
         var minPredicted = await MinPredictedAsync(account.Id, ct);
         var exclude = req.ExcludeTitleIds.ToList();
         // Online residual head for this artifact, loaded once and added to every window score below.
-        var residual = await residualModel.LoadAsync(account.Id, artifact.Id, ct);
+        var residual = await residualModel.LoadAsync(account.Id, artifact, ct);
+        // The account's monotone predicted→actual map, applied after the residual so a paged-in card
+        // carries the same number the snapshot build would have given it.
+        var calibrator = await calibration.GetAsync(account.Id, ct);
 
         var pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-        var all = await ScoreWindowAsync(artifact, taste, pool, residual, now, ct);
+        var all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
         var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
@@ -181,7 +187,7 @@ public sealed class FeedPaginator(
             if (grew > 0)
             {
                 pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-                all = await ScoreWindowAsync(artifact, taste, pool, residual, now, ct);
+                all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
                 scored = all.Where(s => s.Predicted >= minPredicted).ToList();
             }
         }
@@ -258,8 +264,12 @@ public sealed class FeedPaginator(
                 genericUsed = true;
             }
 
+            // 2 dp, matching BuildFeedJobHandler.DisplayRating and the exposure log. Page 2+ is the
+            // same feed as page 1, so it must not be the one surface that quantises coarser: a
+            // calibration join across FeedItem, TitleScore and ExposureLog would inherit the floor
+            // from whichever side is coarsest. Invisible to users — the badge is toFixed(1).
             items.Add(new ScoredFeedItem(
-                c.Scored.Title, Math.Round(c.Scored.Predicted, 1), why, IsReleased(c.Scored.Title, now)));
+                c.Scored.Title, Math.Round(c.Scored.Predicted, 2), why, IsReleased(c.Scored.Title, now)));
         }
 
         return items;
@@ -310,20 +320,14 @@ public sealed class FeedPaginator(
             // the existing agent-unavailable and rerank-failed paths already behave. Whatever
             // batches completed inside the budget are still applied and cached, so the next page
             // over the same titles is warm.
-            using var curationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            curationCts.CancelAfter(CurationCeiling);
-            var started = System.Diagnostics.Stopwatch.StartNew();
-            var curationCt = curationCts.Token;
-            var timedOut = false;
+            //
+            // The budget/ceiling/first-batch mechanics themselves live in LlmBudgetLoop — one copy
+            // shared with the feed why pass, Ask Reel's rerank stream and lens generation.
+            using var loop = new LlmBudgetLoop(
+                new LlmBudgetOptions(CurationBudget, CurationCeiling, RerankBatch, CurationGate), ct);
+            var narrative = await personalisation.ContextForAsync(account.Id, taste, ct);
 
-            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
-            var holdsGate = false;
-            try
-            {
-                await CurationGate.WaitAsync(curationCt);
-                holdsGate = true;
-            }
-            catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            if (!await loop.TryAcquireGateAsync())
             {
                 // Every slot is busy and the budget expired before one freed. Fall through rather
                 // than returning early: whatever fits were already cached still apply, and the
@@ -331,64 +335,24 @@ public sealed class FeedPaginator(
                 logger.LogInformation(
                     "Feed curation for {Row} gave up waiting for a slot within {Budget}s; serving model order.",
                     rowKey, CurationBudget.TotalSeconds);
-                timedOut = true;
             }
-
-            try
+            else
             {
-                if (!holdsGate)
+                var stop = await loop.RunAsync(uncached, async (batch, batchCt) =>
                 {
-                    uncached.Clear();
-                }
-
-                for (var i = 0; i < uncached.Count && !timedOut; i += RerankBatch)
-                {
-                    // Checked BEFORE starting a batch, never during one. A batch that is cancelled
-                    // part-way returns nothing and caches nothing, so the work is simply lost and
-                    // the next request repeats it.
-                    if (i > 0 && started.Elapsed > CurationBudget)
-                    {
-                        logger.LogInformation(
-                            "Feed curation for {Row} stopped after {Elapsed:0.0}s with {Done} of {Total} titles curated; the rest keep model order and are curated on a later page.",
-                            rowKey, started.Elapsed.TotalSeconds, fitById.Count, pool.Count);
-                        break;
-                    }
-
-                    var batch = uncached.Skip(i).Take(RerankBatch).ToList();
-                    IReadOnlyList<RerankResult> results;
-                    try
-                    {
-                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, anchorName, curationCt);
-                    }
-                    catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
-                    {
-                        logger.LogInformation(
-                            "Feed curation for {Row} exceeded {Budget}s after {Done} of {Total} titles; serving model order for the rest.",
-                            rowKey, CurationBudget.TotalSeconds, fitById.Count, pool.Count);
-                        timedOut = true;
-                        break;
-                    }
-                    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-                    {
-                        logger.LogWarning(ex, "Feed curation rerank failed for {Row}; falling back to model order.", rowKey);
-                        break;
-                    }
-
+                    var results = await agent.RerankBatchAsync(batch, query, narrative, anchorName, batchCt);
                     foreach (var r in results)
                     {
                         fitById[r.TitleId] = r;
                         cache.Set(FitKey(account.Id, r.TitleId, rowKey), r, FitTtl);
                     }
-                }
-            }
-            finally
-            {
-                // Only if we actually acquired it — a budget expiry while WAITING means we never
-                // entered, and releasing then would permanently inflate the semaphore's count and
-                // uncap concurrency for the life of the process.
-                if (holdsGate)
+                });
+
+                if (stop != LlmBudgetStop.Completed)
                 {
-                    CurationGate.Release();
+                    logger.LogInformation(
+                        "Feed curation for {Row} stopped ({Stop}) after {Elapsed:0.0}s with {Done} of {Total} titles curated; the rest keep model order and are curated on a later page.",
+                        rowKey, stop, loop.Elapsed.TotalSeconds, fitById.Count, pool.Count);
                 }
             }
         }
@@ -408,27 +372,6 @@ public sealed class FeedPaginator(
             .OrderByDescending(x => x.Blend)
             .Select(x => new Curated(x.Scored, x.Fit?.Why))
             .ToList();
-    }
-
-    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
-    {
-        var topGenres = taste.GenreRatings
-            .OrderByDescending(kv => kv.Value.Count).Take(4).Select(kv => kv.Key).ToList();
-        var loved = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id)).Select(t => t.Name).Take(4).ToListAsync(ct);
-
-        var parts = new List<string>();
-        if (topGenres.Count > 0)
-        {
-            parts.Add("favours " + string.Join(", ", topGenres));
-        }
-
-        if (loved.Count > 0)
-        {
-            parts.Add("loves " + string.Join(", ", loved));
-        }
-
-        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
     }
 
     private static string QueryFor(MoreFeedRequest req) => req.Context switch
@@ -455,8 +398,11 @@ public sealed class FeedPaginator(
     /// to <see cref="FitKey"/>) on purpose: the feed build's why pass and this paginator's curation
     /// pass share one 6h fit cache, so a rail warmed at build time serves its later pages without
     /// re-spending, and vice versa. Stable per (rowKind, anchor) across rebuilds.
+    /// <para>Public rather than internal because the exposure log records this exact string as a
+    /// card's <c>RowKey</c> from the API layer too. A second copy of the format in another assembly
+    /// is how a rail's cache key and its exposure key start disagreeing about which rail it was.</para>
     /// </summary>
-    internal static string RowKeyFor(Domain.Feed.FeedRowKind row, Guid? anchorTitleId) => row switch
+    public static string RowKeyFor(Domain.Feed.FeedRowKind row, Guid? anchorTitleId) => row switch
     {
         Domain.Feed.FeedRowKind.BecauseYouLoved => $"loved:{anchorTitleId}",
         Domain.Feed.FeedRowKind.Hero => "hero",
@@ -630,7 +576,8 @@ public sealed class FeedPaginator(
     /// </summary>
     private async Task<List<Scored>> ScoreWindowAsync(
         ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Title> pool, OnlineResidualModel.ResidualState residual, DateTime now, CancellationToken ct)
+        IReadOnlyList<Title> pool, OnlineResidualModel.ResidualState residual, RatingCalibrator calibrator,
+        DateTime now, CancellationToken ct)
     {
         if (pool.Count == 0)
         {
@@ -657,10 +604,14 @@ public sealed class FeedPaginator(
 
         return scorable.Zip(rows, (title, row) =>
             {
-                var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[title.Id]);
+                // base + residual → calibrator → demotion: the same fixed order as the snapshot
+                // build and OnDemandScorer. The pre-calibration value and the map's delta ride along
+                // for the exposure log, and are never written to a column.
+                var adjusted = row.Score + OnlineResidualModel.Residual(residual, vectors[title.Id]);
+                var calibrated = calibrator.Calibrate(adjusted);
                 var predicted = DislikeSignal.ApplyDemotion(
-                    Math.Clamp((decimal)adjusted, 0m, 10m), demotions.GetValueOrDefault(title.Id));
-                return new Scored(title, row, predicted);
+                    (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
+                return new Scored(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
             })
             .ToList();
     }
@@ -668,8 +619,10 @@ public sealed class FeedPaginator(
     /// <summary>Pull another TMDB page into the catalog for this lane. Returns rows newly created.</summary>
     private async Task<int> DeepenAsync(MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, string region, int seenCount, CancellationToken ct)
     {
-        // Walk deeper into TMDB as the user scrolls: each ~20 cards seen advances a page.
-        var page = Math.Clamp(2 + seenCount / 20, 2, MaxDeepenPage);
+        // Walk deeper into TMDB as the user scrolls: each ~20 cards seen advances a page. The
+        // arithmetic lives in DiscoveryPaging, which the feed BUILD now reads from too — it used to
+        // exist only here, which is why the build read page 1 for ever.
+        var page = DiscoveryPaging.DeepenPage(seenCount, MaxDeepenPage);
         // Media-aware deepen: a "Movies" lane pulls ONLY movies from TMDB (and vice versa), so a thin
         // movies lane grows with movies instead of half its deepen budget landing shows the media
         // window would then drop. Null medium keeps the original both-media behaviour.
@@ -1023,7 +976,14 @@ public sealed class FeedPaginator(
     /// <summary>The rail's anchor as the why-lines need it: its name and its genres.</summary>
     private sealed record AnchorInfo(string Name, string[] Genres);
 
-    private sealed record Scored(Title Title, ScoredRow Row, decimal Predicted);
+    /// <summary>
+    /// One scored title in a page window. <paramref name="Predicted"/> is what the user sees;
+    /// <paramref name="BaseScore"/> is the pre-calibration value (base model + online residual) and
+    /// <paramref name="CalibrationDelta"/> how far the calibrator moved it — carried for the exposure
+    /// log the closed-loop work lands next, never persisted as a column.
+    /// </summary>
+    private sealed record Scored(
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
 
     /// <summary>A model-scored title after the LLM curation pass — Why is the agent's line, or null.</summary>
     private sealed record Curated(Scored Scored, string? Why);
