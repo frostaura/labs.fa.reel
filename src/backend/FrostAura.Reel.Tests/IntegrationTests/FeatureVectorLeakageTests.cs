@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.EntityFrameworkCore;
 using Pgvector;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -16,8 +17,48 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// were pure train/serve skew. Skips when REEL_TEST_CONNECTION_STRING is unset.
 /// </summary>
 [Collection("postgres")]
-public class FeatureVectorLeakageTests(PostgresFixture fixture)
+public class FeatureVectorLeakageTests(PostgresFixture fixture) : IAsyncLifetime
 {
+    /// <summary>
+    /// A synthetic LANGUAGE stamped on every title this class seeds, and the handle its cleanup
+    /// deletes by. Copied deliberately from <see cref="TasteClusterRetrievalTests"/>, whose own
+    /// remarks record the measurement: the catalogue is GLOBAL and its HNSW index is APPROXIMATE, so
+    /// a pile of embedded fixtures changes which neighbours an unrelated class's semantic search
+    /// finds, even when every one of those titles is ineligible for its account. Eligibility
+    /// isolation cannot fix that — the interference happens inside the index, before eligibility is
+    /// applied — so the rows have to actually go.
+    ///
+    /// <para>Schema v6 roughly tripled this class's embedded fixture count, which is what made an
+    /// already-marginal <c>LiveSearchExpansionTests</c> assertion tip over. The cleanup is the fix;
+    /// the language scope is belt-and-braces while the rows are alive, since eligibility defaults to
+    /// English-only and a non-English row is invisible to every other account in the collection.</para>
+    /// </summary>
+    private readonly string _scope = $"fx-{Guid.NewGuid():N}"[..8];
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    /// <inheritdoc cref="_scope"/>
+    public async Task DisposeAsync()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var titleIds = await db.Titles.Where(t => t.Language == _scope).Select(t => t.Id).ToListAsync();
+        if (titleIds.Count == 0)
+        {
+            return;
+        }
+
+        await db.UserRatings.Where(r => titleIds.Contains(r.TitleId)).ExecuteDeleteAsync();
+        await db.WatchedTitles.Where(w => titleIds.Contains(w.TitleId)).ExecuteDeleteAsync();
+        await db.TitleCredits.Where(c => titleIds.Contains(c.TitleId)).ExecuteDeleteAsync();
+        await db.TitleEmbeddings.Where(e => titleIds.Contains(e.TitleId)).ExecuteDeleteAsync();
+        await db.Titles.Where(t => titleIds.Contains(t.Id)).ExecuteDeleteAsync();
+    }
+
     private static int IndexOf(string scalar) => Array.IndexOf(FeatureSchema.Scalars, scalar);
 
     [Fact]
@@ -392,6 +433,275 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
         }
     }
 
+    // ── Schema v6: the watch history ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task A_watched_unrated_title_is_never_compared_against_a_centroid_it_is_still_inside()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // simWatchedCentroid's leave-one-out, proved the only way it can be: two accounts with the
+        // SAME watch history except that one of them has not watched the title under test. The pool
+        // minus a member must equal a pool that never held it, or a member is being described by a
+        // centroid it is still inside — the embedding-side twin of the simTopLovedMax leak above.
+        var withMember = await SeedAccountAsync();
+        var without = await SeedAccountAsync();
+
+        var watched = new List<Guid>();
+        for (var i = 0; i < 10; i++)
+        {
+            watched.Add(await SeedTitleAsync($"Watched {i}", NearUnit(200 + i, 0.4f)));
+        }
+
+        // Both accounts need a rating history, or the taste state has no mean to work from — and
+        // these titles must be rated by NEITHER account, or they leave the watched-unrated pool.
+        foreach (var accountId in new[] { withMember, without })
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                var other = await SeedBareTitleAsync($"Rated {accountId:N}-{i}", 100, 7m, 10m);
+                await SeedRatingAsync(accountId, other, (short)(6 + (i % 3)), DateTime.UtcNow.AddDays(-60 - i));
+            }
+        }
+
+        var subject = watched[0];
+        foreach (var id in watched)
+        {
+            await SeedWatchedAsync(withMember, id, plays: 1, DateTime.UtcNow.AddDays(-40));
+            if (id != subject)
+            {
+                await SeedWatchedAsync(without, id, plays: 1, DateTime.UtcNow.AddDays(-40));
+            }
+        }
+
+        var sim = IndexOf("simWatchedCentroid");
+        var has = IndexOf("hasWatchedCentroid");
+
+        var member = (await BuildAsync(withMember, [subject]))[subject];
+        var stranger = (await BuildAsync(without, [subject]))[subject];
+
+        Assert.Equal(1f, member[has]);
+        Assert.Equal(1f, stranger[has]);
+        Assert.True(
+            member[sim] < 1f,
+            $"simWatchedCentroid was {member[sim]} — a pool member is still matching its own embedding.");
+        Assert.True(member[sim] > 0f, "the feature has to be doing something, or the test proves nothing");
+        Assert.Equal(stranger[sim], member[sim], 4);
+    }
+
+    [Fact]
+    public async Task An_account_with_nothing_watched_and_unrated_gets_a_flag_of_zero_not_a_similarity_of_zero()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The v2 lesson, re-stated for v6: "the pool is empty" and "the cosine happens to be 0" must
+        // not be spelled the same way. Every title this account has watched, it also rated — so the
+        // watched-unrated pool is empty by construction and the flag, not the value, says so.
+        var accountId = await SeedAccountAsync();
+        var candidate = await SeedTitleAsync("Candidate", NearUnit(300, 0.3f));
+        for (var i = 0; i < 5; i++)
+        {
+            var rated = await SeedTitleAsync($"Rated and watched {i}", NearUnit(310 + i, 0.3f));
+            await SeedRatingAsync(accountId, rated, rating: 8, DateTime.UtcNow.AddDays(-30 - i));
+            await SeedWatchedAsync(accountId, rated, plays: 1, DateTime.UtcNow.AddDays(-31 - i));
+        }
+
+        var vector = (await BuildAsync(accountId, [candidate]))[candidate];
+
+        Assert.Equal(0f, vector[IndexOf("hasWatchedCentroid")]);
+        Assert.Equal(0f, vector[IndexOf("simWatchedCentroid")]);
+        Assert.Equal(0f, vector[IndexOf("watchedGenreShare")]);
+
+        // …while the REWATCH pool is a different pool and takes rated titles, so its flag is silent
+        // here only because nothing was watched twice.
+        Assert.Equal(0f, vector[IndexOf("hasRewatchCentroid")]);
+    }
+
+    [Fact]
+    public async Task A_rewatched_training_row_is_taken_back_out_of_the_plays_weighted_centroid()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The rewatch pool is the one v6 pool a TRAINING row is routinely a member of — it takes
+        // rated titles, because a title watched three times and rated 9 is evidence twice over. So
+        // this is where the leave-one-out actually fires in training, and the subtraction has to
+        // carry the member's OWN min(plays, 3) weight rather than an average of everyone's.
+        var withMember = await SeedAccountAsync();
+        var without = await SeedAccountAsync();
+
+        var subject = await SeedTitleAsync("Rewatched and rated", NearUnit(400, 0.35f));
+        var others = new List<(Guid Id, int Plays)>();
+        for (var i = 0; i < 6; i++)
+        {
+            others.Add((await SeedTitleAsync($"Rewatched {i}", NearUnit(410 + i, 0.35f)), 2 + (i % 3)));
+        }
+
+        foreach (var accountId in new[] { withMember, without })
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                var filler = await SeedBareTitleAsync($"Filler {accountId:N}-{i}", 100, 7m, 10m);
+                await SeedRatingAsync(accountId, filler, (short)(6 + (i % 3)), DateTime.UtcNow.AddDays(-70 - i));
+            }
+
+            foreach (var (id, plays) in others)
+            {
+                await SeedWatchedAsync(accountId, id, plays, DateTime.UtcNow.AddDays(-25));
+            }
+        }
+
+        // The subject is rated by BOTH accounts — so it is a training row for both — but rewatched by
+        // only one. Watched once is not a rewatch, so it stays out of the pool for `without`.
+        await SeedRatingAsync(withMember, subject, rating: 9, DateTime.UtcNow.AddDays(-20));
+        await SeedRatingAsync(without, subject, rating: 9, DateTime.UtcNow.AddDays(-20));
+        await SeedWatchedAsync(withMember, subject, plays: 3, DateTime.UtcNow.AddDays(-20));
+        await SeedWatchedAsync(without, subject, plays: 1, DateTime.UtcNow.AddDays(-20));
+
+        var sim = IndexOf("simRewatchCentroid");
+        var member = (await BuildAsync(withMember, [subject]))[subject];
+        var stranger = (await BuildAsync(without, [subject]))[subject];
+
+        Assert.Equal(1f, member[IndexOf("hasRewatchCentroid")]);
+        Assert.True(
+            member[sim] < 1f,
+            $"simRewatchCentroid was {member[sim]} — a rewatched training row is matching itself.");
+        Assert.True(member[sim] > 0f);
+        Assert.Equal(stranger[sim], member[sim], 4);
+    }
+
+    [Fact]
+    public async Task The_rewatch_pool_takes_a_title_rated_below_the_loved_bar()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // "Rated or not" means rated ANYTHING. A title watched three times and rated 6 is a rewatch,
+        // and it is arguably the most interesting kind — a comfort watch the user would never call a
+        // favourite. This is a regression test for a real bug found while writing this bump: the
+        // rewatch centroid drew its embeddings from the LOVED dictionary, so every rewatch rated
+        // below 8 fell out of the pool without a trace.
+        var accountId = await SeedAccountAsync();
+        var comfort = await SeedTitleAsync("Comfort Watch", NearUnit(600, 0.3f));
+        var loved = await SeedTitleAsync("Loved Rewatch", NearUnit(610, 0.3f));
+
+        await SeedRatingAsync(accountId, comfort, rating: 6, DateTime.UtcNow.AddDays(-30));
+        await SeedRatingAsync(accountId, loved, rating: 9, DateTime.UtcNow.AddDays(-30));
+        await SeedWatchedAsync(accountId, comfort, plays: 3, DateTime.UtcNow.AddDays(-15));
+        await SeedWatchedAsync(accountId, loved, plays: 2, DateTime.UtcNow.AddDays(-15));
+
+        var taste = await TasteAsync(accountId, DateTime.UtcNow);
+
+        Assert.Contains(comfort, taste.Self.RewatchWeights.Keys);
+        Assert.Contains(loved, taste.Self.RewatchWeights.Keys);
+
+        // …and the weight is min(plays, 3), so the comfort watch outweighs the loved one here. The
+        // pool is behaviour, not opinion; the rating decides nothing inside it.
+        Assert.Equal(3d, taste.Self.RewatchWeights[comfort]);
+        Assert.Equal(2d, taste.Self.RewatchWeights[loved]);
+        Assert.Equal(5d, taste.Self.RewatchWeightTotal);
+    }
+
+    [Fact]
+    public async Task Watched_and_unrated_is_evaluated_as_of_the_cut_and_not_as_of_today()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // THE leakage rule of this bump, and the one that is invisible if you test at asOf = now.
+        // A title watched in January and rated in June is watched-AND-UNRATED for a vector built in
+        // March; using today's ratings to decide would remove it from the March pool because of
+        // something that had not happened yet. That is future information, and it would delete every
+        // holdout title from the pool exactly when the holdout is what is being measured.
+        var accountId = await SeedAccountAsync();
+        var subject = await SeedTitleAsync("Watched then rated", NearUnit(500, 0.3f));
+
+        for (var i = 0; i < 5; i++)
+        {
+            var filler = await SeedBareTitleAsync($"Filler {i}", 100, 7m, 10m);
+            await SeedRatingAsync(accountId, filler, (short)(6 + (i % 3)), DateTime.UtcNow.AddDays(-200 - i));
+        }
+
+        await SeedWatchedAsync(accountId, subject, plays: 1, DateTime.UtcNow.AddDays(-100));
+        await SeedRatingAsync(accountId, subject, rating: 9, DateTime.UtcNow.AddDays(-10));
+
+        var duringTheGap = await TasteAsync(accountId, DateTime.UtcNow.AddDays(-50));
+        var today = await TasteAsync(accountId, DateTime.UtcNow);
+
+        Assert.Contains(subject, duringTheGap.Self.WatchedUnratedTitleIds);
+        Assert.DoesNotContain(subject, today.Self.WatchedUnratedTitleIds);
+
+        // …and the complement holds in both directions, which is what makes the two pools a partition
+        // rather than two independent queries that can disagree.
+        Assert.DoesNotContain(subject, duringTheGap.Self.Ratings.Keys);
+        Assert.Contains(subject, today.Self.Ratings.Keys);
+
+        // A watch that had not happened yet is not a member either — the pool is bounded on both
+        // sides by asOf, not just on the rating side.
+        var beforeTheWatch = await TasteAsync(accountId, DateTime.UtcNow.AddDays(-150));
+        Assert.DoesNotContain(subject, beforeTheWatch.Self.WatchedUnratedTitleIds);
+    }
+
+    [Fact]
+    public async Task Watched_genre_share_measures_reach_into_the_watched_pool()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The genre half of the same signal, and the one that keeps working for the ~8 titles in
+        // every hundred that carry no embedding at all. Six of ten watched-unrated titles are drama,
+        // two are western, two are documentary — so a drama candidate reaches 0.6 and a western one
+        // 0.2, and the spread between them is the whole feature.
+        var accountId = await SeedAccountAsync();
+        for (var i = 0; i < 5; i++)
+        {
+            var filler = await SeedBareTitleAsync($"Share filler {i}", 100, 7m, 10m, ["comedy"]);
+            await SeedRatingAsync(accountId, filler, (short)(6 + (i % 3)), DateTime.UtcNow.AddDays(-90 - i));
+        }
+
+        var pool = new List<Guid>();
+        for (var i = 0; i < 10; i++)
+        {
+            var genres = i < 6 ? new[] { "drama" } : i < 8 ? ["western"] : new[] { "documentary" };
+            var id = await SeedBareTitleAsync($"Watched genre {i}", 100, 7m, 10m, genres);
+            await SeedWatchedAsync(accountId, id, plays: 1, DateTime.UtcNow.AddDays(-45));
+            pool.Add(id);
+        }
+
+        var drama = await SeedBareTitleAsync("Drama candidate", 100, 7m, 10m, ["drama"]);
+        var western = await SeedBareTitleAsync("Western candidate", 100, 7m, 10m, ["western"]);
+        var holiday = await SeedBareTitleAsync("Holiday candidate", 100, 7m, 10m, ["holiday"]);
+
+        var share = IndexOf("watchedGenreShare");
+        var vectors = await BuildAsync(accountId, [drama, western, holiday, pool[0]]);
+
+        Assert.Equal(0.6f, vectors[drama][share], 4);
+        Assert.Equal(0.2f, vectors[western][share], 4);
+        // Nothing in the pool shares the genre: low, not missing. hasEmbedding is what says "we know
+        // nothing about this title"; this scalar says "nothing you watched looks like it".
+        Assert.Equal(0f, vectors[holiday][share], 4);
+
+        // A pool MEMBER never counts itself: 5 of the other 9, not 6 of 10. The training path cannot
+        // reach this branch (a rated row is not a pool member by construction), but the title-detail
+        // path scores watched-and-unrated titles directly, and it would otherwise inflate every one
+        // of them by 1/|pool|.
+        Assert.Equal(5f / 9f, vectors[pool[0]][share], 4);
+    }
+
     private async Task<Dictionary<Guid, float[]>> BuildAsync(Guid accountId, IReadOnlyCollection<Guid> titleIds)
     {
         var scoped = new AccountContext();
@@ -401,6 +711,31 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
         var now = DateTime.UtcNow;
         var taste = await builder.BuildTasteStateAsync(accountId, now, CancellationToken.None);
         return await builder.BuildAsync(taste, titleIds, now, CancellationToken.None);
+    }
+
+    private async Task<FeatureVectorBuilder.TasteState> TasteAsync(Guid accountId, DateTime asOf)
+    {
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var db = fixture.CreateContext(scoped);
+        return await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, asOf, CancellationToken.None);
+    }
+
+    private async Task SeedWatchedAsync(Guid accountId, Guid titleId, int plays, DateTime lastWatchedAt)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.WatchedTitles.Add(new WatchedTitle
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            TitleId = titleId,
+            Plays = plays,
+            LastWatchedAt = lastWatchedAt,
+            IsFullyWatched = true,
+            FirstSyncedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedAccountAsync()
@@ -446,7 +781,7 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
         return title.Id;
     }
 
-    private static Title NewTitle(
+    private Title NewTitle(
         string name, int? runtime, decimal? traktRating, decimal? popularity, int? year, string[]? genres = null) => new()
         {
             Id = Guid.NewGuid(),
@@ -454,7 +789,9 @@ public class FeatureVectorLeakageTests(PostgresFixture fixture)
             TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
             TraktSlug = string.Empty,
             Name = name,
-            Language = "en",
+            // The cleanup handle — see _scope. Nothing in FeatureVectorBuilder reads Language, so
+            // this is invisible to every assertion in this file and visible to DisposeAsync alone.
+            Language = _scope,
             // No poster: every discovery lane filters on PosterPath != null, so these fixtures cannot
             // leak into the candidate pools of the other tests sharing this database.
             PosterPath = null,

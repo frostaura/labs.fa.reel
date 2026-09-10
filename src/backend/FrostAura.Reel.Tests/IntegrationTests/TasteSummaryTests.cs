@@ -137,7 +137,11 @@ public class TasteSummaryTests(PostgresFixture fixture)
             [],
             new Dictionary<string, double>(),
             null,
-            0.5m);
+            0.5m,
+            null,
+            null,
+            [],
+            new Dictionary<string, int>());
 
     private async Task<Guid> SeedAccountAsync()
     {
