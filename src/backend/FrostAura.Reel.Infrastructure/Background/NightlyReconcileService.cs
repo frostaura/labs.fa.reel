@@ -78,6 +78,8 @@ public sealed class NightlyReconcileService(
                 var enqueued = 0;
                 var retrains = 0;
                 var listRemovals = 0;
+                var narratives = 0;
+                var lensPasses = 0;
                 foreach (var accountId in accountIds)
                 {
                     // Managed-list auto-remove backstop: anything in "Reel — Up Next" detected watched
@@ -132,6 +134,57 @@ public sealed class NightlyReconcileService(
                         logger.LogInformation(
                             "Nightly reconcile queued a retrain for {AccountId} ({Trigger}).", accountId, trigger);
                     }
+
+                    // The weekly taste narrative. Sunday, and only when the account has not been
+                    // written one inside the last week — the handler ALSO exits early when the
+                    // account's taste fingerprint has not moved, so the cadence here is a ceiling on
+                    // how often it may be asked, not a promise that it will spend. A build that sees
+                    // the fingerprint move queues it sooner; this is the floor under that.
+                    if (now.DayOfWeek == DayOfWeek.Sunday)
+                    {
+                        var writtenRecently = await db.AccountTasteNarratives.AnyAsync(
+                            n => n.AccountId == accountId && n.GeneratedAt >= now.AddDays(-6), stoppingToken);
+                        var narrativeInFlight = await db.SyncJobs.AnyAsync(
+                            j => j.AccountId == accountId && j.Kind == JobKind.BuildTasteNarrative
+                                && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running),
+                            stoppingToken);
+                        if (!writtenRecently && !narrativeInFlight)
+                        {
+                            db.SyncJobs.Add(new SyncJob
+                            {
+                                Id = Guid.NewGuid(),
+                                AccountId = accountId,
+                                Kind = JobKind.BuildTasteNarrative,
+                                Priority = 4,
+                                EnqueuedAt = now,
+                                TriggerReason = "weekly-narrative",
+                            });
+                            narratives++;
+                        }
+                    }
+
+                    // The Saved prefetch: lens copy for the queue's top twenty by prediction. The
+                    // queue is where deliberation happens, so it is where the richest copy belongs —
+                    // and the nightly pass is when it can be written without anyone waiting. The
+                    // account's own daily ceiling still binds, so this cannot run away.
+                    var lensInFlight = await db.SyncJobs.AnyAsync(
+                        j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles
+                            && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running),
+                        stoppingToken);
+                    if (!lensInFlight)
+                    {
+                        db.SyncJobs.Add(new SyncJob
+                        {
+                            Id = Guid.NewGuid(),
+                            AccountId = accountId,
+                            Kind = JobKind.PersonaliseTitles,
+                            Priority = 4,
+                            EnqueuedAt = now,
+                            TriggerReason = "nightly-saved-prefetch",
+                            CursorJson = Application.Jobs.PersonaliseTitlesJobHandler.SavedCursor,
+                        });
+                        lensPasses++;
+                    }
                 }
 
                 // A concurrent enqueue (EnrichCatalogJobHandler's chain, another instance's nightly
@@ -145,8 +198,9 @@ public sealed class NightlyReconcileService(
                 }
 
                 logger.LogInformation(
-                    "Nightly reconcile: {Sync} delta sync(s), {Retrain} retrain(s), {ListRemove} managed-list removal(s).",
-                    enqueued, retrains, listRemovals);
+                    "Nightly reconcile: {Sync} delta sync(s), {Retrain} retrain(s), {ListRemove} managed-list removal(s), "
+                    + "{Narrative} taste narrative(s), {Lens} lens pass(es).",
+                    enqueued, retrains, listRemovals, narratives, lensPasses);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

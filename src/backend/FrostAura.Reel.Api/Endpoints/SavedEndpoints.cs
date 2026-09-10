@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Saved;
@@ -72,7 +73,11 @@ public static class SavedEndpoints
         bool FitsEveningBudget,
         bool OnManagedList,
         bool WatchTonight,
-        string? WatchTonightReason);
+        string? WatchTonightReason,
+        // Trailing and optional: the lens's one-line hook where copy exists for this account and
+        // title, and null everywhere it does not. The queue is where deliberation happens, so it is
+        // where the richest copy belongs — but a saved card has to read perfectly well without it.
+        string? Hook = null);
 
     /// <param name="ExpectedAbsoluteError">What a displayed prediction is typically off by. Null until the account's closed loop has pairs — an unmeasured band is not a band.</param>
     /// <param name="UnscoredRemaining">Saves still without a prediction after this request's budget was spent.</param>
@@ -108,13 +113,35 @@ public static class SavedEndpoints
             IReelDbContext db,
             OnDemandScorer scorer,
             RatingCalibrationService calibration,
+            LensService lens,
+            FeatureVectorBuilder featureBuilder,
+            TasteFactsBuilder tasteFacts,
             HttpContext http,
             CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
-            return account is null
-                ? Results.Unauthorized()
-                : Results.Ok(await QueueAsync(sort, account, db, scorer, calibration, DateTime.UtcNow, ct));
+            if (account is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var now = DateTime.UtcNow;
+            var queue = await QueueAsync(sort, account, db, scorer, calibration, now, ct);
+
+            // Read-only, like the feed: a page load must never be able to start a generation. The
+            // nightly pass pre-fetches the queue's top twenty, so in steady state most of these are
+            // already warm and the rest simply render without a hook.
+            var taste = await featureBuilder.BuildTasteStateAsync(account.Id, now, ct);
+            var profile = await tasteFacts.BuildAsync(account.Id, taste, now, ct);
+            var notes = await lens.ResolveManyAsync(
+                account.Id, queue.Items.Select(i => i.TitleId).ToList(), profile.ProfileHash, ct);
+
+            return Results.Ok(queue with
+            {
+                Items = queue.Items
+                    .Select(i => i with { Hook = notes.GetValueOrDefault(i.TitleId)?.Note?.Hook })
+                    .ToList(),
+            });
         });
 
         group.MapGet("/recently-watched", async (

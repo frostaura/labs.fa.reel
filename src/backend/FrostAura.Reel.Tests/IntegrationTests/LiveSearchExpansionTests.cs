@@ -378,12 +378,12 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
             new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             featureBuilder,
+            new PersonalisationContext(db, new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions()))),
             new OnDemandScorer(
                 db, featureBuilder, engine, residualModel,
                 new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
                 new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions()))),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
-            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
             new LexicalSearchService(eligibility),
             new CatalogWorkCoordinator(),
             new MemoryCache(new MemoryCacheOptions()),

@@ -161,6 +161,7 @@ public static class DependencyInjection
         services.AddScoped<Application.Lens.LensVerifier>();
         services.AddScoped<Application.Lens.LensService>();
         services.AddScoped<Application.Lens.TasteNarrativeService>();
+        services.AddScoped<Application.Lens.LensAudit>();
 
         // ── Serving pipeline ─────────────────────────────────────────────────────────────
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();

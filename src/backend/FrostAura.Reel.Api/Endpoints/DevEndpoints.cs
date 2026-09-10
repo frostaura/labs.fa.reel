@@ -171,5 +171,41 @@ public static class DevEndpoints
                 },
             });
         });
+
+        // ── The lens audit ──────────────────────────────────────────────────────────────────
+        // Founder-only, and the reason it is founder-only is that it SPENDS: it re-reads the last
+        // N generated notes and asks the same model family to score each against a frozen rubric.
+        //
+        // How to read it: compare MEANS between prompt versions, never absolute values — the judge
+        // shares the writer's blind spots, so a level is close to meaningless and a difference is
+        // not. `rejectedByGuards` is worth more than any mean, because it counts notes that were
+        // actually refused rather than opinions about them. The failure mode to watch for is
+        // specificity rising while grounding falls: that is what "more confident and less true"
+        // looks like, and it is exactly what a prompt tweak aimed at livelier copy tends to buy.
+        //
+        // ?score=false returns the same rows without paying for a judgement, which is the right
+        // call when you only want to read fifty generations yourself.
+        app.MapGet("/api/dev/lens-audit", async (
+            Application.Lens.LensAudit audit,
+            Application.Tenancy.IAccountContext accountContext,
+            FeatureVectorBuilder featureBuilder,
+            int? sample,
+            bool? score,
+            CancellationToken ct) =>
+        {
+            if (accountContext.AccountId is not { } accountId)
+            {
+                return Results.Unauthorized();
+            }
+
+            var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
+            var report = await audit.RunAsync(
+                accountId,
+                taste,
+                sample ?? Application.Lens.LensAudit.DefaultSampleSize,
+                score ?? true,
+                ct);
+            return Results.Ok(report);
+        });
     }
 }

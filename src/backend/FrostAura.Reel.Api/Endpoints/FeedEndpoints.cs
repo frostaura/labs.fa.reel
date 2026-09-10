@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
@@ -33,6 +34,16 @@ public static class FeedEndpoints
     /// number, so it needs no column and no migration.
     /// </param>
     /// <param name="FloorUsed">The bar that card was measured against — <see cref="HeroConfidence.BarFor"/>.</param>
+    /// <param name="Hook">
+    /// The lens's one-line reason to press play tonight, where copy has been written for this
+    /// account and title. Null everywhere it has not — a card must render identically well without
+    /// it, because the budget, the provider and the guards can each withhold it.
+    /// </param>
+    /// <param name="LensClause">The first clause of the lens, for the card's two-line why.</param>
+    /// <param name="Mood">
+    /// The lens's closed-vocabulary mood, which is what the tonight-mood chips re-sort over. Sent
+    /// with the card so the re-sort is instant and client-side rather than a rebuild.
+    /// </param>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
@@ -40,13 +51,14 @@ public static class FeedEndpoints
         string WhyThis, bool IsReleased, IReadOnlyList<CardProvider> Providers,
         // Optional and trailing on purpose: every other producer of this record — the digest, the
         // paginated lane — is serving a non-hero surface and has no bar to report.
-        string? Confidence = null, decimal? FloorUsed = null);
+        string? Confidence = null, decimal? FloorUsed = null,
+        string? Hook = null, string? LensClause = null, string? Mood = null);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -239,11 +251,21 @@ public static class FeedEndpoints
                 .FirstOrDefaultAsync(ct));
             var heroBar = HeroConfidence.BarFor(minPredicted);
 
+            // Lens copy for the whole page in one query. READ ONLY — this path never generates:
+            // a page load must not be able to start an LLM call, which is the job's work and the
+            // on-demand endpoint's. Where nothing has been written the card renders exactly as it
+            // did before, on the templater's sentence.
+            var lensTaste = await featureBuilder.BuildTasteStateAsync(account.Id, nowUtc, ct);
+            var lensProfile = await tasteFacts.BuildAsync(account.Id, lensTaste, nowUtc, ct);
+            var lensByTitle = await lens.ResolveManyAsync(
+                account.Id, items.Select(x => x.Title.Id).ToList(), lensProfile.ProfileHash, ct);
+
             FeedCard ToCard(FeedItem item, Title title, bool hero = false)
             {
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
                 var (crowd, crowdVotes) = Domain.Catalog.CrowdRating.Resolve(title);
+                var note = lensByTitle.GetValueOrDefault(title.Id)?.Note;
                 return new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
@@ -252,7 +274,10 @@ public static class FeedEndpoints
                     // Rows carry no label: they are selected against the account's own floor, not the
                     // hero bar, so "reaching" would be measuring them against a rule they never had.
                     hero ? HeroConfidence.For(item.PredictedRating, heroBar) : null,
-                    hero ? heroBar : null);
+                    hero ? heroBar : null,
+                    note?.Hook,
+                    note?.FirstClause(),
+                    note?.Mood);
             }
 
             var hero = items.Where(x => x.Item.Row == FeedRowKind.Hero)

@@ -108,7 +108,8 @@ public static class TitleEndpoints
             IReelDbContext db, IAccountContext accountContext,
             ITmdbClient tmdb, CandidateGenerator candidateGenerator, TitleHydrator hydrator,
             ICatalogWorkCoordinator coordinator, OnDemandScorer scorer, FeatureVectorBuilder featureBuilder,
-            DislikeSignal dislikes, CancellationToken ct) =>
+            DislikeSignal dislikes, Application.Lens.LensService lens, TasteFactsBuilder tasteFacts,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await ResolveTitleAsync(db, mediaType, tmdbId, ct);
@@ -161,6 +162,18 @@ public static class TitleEndpoints
             var whyThis = await SnapshotWhyAsync(db, accountId, title.Id, ct)
                 ?? await TemplatedWhyAsync(db, taste, title, score, ct);
 
+            // "Through your lens", where copy has been written. READ ONLY on this path: the modal
+            // renders instantly from what exists, and the client asks the dedicated /lens endpoint
+            // for a generation if it wants one. That split is what keeps opening a title fast —
+            // the whole page must never wait on a provider.
+            var lensView = taste is null
+                ? null
+                : LensEndpoints.ToResponse(await lens.ResolveAsync(
+                    accountId,
+                    title.Id,
+                    (await tasteFacts.BuildAsync(accountId, taste, DateTime.UtcNow, ct)).ProfileHash,
+                    ct));
+
             // The serving-time dislike demotion behind this score (the PredictedRating already
             // reflects it — OnDemandScorer subtracted it). When it is big enough to notice, the
             // breakdown gets an honest synthetic negative bar + note so the lowered number
@@ -199,6 +212,7 @@ public static class TitleEndpoints
                 year = title.Year,
                 overview = title.Overview,
                 whyThis,
+                lens = lensView,
                 tagline = title.Tagline,
                 runtimeMinutes = title.RuntimeMinutes,
                 certification = title.Certification,
