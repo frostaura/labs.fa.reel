@@ -605,24 +605,6 @@ public class CrossReferenceFeedIntegrationTests(PostgresFixture fixture) : Embed
         }
     }
 
-    /// <summary>Never answers, so the build orders on the model and the verdicts and nothing else.</summary>
-    private sealed class UnavailableSearchAgent : ISearchAgent
-    {
-        public bool IsAvailable => false;
-
-        public string ModelId => "stub";
-
-        public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary,
-            IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
-            IReadOnlyList<RerankInput> titles, string query, LensPersona persona,
-            string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-    }
-
     /// <summary>A TMDB port with no corpus: discovery adds nothing, so the pool is what was seeded.</summary>
     private sealed class OfflineTmdbClient : ITmdbClient
     {

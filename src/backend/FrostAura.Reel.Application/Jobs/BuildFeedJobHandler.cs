@@ -2070,67 +2070,26 @@ public class BuildFeedJobHandler(
         return false;
     }
 
-    private async Task<IReadOnlyDictionary<Guid, RerankTitleContext>> RerankContextsAsync(
-        IReadOnlyList<Candidate> scored, CancellationToken ct)
-    {
-        var ids = scored.Select(c => c.Title.Id).Distinct().ToList();
-        if (ids.Count == 0)
-        {
-            return new Dictionary<Guid, RerankTitleContext>();
-        }
-
-        var attributes = await db.TitleAttributes
-            .Where(a => ids.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done)
-            .ToDictionaryAsync(a => a.TitleId, ct);
-
-        var credits = (await db.TitleCredits
-                .Where(c => ids.Contains(c.TitleId))
-                .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.Role, c.CastOrder, p.Name })
-                .ToListAsync(ct))
-            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
-            .GroupBy(c => c.TitleId)
-            .ToDictionary(g => g.Key, g => g.ToList());
-
-        var contributionsByTitle = scored
-            .GroupBy(c => c.Title.Id)
-            .ToDictionary(
-                g => g.Key,
-                g => g.First().Row.TopContributions
-                    .OrderByDescending(c => Math.Abs(c.Contribution))
-                    .Take(3)
-                    .Select(c => c.Feature)
-                    .ToList());
-
-        var contexts = new Dictionary<Guid, RerankTitleContext>();
-        foreach (var id in ids)
-        {
-            attributes.TryGetValue(id, out var attrs);
-            var titleCredits = credits.GetValueOrDefault(id) ?? [];
-            contexts[id] = new RerankTitleContext(
-                // Only a closed-vocabulary tone is trusted: rows written before enforcement carry
-                // polluted free-text labels (see AttributeVocabulary).
-                AttributeVocabulary.IsClosedVocabTone(attrs?.Tone) ? attrs!.Tone : null,
-                attrs?.Era,
-                attrs?.Themes ?? [],
-                attrs?.Darkness,
-                attrs?.Pacing,
-                attrs?.Complexity,
-                attrs?.EmotionalIntensity,
-                attrs?.Humor,
-                attrs?.Optimism,
-                attrs?.EnsembleVsSolo,
-                titleCredits.Where(c => c.Role == CreditRole.Director)
-                    .OrderBy(c => c.Name, StringComparer.Ordinal).Select(c => c.Name).FirstOrDefault(),
-                titleCredits.Where(c => c.Role == CreditRole.Writer)
-                    .OrderBy(c => c.Name, StringComparer.Ordinal).Select(c => c.Name).FirstOrDefault(),
-                titleCredits.Where(c => c.Role == CreditRole.Actor)
-                    .OrderBy(c => c.CastOrder ?? int.MaxValue).ThenBy(c => c.Name, StringComparer.Ordinal)
-                    .Select(c => c.Name).Take(3).ToList(),
-                contributionsByTitle.GetValueOrDefault(id) ?? []);
-        }
-
-        return contexts;
-    }
+    /// <summary>
+    /// The feed build's half of the shared re-rank context: the model's own top contributions per
+    /// title, handed to <see cref="RerankContextBuilder"/> with the ids. The assembly itself moved
+    /// to the builder so Ask Reel judges candidates on the same evidence this surface does.
+    /// </summary>
+    private Task<IReadOnlyDictionary<Guid, RerankTitleContext>> RerankContextsAsync(
+        IReadOnlyList<Candidate> scored, CancellationToken ct) =>
+        RerankContextBuilder.BuildAsync(
+            db,
+            scored.Select(c => c.Title.Id).Distinct().ToList(),
+            scored
+                .GroupBy(c => c.Title.Id)
+                .ToDictionary(
+                    g => g.Key,
+                    g => (IReadOnlyList<string>)g.First().Row.TopContributions
+                        .OrderByDescending(c => Math.Abs(c.Contribution))
+                        .Take(3)
+                        .Select(c => c.Feature)
+                        .ToList()),
+            ct);
 
     /// <summary>One candidate in the shape the agent judges, with everything the catalogue knows about it.</summary>
     private static RerankInput RerankInputFor(

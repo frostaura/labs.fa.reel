@@ -1,8 +1,10 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
@@ -34,6 +36,38 @@ public class OpenRouterSearchAgent(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// The interpret completion's ceiling. The answer is one short reply sentence plus a small
+    /// discovery spec — roughly 250 tokens at its widest, so 400 is headroom rather than a target.
+    /// An UNBOUNDED completion here is the expensive shape: nothing about the response schema stops
+    /// a model from monologuing, and the caller pays for every token of it.
+    /// </summary>
+    private const int InterpretTokenBudget = 400;
+
+    /// <summary>
+    /// The re-rank ceiling. The widest live batch is 9 titles (<c>BuildFeedJobHandler</c> and
+    /// <c>FeedPaginator</c>; Ask Reel uses 6), each entry being a 36-char id, a number and a why
+    /// capped at 160 chars by the prompt — about 75 tokens, so ~700 for a full batch. 900 leaves
+    /// room for a model that pads its JSON without leaving room for one that rambles.
+    /// </summary>
+    private const int RerankTokenBudget = 900;
+
+    /// <summary>
+    /// A conversational reply is one short sentence by contract. 400 chars is the outer bound of
+    /// "short"; past that the model has stopped answering and started writing, and the surface
+    /// renders it above the grid where length costs the cards their space.
+    /// </summary>
+    private const int MaxReplyChars = 400;
+
+    /// <summary>
+    /// PROCESS-wide, not per-instance, and that is the whole point: this adapter is registered on a
+    /// transient typed HttpClient and is rebuilt for every scope, so an instance flag would
+    /// re-probe strict schema support on literally every call and re-pay the rejected request each
+    /// time. One rejection retires strict mode for the process; the parser was always the real
+    /// backstop and stays exactly as strict as it was.
+    /// </summary>
+    private static volatile bool _strictSchemaSupported = true;
+
     private string? ApiKey => configuration["OPENROUTER_API_KEY"] is { Length: > 0 } key ? key : null;
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
@@ -52,7 +86,8 @@ public class OpenRouterSearchAgent(
         : "openai/gpt-5.4-mini";
 
     public async Task<AgentReply> InterpretAsync(
-        IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default)
+        IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
+        CancellationToken ct = default, string? standingFilters = null)
     {
         // The interpreter's FREE deterministic reading, not a second billable round-trip. This
         // value is only ever a fallback — SearchIntentParser consumes it solely when the model's
@@ -68,15 +103,20 @@ public class OpenRouterSearchAgent(
 
         try
         {
-            var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles);
-            var (content, usage) = await ChatAsync(InterpretSystemPrompt, user, ct);
+            var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles, standingFilters);
+            // schema: null deliberately. The interpret spec is a dozen fields wide and strict mode
+            // requires every one of them declared and required, with nullability expressed as a
+            // union type — that schema is Phase 3's, written against the finished field set rather
+            // than guessed at here. The ceiling and the length guard below are the parts that stop
+            // spend today, and they do not depend on it.
+            var (content, usage) = await ChatAsync(InterpretSystemPrompt, user, InterpretTokenBudget, schema: null, ct);
             RecordCall(ApiUsagePurpose.SearchAgent, usage);
             if (!string.IsNullOrWhiteSpace(content))
             {
                 using var doc = JsonDocument.Parse(content);
                 var root = doc.RootElement;
                 var reply = root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } s
-                    ? s : StubReply(message, intentFallback);
+                    ? CapReply(s) : StubReply(message, intentFallback);
                 var intent = SearchIntentParser.FromJson(root, message, intentFallback);
                 return new AgentReply(reply, intent);
             }
@@ -92,7 +132,11 @@ public class OpenRouterSearchAgent(
         // earns its cost: the interpreter's prompt is smaller and single-purpose, so it often
         // answers where the agent's did not — and it degrades to the same free heuristic if it
         // fails too, which is exactly what the old code fell back to.
-        var recovered = await interpreter.InterpretAsync(message, ct);
+        // The standing filters ride the fallback too. This is THE drift the two-prompt gotcha is
+        // about: the recovery path is the one a failing turn actually takes, so a rule the live
+        // prompt honours and this one does not is invisible until a user is told about a title
+        // their own filters exclude.
+        var recovered = await interpreter.InterpretAsync(message, ct, standingFilters);
         return new AgentReply(StubReply(message, recovered), recovered);
     }
 
@@ -113,7 +157,8 @@ public class OpenRouterSearchAgent(
         try
         {
             var user = BuildRerankPrompt(titles, query, persona, anchorName);
-            var (content, usage) = await ChatAsync(RerankSystemPrompt, user, ct);
+            var (content, usage) = await ChatAsync(
+                RerankSystemPrompt, user, RerankTokenBudget, RerankSchema(), ct);
             RecordCall(usagePurpose, usage);
             if (string.IsNullOrWhiteSpace(content))
             {
@@ -236,15 +281,31 @@ public class OpenRouterSearchAgent(
             usage?.PromptTokens,
             usage?.CompletionTokens);
 
-    private async Task<(string? Content, OpenRouterUsage? Usage)> ChatAsync(string system, string user, CancellationToken ct)
+    /// <summary>
+    /// One chat completion, with a token ceiling and — where a <paramref name="schema"/> is given
+    /// and the provider still accepts one — strict <c>json_schema</c> enforcement. Lifted from
+    /// <c>OpenRouterLensWriter.ChatAsync</c>, which had all three guards while the search agent,
+    /// the one path a user waits on, had none of them.
+    ///
+    /// <para>A <c>length</c> finish is returned as a FAILURE rather than as content. This is the
+    /// non-obvious half: a truncated discovery spec usually still parses, because the fields that
+    /// were cut off are simply absent — so "80s sci-fi, no ghosts" silently became "80s sci-fi"
+    /// with the negation missing, and nothing anywhere looked wrong. The caller's existing
+    /// fallback (interpreter for intent, deterministic fit for re-rank) is a better answer than a
+    /// half-answer that reads as a whole one.</para>
+    /// </summary>
+    private async Task<(string? Content, OpenRouterUsage? Usage)> ChatAsync(
+        string system, string user, int maxTokens, object? schema, CancellationToken ct)
     {
+        var strict = schema is not null && _strictSchemaSupported;
         using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
         {
             Content = JsonContent.Create(new
             {
                 model = ModelId,
                 temperature = 0,
-                response_format = new { type = "json_object" },
+                max_tokens = maxTokens,
+                response_format = strict ? schema! : new { type = "json_object" },
                 messages = new object[]
                 {
                     new { role = "system", content = system },
@@ -255,31 +316,175 @@ public class OpenRouterSearchAgent(
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
 
         using var response = await httpClient.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            if (strict && IsStrictSchemaRejection(response.StatusCode, await response.Content.ReadAsStringAsync(ct)))
+            {
+                _strictSchemaSupported = false;
+                logger.LogWarning(
+                    "OpenRouter rejected strict json_schema for {Model} (HTTP {Status}); falling back to "
+                    + "json_object for the remainder of this process. Field validation now rests on the parser.",
+                    ModelId, (int)response.StatusCode);
+                return await ChatAsync(system, user, maxTokens, schema, ct);
+            }
+
+            // Anything else is the caller's existing failure path — it logs, and falls back.
+            response.EnsureSuccessStatusCode();
+        }
+
         var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
-        return (dto?.Choices?.FirstOrDefault()?.Message?.Content, dto?.Usage);
+        var choice = dto?.Choices?.FirstOrDefault();
+        if (string.Equals(choice?.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning(
+                "Search agent completion hit its {MaxTokens}-token ceiling for {Model}; discarding the truncated "
+                + "object rather than parsing a partial answer as a whole one.",
+                maxTokens, ModelId);
+            return (null, dto?.Usage);
+        }
+
+        return (choice?.Message?.Content, dto?.Usage);
+    }
+
+    /// <summary>
+    /// Whether a failure is the provider saying it cannot do strict schemas, as opposed to any
+    /// other 4xx. Deliberately the same predicate as the lens writer's: a broader reading would
+    /// retire strict mode on an unrelated bad request and never re-probe it.
+    /// </summary>
+    private static bool IsStrictSchemaRejection(HttpStatusCode status, string body)
+    {
+        if (status is not (HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity
+            or HttpStatusCode.NotImplemented or HttpStatusCode.NotFound))
+        {
+            return false;
+        }
+
+        return body.Contains("json_schema", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("response_format", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("structured output", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The re-rank response shape, enforced by the provider where it can be. Every constraint here
+    /// already exists in <see cref="TryReadEntry"/>; declaring it twice is the point — the parser
+    /// discards a bad entry AFTER paying for it, the schema stops it being generated. titleId as a
+    /// string rather than a number is the specific defect that cost a whole batch its fits.
+    ///
+    /// <para>Kept to constructs this codebase has already proven against the provider (the lens
+    /// writer's schemas use exactly these); numeric bounds are left to the parser, which rejects an
+    /// off-scale fit rather than clamping it.</para>
+    /// </summary>
+    internal static object RerankSchema() => new
+    {
+        type = "json_schema",
+        json_schema = new
+        {
+            name = "reel_rerank",
+            strict = true,
+            schema = new
+            {
+                type = "object",
+                additionalProperties = false,
+                required = new[] { "results" },
+                properties = new Dictionary<string, object>
+                {
+                    ["results"] = new
+                    {
+                        type = "array",
+                        items = new
+                        {
+                            type = "object",
+                            additionalProperties = false,
+                            // Strict mode requires EVERY property to be listed as required.
+                            required = new[] { "titleId", "fit", "why" },
+                            properties = new Dictionary<string, object>
+                            {
+                                ["titleId"] = new { type = "string" },
+                                ["fit"] = new { type = "number" },
+                                ["why"] = new { type = "string", maxLength = 160 },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    };
+
+    /// <summary>
+    /// Bounds the conversational reply, cutting at a SENTENCE boundary so the result reads as a
+    /// finished thought rather than a severed one. A hard cut is the fallback, and it backs off a
+    /// trailing high surrogate — half an emoji is not a character.
+    /// </summary>
+    internal static string CapReply(string reply)
+    {
+        if (reply.Length <= MaxReplyChars)
+        {
+            return reply;
+        }
+
+        var window = reply[..MaxReplyChars];
+        var boundary = window.LastIndexOfAny(['.', '!', '?', '\u2026']);
+
+        // A boundary in the first fifth of the window is a stray abbreviation, not the end of a
+        // sentence — cutting there would throw away most of an answer the user can read.
+        if (boundary >= MaxReplyChars / 5)
+        {
+            return window[..(boundary + 1)];
+        }
+
+        return (char.IsHighSurrogate(window[^1]) ? window[..^1] : window).TrimEnd() + '\u2026';
     }
 
     private static string StubReply(string message, SearchIntent intent)
     {
         var lens = intent.Genres.Count > 0 ? intent.Genres[0] : intent.Keywords.Count > 0 ? intent.Keywords[0] : "your taste";
-        return $"Here are some {lens} picks for “{message}” — leaning into what you tend to love.";
+        // Capped like the model's own reply: this one interpolates the user's message, which the
+        // endpoint bounds at 1,000 chars — comfortably longer than a "short sentence".
+        return CapReply($"Here are some {lens} picks for “{message}” — leaning into what you tend to love.");
     }
+
+    /// <summary>
+    /// The hash-derived fit, masked rather than <c>Math.Abs</c>-ed. <c>Math.Abs(int.MinValue)</c>
+    /// THROWS OverflowException — and this is the fallback path, reached from inside a batch loop
+    /// whose whole purpose is to survive a bad response, so one unluckily-hashed title name would
+    /// have taken down every other title's fit with it. Masking the sign bit is total.
+    /// </summary>
+    internal static double StableFit(int hash) => (hash & int.MaxValue) % 1000 / 1000d;
 
     private static RerankResult StubRerank(RerankInput t)
     {
         // Deterministic: anchor fit on the personal prediction when present, else a stable hash.
         var fit = t.Predicted is { } p
             ? Math.Clamp((double)p / 10d, 0d, 1d)
-            : Math.Abs(t.Name.GetHashCode()) % 1000 / 1000d;
+            : StableFit(t.Name.GetHashCode());
         var genre = t.Genres.Count > 0 ? t.Genres[0] : "this";
         return new RerankResult(t.TitleId, fit, $"A {genre} pick aligned with your taste.");
     }
 
-    private static string BuildInterpretPrompt(IReadOnlyList<ChatTurn> history, string message, string taste, IReadOnlyList<string> shown)
+    /// <summary>
+    /// The line that carries the account's standing content rules into a prompt. Single-sourced
+    /// and internal because BOTH Ask Reel prompts must carry it identically — this agent's live
+    /// prompt and <see cref="OpenRouterSearchInterpreter"/>'s fallback. A session was already lost
+    /// to that pair drifting once, when maxYear reached one prompt and not the other.
+    /// </summary>
+    internal static string StandingFiltersLine(string filters) =>
+        "Standing filters (the account's own rules; the answer space is limited to titles that pass them): "
+        + filters + '\n';
+
+    private static string BuildInterpretPrompt(
+        IReadOnlyList<ChatTurn> history, string message, string taste, IReadOnlyList<string> shown,
+        string? standingFilters = null)
     {
         var sb = new StringBuilder();
         sb.Append("Your taste: ").Append(taste).Append('\n');
+
+        // Beside taste, deliberately: both describe WHO is asking rather than what was asked, and
+        // the model reads the pair as one frame. In the USER message rather than the system one
+        // because it is per-account data, not policy.
+        if (standingFilters is { Length: > 0 } filters)
+        {
+            sb.Append(StandingFiltersLine(filters));
+        }
         if (history.Count > 0)
         {
             sb.Append("Conversation so far:\n");
@@ -463,6 +668,9 @@ public class OpenRouterSearchAgent(
         "YEAR RANGES: a decade means both bounds — \"80s\" is minYear 1980 and maxYear 1989, \"from the 90s\" is 1990-1999. " +
         "\"before 2000\" sets only maxYear; \"after 2015\" sets only minYear. Do not infer a year from a title that merely " +
         "looks like one (\"1917\", \"300\", \"2001\"). " +
+        "STANDING FILTERS: when the request collides with a rule listed under \"Standing filters\" — they ask for " +
+        "something those rules exclude — say so plainly in reply and offer the closest thing that DOES pass, " +
+        "instead of promising the excluded thing. Never put an excluded genre or term in genres/keywords. " +
         "Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
     private const string RerankSystemPrompt =
@@ -488,7 +696,8 @@ public class OpenRouterSearchAgent(
 
     private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 
-    private sealed record ChatChoice(ChatMessage? Message);
+    private sealed record ChatChoice(
+        ChatMessage? Message, [property: JsonPropertyName("finish_reason")] string? FinishReason);
 
     private sealed record ChatMessage(string? Content);
 }

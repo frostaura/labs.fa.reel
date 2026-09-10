@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { SESSION_FOUNDER, askEnd, askPush, askRequests, mockJson, stubAskReel, stubEventSource, waitForAsk } from "./helpers";
+import { SESSION_FOUNDER, askEnd, askPush, askPushConflict, askRequests, mockJson, stubAskReel, stubEventSource, waitForAsk } from "./helpers";
 
 /**
  * Ask Reel's honest channel and stream discipline, driven frame-by-frame through the scripted
@@ -9,7 +9,10 @@ import { SESSION_FOUNDER, askEnd, askPush, askRequests, mockJson, stubAskReel, s
  *    could get", after the main grid, never interleaved;
  *  - candidate-scored frames update data in place — DOM order holds until a phase frame, the one
  *    boundary where re-sorting is allowed;
- *  - a fresh /search shows the preset mood chips, and tapping one sends its text as the turn.
+ *  - a fresh /search shows the preset mood chips, and tapping one sends its text as the turn;
+ *  - one message costs exactly one /ask request, paging being a button rather than a sentinel;
+ *  - the server's conflict sentence lands above the grid, and the quality floor's cut is
+ *    accounted for in its own collapsed tray under it.
  */
 
 const card = (id: string, name: string, similarity: number, outside = false) => ({
@@ -34,9 +37,23 @@ const BORDER = card("b2", "Border Town", 0.9);
 const CEDAR = card("c3", "Cedar Falls", 0.5);
 const XCLUDED = card("d4", "Xcluded Manor", 0.95, true);
 
-async function bootSearch(page: Page) {
+/**
+ * The account's saved conditions, as `/settings/filters` returns them. `minPredictedRating` is the
+ * bar the floor tray names, and it is read from here rather than from the stream on purpose: it is
+ * the user's own standing setting, the same one `PickConditionsSummary` renders at the top of the
+ * page, so the two can never quote different numbers.
+ */
+const FILTERS_WITH_FLOOR = {
+  excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+  minPredictedRating: 6, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+};
+
+async function bootSearch(page: Page, filters?: unknown) {
   await stubEventSource(page);
   await stubAskReel(page);
+  // Registered only when a test cares: without it the query fails and the page must still render
+  // the tray with its unnumbered fallback, which is what the collision test above exercises.
+  if (filters !== undefined) await mockJson(page, "**/api/settings/filters", filters);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
     pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
@@ -121,5 +138,101 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
 
     await askPush(page, "done", { results: [], reason: null });
     await askEnd(page);
+  });
+
+  test("one message produces exactly one ask request", async ({ page }) => {
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("tense small-town thriller, no horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    await askPush(page, "candidate", ALPHA);
+    await askPush(page, "candidate", BORDER);
+    await askPush(page, "done", { results: [ALPHA, BORDER], reason: "2 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+
+    // The scroll sentinel that used to sit here had `rootMargin: 600px`, so it was already inside
+    // the viewport when the first page painted: every message cost two full-price /ask turns, the
+    // second one's interpret reply generated, billed and thrown away. Paging is now a button, so
+    // settling on the results must issue nothing at all.
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+    await page.waitForTimeout(750);
+    expect(await askRequests(page)).toHaveLength(1);
+
+    // …and the button still pages, so the capability was moved rather than dropped.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    const requests = (await askRequests(page)) as { query: string; continuation?: boolean }[];
+    expect(requests).toHaveLength(2);
+    expect(requests[1].query).toBe("tense small-town thriller, no horror");
+    expect(requests[1].continuation).toBe(true);
+    await askPush(page, "done", { results: [], reason: null });
+    await askEnd(page);
+  });
+
+  test("a filter collision is named above the grid, and the floor's cut gets its own tray", async ({ page }) => {
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("small-town horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Only `message` — the shape an older server sends. The page must render the server's
+    // sentence verbatim and must not compose one of its own from the numeric fields.
+    await askPushConflict(page, "You asked for horror, but your saved conditions exclude it.");
+    const notice = page.getByTestId("askreel-conflict");
+    await expect(notice).toBeVisible();
+    await expect(notice).toHaveText(/You asked for horror, but your saved conditions exclude it\./);
+
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER],
+      reason: "2 picks ranked for you, from 40 pulled.",
+      belowFloor: [CEDAR],
+      droppedByFloor: 1,
+    });
+    await askEnd(page);
+
+    // The floor's cut is accounted for, collapsed, under the grid — never mixed into it.
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray).toBeVisible();
+    await expect(tray.getByText("Cedar Falls")).toBeHidden();
+    await expect(page.getByTestId("semantic-results").getByText("Cedar Falls")).toHaveCount(0);
+    await tray.locator("summary").click();
+    await expect(tray.getByText("Cedar Falls")).toBeVisible();
+
+    const gridPrecedesTray = await page.evaluate(() => {
+      const grid = document.querySelector('[data-testid="semantic-results"]');
+      const t = document.querySelector('[data-testid="askreel-below-floor"]');
+      return !!grid && !!t && !!(grid.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    expect(gridPrecedesTray).toBe(true);
+    // No saved bar was mocked, so the label cannot name one and says so in words instead of
+    // printing "under your null bar".
+    await expect(tray.locator("summary")).toHaveText("Show the 1 pick Reel held back");
+  });
+
+  test("the floor tray names the account's own bar when there is one", async ({ page }) => {
+    // Same tray, one field different from the test above: the account has a saved
+    // `minPredictedRating`. That single field is what turns "Reel held some back" into a sentence
+    // naming a number the user chose and can go and change.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+
+    await page.getByTestId("askreel-composer").fill("small-town horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Three cut, one card sent down: the label must quote the SERVER's count, not the tray's.
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER],
+      reason: "2 picks ranked for you, from 40 pulled.",
+      belowFloor: [CEDAR],
+      droppedByFloor: 3,
+    });
+    await askEnd(page);
+
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray).toBeVisible();
+    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6 bar");
   });
 });

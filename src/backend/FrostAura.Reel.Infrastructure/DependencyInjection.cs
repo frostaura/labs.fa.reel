@@ -120,7 +120,22 @@ public static class DependencyInjection
             client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
             client.Timeout = TimeSpan.FromSeconds(60);
             client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
-        }).AddStandardResilienceHandler();
+        }).AddStandardResilienceHandler(o =>
+        {
+            // The ONE client a user sits and waits on, so the budget is stated rather than
+            // defaulted. The default is 3 attempts at 10s inside 30s total; here a slow-but-alive
+            // completion was being killed at 10s and then bought twice more, tripling the spend on
+            // a turn that was going to succeed. ONE retry, because a chat completion that failed
+            // has already been paid for and an identical re-ask is a second bill, not a cheaper
+            // one. 25s per attempt is above the observed p99 for these two calls; 55s total leaves
+            // room for exactly one retry and still lands inside the client's own 60s cap.
+            // CircuitBreaker sampling must stay >= 2x the attempt timeout or the validator throws
+            // at startup.
+            o.Retry.MaxRetryAttempts = 1;
+            o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(25);
+            o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(55);
+            o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(50);
+        });
 
         // The cross-reference judge runs a 60-title batch against a strict schema — the longest
         // single chat call in the product at 20-35s observed, so it gets the lens writer's ceiling

@@ -20,6 +20,65 @@ public static class EndpointHelpers
         return group;
     }
 
+    /// <summary>
+    /// 403 guard for endpoint groups that only some tiers may reach. Composes AFTER
+    /// <see cref="RequireAccount"/> — it answers 401 for an unpinned scope rather than 403, because
+    /// "you are not signed in" and "your tier is not enough" are different facts and a client that
+    /// cannot tell them apart will retry the wrong one forever.
+    ///
+    /// <para>It resolves the account the same way <see cref="GetCurrentAccountAsync"/> does rather
+    /// than trusting a claim, because tier lives on the row and is changed by billing without the
+    /// session cookie being reissued.</para>
+    ///
+    /// <para><b>Hazard, inherited deliberately.</b> <c>Results.Forbid()</c> is the house shape for
+    /// 403 here (eight existing sites use it), but this app registers no ASP.NET Core
+    /// authentication handler, so <c>ForbidAsync</c> has no scheme to dispatch to. Matching the
+    /// house is the right call for a contracts-only change; whoever first WIRES this filter onto a
+    /// route should verify the status code against the running app rather than assume 403.</para>
+    /// </summary>
+    public static RouteGroupBuilder RequireTier(this RouteGroupBuilder group, params AccountTier[] tiers)
+    {
+        group.AddEndpointFilter(async (context, next) =>
+        {
+            var db = context.HttpContext.RequestServices.GetRequiredService<IReelDbContext>();
+            var account = await context.HttpContext.GetCurrentAccountAsync(db, context.HttpContext.RequestAborted);
+            if (account is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            return tiers.Contains(account.Tier)
+                ? await next(context)
+                : Results.Forbid();
+        });
+        return group;
+    }
+
+    /// <summary>
+    /// The founder-only case of <see cref="RequireTier"/>, named rather than spelled out at every
+    /// call site — the diagnostic surfaces are gated on exactly this and a typo'd tier list on one
+    /// of them would open a founder surface to every paying account.
+    /// </summary>
+    public static RouteGroupBuilder RequireFounder(this RouteGroupBuilder group) =>
+        group.RequireTier(AccountTier.Founder);
+
+    /// <summary>
+    /// Whether a request may see founder-only diagnostics on an endpoint that is NOT itself
+    /// founder-only — <c>?debug=1</c> from a Founder-tier account, and nothing else.
+    ///
+    /// <para>Separate from <see cref="RequireFounder"/> on purpose: that filter gates a whole route,
+    /// and these routes are open to every paying account. Only one FIELD of the answer is
+    /// privileged, so the decision has to be taken inside the handler. Kept here, as a pure
+    /// function of the two inputs, so the rule is one line in one place and can be pinned without a
+    /// host — the alternative was an inline comparison on every such handler, which is how a
+    /// diagnostic surface ends up open by a typo.</para>
+    ///
+    /// <para>The tier must be read from the account ROW rather than a claim: billing changes it
+    /// without reissuing the session cookie.</para>
+    /// </summary>
+    public static bool AllowsFounderDebug(string? debugFlag, AccountTier? tier) =>
+        debugFlag == "1" && tier == AccountTier.Founder;
+
     public static async Task<Account?> GetCurrentAccountAsync(this HttpContext httpContext, IReelDbContext db, CancellationToken ct)
     {
         var accountContext = httpContext.RequestServices.GetRequiredService<IAccountContext>();

@@ -49,9 +49,26 @@ public interface ISearchAgent
 
     string ModelId { get; }
 
-    /// <summary>Reply + intent for a conversational turn, aware of prior turns and the shown titles.</summary>
+    /// <summary>
+    /// Reply + intent for a conversational turn, aware of prior turns and the shown titles.
+    ///
+    /// <para><paramref name="standingFilters"/> is a one-line, human-readable summary of the
+    /// account's standing content filters ("never horror; nothing before 1990"), or null where the
+    /// account has none. It exists because the agent used to resolve an intent in total ignorance
+    /// of the exclusions the server would then apply, so a turn could confidently promise a genre
+    /// the account has permanently excluded and come back empty — the collision was invisible to
+    /// the model and unexplainable to the user. The port carries it; the prompt half and the
+    /// computation half land separately.</para>
+    ///
+    /// <para><b>Why it sits AFTER <paramref name="ct"/>,</b> which is otherwise wrong: the existing
+    /// production caller passes its CancellationToken POSITIONALLY, so an optional parameter
+    /// inserted before it would silently rebind that argument and fail to compile. The alternative
+    /// was editing a file this change deliberately does not own. Trailing is the honest cost of a
+    /// signature-only change.</para>
+    /// </summary>
     Task<AgentReply> InterpretAsync(
-        IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default);
+        IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
+        CancellationToken ct = default, string? standingFilters = null);
 
     /// <summary>
     /// Score each candidate's fit for this user + query (batched). Row-aligned to the input.

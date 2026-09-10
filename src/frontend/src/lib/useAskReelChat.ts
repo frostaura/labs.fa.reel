@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import { isFailedDone, streamAskReel, type AskCard, type PhaseData } from "./askReelStream";
+import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type DoneData, type PhaseData } from "./askReelStream";
 
-type Status = "idle" | "streaming" | "done" | "error";
+/**
+ * `resumed` is a fourth state, not a flavour of `done`: the transcript came back from the server
+ * but this visit has not run a search, so nothing on screen was produced by a query in this
+ * session. Reporting it as `done` is what rendered "No matches for that one" over a conversation
+ * that had matched plenty — the cards simply were not part of what `/conversations/latest`
+ * returned. Callers that want "there is a conversation here" should test `turns.length`, not the
+ * status.
+ */
+export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "error";
+
+/** Why the stream ended badly, where the client can tell. `null` = an unclassified failure. */
+export type ErrorReason = "session" | "timeout" | null;
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -21,6 +32,12 @@ export interface ChatTurn {
  */
 export const MAX_HISTORY_TURNS = 12;
 export const MAX_SHOWN_IDS = 300;
+
+/** Inter-frame silence that means the stream is dead rather than thinking, in milliseconds. */
+export const STREAM_IDLE_TIMEOUT_MS = 30_000;
+
+/** How long a backgrounded tab may hold an open stream before it is abandoned, in milliseconds. */
+export const HIDDEN_ABORT_MS = 60_000;
 
 /** The transcript as the wire wants it, trimmed to the most recent {@link MAX_HISTORY_TURNS}. */
 export function capHistory(turns: ChatTurn[]): { role: string; text: string }[] {
@@ -62,9 +79,17 @@ export function nextBootstrap(seed: string, handled: string | null): { action: B
   return { action: handled === null ? "resume" : "none", handled: "" };
 }
 
+/** The text of the last thing the USER said — what a page or a re-ask has to replay. */
+export function lastUserQuery(turns: ChatTurn[]): string {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === "user") return turns[i].text;
+  }
+  return "";
+}
+
 interface State {
   turns: ChatTurn[];
-  status: Status;
+  status: ChatStatus;
   phase: PhaseData | null;
   byId: Record<string, AskCard>;
   order: string[];
@@ -77,6 +102,23 @@ interface State {
   lastQuery: string;
   /** Latches when a page adds nothing new, so the scroll sentinel stops asking. */
   exhausted: boolean;
+  /**
+   * The server's account of a collision between this question and the account's own exclusions —
+   * "you asked for horror, and horror is excluded". Shown as a note beside the answer, never as an
+   * error: the exclusion still holds and the turn still ran.
+   */
+  conflict: string | null;
+  /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
+  belowFloor: AskCard[];
+  /**
+   * The server's own count of what the quality floor cut on the last completed turn. Distinct from
+   * `belowFloor.length` on purpose: a turn can report a cut without sending the cards down, and the
+   * tray has to be able to say "3 held back" when it was handed none of them. `null` = the server
+   * said nothing, which is not the same as zero.
+   */
+  droppedByFloor: number | null;
+  /** Set alongside `status: "error"` when the client can name the cause. */
+  errorReason: ErrorReason;
 }
 
 type Action =
@@ -85,20 +127,31 @@ type Action =
   | { type: "reaskTurn" }
   | { type: "phase"; data: PhaseData }
   | { type: "conversation"; data: { id: string } }
-  | { type: "resume"; turns: ChatTurn[]; conversationId: string }
+  | { type: "resume"; turns: ChatTurn[]; conversationId: string; shown?: number[] }
   | { type: "assistant"; data: { text: string } }
   | { type: "candidate"; data: AskCard }
   | { type: "scored"; data: { titleId: string; predictedRating: number | null } }
   | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { type: "done"; data: { results: AskCard[]; reason: string | null } }
-  | { type: "error" };
+  | { type: "conflict"; message: string }
+  | { type: "done"; data: DoneData }
+  | { type: "stop" }
+  | { type: "error"; reason?: ErrorReason };
 
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false,
+  conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
 };
 
+/**
+ * The ranking score for a card. The server sends its own `blend` and its order is authoritative,
+ * so prefer it: re-deriving a second blend here from the parts produced a subtly different order
+ * on the client than the one the server had already committed to storage as `Rank`.
+ * The local formula remains for older servers and for cards still mid-stream, which have no
+ * server blend until the turn completes.
+ */
 function blend(c: AskCard): number {
+  if (c.blend != null) return c.blend;
   return (c.similarity ?? 0) * 0.35 + ((c.predictedRating ?? 6) / 10) * 0.25 + (c.fit ?? 0.5) * 0.4;
 }
 
@@ -118,6 +171,15 @@ export function partitionedOrder(order: string[], byId: Record<string, AskCard>)
   ];
 }
 
+/**
+ * The running floor count across a paged answer. Silence on both sides stays silence: `null` means
+ * "the server never told us", which the tray treats differently from a genuine zero.
+ */
+function sumDropped(carried: number | null, incoming: number | undefined): number | null {
+  if (carried == null && incoming == null) return null;
+  return (carried ?? 0) + (incoming ?? 0);
+}
+
 export function chatReducer(state: State, action: Action): State {
   switch (action.type) {
     case "userTurn": {
@@ -127,11 +189,14 @@ export function chatReducer(state: State, action: Action): State {
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
             byId: {}, order: [], reason: null, appending: false, lastQuery: action.message, exhausted: false,
+            // A conflict describes the question that produced it. A new question gets a clean
+            // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
+            conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
           };
     }
     case "moreTurn":
       // A page, not a turn: no transcript entry, and the existing cards stay put.
-      return { ...state, status: "streaming", phase: null, appending: true };
+      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
       // page it adds no transcript entry (the user said it once; echoing their bubble on every
@@ -141,6 +206,7 @@ export function chatReducer(state: State, action: Action): State {
       return {
         ...state, turns, status: "streaming", phase: null,
         byId: {}, order: [], reason: null, appending: false, exhausted: false,
+        belowFloor: [], droppedByFloor: null, errorReason: null,
       };
     }
     case "phase":
@@ -150,7 +216,17 @@ export function chatReducer(state: State, action: Action): State {
     case "conversation":
       return { ...state, conversationId: action.data.id };
     case "resume":
-      return { ...initialChatState, turns: action.turns, conversationId: action.conversationId, status: "done" };
+      // NOT `done`: see the Status doc-comment. `lastQuery` comes back with the transcript so the
+      // media toggle and the retry have something to replay — without it, a resumed thread's chips
+      // were inert until the user typed again.
+      return {
+        ...initialChatState,
+        turns: action.turns,
+        conversationId: action.conversationId,
+        status: "resumed",
+        lastQuery: lastUserQuery(action.turns),
+        shown: action.shown ? capShown(action.shown) : [],
+      };
     case "assistant":
       // Paging replays the last message, so the model replies again — suppress it rather than
       // stuttering the same answer into the transcript on every scroll.
@@ -172,6 +248,8 @@ export function chatReducer(state: State, action: Action): State {
       if (!e) return state;
       return { ...state, byId: { ...state.byId, [action.data.titleId]: { ...e, fit: action.data.fit, why: action.data.why } } };
     }
+    case "conflict":
+      return { ...state, conflict: action.message };
     case "done": {
       // A caught server exception arrives as `done` with no results. Treat it as the failure it is
       // rather than as an empty answer, and keep whatever is already on screen — a page that blew
@@ -197,11 +275,69 @@ export function chatReducer(state: State, action: Action): State {
         ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
         reason: state.appending && gained === 0 ? state.reason : action.data.reason,
         exhausted: state.appending ? gained === 0 : false,
+        // The under-floor tray belongs to the turn that produced it. A page appends its own tray
+        // to the previous one; a fresh answer replaces it.
+        belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
+        // Same rule as the tray it labels: a page ADDS its cut to the running total, a fresh answer
+        // replaces it. `null` rather than `0` where neither side said anything — a server that never
+        // sent the field has not told us it cut nothing, and the tray falls back to counting the
+        // cards it was handed in that case, which zero would silently suppress.
+        droppedByFloor: sumDropped(state.appending ? state.droppedByFloor : null, action.data.droppedByFloor),
       };
     }
+    case "stop":
+      // The user pressed Stop. Whatever streamed so far is the answer if there is one; otherwise
+      // this is a cold page again. Never an error — they asked for this.
+      return {
+        ...state, status: state.order.length > 0 ? "done" : "idle", phase: null, appending: false,
+      };
     case "error":
-      return { ...state, status: "error" };
+      // `appending` and `phase` are cleared deliberately. A failed page used to leave `appending`
+      // latched true, so the next `done` appended to a grid the user had been told was broken, and
+      // the progress bar kept animating under an error banner.
+      return { ...state, status: "error", appending: false, phase: null, errorReason: action.reason ?? null };
   }
+}
+
+/**
+ * Mount guard for React StrictMode's deliberate mount → unmount → mount cycle in development.
+ *
+ * The unmount abort has to stay: leaving a stream running after the page is gone leaks a reader
+ * and keeps the server's turn open. But StrictMode's fake unmount fires that same cleanup on a
+ * component that is about to come straight back, killing the request the first mount had just
+ * started — and `nextBootstrap` will not restart it, because the seed is already recorded as
+ * handled. The result was a /search landing that showed a spinner and never resolved.
+ *
+ * So the abort is deferred by one turn of the event loop and cancelled if a mount lands first.
+ * A real unmount is one tick later than it was; a StrictMode remount costs nothing.
+ *
+ * `schedule` / `cancel` are injectable so this is testable as a pure state machine — the hook
+ * itself cannot be, since vitest here runs in node with no renderer.
+ */
+export function createMountGuard(
+  abort: () => void,
+  schedule: (fn: () => void) => unknown = (fn) => setTimeout(fn, 0),
+  cancel: (handle: unknown) => void = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+): { mount: () => void; unmount: () => void } {
+  let mounted = false;
+  let pending: unknown = null;
+  return {
+    mount() {
+      mounted = true;
+      if (pending !== null) {
+        cancel(pending);
+        pending = null;
+      }
+    },
+    unmount() {
+      mounted = false;
+      if (pending !== null) cancel(pending);
+      pending = schedule(() => {
+        pending = null;
+        if (!mounted) abort();
+      });
+    },
+  };
 }
 
 /**
@@ -226,6 +362,7 @@ export function useAskReelChat() {
     stateRef.current = state;
   }, [state]);
   const abortRef = useRef<AbortController | null>(null);
+  const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The active media filter, kept in a ref so `send`/`loadMore` stay referentially stable while
   // still reading the current value — a filter change re-sends rather than hiding cards locally.
@@ -234,10 +371,30 @@ export function useAskReelChat() {
     mediaRef.current = types;
   }, []);
 
+  const clearWatchdog = useCallback(() => {
+    if (watchdogRef.current !== null) {
+      clearTimeout(watchdogRef.current);
+      watchdogRef.current = null;
+    }
+  }, []);
+
   const run = useCallback((msg: string, fresh: boolean, kind: "turn" | "more" | "reask") => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // A stream that goes quiet is indistinguishable from one that is thinking, so it needs a
+    // deadline rather than a guess. Reset on every frame: a slow turn that keeps talking is fine,
+    // thirty seconds of silence is not, and before this the tab simply span forever.
+    const armWatchdog = () => {
+      clearWatchdog();
+      watchdogRef.current = setTimeout(() => {
+        controller.abort();
+        if (abortRef.current === controller) abortRef.current = null;
+        dispatch({ type: "error", reason: "timeout" });
+      }, STREAM_IDLE_TIMEOUT_MS);
+    };
+    armWatchdog();
 
     // Both payloads are capped — see MAX_HISTORY_TURNS / MAX_SHOWN_IDS. Everything except a fresh
     // start still carries the no-repeat list, re-ask included: the conversation's promise is that
@@ -252,6 +409,7 @@ export function useAskReelChat() {
     );
 
     streamAskReel({ query: msg, history, shownTmdbIds, conversationId, mediaTypes: mediaRef.current, continuation: kind !== "turn" }, (ev) => {
+      armWatchdog();
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data }); break;
         case "conversation": dispatch({ type: "conversation", data: ev.data }); break;
@@ -259,14 +417,24 @@ export function useAskReelChat() {
         case "candidate": dispatch({ type: "candidate", data: ev.data }); break;
         case "candidate-scored": dispatch({ type: "scored", data: ev.data }); break;
         case "candidate-reranked": dispatch({ type: "reranked", data: ev.data }); break;
+        case "conflict": dispatch({ type: "conflict", message: ev.data.message }); break;
         case "done": dispatch({ type: "done", data: ev.data }); break;
         default: break;
       }
-    }, controller.signal).catch((err) => {
-      if (!controller.signal.aborted) dispatch({ type: "error" });
-      void err;
-    });
-  }, []);
+    }, controller.signal)
+      .then(() => {
+        clearWatchdog();
+      })
+      .catch((err: unknown) => {
+        clearWatchdog();
+        if (controller.signal.aborted) return;
+        // A 401 here already survived one refresh-and-retry inside streamAskReel, so the session
+        // is genuinely gone rather than merely stale — say so, and let the page offer a sign-in
+        // rather than a "try again" that cannot work.
+        const reason: ErrorReason = err instanceof AskStreamError && err.status === 401 ? "session" : null;
+        dispatch({ type: "error", reason });
+      });
+  }, [clearWatchdog]);
 
   const send = useCallback((message: string, fresh = false) => {
     const msg = message.trim();
@@ -297,11 +465,55 @@ export function useAskReelChat() {
     run(s.lastQuery, false, "reask");
   }, [run]);
 
-  const resume = useCallback((turns: ChatTurn[], conversationId: string) => {
-    if (turns.length > 0) dispatch({ type: "resume", turns, conversationId });
+  /** Abandon the turn in flight, keeping whatever it already produced. */
+  const stop = useCallback(() => {
+    clearWatchdog();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    dispatch({ type: "stop" });
+  }, [clearWatchdog]);
+
+  const resume = useCallback((turns: ChatTurn[], conversationId: string, shown?: number[]) => {
+    if (turns.length > 0) dispatch({ type: "resume", turns, conversationId, shown });
   }, []);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    const guard = createMountGuard(() => {
+      abortRef.current?.abort();
+      if (watchdogRef.current !== null) clearTimeout(watchdogRef.current);
+    });
+    guard.mount();
+    return () => guard.unmount();
+  }, []);
+
+  // A backgrounded tab holds the stream open indefinitely — the server keeps a turn alive and the
+  // reader keeps a connection for a page nobody is looking at. A minute out of sight is the line;
+  // coming back inside it costs nothing, and beyond it the user gets a retry rather than a stale
+  // answer that finished streaming into a hidden tab.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+    const onVisibility = () => {
+      if (hiddenTimer !== null) {
+        clearTimeout(hiddenTimer);
+        hiddenTimer = null;
+      }
+      if (document.visibilityState !== "hidden") return;
+      hiddenTimer = setTimeout(() => {
+        hiddenTimer = null;
+        if (stateRef.current.status !== "streaming") return;
+        clearWatchdog();
+        abortRef.current?.abort();
+        abortRef.current = null;
+        dispatch({ type: "error", reason: "timeout" });
+      }, HIDDEN_ABORT_MS);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      if (hiddenTimer !== null) clearTimeout(hiddenTimer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [clearWatchdog]);
 
   // NO render-time sort: `order` is the state's stream-stable order, so rows only ever move when
   // the reducer re-sorts it (phase / done) — sorting here is what made cards jump on every event.
@@ -310,9 +522,22 @@ export function useAskReelChat() {
   const all = applyScoreOverrides(state.order.map((id) => state.byId[id]).filter(Boolean), overrides);
   const cards = all.filter((c) => !c.outsideRequest);
   const outsideCards = all.filter((c) => c.outsideRequest);
+  const belowFloor = applyScoreOverrides(state.belowFloor, overrides);
   return {
     turns: state.turns, status: state.status, phase: state.phase, cards, outsideCards, reason: state.reason,
-    send, resume, loadMore, reask, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+    send, resume, loadMore, reask, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+    /** The server's note that this question collides with a standing exclusion; not an error. */
+    conflict: state.conflict,
+    /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
+    belowFloor,
+    /**
+     * How many the quality floor cut on the last turn, as the SERVER counted them. Cleared on a new
+     * user turn, a re-ask and a fresh conversation, so last question's number never labels this
+     * question's tray. `null` when the server said nothing at all.
+     */
+    droppedByFloor: state.droppedByFloor,
+    /** Why the last failure happened, where the client can name it. */
+    errorReason: state.errorReason,
     /** True once the last question has been asked, so a retry has something to replay. */
     canRetry: state.lastQuery.length > 0,
   };

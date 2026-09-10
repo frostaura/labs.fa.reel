@@ -16,6 +16,7 @@ using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Telemetry;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
@@ -243,9 +244,17 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
                 r.GetProperty("why").GetString());
         }
 
+        // The reason is a CLAUSE LIST now, not a sentence with optional tails — see AskReelReason for
+        // why (the old nesting made the rating-floor clause unreachable in one of its two branches).
         Assert.Equal(
-            "5 picks matched everything you asked; 7 closest-but-outside shown separately.",
+            "5 picks matched everything you asked · 7 closest-but-outside shown separately",
             done.Data.GetProperty("reason").GetString());
+
+        // Nothing vanishes unexplained: everything streamed is either kept or in the tray.
+        Assert.Equal(12, done.Data.GetProperty("streamed").GetInt32());
+        Assert.Equal(12, done.Data.GetProperty("kept").GetInt32());
+        Assert.Equal(0, done.Data.GetProperty("droppedByFloor").GetInt32());
+        Assert.Empty(done.Data.GetProperty("belowFloor").EnumerateArray());
     }
 
     /// <summary>A canned agent that wants thrillers and explicitly rules horror out.</summary>
@@ -256,7 +265,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         public string ModelId => "fake-exclusion-agent";
 
         public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 "Tense thrillers, steering clear of horror.",
                 new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
@@ -274,7 +283,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         public string ModelId => "fake-vibe-agent";
 
         public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 "Fantastically futuristic, tense, high-energy science fiction.",
                 new SearchIntent(["science-fiction"], ["futuristic", "dystopian"], [], "fantastically futuristic tense", null, null, null)));
@@ -334,7 +343,7 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
         public string ModelId => "fake-person-agent";
 
         public Task<AgentReply> InterpretAsync(
-            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 $"Here are films {person.Role} {person.Name}.",
                 new SearchIntent([], [], [], message, null, null, [person])));
@@ -555,32 +564,5 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
-    }
-
-    private sealed class StubEmbeddingProvider : IEmbeddingProvider
-    {
-        public bool IsAvailable => true;
-
-        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
-        {
-            var vectors = texts.Select(t =>
-            {
-                var v = new float[1536];
-                var seed = t.Length;
-                for (var i = 0; i < v.Length; i++)
-                {
-                    v[i] = (float)Math.Sin(seed + i);
-                }
-
-                var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
-                for (var i = 0; i < v.Length; i++)
-                {
-                    v[i] /= norm;
-                }
-
-                return v;
-            }).ToArray();
-            return Task.FromResult(vectors);
-        }
     }
 }
