@@ -42,7 +42,9 @@ export function useSpeech(onResult: (text: string) => void) {
     setError(null);
     const Ctor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     const rec = new Ctor();
-    rec.lang = "en-US";
+    // The browser's own locale, not a hardcoded one. A hardcoded en-US transcribed an Afrikaans
+    // or German speaker's title into the nearest English words and searched for those.
+    rec.lang = navigator.language || "en-US";
     rec.interimResults = false;
     rec.maxAlternatives = 1;
     rec.onresult = (e: any) => {

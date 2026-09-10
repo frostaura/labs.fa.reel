@@ -162,6 +162,16 @@ export async function askPush(page: Page, event: string, data: Record<string, un
   );
 }
 
+/**
+ * Pushes a `conflict` frame — the server naming a collision between the question and the
+ * account's own exclusions. Its own helper because the payload has four fields of which only
+ * `message` is required, and a spec that spells the object out inline tends to send all four and
+ * so never exercises the shape an older server actually sends.
+ */
+export async function askPushConflict(page: Page, message: string, extra: Record<string, unknown> = {}): Promise<void> {
+  await askPush(page, "conflict", { message, ...extra });
+}
+
 /** Closes the most recent live Ask Reel stream (the server ending the response). */
 export async function askEnd(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.end());
