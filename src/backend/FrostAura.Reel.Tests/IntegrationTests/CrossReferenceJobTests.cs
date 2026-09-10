@@ -50,7 +50,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// <c>CandidateRetrieverTests</c> documents.</para>
 /// </summary>
 [Collection("postgres")]
-public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
+public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>
     /// The dimension block every embedding in this file lives on. Reserved far above the
@@ -69,20 +69,19 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
 
     private int _seeded;
 
-    public Task InitializeAsync() => Task.CompletedTask;
-
     /// <summary>
     /// Removes this instance's rows from the shared catalogue. Raw SQL in FK order rather than EF,
     /// because the point is to delete rows regardless of which account context is ambient.
     /// </summary>
-    public async Task DisposeAsync()
+    public override async Task DisposeAsync()
     {
-        if (!fixture.Available)
+        await base.DisposeAsync();
+        if (!Fixture.Available)
         {
             return;
         }
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var accounts = _accounts.ToArray();
         await db.Database.ExecuteSqlAsync(
             $"""
@@ -120,7 +119,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task A_run_writes_one_verdict_per_candidate_and_never_queues_itself()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -133,7 +132,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         var events = new RecordingEventHub();
         var job = await RunAsync(accountId, judge, events);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var rows = await db.TitleCrossReferenceVerdicts
             .Where(v => v.AccountId == accountId)
             .ToListAsync();
@@ -180,7 +179,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task A_second_run_over_an_unchanged_pool_makes_zero_judge_calls()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -197,7 +196,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         await RunAsync(accountId, second, new RecordingEventHub());
         Assert.Equal(0, second.Calls);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(5, await db.TitleCrossReferenceVerdicts.CountAsync(v => v.AccountId == accountId));
         // Nothing was judged, so nothing changed, so no rebuild was asked for: an unconditional
         // request here would make a ping-pong out of build → cross-reference → build.
@@ -209,7 +208,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task A_provider_outage_writes_no_rows_at_all_and_lands_on_the_job_error()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -229,7 +228,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
             () => RunAsync(accountId, judge, events));
         Assert.Contains("no verdicts were written", error.Message, StringComparison.Ordinal);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(0, await db.TitleCrossReferenceVerdicts.CountAsync(v => v.AccountId == accountId));
         Assert.False(await db.SyncJobs.AnyAsync(j => j.AccountId == accountId && j.Kind == JobKind.BuildFeed));
         // And no completion frame: a run that answered nothing has not completed, and telling the
@@ -241,7 +240,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task The_daily_ceiling_stops_the_run_after_the_batch_that_hit_it_and_keeps_what_landed()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -252,12 +251,12 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         // One call's worth of allowance, and a judge that bills the ledger the way the real adapter
         // does. The gate is re-checked PER BATCH precisely because the ledger is day-grained and a
         // batch loop can spend a day's allowance inside one 15-second flush window.
-        var judge = new StubJudge { LedgerAccountId = accountId, Fixture = fixture };
+        var judge = new StubJudge { LedgerAccountId = accountId, Fixture = Fixture };
         await RunAsync(accountId, judge, new RecordingEventHub(), Config(("LLM_XREF_DAILY_CALLS", "1")));
 
         Assert.Equal(1, judge.Calls);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var judged = await db.TitleCrossReferenceVerdicts
             .Where(v => v.AccountId == accountId)
             .Select(v => v.TitleId)
@@ -274,7 +273,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task The_fingerprint_is_pinned_at_run_start_even_when_taste_moves_mid_run()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -296,7 +295,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
                     return;
                 }
 
-                await using var db = fixture.CreateContext(Scoped(accountId));
+                await using var db = Fixture.CreateContext(Scoped(accountId));
                 db.UserTitleReactions.Add(new UserTitleReaction
                 {
                     Id = Guid.NewGuid(),
@@ -316,7 +315,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         // nothing — the assertion is here so it cannot pass vacuously.
         Assert.NotEqual(before, after);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var hashes = await db.TitleCrossReferenceVerdicts
             .Where(v => v.AccountId == accountId)
             .Select(v => v.ProfileHash)
@@ -329,7 +328,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task Titles_carrying_a_verdict_at_a_superseded_fingerprint_are_judged_first()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -343,10 +342,10 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         var stale = candidates.TakeLast(3).ToList();
         await SeedStaleVerdictsAsync(accountId, stale);
 
-        var judge = new StubJudge { LedgerAccountId = accountId, Fixture = fixture };
+        var judge = new StubJudge { LedgerAccountId = accountId, Fixture = Fixture };
         await RunAsync(accountId, judge, new RecordingEventHub(), Config(("LLM_XREF_DAILY_CALLS", "1")));
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var current = await ProfileHashAsync(accountId);
         var judged = await db.TitleCrossReferenceVerdicts
             .Where(v => v.AccountId == accountId && v.ProfileHash == current)
@@ -365,7 +364,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task A_candidate_with_neither_an_embedding_nor_attributes_is_counted_and_never_becomes_permanent_work()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -377,7 +376,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         var events = new RecordingEventHub();
         await RunAsync(accountId, new StubJudge(), events);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(2, await db.TitleCrossReferenceVerdicts.CountAsync(v => v.AccountId == accountId));
 
         var completed = Assert.Single(events.Completed);
@@ -394,7 +393,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     [Fact]
     public async Task A_preserve_build_queues_the_pass_when_work_is_pending_and_leaves_it_alone_when_it_is_not()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -445,7 +444,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     private async Task<SyncJob> RunAsync(
         Guid accountId, StubJudge judge, RecordingEventHub events, IConfiguration? configuration = null)
     {
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var cache = new MemoryCache(new MemoryCacheOptions());
         var features = new FeatureVectorBuilder(db);
         var dislikes = new DislikeSignal(db, cache);
@@ -477,7 +476,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     /// <summary>Would the enqueue gate fire right now? The same three brakes the build asks through.</summary>
     private async Task<bool> SchedulerFiresAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var scheduler = new CrossReferenceScheduler(
             db,
             new EligibilityQueryBuilder(db),
@@ -491,7 +490,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
 
     private async Task<string> ProfileHashAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var cache = new MemoryCache(new MemoryCacheOptions());
         var features = new FeatureVectorBuilder(db);
         var facts = new TasteFactsBuilder(db, new DislikeSignal(db, cache), features, cache);
@@ -502,7 +501,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
 
     private async Task<bool> CrossReferenceQueuedAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         return await db.SyncJobs.AnyAsync(j =>
             j.AccountId == accountId && j.Kind == JobKind.CrossReference
             && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running));
@@ -511,7 +510,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     /// <summary>Marks any queued pass as finished, the way the runner would once it had run.</summary>
     private async Task CompleteCrossReferenceJobsAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         await db.Database.ExecuteSqlAsync(
             $"""
              UPDATE "SyncJobs" SET "Status" = 'Succeeded', "CompletedAt" = {DateTime.UtcNow}
@@ -521,7 +520,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
 
     private async Task AssertLatestBuildWasNotFreshAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var mode = await db.FeedBuildStats
             .Where(s => s.AccountId == accountId)
             .OrderByDescending(s => s.BuiltAt)
@@ -532,7 +531,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
 
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -602,7 +601,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
             new TrainingMatrix(rows, labels, names),
             """{"Trees":10,"Leaves":4,"MinExamplesPerLeaf":5,"LearningRate":0.2}""");
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         await db.Database.ExecuteSqlAsync(
             $"""UPDATE "ModelArtifacts" SET "ArtifactBytes" = {trained.ArtifactBytes} WHERE "AccountId" = {accountId}""");
         return accountId;
@@ -612,7 +611,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     private async Task<List<Guid>> SeedRatedNeighboursAsync(Guid accountId, int count)
     {
         var ids = new List<Guid>();
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
             var title = NewTitle($"Rated {i}");
@@ -645,7 +644,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
         Guid accountId, int count, bool embedded, bool attributed = true, bool scored = true)
     {
         var ids = new List<Guid>();
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var artifactId = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId)
             .Select(a => a.Id)
@@ -699,7 +698,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     /// <summary>Verdicts written against a fingerprint the account has since moved off.</summary>
     private async Task SeedStaleVerdictsAsync(Guid accountId, IReadOnlyList<Guid> titleIds)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         foreach (var id in titleIds)
         {
             db.TitleCrossReferenceVerdicts.Add(new TitleCrossReferenceVerdict
@@ -756,7 +755,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
     /// <summary>Runs the real feed build, with the cross-reference scheduler wired in as DI supplies it.</summary>
     private async Task RunBuildAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(Scoped(accountId));
+        await using var db = Fixture.CreateContext(Scoped(accountId));
         var cache = new MemoryCache(new MemoryCacheOptions());
         var features = new FeatureVectorBuilder(db);
         var eligibility = new EligibilityQueryBuilder(db);
@@ -834,9 +833,9 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : IAsyncLifetime
             Assert.Equal(ApiUsagePurpose.CrossReference, usagePurpose);
             Calls++;
 
-            if (LedgerAccountId is { } accountId && Fixture is { } fixture)
+            if (LedgerAccountId is { } accountId && Fixture is { } postgres)
             {
-                await using var db = fixture.CreateContext(new AccountContext());
+                await using var db = postgres.CreateContext(new AccountContext());
                 db.ExternalApiUsages.Add(new ExternalApiUsage
                 {
                     Id = Guid.NewGuid(),

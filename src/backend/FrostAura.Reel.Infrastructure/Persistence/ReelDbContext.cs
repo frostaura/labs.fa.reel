@@ -128,6 +128,19 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         configurationBuilder.Properties<DateTime>().HaveConversion<UtcDateTimeConverter>();
     }
 
+    /// <summary>
+    /// Attaches <see cref="HnswFilteredSearchInterceptor"/> here rather than at DI registration, so
+    /// that EVERY context — the API's, a job's, and the one the integration fixture constructs by
+    /// hand — opens its connections with the same filtered-ANN contract. Read that interceptor's
+    /// remarks before removing this: without it, filtered vector searches silently return a
+    /// fraction of the rows they ask for.
+    /// </summary>
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder.AddInterceptors(HnswFilteredSearchInterceptor.Instance);
+        base.OnConfiguring(optionsBuilder);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasPostgresExtension("vector");

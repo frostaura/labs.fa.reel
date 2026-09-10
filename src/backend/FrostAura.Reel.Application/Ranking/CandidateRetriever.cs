@@ -337,7 +337,19 @@ public sealed class CandidateRetriever(
     }
 
     /// <summary>Nearest eligible titles to <paramref name="centroid"/> by cosine distance (HNSW index).
-    /// Ties broken by id for the same reason as the popularity arm: identical inputs, identical pool.</summary>
+    /// Ties broken by id for the same reason as the popularity arm: identical inputs, identical pool.
+    ///
+    /// <para><b>The tiebreak is load-bearing twice over.</b> A filtered HNSW scan applies the
+    /// predicate to a bounded window of graph candidates and, at pgvector's default, stops there —
+    /// so a lane that is a small slice of the catalogue can come back far short of
+    /// <paramref name="take"/>, which on this arm reads as "the taste centroid found nothing". This
+    /// query has largely escaped that because <c>ThenBy</c> gives it a second sort key the vector
+    /// index cannot supply, which pushes the planner towards sorting, and a sort is exact. That is
+    /// luck, not a guarantee — the planner may reach the same rows by an index scan and an
+    /// incremental sort. <c>hnsw.iterative_scan</c>, set on every connection by
+    /// <c>HnswFilteredSearchInterceptor</c>, is what makes the pull whole under either plan; its
+    /// remarks carry the measurement, and <c>LiveSearchExpansionService</c>'s semantic arm — which
+    /// has no second key — is where the same flaw was actually caught.</para></summary>
     private Task<List<Title>> AnnPullAsync(IQueryable<Guid> laneIds, Vector centroid, int take, CancellationToken ct) =>
         db.TitleEmbeddings
             .Where(e => laneIds.Contains(e.TitleId))

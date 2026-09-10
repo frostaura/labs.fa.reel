@@ -26,19 +26,19 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// and that the probe writes nothing.</para>
 /// </summary>
 [Collection("postgres")]
-public class RetrievalRecallProbeTests(PostgresFixture fixture)
+public class RetrievalRecallProbeTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     private const int EmbeddingDims = 1536;
 
     /// <summary>Every title in this suite carries it, and the account allow-lists it — see <see cref="SeedAccountAsync"/>.</summary>
-    private const string FixtureGenre = "retrieval-recall-fixture";
+    private const string FixtureGenre = "retrieval-recall-Fixture";
 
     private static readonly DateTime Now = new(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc);
 
     [Fact]
     public async Task A_target_is_eligible_on_its_own_as_of_day_even_though_it_is_rated_today()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -70,7 +70,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task A_title_the_catalogue_did_not_hold_that_day_is_reported_as_supply_not_retrieval()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -106,7 +106,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task An_eligible_title_no_arm_returned_is_reported_as_a_genuine_retrieval_miss()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -134,7 +134,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task The_ann_arm_is_credited_even_when_popularity_claimed_the_title_first()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -174,7 +174,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task The_disliked_band_is_measured_separately_as_the_false_positive_side()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -213,7 +213,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task The_probe_persists_nothing()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -235,7 +235,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task Ratings_outside_the_window_are_not_measured()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -267,7 +267,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     [Fact]
     public async Task The_per_cluster_block_partitions_the_loved_targets_and_reports_the_cluster_arm()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -314,7 +314,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
         {
             // 66 embedded vectors in a shared HNSW index perturb unrelated semantic-search tests —
             // see TasteClusterRetrievalTests.DisposeAsync for the measurement behind this.
-            await using var db = fixture.CreateContext(new AccountContext());
+            await using var db = Fixture.CreateContext(new AccountContext());
             await db.UserRatings.Where(r => planted.Contains(r.TitleId)).ExecuteDeleteAsync();
             await db.TitleEmbeddings.Where(e => planted.Contains(e.TitleId)).ExecuteDeleteAsync();
             await db.Titles.Where(t => planted.Contains(t.Id)).ExecuteDeleteAsync();
@@ -326,7 +326,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        await using var db = fixture.CreateContext(scoped);
+        await using var db = Fixture.CreateContext(scoped);
         var eligibility = new EligibilityQueryBuilder(db);
         var clusters = new TasteClusterProvider(
             db,
@@ -348,7 +348,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
-        await using var db = fixture.CreateContext(scoped);
+        await using var db = Fixture.CreateContext(scoped);
         return (
             await db.UserRatings.CountAsync(r => r.AccountId == accountId),
             await db.TitleScores.CountAsync(s => s.AccountId == accountId),
@@ -364,7 +364,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     /// </summary>
     private async Task<Guid> SeedAccountAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -388,7 +388,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
 
     private async Task<Guid> SeedTitleAsync(string name, decimal popularity, DateTime createdAt)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = new Title
         {
             Id = Guid.NewGuid(),
@@ -411,7 +411,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
 
     private async Task SeedRatingAsync(Guid accountId, Guid titleId, short rating, DateTime firstRatedAt)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.UserRatings.Add(new UserRating
         {
             Id = Guid.NewGuid(),
@@ -429,7 +429,7 @@ public class RetrievalRecallProbeTests(PostgresFixture fixture)
     /// <summary>A unit plot embedding along one axis — identical (cos 1) or orthogonal (cos 0) pairs.</summary>
     private async Task SeedEmbeddingAsync(Guid titleId, int axis)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var vector = new float[EmbeddingDims];
         vector[axis] = 1f;
         db.TitleEmbeddings.Add(new TitleEmbedding

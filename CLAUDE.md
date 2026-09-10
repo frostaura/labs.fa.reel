@@ -69,6 +69,7 @@ Local Postgres publishes on **5433**, not 5432 (5432 is taken on the dev Mac). C
 - Never surface a title with any interaction footprint on a suggestion surface.
 - Never edit `FeatureSchema.cs` field order in place.
 - Never read `TitleScore` from training or evaluation code.
+- Never assume a filtered vector query's `WHERE` bounds what pgvector returns — an HNSW scan post-filters a fixed candidate window and stops, so `hnsw.iterative_scan` (set per connection in `ReelDbContext.OnConfiguring`) is what makes the pull whole, and a test that seeds `TitleEmbeddings` must inherit `EmbeddedCatalogTestBase`.
 - Never introduce a manual/notebook pipeline as the path of record.
 - Never scrape watch-provider deep links.
 - Never format a number or a date into a prompt, URL, cache key, filter row or SSE payload without `CultureInfo.InvariantCulture`.
