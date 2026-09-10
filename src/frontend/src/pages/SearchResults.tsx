@@ -42,30 +42,28 @@ function mediaTypesFor(filter: BrowseFilter): string[] {
 }
 
 /**
- * The parts of `useAskReelChat` that are landing alongside this page: a `"resumed"` status, a
- * `stop()` for the in-flight stream, the standing-filter `conflict` frame, and the floor's
- * under-the-bar tray. `useAskReelChat.ts` is not this workstream's file, so rather than edit it,
- * the page reads the incoming members through this widening — every one optional, every one
- * guarded at runtime, so the page renders correctly against the hook with or without them and
- * the feature simply stays dark until its half arrives.
+ * The one member of the floor tray that `useAskReelChat` does not (yet) forward: the server's own
+ * count of what it cut, and the bar it cut at. Both ride on the `done` frame; when the hook passes
+ * them through, the tray labels itself with the server's numbers, and until then it falls back to
+ * counting the cards it was actually given. Optional and runtime-guarded either way, so this page
+ * renders correctly against the hook as it stands today.
  */
-interface PendingChatApi {
-  /** Widened to `string` so `"resumed"` can be compared before the union carries it. */
-  status: string;
-  /** Abort the stream in flight (0.12's client half). */
-  stop?: () => void;
-  /** The honest collision between what was asked for and a standing exclusion (0.7's server half). */
-  conflict?: { message?: string | null } | null;
-  /** How many picks the score floor held back, and the picks themselves (0.4's server half). */
+interface PendingFloorApi {
   droppedByFloor?: number | null;
-  belowFloor?: AskCard[] | null;
-  /** The floor the server actually applied, for the tray's label. */
   floor?: number | string | null;
 }
 
-/** Reads {@link PendingChatApi} off the hook without asserting anything the hook does not have. */
-function pendingApi(chat: ReturnType<typeof useAskReelChat>): PendingChatApi {
-  return chat;
+/**
+ * Reads {@link PendingFloorApi} off the hook and validates it here, so the call site never sees a
+ * value the server did not actually send. Takes `object` deliberately: the whole point is that
+ * these members may not be on the hook's type at all.
+ */
+function pendingFloorApi(chat: object): PendingFloorApi {
+  const c = chat as PendingFloorApi;
+  return {
+    droppedByFloor: typeof c.droppedByFloor === "number" && c.droppedByFloor > 0 ? c.droppedByFloor : null,
+    floor: typeof c.floor === "number" || typeof c.floor === "string" ? c.floor : null,
+  };
 }
 
 function narrate(phase: PhaseData | null): string {
@@ -107,10 +105,10 @@ function AskReel() {
   const [draft, setDraft] = useState("");
   const chat = useAskReelChat();
   const {
-    turns, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
-    exhausted, appending, canRetry,
+    turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, stop,
+    setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor,
   } = chat;
-  const { status, stop, conflict, droppedByFloor, belowFloor, floor } = pendingApi(chat);
+  const { droppedByFloor, floor } = pendingFloorApi(chat);
   const speech = useSpeech((text) => send(text, false));
 
   // The media toggle is per-device and persists across visits, so a resumed thread starts with a
@@ -163,18 +161,15 @@ function AskReel() {
   const outsideVisible = outsideCards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
 
-  // Optional, and typed only as far as this page needs it — A6's parser surfaces the frame and
-  // A3's service writes the sentence. Anything that is not a non-empty string is no conflict.
-  const conflictMessage = typeof conflict?.message === "string" && conflict.message.trim() ? conflict.message : null;
+  // The hook carries the server's sentence verbatim; the page only decides where it goes.
+  const conflictMessage = conflict?.trim() ? conflict : null;
 
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
   // and was, until now, invisible: the picks simply never existed as far as the screen was
   // concerned. Both fields are optional (they arrive with A3's `done` frame) and both are
   // runtime-guarded, so the tray stays dark rather than half-rendering against an older server.
-  const belowFloorVisible = Array.isArray(belowFloor)
-    ? belowFloor.filter((c) => c && !removedSet.has(c.titleId))
-    : [];
+  const belowFloorVisible = belowFloor.filter((c) => !removedSet.has(c.titleId));
   const floorHeldBack =
     typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : belowFloorVisible.length;
   // `toFixed` rather than `toLocaleString`: this is a threshold the server sent, and a comma
@@ -287,19 +282,16 @@ function AskReel() {
             </span>
           )}
           {/* A turn can run for tens of seconds against a slow model, and until now the only way
-              out was to navigate away — the stream kept running and kept billing. Rendered only
-              when the hook actually offers `stop`, so it is never a button that does nothing. */}
-          {stop && (
-            <button
-              type="button"
-              onClick={stop}
-              data-testid="askreel-stop"
-              aria-label="Stop searching"
-              className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 text-fa-frost-dim shrink-0 hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
-            >
-              <Square className="h-3 w-3" /> Stop
-            </button>
-          )}
+              out was to navigate away — the stream kept running and kept billing. */}
+          <button
+            type="button"
+            onClick={stop}
+            data-testid="askreel-stop"
+            aria-label="Stop searching"
+            className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 text-fa-frost-dim shrink-0 hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
+          >
+            <Square className="h-3 w-3" /> Stop
+          </button>
         </div>
       )}
 
