@@ -36,6 +36,33 @@ function mediaTypesFor(filter: BrowseFilter): string[] {
   return [];
 }
 
+/**
+ * The parts of `useAskReelChat` that are landing alongside this page: a `"resumed"` status, a
+ * `stop()` for the in-flight stream, the standing-filter `conflict` frame, and the floor's
+ * under-the-bar tray. `useAskReelChat.ts` is not this workstream's file, so rather than edit it,
+ * the page reads the incoming members through this widening — every one optional, every one
+ * guarded at runtime, so the page renders correctly against the hook with or without them and
+ * the feature simply stays dark until its half arrives.
+ */
+interface PendingChatApi {
+  /** Widened to `string` so `"resumed"` can be compared before the union carries it. */
+  status: string;
+  /** Abort the stream in flight (0.12's client half). */
+  stop?: () => void;
+  /** The honest collision between what was asked for and a standing exclusion (0.7's server half). */
+  conflict?: { message?: string | null } | null;
+  /** How many picks the score floor held back, and the picks themselves (0.4's server half). */
+  droppedByFloor?: number | null;
+  belowFloor?: AskCard[] | null;
+  /** The floor the server actually applied, for the tray's label. */
+  floor?: number | string | null;
+}
+
+/** Reads {@link PendingChatApi} off the hook without asserting anything the hook does not have. */
+function pendingApi(chat: ReturnType<typeof useAskReelChat>): PendingChatApi {
+  return chat;
+}
+
 function narrate(phase: PhaseData | null): string {
   switch (phase?.stage) {
     case "searching":
@@ -58,11 +85,21 @@ export default function SearchResults() {
   const seed = params.get("q") ?? "";
   const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
+  const chat = useAskReelChat();
   const {
-    turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
+    turns, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
     exhausted, appending, canRetry,
-  } = useAskReelChat();
+  } = chat;
+  const { status } = pendingApi(chat);
   const speech = useSpeech((text) => send(text, false));
+
+  // The media toggle is per-device and persists across visits, so a resumed thread starts with a
+  // filter the server has never been told about — and `reask` (the retry, and the toggle itself)
+  // would then re-ask under the wrong constraint. Pushed on mount, and declared ABOVE the
+  // bootstrap effect so it lands before the seeded turn goes out.
+  useEffect(() => {
+    setMediaTypes(mediaTypesFor(filter));
+  }, [filter, setMediaTypes]);
 
   // A search from the header box (?q=) starts a fresh conversation; landing on /search with no
   // query resumes the most recent one. The seed is CONSUMED — cleared from the URL the moment it
@@ -218,8 +255,10 @@ export default function SearchResults() {
         </div>
       )}
 
-      {/* Refine chips + media filter */}
-      {cards.length > 0 && (
+      {/* Refine chips + media filter. Gated on the TRANSCRIPT, not on cards: a resumed thread has
+          a conversation but no cards until it is asked again, and hiding the refine controls there
+          left the user with a transcript they could not act on. */}
+      {turns.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           {REFINE_CHIPS.map((chip) => (
             <button
@@ -253,6 +292,18 @@ export default function SearchResults() {
           <p className="fa-body text-fa-frost-bright">Search hit a snag</p>
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
+        </div>
+      ) : status === "resumed" && visible.length === 0 && outsideVisible.length === 0 ? (
+        // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
+        // "No matches for that one" under the user's own question — the page reporting a verdict
+        // on a search it never ran. Threads from before picks were stored simply have no cards,
+        // and saying so is the honest version.
+        <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-transcript-only">
+          <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
+          <p className="fa-caption text-fa-frost-dim">
+            Transcript only — this thread predates saved picks. Ask again to bring it back.
+          </p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
       ) : status === "done" && visible.length === 0 && outsideVisible.length === 0 ? (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="semantic-empty">
