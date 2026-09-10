@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
 
@@ -55,6 +56,84 @@ public sealed record ConversionStats(
     double? ShownToRated,
     double? MedianDaysToWatch);
 
+/// <summary>
+/// How the titles carrying one cross-reference standing actually turned out — the ONLINE half of
+/// the cross-reference report, and corroboration only.
+///
+/// <para><b>It can never be the gate, and the shape says so.</b> Only about 2% of this account's
+/// ratings are made in app, so the join behind it is temporal rather than causal, and the standing
+/// itself is written on the exposure row at serve time rather than reconstructed later. Every rate
+/// is nullable and <see cref="Answerable"/> is false until the count clears
+/// <see cref="AccuracyQuery.MinimumVerdictOutcomes"/>: a mean later rating over four titles is a
+/// number the page must refuse to draw a conclusion from, and refusing in words is the only way to
+/// stop it being read as one.</para>
+/// </summary>
+/// <param name="Verdict">The <c>AggregateVerdict</c> name as recorded on the exposure row.</param>
+/// <param name="Count">Distinct titles served under this standing that have since been rated.</param>
+/// <param name="MeanLaterRating">What the account went on to give them, on average.</param>
+/// <param name="LovedRate">Share later rated 8 or higher.</param>
+/// <param name="DislikedRate">Share later rated 4 or lower.</param>
+/// <param name="Answerable">Whether <paramref name="Count"/> is large enough to mean anything.</param>
+public sealed record CrossReferenceVerdictOutcome(
+    string Verdict,
+    int Count,
+    double? MeanLaterRating,
+    double? LovedRate,
+    double? DislikedRate,
+    bool Answerable);
+
+/// <summary>
+/// The OFFLINE half: the newest pooled backtest at one prompt generation. This is the evidence base
+/// that actually decided what the verdicts are allowed to do, so it is reported per generation
+/// rather than collapsed — v1 and v2 are different questions and a single "latest" row would hide
+/// which one is being served.
+/// </summary>
+/// <param name="PromptVersion">The generation this run judged under.</param>
+/// <param name="EvaluatedAt">When the run finished.</param>
+/// <param name="HoldoutJudged">Holdout titles judged, pooled across the split origins.</param>
+/// <param name="Auc">Rank AUC of the signed confidence, loved against disliked. 0.5 is no discrimination.</param>
+/// <param name="MeanLaterRatingKeep">Mean later rating of the titles it kept.</param>
+/// <param name="MeanLaterRatingOut">Mean later rating of the titles it ruled out.</param>
+/// <param name="KeepLovedRate">Share of kept titles later rated 8 or higher.</param>
+/// <param name="KeepDislikedRate">Share of kept titles later rated 4 or lower.</param>
+/// <param name="FalseRuleOutRate">Share of later-loved titles the judge ruled out.</param>
+/// <param name="FalseRuleOutLow">Lower 95% Wilson bound on that.</param>
+/// <param name="FalseRuleOutHigh">Upper 95% Wilson bound — the gate reads this one.</param>
+/// <param name="TrueRuleOutRate">Share of later-disliked titles the judge ruled out.</param>
+/// <param name="UnsureRate">Share of judged titles it could not call.</param>
+/// <param name="Gating">What that earned: <c>gating</c> or <c>demote-only</c>.</param>
+/// <param name="Caveat">The persisted "how to read this", naming n and the interval.</param>
+/// <param name="Current">Whether this is the generation the job is writing today.</param>
+public sealed record CrossReferenceBacktestSummary(
+    int PromptVersion,
+    DateTime EvaluatedAt,
+    int HoldoutJudged,
+    double? Auc,
+    double? MeanLaterRatingKeep,
+    double? MeanLaterRatingOut,
+    double? KeepLovedRate,
+    double? KeepDislikedRate,
+    double FalseRuleOutRate,
+    double FalseRuleOutLow,
+    double FalseRuleOutHigh,
+    double TrueRuleOutRate,
+    double UnsureRate,
+    string Gating,
+    string Caveat,
+    bool Current);
+
+/// <summary>
+/// The cross-reference block of the track record: what the backtest measured, and what the titles
+/// actually served under each standing went on to do.
+/// </summary>
+/// <param name="Online">Per standing, from the exposure log. Corroboration, never the gate.</param>
+/// <param name="Backtests">Newest pooled run per prompt generation, newest generation first.</param>
+/// <param name="MinimumOutcomes">The count below which the online half declines to answer.</param>
+public sealed record CrossReferenceAccuracy(
+    IReadOnlyList<CrossReferenceVerdictOutcome> Online,
+    IReadOnlyList<CrossReferenceBacktestSummary> Backtests,
+    int MinimumOutcomes);
+
 /// <summary>The whole /api/accuracy payload, before presentation rounding.</summary>
 public sealed record AccuracyReport(
     string Window,
@@ -66,7 +145,8 @@ public sealed record AccuracyReport(
     IReadOnlyList<AccuracyMoment> Moments,
     ConversionStats Conversion,
     IReadOnlyList<CounterfactualWindow> Counterfactual,
-    ModelLearned? LearnedThisWeek);
+    ModelLearned? LearnedThisWeek,
+    CrossReferenceAccuracy CrossReference);
 
 /// <summary>
 /// "How wrong am I, and what am I doing about it" — computed live, per account, from what already
@@ -91,13 +171,41 @@ public sealed record AccuracyReport(
 /// called. Run the same query under two scopes and get two answers — which is what the isolation
 /// test asserts.</para>
 /// </summary>
-public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountContext, RetroLoopQuery retro, ModelLearnedQuery learned)
+public sealed class AccuracyQuery(
+    IReelDbContext db,
+    IAccountContext accountContext,
+    RetroLoopQuery retro,
+    ModelLearnedQuery learned,
+    // Injected for ONE reason: which prompt generation the job is writing today, so the page can
+    // mark the backtest row that actually governs what is being served. Reading it from a literal
+    // here would be a second copy of a persisted key part, and the two would drift the first time
+    // one moved.
+    ICrossReferenceJudge judge)
 {
     /// <summary>How many moments the strip shows. Newest first — the recent misses are the ones that sting.</summary>
     public const int MomentLimit = 50;
 
     /// <summary>Predicted-rating bands the calibration chart is cut into, across the full 0–10 range.</summary>
     public const int CalibrationBuckets = 10;
+
+    /// <summary>
+    /// Outcomes needed under one cross-reference standing before the page will read anything into
+    /// it. Below this the block reports the count and says, in words, that it cannot yet answer.
+    ///
+    /// <para>Twenty is not a significance threshold and is not presented as one — at n = 20 a
+    /// difference of a whole rating point is still inside the noise. It is the point below which a
+    /// mean is actively misleading rather than merely imprecise, and it exists because this panel
+    /// was never going to reach significance: demoted titles are served less often and only about
+    /// 2% of this account's ratings are made in the app, which is why the OFFLINE backtest is the
+    /// gate and this half is corroboration.</para>
+    /// </summary>
+    public const int MinimumVerdictOutcomes = 20;
+
+    /// <summary>Rated this or higher is "loved" — the same bar the backtest and the harness use.</summary>
+    private const int LovedThreshold = 8;
+
+    /// <summary>Rated this or lower is "disliked".</summary>
+    private const int DislikedThreshold = 4;
 
     /// <summary>The windows the endpoint accepts. Anything else is a 400, never a silent default.</summary>
     public static readonly IReadOnlyDictionary<string, int?> Windows = new Dictionary<string, int?>(StringComparer.OrdinalIgnoreCase)
@@ -161,7 +269,8 @@ public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountCont
                 .ToList(),
             await ConversionAsync(from, ct),
             report.Counterfactual,
-            await learned.GetAsync(accountContext.AccountId.Value, ct));
+            await learned.GetAsync(accountContext.AccountId.Value, ct),
+            await CrossReferenceAsync(from, ct));
     }
 
     /// <summary>
@@ -324,6 +433,93 @@ public sealed class AccuracyQuery(IReelDbContext db, IAccountContext accountCont
             Rate(watchedSaves.Select(s => s.TitleId).Distinct().Count(), savedTitleIds.Count),
             Rate(ratedAfterSave, exposed),
             Median(daysToWatch));
+    }
+
+    /// <summary>
+    /// The cross-reference block: the offline runs that decided what a verdict may do, and the
+    /// online outcomes of the cards actually served under each standing.
+    ///
+    /// <para><b>The temporal join is the same one the outcome view makes</b> — a rating counts only
+    /// when its immutable <c>FirstRatedAt</c> POSTDATES the serve — and it is written out here
+    /// rather than read off <c>ExposureOutcomes</c> because that view was created before the two
+    /// xref columns existed and does not carry them. Adding them to the view would be a migration,
+    /// and the join is four lines.</para>
+    ///
+    /// <para><b>NULL verdicts are excluded, not counted as Unsure.</b> A null means the pass had
+    /// not reached the title when the card was served — by far the commonest state on an account
+    /// mid-pass — and folding it into any bucket would put thousands of unjudged serves behind a
+    /// number describing a judgement.</para>
+    ///
+    /// <para><b>One row per title, at its EARLIEST qualifying serve</b>, exactly as the headline
+    /// pairs do: a title shown twenty times before it was rated is one outcome, and the first claim
+    /// is the honest one to score.</para>
+    /// </summary>
+    private async Task<CrossReferenceAccuracy> CrossReferenceAsync(DateTime? since, CancellationToken ct)
+    {
+        var rows = await (
+            from exposure in db.ExposureEvents
+            where exposure.XrefVerdict != null
+            where since == null || exposure.OccurredAt >= since
+            join rating in db.UserRatings
+                on new { exposure.AccountId, exposure.TitleId }
+                equals new { rating.AccountId, rating.TitleId }
+            where rating.SubjectType == RatingSubjectType.Movie || rating.SubjectType == RatingSubjectType.Show
+            where rating.SeasonNumber == 0 && rating.EpisodeNumber == 0
+            // The causal guard, and the reason FirstRatedAt exists: RatedAt is rewritten by every
+            // Trakt ratings walk, so an old opinion would drift forward past a new serve.
+            where rating.FirstRatedAt > exposure.OccurredAt
+            select new
+            {
+                exposure.TitleId,
+                Verdict = exposure.XrefVerdict!,
+                exposure.OccurredAt,
+                Actual = (int)rating.Rating,
+            }).ToListAsync(ct);
+
+        var online = rows
+            .GroupBy(r => r.TitleId)
+            .Select(g => g.OrderBy(r => r.OccurredAt).First())
+            .GroupBy(r => r.Verdict, StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => new CrossReferenceVerdictOutcome(
+                g.Key,
+                g.Count(),
+                g.Average(r => (double)r.Actual),
+                Rate(g.Count(r => r.Actual >= LovedThreshold), g.Count()),
+                Rate(g.Count(r => r.Actual <= DislikedThreshold), g.Count()),
+                g.Count() >= MinimumVerdictOutcomes))
+            .ToList();
+
+        // The summary rows only — SplitFraction null is the pooled mean across the five origins,
+        // and a per-origin row would be one fifth of the evidence presented as all of it.
+        var evaluations = await db.CrossReferenceEvaluations
+            .Where(e => e.SplitFraction == null)
+            .ToListAsync(ct);
+
+        var backtests = evaluations
+            .GroupBy(e => e.PromptVersion)
+            .Select(g => g.OrderByDescending(e => e.EvaluatedAt).First())
+            .OrderByDescending(e => e.PromptVersion)
+            .Select(e => new CrossReferenceBacktestSummary(
+                e.PromptVersion,
+                e.EvaluatedAt,
+                e.HoldoutJudged,
+                (double?)e.AucKeepVsOut,
+                (double?)e.MeanLaterRatingKeep,
+                (double?)e.MeanLaterRatingOut,
+                (double?)e.KeepLovedRate,
+                (double?)e.KeepDislikedRate,
+                (double)e.FalseRuleOutRate,
+                (double)e.WilsonLow,
+                (double)e.WilsonHigh,
+                (double)e.TrueRuleOutRate,
+                (double)e.UnsureRate,
+                e.GatingDecision,
+                e.Caveat,
+                e.PromptVersion == judge.PromptVersion))
+            .ToList();
+
+        return new CrossReferenceAccuracy(online, backtests, MinimumVerdictOutcomes);
     }
 
     /// <summary>A rate, or null. Never zero over an empty denominator — "unknown" is not "none".</summary>
