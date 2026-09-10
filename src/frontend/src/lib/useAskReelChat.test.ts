@@ -5,7 +5,9 @@ import {
   capHistory,
   capShown,
   chatReducer,
+  createMountGuard,
   initialChatState,
+  lastUserQuery,
   nextBootstrap,
   showMoodPresets,
   type ChatTurn,
@@ -261,6 +263,199 @@ describe("showMoodPresets", () => {
 
   it("hides when cards are on screen", () => {
     expect(showMoodPresets(0, 3, false)).toBe(false);
+  });
+});
+
+/**
+ * A resumed conversation is not a completed search. `resume` used to report `status: "done"` with
+ * zero cards, which is the exact shape of "your search found nothing" — so reopening a thread that
+ * had produced twenty picks greeted the user with the empty state, and `lastQuery` came back blank
+ * so the media toggle and the retry had nothing to replay.
+ */
+describe("chatReducer — resume", () => {
+  const turns: ChatTurn[] = [
+    { role: "user", text: "slow-burn sci-fi" },
+    { role: "assistant", text: "Here are a few." },
+    { role: "user", text: "something quieter" },
+    { role: "assistant", text: "Quieter, then." },
+  ];
+
+  it("resume_sets_status_resumed_not_done", () => {
+    // Fixture variation: a transcript ending in an assistant turn (the normal case) and one
+    // ending in a user turn (a thread whose last question failed mid-stream). Both are resumed
+    // conversations; neither is a completed search, and the second is the one that would have
+    // tempted a "last turn answered?" heuristic into reporting `done`.
+    for (const t of [turns, turns.slice(0, -1)]) {
+      const state = chatReducer(initialChatState, { type: "resume", turns: t, conversationId: "c1" });
+      expect(state.status).toBe("resumed");
+      expect(state.order).toEqual([]);
+    }
+  });
+
+  it("resume_restores_lastQuery_from_the_last_user_turn", () => {
+    // Fixture variation: the same two transcripts. The trailing-assistant one is the trap — the
+    // last ENTRY is not the last QUESTION, so `turns.at(-1)` would replay the model's own reply.
+    expect(chatReducer(initialChatState, { type: "resume", turns, conversationId: "c1" }).lastQuery)
+      .toBe("something quieter");
+    expect(chatReducer(initialChatState, { type: "resume", turns: turns.slice(0, -1), conversationId: "c1" }).lastQuery)
+      .toBe("something quieter");
+    // And an assistant-only transcript has no question to replay — better empty than the reply.
+    expect(lastUserQuery([{ role: "assistant", text: "hello" }])).toBe("");
+  });
+
+  it("keeps the shown ids when the server sends them, so a resumed thread still never repeats", () => {
+    // Fixture variation: `shown` provided, and omitted. Omitted must not crash or invent ids —
+    // a stored conversation from before cards were persisted has no id list to give back.
+    expect(chatReducer(initialChatState, { type: "resume", turns, conversationId: "c1", shown: [1, 2, 3] }).shown)
+      .toEqual([1, 2, 3]);
+    expect(chatReducer(initialChatState, { type: "resume", turns, conversationId: "c1" }).shown).toEqual([]);
+  });
+});
+
+/**
+ * A failed page used to leave `appending` latched true: the next `done` then APPENDED to a grid
+ * the user had just been told was broken, and the progress bar kept animating under the error
+ * banner because `phase` survived too.
+ */
+describe("chatReducer — error", () => {
+  it("an_error_action_clears_appending", () => {
+    // Fixture variation: the error arrives on a PAGE (appending true) and on a fresh turn
+    // (appending false). Only the page case was red; the fresh-turn case is the control that
+    // proves the fix did not just hardcode `appending: false` somewhere that mattered elsewhere.
+    const answered = chatReducer(
+      chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true }),
+      { type: "done", data: { results: [card(1)], reason: "1 pick" } },
+    );
+
+    const pageFailed = chatReducer(chatReducer(answered, { type: "moreTurn" }), { type: "error" });
+    expect(pageFailed.appending).toBe(false);
+    expect(pageFailed.phase).toBeNull();
+    expect(pageFailed.status).toBe("error");
+    // The cards that were already on screen survive — a failed page offers a retry, not a wipe.
+    expect(pageFailed.order).toEqual(["t1"]);
+
+    const turnFailed = chatReducer(
+      chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true }),
+      { type: "error", reason: "session" },
+    );
+    expect(turnFailed.appending).toBe(false);
+    expect(turnFailed.errorReason).toBe("session");
+  });
+});
+
+/**
+ * A conflict is the server naming a collision between the question and the account's standing
+ * exclusions ("you asked for horror; horror is excluded"). It is a note beside the answer, not an
+ * error — and it belongs to the question that produced it.
+ */
+describe("chatReducer — conflict", () => {
+  it("a_conflict_frame_is_stored_and_cleared_by_the_next_turn", () => {
+    // Fixture variation: the next turn arrives as a FRESH one and as a follow-up in the same
+    // thread. Fresh resets through initialChatState; the follow-up has to clear it explicitly,
+    // and that is the branch where a stale note would have hung over an unrelated answer.
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "something scary", fresh: true });
+    const conflicted = chatReducer(asked, { type: "conflict", message: "Horror is excluded on this account." });
+    expect(conflicted.conflict).toBe("Horror is excluded on this account.");
+    // It survives the answer it annotates.
+    expect(chatReducer(conflicted, { type: "done", data: { results: [card(1)], reason: "1 pick" } }).conflict)
+      .toBe("Horror is excluded on this account.");
+
+    expect(chatReducer(conflicted, { type: "userTurn", message: "something funny", fresh: false }).conflict).toBeNull();
+    expect(chatReducer(conflicted, { type: "userTurn", message: "something funny", fresh: true }).conflict).toBeNull();
+  });
+});
+
+/**
+ * Server order is authoritative: the server computes a blend, stores it as the card's rank and
+ * sends it. Re-deriving a second blend on the client from similarity/rating/fit produced a
+ * different order than the one already committed to storage, so a reload silently reshuffled
+ * the same answer.
+ */
+describe("chatReducer — server blend", () => {
+  it("cards_prefer_the_server_blend_when_present", () => {
+    // Fixture variation: one card carries a server blend that CONTRADICTS the local formula, the
+    // other carries none. The contradiction is the point — agreeing blends cannot tell the two
+    // code paths apart, which is how a test could pass while the client still ignored the field.
+    const localWinner = card(1, { similarity: 0.9, predictedRating: 9, fit: 0.9, blend: 0.1 });
+    const serverWinner = card(2, { similarity: 0.1, predictedRating: 2, fit: 0.1, blend: 0.9 });
+    const streamed = [localWinner, serverWinner].reduce(
+      (st, c) => chatReducer(st, { type: "candidate", data: c }),
+      chatReducer(initialChatState, { type: "userTurn", message: "anything", fresh: true }),
+    );
+    expect(chatReducer(streamed, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } }).order)
+      .toEqual(["t2", "t1"]);
+
+    // Without a server blend the local formula still decides — older servers send no field.
+    const unblended = [card(3, { similarity: 0.1 }), card(4, { similarity: 0.9 })].reduce(
+      (st, c) => chatReducer(st, { type: "candidate", data: c }),
+      chatReducer(initialChatState, { type: "userTurn", message: "anything", fresh: true }),
+    );
+    expect(chatReducer(unblended, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } }).order)
+      .toEqual(["t4", "t3"]);
+  });
+});
+
+/**
+ * The quality floor cuts cards rather than showing them, and the count of what it cut used to be
+ * the only trace. `belowFloor` carries the cards themselves, for a collapsed tray under the grid —
+ * they must never reach `order`, or the floor would be decorative.
+ */
+describe("chatReducer — belowFloor", () => {
+  it("done_stores_belowFloor_cards_separately", () => {
+    // Fixture variation: a done frame WITH a tray, and the same frame without one. The absent
+    // case is what every server before the floor split sends, and it must clear the previous
+    // turn's tray rather than leaving it under a new answer.
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true });
+    const withTray = chatReducer(asked, {
+      type: "done",
+      data: { results: [card(1)], reason: "1 pick", droppedByFloor: 2, belowFloor: [card(8), card(9)] },
+    });
+    expect(withTray.order).toEqual(["t1"]);
+    expect(withTray.belowFloor.map((c) => c.titleId)).toEqual(["t8", "t9"]);
+    // The tray is not part of the no-repeat set: those titles were never offered.
+    expect(withTray.shown).toEqual([1]);
+
+    const reasked = chatReducer(withTray, { type: "reaskTurn" });
+    expect(reasked.belowFloor).toEqual([]);
+    const without = chatReducer(reasked, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
+    expect(without.belowFloor).toEqual([]);
+  });
+});
+
+/**
+ * StrictMode mounts, unmounts and remounts every component in development. The unmount abort is
+ * correct on a real unmount and fatal on the fake one — it killed the request the first mount had
+ * just started, and `nextBootstrap` refuses to restart a seed it has already recorded as handled,
+ * so /search sat on a spinner forever.
+ */
+describe("createMountGuard", () => {
+  function harness() {
+    const queue: (() => void)[] = [];
+    let aborted = 0;
+    const guard = createMountGuard(
+      () => { aborted += 1; },
+      (fn) => { queue.push(fn); return queue.length - 1; },
+      (handle) => { queue[handle as number] = () => {}; },
+    );
+    return { guard, flush: () => { const pending = queue.splice(0); for (const fn of pending) fn(); }, aborted: () => aborted };
+  }
+
+  it("an aborted-then-restarted mount does not kill the stream", () => {
+    // Fixture variation: the StrictMode cycle (mount → unmount → mount) against a real teardown
+    // (mount → unmount). Same guard, same scheduler; only the trailing mount differs, which is
+    // exactly the one bit the old unconditional cleanup could not see.
+    const strict = harness();
+    strict.guard.mount();
+    strict.guard.unmount();
+    strict.guard.mount();
+    strict.flush();
+    expect(strict.aborted()).toBe(0);
+
+    const real = harness();
+    real.guard.mount();
+    real.guard.unmount();
+    real.flush();
+    expect(real.aborted()).toBe(1);
   });
 });
 
