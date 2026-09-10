@@ -19,7 +19,10 @@ import type { AskCard, PhaseData } from "../lib/askReelStream";
  * re-orders them as hyper-personal LLM fit lands, and refines across turns ("only movies",
  * "less intense", "more like the first one") — never repeating a title.
  */
-const REFINE_CHIPS = ["Only movies", "Only TV", "Something lighter", "More intense", "More like the first one"];
+// No "Only movies" / "Only TV" here: the media segment in `BrowseFilters` sits in this same row
+// and is the control that actually narrows discovery server-side. The chips only phrased the same
+// request as free text, so tapping one and the toggle beside it could disagree on screen.
+const REFINE_CHIPS = ["Something lighter", "More intense", "More like the first one"];
 
 /** Cold-start mood presets — one tap seeds a whole first turn on an otherwise empty page. */
 const MOOD_PRESETS = [
