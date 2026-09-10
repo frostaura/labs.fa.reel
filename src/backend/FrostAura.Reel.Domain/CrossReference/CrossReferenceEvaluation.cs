@@ -86,6 +86,72 @@ public class CrossReferenceEvaluation : IAccountScoped
     /// claim on any surface can be stated honestly rather than rounded away.</summary>
     public int NoEmbeddingCount { get; set; }
 
+    // ── Discrimination ─────────────────────────────────────────────────────────────────────
+    // Every column below is NULLABLE, and every one of them is null on a row written before
+    // 2026-09-10. They exist because the first live run answered the question it was built to ask
+    // ("how often does an `out` hide something the viewer loved?" — 12.0%) and could not answer the
+    // question that answer immediately raises ("is that better than chance?" — the true-rule-out
+    // rate was 10.1%, so no). A rule-out rate on loved titles and a rule-out rate on disliked ones
+    // that agree to within a couple of points describe a verdict uncorrelated with the outcome, and
+    // no amount of tightening a Wilson bound around either number changes that.
+    //
+    // Nullable rather than defaulted to zero for the house reason: a zero is a claim. A row from
+    // before the metrics existed did not measure an AUC of 0.5, it measured no AUC.
+
+    /// <summary>Judged holdout titles the judge answered <c>keep</c> on.</summary>
+    public int? KeepCount { get; set; }
+
+    /// <summary>Judged holdout titles the judge answered <c>out</c> on, at ANY confidence.
+    /// Deliberately not the ≥ 0.70 rule-out set: this is a description of the judge's answers, not
+    /// of the gating rule applied to them.</summary>
+    public int? OutCount { get; set; }
+
+    public int? UnsureCount { get; set; }
+
+    /// <summary>Mean later rating of the titles it kept. The number that says whether <c>keep</c>
+    /// carries signal — which the aggregate-only first run could not answer at all.</summary>
+    public decimal? MeanLaterRatingKeep { get; set; }
+
+    public decimal? MeanLaterRatingOut { get; set; }
+
+    public decimal? MeanLaterRatingUnsure { get; set; }
+
+    /// <summary>Share of kept titles the account later rated ≥ 8.</summary>
+    public decimal? KeepLovedRate { get; set; }
+
+    /// <summary>Share of kept titles the account later rated ≤ 4.</summary>
+    public decimal? KeepDislikedRate { get; set; }
+
+    /// <summary>Share of ruled-out titles the account later rated ≥ 8.</summary>
+    public decimal? OutLovedRate { get; set; }
+
+    /// <summary>Share of ruled-out titles the account later rated ≤ 4.</summary>
+    public decimal? OutDislikedRate { get; set; }
+
+    /// <summary>
+    /// Spearman rank correlation between the SIGNED confidence score — <c>+confidence</c> for a
+    /// keep, <c>−confidence</c> for an out, <c>0</c> for an unsure — and the later rating, over
+    /// every judged item.
+    ///
+    /// <para>The signed score is what makes the two verdicts comparable on one axis: a keep at 0.9
+    /// and an out at 0.9 are opposite claims of equal strength, and a metric that treated
+    /// confidence as an unsigned magnitude would rank them identically. Positive means the judge
+    /// orders titles the way the viewer later did; near zero means it does not.</para>
+    /// </summary>
+    public decimal? SpearmanConfidenceVsRating { get; set; }
+
+    /// <summary>
+    /// Rank-based AUC of the same signed score, separating the titles later rated ≥ 8 from those
+    /// later rated ≤ 4 — the Mann-Whitney statistic, ties counted as half.
+    ///
+    /// <para><b>0.5 is the number to look for, and it means no discrimination at all.</b> It is the
+    /// same thing the equal false- and true-rule-out rates say, expressed on a scale that does not
+    /// depend on where the Out threshold happens to sit — which is why it is worth persisting
+    /// beside them rather than instead of them. Below 0.5 means the judge is ordering the two
+    /// classes backwards, which is information and not an error.</para>
+    /// </summary>
+    public decimal? AucKeepVsOut { get; set; }
+
     /// <summary>One of <see cref="GatingDecisions"/>.</summary>
     public string GatingDecision { get; set; } = GatingDecisions.DemoteOnly;
 

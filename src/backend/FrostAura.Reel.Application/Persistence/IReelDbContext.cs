@@ -70,6 +70,11 @@ public interface IReelDbContext
 
     DbSet<Domain.CrossReference.CrossReferenceEvaluation> CrossReferenceEvaluations { get; }
 
+    // One row per judged holdout title inside a backtest origin — the verdict beside the outcome.
+    // The aggregate rows above cannot be re-interrogated; these can, which is what makes a new
+    // discrimination metric a recomputation rather than another paid run.
+    DbSet<Domain.CrossReference.CrossReferenceEvaluationItem> CrossReferenceEvaluationItems { get; }
+
     // The closed loop. ExposureEvents is append-only; the other two are read-only SQL views.
     DbSet<ExposureEvent> ExposureEvents { get; }
     DbSet<ExposureOutcome> ExposureOutcomes { get; }

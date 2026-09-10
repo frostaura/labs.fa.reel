@@ -72,11 +72,71 @@ public sealed class NeighbourFinder(IReelDbContext db)
     /// NULL when serving.
     /// </param>
     /// <param name="IncludeNearestDisliked">
-    /// Round 2's extra evidence: the single nearest neighbour rated ≤ 4 at similarity ≥ 0.60,
-    /// appended after the ranked ones. Absent where nothing qualifies, never substituted.
+    /// Whether to append low-rated neighbours after the ranked ones — round 2's extra evidence, and
+    /// prompt v2's in round 1. Absent where nothing qualifies, never substituted.
+    /// </param>
+    /// <param name="DislikedTake">
+    /// How many low-rated neighbours to append. 1 in round 2; 2 under prompt v2, whose whole
+    /// premise is that the judge could not see a disliked neighbour often enough to use one.
+    /// </param>
+    /// <param name="DislikedRatingCeiling">
+    /// The rating at or below which a neighbour counts as low-rated. <see cref="DislikedCeiling"/>
+    /// (4) for round 2, which wants an unambiguous dislike; prompt v2 widens it to 5 so that an
+    /// account whose lowest scores cluster at 5 still shows the judge its negative evidence rather
+    /// than showing it nothing.
+    /// </param>
+    /// <param name="DislikedSimilarityFloor">
+    /// And how near it has to be to mean anything. Round 2 uses 0.60; prompt v2 uses 0.55, the
+    /// same trade in the same direction — a slightly weaker comparison beats no comparison, and
+    /// the similarity is printed beside it so the judge can discount it itself.
     /// </param>
     public sealed record Options(
-        int K = DefaultK, int Skip = 0, DateTime? AsOf = null, bool IncludeNearestDisliked = false);
+        int K = DefaultK,
+        int Skip = 0,
+        DateTime? AsOf = null,
+        bool IncludeNearestDisliked = false,
+        int DislikedTake = 1,
+        short DislikedRatingCeiling = DislikedCeiling,
+        double DislikedSimilarityFloor = DislikedMinimumSimilarity);
+
+    /// <summary>Prompt v2 shows two low-rated neighbours, not one.</summary>
+    public const int SecondVersionDislikedTake = 2;
+
+    /// <summary>
+    /// And counts a 5 as low. Prompt v2's whole premise is that a negative comparison has to be
+    /// VISIBLE whenever one exists — on an account whose lowest scores cluster at 5, a ceiling of 4
+    /// shows the judge nothing at all, and nothing is what the 2026-09-10 run measured.
+    /// </summary>
+    public const short SecondVersionDislikedCeiling = 5;
+
+    /// <summary>
+    /// At a slightly looser similarity floor than round 2's, for the same reason: a weaker
+    /// comparison the judge can discount — the similarity is printed beside it — beats no
+    /// comparison at all.
+    /// </summary>
+    public const double SecondVersionDislikedSimilarity = 0.55d;
+
+    /// <summary>
+    /// The evidence a prompt generation is shown, in ONE place. The mapping from "which prompt" to
+    /// "which neighbours" is part of what a stored verdict means, so the backtest and the serving
+    /// job have to read it from the same line or a measured v2 result would not describe the v2
+    /// that later ships.
+    ///
+    /// <para>v1: the three nearest rated titles, whatever they are rated. v2: the same three plus up
+    /// to two nearest rated ≤ 5 at similarity ≥ 0.55 — five neighbours, at least two of which are
+    /// negative evidence where the account has any.</para>
+    /// </summary>
+    public static Options ForPromptVersion(int promptVersion, DateTime? asOf) =>
+        promptVersion >= Domain.CrossReference.CrossReferencePromptVersions.Second
+        ? new Options(
+            DefaultK,
+            Skip: 0,
+            AsOf: asOf,
+            IncludeNearestDisliked: true,
+            DislikedTake: SecondVersionDislikedTake,
+            DislikedRatingCeiling: SecondVersionDislikedCeiling,
+            DislikedSimilarityFloor: SecondVersionDislikedSimilarity)
+        : new Options(DefaultK, Skip: 0, AsOf: asOf, IncludeNearestDisliked: false);
 
     /// <summary>The raw projection the query returns. Internal shape; callers get the grouped map.</summary>
     private sealed record NeighbourRow(
@@ -159,10 +219,19 @@ public sealed class NeighbourFinder(IReelDbContext db)
             return ranked;
         }
 
-        // Round 2's extra clause, and it needs its OWN scan. Filtering the ranked rows would only
-        // ever find a disliked neighbour that already made the top-k — which is the case where the
-        // prompt least needs the extra evidence. This asks the question directly: of the titles
-        // this viewer rated ≤ 4, which is nearest, and is it near enough to mean anything.
+        if (options.DislikedTake <= 0)
+        {
+            return ranked;
+        }
+
+        // The extra clause, and it needs its OWN scan. Filtering the ranked rows would only ever
+        // find a low-rated neighbour that already made the top-k — which is precisely the case
+        // where the prompt least needs the extra evidence. This asks the question directly: of the
+        // titles this viewer rated at or below the ceiling, which are nearest, and are they near
+        // enough to mean anything.
+        var dislikedTake = options.DislikedTake;
+        var dislikedCeiling = options.DislikedRatingCeiling;
+        var similarityFloor = options.DislikedSimilarityFloor;
         var dislikedRows = await db.Database.SqlQuery<NeighbourRow>(
             $"""
              WITH rated AS MATERIALIZED (
@@ -176,7 +245,7 @@ public sealed class NeighbourFinder(IReelDbContext db)
                  JOIN "Titles" t ON t."Id" = r."TitleId"
                  WHERE r."AccountId" = {accountId}
                    AND r."SubjectType" IN ('Movie', 'Show')
-                   AND r."Rating" <= {DislikedCeiling}
+                   AND r."Rating" <= {dislikedCeiling}
                    AND ({asOf}::timestamptz IS NULL OR r."FirstRatedAt" <= {asOf}::timestamptz)
              )
              SELECT c."CandidateId" AS "CandidateId",
@@ -196,32 +265,34 @@ public sealed class NeighbourFinder(IReelDbContext db)
                  FROM rated rt
                  WHERE rt."TitleId" <> c."CandidateId"
                  ORDER BY rt."Embedding" <=> ce."Embedding"
-                 LIMIT 1
+                 LIMIT {dislikedTake}
              ) n
-             WHERE n."Similarity" >= {DislikedMinimumSimilarity}
+             WHERE n."Similarity" >= {similarityFloor}
              """).ToListAsync(ct);
 
         var nearestDisliked = dislikedRows
             .GroupBy(r => r.CandidateId)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.Similarity).ThenBy(r => r.TitleId).First());
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(r => r.Similarity).ThenBy(r => r.TitleId).ToList());
 
         var withDisliked = new Dictionary<Guid, IReadOnlyList<CrossReferenceNeighbour>>();
         foreach (var candidateId in ids)
         {
             var shown = ranked.TryGetValue(candidateId, out var list) ? list : [];
-            if (!nearestDisliked.TryGetValue(candidateId, out var row)
-                || shown.Any(n => n.TitleId == row.TitleId))
+            // Deduplicated against the ranked set rather than merged with it: a low-rated title that
+            // already made the top-k is the same evidence, and printing it twice would read to the
+            // judge as two independent negatives.
+            var extra = (nearestDisliked.GetValueOrDefault(candidateId) ?? [])
+                .Where(r => shown.All(n => n.TitleId != r.TitleId))
+                .Take(dislikedTake)
+                .Select(r => new CrossReferenceNeighbour(r.Name, r.Year, r.Rating, r.Similarity, r.TitleId))
+                .ToList();
+
+            if (shown.Count + extra.Count > 0)
             {
-                if (shown.Count > 0)
-                {
-                    withDisliked[candidateId] = shown;
-                }
-
-                continue;
+                withDisliked[candidateId] = [.. shown, .. extra];
             }
-
-            withDisliked[candidateId] =
-                [.. shown, new CrossReferenceNeighbour(row.Name, row.Year, row.Rating, row.Similarity, row.TitleId)];
         }
 
         return withDisliked;

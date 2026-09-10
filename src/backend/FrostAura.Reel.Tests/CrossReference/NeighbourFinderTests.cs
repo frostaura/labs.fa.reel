@@ -197,6 +197,8 @@ public class NeighbourFinderTests(PostgresFixture fixture) : EmbeddedCatalogTest
         // A disliked title genuinely close to the candidate: real evidence for round 2.
         var closeCandidate = await SeedTitleAsync("Close Case", UnitVector(0));
         var closeDisliked = await SeedRatedAsync(accountId, "Close Disliked", NearUnit(0, 0.20f), 2);
+        // …and one rated 5, which round 2's ceiling of 4 cannot see and prompt v2's ceiling can.
+        var closeFive = await SeedRatedAsync(accountId, "Close Five", NearUnit(0, 0.25f), 5);
         for (var i = 0; i < 3; i++)
         {
             await SeedRatedAsync(accountId, $"Loved {i}", NearUnit(0, 0.01f * (i + 1)), 9);
@@ -218,6 +220,62 @@ public class NeighbourFinderTests(PostgresFixture fixture) : EmbeddedCatalogTest
         var farOnly = await FindAsync(
             accountId, [farCandidate], new NeighbourFinder.Options(K: 3, IncludeNearestDisliked: true));
         Assert.Equal(3, farOnly[farCandidate].Count);
+    }
+
+    [Fact]
+    public async Task Prompt_version_two_shows_five_neighbours_with_two_of_them_low_rated()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Prompt v2's premise: on the 2026-09-10 run the `out` verdict was uncorrelated with the
+        // outcome, and a three-nearest window on an account that rates most things well shows the
+        // judge no negative evidence at all. v2 asks for the three nearest AND the two nearest rated
+        // ≤ 5 — the ceiling widened from 4 so an account whose lowest scores cluster at 5 still has
+        // something to compare against.
+        //
+        // Seeded on the SAME fixture shape as the round-2 test above rather than a fresh one: the
+        // catalogue is global and a fixed-size retrieval window sits in front of eligibility, so
+        // every extra title here is a title that can displace a sibling class's own fixture.
+        var accountId = await SeedAccountAsync();
+        var candidateId = await SeedTitleAsync("V2 Case", UnitVector(0));
+        var loved = new List<Guid>();
+        for (var i = 0; i < 3; i++)
+        {
+            loved.Add(await SeedRatedAsync(accountId, $"V2 Loved {i}", NearUnit(0, 0.01f * (i + 1)), 9));
+        }
+
+        var lowTwo = await SeedRatedAsync(accountId, "V2 Low Two", NearUnit(0, 0.20f), 2);
+        var lowFive = await SeedRatedAsync(accountId, "V2 Low Five", NearUnit(0, 0.25f), 5);
+
+        var v2 = NeighbourFinder.ForPromptVersion(Domain.CrossReference.CrossReferencePromptVersions.Second, null);
+        var neighbours = (await FindAsync(accountId, [candidateId], v2))[candidateId];
+
+        Assert.Equal(5, neighbours.Count);
+        Assert.Equal(loved, neighbours.Take(3).Select(n => n.TitleId));
+        // The two low-rated ones are APPENDED after the ranked window, in similarity order — and the
+        // 5 is there, which is the whole difference from round 2's rule.
+        Assert.Equal([lowTwo, lowFive], neighbours.Skip(3).Select(n => n.TitleId));
+        Assert.All(
+            neighbours,
+            n => Assert.True(
+                n.Similarity >= NeighbourFinder.SecondVersionDislikedSimilarity,
+                $"{n.Name} came back at {n.Similarity}, under the v2 floor"));
+
+        // Round 2's narrower rule sees only the 2 — one appended neighbour, not two.
+        var roundTwo = await FindAsync(
+            accountId, [candidateId], new NeighbourFinder.Options(K: 3, IncludeNearestDisliked: true));
+        Assert.Equal(4, roundTwo[candidateId].Count);
+        Assert.Equal(lowTwo, roundTwo[candidateId][^1].TitleId);
+
+        // …and a low-rated neighbour that already made the ranked window is not printed twice.
+        // Printing it twice would read to the judge as two independent negatives.
+        var wideRanked = (await FindAsync(accountId, [candidateId], v2 with { K = 5 }))[candidateId];
+        Assert.Equal(5, wideRanked.Count);
+        Assert.Equal(1, wideRanked.Count(n => n.TitleId == lowTwo));
+        Assert.Equal(1, wideRanked.Count(n => n.TitleId == lowFive));
     }
 
     [Fact]

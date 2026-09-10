@@ -210,7 +210,170 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture) : EmbeddedCata
         Assert.All(judge.Seen, c => Assert.Null(c.Predicted));
     }
 
-    private async Task<CrossReferenceBacktest.Report?> RunAsync(Guid accountId, ICrossReferenceJudge judge)
+    [Fact]
+    public async Task Every_judged_title_lands_as_its_own_item_row()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The whole point of the table: an aggregate cannot be re-interrogated. The first live run
+        // reported a false-rule-out rate of 12.0% and could not say WHICH titles it was wrong about,
+        // nor whether `keep` carried signal, without repeating the entire paid run.
+        var accountId = await SeedHistoryAsync();
+        var report = await RunAsync(accountId, new ScriptedJudge(
+            rating => rating >= 8 ? CrossReferenceVerdict.Keep : CrossReferenceVerdict.Out));
+
+        Assert.NotNull(report);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        foreach (var origin in report.Origins)
+        {
+            var items = db.CrossReferenceEvaluationItems.Where(i => i.EvaluationId == origin.Id).ToList();
+
+            // One per JUDGED title. Titles skipped for having no embedding and no attributes never
+            // reached the judge and are already outside HoldoutJudged, so they are outside this
+            // count too — they are reported on NoEmbeddingCount and are in no denominator.
+            Assert.Equal(origin.HoldoutJudged, items.Count);
+            Assert.All(items, i => Assert.Equal(origin.SplitFraction, i.SplitFraction));
+            Assert.All(items, i => Assert.Equal(accountId, i.AccountId));
+            // The later rating is the one field on the row the judge never saw.
+            Assert.All(items, i => Assert.True(i.LaterRating is 9 or 3, $"unexpected later rating {i.LaterRating}"));
+            Assert.All(items, i => Assert.False(string.IsNullOrWhiteSpace(i.ReasonCode)));
+            Assert.All(
+                items,
+                i => Assert.True(
+                    CrossReferenceReasons.IsLegal(i.Verdict, i.ReasonCode),
+                    $"{i.Verdict} / {i.ReasonCode} is not a legal pair"));
+
+            // The verdict recorded per title agrees with the aggregate it rolled into.
+            Assert.Equal(origin.KeepCount, items.Count(i => i.Verdict == CrossReferenceVerdict.Keep));
+            Assert.Equal(origin.OutCount, items.Count(i => i.Verdict == CrossReferenceVerdict.Out));
+        }
+
+        // The mean row summarises the origins and owns no items of its own.
+        Assert.Empty(db.CrossReferenceEvaluationItems.Where(i => i.EvaluationId == report.Mean.Id).ToList());
+    }
+
+    [Fact]
+    public async Task The_discrimination_metrics_separate_a_judge_that_works_from_one_that_does_not()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedHistoryAsync();
+
+        // A judge that reads the outcome perfectly: every loved title kept, every disliked one out.
+        var perfect = await RunAsync(accountId, new ScriptedJudge(
+            rating => rating >= 8 ? CrossReferenceVerdict.Keep : CrossReferenceVerdict.Out));
+        Assert.NotNull(perfect);
+        Assert.Equal(1m, perfect.Mean.AucKeepVsOut);
+        Assert.Equal(1m, perfect.Mean.KeepLovedRate);
+        Assert.Equal(0m, perfect.Mean.OutLovedRate);
+        Assert.True(perfect.Mean.SpearmanConfidenceVsRating > 0m);
+
+        // …and one whose answer has nothing to do with it. This is the 2026-09-10 shape: the rates
+        // look survivable in isolation and the AUC says the ordering is a coin.
+        var index = 0;
+        var arbitrary = await RunAsync(accountId, new ScriptedJudge(
+            _ => index++ % 2 == 0 ? CrossReferenceVerdict.Keep : CrossReferenceVerdict.Out));
+        Assert.NotNull(arbitrary);
+        Assert.NotNull(arbitrary.Mean.AucKeepVsOut);
+        Assert.True(
+            Math.Abs(arbitrary.Mean.AucKeepVsOut.Value - 0.5m) < 0.2m,
+            $"an uncorrelated judge should sit near 0.5, not {arbitrary.Mean.AucKeepVsOut}");
+    }
+
+    [Fact]
+    public async Task A_non_discriminating_run_says_so_in_the_persisted_caveat()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Out on everything: false-rule-out 1.0, true-rule-out 1.0 — identical, which is the
+        // clearest possible statement that the verdict is not distinguishing anything.
+        var accountId = await SeedHistoryAsync();
+        var report = await RunAsync(accountId, new ScriptedJudge(_ => CrossReferenceVerdict.Out));
+
+        Assert.NotNull(report);
+        Assert.Contains(
+            "not distinguishing loved from disliked on this history",
+            report.Mean.Caveat,
+            StringComparison.Ordinal);
+        // And the caveat it is appended to still names n and the interval.
+        Assert.Contains("95% Wilson interval", report.Mean.Caveat, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_requested_prompt_version_reaches_the_judge_the_rows_and_the_evidence()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedHistoryAsync();
+
+        var v1Judge = new ScriptedJudge(_ => CrossReferenceVerdict.Unsure);
+        var v1 = await RunAsync(accountId, v1Judge, CrossReferencePromptVersions.First);
+        Assert.NotNull(v1);
+        Assert.All(v1Judge.Options, o => Assert.Equal(CrossReferencePromptVersions.First, o.PromptVersion));
+        // v1 renders neither of v2's two extra inputs, so the backtest must not be building them
+        // into the options either — a prompt cannot be byte-identical if its inputs are not.
+        Assert.All(v1Judge.Options, o => Assert.Null(o.GenreAffinity));
+        Assert.All(v1Judge.Options, o => Assert.Null(o.LovedShare));
+        Assert.Equal(CrossReferencePromptVersions.First, v1.Mean.PromptVersion);
+
+        var v2Judge = new ScriptedJudge(_ => CrossReferenceVerdict.Unsure);
+        var v2 = await RunAsync(accountId, v2Judge, CrossReferencePromptVersions.Second);
+        Assert.NotNull(v2);
+        Assert.All(v2Judge.Options, o => Assert.Equal(CrossReferencePromptVersions.Second, o.PromptVersion));
+        // The base rates are computed from ratings cut at the split, so they are present and are a
+        // real share of this fixture's history rather than a placeholder.
+        Assert.All(v2Judge.Options, o => Assert.NotNull(o.LovedShare));
+        Assert.All(v2Judge.Options, o => Assert.NotNull(o.DislikedShare));
+        Assert.All(v2Judge.Options, o => Assert.InRange(o.LovedShare!.Value, 0m, 1m));
+        Assert.Equal(CrossReferencePromptVersions.Second, v2.Mean.PromptVersion);
+        Assert.All(v2.Origins, o => Assert.Equal(CrossReferencePromptVersions.Second, o.PromptVersion));
+
+        // Two generations, two runs, both readable — which is what makes the comparison a read.
+        Assert.NotEqual(v1.RunId, v2.RunId);
+    }
+
+    [Fact]
+    public async Task The_version_two_base_rates_are_cut_at_the_split()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The fixture's train half is 60 ratings of 6, 7 and 8, and its holdout half is 40
+        // alternating 9s and 3s laid down after it. Over the WHOLE history the dislike share is
+        // exactly 20/100; cut at a split it can only ever be lower, and at the earliest origin —
+        // whose split point is the first holdout rating — there is not a single 3 before it at all.
+        // The share is the tell, and it is the cheapest possible check that this prompt input is not
+        // reading the holdout it is about to be scored on.
+        var accountId = await SeedHistoryAsync();
+        var judge = new ScriptedJudge(_ => CrossReferenceVerdict.Unsure);
+        await RunAsync(accountId, judge, CrossReferencePromptVersions.Second);
+
+        Assert.NotEmpty(judge.Options);
+        var shares = judge.Options.Select(o => o.DislikedShare!.Value).Distinct().ToList();
+        Assert.All(shares, share => Assert.True(share < 0.20m, $"dislike share {share} reaches the holdout"));
+        Assert.Contains(0m, shares);
+    }
+
+    private Task<CrossReferenceBacktest.Report?> RunAsync(Guid accountId, ICrossReferenceJudge judge) =>
+        RunAsync(accountId, judge, CrossReferencePromptVersions.First);
+
+    private async Task<CrossReferenceBacktest.Report?> RunAsync(
+        Guid accountId, ICrossReferenceJudge judge, int promptVersion)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var features = new FeatureVectorBuilder(db);
@@ -221,29 +384,17 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture) : EmbeddedCata
         var backtest = new CrossReferenceBacktest(
             db, judge, features, personalisation, eligibility, candidates,
             NullLogger<CrossReferenceBacktest>.Instance);
-        return await backtest.RunAsync(accountId, CancellationToken.None);
+        return await backtest.RunAsync(accountId, promptVersion, CancellationToken.None);
     }
 
     /// <summary>
-    /// Enough history to split, with a holdout that carries both loved and disliked titles —
-    /// seeded ONCE for the whole class and reused.
-    ///
-    /// <para><b>The sharing is not an optimisation.</b> xUnit builds a fresh instance per test, so
-    /// a per-test fixture put a hundred titles and their embeddings into the GLOBAL catalogue six
-    /// times over, and five hundred extra rows was enough to change what an unrelated class's
-    /// retrieval window contained — the contamination class <c>CandidateRetrieverTests</c>
-    /// documents, arriving here as volume rather than as similarity. The backtest is read-only over
-    /// this history (it writes only its own evaluation rows, under a fresh RunId each time), so one
-    /// account serves every test in the class without them observing each other.</para>
+    /// One account with a 100-rating history, seeded FRESH for every test.
     ///
     /// <para>The ratings are laid down oldest-first on <c>FirstRatedAt</c> so the split origins land
     /// inside the range; the later half deliberately alternates loved and disliked so every origin
     /// has both denominators. Only the HOLDOUT half carries an embedding: those are the titles the
     /// judge is asked about, and an embedding on a train title would be forty more rows in the
     /// shared catalogue buying nothing.</para>
-    /// </summary>
-    /// <summary>
-    /// One account with a 100-rating history, seeded FRESH for every test.
     ///
     /// <para>It used to be seeded once per class and cached in a static, which was a real saving and
     /// is no longer available: <see cref="EmbeddedCatalogTestBase"/> removes this class's embedding
@@ -373,19 +524,23 @@ public class CrossReferenceBacktestTests(PostgresFixture fixture) : EmbeddedCata
 
         public List<CrossReferenceRound> Rounds { get; } = [];
 
+        /// <summary>Every options record the backtest handed in — the prompt-version routing assertion.</summary>
+        public List<CrossReferenceJudgeOptions> Options { get; } = [];
+
         public bool IsAvailable => true;
 
         public string ModelId => "scripted/test";
 
-        public int PromptVersion => 1;
+        public int PromptVersion => CrossReferencePromptVersions.First;
 
         public Task<CrossReferenceBatchResult> JudgeAsync(
             IReadOnlyList<CrossReferenceCandidate> candidates, LensPersona persona, CrossReferenceRound round,
-            string usagePurpose, CancellationToken ct = default)
+            string usagePurpose, CrossReferenceJudgeOptions options, CancellationToken ct = default)
         {
             Seen.AddRange(candidates);
             Purposes.Add(usagePurpose);
             Rounds.Add(round);
+            Options.Add(options);
 
             var entries = candidates.Select(c =>
             {
