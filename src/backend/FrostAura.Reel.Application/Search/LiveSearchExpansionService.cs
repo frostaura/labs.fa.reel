@@ -112,6 +112,78 @@ public sealed class LiveSearchExpansionService(
     public delegate Task Emit(string eventName, object payload);
 
     /// <summary>
+    /// One card of the answer, as a row rather than as JSON. Built from the SAME projection as the
+    /// <c>done.results</c> array and in the same order, so <see cref="Rank"/> is the position on
+    /// screen, the stored rank and the exposure rank — one number, three readers, no chance of
+    /// them disagreeing.
+    /// </summary>
+    /// <param name="TitleId">The title on the card.</param>
+    /// <param name="TmdbId">Denormalised no-repeat key; null for a title with no TMDB id.</param>
+    /// <param name="Rank">Index in <c>done.results</c>, zero-based.</param>
+    /// <param name="OutsideRequest">The closest-but-outside reserve flag, as it was on the wire.</param>
+    /// <param name="Similarity">Cosine to the ranking vector, rounded as rendered.</param>
+    /// <param name="PredictedRating">The prediction the card carried, at the column's 2 dp.</param>
+    /// <param name="LlmFit">The re-rank fit, at the column's 3 dp.</param>
+    /// <param name="Blend">The server's ranking value — the number <see cref="Rank"/> came from.</param>
+    /// <param name="Why">The why-line rendered, verbatim.</param>
+    /// <param name="WhySource">How that sentence was produced — an <c>ExposureWhySource</c> value.</param>
+    public readonly record struct TurnCard(
+        Guid TitleId,
+        long? TmdbId,
+        int Rank,
+        bool OutsideRequest,
+        double? Similarity,
+        decimal? PredictedRating,
+        decimal? LlmFit,
+        decimal Blend,
+        string? Why,
+        string WhySource);
+
+    /// <summary>
+    /// What the turn was, handed back to whoever has a place to put it.
+    ///
+    /// <para>The service streams the answer and returns this; the ENDPOINT owns persistence,
+    /// because only it knows which row this turn is and it must write on a scope that outlives the
+    /// request's own tracked context. Nothing here is read back by the pipeline — a turn that is
+    /// never stored behaves identically — so a persistence failure can never cost the user the
+    /// answer they are already looking at.</para>
+    /// </summary>
+    /// <param name="AssistantText">The agent's reply, exactly as emitted.</param>
+    /// <param name="Reason">The <c>done.reason</c> clause list, exactly as emitted.</param>
+    /// <param name="Failed">Whether the terminal frame admitted a crash.</param>
+    /// <param name="FailureCode">The exception type or pipeline code behind <paramref name="Failed"/>.</param>
+    /// <param name="Relaxation">How many levels discovery widened through.</param>
+    /// <param name="FloorRelaxed">Whether the account's rating floor was relaxed for this turn.</param>
+    /// <param name="DiscoveredCount">How many candidates discovery returned, before eligibility.</param>
+    /// <param name="IntentJson">The interpreted intent, serialised.</param>
+    /// <param name="ModelArtifactId">The artifact behind the predictions on these cards.</param>
+    /// <param name="ModelId">The chat model that produced the reply.</param>
+    /// <param name="Cards">The answer, in the order it was returned.</param>
+    public sealed record TurnOutcome(
+        string? AssistantText,
+        string? Reason,
+        bool Failed,
+        string? FailureCode,
+        int? Relaxation,
+        bool FloorRelaxed,
+        int? DiscoveredCount,
+        string? IntentJson,
+        Guid? ModelArtifactId,
+        string? ModelId,
+        IReadOnlyList<TurnCard> Cards)
+    {
+        /// <summary>A turn that answered without cards — an empty query, a fallback, a filmography.</summary>
+        public static TurnOutcome Answered(string? assistantText, string? reason, IReadOnlyList<TurnCard>? cards = null) =>
+            new(assistantText, reason, Failed: false, FailureCode: null, Relaxation: null, FloorRelaxed: false,
+                DiscoveredCount: null, IntentJson: null, ModelArtifactId: null, ModelId: null, cards ?? []);
+
+        /// <summary>A turn that fell over. <paramref name="failureCode"/> is what the row records.</summary>
+        public static TurnOutcome Crashed(string? assistantText, string reason, string failureCode) =>
+            new(assistantText, reason, Failed: true, failureCode, Relaxation: null, FloorRelaxed: false,
+                DiscoveredCount: null, IntentJson: null, ModelArtifactId: null, ModelId: null, []);
+    }
+
+    /// <summary>
     /// Single-turn convenience overload (no conversation history / shown set) — a query EXPANDED
     /// rather than a conversation continued, and billed as <c>rerank-expand</c> for that reason.
     /// The two shapes cost differently and are wanted separately on the ledger: one is a person
@@ -132,7 +204,7 @@ public sealed class LiveSearchExpansionService(
     /// ENTITLEMENT decision is not made here: the endpoint resolves it from the tier and the query
     /// string, because that is where the account row and the request live.</para>
     /// </summary>
-    public Task StreamAsync(
+    public Task<TurnOutcome> StreamAsync(
         string message,
         IReadOnlyList<ChatTurn> history,
         IReadOnlyList<long> shownTmdbIds,
@@ -140,8 +212,10 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyList<MediaType> mediaFilter,
         Emit emit,
         CancellationToken ct,
-        bool debug = false) =>
-        StreamAsync(message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct, debug);
+        bool debug = false,
+        Guid? sourceTurnId = null) =>
+        StreamAsync(
+            message, history, shownTmdbIds, region, mediaFilter, ApiUsagePurpose.RerankAsk, emit, ct, debug, sourceTurnId);
 
     /// <summary>
     /// Runs a conversational turn end-to-end, emitting the SSE event stream. Never throws for an
@@ -153,7 +227,7 @@ public sealed class LiveSearchExpansionService(
     /// budget because a 3 a.m. feed build spent it is precisely what the ceiling exists to
     /// prevent.</para>
     /// </summary>
-    public async Task StreamAsync(
+    public async Task<TurnOutcome> StreamAsync(
         string message,
         IReadOnlyList<ChatTurn> history,
         IReadOnlyList<long> shownTmdbIds,
@@ -162,7 +236,8 @@ public sealed class LiveSearchExpansionService(
         string rerankPurpose,
         Emit emit,
         CancellationToken ct,
-        bool debug = false)
+        bool debug = false,
+        Guid? sourceTurnId = null)
     {
         var accountId = accountContext.AccountId
             ?? throw new InvalidOperationException("Live search requires an account.");
@@ -170,13 +245,18 @@ public sealed class LiveSearchExpansionService(
         if (trimmed.Length == 0)
         {
             await emit("done", new { results = Array.Empty<object>(), reason = "empty query" });
-            return;
+            return TurnOutcome.Answered(assistantText: null, "empty query");
         }
 
         // Where this turn's seconds went. Stages accumulate, so discovery running three times at
         // three relaxation levels reports one total rather than three entries, and a stage that
         // never ran is absent rather than zero.
         var timings = new AskStageTimings();
+
+        // Held outside the try so a crash after the reply still records what the user was told:
+        // a failed turn that shows the question and the reply is a recoverable record; one that
+        // shows neither is an orphan.
+        string? assistantText = null;
 
         try
         {
@@ -190,14 +270,15 @@ public sealed class LiveSearchExpansionService(
             // done, not a checklist to fill in.
             if (!embeddings.IsAvailable)
             {
+                TurnOutcome fallback;
                 using (timings.Stage(AskStageTimings.Emit))
                 {
-                    await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
+                    fallback = await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
                 }
 
                 logger.LogInformation(
                     "Ask Reel '{Query}': lexical fallback (no embeddings provider). {StageTimings}", trimmed, timings);
-                return;
+                return fallback;
             }
 
             var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
@@ -235,6 +316,7 @@ public sealed class LiveSearchExpansionService(
                 agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct, standingSummary);
             }
 
+            assistantText = agentReply.Reply;
             await emit("assistant-message", new { text = agentReply.Reply });
 
             // A named-person query ("all movies Nolan directs") is a lookup: it relaxes the
@@ -370,15 +452,17 @@ public sealed class LiveSearchExpansionService(
                     "Ask Reel '{Query}': nothing survived discovery. {EligiblePool} titles are eligible for this account overall.",
                     trimmed, eligiblePoolSize);
                 await emit("done", new { results = Array.Empty<object>(), reason = AskReelReason.Empty });
-                return;
+                // A completed turn with no cards, not a failure: the pipeline ran and the honest
+                // answer is nothing. The row records the reason so a reload says the same thing.
+                return TurnOutcome.Answered(assistantText, AskReelReason.Empty);
             }
 
             // Person queries are a filmography, not a vibe match: order chronologically, badge what
             // you've seen, score for the predicted-rating badge — but never re-order or cull by fit.
             if (isPersonQuery)
             {
-                await StreamFilmographyAsync(accountId, agentReply.Intent, eligible, taste, now, timings, emit, ct);
-                return;
+                return await StreamFilmographyAsync(
+                    accountId, assistantText, agentReply.Intent, eligible, taste, now, timings, emit, ct);
             }
 
             // ── Embed eligible candidates that lack a vector, then cosine pre-rank ───────────
@@ -589,6 +673,39 @@ public sealed class LiveSearchExpansionService(
                     outsideRequest: true, blend: x.Blend)))
                 .ToList();
 
+            // The SAME projection as `final`, as rows: same sources, same concatenation, same order,
+            // so the stored rank IS the index in `done.results`. Built here rather than derived from
+            // `final` afterwards because `final` is anonymous JSON — re-reading it back into rows
+            // would be a second definition of the answer, and two definitions drift.
+            var storedCards = new List<TurnCard>(blended.Count + blendedOutside.Count);
+            foreach (var x in blended)
+            {
+                storedCards.Add(new TurnCard(
+                    x.Title.Id, x.Title.TmdbId, storedCards.Count, OutsideRequest: false,
+                    x.Sim is { } sim ? Math.Round(sim, 2) : null,
+                    x.Predicted is { } p ? Math.Round(p, 2, MidpointRounding.AwayFromZero) : null,
+                    x.Fit is { } fit ? Math.Round((decimal)fit.Fit, 3, MidpointRounding.AwayFromZero) : null,
+                    Math.Round((decimal)x.Blend, 4, MidpointRounding.AwayFromZero),
+                    x.Fit?.Why,
+                    // Same rule the exposure row uses, so a card and the exposure describing it can
+                    // never disagree about where its sentence came from.
+                    x.Fit?.Why is { Length: > 0 } ? ExposureWhySource.Llm : ExposureWhySource.Templater));
+            }
+
+            foreach (var x in blendedOutside)
+            {
+                storedCards.Add(new TurnCard(
+                    x.Title.Id, x.Title.TmdbId, storedCards.Count, OutsideRequest: true,
+                    x.Sim is { } sim ? Math.Round(sim, 2) : null,
+                    x.Predicted is { } p ? Math.Round(p, 2, MidpointRounding.AwayFromZero) : null,
+                    LlmFit: null,
+                    Math.Round((decimal)x.Blend, 4, MidpointRounding.AwayFromZero),
+                    // The deterministic caption, not an LLM's: an outside card never reaches the
+                    // rerank model, and its why-line states which exclusion it trips.
+                    OutsideWhy(NegationMatches(x.Title, intent)),
+                    ExposureWhySource.Templater));
+            }
+
             // The tray. A card the floor removed is still a card the pipeline chose, and the user is
             // owed the chance to look at it — a silent drop and a bug are indistinguishable from the
             // outside. Rendered under a fence, never mixed into the picks.
@@ -600,6 +717,12 @@ public sealed class LiveSearchExpansionService(
             blendStage.Dispose();
 
             using var emitStage = timings.Stage(AskStageTimings.Emit);
+
+            // Named rather than inlined, because the row records the same sentence the user was
+            // shown. A transcript that paraphrases the footer is a transcript that can be wrong.
+            var reason = AskReelReason.Build(
+                blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
+                widened: relaxation > 0, floorRelaxed, floor);
 
             // Report what was RETURNED, not what was pulled. The old wording was derived purely
             // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —
@@ -614,9 +737,7 @@ public sealed class LiveSearchExpansionService(
                 kept = final.Count,
                 droppedByFloor = belowFloor.Count,
                 belowFloor,
-                reason = AskReelReason.Build(
-                    blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
-                    widened: relaxation > 0, floorRelaxed, floor),
+                reason,
                 // Founder-only, and only when asked for: the per-stage millisecond breakdown of this
                 // turn. Always PRESENT as a key so the client has one shape to render, null when the
                 // caller is not entitled to it. `emit` is absent here and only here — a payload
@@ -670,7 +791,7 @@ public sealed class LiveSearchExpansionService(
 
                 await exposures.RecordAsync(
                     accountId, ExposureSurface.AskReel, feedSnapshotId: null, activeArtifactId,
-                    DateTime.UtcNow, loggable, ct);
+                    DateTime.UtcNow, loggable, ct, sourceTurnId);
             }
 
             // Logs `final` too: the count the user actually sees is the one worth alerting on, and
@@ -683,6 +804,23 @@ public sealed class LiveSearchExpansionService(
                 + "{StageTimings}",
                 trimmed, discovered.Count, relaxation, eligible.Count, eligiblePoolSize, sliceIds.Count,
                 fitById.Count, final.Count, timings);
+
+            return new TurnOutcome(
+                assistantText,
+                reason,
+                Failed: false,
+                FailureCode: null,
+                relaxation,
+                floorRelaxed,
+                discovered.Count,
+                // System.Text.Json writes numbers with the invariant format regardless of the
+                // ambient culture, which is what makes this safe to store and re-read on a machine
+                // set to de-DE — the one place in this file where the culture rule is satisfied by
+                // the serializer rather than by a FormattableString.
+                System.Text.Json.JsonSerializer.Serialize(intent),
+                artifactId,
+                agent.ModelId,
+                storedCards);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -690,7 +828,9 @@ public sealed class LiveSearchExpansionService(
             // `failed` is what lets the client tell a crash from an honest empty answer. Without it
             // the only signal was the wording of `reason`, so the UI string-matched "snag" — and a
             // genuine no-match and a server exception rendered two contradictory messages at once.
-            await emit("done", new { results = Array.Empty<object>(), reason = "search hit a snag — please try again", failed = true });
+            const string reason = "search hit a snag — please try again";
+            await emit("done", new { results = Array.Empty<object>(), reason, failed = true });
+            return TurnOutcome.Crashed(assistantText, reason, ex.GetType().Name);
         }
     }
 
@@ -1312,8 +1452,8 @@ public sealed class LiveSearchExpansionService(
     /// and badged, the top slice scored for the predicted-rating badge — but never re-ordered or
     /// culled by LLM fit, because the user asked for the WHOLE list, not a recommendation.
     /// </summary>
-    private async Task StreamFilmographyAsync(
-        Guid accountId, SearchIntent intent, List<Title> eligible,
+    private async Task<TurnOutcome> StreamFilmographyAsync(
+        Guid accountId, string? assistantText, SearchIntent intent, List<Title> eligible,
         FeatureVectorBuilder.TasteState taste, DateTime now, AskStageTimings timings, Emit emit, CancellationToken ct)
     {
         var ordered = eligible
@@ -1360,6 +1500,17 @@ public sealed class LiveSearchExpansionService(
         logger.LogInformation(
             "Ask Reel filmography: {Count} titles for {Person}. {StageTimings}",
             ordered.Count, who?.Name ?? "?", timings);
+
+        // Chronological, not ranked — so the stored rank is the position in the filmography and
+        // there is no blend to record. Replaying it re-establishes the same list in the same order.
+        var stored = ordered
+            .Select((t, index) => new TurnCard(
+                t.Id, t.TmdbId, index, OutsideRequest: false,
+                Similarity: null,
+                scores.TryGetValue(t.Id, out var predicted) ? Math.Round(predicted, 2, MidpointRounding.AwayFromZero) : null,
+                LlmFit: null, Blend: 0m, Why: null, ExposureWhySource.Generic))
+            .ToList();
+        return TurnOutcome.Answered(assistantText, reason, stored);
     }
 
     /// <summary>The subset of the given title ids the account has watched or rated (for "seen" badges).</summary>
@@ -1641,18 +1792,29 @@ public sealed class LiveSearchExpansionService(
             .ToListAsync(ct);
     }
 
-    private async Task StreamLexicalFallbackAsync(Guid accountId, string query, Emit emit, CancellationToken ct)
+    private async Task<TurnOutcome> StreamLexicalFallbackAsync(Guid accountId, string query, Emit emit, CancellationToken ct)
     {
         var hits = await lexical.SearchAsync(accountId, query, ReturnCount, ct);
         var cards = new List<object>();
+        var stored = new List<TurnCard>();
         foreach (var hit in hits)
         {
-            var card = Card(hit.Title, similarity: Math.Round(hit.MatchScore, 3), predicted: null);
+            var similarity = Math.Round(hit.MatchScore, 3);
+            var card = Card(hit.Title, similarity: similarity, predicted: null);
             cards.Add(card);
+            // Stored in the SAME order as the wire, so a lexical turn replays as itself rather
+            // than as an empty transcript. It has no blend — nothing blended it — and zero is the
+            // honest value for a rank that came from the match score alone.
+            stored.Add(new TurnCard(
+                hit.Title.Id, hit.Title.TmdbId, stored.Count, OutsideRequest: false,
+                similarity, PredictedRating: null, LlmFit: null, Blend: 0m,
+                Why: null, ExposureWhySource.Generic));
             await emit("candidate", card);
         }
 
-        await emit("done", new { results = cards, reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords" });
+        var reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords";
+        await emit("done", new { results = cards, reason });
+        return TurnOutcome.Answered(assistantText: null, reason, stored);
     }
 
     /// <summary>
