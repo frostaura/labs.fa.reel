@@ -24,6 +24,15 @@ public enum JobKind
     /// already time-boxed at 20s soft / 60s hard and would turn into a timeout.
     /// </summary>
     PersonaliseTitles,
+
+    /// <summary>
+    /// The one-off catalogue bulk seed: walks TMDB discover by <c>vote_count.desc</c>, partitioned
+    /// by release year, upserting summary rows for the whole modern high-signal corpus. Global
+    /// (null account) — the rows belong to every tenant — and priority 4, BELOW everything else,
+    /// because it is supply acquisition and nothing waits on it. Resumable from
+    /// <see cref="SyncJob.CursorJson"/> and re-enqueues itself while the plan is unfinished.
+    /// </summary>
+    SeedCatalog,
 }
 
 public enum JobStatus

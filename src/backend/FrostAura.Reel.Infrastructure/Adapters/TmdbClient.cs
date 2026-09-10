@@ -78,6 +78,35 @@ public class TmdbClient(
         return await GetListAsync(path + query, movies, RatePriority.Reconcile, ct);
     }
 
+    public async Task<TmdbDiscoverPage> DiscoverSeedPageAsync(
+        bool movies, int year, int minVoteCount, int page, CancellationToken ct = default)
+    {
+        var path = movies ? "discover/movie" : "discover/tv";
+        var dateField = movies ? "primary_release_date" : "first_air_date";
+
+        // Every number and date here is written invariant, and this is one of the sites where a
+        // comma decimal separator or a Hijri year would not fail — TMDB IGNORES a parameter it
+        // cannot parse and returns a valid, unfiltered, unpartitioned page. That page would sail
+        // past the 500-page wall silently and the walk would seed a different corpus than the plan
+        // describes. Composed from ints via an invariant interpolated string for exactly that reason.
+        var query = string.Create(CultureInfo.InvariantCulture, $"?sort_by=vote_count.desc&include_adult=false&page={page}")
+            + string.Create(CultureInfo.InvariantCulture, $"&vote_count.gte={minVoteCount}")
+            + string.Create(CultureInfo.InvariantCulture, $"&{dateField}.gte={year:0000}-01-01")
+            + string.Create(CultureInfo.InvariantCulture, $"&{dateField}.lte={year:0000}-12-31");
+
+        // Backfill: the lowest lane there is, so a catalogue-wide walk can never make a live search
+        // or a feed build wait on the shared 40/sec gate.
+        using var response = await SendAsync(path + query, RatePriority.Backfill, ct, ApiUsagePurpose.Seed);
+        response.EnsureSuccessStatusCode();
+        var dto = await response.Content.ReadFromJsonAsync<ListDto>(JsonOptions, ct);
+
+        return new TmdbDiscoverPage(
+            Project(dto?.Results, movies),
+            dto?.Page > 0 ? dto.Page : page,
+            dto?.TotalPages ?? 0,
+            dto?.TotalResults ?? 0);
+    }
+
     public Task<IReadOnlyList<TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default) =>
         GetListAsync(movies ? "trending/movie/week" : "trending/tv/week", movies, RatePriority.Reconcile, ct);
 
@@ -323,8 +352,11 @@ public class TmdbClient(
         using var response = await SendAsync(path, priority, ct);
         response.EnsureSuccessStatusCode();
         var dto = await response.Content.ReadFromJsonAsync<ListDto>(JsonOptions, ct);
+        return Project(dto?.Results, movies);
+    }
 
-        return (dto?.Results ?? [])
+    private static IReadOnlyList<TmdbListItem> Project(ListResultDto[]? results, bool movies) =>
+        (results ?? [])
             .Where(r => r.Id > 0 && (r.Title ?? r.Name) is not null)
             .Select(r => new TmdbListItem(
                 r.Id,
@@ -340,7 +372,6 @@ public class TmdbClient(
                 r.GenreIds ?? [],
                 r.OriginalLanguage))
             .ToList();
-    }
 
     /// <summary>
     /// Sends an authenticated GET, retrying HTTP 429 with bounded exponential backoff and honouring
@@ -350,14 +381,18 @@ public class TmdbClient(
     /// to EnsureSuccessStatusCode and surface as a hard job failure. The caller owns the response.
     /// GETs only — no non-idempotent request is ever replayed.
     /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(string path, RatePriority priority, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendAsync(
+        string path, RatePriority priority, CancellationToken ct, string? purpose = null)
     {
         for (var attempt = 0; ; attempt++)
         {
             // Re-acquired per attempt: a retry is a fresh call against both the rate gate and the
             // daily Fair-Use ledger.
             await rateGate.AcquireAsync(priority, ct);
-            usageRecorder.Record(ApiProvider.Tmdb);
+            // purpose is null for every TMDB call but the catalogue bulk seed, which needs its own
+            // ledger line so its spend is separable from the feed's. A null purpose keeps the
+            // pre-existing (Tmdb, day, null, null, null) bucket exactly as it was.
+            usageRecorder.Record(ApiProvider.Tmdb, purpose);
 
             using var request = AuthGet(path);
             var response = await httpClient.SendAsync(request, ct);
@@ -433,7 +468,10 @@ public class TmdbClient(
         [property: JsonPropertyName("genre_ids")] int[]? GenreIds,
         string? Job);
 
-    private sealed record ListDto(ListResultDto[]? Results);
+    // Page/TotalPages/TotalResults default to 0 so every existing single-page caller is unchanged;
+    // the snake_case naming policy maps them to TMDB's own total_pages / total_results.
+    private sealed record ListDto(
+        ListResultDto[]? Results, int Page = 0, int TotalPages = 0, int TotalResults = 0);
 
     private sealed record ListResultDto(
         long Id,

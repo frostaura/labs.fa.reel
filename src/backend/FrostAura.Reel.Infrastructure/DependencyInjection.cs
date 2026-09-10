@@ -201,10 +201,19 @@ public static class DependencyInjection
         services.AddScoped<IJobHandler, BuildDigestJobHandler>();
         services.AddScoped<IJobHandler, BuildTasteNarrativeJobHandler>();
         services.AddScoped<IJobHandler, PersonaliseTitlesJobHandler>();
+        services.AddScoped<IJobHandler, SeedCatalogJobHandler>();
+
+        // The catalogue's two daily ceilings. Scoped because both read the ledger through the
+        // request/job DbContext; the enrichment one also reads the recorder's un-flushed counters,
+        // which is why IPendingApiUsage is a singleton resolved into it rather than the reverse.
+        services.AddScoped<Application.Jobs.CatalogHydrationBudget>();
+        services.AddScoped<Application.Jobs.CatalogEnrichmentBudget>();
+        services.AddScoped<Application.Jobs.CatalogSeedProgressQuery>();
         services.AddHostedService<JobRunnerService>();
         services.AddHostedService<TraktDeltaPollService>();
         services.AddHostedService<NightlyReconcileService>();
         services.AddHostedService<CatalogGrowthService>();
+        services.AddHostedService<CatalogFollowThroughService>();
         services.AddHostedService<TitleLanguageBackfillService>();
         services.AddHostedService<TokenRefreshService>();
         services.AddHostedService<TraktOutboxDispatcherService>();

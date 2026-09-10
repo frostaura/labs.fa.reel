@@ -75,6 +75,27 @@ public sealed record TmdbDiscoverOptions(
     RatePriority Priority = RatePriority.Interactive);
 
 /// <summary>
+/// One discover page WITH its pagination envelope — what a bulk walk needs and what
+/// <c>DiscoverAsync</c> throws away.
+///
+/// <para>
+/// <paramref name="TotalPages"/> is TMDB's own count for the query and is the only honest way to
+/// know a partition is exhausted: paging until an empty page costs one wasted call per partition,
+/// and paging to a fixed depth either stops short or hammers the 500-page wall. TMDB reports
+/// <c>total_pages</c> for the whole result set even when it will only SERVE 500 of them, so a
+/// caller must clamp it itself — see <c>CatalogSeedPlan.MaxDiscoverPage</c>.
+/// </para>
+///
+/// <para>
+/// <paramref name="TotalResults"/> is what makes the plan measurable before it is run: one call per
+/// partition reports exactly how many titles that partition holds, which is how the seed's size is
+/// estimated from TMDB's numbers rather than guessed.
+/// </para>
+/// </summary>
+public sealed record TmdbDiscoverPage(
+    IReadOnlyList<TmdbListItem> Items, int Page, int TotalPages, int TotalResults);
+
+/// <summary>
 /// TMDB genre-id ↔ Trakt-style slug mapping (movie and TV id spaces differ). Slugs align with
 /// the ingest vocabulary so genre features and filters treat discovery candidates identically.
 /// </summary>

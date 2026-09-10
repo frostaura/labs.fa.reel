@@ -55,6 +55,17 @@ services:
       SYNC_HOT_MINUTES: ${SYNC_HOT_MINUTES:-5}
       RETRAIN_MIN_NEW_RATINGS: ${RETRAIN_MIN_NEW_RATINGS:-10}
       GEOIP_DEFAULT_REGION: ${GEOIP_DEFAULT_REGION:-US}
+      # Catalogue bulk seed (POST /api/dev/seed-catalog) and the daily ceilings that complete it.
+      # The two vote floors decide how big the seeded corpus is: measured 2026-09-10 the defaults
+      # yield ~9,300 titles, and 50/50 yields ~34,800. EXTRACT_DAILY_TOKENS is the only one that
+      # costs real money — 1.5M tokens is ~$0.23/day at gpt-5.4-mini input pricing, ~1,360 titles.
+      SEED_MOVIE_MIN_VOTES: ${SEED_MOVIE_MIN_VOTES:-500}
+      SEED_SHOW_MIN_VOTES: ${SEED_SHOW_MIN_VOTES:-200}
+      SEED_PAGES_PER_RUN: ${SEED_PAGES_PER_RUN:-400}
+      SEED_MAX_TITLES: ${SEED_MAX_TITLES:-60000}
+      HYDRATE_MAX_TITLES_PER_DAY: ${HYDRATE_MAX_TITLES_PER_DAY:-1500}
+      EXTRACT_DAILY_TOKENS: ${EXTRACT_DAILY_TOKENS:-1500000}
+      EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://reel.frostaura.net}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://reel.frostaura.net}
     healthcheck:

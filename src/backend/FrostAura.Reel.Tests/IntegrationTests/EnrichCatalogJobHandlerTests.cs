@@ -404,8 +404,11 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         }
 
         await using var db = fixture.CreateContext(scoped);
+        var configuration = Config(cap);
         var handler = new EnrichCatalogJobHandler(
-            db, embeddings, extractor, new NoopEventHub(), Config(cap), NullLogger<EnrichCatalogJobHandler>.Instance);
+            db, embeddings, extractor, new NoopEventHub(), configuration,
+            new CatalogEnrichmentBudget(db, configuration),
+            NullLogger<EnrichCatalogJobHandler>.Instance);
         var job = new SyncJob
         {
             Id = Guid.NewGuid(),
@@ -508,16 +511,21 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     }
 
     /// <summary>
-    /// A hydrated title belonging to no account, with an id that sorts FIRST in Postgres's uuid
-    /// order. The global sweep has no priority tiers and falls back to id order, so this is how a
-    /// test over a shared catalogue can name the row a capped global run will pick — without a
-    /// large cap that would sweep every other class's titles as a side effect.
+    /// A hydrated title belonging to no account, carrying a vote count no real TMDB row could reach.
+    /// <para>
+    /// The global sweep has no account to prioritise for and takes the catalogue in SUPPLY order —
+    /// highest <c>TmdbVoteCount</c>, then recency — so an absurd vote count is how a test over a
+    /// shared catalogue names the row a capped global run will pick. It used to be an id sorting
+    /// first in Postgres's uuid order, which was the same trick against the ordering the sweep used
+    /// before the catalogue bulk seed made a global backlog worth prioritising.
+    /// </para>
     /// </summary>
     private async Task<Guid> SeedOrphanTitleAsync()
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = NewHydratedTitle("Orphan Title");
-        title.Id = new Guid($"00000000-0000-0000-0000-{Guid.NewGuid():N}"[..36]);
+        title.TmdbVoteCount = 8_000_000;
+        title.Year = 2999;
         db.Add(title);
         await db.SaveChangesAsync();
         return title.Id;
