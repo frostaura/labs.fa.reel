@@ -73,45 +73,35 @@ namespace FrostAura.Reel.Application.Ml;
 /// pre-existing genre index is unmoved relative to the start of the block.</item>
 /// </list>
 /// </item>
-/// <item><b>6</b> — the WATCHED-HISTORY bump, and a pure append (no reorder). Seven scalars, all on
-/// the end of the scalar block. Until v6 every user-side signal in this vector was built from RATED
-/// titles alone: on the founder's live account that is ~2,045 of 3,354 watched titles, so 1,363
-/// titles he chose, finished and never scored — and 608 he watched more than once, 86 of them
-/// unrated — contributed nothing to any feature. Watching something is weaker evidence than rating
-/// it, which is an argument for weighting it low, not for discarding it.
-/// <list type="number">
-/// <item><b><c>simWatchedCentroid</c> / <c>hasWatchedCentroid</c>.</b> Cosine to the centroid of the
-/// titles the account had WATCHED but not RATED as of the split point. Deliberately its own
-/// centroid rather than a contribution to <c>simLovedCentroid</c>: "I finished it" and "I rated it
-/// 9" are different claims, and averaging them would let the weaker one move the stronger one's
-/// number.</item>
-/// <item><b><c>simRewatchCentroid</c> / <c>hasRewatchCentroid</c>.</b> Cosine to the plays-weighted
-/// centroid of everything watched at least twice, rated or not, weighted <c>min(plays, 3)</c>. A
-/// rewatch is the strongest un-labelled signal a viewing history carries, and it is the one signal
-/// here that is a BEHAVIOUR rather than an opinion — which is why it is a weight and never a
-/// pseudo-rating. Pseudo-labelling rewatches into the training matrix was considered and rejected:
-/// it invents a label, changes what the harness is estimating, and breaks continuity with
-/// iterations 13–16. The same information reaches the model losslessly through this scalar.</item>
-/// <item><b><c>watchedGenreShare</c>.</b> The genre half of the same signal, for the ~8 titles in
-/// every hundred that carry no embedding at all.</item>
-/// </list>
-/// <para><b>Two more were designed, built, measured and dropped, and the numbers are here so nobody
-/// re-adds them blind.</b> <c>nearestRatedNeighbourRating</c> (a k = 3 distance-weighted kNN over the
-/// account's own rated titles) and <c>nearestRatedNeighbourSim</c> (the cosine to the nearest of
-/// them) were written in full, leave-one-out'd by title id, and pruned by the two nearest taste
-/// clusters recomputed as-of. They were dropped on a PRE-REGISTERED cost gate, not on taste. A full
-/// <c>EvalHarness</c> run over a copy of the founder's live database, warm: <b>2.8–2.9 s at v5</b>,
-/// <b>3.8–4.2 s with the five scalars above</b> (1.3–1.5×), <b>12.6–12.8 s with the kNN pair added</b>
-/// (4.4–5.5× depending on machine load) — against a stated ceiling of 2×. The cost is not the scan
-/// alone: building the search index (every rated embedding, L2-normalised, plus a k-means pass)
-/// moved <c>BuildTasteStateAsync</c> from ~100 ms to ~1,036 ms on its own, and the harness pays that
-/// five times per run. Cluster pruning bought roughly 4×, which is a real improvement over a naive
-/// scan and nowhere near enough.
-/// <para>The claim they carried is real and unresolved — "a 9 at cosine 0.82" and "a 9 at cosine
-/// 0.31" are the same number without the confidence half, which is the v5 <c>knownPeopleFraction</c>
-/// lesson — so if they return it should be behind a materialised, incrementally-maintained neighbour
-/// index rather than a per-taste-state rebuild, and on their own bump with their own measurement.
-/// Re-adding them inside the recompute-per-build design would repeat this measurement.</para></para>
+/// <item><b>6</b> — the WATCHED-HISTORY bump. <b>Built, measured and REVERTED. Version 6 is burned:
+/// the next bump is 7.</b> It appended five scalars (132 → 137) — <c>simWatchedCentroid</c> /
+/// <c>hasWatchedCentroid</c> (cosine to the centroid of titles WATCHED but not RATED as-of),
+/// <c>simRewatchCentroid</c> / <c>hasRewatchCentroid</c> (<c>min(plays, 3)</c>-weighted centroid of
+/// <c>Plays &gt;= 2</c> titles, rated or not) and <c>watchedGenreShare</c> — on the argument that
+/// every user-side feature up to v5 reads RATED titles alone, so on the founder's account 1,363
+/// watched-and-never-scored titles fed nothing.
+/// <para><b>Why it is not here.</b> Iteration 17 was run under a rule pre-registered before the
+/// numbers existed (recorded in <c>memory/decisions.md</c>): ship only if the mean relative NDCG
+/// lift improves on iteration 16 <i>and</i> <c>NdcgLiftCiLow</c> does not move further negative.
+/// Iteration 17 at v6 measured NDCG@10 <b>0.053</b> against a popularity baseline of 0.198, CI
+/// <b>[−0.356, +0.026]</b>, Spearman 0.116, holdout 209. Iteration 16 at v5 measured <b>0.056</b>
+/// against the same 0.198 baseline, CI [−0.43, +0.08]. No lift; the bump was reverted per the rule
+/// rather than renegotiated once the number was on screen.</para>
+/// <para><b>What the revert does NOT establish.</b> It does not say these features carry no signal.
+/// The instrument is noise-dominated at this holdout size — two v5 runs over identical data returned
+/// 0.000 and 0.056 — so an effect the size of the one being looked for is not resolvable here. The
+/// honest reading is "unmeasurable with a 209-row holdout", not "absent". Re-proposing this idea is
+/// legitimate; re-proposing it against <i>this</i> instrument is not, and it would land as v7 with a
+/// wider vector, never by reusing 6.</para>
+/// <para>Two further scalars scoped into the same bump — <c>nearestRatedNeighbourRating</c> and
+/// <c>nearestRatedNeighbourSim</c>, a k = 3 distance-weighted kNN over the account's own rated
+/// titles — were written in full and dropped BEFORE the iteration ran, on a separate pre-registered
+/// cost gate of 2×. A warm <c>EvalHarness</c> run over a copy of the live database: <b>2.8–2.9 s at
+/// v5</b>, <b>3.8–4.2 s with the five scalars above</b> (1.3–1.5×), <b>12.6–12.8 s with the kNN pair
+/// added</b> (4.4–5.5×). The cost was not the scan — building the search index alone moved
+/// <c>BuildTasteStateAsync</c> from ~100 ms to ~1,036 ms, and the harness pays that five times a
+/// run. If they ever return it is behind a materialised, incrementally-maintained neighbour index,
+/// on their own bump with their own measurement, never inside the per-build recompute.</para>
 /// </item>
 /// </list>
 /// A version bump makes every stored artifact unreadable by construction — the vector width and
@@ -121,7 +111,13 @@ namespace FrostAura.Reel.Application.Ml;
 /// </remarks>
 public static class FeatureSchema
 {
-    public const int Version = 6;
+    /// <summary>
+    /// The live schema version. <b>The next bump is 7, not 6</b> — 6 was built, measured against the
+    /// iteration-17 pre-registered rule and reverted; the version history above records what it held
+    /// and why it went. Re-using a burned number would make two different 137-wide vectors answer to
+    /// the same integer in stored <c>ModelArtifact.FeatureSchemaJson</c> rows.
+    /// </summary>
+    public const int Version = 5;
 
     /// <summary>
     /// Neutral fill-ins for crowd data the catalogue simply does not have. Half the catalogue has no
@@ -251,18 +247,6 @@ public static class FeatureSchema
         "knownPeopleFraction",    // distinct credited people the user has rated / distinct credited people; 0 with no credits
         "knownDirectorOrWriter",  // 1 when at least one director or writer credit resolves to a rated person
         "isUnscripted",           // aggregate of the five unscripted genre slots (reality/soap/talk-show/news/game-show)
-        // Watched history (schema v6). Appended, same rule as every bump since v2. Everything above
-        // this line is derived from RATED titles; these five are the first features in this vector
-        // that read a watch history at all. Each is as-of and leave-one-out'd exactly like its rated
-        // counterpart — see FeatureVectorBuilder for the pool definitions and the subtraction. The
-        // two kNN scalars this bump was scoped to also carry were built and dropped on a measured
-        // cost gate; the numbers are in the version history above, so do not re-add them from the
-        // plan without reading it.
-        "simWatchedCentroid",     // cosine to the centroid of titles WATCHED but not RATED as-of
-        "hasWatchedCentroid",     // 1 when that centroid exists (the as-of pool has embedded members)
-        "simRewatchCentroid",     // cosine to the min(plays,3)-weighted centroid of Plays >= 2 titles, as-of
-        "hasRewatchCentroid",     // 1 when that centroid exists
-        "watchedGenreShare",      // share of the watched-unrated pool carrying any of this title's genres
     ];
 
     /// <summary>

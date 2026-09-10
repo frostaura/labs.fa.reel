@@ -51,17 +51,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
     /// </summary>
     public const int RecentCentroidWindowDays = 365;
 
-    /// <summary>Plays that make a title a REWATCH — behaviour worth a centroid of its own (schema v6).</summary>
-    public const int RewatchPlays = 2;
-
-    /// <summary>
-    /// Plays beyond this add no further weight to <see cref="TasteState.RewatchCentroid"/>. The same
-    /// constant, for the same reason, as <see cref="TasteClusterer.MaxCountedPlays"/>: a rewatch is
-    /// evidence, a marathon is not proportionally more evidence, and an uncapped play count would let
-    /// one comfort show dominate a centroid meant to describe a whole history.
-    /// </summary>
-    public const int MaxCountedPlays = 3;
-
     /// <summary>The user's own label on a title, plus the crowd rating it was paired against.</summary>
     public readonly record struct SelfRating(short Rating, DateTime RatedAt, decimal? GlobalRating);
 
@@ -81,22 +70,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
         IReadOnlySet<Guid> ExplicitPersonIds,
         int ContrarianCount,
         decimal ContrarianSum,
-        IReadOnlyDictionary<string, (int Count, decimal Sum)> GenreContrarian,
-        // ── Watched-history pools (schema v6) ──────────────────────────────────────────────
-        // The same four-part shape as LovedTitleIds / LovedEmbeddingCount above, once per new
-        // centroid: WHO is in the pool (so a member can be recognised) and HOW MUCH of it moved the
-        // centroid (so the member's contribution can be arithmetic rather than a rebuild).
-        //
-        // The rewatch half carries a dictionary where the loved half carries a count, and that is
-        // not an inconsistency: LovedCentroid is an unweighted mean, so removing a member is
-        // (mean·n − own) / (n − 1) and n is all the arithmetic needs. RewatchCentroid is weighted by
-        // min(plays, 3), so removing a member is (mean·W − wᵢ·own) / (W − wᵢ) and the member's OWN
-        // weight has to be recoverable. Storing the total alone would silently subtract the wrong
-        // amount for every title watched a different number of times from the average.
-        IReadOnlySet<Guid> WatchedUnratedTitleIds,
-        int WatchedEmbeddingCount,
-        IReadOnlyDictionary<Guid, double> RewatchWeights,
-        double RewatchWeightTotal)
+        IReadOnlyDictionary<string, (int Count, decimal Sum)> GenreContrarian)
     {
         /// <summary>An account with no history — nothing to exclude.</summary>
         public static SelfExclusion Empty { get; } = new(
@@ -110,11 +84,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
             new HashSet<Guid>(),
             0,
             0m,
-            new Dictionary<string, (int, decimal)>(),
-            new HashSet<Guid>(),
-            0,
-            new Dictionary<Guid, double>(),
-            0d);
+            new Dictionary<string, (int, decimal)>());
 
         /// <summary>
         /// The user's overall mean rating with <paramref name="self"/>'s own rating removed — the prior
@@ -154,21 +124,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
         /// TMDB for the two media in the proportion the user actually rates, instead of a fixed 1:1
         /// intake that produced an all-TV live feed on the founder's account.
         /// </summary>
-        decimal MovieRatedShare,
-        // ── Watched history (schema v6) ────────────────────────────────────────────────────
-        /// <summary>Mean embedding of the titles WATCHED but not RATED as of the cut. Null when none is embedded.</summary>
-        float[]? WatchedCentroid,
-        /// <summary><c>min(plays, 3)</c>-weighted mean embedding of everything watched twice or more, rated or not.</summary>
-        float[]? RewatchCentroid,
-        /// <summary>
-        /// One 64-bit genre mask per watched-unrated title, and the bit each genre slug was assigned.
-        /// A list of masks rather than per-genre counts because the feature counts pool titles sharing
-        /// AT LEAST ONE genre with the candidate, and a union cannot be recovered from per-genre
-        /// counts without double-counting every multi-genre title.
-        /// </summary>
-        IReadOnlyList<ulong> WatchedGenreMasks,
-        /// <inheritdoc cref="WatchedGenreMasks"/>
-        IReadOnlyDictionary<string, int> WatchedGenreBits);
+        decimal MovieRatedShare);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -324,12 +280,12 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Where(r => r.Rating >= LovedThreshold && r.RatedAt >= recentCutoff)
             .Select(r => r.TitleId).Distinct().ToList();
 
-        var ratedEmbeddings = await LoadEmbeddingsAsync(lovedIds, ct);
-        var lovedCentroid = Centroid(lovedIds.Select(id => ratedEmbeddings.GetValueOrDefault(id)));
-        var recentCentroid = Centroid(recentLovedIds.Select(id => ratedEmbeddings.GetValueOrDefault(id)));
+        var lovedEmbeddings = await LoadEmbeddingsAsync(lovedIds, ct);
+        var lovedCentroid = Centroid(lovedIds.Select(id => lovedEmbeddings.GetValueOrDefault(id)));
+        var recentCentroid = Centroid(recentLovedIds.Select(id => lovedEmbeddings.GetValueOrDefault(id)));
         var topLovedEmbeddings = topLoved
-            .Where(ratedEmbeddings.ContainsKey)
-            .ToDictionary(id => id, id => ratedEmbeddings[id]);
+            .Where(lovedEmbeddings.ContainsKey)
+            .ToDictionary(id => id, id => lovedEmbeddings[id]);
 
         // ── Dislike signals (schema v3) — as-of aware like every other label source ─────────
         // A reaction created after asOf does not exist yet; one revoked after asOf was still live
@@ -414,116 +370,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
             }
         }
 
-        // ── Watched history (schema v6) — as-of aware, exactly like every label source ──────
-        // THE as-of question here is "had this been watched by asOf", and LastWatchedAt is the field
-        // that answers it. Three reasons it is the right one, and the third is the leakage argument:
-        //
-        //   1. FirstSyncedAt is immutable but it is the INGEST date, not a watch date. ~3,354 of the
-        //      founder's watched rows share one bulk-link timestamp, so an as-of filter on it is
-        //      all-or-nothing at the day Trakt was linked — the same collapse that UserRating's
-        //      FirstRatedAt exists to avoid, described in that field's own doc comment.
-        //   2. TasteClusterProvider already made this call for the clustering pool. Two different
-        //      as-of definitions of "watched" inside one codebase is the drift this repo keeps paying
-        //      for, so there is one.
-        //   3. LastWatchedAt IS mutable, and that mutability cannot leak. It only ever moves FORWARD
-        //      (a later play overwrites it), and a forward move can only push a title OUT of an
-        //      as-of pool — never admit one that had not been watched by asOf. The error direction is
-        //      "we under-count the pool", which is conservative; the direction that would matter,
-        //      future information entering a past vector, is unreachable.
-        //
-        // A null LastWatchedAt reads as not-yet-watched, the same rule the recall probe applies:
-        // absence of a date is not evidence of the wrong date.
-        var watchedRows = await db.WatchedTitles
-            .Where(w => w.AccountId == accountId && w.LastWatchedAt != null && w.LastWatchedAt <= asOf)
-            .Select(w => new { w.TitleId, w.Plays, w.LastWatchedAt })
-            .ToListAsync(ct);
-        var watchedByTitle = watchedRows
-            .GroupBy(w => w.TitleId)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(w => w.Plays).First());
-
-        // "Unrated" is the exact COMPLEMENT of the rated set this method already built, taken from
-        // that set rather than from a second query. Doing it any other way invites the two predicates
-        // to drift apart and a title to be in both pools at once — and it makes the definition
-        // automatically correct whichever column the rated filter above is keyed on.
-        var ratedIdSet = ratedTitleIds.ToHashSet();
-        var watchedUnratedIds = watchedByTitle.Keys.Where(id => !ratedIdSet.Contains(id)).ToList();
-
-        var watchedGenres = watchedUnratedIds.Count == 0
-            ? []
-            : await db.Titles
-                .Where(t => watchedUnratedIds.Contains(t.Id))
-                .Select(t => new { t.Id, t.Genres })
-                .ToListAsync(ct);
-
-        // Genre bits, assigned in sorted slug order so the mapping is a pure function of the pool and
-        // two builds over the same history produce identical masks. Bit 63 is a shared overflow slot
-        // for the 64th distinct genre onward — Trakt's vocabulary is 30 slugs and the schema knows all
-        // of them, so it exists only so the function is total.
-        var watchedGenreBits = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var genre in watchedGenres.SelectMany(t => t.Genres).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal))
-        {
-            watchedGenreBits[genre] = Math.Min(watchedGenreBits.Count, 63);
-        }
-
-        var genresByWatchedTitle = watchedGenres.ToDictionary(t => t.Id, t => t.Genres);
-        var watchedGenreMasks = new List<ulong>(watchedUnratedIds.Count);
-        foreach (var id in watchedUnratedIds)
-        {
-            watchedGenreMasks.Add(GenreMask(genresByWatchedTitle.GetValueOrDefault(id, []), watchedGenreBits));
-        }
-
-        // The two pools' embeddings in ONE load, and it is a UNION rather than the watched-unrated
-        // set alone: the rewatch pool deliberately takes RATED titles too, and `ratedEmbeddings`
-        // above holds only the LOVED subset. Reading rewatch embeddings out of it would silently drop
-        // every title rated below the loved bar and watched three times — which is precisely the kind
-        // of title this bump exists to hear from.
-        //
-        // They are loaded, folded in and DROPPED. Only the centroids (one vector each) and the
-        // counts survive into the taste state, because leave-one-out needs the CANDIDATE's own
-        // embedding — which BuildAsync loads for itself — and never the pool's.
-        var rewatchIds = watchedByTitle
-            .Where(kv => kv.Value.Plays >= RewatchPlays)
-            .Select(kv => kv.Key)
-            .ToList();
-        var watchedEmbeddings = await LoadEmbeddingsAsync([.. watchedUnratedIds.Concat(rewatchIds).Distinct()], ct);
-        var watchedCentroid = Centroid(watchedUnratedIds.Select(id => watchedEmbeddings.GetValueOrDefault(id)));
-
-        var rewatchWeights = new Dictionary<Guid, double>();
-        double[]? rewatchSum = null;
-        var rewatchWeightTotal = 0d;
-        foreach (var titleId in rewatchIds.Order())
-        {
-            if (!watchedEmbeddings.TryGetValue(titleId, out var embedding))
-            {
-                continue;
-            }
-
-            var weight = (double)Math.Min(watchedByTitle[titleId].Plays, MaxCountedPlays);
-            rewatchSum ??= new double[embedding.Length];
-            if (rewatchSum.Length != embedding.Length)
-            {
-                continue;
-            }
-
-            for (var i = 0; i < embedding.Length; i++)
-            {
-                rewatchSum[i] += weight * embedding[i];
-            }
-
-            rewatchWeights[titleId] = weight;
-            rewatchWeightTotal += weight;
-        }
-
-        float[]? rewatchCentroid = null;
-        if (rewatchSum is not null && rewatchWeightTotal > 0d)
-        {
-            rewatchCentroid = new float[rewatchSum.Length];
-            for (var i = 0; i < rewatchSum.Length; i++)
-            {
-                rewatchCentroid[i] = (float)(rewatchSum[i] / rewatchWeightTotal);
-            }
-        }
-
         var self = new SelfExclusion(
             selfRatings,
             titleRatings.Sum(r => (decimal)r.Rating),
@@ -532,16 +378,12 @@ public class FeatureVectorBuilder(IReelDbContext db)
             recentLovedIds.ToHashSet(),
             // Only members that actually HAD an embedding moved the centroid, so only they can be
             // subtracted back out of it.
-            lovedIds.Count(ratedEmbeddings.ContainsKey),
-            recentLovedIds.Count(ratedEmbeddings.ContainsKey),
+            lovedIds.Count(lovedEmbeddings.ContainsKey),
+            recentLovedIds.Count(lovedEmbeddings.ContainsKey),
             explicitPersonIds,
             contrarianPairs.Count,
             contrarianPairs.Sum(p => p.User - p.Global),
-            genrePairs.ToDictionary(kv => kv.Key, kv => (kv.Value.Count, kv.Value.Sum(p => p.User - p.Global))),
-            watchedUnratedIds.ToHashSet(),
-            watchedUnratedIds.Count(watchedEmbeddings.ContainsKey),
-            rewatchWeights,
-            rewatchWeightTotal);
+            genrePairs.ToDictionary(kv => kv.Key, kv => (kv.Value.Count, kv.Value.Sum(p => p.User - p.Global))));
 
         return new TasteState(
             userMean,
@@ -558,26 +400,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
             lovedAnchorPool,
             dislikedGenreWeights,
             notInterestedCentroid,
-            movieRatedShare,
-            watchedCentroid,
-            rewatchCentroid,
-            watchedGenreMasks,
-            watchedGenreBits);
-    }
-
-    /// <summary>The genre set as a bit mask over <paramref name="bits"/>; 0 when nothing maps.</summary>
-    internal static ulong GenreMask(string[] genres, IReadOnlyDictionary<string, int> bits)
-    {
-        var mask = 0UL;
-        foreach (var genre in genres)
-        {
-            if (bits.TryGetValue(genre, out var bit))
-            {
-                mask |= 1UL << bit;
-            }
-        }
-
-        return mask;
+            movieRatedShare);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
@@ -635,9 +458,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
             // one; scored candidates never do). Everything below subtracts it back out.
             SelfRating? self = taste.Self.Ratings.TryGetValue(id, out var own) ? own : null;
             var prior = taste.Self.MeanExcluding(self, NeutralUserMean);
-            // Hoisted once: the v1 and v3 blocks each look the embedding up for themselves, and the
-            // v6 block below needs it outside either of their scopes.
-            var titleEmbedding = embeddings.GetValueOrDefault(id);
             var selfWeight = self is { } weighted ? (decimal)TasteMath.RecencyWeight(weighted.RatedAt, asOf) : 0m;
 
             // ── Title scalars ──────────────────────────────────────────────────────────
@@ -795,45 +615,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
             // a soap is scripted, it just shares the scheduling-filler economics, so it gets its own
             // genre slot and no claim about being unscripted.
             vector[s++] = UnscriptedFormats.IsUnscripted(title.Genres) ? 1f : 0f;
-
-            // ── Watched history (schema v6) ────────────────────────────────────────────
-            // The first features in this vector built from titles the account never RATED. Both
-            // centroids are leave-one-out'd on exactly the terms simLovedCentroid is: a pool member
-            // has its own vector taken back out before the pool is used to describe it, so a member
-            // can never score Cosine(a, a) = 1.0 against itself.
-            //
-            // Where that subtraction actually fires is worth being precise about, because claiming
-            // more for it than it does is how a leakage guard becomes decoration:
-            //   · The WATCHED-UNRATED pool excludes rated-as-of titles by construction, so a TRAINING
-            //     row is never a member. EvalHarness's holdout is triple-filtered to titles with no
-            //     watch footprint at the split, so a HOLDOUT row is never one either. The subtraction
-            //     is nonetheless real, because BuildAsync is also called from the title-detail path,
-            //     which will happily score a title the account has watched and not rated.
-            //   · The REWATCH pool takes rated titles too, so a training row IS routinely a member
-            //     and this is its live leave-one-out.
-            // One code path either way: an unrated candidate has nothing to subtract, and the branch
-            // simply does not fire — no divergence between train and serve.
-            var watchedCentroid = titleEmbedding is not null && taste.Self.WatchedUnratedTitleIds.Contains(id)
-                ? CentroidExcluding(taste.WatchedCentroid, taste.Self.WatchedEmbeddingCount, titleEmbedding)
-                : taste.WatchedCentroid;
-            vector[s++] = titleEmbedding is null ? 0f : Cosine(titleEmbedding, watchedCentroid);
-            // The flag is an ACCOUNT-level fact — "is there a watched-unrated centroid at all" — not a
-            // per-candidate one, exactly as hasEmbedding beside it is the per-candidate half. It reads
-            // the centroid rather than the raw pool count on purpose: a pool of forty titles none of
-            // which carry an embedding moved nothing, and flagging it as present would re-tell the v2
-            // lie in a new place.
-            vector[s++] = taste.WatchedCentroid is null ? 0f : 1f;
-
-            var rewatchCentroid = titleEmbedding is not null && taste.Self.RewatchWeights.TryGetValue(id, out var ownRewatchWeight)
-                ? CentroidExcludingWeighted(taste.RewatchCentroid, taste.Self.RewatchWeightTotal, ownRewatchWeight, titleEmbedding)
-                : taste.RewatchCentroid;
-            vector[s++] = titleEmbedding is null ? 0f : Cosine(titleEmbedding, rewatchCentroid);
-            vector[s++] = taste.RewatchCentroid is null ? 0f : 1f;
-
-            vector[s++] = (float)WatchedGenreShare(
-                taste.WatchedGenreMasks,
-                GenreMask(title.Genres, taste.WatchedGenreBits),
-                taste.Self.WatchedUnratedTitleIds.Contains(id));
 
             // ── Genre multi-hot ────────────────────────────────────────────────────────
             var genreSet = title.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -1154,57 +935,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
         return total / genres.Length;
     }
 
-    /// <summary>
-    /// The share of the account's WATCHED-BUT-UNRATED titles that carry at least one of
-    /// <paramref name="genres"/> (schema v6). Precisely:
-    /// <code>
-    ///   P = { t : t watched ≤ asOf ∧ t not rated ≤ asOf }        the pool
-    ///   M = { t ∈ P : genres(t) ∩ genres(candidate) ≠ ∅ }        the matches
-    ///   share = |M \ {candidate}| / |P \ {candidate}|            0 when the denominator is 0
-    /// </code>
-    /// It is a UNION over the candidate's genres, not a per-genre average: a title is counted once
-    /// however many of the candidate's genres it happens to share. Dividing by the pool size is the
-    /// volume normalisation — it is what makes the number comparable between an account with 1,363
-    /// watched-unrated titles and one with forty, and it is why the feature is a share rather than the
-    /// count it is derived from. A many-genre candidate therefore trends toward 1 and a
-    /// single-rare-genre candidate toward 0; that spread is the signal, and it is the intended
-    /// reading — the feature measures REACH into the watched pool, not concentration within it.
-    ///
-    /// <para><b>Leave-one-out.</b> The subtraction in the formula never fires on a training row: a
-    /// rated-as-of title is excluded from P by construction, which is the whole argument the brief
-    /// makes for this feature needing no LOO at all. It is written anyway, for one line, because the
-    /// title-detail path scores watched-and-unrated titles directly and a pool member matching itself
-    /// would otherwise inflate its own share by 1/|P| — small, structural, and exactly the shape of
-    /// defect this file has had to fix four times.</para>
-    /// </summary>
-    internal static double WatchedGenreShare(IReadOnlyList<ulong> poolMasks, ulong candidateMask, bool candidateIsPoolMember)
-    {
-        var pool = poolMasks.Count;
-        if (pool == 0 || candidateMask == 0UL)
-        {
-            return 0d;
-        }
-
-        var matches = 0;
-        foreach (var member in poolMasks)
-        {
-            if ((member & candidateMask) != 0UL)
-            {
-                matches++;
-            }
-        }
-
-        if (candidateIsPoolMember)
-        {
-            // The candidate IS one of the pool rows, and it always matches itself — its own mask is
-            // the mask being tested. Take it out of both halves.
-            matches -= 1;
-            pool -= 1;
-        }
-
-        return pool <= 0 ? 0d : (double)matches / pool;
-    }
-
     private async Task<Dictionary<Guid, float[]>> LoadEmbeddingsAsync(IReadOnlyCollection<Guid> titleIds, CancellationToken ct)
     {
         if (titleIds.Count == 0)
@@ -1258,7 +988,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
     /// WAS the centroid (n = 1) — a one-title centroid minus that title is not a taste signal, and
     /// <see cref="Cosine"/> treats null as "no similarity known" (0).
     /// </summary>
-    internal static float[]? CentroidExcluding(float[]? centroid, int count, float[] own)
+    private static float[]? CentroidExcluding(float[]? centroid, int count, float[] own)
     {
         if (centroid is null || count <= 1 || centroid.Length != own.Length)
         {
@@ -1269,29 +999,6 @@ public class FeatureVectorBuilder(IReelDbContext db)
         for (var i = 0; i < result.Length; i++)
         {
             result[i] = ((centroid[i] * count) - own[i]) / (count - 1);
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// <see cref="CentroidExcluding"/> for a WEIGHTED mean: <c>(mean·W − wᵢ·own) / (W − wᵢ)</c>. Null
-    /// when the member was the whole centroid, matching the unweighted form's <c>n = 1</c> case — a
-    /// centroid that is one title minus that title is not a taste signal, and <see cref="Cosine"/>
-    /// reads null as "no similarity known".
-    /// </summary>
-    internal static float[]? CentroidExcludingWeighted(float[]? centroid, double total, double own, float[] vector)
-    {
-        var remaining = total - own;
-        if (centroid is null || remaining <= 0d || centroid.Length != vector.Length)
-        {
-            return null;
-        }
-
-        var result = new float[centroid.Length];
-        for (var i = 0; i < result.Length; i++)
-        {
-            result[i] = (float)(((centroid[i] * total) - (own * vector[i])) / remaining);
         }
 
         return result;
