@@ -93,7 +93,7 @@ export default function SearchResults() {
     turns, phase, cards, outsideCards, reason, send, resume, loadMore, reask, setMediaTypes,
     exhausted, appending, canRetry,
   } = chat;
-  const { status } = pendingApi(chat);
+  const { status, droppedByFloor, belowFloor, floor } = pendingApi(chat);
   const speech = useSpeech((text) => send(text, false));
 
   // The media toggle is per-device and persists across visits, so a resumed thread starts with a
@@ -145,6 +145,20 @@ export default function SearchResults() {
   const visible = cards.filter((c) => !removedSet.has(c.titleId));
   const outsideVisible = outsideCards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
+
+  // The score floor's other half. The server ranks everything it found and then holds back what
+  // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
+  // and was, until now, invisible: the picks simply never existed as far as the screen was
+  // concerned. Both fields are optional (they arrive with A3's `done` frame) and both are
+  // runtime-guarded, so the tray stays dark rather than half-rendering against an older server.
+  const belowFloorVisible = Array.isArray(belowFloor)
+    ? belowFloor.filter((c) => c && !removedSet.has(c.titleId))
+    : [];
+  const floorHeldBack =
+    typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : belowFloorVisible.length;
+  // `toFixed` rather than `toLocaleString`: this is a threshold the server sent, and a comma
+  // decimal separator would print a number the account's settings never contained.
+  const floorLabel = typeof floor === "number" ? floor.toFixed(1) : floor ? String(floor) : null;
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
@@ -339,6 +353,30 @@ export default function SearchResults() {
                 ))}
               </div>
             </div>
+          )}
+
+          {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
+              collapsed: these picks are not being recommended, they are being accounted for. The
+              count comes from the server (`droppedByFloor`) so the tray is honest even on a turn
+              where the cards themselves were not sent down. */}
+          {floorHeldBack > 0 && !streaming && (
+            <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
+              <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
+                {floorLabel
+                  ? `Show the ${floorHeldBack} under your ${floorLabel} bar`
+                  : `Show the ${floorHeldBack} Reel held under your bar`}
+              </summary>
+              <p className="fa-caption text-fa-frost-dim/70 mt-1">
+                These matched the request but scored below the bar Reel holds itself to for you.
+              </p>
+              {belowFloorVisible.length > 0 && (
+                <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+                  {belowFloorVisible.map((card) => (
+                    <ResultCard key={card.titleId} card={card} />
+                  ))}
+                </div>
+              )}
+            </details>
           )}
         </>
       )}
