@@ -554,6 +554,14 @@ public sealed class LiveSearchExpansionService(
         var qnorm = NormalizeQuery(query);
         var fitById = new Dictionary<Guid, RerankResult>();
 
+        // The evidence the feed build has always given the judge and this surface never did: tone,
+        // era, themes, the seven attribute scalars and the people. Two indexed reads for the whole
+        // turn, taken ONCE before the batching loop rather than per batch. Contributions are null
+        // because OnDemandScorer computes none — an empty list is the honest answer, and a title the
+        // catalogue has not enriched carries nulls rather than zeros.
+        var contexts = await RerankContextBuilder.BuildAsync(
+            db, ranked.Select(r => r.Title.Id).ToList(), topContributions: null, ct);
+
         // A title can be judged more than once across a long conversation; averaging the verdicts
         // is the caller's half of the LLM position-bias mitigation (see PositionDebiasedFit).
         var debiased = new PositionDebiasedFit();
@@ -572,7 +580,8 @@ public sealed class LiveSearchExpansionService(
                 {
                     uncached.Add(new RerankInput(
                         title.Id, title.Name, title.Year, title.MediaType.ToString(), title.Genres, title.Overview,
-                        scores.TryGetValue(title.Id, out var p) ? p : null));
+                        scores.TryGetValue(title.Id, out var p) ? p : null,
+                        contexts.GetValueOrDefault(title.Id)));
                 }
             }
 
