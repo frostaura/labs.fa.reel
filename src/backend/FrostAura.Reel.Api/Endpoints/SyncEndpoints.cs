@@ -63,6 +63,13 @@ public static class SyncEndpoints
             // (onboarding/enrichment/training) outranks a background Trakt poll (delta/reconcile)
             // that fires every few minutes — otherwise a transient DeltaSync, enqueued after a
             // long EnrichCatalog, would hijack the pill and read as a generic "Syncing".
+            //
+            // JobKind.CrossReference is deliberately NOT here, and its "xref" kind is deliberately
+            // not in the frontend's BACKGROUND_KINDS either. A pass that can legitimately run for
+            // ten minutes is the most interesting thing happening to the account while it runs, and
+            // the founder asked to watch it count; letting a delta poll steal the pill from it would
+            // report a five-second sync over a ten-minute one. The two sets must stay mirrored:
+            // src/frontend/src/lib/syncCopy.ts.
             static bool IsBackground(JobKind k) =>
                 k is JobKind.DeltaSync or JobKind.FullReconcile or JobKind.RefreshAvailability;
 

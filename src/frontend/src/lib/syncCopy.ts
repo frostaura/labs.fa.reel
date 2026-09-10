@@ -69,6 +69,28 @@ const EXPLAINERS: Record<string, SyncExplainer> = {
       "Ranking by predicted rating, freshness and variety",
     ],
   },
+  narrative: {
+    title: "Writing your taste profile",
+    lines: [
+      "Turning your ratings into a description of what you actually like",
+      "Rewritten only when your taste has genuinely moved",
+    ],
+  },
+  lens: {
+    title: "Writing tonight's notes",
+    lines: [
+      "A short note on why each headline pick fits you",
+      "Written for the hero and the leaders of each row",
+    ],
+  },
+  xref: {
+    title: "Cross-referencing against your history",
+    lines: [
+      "Checking every eligible title against the ones you've actually rated",
+      "Each candidate is judged beside your nearest rated titles and your own scores",
+      "Nothing gets hidden — at most a title is pushed down the page",
+    ],
+  },
 };
 
 const FALLBACK: SyncExplainer = {
@@ -93,6 +115,11 @@ const JOB_KIND_TO_SSE: Record<string, string> = {
   Train: "train",
   Evaluate: "evaluate",
   BuildFeed: "feed",
+  // These two shipped without a mapping and fell back to "Background sync" — a job the user is
+  // watching, described as nothing in particular.
+  BuildTasteNarrative: "narrative",
+  PersonaliseTitles: "lens",
+  CrossReference: "xref",
 };
 
 export function jobKindToSseKind(jobKind: string | null | undefined): string | null {
@@ -102,6 +129,12 @@ export function jobKindToSseKind(jobKind: string | null | undefined): string | n
 /**
  * Background Trakt polls (delta/reconcile) fire every few minutes and must not hijack the pill
  * from a primary pipeline job (onboarding, enrichment, training) that the user is waiting on.
+ *
+ * `xref` is deliberately NOT in here. A cross-reference pass can legitimately own the pill for ten
+ * minutes, counting titles as it goes, and that is the founder's stated preference: a five-second
+ * delta poll stealing the pill from it would report the least interesting thing on screen. Mirrors
+ * `IsBackground` in `src/backend/FrostAura.Reel.Api/Endpoints/SyncEndpoints.cs`; change one, change
+ * the other.
  */
 const BACKGROUND_KINDS = new Set(["delta", "reconcile"]);
 

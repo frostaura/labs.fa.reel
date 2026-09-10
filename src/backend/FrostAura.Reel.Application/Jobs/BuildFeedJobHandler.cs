@@ -61,7 +61,11 @@ public class BuildFeedJobHandler(
     // Also optional, and for the same reason: the hand-built integration handlers predate the
     // ceiling. A null budget means "no ceiling", which is exactly the behaviour those tests were
     // written against — the gate is opt-in per construction site, and DI always supplies it.
-    CrossReference.RerankBudget? rerankBudget = null) : IJobHandler
+    CrossReference.RerankBudget? rerankBudget = null,
+    // Optional on the same terms again: a null scheduler means this build never queues a
+    // cross-reference pass, which is precisely what every hand-built test handler was written
+    // against. DI always supplies it.
+    CrossReference.CrossReferenceScheduler? crossReference = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -304,6 +308,20 @@ public class BuildFeedJobHandler(
             await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct);
         }
 
+        // The taste fingerprint, computed ONCE for both follow-up enqueues below. It costs a handful
+        // of aggregate queries and no LLM spend, which is what makes it affordable to ask on every
+        // build rather than on a timer. Null means it could not be computed, and both enqueues then
+        // stand down rather than guessing a key.
+        var profileHash = await ProfileHashOrNullAsync(accountId, taste, now, ct);
+
+        // Cross-reference is enqueued on BOTH exits, unlike the narrative below. A Preserve build
+        // means the PAGE did not move, not that the pool did not: catalogue sweeps and enrichment
+        // add eligible, scored, embedded titles all day, and suppressing this with the snapshot
+        // would starve the pass on exactly the quiet days it exists to work through. Its own three
+        // brakes — nothing in flight, headroom left today, and something genuinely unjudged at this
+        // fingerprint — decide whether anything is actually queued.
+        await EnqueueCrossReferenceIfWorkPendingAsync(accountId, profileHash, now, ct);
+
         if (snapshot is null)
         {
             // Preserve-mode: the assembled feed is item-for-item what the Active snapshot already
@@ -378,7 +396,7 @@ public class BuildFeedJobHandler(
         // And the narrative itself, when the account's taste has actually moved. The comparison is
         // against the stored fingerprint, not a clock, so an ordinary week of ratings costs nothing
         // and a genuine shift is picked up the same night rather than waiting for Sunday.
-        await EnqueueNarrativeIfProfileMovedAsync(accountId, taste, now, ct);
+        await EnqueueNarrativeIfProfileMovedAsync(accountId, profileHash, now, ct);
 
         // See the no-op path above: the availability and enrichment enqueues both race the index.
         await db.SaveAbsorbingRebuildRaceAsync(ct);
@@ -528,23 +546,51 @@ public class BuildFeedJobHandler(
     }
 
     /// <summary>
-    /// Queues a narrative rewrite when the account's taste fingerprint no longer matches the one
-    /// its current narrative was written from. Computing the fingerprint costs a handful of
-    /// aggregate queries and no LLM spend, so it is cheap to ask every Fresh build; writing the
-    /// narrative is what costs, and that only happens when the answer is yes.
+    /// The account's current taste fingerprint, or null when it could not be computed.
+    ///
+    /// <para>Computing it costs a handful of aggregate queries and no LLM spend, so it is cheap to
+    /// ask on every build; what it gates — a narrative rewrite, a cross-reference pass — is what
+    /// costs. Failure is swallowed and logged rather than thrown, because both callers decorate a
+    /// feed that has already been built and is already being served.</para>
     /// </summary>
-    private async Task EnqueueNarrativeIfProfileMovedAsync(
+    private async Task<string?> ProfileHashOrNullAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, DateTime now, CancellationToken ct)
     {
         try
         {
             var built = await tasteFacts.BuildAsync(accountId, taste, now, ct);
+            return built.ProfileHash;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex, "Could not evaluate the taste fingerprint for {AccountId}; its follow-up jobs are not queued.",
+                accountId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Queues a narrative rewrite when the account's taste fingerprint no longer matches the one
+    /// its current narrative was written from. Writing the narrative is what costs, and that only
+    /// happens when the answer is yes.
+    /// </summary>
+    private async Task EnqueueNarrativeIfProfileMovedAsync(
+        Guid accountId, string? profileHash, DateTime now, CancellationToken ct)
+    {
+        if (profileHash is null)
+        {
+            return;
+        }
+
+        try
+        {
             var current = await db.AccountTasteNarratives
                 .Where(n => n.AccountId == accountId)
                 .OrderByDescending(n => n.Version)
                 .Select(n => n.ProfileHash)
                 .FirstOrDefaultAsync(ct);
-            if (string.Equals(current, built.ProfileHash, StringComparison.Ordinal))
+            if (string.Equals(current, profileHash, StringComparison.Ordinal))
             {
                 return;
             }
@@ -555,7 +601,32 @@ public class BuildFeedJobHandler(
         {
             // A narrative is a decoration on a feed that has already been built and is already
             // being served. Nothing here is worth failing the build over.
-            logger.LogWarning(ex, "Could not evaluate the taste fingerprint for {AccountId}; narrative not queued.", accountId);
+            logger.LogWarning(ex, "Could not decide the narrative enqueue for {AccountId}; it is not queued.", accountId);
+        }
+    }
+
+    /// <summary>
+    /// Queues a <see cref="JobKind.CrossReference"/> pass when there is judgeable work at the
+    /// current fingerprint. The decision itself lives in <c>CrossReferenceScheduler</c> — this
+    /// wrapper exists only to hold the same try/catch posture the narrative enqueue has, and for
+    /// the same reason: a feed that is already assembled must never fail over a follow-up job.
+    /// </summary>
+    private async Task EnqueueCrossReferenceIfWorkPendingAsync(
+        Guid accountId, string? profileHash, DateTime now, CancellationToken ct)
+    {
+        if (crossReference is null || profileHash is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await crossReference.EnqueueIfWorkPendingAsync(accountId, profileHash, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex, "Could not decide the cross-reference enqueue for {AccountId}; it is not queued.", accountId);
         }
     }
 

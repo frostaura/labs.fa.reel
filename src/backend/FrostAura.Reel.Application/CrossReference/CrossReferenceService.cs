@@ -86,6 +86,28 @@ public sealed class CrossReferenceService(
     }
 
     /// <summary>
+    /// Does <paramref name="candidateTitleIds"/> contain anything with no verdict at this key? The
+    /// question the enqueue gate asks before queuing a run at all, answered in ONE round trip over
+    /// <c>IX_TitleCrossReferenceVerdicts_Sweep</c> without materialising a pool of thousands of ids.
+    ///
+    /// <para>Deliberately <c>EXISTS</c> rather than the COUNT the design note called for: the
+    /// predicate is identical and the answer is the same boolean, but a semi-join stops at the
+    /// first unjudged row instead of scanning the whole pool on a feed build that runs every few
+    /// minutes. The COUNT still exists — see <see cref="UnjudgedCountAsync"/> — for the caller that
+    /// genuinely needs the number.</para>
+    /// </summary>
+    public Task<bool> AnyUnjudgedAsync(
+        Guid accountId, IQueryable<Guid> candidateTitleIds, string profileHash, int promptVersion,
+        CrossReferenceRound round, CancellationToken ct) =>
+        candidateTitleIds
+            .AnyAsync(id => !db.TitleCrossReferenceVerdicts.Any(v =>
+                v.AccountId == accountId
+                && v.ProfileHash == profileHash
+                && v.PromptVersion == promptVersion
+                && v.Round == round
+                && v.TitleId == id), ct);
+
+    /// <summary>
     /// The stale ladder: titles carrying a verdict at a SUPERSEDED fingerprint, newest first.
     ///
     /// <para>These are judged before never-judged titles, because a stale verdict is the one place

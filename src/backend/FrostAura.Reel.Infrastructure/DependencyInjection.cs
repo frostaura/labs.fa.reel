@@ -187,6 +187,9 @@ public static class DependencyInjection
         services.AddScoped<Application.CrossReference.NeighbourFinder>();
         services.AddScoped<Application.CrossReference.CrossReferenceCandidateBuilder>();
         services.AddScoped<Application.CrossReference.CrossReferenceService>();
+        // The enqueue gate the feed build asks before queuing a pass. Scoped so the job it adds
+        // lands on the BUILD's tracked context and commits with the build's own writes.
+        services.AddScoped<Application.CrossReference.CrossReferenceScheduler>();
         // Offline only, reached through the founder-only /api/dev surface.
         services.AddScoped<Application.CrossReference.CrossReferenceBacktest>();
 
@@ -226,6 +229,7 @@ public static class DependencyInjection
         services.AddScoped<IJobHandler, BuildDigestJobHandler>();
         services.AddScoped<IJobHandler, BuildTasteNarrativeJobHandler>();
         services.AddScoped<IJobHandler, PersonaliseTitlesJobHandler>();
+        services.AddScoped<IJobHandler, CrossReferenceJobHandler>();
         services.AddScoped<IJobHandler, SeedCatalogJobHandler>();
 
         // The catalogue's two daily ceilings. Scoped because both read the ledger through the
