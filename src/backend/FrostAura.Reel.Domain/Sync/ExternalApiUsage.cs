@@ -8,8 +8,10 @@ public enum ApiProvider
 }
 
 /// <summary>
-/// The purposes an OpenRouter/LLM call can be made for. Kept as constants rather than an enum so
-/// the column stays readable in ad-hoc SQL and a new purpose does not force a migration.
+/// The purposes an external call can be made for — mostly OpenRouter/LLM work, and since the
+/// catalogue bulk seed also <see cref="Seed"/>, which is a TMDB purpose. Kept as constants rather
+/// than an enum so the column stays readable in ad-hoc SQL and a new purpose does not force a
+/// migration.
 /// </summary>
 public static class ApiUsagePurpose
 {
@@ -31,6 +33,14 @@ public static class ApiUsagePurpose
     /// <summary>The founder-only LLM-judge pass over generated lens copy. Deliberately NOT
     /// <see cref="Lens"/>, so auditing a prompt version cannot eat the budget it is auditing.</summary>
     public const string LensAudit = "lens-audit";
+
+    /// <summary>
+    /// TMDB discover pages fetched by the catalogue bulk seed — the first non-LLM purpose on this
+    /// ledger, and the reason the seed's spend is separable from the feed's. It is what
+    /// <c>GET /api/dev/seed-catalog</c> reads for "pages used today": the seed is the only writer
+    /// of this string, so a count of calls under it IS a count of discover pages.
+    /// </summary>
+    public const string Seed = "seed";
 }
 
 /// <summary>
@@ -92,4 +102,12 @@ public interface IPendingApiUsage
     /// unknown spend is not free, but it is also not a number this gate can subtract.
     /// </summary>
     (long Calls, long Tokens) PendingToday(ApiProvider provider, Guid? accountId, string purpose);
+
+    /// <summary>
+    /// As <see cref="PendingToday"/>, summed across EVERY account and the null-account (global)
+    /// bucket. This is the shape a catalogue-wide ceiling needs: a <c>Title</c> row is
+    /// tenant-shared, so "what has extraction cost today" is one system number, and a gate that
+    /// asked per account would admit N accounts' worth of spend against a budget written for one.
+    /// </summary>
+    (long Calls, long Tokens) PendingTodayAllAccounts(ApiProvider provider, string purpose);
 }
