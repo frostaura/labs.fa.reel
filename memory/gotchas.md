@@ -1,8 +1,8 @@
 ---
 name: fa-reel-gotchas
-description: "Embeddings gotcha CORRECTED (never broken — OpenRouter fallback chain); TMDB TV has no horror genre (subgenres/keywords carry truth); iCloud delays other sessions' writes by minutes; ~/.dotnet/dotnet not system dotnet (MSB4014) + MSB3021 retry; Ask Reel filter/negation/feed rules (do not undo); port 5173 authoritative; PWA shell hides a dead stack"
+description: "Dev from ~/src/fa.reel not iCloud (Vite hangs, git takes minutes); calibrator at rho~0 collapses to a constant; EnrichCatalog only enqueued from onboarding; residual head v2 auto-resets on load (DB row can look stale); test DBs reel_test_* on :5433 (fixture drops them); plus the 2026-08 gotchas: TMDB TV has no horror genre, two Ask Reel prompts, port 5173 authoritative, PWA shell hides a dead stack"
 type: gotcha
-last_verified: 2026-08-10
+last_verified: 2026-09-09
 ---
 
 # Gotchas
@@ -32,3 +32,10 @@ last_verified: 2026-08-10
 - Of six Playwright e2e specs only `smoke.spec.ts` gates CI. Images publish under `latest` only — no semver.
 - The compose comment still says `vector(384)` while the configured provider emits 1536 dims.
 - Tailwind is **v3.4.10**, not v4.
+
+- **Develop from `~/src/fa.reel`, never from this iCloud path.** On 2026-09-09 fileproviderd pushed load to 13: `git status` >2 min, a 40 MB Docker context 16 min, Vite 137 s to boot then hung on a file close (sign-in button stayed disabled while the PWA shell rendered from cache). Clone runs Vite in 330 ms. Docker build from iCloud was killed; the gateway container is stopped so Vite owns 5173.
+- **Integration tests drop the database they point at.** Throwaway DBs `reel_test_w1..w6`, `reel_test_int`, `reel_test_base` exist on :5433 for parallel worktrees (`~/src/fa.reel-wt/<branch>`). Never `Database=reel`. Local run: `REEL_REQUIRE_INTEGRATION=1 REEL_SKIP_LOCAL_FLAKY=1`.
+- **The residual head auto-resets on load, not on write.** After the v2 bump the `OnlineModelStates` row still shows AlgorithmVersion 1 / bias −1.683 / UpdateCount 224 until the next observe; the served head is the zero state. Do not read the row as the live head.
+- **A calibrator fit on pairs with no rank signal is a constant.** Isotonic PAV on ρ≈0 pairs maps everything to the mean; use bias-shift unless ρ ≥ 0.2 (policy fix 2026-09-09). Also: pairs pooled across artifacts with different score levels (v6→v12 means 6.9→5.2→7.4→5.8) blur the map — de-mean per artifact.
+- **`EnrichCatalog` was only ever enqueued from the onboarding chain** (HydrateCatalog ← FullIngest ← OAuth link) and it sweeps every Pending row globally — the reason ~1,360 titles had no embedding and a test expecting 4 extractor calls saw 212. Scheduling + scoping fix in flight.
+- **Playwright silently drives the LIVE app if port 5173 is busy.** `playwright.config.ts` has `reuseExistingServer: !isCI` on 5173, which the dev Vite owns, so a bare `npx playwright test` in a worktree runs the founder's live stack and every new spec fails. Always run `CI=1 PW_PORT=<free port> npx playwright test` from a worktree.

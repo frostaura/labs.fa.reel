@@ -1,8 +1,8 @@
 ---
 name: fa-reel-decisions
-description: "2026-08-10 remediation decisions WITH rationale: movie-only history writeback, stable-tonight contract, negation quarantine, dislike demotion + schema v3 retrain, anchored why-lines, PIN tokens, TMDB global lookup, digest/push/blend; plus PRIVATE repo flip, react-router waiver, gpt-5.4-mini extraction"
+description: "2026-09-09 founder decisions: model-first then product programme; honest numbers from day one; filter cost meter (Dean decides in-app); subagents on Opus; plus the 2026-08-10 remediation decisions with rationale, PRIVATE repo, react-router waiver (review 2026-11-07), gpt-5.4-mini"
 type: decision
-last_verified: 2026-08-10
+last_verified: 2026-09-09
 ---
 
 # Live decisions
@@ -24,3 +24,10 @@ last_verified: 2026-08-10
 - **2026-08-10 — PIN unlock is a DataProtection token, never the cached raw PIN** (`991e013`). *Why:* the client stored the plaintext PIN in sessionStorage and replayed it per call — any XSS or shared-screen devtools read it. verify → 15-min `X-Settings-Unlock` token; destructive ops always re-prompt for the raw PIN.
 - **2026-08-10 — Lookup ≠ suggestion extends to TMDB** (`d3ea403`). *Why:* typeahead's catalogue scope made any un-ingested film unfindable. Global TMDB rows (flagged, unscored) + on-demand hydration keep the zero-footprint suggestion invariant intact while making all of TMDB addressable.
 - **2026-08-10 — Digest/Push/Blend shipped behind existing patterns** (`c5483f5`). *Why:* wishlist items; Web Push uses self-generated VAPID (no third-party service), blend uses `IgnoreQueryFilters` strictly for exclusion-only intersection (no cross-tenant data surfaced), PWA switched generateSW → injectManifest to host the push handler.
+
+- **2026-09-09 — Programme: both, model first (founder).** *Why:* the ledger (12/12 non-positive, −80%), the served-title correlation (−0.004) and the retro loop (5.78 vs 6.74) say the FastTree engine has no measurable edge; Dean chose to repair the serving arithmetic and the evaluation instrument before any user-facing number changes, then run the product programme (closed loop, supply, taste profile, "through your lens" copy). The M2 gate is treated as a consistent negative, not instrument noise; repairing the instrument tells us where and how much.
+- **2026-09-09 — Honest from day one (founder).** Publish the real track record and the "what might bug you" caution immediately, framed as "here is how wrong I am and what I am doing about it". A calibrated number that is honest but constant is NOT acceptable (see calibrator policy in gotchas).
+- **2026-09-09 — Filters: cost meter, Dean decides in-app (founder).** The plan never changes a content rule; discovery becomes filter-aware and the conditions editor shows the marginal cost of each rule.
+- **2026-09-09 — Do not normalise the residual bias away without a replacement calibrator.** *Why:* the −1.68 offset was compensating a base model that over-predicts by 1–2.7 points; removing it alone makes every number jump and get less honest. Replaced by an explicit calibrator; head kept only for discriminative corrections.
+- **2026-09-09 — Exposure logging will be append-only per serve with a derived rollup, temporal join as primary attribution** (only 2% of ratings are made in-app), written where cards are served including the live refill; no client viewport beacon; the 7-snapshot prune stays. *Why:* the adversarial wave showed a de-duplicated-on-build design loses the drift the founder complains about and never sees the refill path.
+- **2026-09-09 — No hero exploration slot; supply and filters are the levers.** With ~421 eligible titles ranked end to end there is nothing to explore.
