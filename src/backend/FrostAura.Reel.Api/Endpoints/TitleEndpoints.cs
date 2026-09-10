@@ -171,7 +171,7 @@ public static class TitleEndpoints
                 : LensEndpoints.ToResponse(await lens.ResolveAsync(
                     accountId,
                     title.Id,
-                    (await tasteFacts.BuildAsync(accountId, taste, DateTime.UtcNow, ct)).ProfileHash,
+                    await tasteFacts.CurrentHashAsync(accountId, DateTime.UtcNow, ct),
                     ct));
 
             // The serving-time dislike demotion behind this score (the PredictedRating already

@@ -372,7 +372,7 @@ export default function TitleDetail() {
                       been written, which leaves the why-line above and the synopsis below exactly
                       as they were. It sits ABOVE the synopsis and never replaces it: when the lens
                       is wrong or absent, the page still tells you what the thing is about. */}
-                  <LensBlock mediaType={mediaType} tmdbId={Number(tmdbId)} overview={title.overview} />
+                  <LensBlock mediaType={mediaType} tmdbId={Number(tmdbId)} />
 
                   {/* Synopsis */}
                   {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}

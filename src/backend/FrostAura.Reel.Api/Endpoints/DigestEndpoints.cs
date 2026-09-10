@@ -18,7 +18,7 @@ public static class DigestEndpoints
 
         // The current ISO week's digest as feed-shaped cards; { items: [] } until the weekly
         // build has run — the Home rail hides itself on empty rather than erroring.
-        group.MapGet("/current", async (IReelDbContext db, ExposureLog exposures, LensService lens, FeatureVectorBuilder featureBuilder, TasteFactsBuilder tasteFacts, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/current", async (IReelDbContext db, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -49,9 +49,8 @@ public static class DigestEndpoints
 
             // Read-only: the digest is rendered, never generated from. The job that built it
             // already asked for lens copy on its top pick.
-            var digestTaste = await featureBuilder.BuildTasteStateAsync(account.Id, nowUtc, ct);
-            var digestProfile = await tasteFacts.BuildAsync(account.Id, digestTaste, nowUtc, ct);
-            var notes = await lens.ResolveManyAsync(account.Id, ids, digestProfile.ProfileHash, ct);
+            var notes = await lens.ResolveManyAsync(
+                account.Id, ids, await tasteFacts.CurrentHashAsync(account.Id, nowUtc, ct), ct);
 
             var cards = new List<FeedEndpoints.FeedCard>();
             foreach (var item in digestItems)

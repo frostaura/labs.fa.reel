@@ -370,7 +370,11 @@ public class EnrichSchedulingTests(PostgresFixture fixture)
             new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())),
             new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
             new UnavailableSearchAgent(),
-            new TasteFactsBuilder(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
+            new TasteFactsBuilder(
+                db,
+                new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
+                featureBuilder,
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             new PersonalisationContext(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
             new MemoryCache(new MemoryCacheOptions()),
             new NoopEventHub(),

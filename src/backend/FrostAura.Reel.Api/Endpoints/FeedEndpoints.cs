@@ -269,10 +269,9 @@ public static class FeedEndpoints
             // a page load must not be able to start an LLM call, which is the job's work and the
             // on-demand endpoint's. Where nothing has been written the card renders exactly as it
             // did before, on the templater's sentence.
-            var lensTaste = await featureBuilder.BuildTasteStateAsync(account.Id, nowUtc, ct);
-            var lensProfile = await tasteFacts.BuildAsync(account.Id, lensTaste, nowUtc, ct);
+            var profileHash = await tasteFacts.CurrentHashAsync(account.Id, nowUtc, ct);
             var lensByTitle = await lens.ResolveManyAsync(
-                account.Id, items.Select(x => x.Title.Id).ToList(), lensProfile.ProfileHash, ct);
+                account.Id, items.Select(x => x.Title.Id).ToList(), profileHash, ct);
 
             // The scalars behind the tonight-mood chips. One query for the page; the chips then
             // re-sort in the browser with no further round trip and no rebuild.

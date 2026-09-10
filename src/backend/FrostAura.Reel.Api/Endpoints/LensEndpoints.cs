@@ -53,6 +53,8 @@ public static class LensEndpoints
 
             var accountId = accountContext.AccountId!.Value;
             var now = DateTime.UtcNow;
+            // The taste state is needed here whatever happens — a generation reads it — so the
+            // full build is honest on this path, unlike the render paths that only need the hash.
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
             var built = await facts.BuildAsync(accountId, taste, now, ct);
 

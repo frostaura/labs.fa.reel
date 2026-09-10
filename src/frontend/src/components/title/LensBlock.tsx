@@ -35,15 +35,7 @@ const WHEN_LABELS: Record<string, string> = {
  *  - **The overview never disappears.** This block sits above it, it does not replace it. If the
  *    lens is wrong or absent the page still tells you what the film is about.
  */
-export default function LensBlock({
-  mediaType,
-  tmdbId,
-  overview,
-}: {
-  mediaType: string;
-  tmdbId: number;
-  overview: string | null;
-}) {
+export default function LensBlock({ mediaType, tmdbId }: { mediaType: string; tmdbId: number }) {
   const { data, isLoading } = useGetLensQuery({ mediaType, tmdbId });
   const [report, { isLoading: reporting }] = useReportLensSpoilerMutation();
   const [showCaution, setShowCaution] = useState(false);
@@ -141,10 +133,6 @@ export default function LensBlock({
           <Flag className="h-3.5 w-3.5" /> This spoiled it
         </button>
       </div>
-
-      {/* The synopsis is never replaced — it is what the page falls back to, and it is still what
-          tells you what the thing is about when the lens is wrong. Rendered by the caller. */}
-      {overview === null && null}
     </section>
   );
 }

@@ -75,7 +75,7 @@ public class LensPipelineTests(PostgresFixture fixture)
 
         public FeatureVectorBuilder Features => new(db);
 
-        public TasteFactsBuilder Facts => new(db, Dislikes);
+        public TasteFactsBuilder Facts => new(db, Dislikes, Features, Cache);
 
         public PersonalisationContext Personalisation => new(db, Dislikes);
 

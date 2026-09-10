@@ -5,6 +5,7 @@ using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace FrostAura.Reel.Application.Ml;
 
@@ -24,8 +25,24 @@ namespace FrostAura.Reel.Application.Ml;
 /// not a favourite, and the old summary would happily open with one — asking the model to write
 /// warmly about a taste the surface forbids.</para>
 /// </summary>
-public sealed class TasteFactsBuilder(IReelDbContext db, DislikeSignal dislikes)
+public sealed class TasteFactsBuilder(
+    IReelDbContext db, DislikeSignal dislikes, FeatureVectorBuilder features, IMemoryCache cache)
 {
+    /// <summary>
+    /// How long a computed profile hash is reused on the RENDER paths.
+    ///
+    /// <para>Every surface that shows lens copy needs the account's current fingerprint to know
+    /// which cached notes are fresh — the feed, the digest, Saved and the title modal. Computing it
+    /// means building the whole taste state and running half a dozen aggregates, which is fine once
+    /// a night in a job and absurd on a page load that fires four of them at once. Two minutes is
+    /// well inside a browsing session and far shorter than the fingerprint's own cadence, which is
+    /// measured in weeks.</para>
+    ///
+    /// <para>Deliberately NOT used by the jobs: a generation pass must key its writes on a
+    /// fingerprint it actually computed, not on one a page load left lying around.</para>
+    /// </summary>
+    public static readonly TimeSpan HashCacheTtl = TimeSpan.FromMinutes(2);
+
     /// <summary>The affinity list length. Matches <see cref="TasteProfileHash.TopN"/> — the hash reads the same list.</summary>
     public const int TopGenres = TasteProfileHash.TopN;
 
@@ -47,6 +64,25 @@ public sealed class TasteFactsBuilder(IReelDbContext db, DislikeSignal dislikes)
     /// <summary>The facts, plus the fingerprint they hash to and the loved ids that fed it.</summary>
     public sealed record Result(
         TasteFacts Facts, string ProfileHash, string ProfileFingerprint, IReadOnlyList<Guid> TopLovedTitleIds);
+
+    /// <summary>
+    /// The account's current profile hash, cached briefly — what a RENDER path needs and all it
+    /// needs. See <see cref="HashCacheTtl"/> for why this exists separately from
+    /// <see cref="BuildAsync"/>.
+    /// </summary>
+    public async Task<string> CurrentHashAsync(Guid accountId, DateTime asOf, CancellationToken ct)
+    {
+        var key = $"profilehash:{accountId}";
+        if (cache.TryGetValue<string>(key, out var cached) && cached is { Length: > 0 })
+        {
+            return cached;
+        }
+
+        var taste = await features.BuildTasteStateAsync(accountId, asOf, ct);
+        var built = await BuildAsync(accountId, taste, asOf, ct);
+        cache.Set(key, built.ProfileHash, HashCacheTtl);
+        return built.ProfileHash;
+    }
 
     public async Task<Result> BuildAsync(
         Guid accountId, FeatureVectorBuilder.TasteState taste, DateTime asOf, CancellationToken ct)

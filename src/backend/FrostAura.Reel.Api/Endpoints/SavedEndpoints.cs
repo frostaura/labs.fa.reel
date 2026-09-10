@@ -114,7 +114,6 @@ public static class SavedEndpoints
             OnDemandScorer scorer,
             RatingCalibrationService calibration,
             LensService lens,
-            FeatureVectorBuilder featureBuilder,
             TasteFactsBuilder tasteFacts,
             HttpContext http,
             CancellationToken ct) =>
@@ -131,10 +130,11 @@ public static class SavedEndpoints
             // Read-only, like the feed: a page load must never be able to start a generation. The
             // nightly pass pre-fetches the queue's top twenty, so in steady state most of these are
             // already warm and the rest simply render without a hook.
-            var taste = await featureBuilder.BuildTasteStateAsync(account.Id, now, ct);
-            var profile = await tasteFacts.BuildAsync(account.Id, taste, now, ct);
             var notes = await lens.ResolveManyAsync(
-                account.Id, queue.Items.Select(i => i.TitleId).ToList(), profile.ProfileHash, ct);
+                account.Id,
+                queue.Items.Select(i => i.TitleId).ToList(),
+                await tasteFacts.CurrentHashAsync(account.Id, now, ct),
+                ct);
 
             return Results.Ok(queue with
             {
