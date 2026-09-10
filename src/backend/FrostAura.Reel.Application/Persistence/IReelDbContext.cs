@@ -53,6 +53,10 @@ public interface IReelDbContext
     DbSet<FeedBuildStat> FeedBuildStats { get; }
     DbSet<AccountDigest> AccountDigests { get; }
 
+    // "Through your lens": the account's own taste, written out, and titles retold through it.
+    DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives { get; }
+    DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies { get; }
+
     // The closed loop. ExposureEvents is append-only; the other two are read-only SQL views.
     DbSet<ExposureEvent> ExposureEvents { get; }
     DbSet<ExposureOutcome> ExposureOutcomes { get; }

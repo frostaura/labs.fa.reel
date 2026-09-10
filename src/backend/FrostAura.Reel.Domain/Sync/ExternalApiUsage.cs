@@ -18,6 +18,19 @@ public static class ApiUsagePurpose
     public const string SearchAgent = "search-agent";
     public const string Rerank = "rerank";
     public const string Embed = "embed";
+
+    /// <summary>Writing an account's second-person taste narrative. Weekly, one call per account.</summary>
+    public const string TasteNarrative = "taste-narrative";
+
+    /// <summary>
+    /// Writing "through your lens" copy for a title. This is the purpose the per-account daily
+    /// call and token ceilings are enforced against, so nothing else may borrow the string.
+    /// </summary>
+    public const string Lens = "lens";
+
+    /// <summary>The founder-only LLM-judge pass over generated lens copy. Deliberately NOT
+    /// <see cref="Lens"/>, so auditing a prompt version cannot eat the budget it is auditing.</summary>
+    public const string LensAudit = "lens-audit";
 }
 
 /// <summary>
@@ -63,4 +76,20 @@ public class ExternalApiUsage
     public long? PromptTokens { get; set; }
 
     public long? CompletionTokens { get; set; }
+}
+
+/// <summary>
+/// The counters that have not reached the day ledger yet. The recorder flushes every 15 seconds,
+/// and a single lens job can spend its whole daily allowance well inside one of those windows — so
+/// a budget gate that reads only the persisted table would let a burst straight through. Exposed
+/// as a port because the gate lives in the application layer and the recorder in infrastructure.
+/// </summary>
+public interface IPendingApiUsage
+{
+    /// <summary>
+    /// Calls and tokens recorded today for this (provider, account, purpose) and still in memory.
+    /// Tokens are prompt + completion, and count as zero where the provider reported nothing —
+    /// unknown spend is not free, but it is also not a number this gate can subtract.
+    /// </summary>
+    (long Calls, long Tokens) PendingToday(ApiProvider provider, Guid? accountId, string purpose);
 }

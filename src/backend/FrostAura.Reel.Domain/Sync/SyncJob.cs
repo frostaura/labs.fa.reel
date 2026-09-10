@@ -14,6 +14,16 @@ public enum JobKind
     BuildFeed,
     RefreshAvailability,
     BuildDigest,
+
+    /// <summary>Writes the account's second-person taste narrative. Weekly, and whenever its profile hash moves.</summary>
+    BuildTasteNarrative,
+
+    /// <summary>
+    /// Writes "through your lens" copy for the titles that carry the day. Priority 3, enqueued
+    /// AFTER a Fresh build's snapshot is written — never inside the build, whose why pass is
+    /// already time-boxed at 20s soft / 60s hard and would turn into a timeout.
+    /// </summary>
+    PersonaliseTitles,
 }
 
 public enum JobStatus

@@ -1,6 +1,7 @@
 using System.Globalization;
 using FrostAura.Reel.Application.Abstractions;
 using FrostAura.Reel.Application.Ingestion;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
@@ -10,6 +11,7 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
@@ -39,9 +41,9 @@ public sealed class LiveSearchExpansionService(
     CandidateGenerator candidateGenerator,
     TitleHydrator hydrator,
     FeatureVectorBuilder featureBuilder,
+    PersonalisationContext personalisation,
     OnDemandScorer scorer,
     ExposureLog exposures,
-    DislikeSignal dislikes,
     LexicalSearchService lexical,
     ICatalogWorkCoordinator coordinator,
     IMemoryCache cache,
@@ -128,17 +130,19 @@ public sealed class LiveSearchExpansionService(
             var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
             var now = DateTime.UtcNow;
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
-            var tasteSummary = await TasteSummary.BuildAsync(db, accountId, taste, ct);
-
-            // Recently-declined titles ride BOTH agent prompts (interpret + rerank) through the
-            // taste summary, so conversational picks verbally respect dislikes too. The scored
-            // component already respects them numerically — OnDemandScorer subtracts the
-            // DislikeSignal demotion, and its output feeds this surface's final blend below.
-            var dislikeProfile = await dislikes.GetProfileAsync(accountId, ct);
-            if (DislikeSignal.DeclinedLine(dislikeProfile) is { } declined)
-            {
-                tasteSummary = $"{tasteSummary}. {declined}";
-            }
+            // The account's effective taste narrative — its own words where it has edited them —
+            // falling back to the compact line for an account not yet written one. Ask Reel used to
+            // build that line here by hand; PersonalisationContext is now the single definition, so
+            // the feed, the paginator and this surface cannot describe the same person differently.
+            //
+            // Recently-declined titles ride BOTH agent prompts (interpret + rerank), so
+            // conversational picks verbally respect dislikes too. The scored component already
+            // respects them numerically — OnDemandScorer subtracts the DislikeSignal demotion, and
+            // its output feeds this surface's final blend below.
+            var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
+            var tasteSummary = persona.Declined is { Length: > 0 } declined
+                ? $"{persona.Taste}. {declined}"
+                : persona.Taste;
 
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
             var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
@@ -360,7 +364,7 @@ public sealed class LiveSearchExpansionService(
             var rerankQuery = referenceNames.Count > 0
                 ? $"{trimmed}\nThe user wants something like: {string.Join(", ", referenceNames)}"
                 : trimmed;
-            var fitById = await RerankStreamAsync(accountId, rerankQuery, tasteSummary, ranked, scores, emit, ct);
+            var fitById = await RerankStreamAsync(accountId, rerankQuery, persona, ranked, scores, emit, ct);
             foreach (var (title, _) in outside)
             {
                 await emit("candidate-reranked", new
@@ -488,18 +492,32 @@ public sealed class LiveSearchExpansionService(
         }
     }
 
-    /// <summary>Re-ranks every shown card with the agent (batched, cached per (account,title,query)); streams candidate-reranked.</summary>
+    /// <summary>
+    /// Re-ranks every shown card with the agent (batched, cached per (account, title, query)) and
+    /// streams <c>candidate-reranked</c> per batch, so the grid sharpens as the answers land rather
+    /// than all at once at the end.
+    ///
+    /// <para>Time-boxed only by the caller's own request: unlike the feed build and the paginator,
+    /// this surface is a stream, and a partial answer is already what it delivers — every batch
+    /// that completes is emitted before the next begins. The batching, failure handling and
+    /// per-batch caching are the shared <see cref="LlmBudgetLoop"/> all the same, so there is one
+    /// definition of "a batch that was cancelled part-way caches nothing" rather than three.</para>
+    /// </summary>
     private async Task<Dictionary<Guid, RerankResult>> RerankStreamAsync(
-        Guid accountId, string query, string tasteSummary,
+        Guid accountId, string query, LensPersona persona,
         IReadOnlyList<(Title Title, double Sim)> ranked,
         IReadOnlyDictionary<Guid, decimal> scores, Emit emit, CancellationToken ct)
     {
         var qnorm = NormalizeQuery(query);
         var fitById = new Dictionary<Guid, RerankResult>();
 
-        for (var i = 0; i < ranked.Count; i += RerankBatch)
+        // A title can be judged more than once across a long conversation; averaging the verdicts
+        // is the caller's half of the LLM position-bias mitigation (see PositionDebiasedFit).
+        var debiased = new PositionDebiasedFit();
+
+        using var loop = new LlmBudgetLoop(LlmBudgetOptions.Unbounded(RerankBatch), ct);
+        await loop.RunAsync(ranked, async (batch, batchCt) =>
         {
-            var batch = ranked.Skip(i).Take(RerankBatch).ToList();
             var uncached = new List<RerankInput>();
             foreach (var (title, _) in batch)
             {
@@ -519,9 +537,11 @@ public sealed class LiveSearchExpansionService(
             {
                 // No anchor title here: Ask Reel's "anchor" is the user's request itself, which
                 // already rides the query — behaviour deliberately unchanged.
-                var results = await agent.RerankBatchAsync(uncached, query, tasteSummary, anchorName: null, ct);
-                foreach (var res in results)
+                var results = await agent.RerankBatchAsync(uncached, query, persona, anchorName: null, batchCt);
+                foreach (var raw in results)
                 {
+                    debiased.Observe(raw);
+                    var res = debiased.For(raw.TitleId)!;
                     fitById[res.TitleId] = res;
                     cache.Set(FitKey(accountId, res.TitleId, qnorm), res, FitTtl);
                 }
@@ -534,7 +554,7 @@ public sealed class LiveSearchExpansionService(
                     await emit("candidate-reranked", new { titleId = title.Id, fit = fit.Fit, why = fit.Why });
                 }
             }
-        }
+        });
 
         return fitById;
     }

@@ -18,6 +18,7 @@ import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
 import WhereToWatch from "../components/title/WhereToWatch";
 import CastMemberCard from "../components/title/CastMemberCard";
 import FadeScrollRow from "../components/FadeScrollRow";
+import LensBlock from "../components/title/LensBlock";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import { DEFAULT_BROWSE_FILTER } from "../lib/browseFilter";
 import { DISLIKE_REASONS } from "../lib/dislikeReasons";
@@ -365,6 +366,13 @@ export default function TitleDetail() {
                       {title.whyThis}
                     </p>
                   )}
+
+                  {/* "Through your lens" — the premise retold in your own taste vocabulary, with
+                      the honest reservation behind a tap. Renders nothing at all when no copy has
+                      been written, which leaves the why-line above and the synopsis below exactly
+                      as they were. It sits ABOVE the synopsis and never replaces it: when the lens
+                      is wrong or absent, the page still tells you what the thing is about. */}
+                  <LensBlock mediaType={mediaType} tmdbId={Number(tmdbId)} />
 
                   {/* Synopsis */}
                   {title.overview && <p className="fa-body text-fa-frost leading-relaxed max-w-3xl">{title.overview}</p>}

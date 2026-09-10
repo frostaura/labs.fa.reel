@@ -1,5 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
+using FrostAura.Reel.Application.Lens;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
@@ -16,7 +18,7 @@ public static class DigestEndpoints
 
         // The current ISO week's digest as feed-shaped cards; { items: [] } until the weekly
         // build has run — the Home rail hides itself on empty rather than erroring.
-        group.MapGet("/current", async (IReelDbContext db, ExposureLog exposures, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/current", async (IReelDbContext db, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -45,6 +47,11 @@ public static class DigestEndpoints
                 : await db.Titles.Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
             var providers = await FeedEndpoints.ProvidersForAsync(db, account.Region, ids, nowUtc, ct);
 
+            // Read-only: the digest is rendered, never generated from. The job that built it
+            // already asked for lens copy on its top pick.
+            var notes = await lens.ResolveManyAsync(
+                account.Id, ids, await tasteFacts.CurrentHashAsync(account.Id, nowUtc, ct), ct);
+
             var cards = new List<FeedEndpoints.FeedCard>();
             foreach (var item in digestItems)
             {
@@ -56,12 +63,18 @@ public static class DigestEndpoints
                 var releaseDate = title.MediaType == MediaType.Movie ? title.ReleasedAt : title.FirstAiredAt;
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
                 var (crowd, crowdVotes) = CrowdRating.Resolve(title);
-                var whyThis = DigestReasons.CopyFor(item.Reason);
+                var note = notes.GetValueOrDefault(title.Id)?.Note;
+                // The lens's hook where one exists, and the reason copy where it does not. Both are
+                // true statements about why the card is here; the hook is simply the one written
+                // for this reader.
+                var whyThis = note?.Hook ?? DigestReasons.CopyFor(item.Reason);
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
                     Math.Round(item.PredictedRating, 1), crowd, crowdVotes, whyThis, isReleased,
-                    providers.GetValueOrDefault(title.Id, [])));
+                    providers.GetValueOrDefault(title.Id, []),
+                    Confidence: null, FloorUsed: null,
+                    Hook: note?.Hook, LensClause: note?.FirstClause(), Mood: note?.Mood));
             }
 
             // The digest is the one surface whose picks were frozen days ago by a job that did not

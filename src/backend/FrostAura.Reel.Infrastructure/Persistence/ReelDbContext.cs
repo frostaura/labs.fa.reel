@@ -77,6 +77,12 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<FeedBuildStat> FeedBuildStats => Set<FeedBuildStat>();
     public DbSet<AccountDigest> AccountDigests => Set<AccountDigest>();
 
+    // ── "Through your lens" ────────────────────────────────────────────────────────────
+    // Both are account-owned and therefore filtered; TitleLensCopy is deliberately NOT shared
+    // across tenants the way TitleAttributes is — being per-account is the whole point of it.
+    public DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives => Set<Domain.Lens.AccountTasteNarrative>();
+    public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => Set<Domain.Lens.TitleLensCopy>();
+
     // ── The closed loop ────────────────────────────────────────────────────────────────
     // ExposureEvents is append-only and is never touched by the feed builder's prune.
     // The other two are read-only SQL views created in the Phase2ExposureLog migration.
@@ -379,6 +385,33 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(s => new { s.AccountId, s.BuiltAt }).IsDescending(false, true);
             e.Property(s => s.ShortlistP50).HasPrecision(4, 2);
             e.Property(s => s.ShortlistP90).HasPrecision(4, 2);
+        });
+
+        // ── "Through your lens" ────────────────────────────────────────────────────────────
+        modelBuilder.Entity<Domain.Lens.AccountTasteNarrative>(e =>
+        {
+            // One live narrative per account per version; regeneration writes a new version rather
+            // than mutating the old one, so the history of what the product believed about someone
+            // stays readable.
+            e.HasIndex(n => new { n.AccountId, n.Version }).IsUnique();
+            e.Property(n => n.ProfileHash).HasMaxLength(16);
+            e.Property(n => n.ProfileFingerprint).HasMaxLength(2048);
+            e.Property(n => n.ModelId).HasMaxLength(128);
+            e.Property(n => n.FactsJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<Domain.Lens.TitleLensCopy>(e =>
+        {
+            // The cache key. ProfileHash carries the taste fingerprint (including the dislike
+            // version) and PromptVersion the manual bump lever; the model artifact is deliberately
+            // absent — see TasteProfileHash for why, and why the prose never states the number.
+            e.HasIndex(c => new { c.AccountId, c.TitleId, c.ProfileHash, c.PromptVersion }).IsUnique();
+            // The lens job's "what is already warm" read, and the stale-note fallback's read.
+            e.HasIndex(c => new { c.AccountId, c.TitleId, c.GeneratedAt }).IsDescending(false, false, true);
+            e.Property(c => c.ProfileHash).HasMaxLength(16);
+            e.Property(c => c.ModelId).HasMaxLength(128);
+            e.Property(c => c.RejectionReason).HasMaxLength(128);
+            e.Property(c => c.LensJson).HasColumnType("jsonb");
         });
 
         // ── The closed loop ────────────────────────────────────────────────────────────────

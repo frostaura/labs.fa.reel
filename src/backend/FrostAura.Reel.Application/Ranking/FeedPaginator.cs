@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
@@ -67,6 +68,7 @@ public sealed class FeedPaginator(
     CandidateGenerator candidateGenerator,
     ITmdbClient tmdb,
     ISearchAgent agent,
+    PersonalisationContext personalisation,
     IMemoryCache cache,
     ILogger<FeedPaginator> logger)
 {
@@ -314,20 +316,14 @@ public sealed class FeedPaginator(
             // the existing agent-unavailable and rerank-failed paths already behave. Whatever
             // batches completed inside the budget are still applied and cached, so the next page
             // over the same titles is warm.
-            using var curationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            curationCts.CancelAfter(CurationCeiling);
-            var started = System.Diagnostics.Stopwatch.StartNew();
-            var curationCt = curationCts.Token;
-            var timedOut = false;
+            //
+            // The budget/ceiling/first-batch mechanics themselves live in LlmBudgetLoop — one copy
+            // shared with the feed why pass, Ask Reel's rerank stream and lens generation.
+            using var loop = new LlmBudgetLoop(
+                new LlmBudgetOptions(CurationBudget, CurationCeiling, RerankBatch, CurationGate), ct);
+            var narrative = await personalisation.ContextForAsync(account.Id, taste, ct);
 
-            var tasteSummary = await TasteSummary.BuildAsync(db, account.Id, taste, ct);
-            var holdsGate = false;
-            try
-            {
-                await CurationGate.WaitAsync(curationCt);
-                holdsGate = true;
-            }
-            catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            if (!await loop.TryAcquireGateAsync())
             {
                 // Every slot is busy and the budget expired before one freed. Fall through rather
                 // than returning early: whatever fits were already cached still apply, and the
@@ -335,64 +331,24 @@ public sealed class FeedPaginator(
                 logger.LogInformation(
                     "Feed curation for {Row} gave up waiting for a slot within {Budget}s; serving model order.",
                     rowKey, CurationBudget.TotalSeconds);
-                timedOut = true;
             }
-
-            try
+            else
             {
-                if (!holdsGate)
+                var stop = await loop.RunAsync(uncached, async (batch, batchCt) =>
                 {
-                    uncached.Clear();
-                }
-
-                for (var i = 0; i < uncached.Count && !timedOut; i += RerankBatch)
-                {
-                    // Checked BEFORE starting a batch, never during one. A batch that is cancelled
-                    // part-way returns nothing and caches nothing, so the work is simply lost and
-                    // the next request repeats it.
-                    if (i > 0 && started.Elapsed > CurationBudget)
-                    {
-                        logger.LogInformation(
-                            "Feed curation for {Row} stopped after {Elapsed:0.0}s with {Done} of {Total} titles curated; the rest keep model order and are curated on a later page.",
-                            rowKey, started.Elapsed.TotalSeconds, fitById.Count, pool.Count);
-                        break;
-                    }
-
-                    var batch = uncached.Skip(i).Take(RerankBatch).ToList();
-                    IReadOnlyList<RerankResult> results;
-                    try
-                    {
-                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, anchorName, curationCt);
-                    }
-                    catch (OperationCanceledException) when (curationCts.IsCancellationRequested && !ct.IsCancellationRequested)
-                    {
-                        logger.LogInformation(
-                            "Feed curation for {Row} exceeded {Budget}s after {Done} of {Total} titles; serving model order for the rest.",
-                            rowKey, CurationBudget.TotalSeconds, fitById.Count, pool.Count);
-                        timedOut = true;
-                        break;
-                    }
-                    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-                    {
-                        logger.LogWarning(ex, "Feed curation rerank failed for {Row}; falling back to model order.", rowKey);
-                        break;
-                    }
-
+                    var results = await agent.RerankBatchAsync(batch, query, narrative, anchorName, batchCt);
                     foreach (var r in results)
                     {
                         fitById[r.TitleId] = r;
                         cache.Set(FitKey(account.Id, r.TitleId, rowKey), r, FitTtl);
                     }
-                }
-            }
-            finally
-            {
-                // Only if we actually acquired it — a budget expiry while WAITING means we never
-                // entered, and releasing then would permanently inflate the semaphore's count and
-                // uncap concurrency for the life of the process.
-                if (holdsGate)
+                });
+
+                if (stop != LlmBudgetStop.Completed)
                 {
-                    CurationGate.Release();
+                    logger.LogInformation(
+                        "Feed curation for {Row} stopped ({Stop}) after {Elapsed:0.0}s with {Done} of {Total} titles curated; the rest keep model order and are curated on a later page.",
+                        rowKey, stop, loop.Elapsed.TotalSeconds, fitById.Count, pool.Count);
                 }
             }
         }

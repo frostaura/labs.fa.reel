@@ -203,6 +203,23 @@ public sealed class BuildDigestJobHandler(
     }
 
     /// <summary>
+    /// The lens's hook out of a stored note, or null when the row cannot be read. A push is not
+    /// worth failing over a JSON shape that has moved on.
+    /// </summary>
+    private static string? ReadHook(string lensJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<Domain.Lens.LensNote>(
+                lensJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))?.Hook;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The web-push payload for a built digest. Pure and internal so the copy is unit-testable
     /// without a database or a push service.
     ///
@@ -210,9 +227,10 @@ public sealed class BuildDigestJobHandler(
     /// waiting — "Sicario: Day of the Soldado — 8.2 for you, plus 9 more this week". A digest of
     /// one drops the "plus" clause rather than saying "plus 0 more".</para>
     ///
-    /// <para>Body: the top item's own why — or, when the "high for you" floor had to be relaxed,
-    /// the degraded reason instead, because a push that oversells a relaxed digest is exactly the
-    /// dishonesty the relaxed floor exists to avoid.</para>
+    /// <para>Body: the lens's hook for the top pick when one has been written, the item's own why
+    /// otherwise — or, when the "high for you" floor had to be relaxed, the degraded reason
+    /// instead, because a push that oversells a relaxed digest is exactly the dishonesty the
+    /// relaxed floor exists to avoid, and a personally-written hook oversells it best.</para>
     ///
     /// <para>Url: the deep link to that title. Falls back to "/" only when the title row is missing
     /// or carries no TMDB id, which is the one case the route cannot express.</para>
@@ -222,7 +240,8 @@ public sealed class BuildDigestJobHandler(
     /// seen anywhere else in the product.</para>
     /// </summary>
     internal static DigestPushPayload BuildPushPayload(
-        string? topName, string? topMediaType, long? topTmdbId, DigestItem top, int itemCount)
+        string? topName, string? topMediaType, long? topTmdbId, DigestItem top, int itemCount,
+        string? topHook = null)
     {
         var culture = System.Globalization.CultureInfo.InvariantCulture;
         var rating = Math.Round(top.PredictedRating, 1).ToString("0.0", culture);
@@ -238,7 +257,13 @@ public sealed class BuildDigestJobHandler(
             ? $"/title/{mediaType.ToLowerInvariant()}/{tmdbId}"
             : "/";
 
-        return new DigestPushPayload(title, top.DegradedReason ?? DigestReasons.CopyFor(top.Reason), url);
+        // The lens's hook is the body where one exists — it is the one sentence in the product
+        // written to make THIS reader press play, which is exactly what a push body is for. The
+        // degraded reason still outranks it: a push that oversells a relaxed digest is the
+        // dishonesty the relaxed floor exists to avoid, and a personal hook oversells it best.
+        var body = top.DegradedReason
+            ?? (topHook is { Length: > 0 } hook ? hook : DigestReasons.CopyFor(top.Reason));
+        return new DigestPushPayload(title, body, url);
     }
 
     private async Task NotifyAsync(Guid accountId, IReadOnlyList<DigestItem> items, DateTime now, CancellationToken ct)
@@ -260,12 +285,26 @@ public sealed class BuildDigestJobHandler(
             .Select(t => new { t.Name, t.MediaType, t.TmdbId })
             .FirstOrDefaultAsync(ct);
 
+        // Whatever lens copy already exists for the top pick. Read only, and deliberately so: a
+        // notification is not worth an LLM call, and the PersonaliseTitles job asks for the digest's
+        // top pick anyway, so in steady state this is warm by the time Friday's push goes out.
+        var hook = (await db.TitleLensCopies
+                .Where(c => c.AccountId == accountId && c.TitleId == top.TitleId
+                    && c.Status == Domain.Lens.LensStatus.Done)
+                .OrderByDescending(c => c.GeneratedAt)
+                .Select(c => c.LensJson)
+                .FirstOrDefaultAsync(ct))
+            is { Length: > 0 } json
+            ? ReadHook(json)
+            : null;
+
         var payload = JsonSerializer.Serialize(BuildPushPayload(
             topTitle?.Name,
             topTitle?.MediaType.ToString(),
             topTitle?.TmdbId,
             top,
-            items.Count));
+            items.Count,
+            hook));
 
         foreach (var subscription in subscriptions)
         {
