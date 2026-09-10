@@ -207,9 +207,14 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
         catch (Exception ex)
         {
             Detach(staged);
-            logger.LogWarning(
+            // Error, not Warning. Swallowing the failure is right — the page is already rendered and
+            // a 500 here would trade a served card for the row that records it — but swallowing it
+            // QUIETLY is what let the exposure log sit at zero rows for a day without anyone's
+            // dashboard turning a colour. The catch keeps the serve; the level keeps the evidence.
+            logger.LogError(
                 ex,
-                "Exposure logging failed for {Surface} on {AccountId} ({Count} cards) — the response is unaffected.",
+                "Exposure logging failed for {Surface} on {AccountId} ({Count} cards) — the response is unaffected, "
+                + "but the closed loop lost this serve and every accuracy number computed from it is now short.",
                 surface, accountId, cards.Count);
             return 0;
         }

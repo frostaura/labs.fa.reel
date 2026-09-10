@@ -13,6 +13,15 @@ public enum FeedBuildOutcome
 
     /// <summary>The assembled feed was item-for-item what was already Active, so nothing was written.</summary>
     NoOp,
+
+    /// <summary>
+    /// The build never reached assembly because there was no Active model artifact this binary
+    /// could read. Recorded rather than left as a log line: on 2026-09-10 this was the outcome of
+    /// EVERY build the running binary claimed for a day, while the instrument that was supposed to
+    /// show it wrote nothing at all — because the only path that wrote a row was the one that never
+    /// ran. A skipped build is a build.
+    /// </summary>
+    Skipped,
 }
 
 /// <summary>

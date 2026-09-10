@@ -110,6 +110,7 @@ public class BuildFeedJobHandler(
         // keeping, and it was the one the old log line never made.
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var capture = new BuildCapture();
+        var now = DateTime.UtcNow;
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
         var artifact = await db.ModelArtifacts
             .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
@@ -121,13 +122,10 @@ public class BuildFeedJobHandler(
             .FirstOrDefaultAsync(ct);
         if (artifact is null)
         {
-            logger.LogWarning("BuildFeed skipped for {AccountId}: no active model artifact.", accountId);
-            job.ProgressMessage = "skipped — train a model first";
-            await db.SaveChangesAsync(ct);
+            await SkipWithoutReadableArtifactAsync(job, accountId, now, stopwatch, ct);
             return;
         }
 
-        var now = DateTime.UtcNow;
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         // The online residual head for this Active artifact, loaded once and folded into every score
         // (first-pass ranking + final predicted rating). Zero head ⇒ no change from the base model.
@@ -358,6 +356,99 @@ public class BuildFeedJobHandler(
         });
         logger.LogInformation("Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored).",
             snapshot.Id, accountId, candidates.Count);
+    }
+
+    /// <summary>
+    /// The one exit that produces no feed: <c>db.ModelArtifacts</c> handed back nothing Active.
+    ///
+    /// <para><b>Why this is not a one-line log.</b> "No Active artifact" has two causes that look
+    /// identical from inside the query and could not be further apart in what they mean. Either the
+    /// account has never trained — in which case "train a model first" is exactly right — or an
+    /// Active artifact EXISTS and the <c>ModelArtifact</c> query filter is hiding it because it was
+    /// trained against a different <see cref="FeatureSchema"/> version than this binary runs. The
+    /// second case is not the user's problem to solve and cannot be solved by retraining, because
+    /// whatever produced the incompatible artifact will produce another one; on 2026-09-10 a stale
+    /// second job runner sharing this database did exactly that in a loop, and every build this
+    /// binary claimed for a day left nothing behind but the word "skipped".</para>
+    ///
+    /// <para>So the two cases are separated, the incompatible one is reported at <b>Error</b> with
+    /// both schema versions, and either way a <see cref="FeedBuildOutcome.Skipped"/> row lands — the
+    /// instrument has to be able to show a run that produced nothing, or "the feed stopped moving"
+    /// stays a story told only in logs that roll over.</para>
+    /// </summary>
+    private async Task SkipWithoutReadableArtifactAsync(
+        SyncJob job, Guid accountId, DateTime now, System.Diagnostics.Stopwatch stopwatch, CancellationToken ct)
+    {
+        // IgnoreQueryFilters is the whole point: the row worth reporting is precisely the one the
+        // filter above removed. Projected rather than materialised — ArtifactBytes is a model blob
+        // and this path must stay cheap enough to run on every claimed build.
+        var hidden = await db.ModelArtifacts
+            .IgnoreQueryFilters()
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            .OrderByDescending(a => a.Version)
+            .Select(a => new { a.Id, a.Version, a.FeatureSchemaJson })
+            .FirstOrDefaultAsync(ct);
+
+        if (hidden is null)
+        {
+            logger.LogWarning("BuildFeed skipped for {AccountId}: no active model artifact.", accountId);
+            job.ProgressMessage = "skipped — train a model first";
+        }
+        else
+        {
+            var storedSchema = SchemaVersionOf(hidden.FeatureSchemaJson);
+            logger.LogError(
+                "BuildFeed skipped for {AccountId}: model artifact {ArtifactId} (v{Version}) is Active but was trained "
+                + "against feature schema {StoredSchema} while this build runs schema {CurrentSchema}, so no scoring "
+                + "path can read it. Retraining will NOT fix this if another process on this database is the one "
+                + "answering Train jobs — check that only one job runner is live and that it is running this build.",
+                accountId, hidden.Id, hidden.Version, storedSchema?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown",
+                FeatureSchema.Version);
+            job.ProgressMessage = string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "skipped — the active model was trained against feature schema {0}, this build needs {1}",
+                storedSchema?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "an unknown version",
+                FeatureSchema.Version);
+        }
+
+        // ModelArtifactId carries the artifact this build COULD NOT use where there was one, and
+        // Guid.Empty where there was genuinely nothing — the column is not nullable and a migration
+        // to make it so would buy nothing the Mode column does not already say.
+        db.FeedBuildStats.Add(new FeedBuildStat
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = null,
+            ModelArtifactId = hidden?.Id ?? Guid.Empty,
+            BuiltAt = now,
+            Mode = FeedBuildOutcome.Skipped,
+            DegradedReason = job.ProgressMessage,
+            DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        });
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// The <c>version</c> an artifact's <c>FeatureSchemaJson</c> records, or null when the document
+    /// predates the field or is not the object shape <c>TrainJobHandler</c> writes. Read in memory
+    /// rather than through the stored generated column, so this stays inside the Application layer.
+    /// </summary>
+    private static int? SchemaVersionOf(string featureSchemaJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(featureSchemaJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("version", out var version)
+                && version.TryGetInt32(out var parsed)
+                ? parsed
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
