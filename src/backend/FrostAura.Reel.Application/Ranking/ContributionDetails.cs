@@ -31,6 +31,46 @@ public static class ContributionDetails
     public static Detail DislikedSimilarity() =>
         new(DislikedSimilarityFeature, People: [], Note: "you passed on similar titles recently");
 
+    /// <summary>
+    /// The taste prior's factors, as bars and notes for the title page.
+    ///
+    /// <para>These are RANKING facts, not scoring facts, and the difference is the whole reason they
+    /// are carried separately: the prediction above them is what the model believes and is not
+    /// touched by any of this, while these say why the title did or did not reach the page in front
+    /// of it. That is the founder's "why not" — <i>you have rated 3 reality titles ever</i> — and it
+    /// is a sentence the model has no way to produce, because from inside the model a reality show
+    /// with no rated credits looks exactly like a well-matched one.</para>
+    ///
+    /// <para>Neutral factors are omitted rather than rendered at zero: a bar that says nothing is
+    /// noise on a card, and the common case is that the prior has nothing to say.</para>
+    /// </summary>
+    public static (IReadOnlyList<(string Feature, decimal Value)> Bars, IReadOnlyList<Detail> Details) TastePriorBreakdown(
+        TastePrior prior, Title title)
+    {
+        var components = prior.ComponentsFor(title);
+        if (components.IsNeutral)
+        {
+            return ([], []);
+        }
+
+        var bars = TastePrior.ContributionEntries(components)
+            .Select(e => (e.Feature, Value: Math.Round((decimal)e.Value, 2)))
+            .ToList();
+
+        var details = new List<Detail>(2);
+        if (TastePrior.NoHistoryNote(components) is { } noHistory)
+        {
+            details.Add(new Detail(TastePrior.NoHistoryFeature, Note: noHistory));
+        }
+
+        if (prior.MediaNote(title.MediaType) is { } media)
+        {
+            details.Add(new Detail(TastePrior.MediaFeature, Note: media));
+        }
+
+        return (bars, details);
+    }
+
     /// <summary>One verified person behind a person-affinity bar. Averages are 1dp at the response edge.</summary>
     public sealed record PersonDetail(Guid PersonId, string Name, decimal YourAverage, int TitleCount);
 

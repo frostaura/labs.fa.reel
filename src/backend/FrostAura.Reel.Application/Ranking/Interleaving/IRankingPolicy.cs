@@ -20,6 +20,13 @@ namespace FrostAura.Reel.Application.Ranking.Interleaving;
 /// <param name="PreferenceBoost">The declared-preference-tag multiplier, or 1.</param>
 /// <param name="Popularity">Present-day TMDB popularity — the popularity baseline's ENTIRE signal.</param>
 /// <param name="SlateAffinity">The slate's own multiplier (a rail's anchor similarity term), or 1.</param>
+/// <param name="TastePrior">
+/// The account-level taste prior for this title (see <c>TastePrior</c>): the no-history-genre
+/// demotion, the volume-weighted genre-affinity term and the media prior, pre-multiplied. 1 where
+/// the prior has nothing to say. Supplied by the caller for the same reason freshness is — it is a
+/// property of the ACCOUNT and the title, not of the ranker, and both policies must be ordering
+/// exactly the same information.
+/// </param>
 /// <param name="LlmFit">The re-rank fit where one has been observed for this title; otherwise null.</param>
 public readonly record struct PolicyCandidate(
     Guid TitleId,
@@ -28,6 +35,7 @@ public readonly record struct PolicyCandidate(
     double PreferenceBoost,
     decimal Popularity,
     double SlateAffinity = 1d,
+    double TastePrior = 1d,
     double? LlmFit = null);
 
 /// <summary>
@@ -56,10 +64,10 @@ public interface IRankingPolicy
 }
 
 /// <summary>
-/// The order the feed serves today: calibrated prediction × freshness × preference boost, times the
-/// slate's own affinity term. This is policy A in the honest first comparison, and it exists as a
-/// named policy so that "what the product does now" is a thing the harness can measure rather than
-/// an implicit baseline.
+/// The order the feed serves today: calibrated prediction × the taste prior × freshness ×
+/// preference boost, times the slate's own affinity term. This is policy A in the honest first
+/// comparison, and it exists as a named policy so that "what the product does now" is a thing the
+/// harness can measure rather than an implicit baseline.
 /// </summary>
 public sealed class CalibratedModelPolicy : IRankingPolicy
 {
@@ -70,14 +78,14 @@ public sealed class CalibratedModelPolicy : IRankingPolicy
     public string PolicyId => Id;
 
     /// <inheritdoc />
-    public string Description => "Calibrated prediction × freshness × preference boost — today's served order.";
+    public string Description => "Calibrated prediction × taste prior × freshness × preference boost — today's served order.";
 
     /// <summary>
     /// The served ordering key. Public because the other policies fall back to it and the tests pin
     /// that it reproduces the feed builder's own comparator.
     /// </summary>
     public static decimal Key(PolicyCandidate c) =>
-        c.Predicted * c.Freshness * (decimal)c.PreferenceBoost * (decimal)c.SlateAffinity;
+        c.Predicted * (decimal)c.TastePrior * c.Freshness * (decimal)c.PreferenceBoost * (decimal)c.SlateAffinity;
 
     /// <inheritdoc />
     public IReadOnlyList<PolicyCandidate> Order(IReadOnlyList<PolicyCandidate> candidates) =>
@@ -115,13 +123,18 @@ public sealed class PopularityBaselinePolicy : IRankingPolicy
 /// Orders by the LLM's fit verdict where one exists, falling back to
 /// <see cref="CalibratedModelPolicy"/> for everything else.
 ///
-/// <para><b>This is a stub, and saying so is load-bearing.</b> The feed build's fit verdicts are
-/// produced by the why/re-rank pass, which runs AFTER assembly — so at the moment a slate is
-/// drafted, <see cref="PolicyCandidate.LlmFit"/> is null for every candidate and this policy is
-/// byte-for-byte the calibrated one. It is here so the lens work has a policy id to fill rather
-/// than a new interface to invent, and so the fallback is written down once. Configuring it as an
-/// arm today would run a comparison of a ranker against itself; the summary endpoint reports the
-/// policy ids so that is visible rather than silent.</para>
+/// <para><b>This is no longer a stub.</b> It was one for as long as the only fit verdicts came from
+/// the why/re-rank pass, which runs AFTER assembly — every candidate's
+/// <see cref="PolicyCandidate.LlmFit"/> was null at draft time and this policy was byte-for-byte
+/// the calibrated one. A Fresh build now judges its top shortlist slice against the account's taste
+/// narrative BEFORE hero and rail selection and hands those verdicts to the draft, so on a Fresh
+/// build this is a genuinely different order and a legitimate arm.</para>
+///
+/// <para><b>Two honest limits remain.</b> Only the pre-judged slice carries a fit — a candidate the
+/// pre-pass never reached, or a build where the agent was unavailable or the budget ran out, still
+/// falls back to the calibrated key, which is the correct behaviour and not a silent one. And a
+/// PRESERVE rebuild never re-drafts at all, so this policy only ever expresses itself on the Fresh
+/// builds it was given.</para>
 /// </summary>
 public sealed class ProfileRerankPolicy : IRankingPolicy
 {
@@ -132,7 +145,7 @@ public sealed class ProfileRerankPolicy : IRankingPolicy
     public string PolicyId => Id;
 
     /// <inheritdoc />
-    public string Description => "LLM lens fit where one exists, calibrated order otherwise (stub until fit is computed before assembly).";
+    public string Description => "LLM narrative fit where one was judged before assembly, calibrated order otherwise.";
 
     /// <inheritdoc />
     public IReadOnlyList<PolicyCandidate> Order(IReadOnlyList<PolicyCandidate> candidates) =>
