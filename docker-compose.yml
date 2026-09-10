@@ -95,12 +95,16 @@ services:
       TRAKT_ACCESS_TOKEN: ${TRAKT_ACCESS_TOKEN:-}
       TRAKT_REFRESH_TOKEN: ${TRAKT_REFRESH_TOKEN:-}
       TRAKT_DEV_PROFILE: ${TRAKT_DEV_PROFILE:-}
+    # /health/ready, not /health — see the note in docker-compose.prod.yml. Locally the gateway also
+    # gates on this, and a locally built image usually faces an already-migrated database, so the
+    # long start_period costs nothing on the happy path and covers the first run against an empty
+    # volume, which is exactly when it used to flap.
     healthcheck:
-      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health >/dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health/ready >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 20s
+      retries: 30
+      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy

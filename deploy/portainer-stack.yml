@@ -62,12 +62,19 @@ services:
       HYDRATE_MAX_TITLES_PER_DAY: ${HYDRATE_MAX_TITLES_PER_DAY:-1500}
       EXTRACT_DAILY_TOKENS: ${EXTRACT_DAILY_TOKENS:-1500000}
       EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
+    # /health/ready, not /health: /health answers "the process is up", which was already true while
+    # the database was unreachable or the schema was a migration behind — so the gateway's
+    # `condition: service_healthy` was gating on nothing. /health/ready checks both.
+    # start_period is 120s because migrations run BEFORE the listener opens (DatabaseInitializer is
+    # awaited ahead of app.Run()), so a cold host answers nothing at all — connection refused, not
+    # 503 — for as long as the full chain takes against an empty pgvector database. 20s covered a
+    # warm restart and nothing else. Retries stay deliberately generous on top of that.
     healthcheck:
-      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health >/dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health/ready >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 20s
+      retries: 30
+      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,6 +99,12 @@ services:
       frontend:
         condition: service_started
 
+# Portainer stacks can't mount repo files, so the gateway config ships inline. `nginx/nginx.conf`
+# is the CANONICAL descriptor and this is a copy of it; the two are held together by
+# `Tests/Harness/NginxDescriptorParityTests.cs`, not by anyone remembering to edit both.
+# nginx runtime variables are escaped as $$ so compose interpolation leaves them for nginx.
+# Verify a change to this block with `deploy/probe-gateway.sh`, which runs it against a stub
+# upstream in its own throwaway compose project.
 configs:
   reel_nginx:
     content: |
@@ -101,15 +114,45 @@ configs:
         server {
           listen 80;
           location /api/ {
-            proxy_pass http://backend:5000/;
+            # NO trailing slash. A proxy_pass carrying a URI replaces the matched location prefix
+            # with it, so `http://backend:5000/;` rewrote /api/health to /health and the backend
+            # 404'd every single API call. Proven with a stub upstream on 2026-09-10 — the deployed
+            # stack would never have answered. Guarded by NginxDescriptorParityTests.
+            proxy_pass http://backend:5000;
             proxy_set_header Host $$host;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
-            proxy_buffering off;           # SSE
+            # Ask Reel streams on this prefix (`/api/search/ask`), not on /sse/. Buffered here, a
+            # token-by-token turn arrives as one lump and reads as a slow model. Bounded at an
+            # hour: a chat turn's deadline is the request's.
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+            proxy_buffering off;
+            proxy_cache off;
             proxy_read_timeout 3600s;
           }
+          # The pipeline/onboarding event channel. Same directives, day-long timeout — this one is
+          # held open across a whole ingest, not across a single request.
+          location /sse/ {
+            proxy_pass http://backend:5000;
+            proxy_set_header Host $$host;
+            proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $$scheme;
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 86400s;
+          }
+          # Health passthrough. /health is liveness; /health/ready checks the database and pending
+          # migrations and is what the backend healthcheck above gates on, so an operator reaching
+          # the host through Cloudflared gets the same answer Docker does.
+          location /health { proxy_pass http://backend:5000; }
+          location /health/ready { proxy_pass http://backend:5000; }
           location / {
-            proxy_pass http://frontend:80/;
+            proxy_pass http://frontend:80;
             proxy_set_header Host $$host;
           }
         }
