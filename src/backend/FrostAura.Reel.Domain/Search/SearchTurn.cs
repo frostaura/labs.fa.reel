@@ -39,6 +39,21 @@ public static class SearchTurnKind
 
     /// <summary>Another page of the conversation's last question. Writes an assistant row only.</summary>
     public const string Page = "page";
+
+    /// <summary>
+    /// The derivation, stated once. A request whose question is the conversation's last question
+    /// again is another PAGE of it; anything else is a new ask.
+    ///
+    /// <para>Trimmed and case-insensitive, because the same question re-sent by a filter toggle or
+    /// an impatient tap is the same question — and ordinal rather than culture-aware, because two
+    /// strings that are byte-equal must compare equal on every machine this runs on. A conversation
+    /// with no user turn yet has nothing to be a page OF.</para>
+    /// </summary>
+    public static string Derive(string? lastUserText, string message) =>
+        lastUserText is not null
+        && string.Equals(lastUserText.Trim(), message.Trim(), StringComparison.OrdinalIgnoreCase)
+            ? Page
+            : Ask;
 }
 
 /// <summary>

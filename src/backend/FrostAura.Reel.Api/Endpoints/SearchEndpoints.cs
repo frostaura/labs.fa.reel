@@ -307,10 +307,7 @@ public static class SearchEndpoints
             // Kind is DERIVED, never sent. A filter toggle, an infinite-scroll page and an
             // impatient re-tap are indistinguishable from the client's side, and the old
             // client-supplied flag is why a resumed transcript showed the same question five times.
-            var kind = lastUserText is not null
-                && string.Equals(lastUserText.Trim(), message, StringComparison.OrdinalIgnoreCase)
-                    ? Domain.Search.SearchTurnKind.Page
-                    : Domain.Search.SearchTurnKind.Ask;
+            var kind = Domain.Search.SearchTurnKind.Derive(lastUserText, message);
 
             var mediaFilter = (request.MediaTypes ?? [])
                 .Select(m => m?.Trim().ToLowerInvariant())
