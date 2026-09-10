@@ -55,7 +55,11 @@ public class GoldenPromptTests
         ],
         Texture: new TextureFact(0.72m, 0.31m, 0.78m, 0.66m, 0.14m, 0.35m, 0.48m, 118),
         Contrarian: new ContrarianFact(0.37m, [new GenreOffset("crime", 0.7m)]),
-        PreferenceTags: ["cerebral sci-fi", "practical effects"]);
+        PreferenceTags: ["cerebral sci-fi", "practical effects"],
+        // Populated on purpose even though the prompt does not name them: the golden files below are
+        // what proves the writer's prompt is unchanged by B1's fact-sheet addition. If a future
+        // change starts naming clusters, these goldens go red — which is the point.
+        Clusters: [new ClusterFact(["Heat", "Sicario"], 0.41m, 96)]);
 
     private static readonly LensTitleInput Title = new(
         TitleId: Guid.Parse("11111111-1111-1111-1111-111111111111"),

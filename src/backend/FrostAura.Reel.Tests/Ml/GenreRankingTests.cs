@@ -195,5 +195,6 @@ public class GenreRankingTests
         VerifiedPeople: [],
         Texture: null,
         Contrarian: new ContrarianFact(0m, []),
-        PreferenceTags: []);
+        PreferenceTags: [],
+        Clusters: []);
 }

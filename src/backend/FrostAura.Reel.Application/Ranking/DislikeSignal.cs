@@ -48,7 +48,16 @@ namespace FrostAura.Reel.Application.Ranking;
 /// </summary>
 public sealed class DislikeSignal(IReelDbContext db, IMemoryCache cache)
 {
-    /// <summary>How far back a dislike still shapes the profile. Old reactions age out entirely.</summary>
+    /// <summary>
+    /// How far back a dislike still shapes the profile. Old reactions age out entirely.
+    ///
+    /// <para><b>Reactions only.</b> This is the 180 people find when they go looking for one, and it
+    /// is the answer to a different question from the one usually being asked. Ratings and watch
+    /// history are NEVER windowed — see <see cref="Ml.FeatureVectorBuilder.BuildTasteStateAsync"/>,
+    /// which reads every rating ever made — and neither are training labels. A Not-Interested or
+    /// Dropped reaction is a statement about a moment ("not tonight"), so it expires; a rating is a
+    /// verdict, so it does not.</para>
+    /// </summary>
     public const int WindowDays = 180;
 
     /// <summary>e-folding time of the recency decay: <c>w = exp(-ageDays / 90)</c>.</summary>

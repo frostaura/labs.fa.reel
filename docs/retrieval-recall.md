@@ -57,12 +57,48 @@ every title ANN would also have found. The two ANN figures therefore come from a
 popularity-free pass, and answer "could this arm have reached it", not "did it get the credit".
 `popularity` needs no such pass: nothing runs ahead of it.
 
-**4. `disliked` — the false-positive side.**
+**4. `perCluster` — did multi-centroid retrieval actually do anything?**
+
+This block exists to answer one question and it is not "did recall go up". Every loved title is
+assigned to the taste cluster whose centroid it is nearest, so the `targetsNear` counts **partition**
+the loved set and the per-ordinal recalls are directly comparable.
+
+| Field | Meaning |
+| --- | --- |
+| `ordinal` | The cluster's canonical rank — 0 is the heaviest pocket. |
+| `weight` | Mean share of the account's taste weight over the days evaluated. |
+| `memberCount` | Mean number of titles that voted for the pocket. |
+| `targetsNear` | Loved titles in the window whose embedding is nearest this centroid. |
+| `hits` | How many of those the pool actually contained. |
+| `recall` | `hits / targetsNear`, or `null` when nothing was near this pocket. |
+
+**The pass condition is that recall rises in the LOW-weight clusters.** The single all-time centroid
+already serves the heaviest pocket well — that is what a mean vector does. The claim B1 makes is
+about the pockets it points *away* from, and that claim is only supported if the small ordinals'
+recall moves while the big ones' stays roughly where it was.
+
+**A uniform rise across every ordinal is a negative result, not a positive one.** It means the extra
+slots bought the recall and the partition contributed nothing, and the honest response is to raise
+`FirstPassAnnPool`, delete the clusterer, and keep the simpler system.
+
+**Read the ordinal as a rank, not an identity.** The partition is recomputed for each as-of day, so
+ordinal 2 in March and ordinal 2 in September both mean "the third-heaviest pocket" and need not hold
+the same titles. `weight` and `memberCount` are means over the evaluated days for the same reason. An
+account whose taste genuinely reorganised inside the window will blur this table rather than lie
+about it — and an account below `TasteClusterProvider.MinClusterInputs` has no partition at all, so
+the block is empty and `annLoved` carries the whole ANN figure.
+
+**`annCluster` in `hits` / `rates`.** These come from the popularity-free pass like the other two ANN
+figures, and they are the multi-centroid arm's total reach across all pockets. On an account with a
+partition, `annLoved` should be **zero** — the single-centroid arm only fires when there are no
+clusters, so a non-zero `annLoved` beside a populated `perCluster` means something is wrong.
+
+**5. `disliked` — the false-positive side.**
 The same computation over titles rated ≤ 4. A **high** union here is not a supply success; it means
 the arms are efficiently surfacing titles this user goes on to reject, which is a **ranking**
 problem. Read it against the loved union: the gap between the two is the arms' discrimination.
 
-**5. `notReachable[]` — the misses, by name, with the reason each was missed.**
+**6. `notReachable[]` — the misses, by name, with the reason each was missed.**
 
 | `reason` | What it means | What would fix it |
 | --- | --- | --- |
@@ -71,7 +107,7 @@ problem. Read it against the loved union: the gap between the two is the arms' d
 | reachable by ANN alone, but crowded out | ANN found it; the combined budget did not keep it | Rebalance `popCount` / `annCount` |
 | eligible and reachable, and no arm returned it | A genuine retrieval miss | A bigger pool, or a new arm |
 
-**6. `budget.exhausted`.**
+**7. `budget.exhausted`.**
 `true` means the rates describe `daysEvaluated` of `daysTotal` days and nothing more. Days are
 processed newest-first, so a truncated run has dropped the **oldest** evidence. Read the rates as a
 sample, not as the window.
@@ -129,7 +165,8 @@ is the test that holds this.
 
 ## Cost
 
-The probe rebuilds a **full taste state per distinct rating day** in the window, then runs two
-retrievals against it. That is the expensive part, and it is why the 60-second cap is clamped rather
+The probe rebuilds a **full taste state per distinct rating day** in the window — and, since B1, a
+**taste partition** per day as well (cached day-granular, so the two retrievals below share it) — then
+runs two retrievals against it. That is the expensive part, and it is why the 60-second cap is clamped rather
 than merely defaulted: an unbounded run against the live database is a self-inflicted outage. Days
 are grouped, so a window with 40 rated days costs 40 taste states, not one per rating.

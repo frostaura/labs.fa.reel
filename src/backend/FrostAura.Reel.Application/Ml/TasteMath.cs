@@ -44,7 +44,16 @@ public static class TasteMath
     public static decimal ShrunkenWeightedMean(decimal weightedSum, decimal weightTotal, decimal priorMean, decimal k = ShrinkageK) =>
         weightTotal <= 0m ? priorMean : (weightedSum + (k * priorMean)) / (weightTotal + k);
 
-    /// <summary>Exponential recency weight with a configurable half-life (days).</summary>
+    /// <summary>
+    /// Exponential recency weight with a configurable half-life (days).
+    ///
+    /// <para><b>A weight, never a cutoff.</b> Nothing here drops an observation: at the default
+    /// 365-day half-life a rating from 2009 still counts, at roughly 1/45th of one made today. That
+    /// distinction is the whole answer to "does my old history still matter" — it matters, less. A
+    /// caller that wants a cutoff has to write one itself, and only one place in the product does
+    /// (<see cref="FeatureVectorBuilder.RecentCentroidWindowDays"/>, a drift arm layered ON the
+    /// all-time signal).</para>
+    /// </summary>
     public static double RecencyWeight(DateTime ratedAt, DateTime asOf, double halfLifeDays = 365d)
     {
         var days = Math.Max(0d, (asOf - ratedAt).TotalDays);

@@ -87,7 +87,11 @@ export default function TasteDna() {
         <div>
           <h1 className="text-2xl font-light text-fa-frost-bright">Your taste DNA</h1>
           <p className="fa-caption text-fa-frost-dim mt-1">
-            computed from {data.ratingsCount.toLocaleString()} ratings across {data.titlesWatched.toLocaleString()} titles · always yours, always free
+            {/* "rated", not "watched" — deliberately. Every title you have ever RATED feeds this,
+                with no cutoff; titles you watched without rating do not feed a feature yet, and the
+                copy must not claim them until they do. */}
+            every title you&apos;ve ever rated counts — all {data.ratingsCount.toLocaleString()} of them, with recent
+            ones counting a little more · always yours, always free
           </p>
         </div>
         <div className="shrink-0 text-right space-y-1">

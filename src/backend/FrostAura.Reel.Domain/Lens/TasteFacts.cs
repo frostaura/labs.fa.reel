@@ -58,6 +58,22 @@ public sealed record TextureFact(
     [property: JsonPropertyName("ensembleVsSolo")] decimal EnsembleVsSolo,
     [property: JsonPropertyName("sampleSize")] int SampleSize);
 
+/// <summary>
+/// One pocket of taste the account keeps returning to, named by the titles nearest its centre.
+///
+/// <para>This is the prose half of the multi-centroid retrieval work: a partition over embeddings
+/// finds corners of a library that no genre label describes — the late-night procedurals, the
+/// December films, the three-hour ones — and <paramref name="Exemplars"/> is the only handle a human
+/// (or a narrative) has on such a pocket, because it has no name.</para>
+///
+/// <para><paramref name="Share"/> is the pocket's share of the account's total taste weight, 0–1.
+/// It is the ranking key, and it is what the 3% bar is applied to.</para>
+/// </summary>
+public sealed record ClusterFact(
+    [property: JsonPropertyName("exemplars")] IReadOnlyList<string> Exemplars,
+    [property: JsonPropertyName("share")] decimal Share,
+    [property: JsonPropertyName("titleCount")] int TitleCount);
+
 /// <summary>How far the account sits from the crowd, overall and on its strongest genres.</summary>
 public sealed record ContrarianFact(
     [property: JsonPropertyName("overall")] decimal Overall,
@@ -95,7 +111,18 @@ public sealed record TasteFacts(
     [property: JsonPropertyName("verifiedPeople")] IReadOnlyList<PersonFact> VerifiedPeople,
     [property: JsonPropertyName("texture")] TextureFact? Texture,
     [property: JsonPropertyName("contrarian")] ContrarianFact Contrarian,
-    [property: JsonPropertyName("preferenceTags")] IReadOnlyList<string> PreferenceTags)
+    [property: JsonPropertyName("preferenceTags")] IReadOnlyList<string> PreferenceTags,
+    /// <summary>
+    /// Pockets of taste the account keeps returning to, heaviest first — see <see cref="ClusterFact"/>.
+    ///
+    /// <para><b>Deliberately not in the writer's prompt, and deliberately not in
+    /// <see cref="GroundedNames"/>.</b> Naming these to the model is a prompt change, which is a
+    /// <c>PromptVersion</c> bump, which cold-starts every cached lens note on the account — a real
+    /// cost that belongs to whichever release actually wants the sentence, not to the release that
+    /// computes the facts. The invariant this file states runs one way only: everything the PROMPT
+    /// names must appear in the fact sheet. The fact sheet is allowed to know more.</para>
+    /// </summary>
+    [property: JsonPropertyName("clusters")] IReadOnlyList<ClusterFact> Clusters)
 {
     /// <summary>
     /// Genres the account rates well but rarely watches — present in <see cref="TopGenres"/> and

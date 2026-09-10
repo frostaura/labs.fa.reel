@@ -40,7 +40,11 @@ public static class TasteEndpoints
                 db, dislikes, accountContext.AccountId!.Value, offset, limit, ct)));
 
         group.MapGet("/", async (
-            IReelDbContext db, IAccountContext accountContext, FeatureVectorBuilder featureBuilder, CancellationToken ct) =>
+            IReelDbContext db,
+            IAccountContext accountContext,
+            FeatureVectorBuilder featureBuilder,
+            TasteClusterProvider tasteClusters,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var now = DateTime.UtcNow;
@@ -160,6 +164,40 @@ public static class TasteEndpoints
                 })
                 .ToList();
 
+            // The pockets of taste retrieval actually splits its budget across, made visible. This is
+            // the only surface on which the multi-centroid work is legible to the person it is about:
+            // genres and eras describe a library by its labels, and these describe it by what the
+            // titles are LIKE — the corner no genre names. Share, not weight, because the absolute
+            // number is an internal scale and a percentage is the only honest reading of it.
+            var partition = await tasteClusters.GetAsync(accountId, now, ct);
+            var clusterWeight = partition.Sum(c => c.Weight);
+            var clusterExemplarIds = partition.SelectMany(c => c.ExemplarTitleIds).Distinct().ToList();
+            var clusterTitles = clusterExemplarIds.Count == 0
+                ? []
+                : await db.Titles
+                    .Where(t => clusterExemplarIds.Contains(t.Id))
+                    .Select(t => new { t.Id, t.Name, t.Year, t.PosterPath })
+                    .ToDictionaryAsync(t => t.Id, ct);
+            var clusters = clusterWeight <= 0d
+                ? []
+                : partition.Select(c => new
+                {
+                    ordinal = c.Ordinal,
+                    share = Math.Round(c.Weight / clusterWeight, 3),
+                    titleCount = c.MemberCount,
+                    exemplars = c.ExemplarTitleIds
+                        .Where(clusterTitles.ContainsKey)
+                        .Select(id => new
+                        {
+                            name = clusterTitles[id].Name,
+                            year = clusterTitles[id].Year,
+                            posterPath = clusterTitles[id].PosterPath,
+                        })
+                        .ToList(),
+                })
+                .Where(c => c.exemplars.Count > 0)
+                .ToList();
+
             return Results.Ok(new
             {
                 userMean = Math.Round(taste.UserMean, 2),
@@ -174,6 +212,7 @@ public static class TasteEndpoints
                 topActors,
                 histogram,
                 drift,
+                clusters,
             });
         });
     }
