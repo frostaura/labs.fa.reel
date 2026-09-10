@@ -136,9 +136,11 @@ public static class FeedEndpoints
                     // Everything still on the feed or just dropped is off-limits for the refill.
                     var onFeed = items.Select(x => x.Title.Id).Concat(excludedTitleIds).ToHashSet();
                     var eligibleIds = eligibility.EligibleTitles(account.Id).Select(t => t.Id);
-                    // Over-fetch (2× + headroom) so the in-memory maturity gate can drop over-ceiling
-                    // titles and still leave enough survivors to fill every lost slot. Renderable-card
-                    // gate (poster + tmdbId) mirrors the paginator so a backfill never floats a blank.
+                    // Over-fetch so the in-memory maturity gate can drop over-ceiling titles AND the
+                    // taste prior below can genuinely re-order rather than merely re-shuffle the two
+                    // titles that would have been taken anyway — a prior applied to a pool the size
+                    // of the hole it fills is arithmetic with no consequence. Renderable-card gate
+                    // (poster + tmdbId) mirrors the paginator so a backfill never floats a blank.
                     var candidates = await (
                         from s in db.TitleScores
                         join t in db.Titles on s.TitleId equals t.Id
@@ -147,7 +149,7 @@ public static class FeedEndpoints
                             && !onFeed.Contains(s.TitleId) && eligibleIds.Contains(s.TitleId)
                         orderby s.PredictedRating descending
                         select new { s.PredictedRating, s.ContributionsJson, Title = t })
-                        .Take((needed * 2) + 5)
+                        .Take((needed * 6) + 20)
                         .ToListAsync(ct);
 
                     var pool = candidates
@@ -168,6 +170,15 @@ public static class FeedEndpoints
                             entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
                             return await featureBuilder.BuildTasteStateAsync(account.Id, DateTime.UtcNow, ct);
                         }) ?? await featureBuilder.BuildTasteStateAsync(account.Id, DateTime.UtcNow, ct);
+
+                        // The refill is the one path that can put a card on tonight's page without a
+                        // build having chosen it, so it has to rank the way the build ranks. The
+                        // ordering is the persisted TitleScore — unchanged, still what the card shows
+                        // — TIMES the account's taste prior. Sorted in memory rather than in SQL,
+                        // because the prior needs the title's genres and the account's history and
+                        // neither is expressible in the ORDER BY above.
+                        var prior = TastePrior.From(taste);
+                        pool = [.. pool.OrderByDescending(c => prior.Rank(c.PredictedRating, c.Title))];
 
                         var poolIds = pool.Select(c => c.Title.Id).ToList();
                         var personsByTitle = VerifiedPeople.BestByRole(

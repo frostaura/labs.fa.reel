@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Ranking.Interleaving;
 
 namespace FrostAura.Reel.Tests.Ml;
@@ -121,7 +122,8 @@ public class TeamDraftInterleavingTests
     [Fact]
     public void The_calibrated_policy_reproduces_the_served_ordering_key()
     {
-        // predicted × freshness × preference boost × slate affinity — the feed's own comparator.
+        // predicted × taste prior × freshness × preference boost × slate affinity — the feed's own
+        // comparator.
         var low = new PolicyCandidate(Ids(2)[0], 8.0m, 1.0m, 1.0d, 500m);
         var high = new PolicyCandidate(Ids(2)[1], 7.0m, 1.1m, 1.10d, 1m, SlateAffinity: 1.2d);
 
@@ -129,6 +131,13 @@ public class TeamDraftInterleavingTests
 
         Assert.Equal(high.TitleId, ordered[0].TitleId);
         Assert.Equal(2, ordered.Count);
+
+        // And the prior is genuinely IN the key, not merely accepted by the constructor: the same
+        // pair with the winner's no-history genres demoted to the floor flips the order. This is the
+        // property the whole ranking-layer fix rests on — a title the account has no history in
+        // cannot lead on a fraction of a point of model score.
+        var demoted = high with { TastePrior = TastePrior.NoHistoryFloor };
+        Assert.Equal(low.TitleId, new CalibratedModelPolicy().Order([low, demoted])[0].TitleId);
     }
 
     [Fact]
@@ -146,7 +155,7 @@ public class TeamDraftInterleavingTests
     }
 
     [Fact]
-    public void The_profile_rerank_stub_falls_back_to_the_calibrated_order_when_no_fit_exists()
+    public void The_profile_rerank_policy_falls_back_to_the_calibrated_order_when_no_fit_exists()
     {
         var ids = Ids(3);
         var pool = new[]
@@ -174,7 +183,10 @@ public class TeamDraftInterleavingTests
             .Select(i => new PolicyCandidate(
                 new Guid(i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
                 (decimal)(i % 11), 1m + (i % 3 * 0.05m), 1d, i % 7 * 13m, 1d + (i % 5 * 0.1d),
-                i % 4 == 0 ? i % 100 / 100d : null))
+                // Taste priors across the whole band the rule can produce (0.4 floor → 1.08 lift),
+                // so the permutation contract is checked against a live prior rather than a pinned 1.
+                0.4d + (i % 7 * 0.1d),
+                i % 4 == 0 ? i % 100 / 100d : (double?)null))
             .ToList();
 
         foreach (var policy in RankingPolicyCatalog.Policies)
