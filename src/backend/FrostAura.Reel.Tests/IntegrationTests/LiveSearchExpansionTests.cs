@@ -16,6 +16,7 @@ using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Telemetry;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
@@ -555,32 +556,5 @@ public class LiveSearchExpansionTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
-    }
-
-    private sealed class StubEmbeddingProvider : IEmbeddingProvider
-    {
-        public bool IsAvailable => true;
-
-        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
-        {
-            var vectors = texts.Select(t =>
-            {
-                var v = new float[1536];
-                var seed = t.Length;
-                for (var i = 0; i < v.Length; i++)
-                {
-                    v[i] = (float)Math.Sin(seed + i);
-                }
-
-                var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
-                for (var i = 0; i < v.Length; i++)
-                {
-                    v[i] /= norm;
-                }
-
-                return v;
-            }).ToArray();
-            return Task.FromResult(vectors);
-        }
     }
 }
