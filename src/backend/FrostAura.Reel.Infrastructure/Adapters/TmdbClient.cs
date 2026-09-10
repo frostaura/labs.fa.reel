@@ -39,13 +39,20 @@ public class TmdbClient(
     /// <see cref="DiscoverByConceptAsync"/>.</summary>
     private const int DefaultConceptVoteCount = 10;
 
+    /// <summary>TMDB <c>release_dates</c> type 3 = Theatrical — the preferred certification source.</summary>
+    private const int TheatricalReleaseType = 3;
+
     public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
-        GetDetailsAsync($"movie/{tmdbId}?append_to_response=credits,videos,keywords", ct);
+        // release_dates carries the per-region age certification. Appended rather than fetched
+        // separately: TMDB allows up to 20 sub-requests on append_to_response, so certification for
+        // the whole catalogue costs exactly zero additional HTTP calls.
+        GetDetailsAsync($"movie/{tmdbId}?append_to_response=credits,videos,keywords,release_dates", ct);
 
     public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) =>
         // aggregate_credits = the full series regulars (across seasons), not one episode's cast —
         // far better signal for cast/crew affinity than plain credits.
-        GetDetailsAsync($"tv/{tmdbId}?append_to_response=aggregate_credits,videos,keywords", ct);
+        // content_ratings is the TV analogue of release_dates: a flat region → rating list.
+        GetDetailsAsync($"tv/{tmdbId}?append_to_response=aggregate_credits,videos,keywords,content_ratings", ct);
 
     public async Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
         bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
@@ -529,7 +536,57 @@ public class TmdbClient(
             dto.Languages ?? [],
             dto.Title ?? dto.Name,
             ParseDate(dto.ReleaseDate ?? dto.FirstAirDate),
-            (dto.Genres ?? []).Select(g => g.Id).ToArray());
+            (dto.Genres ?? []).Select(g => g.Id).ToArray(),
+            Certifications(dto));
+    }
+
+    /// <summary>
+    /// Region → age certification, from whichever of the two appended blocks the medium carries.
+    ///
+    /// <para>Movies: <c>release_dates.results[]</c> holds one entry per region, each with several
+    /// dated releases that may disagree. <b>Type 3 (Theatrical)</b> is preferred — it is the rating
+    /// the film is actually known by; a later "Digital"/"TV" entry can carry an edited-for-broadcast
+    /// certification, and TMDB returns them in no meaningful order. Any other non-blank
+    /// certification is taken only when the region has no theatrical entry.</para>
+    ///
+    /// <para>TV: <c>content_ratings.results[]</c> is already one rating per region.</para>
+    ///
+    /// <para>Regions are upper-cased and blank certifications are dropped, so a present key always
+    /// means a real value — <c>TasteMath.CertificationOrdinal("")</c> is 0, indistinguishable from
+    /// "we never asked", which is the exact ambiguity schema v4 exists to remove.</para>
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? Certifications(DetailsDto dto)
+    {
+        var byRegion = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var region in dto.ReleaseDates?.Results ?? [])
+        {
+            var code = region.Iso31661?.Trim().ToUpperInvariant();
+            if (string.IsNullOrEmpty(code) || region.ReleaseDates is null)
+            {
+                continue;
+            }
+
+            var entries = region.ReleaseDates
+                .Where(e => !string.IsNullOrWhiteSpace(e.Certification))
+                .ToList();
+            var chosen = entries.FirstOrDefault(e => e.Type == TheatricalReleaseType) ?? entries.FirstOrDefault();
+            if (chosen?.Certification is { } certification)
+            {
+                byRegion[code] = certification.Trim();
+            }
+        }
+
+        foreach (var rating in dto.ContentRatings?.Results ?? [])
+        {
+            var code = rating.Iso31661?.Trim().ToUpperInvariant();
+            if (!string.IsNullOrEmpty(code) && !string.IsNullOrWhiteSpace(rating.Rating))
+            {
+                byRegion[code] = rating.Rating.Trim();
+            }
+        }
+
+        return byRegion.Count == 0 ? null : byRegion;
     }
 
     private sealed record DetailsDto(
@@ -560,9 +617,28 @@ public class TmdbClient(
         string? Name = null,
         [property: JsonPropertyName("release_date")] string? ReleaseDate = null,
         [property: JsonPropertyName("first_air_date")] string? FirstAirDate = null,
-        GenreDto[]? Genres = null);
+        GenreDto[]? Genres = null,
+        // Certification, appended to the same hydration call. Movies nest it two deep
+        // (release_dates.results[].release_dates[].certification, with a release TYPE per entry);
+        // TV is flat (content_ratings.results[].rating).
+        [property: JsonPropertyName("release_dates")] ReleaseDatesDto? ReleaseDates = null,
+        [property: JsonPropertyName("content_ratings")] ContentRatingsDto? ContentRatings = null);
 
     private sealed record GenreDto(int Id, string? Name);
+
+    private sealed record ReleaseDatesDto(ReleaseDateRegionDto[]? Results);
+
+    private sealed record ReleaseDateRegionDto(
+        [property: JsonPropertyName("iso_3166_1")] string? Iso31661,
+        [property: JsonPropertyName("release_dates")] ReleaseDateEntryDto[]? ReleaseDates);
+
+    private sealed record ReleaseDateEntryDto(string? Certification, int Type);
+
+    private sealed record ContentRatingsDto(ContentRatingDto[]? Results);
+
+    private sealed record ContentRatingDto(
+        [property: JsonPropertyName("iso_3166_1")] string? Iso31661,
+        string? Rating);
 
     private sealed record SpokenLanguageDto([property: JsonPropertyName("iso_639_1")] string? Iso6391);
 
