@@ -448,31 +448,124 @@ public static class SearchEndpoints
         // because Program.cs speaks for every endpoint and only this one streams an unbounded prompt.
         .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(AskRequestLimits.MaxBodyBytes));
 
-        // Resume: the most-recent conversation's transcript (newest convo, turns oldest→newest).
-        group.MapGet("/conversations/latest", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+        // ── The read side ───────────────────────────────────────────────────────────────────
+        // Four routes and one deprecated alias, all backed by the single ReplayAsync projection so
+        // the founder-locked eligibility rule is applied in exactly one place.
+
+        /// The conversation list — enough to render a "Recent" menu and nothing more.
+        group.MapGet("/conversations", async (
+            IReelDbContext db, IAccountContext accountContext, CancellationToken ct, int limit = 20) =>
         {
             var accountId = accountContext.AccountId!.Value;
-            var convo = await db.SearchConversations
+            var conversations = await db.SearchConversations
+                .Where(c => c.AccountId == accountId)
+                .OrderByDescending(c => c.LastTurnAt)
+                .Take(Math.Clamp(limit, 1, 100))
+                .Select(c => new
+                {
+                    id = c.Id,
+                    title = c.Title,
+                    turnCount = c.TurnCount,
+                    lastTurnAt = c.LastTurnAt,
+                    // Null is "transcript only" — a thread that predates stored results. The client
+                    // renders that as its own state rather than as an empty grid, which is the
+                    // difference between "this is old" and "we found nothing for you".
+                    lastCardsAt = c.LastCardsAt,
+                })
+                .ToListAsync(ct);
+            return Results.Ok(conversations);
+        });
+
+        /// One conversation, resumed: the transcript plus the answer as it should look NOW.
+        group.MapGet("/conversations/{id:guid}", async (
+            Guid id, IReelDbContext db, IAccountContext accountContext,
+            EligibilityQueryBuilder eligibility, OnDemandScorer scorer, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            var conversation = await db.SearchConversations
+                .FirstOrDefaultAsync(c => c.Id == id && c.AccountId == accountId, ct);
+            return conversation is null
+                ? AskError(StatusCodes.Status404NotFound, "That conversation isn't here any more.", "conversation_not_found")
+                : Results.Ok(await ResumeAsync(db, eligibility, scorer, accountId, conversation, ct));
+        });
+
+        /// The reconnect path. A client that lost the stream asks the TURN what happened to it.
+        ///
+        /// This is what replaces Last-Event-ID replay: the events are gone, but the turn is a row,
+        /// and a row answers the only question the client actually has — is it done, and what did
+        /// it say. 202 while it is still running, so a poller can tell "not yet" from "nothing".
+        group.MapGet("/turns/{id:guid}", async (
+            Guid id, IReelDbContext db, IAccountContext accountContext,
+            EligibilityQueryBuilder eligibility, OnDemandScorer scorer, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            var turn = await db.SearchTurns.FirstOrDefaultAsync(t => t.Id == id && t.AccountId == accountId, ct);
+            if (turn is null)
+            {
+                return AskError(StatusCodes.Status404NotFound, "That turn isn't here any more.", "turn_not_found");
+            }
+
+            if (turn.Status == Domain.Search.SearchTurnStatus.Pending)
+            {
+                return Results.Json(
+                    new { status = turn.Status, reason = (string?)null, failureCode = (string?)null, cards = Array.Empty<object>() },
+                    statusCode: StatusCodes.Status202Accepted);
+            }
+
+            var replay = await ReplayAsync(db, eligibility, scorer, accountId, [turn], ct);
+            return Results.Ok(new
+            {
+                status = turn.Status,
+                reason = replay.Reason,
+                failureCode = turn.FailureCode,
+                cards = replay.Cards,
+                removed = replay.Removed,
+            });
+        });
+
+        /// Erasure, for one conversation.
+        ///
+        /// Cards, then turns, then the conversation — children first, because none of those
+        /// references is a foreign key and the wrong order leaves rows nothing can ever reach again.
+        /// It NEVER touches ExposureEvents: the exposure log is append-only, its rows are the
+        /// evidence every accuracy number is computed from, and a dangling SourceTurnId afterwards
+        /// is the designed state. Deleting a conversation removes what the user can see, not the
+        /// record that the product once served those cards.
+        group.MapDelete("/conversations/{id:guid}", async (
+            Guid id, IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            var exists = await db.SearchConversations.AnyAsync(c => c.Id == id && c.AccountId == accountId, ct);
+            if (!exists)
+            {
+                return AskError(StatusCodes.Status404NotFound, "That conversation isn't here any more.", "conversation_not_found");
+            }
+
+            await db.SearchTurnCards.Where(c => c.ConversationId == id && c.AccountId == accountId).ExecuteDeleteAsync(ct);
+            await db.SearchTurns.Where(t => t.ConversationId == id && t.AccountId == accountId).ExecuteDeleteAsync(ct);
+            await db.SearchConversations.Where(c => c.Id == id && c.AccountId == accountId).ExecuteDeleteAsync(ct);
+            return Results.NoContent();
+        });
+
+        /// DEPRECATED — a thin alias for the newest conversation, kept only so a client that has
+        /// not yet learned to remember its conversation id still resumes. It answers the same shape
+        /// as /conversations/{id}; new callers should use that with a stored id, which is also what
+        /// stops a second device stealing the first one's thread.
+        group.MapGet("/conversations/latest", async (
+            IReelDbContext db, IAccountContext accountContext,
+            EligibilityQueryBuilder eligibility, OnDemandScorer scorer, CancellationToken ct) =>
+        {
+            var accountId = accountContext.AccountId!.Value;
+            var conversation = await db.SearchConversations
                 .Where(c => c.AccountId == accountId)
                 .OrderByDescending(c => c.LastTurnAt)
                 .FirstOrDefaultAsync(ct);
-            if (convo is null)
-            {
-                return Results.Ok(new { id = (Guid?)null, turns = Array.Empty<object>() });
-            }
-
-            // Sequence, not CreatedAt. The two rows of one exchange are written in a single
-            // SaveChanges and share a timestamp to the microsecond, so ordering by time can put
-            // the reply above the question — which is precisely why Sequence exists.
-            var turns = await db.SearchTurns
-                .Where(t => t.ConversationId == convo.Id)
-                .OrderBy(t => t.Sequence)
-                .Select(t => new { role = t.Role, text = t.Text })
-                .ToListAsync(ct);
-            return Results.Ok(new { id = convo.Id, title = convo.Title, turns });
-        });
+            return conversation is null
+                ? Results.Ok(new { id = (Guid?)null, turns = Array.Empty<object>() })
+                : Results.Ok(await ResumeAsync(db, eligibility, scorer, accountId, conversation, ct));
+        })
+        .WithSummary("Deprecated: use GET /api/search/conversations/{id} with a remembered id.");
     }
-
 
     /// <summary>
     /// The typeahead's global TMDB lookup — one movie-search and one show-search page, unioned,
@@ -598,6 +691,93 @@ public static class SearchEndpoints
 
     /// <summary>How many prior turns the interpret prompt reads. The tail is what carries context.</summary>
     private const int AskHistoryTurns = 8;
+
+    /// <summary>
+    /// One conversation, resumed: the transcript, plus the answer as it should look now.
+    ///
+    /// <para><b>Which turns' cards come back.</b> The last completed <c>ask</c>, plus every
+    /// completed <c>page</c> after it — that block IS the answer the user was last looking at,
+    /// because a page adds cards to the question already on screen. Anything older is transcript.
+    /// Ordered <c>(Sequence, Rank)</c>, never re-sorted, so a resumed grid is the grid that was
+    /// there.</para>
+    ///
+    /// <para><c>shown</c> is the whole conversation's no-repeat set, not the block's — it is what
+    /// the SERVER will exclude on the next turn, and the client renders it to explain why. It is
+    /// informational: nothing the client sends back is trusted for it.</para>
+    /// </summary>
+    private static async Task<object> ResumeAsync(
+        IReelDbContext db,
+        EligibilityQueryBuilder eligibility,
+        OnDemandScorer scorer,
+        Guid accountId,
+        Domain.Search.SearchConversation conversation,
+        CancellationToken ct)
+    {
+        var turns = await db.SearchTurns
+            .Where(t => t.ConversationId == conversation.Id)
+            .OrderBy(t => t.Sequence)
+            .ToListAsync(ct);
+
+        var lastAsk = turns.FindLastIndex(t =>
+            t.Role == "assistant"
+            && t.Kind == Domain.Search.SearchTurnKind.Ask
+            && t.Status == Domain.Search.SearchTurnStatus.Completed);
+        var block = lastAsk < 0
+            ? []
+            : turns.Skip(lastAsk)
+                .Where(t => t.Role == "assistant" && t.Status == Domain.Search.SearchTurnStatus.Completed)
+                .ToList();
+
+        var replay = await ReplayAsync(db, eligibility, scorer, accountId, block, ct);
+
+        // The whole conversation's no-repeat set, straight off the index that computes it for the
+        // next turn — one definition, so the client can never be told a different set than the one
+        // the server will actually apply.
+        var shown = await db.SearchTurnCards
+            .Where(c => c.ConversationId == conversation.Id && c.TmdbId != null)
+            .Select(c => c.TmdbId!.Value)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var lastQuery = turns.LastOrDefault(t => t.Role == "user")?.Text;
+        var mediaFilter = block.Count > 0 ? block[^1].MediaFilter : null;
+
+        return new
+        {
+            id = conversation.Id,
+            title = conversation.Title,
+            // Null says "transcript only" — this thread predates stored results, which is a
+            // different fact from a turn that honestly returned nothing.
+            lastCardsAt = conversation.LastCardsAt,
+            turns = turns.Select(t => new
+            {
+                sequence = t.Sequence,
+                role = t.Role,
+                text = t.Text,
+                kind = t.Kind,
+                status = t.Status,
+            }),
+            cards = replay.Cards,
+            reason = replay.Reason,
+            removed = replay.Removed,
+            lastQuery,
+            mediaTypes = MediaTypeTokens(mediaFilter),
+            shown,
+        };
+    }
+
+    /// <summary>
+    /// The stored media filter as the tokens the request accepts, so a resumed page can send the
+    /// filter straight back without a translation table of its own. <c>Show</c> becomes <c>tv</c>
+    /// because that is what the client's own filter emits.
+    /// </summary>
+    private static string[] MediaTypeTokens(string? mediaFilter) =>
+        string.IsNullOrWhiteSpace(mediaFilter)
+            ? []
+            : mediaFilter
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(m => m == nameof(MediaType.Show) ? "tv" : "movie")
+                .ToArray();
 
     /// <summary>A replayed block of turns: the cards as they should be rendered NOW, and what changed.</summary>
     /// <param name="Cards">The stored cards, re-filtered and re-scored, in stored order.</param>

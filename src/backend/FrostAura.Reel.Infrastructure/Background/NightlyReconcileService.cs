@@ -59,6 +59,7 @@ public sealed class NightlyReconcileService(
 
             await SweepStaleSchemaArtifactsAsync(stoppingToken);
             await SweepEnrichmentBacklogAsync(stoppingToken);
+            await SweepAskConversationsAsync(stoppingToken);
 
             try
             {
@@ -385,6 +386,35 @@ public sealed class NightlyReconcileService(
             // Never take the reconcile down over enrichment — the backlog is a quality problem, not
             // a correctness one, and the next nightly pass retries from wherever this one stopped.
             logger.LogError(ex, "Nightly enrichment sweep failed; the next pass continues the drain.");
+        }
+    }
+
+    /// <summary>
+    /// The nightly Ask Reel conversation prune, beside the enrichment sweep and for the same
+    /// reason it sits outside the account loop: a retention failure must never cost the reconcile
+    /// its delta syncs or its retrains.
+    ///
+    /// <para>The policy itself lives in <see cref="SearchConversationRetention"/> so it is testable
+    /// without a host, and it never touches <c>ExposureEvents</c> — see that type for why a
+    /// dangling <c>SourceTurnId</c> after a prune is the correct outcome.</para>
+    /// </summary>
+    private async Task SweepAskConversationsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            var pruned = await SearchConversationRetention.SweepAsync(db, configuration, DateTime.UtcNow, ct);
+            if (pruned > 0)
+            {
+                logger.LogInformation(
+                    "Ask Reel retention: {Pruned} conversation(s) older than {Days} days removed with their turns and cards.",
+                    pruned, SearchConversationRetention.RetentionDays(configuration));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Ask Reel conversation retention failed; the next nightly pass retries it.");
         }
     }
 

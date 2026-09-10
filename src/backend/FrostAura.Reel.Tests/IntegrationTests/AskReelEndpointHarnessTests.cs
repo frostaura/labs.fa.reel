@@ -222,9 +222,19 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
             // Oldest first, and the opening turn is the user's, verbatim.
             Assert.Equal("user", turns[0].GetProperty("role").GetString());
             Assert.Equal(question, turns[0].GetProperty("text").GetString());
-            // Exactly two fields on the wire — role and text. A client that started depending on a
-            // third would break the moment the projection changed.
-            Assert.All(turns, turn => Assert.Equal(2, turn.EnumerateObject().Count()));
+            Assert.Equal(0, turns[0].GetProperty("sequence").GetInt32());
+            // Five fields, and the set is pinned rather than the count: a client renders the
+            // transcript off role/text, and orders and states it off the other three.
+            Assert.All(turns, turn => Assert.Equal(
+                ["kind", "role", "sequence", "status", "text"],
+                turn.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)));
+
+            // The alias answers the same shape as /conversations/{id} — that is what makes it an
+            // alias rather than a second projection to keep in step.
+            foreach (var field in new[] { "cards", "reason", "removed", "lastQuery", "mediaTypes", "shown", "lastCardsAt" })
+            {
+                Assert.True(root.TryGetProperty(field, out _), $"the resume payload is missing {field}");
+            }
         }
     }
 
