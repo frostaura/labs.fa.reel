@@ -151,6 +151,7 @@ public static class DependencyInjection
         services.AddScoped<Application.Ml.PersonAffinityWriter>();
         services.AddScoped<Application.Ml.ClosedLoop.RetroLoopQuery>();
         services.AddScoped<Application.Ml.ClosedLoop.ExposureLog>();
+        services.AddScoped<Application.Experiments.InterleaveSummaryQuery>();
         services.AddScoped<Application.Ml.ClosedLoop.AccuracyQuery>();
         services.AddScoped<Application.Ml.ClosedLoop.RatingVerdictQuery>();
         services.AddScoped<Application.Ml.TasteFactsBuilder>();
@@ -188,6 +189,10 @@ public static class DependencyInjection
         services.AddScoped<IJobHandler, EnrichCatalogJobHandler>();
         services.AddScoped<IJobHandler, TrainJobHandler>();
         services.AddScoped<IJobHandler, EvaluateJobHandler>();
+        // The interleaving posture, resolved from the environment once per process. Singleton so
+        // every build in a process agrees on what the experiment is; off unless INTERLEAVE_ENABLED
+        // says otherwise, in which case nothing downstream behaves differently at all.
+        services.AddSingleton(Application.Ranking.Interleaving.InterleaveOptions.From(configuration));
         services.AddScoped<IJobHandler, BuildFeedJobHandler>();
         services.AddScoped<IJobHandler, RefreshAvailabilityJobHandler>();
         services.AddScoped<IJobHandler, BuildDigestJobHandler>();

@@ -410,6 +410,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("FeedSnapshotId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("InterleaveGroup")
+                        .HasColumnType("uuid");
+
                     b.Property<decimal?>("LlmFit")
                         .HasPrecision(4, 3)
                         .HasColumnType("numeric(4,3)");
@@ -427,6 +430,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<int>("PageIndex")
                         .HasColumnType("integer");
+
+                    b.Property<string>("PolicyId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<decimal>("PredictedRating")
                         .HasPrecision(4, 2)
@@ -460,6 +467,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "InterleaveGroup")
+                        .HasFilter("\"InterleaveGroup\" IS NOT NULL");
 
                     b.HasIndex("AccountId", "ModelArtifactId");
 

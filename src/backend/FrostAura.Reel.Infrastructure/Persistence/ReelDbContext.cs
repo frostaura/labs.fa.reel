@@ -445,6 +445,13 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(x => x.LlmFit).HasPrecision(4, 3);
             e.Property(x => x.RowKey).HasMaxLength(128);
             e.Property(x => x.WhySource).HasMaxLength(32);
+            e.Property(x => x.PolicyId).HasMaxLength(64);
+
+            // The interleaving read: every drafted card, grouped by slate, in time order. Filtered
+            // so the index costs nothing on the overwhelming majority of rows, which carry no
+            // policy at all — the experiment is off by default and most surfaces never draft.
+            e.HasIndex(x => new { x.AccountId, x.InterleaveGroup })
+                .HasFilter("\"InterleaveGroup\" IS NOT NULL");
         });
 
         modelBuilder.Entity<UserRatingEvent>(e =>

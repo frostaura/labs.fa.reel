@@ -131,6 +131,24 @@ public class ExposureEvent : IAccountScoped
     public string WhySource { get; set; } = string.Empty;
 
     /// <summary>
+    /// Which ranking policy contributed this card, when the build drafted the slate between two of
+    /// them. NULL is the ordinary value and means exactly one thing: nobody drafted this card — the
+    /// interleaving switch was off, the build was a Preserve rebuild of a pre-experiment snapshot,
+    /// or the surface is a live serve path (the feed refill, pagination, the digest) that has no
+    /// slate to belong to. A null here is never "we forgot"; the attribution is written by the only
+    /// code that can know it, at the moment the draft happens.
+    /// </summary>
+    public string? PolicyId { get; set; }
+
+    /// <summary>
+    /// The slate this card was drafted into — one id per (snapshot, row), derived deterministically
+    /// from both so a build is reproducible. It is the unit the sequential test counts: preference
+    /// is measured WITHIN a slate, because that is the only place the two rankers competed over the
+    /// same user attention at the same moment. Null wherever <see cref="PolicyId"/> is null.
+    /// </summary>
+    public Guid? InterleaveGroup { get; set; }
+
+    /// <summary>
     /// <see cref="OccurredAt"/> truncated to the minute, computed by Postgres itself (a stored
     /// generated column) so it can never disagree with the timestamp it comes from. It exists only
     /// to carry the idempotency index: RTK Query refetches the feed on tag invalidation and on

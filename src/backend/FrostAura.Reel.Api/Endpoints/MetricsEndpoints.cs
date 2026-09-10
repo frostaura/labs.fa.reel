@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Experiments;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
@@ -151,6 +152,61 @@ public static class MetricsEndpoints
             }
 
             return Results.Accepted();
+        });
+
+        // The interleaving instrument. Founder-only, like the training trigger: it is the readout of
+        // a live experiment on this account's own feed, and the honest cadence attached to it
+        // (months, not days) is a founder conversation rather than a product surface.
+        group.MapGet("/interleave", async (
+            IReelDbContext db,
+            HttpContext http,
+            InterleaveSummaryQuery summaries,
+            CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return Results.Forbid();
+            }
+
+            var summary = await summaries.ComputeAsync(account.Id, DateTime.UtcNow, ct);
+            return Results.Ok(new
+            {
+                computedAt = summary.ComputedAt,
+                enabled = summary.Enabled,
+                policyA = summary.PolicyA,
+                policyB = summary.PolicyB,
+                tau = summary.Tau,
+                alpha = summary.Alpha,
+                slates = summary.Slates,
+                decidedSlates = summary.DecidedSlates,
+                ties = summary.Ties,
+                winsA = summary.WinsA,
+                winsB = summary.WinsB,
+                // Four decimals, un-softened: an always-valid p of 0.41 is the answer, and rounding
+                // it toward a story is exactly the failure the harness exists to prevent.
+                alwaysValidP = Round(summary.AlwaysValidP, 4),
+                significant = summary.Significant,
+                preferenceRateA = Round(summary.PreferenceRateA, 4),
+                ciLow = Round(summary.CiLow, 4),
+                ciHigh = Round(summary.CiHigh, 4),
+                signTestP = Round(summary.SignTestP, 4),
+                firstSlateAt = summary.FirstSlateAt,
+                lastSlateAt = summary.LastSlateAt,
+                decidedSlatesPerDay = Round(summary.DecidedSlatesPerDay, 3),
+                slatesToDecisionAt65 = summary.SlatesToDecisionAt65,
+                estimatedDaysToDecision = Round(summary.EstimatedDaysToDecision, 1),
+                standings = summary.Standings.Select(s => new
+                {
+                    policyId = s.PolicyId,
+                    description = s.Description,
+                    team = s.Team,
+                    slates = s.Slates,
+                    cards = s.Cards,
+                    credits = s.Credits,
+                    slateWins = s.SlateWins,
+                }),
+            });
         });
 
         group.MapGet("/pipeline", async (

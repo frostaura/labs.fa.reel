@@ -375,6 +375,49 @@ export interface ModelEfficiency {
   counterfactual: CounterfactualWindow[];
 }
 
+/** One ranker's record across the interleaving experiment. */
+export interface PolicyStanding {
+  policyId: string;
+  description: string | null;
+  /** "A", "B", or null for a ranker that is no longer one of the configured arms. */
+  team: string | null;
+  slates: number;
+  cards: number;
+  credits: number;
+  slateWins: number;
+}
+
+/**
+ * The interleaving readout. Every number is computed on read from the exposure log, and the
+ * always-valid p-value may be looked at as often as you like without inflating the error rate —
+ * which is the entire reason the harness uses an mSPRT rather than a test with a sample-size plan.
+ */
+export interface InterleaveSummary {
+  computedAt: string;
+  enabled: boolean;
+  policyA: string;
+  policyB: string;
+  tau: number;
+  alpha: number;
+  slates: number;
+  decidedSlates: number;
+  ties: number;
+  winsA: number;
+  winsB: number;
+  alwaysValidP: number;
+  significant: boolean;
+  preferenceRateA: number | null;
+  ciLow: number;
+  ciHigh: number;
+  signTestP: number;
+  firstSlateAt: string | null;
+  lastSlateAt: string | null;
+  decidedSlatesPerDay: number | null;
+  slatesToDecisionAt65: number;
+  estimatedDaysToDecision: number | null;
+  standings: PolicyStanding[];
+}
+
 export interface ModelMetrics {
   gate: {
     /** The mean-relative-NDCG-lift clause of the gate (0.20). */
@@ -954,6 +997,14 @@ export const api = createApi({
       query: () => "metrics/model",
       providesTags: ["Lab"],
     }),
+    /**
+     * The interleaving instrument. Founder-only server-side; polled slowly because the underlying
+     * number moves on the scale of days, and a fast poll would suggest otherwise.
+     */
+    getInterleave: b.query<InterleaveSummary, void>({
+      query: () => "metrics/interleave",
+      providesTags: ["Lab"],
+    }),
     trainModel: b.mutation<void, void>({
       query: () => ({ url: "metrics/model/train", method: "POST" }),
       invalidatesTags: ["Lab", "Sync"],
@@ -1023,6 +1074,7 @@ export const {
   useTriggerSyncMutation,
   useUpdateSettingsMutation,
   useGetModelMetricsQuery,
+  useGetInterleaveQuery,
   useTrainModelMutation,
   useGetFeedQuery,
   useGetContinueWatchingQuery,

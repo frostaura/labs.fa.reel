@@ -1,5 +1,6 @@
 import { FlaskConical, Play } from "lucide-react";
-import { useGetModelMetricsQuery, useTrainModelMutation, useGetSyncStatusQuery } from "../store/api";
+import { useGetModelMetricsQuery, useTrainModelMutation, useGetSyncStatusQuery, useGetInterleaveQuery } from "../store/api";
+import InterleavePanel from "../components/lab/InterleavePanel";
 import type { CounterfactualWindow } from "../store/api";
 
 function pct(value: number | null | undefined, digits = 0): string {
@@ -27,6 +28,9 @@ function windowLabel(w: CounterfactualWindow): string {
 export default function Lab() {
   const { data } = useGetModelMetricsQuery(undefined, { pollingInterval: 10_000 });
   const { data: sync } = useGetSyncStatusQuery();
+  // Slow poll on purpose: the underlying number moves on the scale of days, and a 10s refresh
+  // would imply a cadence this instrument does not have.
+  const { data: interleave } = useGetInterleaveQuery(undefined, { pollingInterval: 120_000 });
   const [train, { isLoading: starting }] = useTrainModelMutation();
 
   const gate = data?.gate;
@@ -257,6 +261,11 @@ export default function Lab() {
           )}
         </section>
       )}
+
+      {/* Interleaving — the online instrument. Below the retro loop because that answers "is the
+          number honest" and this answers "is this ranker better than that one", which is only
+          worth asking once the first has an answer. */}
+      <InterleavePanel data={interleave} />
 
       {/* Metric tiles */}
       {latest && (
