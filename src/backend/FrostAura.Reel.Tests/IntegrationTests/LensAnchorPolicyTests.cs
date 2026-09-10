@@ -48,7 +48,9 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
     private static LensNote Note(params string[] anchors) => new(
         "If you want a bleak procedural that stays close to its own logic, this is that film, and "
         + "it keeps the pressure on without ever raising its voice.",
-        "A quiet, relentless piece of work.",
+        // Second person since prompt v4: the hook-voice guard refuses a third-person tagline, and
+        // this fixture runs the full generation path in the end-to-end cases below.
+        "You get a quiet, relentless piece of work.",
         "It commits to being slow before it commits to being anything else.",
         anchors.Select(a => new LensAnchor(a, "sits in the same register as this one")).ToList(),
         "tense",

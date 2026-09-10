@@ -135,8 +135,22 @@ public interface ILensWriter
 }
 
 /// <summary>The LLM judge's verdict on one generated note. Founder-only; never shown to a user.</summary>
+/// <param name="PovSlips">
+/// Every place the copy made the VIEWER a character in the plot — "the city that failed you", of a
+/// city that failed HER — quoted, or null when there are none.
+///
+/// <para><b>A note rather than a fifth score, deliberately.</b> The slip is rare enough that folding
+/// it into <see cref="Voice"/> would move a mean by less than the judge's own noise, and specific
+/// enough that the offending phrase is worth more than any number. It stays out of
+/// <see cref="Overall"/> for the same reason <see cref="Comment"/> does.</para>
+/// </param>
 public sealed record LensAuditScore(
-    double Specificity, double Grounding, double SpoilerFreeness, double Voice, string? Comment)
+    double Specificity,
+    double Grounding,
+    double SpoilerFreeness,
+    double Voice,
+    string? PovSlips,
+    string? Comment)
 {
     /// <summary>The unweighted mean — the single number a prompt-version comparison is read on.</summary>
     public double Overall => (Specificity + Grounding + SpoilerFreeness + Voice) / 4d;

@@ -144,6 +144,107 @@ public class LensGuardTests
             LensGuards.Inspect(Note(hook: "Probably one to sit this one out."), "Some Film"));
     }
 
+    // ── Marketing register (prompt v4) ──────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("gripping")]
+    [InlineData("must-see")]
+    [InlineData("Must-See")]
+    [InlineData("unmissable")]
+    [InlineData("masterful")]
+    [InlineData("stunning")]
+    [InlineData("thrilling ride")]
+    [InlineData("edge of your seat")]
+    [InlineData("tour de force")]
+    [InlineData("unforgettable")]
+    public void A_banned_marketing_phrase_in_the_lens_is_refused_with_the_word_that_did_it(string word)
+    {
+        var reason = LensGuards.Inspect(
+            Note(lens: "You get a " + word + " hour of it, and it never lets up on you."),
+            "Some Film");
+
+        Assert.Equal("marketing:" + word.ToLowerInvariant(), reason);
+    }
+
+    [Fact]
+    public void A_hook_that_calls_the_film_unmissable_is_refused()
+    {
+        // The live register defect, in the field that is most visible: the card and push headline.
+        Assert.Equal(
+            "marketing:unmissable",
+            LensGuards.Inspect(Note(hook: "You will find this unmissable."), "Some Film"));
+    }
+
+    [Fact]
+    public void The_marketing_token_is_normalised_so_the_audit_can_group_by_it()
+    {
+        // "Must-See", "must see" and "must-see" are one prompt defect. A token that varies with
+        // the model's capitalisation splits one diagnosis into three rows on the audit.
+        Assert.Equal("must see", LensGuards.FirstMarketingWord("A Must  See on a slow night."));
+        Assert.Equal("edge of your seat", LensGuards.FirstMarketingWord("Edge of your seat stuff."));
+        Assert.Null(LensGuards.FirstMarketingWord("A tense, patient hour that never raises its voice."));
+    }
+
+    [Fact]
+    public void A_caution_may_still_name_the_marketing_word_it_is_arguing_against()
+    {
+        // Same asymmetry that lets the caution argue against its own card. "It is not the gripping
+        // thing the trailer sold" is the reservation doing exactly its job.
+        Assert.Null(LensGuards.Inspect(
+            Note(caution: "It is not the gripping thing the trailer sold you; it idles for an hour."),
+            "Some Film"));
+    }
+
+    // ── Hook voice (prompt v4) ──────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("Jodie Foster turns grief into a tight revenge chase.")]
+    [InlineData("A grim London mind-warp that stays moving.")]
+    [InlineData("A quiet, relentless piece of work.")]
+    public void A_third_person_tagline_hook_is_refused(string hook)
+    {
+        // Both of the first two came off the founder-only audit at prompt v3, where meanVoice sat
+        // at 0.57. Neither can be repaired into a hook — the fix is a different sentence — so the
+        // note is refused and the surface falls back rather than rendering a poster line.
+        Assert.Equal(LensRejectionReasons.HookVoice, LensGuards.Inspect(Note(hook: hook), "Some Film"));
+        Assert.False(LensGuards.IsAddressedToTheViewer(hook));
+    }
+
+    [Theory]
+    [InlineData("You get a dark New York crime-thriller with a revenge engine.")]
+    [InlineData("The bleak crime piece you have been circling.")]
+    [InlineData("Your slowest evening this week, and it earns it.")]
+    [InlineData("Expect a long, flat hour before it commits.")]
+    [InlineData("Give this an evening if you have one to lose.")]
+    [InlineData("Save it for a night with nothing after it.")]
+    public void A_hook_addressed_to_the_viewer_passes(string hook)
+    {
+        Assert.True(LensGuards.IsAddressedToTheViewer(hook));
+        Assert.Null(LensGuards.Inspect(Note(hook: hook), "Some Film"));
+    }
+
+    [Fact]
+    public void The_imperative_allowlist_is_closed_rather_than_any_leading_verb()
+    {
+        // "Turns grief into a tight revenge chase" starts with a verb and is precisely the poster
+        // line the guard exists to refuse. An open-ended "starts with a verb" test passes it.
+        Assert.False(LensGuards.IsAddressedToTheViewer("Turns grief into a tight revenge chase."));
+        Assert.False(LensGuards.IsAddressedToTheViewer("Delivers a cold, procedural hour."));
+    }
+
+    [Fact]
+    public void A_worse_fault_in_the_hook_outranks_its_voice()
+    {
+        // Inspect is ordered worst-first, and the register rules are the least serious thing that
+        // can be wrong with a note. A hook that argues against its own card is filed as that.
+        Assert.Equal(
+            LensRejectionReasons.AntiRecommendation,
+            LensGuards.Inspect(Note(hook: "Probably one to sit this one out."), "Some Film"));
+        Assert.Equal(
+            LensRejectionReasons.Spoiler,
+            LensGuards.Inspect(Note(hook: "The ending lands badly."), "Some Film"));
+    }
+
     // ── Provenance ──────────────────────────────────────────────────────────────────────────
 
     [Fact]
