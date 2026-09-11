@@ -18,15 +18,34 @@ namespace FrostAura.Reel.Tests.Harness;
 /// <c>CrossReferenceJobTests</c> — and <c>LiveSearchExpansionTests</c> broke again the moment a
 /// fourth embedded fixture landed. Per-fixture care demonstrably does not compose.</para>
 ///
+/// <para><b>The guard matches any MENTION of the table, not only the two seeding shapes.</b> It
+/// used to match the seeding shapes alone, and the two classes that slipped through cost
+/// <c>LiveSearchExpansionTests</c> its determinism for a second time: <c>EnrichCatalogJobHandler</c>
+/// and the catalogue follow-through embed what they hydrate, through PRODUCTION code, over the
+/// whole shared catalogue — a thousand vectors on a measured run, written by a fixture whose own
+/// source contains no <c>TitleEmbeddings.Add</c> for a regex to find. Both files named the table
+/// (they assert on what the sweep wrote), so the wider rule catches them, and it costs nothing:
+/// every other class in the collection that mentions the table already inherits the base.</para>
+///
+/// <para>The blind spot that remains is a class that leaves vectors behind and never names the
+/// table at all. Nothing source-level can see that, which is why several such classes carry an
+/// explicit <c>&lt;remarks&gt;</c> saying they inherit the base without seeding — and why
+/// <see cref="IntegrationTests.EmbeddedCatalogTestBase"/> repairs the index on EVERY teardown
+/// rather than only its own.</para>
+///
 /// <para>It is a ratchet, not a verdict: <see cref="Exempt"/> holds files that seed embeddings and
 /// legitimately do not inherit the base, each with the reason. A row without a reason is a
 /// suppression, and the reason is the point.</para>
 /// </summary>
 public class EmbeddedFixtureIsolationTests
 {
-    /// <summary>The shapes that put a row into <c>TitleEmbeddings</c>.</summary>
+    /// <summary>
+    /// Any mention of the embeddings table. Deliberately wider than the two literal seeding shapes:
+    /// a fixture that drives a production sweep leaves vectors behind without ever writing one, and
+    /// asserting on what the sweep wrote is the trace it does leave. See the class remark.
+    /// </summary>
     private static readonly Regex Seeds = new(
-        @"TitleEmbeddings\s*\.\s*Add|new\s+TitleEmbedding\b", RegexOptions.Compiled);
+        @"\bTitleEmbeddings?\b", RegexOptions.Compiled);
 
     private static readonly Regex InPostgresCollection = new(
         @"\[Collection\(""postgres""\)\]", RegexOptions.Compiled);
@@ -72,7 +91,8 @@ public class EmbeddedFixtureIsolationTests
 
         Assert.True(
             findings.Count == 0,
-            "These classes seed TitleEmbeddings into the shared postgres catalogue without "
+            "These classes seed or otherwise "
+            + "touch TitleEmbeddings in the shared postgres catalogue without "
             + "inheriting EmbeddedCatalogTestBase, so their vectors stay in the HNSW index for every "
             + "test that runs afterwards and change what an unrelated account's semantic search "
             + "finds. Inherit the base — it removes exactly the rows the test added — or add the "
@@ -81,7 +101,7 @@ public class EmbeddedFixtureIsolationTests
     }
 
     /// <summary>Stale exemptions are worse than none: they read as a considered decision about a
-    /// file that no longer exists or no longer seeds anything.</summary>
+    /// file that no longer exists or no longer names the table.</summary>
     [Fact]
     public void No_exemption_outlives_the_file_it_names()
     {
@@ -97,7 +117,7 @@ public class EmbeddedFixtureIsolationTests
         Assert.True(
             stale.Count == 0,
             "EmbeddedFixtureIsolationTests.Exempt names files that no longer exist or no longer "
-            + "seed TitleEmbeddings. Delete the rows:\n" + string.Join("\n", stale));
+            + "mention TitleEmbeddings. Delete the rows:\n" + string.Join("\n", stale));
     }
 
     private static string TestProjectRoot()
