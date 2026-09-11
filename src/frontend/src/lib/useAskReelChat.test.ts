@@ -37,6 +37,8 @@ import {
   scrollTargetFor,
   bubbleOverflows,
   prefersReducedMotion,
+  skeletonCount,
+  SKELETON_CAP,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -2048,5 +2050,77 @@ describe("prefersReducedMotion", () => {
     expect(prefersReducedMotion()).toBe(false);
     vi.stubGlobal("window", { matchMedia: (q: string) => ({ matches: q.includes("reduce") }) });
     expect(prefersReducedMotion()).toBe(true);
+  });
+});
+
+/**
+ * F6-04 — the grid was zero-height until the first card, so the document went 837 px → 4 482 px in
+ * one frame and the turn scored CLS 0.672 against a 0.25 "poor" boundary.
+ */
+describe("skeletonCount", () => {
+  it("reserves_eight_by_default_and_never_more", () => {
+    // Nothing found yet — which is most of a turn, and the whole of it before `discovered` lands.
+    expect(skeletonCount(null)).toBe(SKELETON_CAP);
+    expect(skeletonCount({ stage: "searching", found: 0, scored: 0 })).toBe(SKELETON_CAP);
+    // A big turn is capped: reserving 24 rows for an answer that will keep ten is the same shift
+    // pointing downward.
+    expect(skeletonCount({ stage: "discovered", found: 24, scored: 0 })).toBe(SKELETON_CAP);
+    expect(skeletonCount({ stage: "discovered", found: 94, scored: 0 })).toBe(SKELETON_CAP);
+  });
+
+  it("reserves_only_what_a_small_turn_will_fill", () => {
+    // Fixture variation across the cap: a narrow first turn genuinely does find one title.
+    expect(skeletonCount({ stage: "discovered", found: 1, scored: 0 })).toBe(1);
+    expect(skeletonCount({ stage: "discovered", found: 3, scored: 0 })).toBe(3);
+    expect(skeletonCount({ stage: "scoring", found: 8, scored: 4 })).toBe(8);
+    expect(skeletonCount({ stage: "scoring", found: 9, scored: 4 })).toBe(SKELETON_CAP);
+  });
+});
+
+/**
+ * F4-08 — 23–24 posters sat on screen for 11.5 to 18.6 seconds and then collapsed to 10, with no
+ * transition and no announcement, the remainder folded into a collapsed tray. The client cannot
+ * rank, but it can apply the one standing condition the user set, at the moment it learns the
+ * score — and it must apply it to that turn's cards ONLY.
+ */
+describe("floorPartition — bounded to the turn still streaming", () => {
+  const settled = card(1, { predictedRating: 4.0 });
+  const streamingUnder = card(2, { predictedRating: 5.2 });
+  const streamingOver = card(3, { predictedRating: 7.4 });
+  const all = [settled, streamingUnder, streamingOver];
+  const unsettled = new Set(["t2", "t3"]);
+
+  it("holds_back_only_the_cards_the_server_has_not_ranked", () => {
+    // `t1` is under the bar and stays: it is finished work the server already floored and
+    // committed, which is exactly what a stopped PAGE's earlier answer and a held-then-restored
+    // previous answer both are. Re-flooring them takes cards out of a grid the server shipped.
+    const bounded = floorPartition(all, 6, unsettled);
+    expect(bounded.kept.map((c) => c.titleId)).toEqual(["t1", "t3"]);
+    expect(bounded.held.map((c) => c.titleId)).toEqual(["t2"]);
+  });
+
+  it("is_unchanged_without_a_bound", () => {
+    // The absent-set case is the whole grid, which is what a turn with nothing settled behind it
+    // wants — and is the behaviour every existing caller had.
+    const whole = floorPartition(all, 6);
+    expect(whole.kept.map((c) => c.titleId)).toEqual(["t3"]);
+    expect(whole.held.map((c) => c.titleId)).toEqual(["t1", "t2"]);
+  });
+
+  it("keeps_badge_precision_and_unscored_cards_inside_the_bound", () => {
+    // 5.96 prints as "6.0", so holding it back would put a card badged 6.0 inside a tray labelled
+    // "under your 6.0 bar"; an unscored card is evidence of nothing. Both rules have to survive
+    // the new parameter rather than being bypassed by it.
+    const rounds = card(4, { predictedRating: 5.96 });
+    const unscored = card(5, { predictedRating: null });
+    const bounded = floorPartition([rounds, unscored], 6, new Set(["t4", "t5"]));
+    expect(bounded.held).toEqual([]);
+    expect(bounded.kept.map((c) => c.titleId)).toEqual(["t4", "t5"]);
+  });
+
+  it("an_empty_bound_holds_nothing_back_at_all", () => {
+    // The held-previous-answer state: every card on screen is settled, so the client's own pass is
+    // a no-op without the page having to test `holdingPrevious` separately.
+    expect(floorPartition(all, 6, new Set()).held).toEqual([]);
   });
 });

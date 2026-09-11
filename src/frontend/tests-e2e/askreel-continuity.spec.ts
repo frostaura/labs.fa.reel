@@ -866,11 +866,19 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     const wayUnder = card("e5", "Way Under", { predictedRating: 4.9, blend: 0.3 });
     const over = card("f6", "Over Bar", { predictedRating: 6.4, blend: 0.6 });
     for (const c of [under, wayUnder, over]) await askPush(page, "candidate", c);
-    await expect(gridNames(page)).toHaveCount(6);
+
+    // The demotion happens as the cards arrive, not at the Stop (F4-08). The page's two sub-floor
+    // picks never enter the grid at all — before this they sat in it for as long as the turn ran,
+    // which for the measured turns was between 11.5 and 18.6 seconds. The three cards of the
+    // answer this page is EXTENDING are untouched: the server already floored and committed them,
+    // and the client's bar is bounded to the ids it has not ranked.
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
 
     await page.getByTestId("askreel-stop").click();
 
-    // Three above the bar from the first turn, plus the one that cleared it here.
+    // …and the Stop changes none of it: three above the bar from the first turn, plus the one that
+    // cleared it here.
     await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
     await expect(page.getByTestId("semantic-results").getByText("Under Bar")).toHaveCount(0);
     await expect(page.getByTestId("semantic-results").getByText("Way Under")).toHaveCount(0);
@@ -898,7 +906,10 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     await page.getByTestId("askreel-more").click();
     await waitForAsk(page, 2);
     await askPush(page, "candidate", card("g7", "Rounds Up", { predictedRating: 5.96, blend: 0.3 }));
+    // In the grid while the page streams, and still there after the Stop — the rounding rule has to
+    // hold at both moments now that the bar is applied as cards arrive.
     await expect(gridNames(page)).toHaveCount(4);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
 
     await page.getByTestId("askreel-stop").click();
 

@@ -19,7 +19,7 @@ import {
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  scrollTargetFor,
+  scrollTargetFor, skeletonCount,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -101,7 +101,7 @@ function AskReel() {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
-    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason,
+    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -251,12 +251,30 @@ function AskReel() {
   // each other. Only on a stopped turn: every other state has the server's own answer.
   const stopped = status === "stopped";
   const floorBar = accountFilters?.minPredictedRating;
-  const cleanPartition = floorPartition(cards.filter((c) => !removedSet.has(c.titleId)), stopped ? floorBar : null);
-  const outsidePartition = floorPartition(outsideCards.filter((c) => !removedSet.has(c.titleId)), stopped ? floorBar : null);
+  // …and on a turn that is still streaming, which is F4-08. The server scores every candidate and
+  // only reveals the split at `done`, so 23–24 posters sat on screen for between 11.5 and 18.6
+  // seconds and then collapsed to 10 with no transition and no announcement — half of F6-04's shift
+  // budget, and the reason the document went 4 482 → 4 851 px on a frame nobody asked for. A card
+  // whose score comes back under the bar the user set belongs under the fence from that moment.
+  //
+  // Bounded to `unsettled` — the ids the server has NOT ranked. The same call over the whole grid
+  // would re-floor finished work: the answer a stopped PAGE was extending, and a previous answer
+  // handed back whole, are both already floored and committed server-side.
+  const unsettledIds = new Set(unsettled);
+  const clientFloor = streaming || stopped ? floorBar : null;
+  const cleanPartition = floorPartition(cards.filter((c) => !removedSet.has(c.titleId)), clientFloor, unsettledIds);
+  const outsidePartition = floorPartition(outsideCards.filter((c) => !removedSet.has(c.titleId)), clientFloor, unsettledIds);
   const visible = cleanPartition.kept;
   const outsideVisible = outsidePartition.kept;
-  /** What a stopped turn moved out of the grid, for the tray to account for. */
-  const stoppedHeldBack = [...cleanPartition.held, ...outsidePartition.held];
+  /** What the client's own pass moved out of the grid, for the tray to account for. */
+  const clientHeldBack = [...cleanPartition.held, ...outsidePartition.held];
+  /**
+   * How much of the grid is still being held open for this turn. Placeholders sit AFTER the cards
+   * that have arrived and shrink as they do, so the grid's height is monotone from the first frame
+   * instead of being zero until the batch lands (F6-04). Never over a held previous answer — that
+   * grid is finished work and is not the one being filled.
+   */
+  const pendingSlots = streaming && !holdingPrevious ? Math.max(0, skeletonCount(phase) - visible.length) : 0;
 
   // The hook carries the server's sentence verbatim; the page only decides where it goes.
   const conflictMessage = conflict?.trim() ? conflict : null;
@@ -275,10 +293,10 @@ function AskReel() {
   // falls back to the unnumbered wording rather than blanking the tray.
   const belowFloorVisible = [
     ...belowFloor.filter((c) => !removedSet.has(c.titleId)),
-    // A stopped turn's sub-floor cards join the tray they belong in rather than staying in the
-    // grid. Appended, so the label counts what the tray actually holds — the previous turn's cut
-    // AND this page's — which is the number a user can open it and verify.
-    ...stoppedHeldBack,
+    // A streaming or stopped turn's sub-floor cards join the tray they belong in rather than
+    // staying in the grid. Appended, so the label counts what the tray actually holds — the
+    // previous turn's cut AND this one's — which is the number a user can open it and verify.
+    ...clientHeldBack,
   ];
   const heldBack = floorHeldBack(belowFloorVisible.length, stopped ? null : droppedByFloor);
   const floorLabel = formatFloor(floorBar);
@@ -732,6 +750,9 @@ function AskReel() {
             {visible.map((card) => (
               <ResultCard key={card.titleId} card={card} />
             ))}
+            {Array.from({ length: pendingSlots }, (_, i) => (
+              <CardSkeleton key={`slot-${i}`} />
+            ))}
           </div>
 
           {/* The honest channel: titles that trip something the user excluded, shown ONLY when
@@ -763,8 +784,11 @@ function AskReel() {
               account's own conditions, formatted to the one decimal the server's sentence uses:
               naming it turns "Reel held some back" into something the user can act on, because
               the number in it is one they chose and can change. */}
-          {heldBack > 0 && !streaming && (
-            <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
+          {heldBack > 0 && (
+            <details
+              className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+              data-testid="askreel-below-floor"
+            >
               <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
                 {floorLabel
                   ? `Show the ${heldBack} under your ${floorLabel} bar`
@@ -1023,6 +1047,23 @@ function ResultCard({ card }: { card: AskCard }) {
         <p className="fa-caption text-fa-frost/80 line-clamp-2" title={card.why}>{card.why}</p>
       )}
     </Link>
+  );
+}
+
+/**
+ * A card-shaped hole in the grid, at the size a card will fill.
+ *
+ * Poster, name and year — deliberately not the why-line, which arrives with the rerank and which a
+ * streaming card does not have either. `aria-hidden` because it says nothing: the live region and
+ * the banner's narration are what tell a screen-reader user the turn is working.
+ */
+function CardSkeleton() {
+  return (
+    <div aria-hidden data-testid="askreel-skeleton">
+      <div className="reel-poster reel-shimmer" />
+      <p className="mt-2 fa-body select-none">&nbsp;</p>
+      <p className="fa-caption select-none">&nbsp;</p>
+    </div>
   );
 }
 

@@ -513,20 +513,52 @@ export function formatFloor(floor: number | null | undefined): string | null {
  *
  * A card with no prediction, and an account with no bar, are both evidence of nothing: never held
  * back. Order is preserved within each half, because a stopped turn has no ranking to assert.
+ *
+ * `appliesTo` bounds it to the cards of a turn the server has NOT ranked — the ids after the
+ * settled prefix. Without it the same call re-floors finished work: a stopped page would apply the
+ * client's bar to the answer it was extending, and a Stop that hands a previous answer back whole
+ * would strip cards out of a grid the server had already floored and committed. Absent = every
+ * card, which is what a turn with nothing settled behind it wants (F4-08).
  */
 export function floorPartition(
   cards: AskCard[],
   floor: number | null | undefined,
+  appliesTo?: ReadonlySet<string>,
 ): { kept: AskCard[]; held: AskCard[] } {
   if (typeof floor !== "number" || !Number.isFinite(floor)) return { kept: cards, held: [] };
   const kept: AskCard[] = [];
   const held: AskCard[] = [];
   for (const c of cards) {
+    if (appliesTo && !appliesTo.has(c.titleId)) {
+      kept.push(c);
+      continue;
+    }
     const rating = c.predictedRating;
     const under = typeof rating === "number" && Number.isFinite(rating) && Math.round(rating * 10) / 10 < floor;
     (under ? held : kept).push(c);
   }
   return { kept, held };
+}
+
+/**
+ * How many card-shaped placeholders the grid holds open while a turn is working.
+ *
+ * F6-04: the grid was zero-height until the first card, so the document went **837 px → 4 482 px in
+ * a single frame** when the batch landed, and the turn scored **CLS 0.672** against Google's 0.25
+ * "poor" boundary — a page with one "Show me more" on it scored 1.158, in four discrete jumps.
+ * Everything the reader was reaching for moved under them.
+ *
+ * Eight, or the server's own count where it is smaller. Both bounds earn their place: reserving 24
+ * rows for a turn that will keep ten is the same shift pointing downward, and reserving nothing
+ * before `discovered` arrives leaves the first 6–10 seconds of every turn unreserved — which is
+ * most of it. A turn that has found nothing yet gets the full eight, because it is going to fill
+ * the grid either way.
+ */
+export const SKELETON_CAP = 8;
+
+export function skeletonCount(phase: PhaseData | null): number {
+  const found = phase?.found ?? 0;
+  return found > 0 ? Math.min(found, SKELETON_CAP) : SKELETON_CAP;
 }
 
 /**
@@ -1594,6 +1626,17 @@ export function useAskReelChat() {
     holdingPrevious: state.holdingPrevious,
     /** Cards this turn streamed before it ended. What the stopped state counts. */
     arrived: state.arrived,
+    /**
+     * The ids of the cards the SERVER has not ranked yet — everything after the settled prefix.
+     *
+     * The page needs the boundary, not just the count: the account's quality bar may be applied on
+     * the client to a turn still streaming (F4-08 — a card scored under the bar belongs in the tray
+     * the moment it is scored, not eighteen seconds later at `done`), and it must never be applied
+     * to the finished work above it. A stopped page's earlier answer, and a previous answer handed
+     * back whole, are both already floored by the server; re-flooring them here would take cards out
+     * of a grid the server committed.
+     */
+    unsettled: state.order.slice(state.settled),
     /**
      * The thread this hook is on, mirrored into `localStorage` as it changes and read back by
      * {@link resumeTarget} on the next cold load — so a tab resumes ITS conversation rather than

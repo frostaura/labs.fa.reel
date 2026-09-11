@@ -461,3 +461,187 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(tray.locator('a[href*="/title/"]')).toHaveCount(1);
   });
 });
+
+/**
+ * F6-04 and F4-08 — the grid that jumped, and the cards that were taken away.
+ *
+ * One ordinary turn scored **CLS 0.672** against Google's 0.25 "poor" boundary; the same page with
+ * one "Show me more" on top scored **1.158** in four discrete jumps. The document went 837 px →
+ * 4 482 px in a single frame when the first card batch landed, and 4 482 → 4 851 again when `done`
+ * retired cards into the tray. Anything the reader was reaching for moved under them.
+ *
+ * Half of that shift budget is F4-08: 23–24 posters sat on screen for 11.5–18.6 seconds and then
+ * collapsed to 10, with no transition, no announcement, and the remainder folded into a collapsed
+ * `<details>`. On relaxed turns nothing vanished at all, so the behaviour differed turn to turn with
+ * nothing on screen explaining why.
+ */
+test.describe("Ask Reel — the grid holds its shape", () => {
+  // 375, because that is where the finder measured and where a grid arriving below a banner moves
+  // the most of what is already on screen.
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  /** 24 candidates, the count the finder watched arrive before `done` kept 10. */
+  const STREAMED = Array.from({ length: 24 }, (_, i) =>
+    card(String.fromCharCode(97 + (i % 26)) + String(i), `Streamed ${String(i).padStart(2, "0")}`, 0.5 + i / 100),
+  );
+  /** What `done` keeps, and what it retires under the fence — F4-08's 10 + 14. */
+  const KEPT = STREAMED.slice(0, 10);
+  const RETIRED = STREAMED.slice(10);
+
+  /** Accumulates `layout-shift` values the way CLS is defined: unbuffered, `hadRecentInput` out. */
+  async function startCls(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      const w = window as unknown as { __cls: number };
+      w.__cls = 0;
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const shift = entry as PerformanceEntry & { value: number; hadRecentInput: boolean };
+          if (!shift.hadRecentInput) w.__cls += shift.value;
+        }
+      }).observe({ type: "layout-shift", buffered: false });
+    });
+  }
+
+  /** The height the page occupies — the number that went 837 → 4 482 px in a single frame. */
+  async function docHeight(page: Page): Promise<number> {
+    return page.evaluate(() => Math.round(document.documentElement.scrollHeight));
+  }
+
+  /** Layout-shift entries are queued, so the observer needs a couple of frames to have them all. */
+  async function readCls(page: Page): Promise<number> {
+    await page.waitForTimeout(400);
+    return page.evaluate(() => (window as unknown as { __cls: number }).__cls);
+  }
+
+  test("a 24-candidate turn that settles on 10 never shows 24, and the page does not jump", async ({ page }) => {
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+    await startCls(page);
+
+    await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Paced, with a paint between batches. Pushing all 24 frames back-to-back collapses the whole
+    // turn into one layout pass and scores ~0.02 whatever the page does, which measures the stub
+    // rather than the product.
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await page.waitForTimeout(120);
+    await askPush(page, "phase", { stage: "discovered", found: 24, scored: 0 });
+    await page.waitForTimeout(150);
+    const reserved = await docHeight(page);
+
+    for (let i = 0; i < STREAMED.length; i += 4) {
+      for (const c of STREAMED.slice(i, i + 4)) await askPush(page, "candidate", c);
+      await page.waitForTimeout(120);
+    }
+    // …and the scoring pass the real server runs over every candidate. Ten clear the account's 6.0
+    // bar and fourteen do not, which is exactly the split `done` is about to commit.
+    for (const c of KEPT) await askPush(page, "candidate-scored", { titleId: c.titleId, predictedRating: 7.4 });
+    for (const c of RETIRED) await askPush(page, "candidate-scored", { titleId: c.titleId, predictedRating: 5.1 });
+    await page.waitForTimeout(200);
+
+    // F4-08, as one assertion: the grid never holds a card it is about to take away. Before this,
+    // 23–24 posters sat here for between 11.5 and 18.6 seconds and then collapsed to ten.
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(10);
+    const peak = await docHeight(page);
+
+    await askPush(page, "done", {
+      results: KEPT,
+      belowFloor: RETIRED,
+      streamed: 24,
+      kept: 10,
+      droppedByFloor: 14,
+      reason: "10 picks ranked for you, from 94 pulled · 14 under your 6.0 bar — shown below.",
+    });
+    await askEnd(page);
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(10);
+    await expect(page.getByTestId("askreel-below-floor")).toContainText("Show the 14 under your 6.0 bar");
+
+    const settledHeight = await docHeight(page);
+    const cls = await readCls(page);
+    console.log(`CLS[one-turn]=${cls.toFixed(3)} reserved=${reserved}px peak=${peak}px settled=${settledHeight}px`);
+
+    // Three assertions, and the height ones are the load-bearing pair.
+    //
+    // The document no longer triples and then shrinks: 812 → 4 401 → 2 340 px on this fixture
+    // before the reserve (the finder measured 837 → 4 482 → 4 851 against a real build), and
+    // 1 960 → 2 328 → 2 340 after it. Monotone is the property — nothing the reader is reaching for
+    // moves up when the answer settles.
+    expect(reserved).toBeGreaterThan(1500);
+    expect(settledHeight).toBeGreaterThanOrEqual(peak - 1);
+
+    // CLS is the weaker signal HERE and is asserted at Google's "poor" boundary rather than at the
+    // 0.1 "good" one, deliberately. Most of the 24 → 10 collapse this fixture removes happened
+    // below the fold, where CLS never counted it, so the harness scores ~0.08 before and ~0.10
+    // after; the residual is almost entirely one shift — the progress banner leaving flow at `done`
+    // and pulling the grid up 86 px, which is 0.085 of it. The finder's 0.672 came from a real
+    // build whose posters load asynchronously. Kept as a regression guard at the boundary that was
+    // actually breached, with the number printed so a change in it is visible in the run log.
+    expect(cls).toBeLessThan(0.25);
+  });
+
+  test("a discovered phase reserves the grid before the first card lands", async ({ page }) => {
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+    await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Before the server has found anything, the reserve is the default eight — the grid is going to
+    // be filled either way, and a zero-height grid is what made the document triple in one frame.
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(8);
+
+    // A turn that will return fewer reserves fewer: over-reserving is its own shift, downward.
+    await askPush(page, "phase", { stage: "discovered", found: 3, scored: 0 });
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(3);
+
+    // …and a big turn is capped at eight rather than reserving 24 rows of nothing.
+    await askPush(page, "phase", { stage: "discovered", found: 24, scored: 0 });
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(8);
+
+    // Cards fill the reserved space rather than adding to it: eight slots, two of them now real.
+    await askPush(page, "candidate", STREAMED[0]);
+    await askPush(page, "candidate", STREAMED[1]);
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(6);
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(2);
+
+    // Nothing of the reserve survives the answer.
+    await askPush(page, "done", { results: [STREAMED[0], STREAMED[1]], reason: "2 picks ranked for you, from 9 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(0);
+  });
+
+  test("a card scored under the account's own bar goes to the tray as it is scored", async ({ page }) => {
+    // F4-08's mechanism, at the frame level: the grid must not show a card it is about to demote.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+    await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "candidate", ALPHA);
+    await askPush(page, "candidate", BORDER);
+    await askPush(page, "candidate", CEDAR);
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Border Town", "Cedar Falls"]);
+
+    // Unscored cards are evidence of nothing and stay in the grid; a score under the bar is the
+    // first moment the client knows, so it acts then rather than 18 seconds later at `done`.
+    await askPush(page, "candidate-scored", { titleId: BORDER.titleId, predictedRating: 5.2 });
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Cedar Falls"]);
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray).toContainText("Show the 1 under your 6.0 bar");
+
+    // Badge precision, not the raw value: 5.96 prints as "6.0", and a card badged 6.0 inside a tray
+    // labelled "under your 6.0 bar" is the same contradiction wearing the other hat.
+    await askPush(page, "candidate-scored", { titleId: CEDAR.titleId, predictedRating: 5.96 });
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Cedar Falls"]);
+
+    // The server stays authoritative. Its `done` puts Border back in the answer — a relaxed floor
+    // does exactly this — and the client's provisional demotion yields to it without argument.
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER, CEDAR],
+      reason: "3 picks ranked for you, from 40 pulled · relaxed to fill the answer.",
+    });
+    await askEnd(page);
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Border Town", "Cedar Falls"]);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+});
