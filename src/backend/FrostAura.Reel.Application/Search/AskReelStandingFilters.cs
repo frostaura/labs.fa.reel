@@ -76,35 +76,87 @@ public static class AskReelStandingFilters
     /// The genres this turn asked for that the account has permanently excluded — the collision the
     /// user is owed an explanation for. Compared case-insensitively because the model writes the
     /// intent and the editor writes the rows, and only one of them is normalised.
+    ///
+    /// <para><b><paramref name="requested"/> is what makes this reachable at all.</b> The other half
+    /// of this feature DESCRIBES the standing rules to the interpret model, and a model that obeys
+    /// that instruction stops asking for the excluded genre: "I want a comedy tonight" comes back as
+    /// <c>genres: []</c>, <c>excludeGenres: ["comedy"]</c>. Intersecting the account's exclusions
+    /// with <see cref="SearchIntent.Genres"/> alone therefore found the empty set on every turn, for
+    /// every account — the better the prompt behaved, the less this rung could fire, and three
+    /// independent finders reported the notice never once appearing. <paramref name="requested"/> is
+    /// the interpreter's free, deterministic reading of the user's own WORDS, which no prompt can
+    /// launder; the union of the two is what the turn actually asked for.</para>
     /// </summary>
-    public static IReadOnlyList<string> CollidingGenres(FilterRuleSet rules, SearchIntent intent) =>
-        rules.ExcludeGenres.Count == 0
-            ? []
-            : intent.Genres
-                .Where(g => rules.ExcludeGenres.Contains(g, StringComparer.OrdinalIgnoreCase))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+    public static IReadOnlyList<string> CollidingGenres(
+        FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
+        Colliding(rules.ExcludeGenres, intent.Genres, requested?.Genres);
+
+    /// <summary>
+    /// The words this turn asked for that the account permanently AVOIDS — the same collision as
+    /// <see cref="CollidingGenres"/>, one vocabulary down.
+    ///
+    /// <para>It exists because the excluded thing is not always a genre. "anime" and "musical" are
+    /// not TMDB genres, so an account that never wants them holds them as avoid-keywords — and a
+    /// finder asking for "an anime series" against exactly that rule got no notice, no excluded
+    /// list and no server sentence, only whatever the model chose to say. A rule the pipeline will
+    /// enforce is owed an explanation regardless of which list the editor happened to write it
+    /// to.</para>
+    ///
+    /// <para>Matched on the WHOLE token, never as a substring: these are single words a user picked,
+    /// and a substring rule would collide "war" with "warm".</para>
+    /// </summary>
+    public static IReadOnlyList<string> CollidingKeywords(
+        FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
+        Colliding(rules.ExcludeKeywords, intent.Keywords, requested?.Keywords);
 
     /// <summary>
     /// True when the turn's release-year window cannot survive the account's standing one — "the
     /// 90s" against a "nothing before 2000" rule. Only a window that is wholly outside the standing
     /// one counts: a partial overlap still has titles to offer and needs no explanation.
+    ///
+    /// <para><paramref name="requested"/> for the reason given on <see cref="CollidingGenres"/>: the
+    /// year half launders identically. Told "min year 2000", the model answers a 1990s request with
+    /// <c>minYear: 2000</c>, and the window it hands back is inside the standing one by
+    /// construction. EITHER window colliding is a collision — the model's reading is not evidence
+    /// that the user did not ask.</para>
     /// </summary>
-    public static bool YearWindowCollides(FilterRuleSet rules, SearchIntent intent) =>
+    public static bool YearWindowCollides(FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
+        WindowCollides(rules, intent) || (requested is not null && WindowCollides(rules, requested));
+
+    private static bool WindowCollides(FilterRuleSet rules, SearchIntent intent) =>
         (rules.MinYear is { } standingMin && intent.MaxYear is { } askedMax && askedMax < standingMin)
         || (rules.MaxYear is { } standingMax && intent.MinYear is { } askedMin && askedMin > standingMax);
+
+    /// <summary>
+    /// The intersection of one standing exclusion list with what the turn asked for, from both
+    /// readings. The INTENT's casing wins where both carry the term, because that is the spelling
+    /// the rest of the turn is working in; order follows the intent and then the user's words, so
+    /// the same turn always names its collisions in the same order.
+    /// </summary>
+    private static IReadOnlyList<string> Colliding(
+        IReadOnlyList<string> excluded, IReadOnlyList<string> fromIntent, IReadOnlyList<string>? fromWords) =>
+        excluded.Count == 0
+            ? []
+            : fromIntent
+                .Concat(fromWords ?? [])
+                .Where(v => excluded.Contains(v, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
     /// <summary>
     /// What the user is told, in prose. Numbers about the POOL travel as raw JSON beside this so the
     /// client can render them how it likes; the only numbers here are the account's own year bounds,
     /// which are part of the sentence — and are invariant, like every number this backend formats.
     /// </summary>
-    public static string Message(IReadOnlyList<string> excludedGenres, bool yearCollides, FilterRuleSet rules)
+    public static string Message(
+        IReadOnlyList<string> excludedGenres, IReadOnlyList<string> excludedKeywords, bool yearCollides,
+        FilterRuleSet rules)
     {
         var parts = new List<string>(3);
-        if (excludedGenres.Count > 0)
+        var excluded = excludedGenres.Concat(excludedKeywords).ToList();
+        if (excluded.Count > 0)
         {
-            parts.Add($"Your conditions permanently exclude {Humanised(excludedGenres)}, so nothing you asked for there can appear.");
+            parts.Add($"Your conditions permanently exclude {Humanised(excluded)}, so nothing you asked for there can appear.");
         }
 
         if (yearCollides)
@@ -118,6 +170,60 @@ public static class AskReelStandingFilters
 
         parts.Add("You can change that under Conditions.");
         return string.Join(" ", parts);
+    }
+
+    /// <summary>
+    /// The reply, qualified by what the account's conditions are about to do to it — appended
+    /// BEFORE the reply is emitted or persisted, so what the user reads and what the transcript
+    /// stores are the same sentence.
+    ///
+    /// <para><b>Why the reply needs qualifying at all.</b> It is written by the interpret model
+    /// before a single candidate exists, and nothing afterwards reconciles it — so a turn opened
+    /// "here are gritty 90s action picks" and then rendered seven post-2000 titles under a notice
+    /// saying the 90s were unavailable. Moving the reply after discovery would fix the honesty and
+    /// cost the turn its only early frame; stating the consequence up front costs nothing and is
+    /// true at the moment it is written, because an exclusion is airtight.</para>
+    ///
+    /// <para>Deterministic on purpose: it is built from the same collision data as the
+    /// <c>conflict</c> frame, so the two can never disagree, and it does not depend on the model
+    /// choosing to be candid — which it demonstrably did not, writing "I'll keep it genuinely funny"
+    /// on one turn and naming the exclusion on the next.</para>
+    /// </summary>
+    public static string Qualify(
+        string reply, IReadOnlyList<string> excludedGenres, IReadOnlyList<string> excludedKeywords,
+        bool yearCollides, FilterRuleSet rules)
+    {
+        var excluded = excludedGenres.Concat(excludedKeywords).ToList();
+        var clauses = new List<string>(2);
+        if (excluded.Count > 0)
+        {
+            clauses.Add($"no {HumanisedOr(excluded)}");
+        }
+
+        if (yearCollides)
+        {
+            clauses.Add(rules.MinYear is { } min && rules.MaxYear is { } max
+                ? FormattableString.Invariant($"titles between {min} and {max}")
+                : rules.MinYear is { } onlyMin
+                    ? FormattableString.Invariant($"titles from {onlyMin} on")
+                    : FormattableString.Invariant($"titles up to {rules.MaxYear}"));
+        }
+
+        if (clauses.Count == 0)
+        {
+            return reply;
+        }
+
+        // The clause opens with an em dash, so a reply that already ended its sentence would read
+        // "…picks. — under your conditions". One trailing full stop is absorbed; a question mark or
+        // an exclamation is left alone, because removing either changes what the reply said.
+        var stem = reply.TrimEnd();
+        if (stem.EndsWith('.'))
+        {
+            stem = stem[..^1].TrimEnd();
+        }
+
+        return $"{stem} — under your conditions that means {string.Join(" and ", clauses)}.";
     }
 
     /// <summary>
@@ -136,11 +242,20 @@ public static class AskReelStandingFilters
     }
 
     /// <summary>"horror", "horror and comedy", "horror, comedy and musicals" — a list a person reads.</summary>
-    private static string Humanised(IReadOnlyList<string> values) =>
+    private static string Humanised(IReadOnlyList<string> values) => Joined(values, "and");
+
+    /// <summary>
+    /// The same list under a "no" — "no horror or comedy". <c>and</c> would read as a conjunction of
+    /// two separate refusals rather than one list of them ("no horror and comedy" is ambiguous about
+    /// whether a horror comedy is the only thing ruled out).
+    /// </summary>
+    private static string HumanisedOr(IReadOnlyList<string> values) => Joined(values, "or");
+
+    private static string Joined(IReadOnlyList<string> values, string conjunction) =>
         values.Count switch
         {
             1 => values[0],
-            2 => $"{values[0]} and {values[1]}",
-            _ => $"{string.Join(", ", values.Take(values.Count - 1))} and {values[^1]}",
+            2 => $"{values[0]} {conjunction} {values[1]}",
+            _ => $"{string.Join(", ", values.Take(values.Count - 1))} {conjunction} {values[^1]}",
         };
 }

@@ -72,7 +72,18 @@ public static class AskReelFloor
             return new Decision<T>(clean, outside, [], Relaxed: false, AboveFloorCount: clean.Count + outside.Count);
         }
 
-        bool Clears(T card) => predictedOf(card) is not { } predicted || predicted >= floor;
+        // Compared at the precision the BADGE renders, not the precision the wire carries. A card
+        // predicted 5.95 is stored and sent as 5.95 and drawn by the badge as "6.0" (the client's
+        // toFixed(1)), so a 2-dp comparison put a card badged 6.0 inside a tray labelled "under
+        // your 6.0 bar" and made "only 2 picks cleared your 6.0 bar" disprovable by counting
+        // badges — 2 claimed against 4 badged on one measured turn, 5 against 7 on another. The
+        // user cannot see the second decimal; the sentence has to be true about what they can see.
+        // AwayFromZero, not banker's rounding, because that is what toFixed does at the .x5 edge.
+        // The wire keeps both decimals: the digit is real, and the ordering and the exposure log
+        // both want it. Only the comparison rounds.
+        bool Clears(T card) =>
+            predictedOf(card) is not { } predicted
+            || decimal.Round(predicted, 1, MidpointRounding.AwayFromZero) >= floor;
 
         var keptClean = clean.Where(Clears).ToList();
         var keptOutside = outside.Where(Clears).ToList();

@@ -69,6 +69,38 @@ public class AskReelFloorTests(PostgresFixture fixture) : EmbeddedCatalogTestBas
     }
 
     /// <summary>
+    /// The bar is compared at the precision the BADGE renders, not the precision the wire carries.
+    ///
+    /// <para>A card predicted 5.95 is stored and sent as 5.95 and rendered by the badge as "6.0"
+    /// (<c>toFixed(1)</c>). Comparing the 2-dp number against the bar therefore put a card badged
+    /// 6.0 into a tray whose label says everything inside it is under 6.0, and made the reason
+    /// sentence's "only 2 picks cleared your 6.0 bar" disprovable by counting badges: a refuter
+    /// measured 2 claimed against 4 badged on one turn and 5 against 7 on another. The user cannot
+    /// see 5.95. They can only see what is on the card, and the sentence has to be true about
+    /// that.</para>
+    ///
+    /// <para>The wire keeps 2 dp — the extra digit is real and is what the exposure log and the
+    /// ordering want. Only the comparison rounds.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(5.94, false)]
+    [InlineData(5.95, true)]
+    [InlineData(5.96, true)]
+    [InlineData(5.99, true)]
+    [InlineData(6.00, true)]
+    public void A_card_the_badge_reads_as_clearing_the_bar_clears_the_bar(double predicted, bool clears)
+    {
+        // One card under the relax threshold would relax the floor and prove nothing, so the probe
+        // card rides with six that unambiguously clear.
+        var picks = Picks(9m, 8m, 7.5m, 7m, 6.5m, 6.2m, (decimal)predicted);
+        var verdict = AskReelFloor.Apply(picks, [], p => p.Predicted, floor: 6m, minKept: 6);
+
+        Assert.False(verdict.Relaxed);
+        Assert.Equal(clears ? 0 : 1, verdict.DroppedByFloor);
+        Assert.Equal(clears ? 7 : 6, verdict.Kept.Count);
+    }
+
+    /// <summary>
     /// A relaxed turn returns EVERYTHING. The old rule truncated to the relax threshold and called
     /// it a concession, so "your floor was relaxed" also meant "and most of your results are gone".
     /// </summary>

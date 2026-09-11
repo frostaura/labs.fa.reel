@@ -282,7 +282,14 @@ public static class SearchEndpoints
                         .ToListAsync(ct))
                     .AsEnumerable()
                     .Reverse()
-                    .Select(t => new Domain.Ports.ChatTurn(t.Role, t.Text))
+                    // Whitelisted rather than passed through. The role reaches the provider's
+                    // messages array, and "system" there is a different instruction set — a client
+                    // used to be able to post its own `role` and have it forwarded verbatim. B1
+                    // closed that by deriving history from rows this endpoint writes, so today the
+                    // only values in the column are "user" and "assistant"; this keeps the
+                    // guarantee LOCAL to the place the prompt is built, instead of resting on a
+                    // write three hundred lines away and a column with no check constraint.
+                    .Select(t => new Domain.Ports.ChatTurn(t.Role == "assistant" ? "assistant" : "user", t.Text))
                     .ToList();
 
                 // The no-repeat set: what this conversation has actually shown, from the server's
