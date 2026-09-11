@@ -476,9 +476,20 @@ export function recentListing(
  * sentence describes a turn that has not finished, and with nothing on screen it is a claim about
  * a grid that is not there.
  */
-export function showsFootnote(status: ChatStatus, appending: boolean, shownCount: number): boolean {
+export function showsFootnote(
+  status: ChatStatus,
+  appending: boolean,
+  shownCount: number,
+  settledAnswer = false,
+): boolean {
   if (appending || shownCount <= 0) return false;
-  return status === "done" || status === "resumed";
+  if (status === "done" || status === "resumed") return true;
+  // F6-06's third casualty. A Stop over a held answer withdrew the provenance line along with the
+  // tray and the paging, leaving a grid with no account of where it came from — for an answer
+  // nothing had replaced and whose sentence was still perfectly true. Offered only over a settled
+  // answer: a stopped turn's own partial has no finished sentence to print, and `reason` is null
+  // there in any case.
+  return status === "stopped" && settledAnswer;
 }
 
 /**
@@ -728,9 +739,17 @@ export function canPage(
   holdingPrevious: boolean,
   exhausted: boolean,
   cardCount: number,
+  settled = 0,
 ): boolean {
   if (cardCount === 0 || exhausted || holdingPrevious) return false;
-  return status === "done" || status === "resumed";
+  if (status === "done" || status === "resumed") return true;
+  // …and the one stopped screen where paging is honest: a Stop that gave a held previous answer
+  // back whole (F6-06). Every card on it is settled — finished, server-ordered, server-floored work
+  // — and `pageQuery` names the question it answers, so the page extends that answer rather than
+  // the abandoned one. A stopped turn's OWN partial is what the rule above exists for and has
+  // `settled === 0` against a non-zero grid, so it is still refused. R1-04 was not "a stopped state
+  // offered paging"; it was paging sending the question that had never been answered.
+  return status === "stopped" && settled === cardCount;
 }
 
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
@@ -852,6 +871,17 @@ interface State {
    * dropped. See {@link staleFrame}.
    */
   stream: number;
+  /**
+   * The question the GRID answers, which is not always the last thing the user said.
+   *
+   * A page replays a question, so it needs the one the cards on screen belong to — and after a Stop
+   * that hands a held previous answer back whole (F6-06) those two differ: `lastQuery` is the
+   * question that was abandoned and is what "Ask again" replays, while this is the question the
+   * restored grid answers and is what "Show me more" extends. Conflating them is R1-04, where
+   * pressing the page control sent the STOPPED question and silently adopted the earlier question's
+   * cards as its page one.
+   */
+  pageQuery: string;
 }
 
 export type ChatAction =
@@ -929,7 +959,7 @@ export const initialChatState: State = {
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
-  lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0,
+  lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
 };
 
 /**
@@ -996,6 +1026,24 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
   return (carried ?? 0) + (incoming ?? 0);
 }
 
+/**
+ * Everything on screen that DESCRIBES the answer rather than being it — the provenance sentence,
+ * whether it is more than one turn's work, the under-floor tray, the tray's own count, and whether
+ * the server has said there is no more.
+ *
+ * F6-06: these were cleared the instant a new question was asked, while the cards they describe
+ * were deliberately held. A Stop three seconds later therefore left the user with the grid and none
+ * of its accounting — 16 tray picks that had been one tap away simply ceased to exist, the footnote
+ * went, and "Show me more" went with it. Reloading the page brought all of it back, which is how it
+ * was known to be a client-side loss rather than a server one.
+ *
+ * So they now move with the grid: held while the grid is held, and released at the single moment
+ * the grid is replaced (the first candidate of the new turn) or completed.
+ */
+function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted"> {
+  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false };
+}
+
 export function chatReducer(state: State, action: ChatAction): State {
   const tag = "stream" in action ? action.stream : undefined;
   // F6-01. A frame from a run this screen has moved on from changes NOTHING — not the grid, not
@@ -1013,16 +1061,19 @@ export function chatReducer(state: State, action: ChatAction): State {
         ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message, stream: tag?.id ?? 0 }
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
-            reason: null, appending: false, lastQuery: action.message, exhausted: false, paged: false,
+            appending: false, lastQuery: action.message,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
+            conflict: null, conflictTerms: [], errorReason: null,
             // The resumed thread's unanswered tail belongs to the visit BEFORE this one. Asking
             // anything replaces it — the retry offer it carries is exactly what was just taken.
             resumedTail: null, answeredQuery: "",
             // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
             // by the first candidate of this turn, not by the act of asking.
             holdingPrevious: state.order.length > 0, arrived: 0,
+            // …and neither is the answer's own accounting, on exactly the same terms. See
+            // {@link clearedAnswerDescription}.
+            ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
           };
     }
     case "moreTurn":
@@ -1052,10 +1103,10 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
-        reason: null, appending: false, exhausted: false, paged: false,
-        belowFloor: [], droppedByFloor: null, errorReason: null,
+        appending: false, errorReason: null,
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
+        ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
       };
     }
     case "phase":
@@ -1099,6 +1150,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The server's own `lastQuery` first: it reads the last USER row, including one whose
         // answer never landed, which is exactly the question a retry has to replay.
         lastQuery: p.lastQuery ?? lastUserQuery(turns),
+        // The restored grid answers the thread's last completed question, which is what a page of
+        // it replays. Same source as `lastQuery` on an ordinary resume; they part company only
+        // after a Stop.
+        pageQuery: p.lastQuery ?? lastUserQuery(turns),
         shown: p.shown ?? [],
         byId,
         // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
@@ -1147,7 +1202,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       if (state.holdingPrevious) {
         // The previous turn's block goes with it, so nothing is settled any more: what is on
         // screen from here is this turn's stream, and it settles at phase boundaries like any other.
-        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1, settled: 0 };
+        return {
+          ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1, settled: 0,
+          // The previous answer is gone at this exact moment, so its accounting goes with it —
+          // this is the release {@link clearedAnswerDescription} is held for.
+          ...clearedAnswerDescription(),
+          pageQuery: state.lastQuery,
+        };
       }
       if (state.byId[c.titleId]) return state;
       return {
@@ -1221,6 +1282,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         // A page that added cards makes the answer a paged one, and it stays paged until the next
         // question replaces it — the footnote needs to know the grid is more than one turn's work.
         paged: state.appending ? state.paged || !emptyPage : false,
+        // The grid now answers THIS question, so that is what a page of it must replay. A page
+        // leaves it alone: it extends the answer it found, it does not become it.
+        pageQuery: state.appending ? state.pageQuery : state.lastQuery,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
@@ -1238,7 +1302,17 @@ export function chatReducer(state: State, action: ChatAction): State {
       // claim a complete answer and print "N picks ranked for you" over a partial one, and `idle`
       // over a transcript rendered literally nothing — no cards, no message, no retry, no way back.
       // Never an error either; they asked for this.
-      return { ...state, status: "stopped", phase: null, appending: false };
+      //
+      // …and the HOLD ends here (F6-06). "Held until the new one arrives" is only true while
+      // something is still coming, and after a Stop nothing is: what is on screen is the previous
+      // answer, whole and finished, not a placeholder for one. Leaving the hold latched is what
+      // left the kept grid at 40 % opacity as a resting state, under a label about a question that
+      // would never be answered, with its tray, its footnote and its paging all withdrawn — every
+      // one of which came back on a reload, because the server had them all along.
+      //
+      // `lastQuery` is deliberately NOT restored: the abandoned question is what "Ask again"
+      // replays. `pageQuery` already holds the one the grid answers, which is what a page extends.
+      return { ...state, status: "stopped", phase: null, appending: false, holdingPrevious: false };
     case "reset":
       // `+ New`. Everything goes, including the conversation id — the whole point is that the next
       // question opens a thread of its own rather than extending one the user has finished with.
@@ -1453,8 +1527,11 @@ export function useAskReelChat() {
     // The authoritative guard, here rather than only in the render: this is what issues the
     // request, and a page over a held or abandoned answer is a billed turn for a question the
     // user never got an answer to (R1-04). See {@link canPage} for what each state means.
-    if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length) || !s.lastQuery) return;
-    run(s.lastQuery, false, "more");
+    // `pageQuery`, not `lastQuery`: after a Stop that handed the previous answer back whole they
+    // are two different questions, and the one this page must replay is the one the grid answers.
+    const query = s.pageQuery || s.lastQuery;
+    if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length, s.settled) || !query) return;
+    run(query, false, "more");
   }, [run]);
 
   /**
@@ -1593,7 +1670,7 @@ export function useAskReelChat() {
      * control and the callback can never disagree about whose answer is on screen. False over a
      * held previous answer, a stopped turn, a failure and a 409; see {@link canPage}.
      */
-    pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length),
+    pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length, state.settled),
     /**
      * Whether this answer is more than one turn's work. Read only by the footnote, which has to
      * say so: the server's sentence describes the turn that produced it, never the accumulation.
@@ -1637,6 +1714,20 @@ export function useAskReelChat() {
      * of a grid the server committed.
      */
     unsettled: state.order.slice(state.settled),
+    /**
+     * True when everything on screen is a completed answer — server-ordered, server-floored,
+     * nothing of it still streaming and none of it held pending a replacement. What tells a Stop
+     * that gave the previous answer back whole apart from a Stop that kept a half-streamed one
+     * (F6-06); `done` and `resumed` satisfy it too, which is why the footnote's own rule can stay
+     * one expression.
+     */
+    settledAnswer: state.order.length > 0 && state.settled >= state.order.length && !state.holdingPrevious,
+    /**
+     * The question the grid answers — what "Show me more" replays. Equal to the last thing the user
+     * said on every ordinary screen, and deliberately not after a Stop: there, `lastQuery` is the
+     * abandoned question ("Ask again" replays that one) and this is the answer still on screen.
+     */
+    pageQuery: state.pageQuery,
     /**
      * The thread this hook is on, mirrored into `localStorage` as it changes and read back by
      * {@link resumeTarget} on the next cold load — so a tab resumes ITS conversation rather than

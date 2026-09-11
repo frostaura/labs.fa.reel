@@ -101,7 +101,8 @@ function AskReel() {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
-    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled,
+    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
+    pageQuery,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -336,6 +337,12 @@ function AskReel() {
   // The settled outcome, announced once the stream stops. Kept separate from the streaming
   // narration below so the two live regions never talk over each other.
   const settledCount = visible.length + outsideVisible.length;
+  /**
+   * A Stop that gave the previous answer back whole — nothing of the abandoned turn arrived, and
+   * what is on screen is the finished answer it was going to replace (F6-06). Distinct from a Stop
+   * that kept a half-streamed partial, which is unranked, unfloored and says so.
+   */
+  const keptWholeAnswer = stopped && arrived === 0 && settledAnswer && settledCount > 0;
   // Counted off the SCREEN, not off the wire: the line claims what a reader can count, and the
   // eligibility filter and the stopped-turn floor both remove cards the server did send.
   const footnoteText = footnote(reason, settledCount, paged);
@@ -743,6 +750,16 @@ function AskReel() {
                 : "Previous answer — the last question never replaced it."}
             </p>
           )}
+          {/* …and the Stop's own seam (F6-06). The hold ends when the turn does, so this grid is no
+              longer "previous" and is no longer dimmed — it is the answer, whole, at full contrast,
+              with its tray and its footnote back. What it still owes the reader is WHICH question
+              it answers, because the one directly above it in the transcript is the one that was
+              abandoned. */}
+          {keptWholeAnswer && pageQuery && (
+            <p className="fa-caption text-fa-frost-dim" data-testid="askreel-kept-answer">
+              Still your answer to “{pageQuery}” — the question you stopped never replaced it.
+            </p>
+          )}
           <div
             className={`grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
             data-testid="semantic-results"
@@ -850,7 +867,7 @@ function AskReel() {
           On a PAGED answer the server's sentence is about one turn and the grid is several, which
           is R1-03: "24 picks ranked for you, from 60 pulled" sat under 37 cards. `footnote` is
           what reconciles the two — see it for why neither sentence alone can be true here. */}
-      {footnoteText && showsFootnote(status, appending, settledCount) && (
+      {footnoteText && showsFootnote(status, appending, settledCount, settledAnswer) && (
         <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
       )}
 

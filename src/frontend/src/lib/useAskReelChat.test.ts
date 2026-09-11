@@ -434,8 +434,16 @@ describe("chatReducer — belowFloor", () => {
     // The tray is not part of the no-repeat set: those titles were never offered.
     expect(withTray.shown).toEqual([1]);
 
+    // The tray moves with the grid it belongs to (F6-06). A re-ask HOLDS the previous answer until
+    // its replacement exists, so the tray is held with it — clearing it at the moment the question
+    // is asked is what left a Stop three seconds later showing the grid and none of its accounting,
+    // with sixteen tray picks that had been one tap away simply gone.
     const reasked = chatReducer(withTray, { type: "reaskTurn" });
-    expect(reasked.belowFloor).toEqual([]);
+    expect(reasked.holdingPrevious).toBe(true);
+    expect(reasked.belowFloor.map((c) => c.titleId)).toEqual(["t8", "t9"]);
+    // …and released at the single moment the grid is replaced.
+    expect(chatReducer(reasked, { type: "candidate", data: card(5) }).belowFloor).toEqual([]);
+
     const without = chatReducer(reasked, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
     expect(without.belowFloor).toEqual([]);
   });
@@ -466,10 +474,20 @@ describe("chatReducer — belowFloor", () => {
     });
     expect(zero.droppedByFloor).toBe(0);
 
-    // Every route into a new turn clears it, or last question's count labels this question's tray.
-    expect(chatReducer(counted, { type: "userTurn", message: "horror", fresh: false }).droppedByFloor).toBeNull();
+    // Every route into a new turn clears it, or last question's count labels this question's tray —
+    // but not one moment before the tray itself goes. A fresh turn takes the whole screen with it
+    // and so clears immediately; a follow-up and a re-ask hold the previous answer, and its count
+    // is held with it until the first card of the new turn replaces both (F6-06).
     expect(chatReducer(counted, { type: "userTurn", message: "horror", fresh: true }).droppedByFloor).toBeNull();
-    expect(chatReducer(counted, { type: "reaskTurn" }).droppedByFloor).toBeNull();
+    const followUp = chatReducer(counted, { type: "userTurn", message: "horror", fresh: false });
+    expect(followUp.droppedByFloor).toBe(3);
+    expect(chatReducer(followUp, { type: "candidate", data: card(5) }).droppedByFloor).toBeNull();
+    const reasking = chatReducer(counted, { type: "reaskTurn" });
+    expect(reasking.droppedByFloor).toBe(3);
+    expect(chatReducer(reasking, { type: "candidate", data: card(5) }).droppedByFloor).toBeNull();
+    // A follow-up asked with nothing on screen has nothing to hold, so it clears at once.
+    const cold = chatReducer(initialChatState, { type: "userTurn", message: "horror", fresh: false });
+    expect(cold.droppedByFloor).toBeNull();
 
     // A page is not a new turn: it adds its own cut to the running total, exactly as the tray it
     // labels appends its cards.
@@ -607,21 +625,36 @@ describe("chatReducer — stop", () => {
     { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
   );
 
-  it("stopping before the first card keeps the previous answer and says so", () => {
+  it("stopping before the first card hands the previous answer back WHOLE", () => {
     // Probe one: Stop at 2.5s, before any candidate — the reported repro, and the case that used
-    // to produce 700px of void.
-    const asking = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    // to produce 700px of void. F6-06 is the second half of it: the answer survived, but stripped.
+    const withTray = chatReducer(answered, {
+      type: "done",
+      data: { results: [card(1), card(2)], reason: "2 picks", droppedByFloor: 16, belowFloor: [card(8)] },
+    });
+    const asking = chatReducer(withTray, { type: "userTurn", message: "slow burn detective series", fresh: false });
     const stopped = chatReducer(chatReducer(asking, { type: "phase", data: { stage: "searching", found: 0, scored: 0 } }), { type: "stop" });
 
     expect(stopped.status).toBe("stopped");
     expect(stopped.arrived).toBe(0);
     // The answer the user was reading is still there — stopping a turn must not cost them one.
     expect(stopped.order).toEqual(["t1", "t2"]);
-    expect(stopped.holdingPrevious).toBe(true);
     expect(stopped.phase).toBeNull();
     expect(stopped.appending).toBe(false);
-    // Something to re-run, which is what "Ask again" needs.
+    // …and the HOLD is over. "Held until the new one arrives" is only true while something is still
+    // coming; latched past the Stop it left the kept grid at 40% opacity as a resting state, under
+    // a label about a question that would never be answered.
+    expect(stopped.holdingPrevious).toBe(false);
+    // Whole: the tray, its count and the provenance sentence are all still with the grid they
+    // describe. Sixteen picks one tap away had been ceasing to exist at this moment, and a reload
+    // brought every one of them back — which is how it was known to be a client-side loss.
+    expect(stopped.belowFloor.map((c) => c.titleId)).toEqual(["t8"]);
+    expect(stopped.droppedByFloor).toBe(16);
+    expect(stopped.reason).toBe("2 picks");
+    // Two questions, kept apart. "Ask again" replays the one that was abandoned; "Show me more"
+    // extends the one the grid answers. Conflating them is R1-04.
     expect(stopped.lastQuery).toBe("slow burn detective series");
+    expect(stopped.pageQuery).toBe("tense heist movie");
   });
 
   it("stopping after three cards keeps those three and counts them", () => {
@@ -1062,17 +1095,42 @@ describe("canPage", () => {
     expect(canPage("resumed", false, false, 2)).toBe(true);
   });
 
-  it("never_pages_a_held_previous_answer", () => {
-    // The R1-04 repro, as state: stopped, holding, cards on screen, a `lastQuery` pointing at the
-    // question that was never answered. Every one of those three states used to render the button.
-    const asking = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
-    const stopped = chatReducer(asking, { type: "stop" });
-    expect(stopped.holdingPrevious).toBe(true);
-    expect(stopped.order).toHaveLength(2);
-    expect(canPage(stopped.status, stopped.holdingPrevious, stopped.exhausted, stopped.order.length)).toBe(false);
-    // …and the hold alone is disqualifying, whatever the status beside it says.
+  it("never_pages_an_answer_that_is_still_being_held", () => {
+    // The hold alone is disqualifying, whatever the status beside it says: those cards are not the
+    // current question's answer, and a page of them would adopt them as its page one (R1-04).
     expect(canPage("streaming", true, false, 2)).toBe(false);
     expect(canPage("blocked", true, false, 2)).toBe(false);
+    expect(canPage("error", true, false, 2)).toBe(false);
+  });
+
+  it("pages_the_answer_a_stop_handed_back_whole_but_never_the_partial", () => {
+    // F6-06 against R1-04, which are easy to mistake for each other. R1-04 was not "a stopped
+    // screen offered paging" — it was paging sending the question that had never been answered.
+    // Here the Stop ends the hold, so what is on screen is a finished, server-ordered,
+    // server-floored answer whose question `pageQuery` names, and extending it is honest.
+    const asking = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    const stopped = chatReducer(asking, { type: "stop" });
+    expect(stopped.holdingPrevious).toBe(false);
+    expect(stopped.settled).toBe(stopped.order.length);
+    expect(canPage(stopped.status, stopped.holdingPrevious, stopped.exhausted, stopped.order.length, stopped.settled)).toBe(true);
+    expect(stopped.pageQuery).toBe("a tense heist movie");
+
+    // …and the partial is still refused. A turn that never reached `done` was never ranked and
+    // never floored; extending it compounds that, and `settled` is 0 against a non-empty grid.
+    let partial = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    for (const n of [7, 8]) partial = chatReducer(partial, { type: "candidate", data: card(n) });
+    const stoppedPartial = chatReducer(partial, { type: "stop" });
+    expect(stoppedPartial.settled).toBe(0);
+    expect(canPage(stoppedPartial.status, stoppedPartial.holdingPrevious, stoppedPartial.exhausted, stoppedPartial.order.length, stoppedPartial.settled)).toBe(false);
+
+    // A stopped PAGE is the third shape: the answer it was extending is settled and its own cards
+    // are not, so the grid is part finished work and part not. Refused.
+    let paging = chatReducer(answered, { type: "moreTurn" });
+    paging = chatReducer(paging, { type: "candidate", data: card(9) });
+    const stoppedPage = chatReducer(paging, { type: "stop" });
+    expect(stoppedPage.settled).toBe(2);
+    expect(stoppedPage.order).toHaveLength(3);
+    expect(canPage(stoppedPage.status, stoppedPage.holdingPrevious, stoppedPage.exhausted, stoppedPage.order.length, stoppedPage.settled)).toBe(false);
   });
 
   it("never_pages_a_turn_that_did_not_finish", () => {
@@ -1188,9 +1246,17 @@ describe("chatReducer — paging is the server's account, not an id diff", () =>
     const paging = chatReducer(answered, { type: "moreTurn" });
     const exhaustedState = chatReducer(paging, { type: "done", data: { results: [], reason: null, kept: 0 } });
     expect(exhaustedState.exhausted).toBe(true);
+    // Held with the answer they describe, and released with it (F6-06): while the exhausted grid is
+    // still on screen it is still exhausted, and offering to page it would be an offer the server
+    // has already refused.
     const asking = chatReducer(exhaustedState, { type: "userTurn", message: "something quieter", fresh: false });
-    expect(asking.exhausted).toBe(false);
-    expect(asking.paged).toBe(false);
+    expect(asking.exhausted).toBe(true);
+    // The page that exhausted it added nothing, so the grid is still one turn's work — held
+    // verbatim rather than reset, which is the property.
+    expect(asking.paged).toBe(exhaustedState.paged);
+    const swapped = chatReducer(asking, { type: "candidate", data: card(8) });
+    expect(swapped.exhausted).toBe(false);
+    expect(swapped.paged).toBe(false);
     const next = chatReducer(asking, { type: "done", data: { results: [card(9)], reason: "1 pick ranked for you, from 12 pulled" } });
     expect(next.exhausted).toBe(false);
     expect(next.paged).toBe(false);
@@ -1522,6 +1588,71 @@ describe("showsFootnote", () => {
     for (const status of ["idle", "streaming", "stopped", "blocked", "error"] as const) {
       expect(showsFootnote(status, false, 24)).toBe(false);
     }
+  });
+
+  it("describes_the_answer_a_stop_handed_back_whole", () => {
+    // F6-06's third casualty. A Stop over a held answer withdrew the provenance line along with
+    // the tray and the paging — from an answer nothing had replaced, whose sentence ("8 picks
+    // ranked for you, from 42 pulled · 16 under your 6.0 bar — shown below") was still true, and
+    // which came back in full on a reload. Fixture variation on one flag, because a stopped
+    // PARTIAL is the state the silence above is for and looks identical without it.
+    expect(showsFootnote("stopped", false, 8, true)).toBe(true);
+    expect(showsFootnote("stopped", false, 8, false)).toBe(false);
+    // …and the flag never overrides the other two conditions.
+    expect(showsFootnote("stopped", false, 0, true)).toBe(false);
+    expect(showsFootnote("stopped", true, 8, true)).toBe(false);
+    // Nor does it reach a state with its own explanation on screen.
+    expect(showsFootnote("error", false, 8, true)).toBe(false);
+    expect(showsFootnote("blocked", false, 8, true)).toBe(false);
+  });
+});
+
+/**
+ * `pageQuery` — the question the GRID answers, which after a Stop is not the last thing the user
+ * said. R1-04 was these two being one field: "Show me more" replayed the abandoned question and
+ * silently adopted the earlier question's cards as its page one.
+ */
+describe("chatReducer — the question a page replays", () => {
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "a tense heist movie", fresh: true }),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
+  );
+
+  it("tracks_the_last_completed_answer_not_the_last_question", () => {
+    expect(answered.pageQuery).toBe("a tense heist movie");
+    // Asking does not change it — the grid on screen still answers the old question.
+    const asking = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    expect(asking.pageQuery).toBe("a tense heist movie");
+    expect(asking.lastQuery).toBe("slow burn detective series");
+    // The swap does, because that is the moment the grid changes hands.
+    expect(chatReducer(asking, { type: "candidate", data: card(7) }).pageQuery).toBe("slow burn detective series");
+    // …and so does a completed answer.
+    expect(chatReducer(asking, { type: "done", data: { results: [card(7)], reason: "1 pick" } }).pageQuery)
+      .toBe("slow burn detective series");
+  });
+
+  it("a_page_extends_an_answer_rather_than_becoming_one", () => {
+    // A page replays the question it is paging, so it must not overwrite the field it reads.
+    const paged = chatReducer(
+      chatReducer(answered, { type: "moreTurn" }),
+      { type: "done", data: { results: [card(3)], reason: "1 more", kept: 1 } },
+    );
+    expect(paged.pageQuery).toBe("a tense heist movie");
+  });
+
+  it("a_resume_takes_it_from_the_stored_thread_and_a_fresh_turn_clears_it", () => {
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-9",
+        turns: [{ sequence: 0, role: "user", text: "something surreal", kind: "ask", status: "Completed" }],
+        cards: [card(1)],
+        lastQuery: "something surreal",
+      },
+    });
+    expect(resumed.pageQuery).toBe("something surreal");
+    expect(chatReducer(answered, { type: "userTurn", message: "anything", fresh: true }).pageQuery).toBe("");
+    expect(chatReducer(answered, { type: "reset" }).pageQuery).toBe("");
   });
 });
 
@@ -1867,8 +1998,15 @@ describe("chatReducer — the tray comes back on a resume", () => {
       type: "resume",
       payload: { ...base, belowFloor: [card(8), card(9), card(10)] },
     });
-    expect(chatReducer(resumed, { type: "userTurn", message: "something else", fresh: false }).belowFloor).toEqual([]);
-    expect(chatReducer(resumed, { type: "reaskTurn" }).belowFloor).toEqual([]);
+    // …at the moment the grid it labels is replaced, not at the moment the question is asked: the
+    // resumed answer is still on screen while the new turn works, and its fence is part of it
+    // (F6-06). A fresh turn takes the whole screen and clears at once.
+    const follow = chatReducer(resumed, { type: "userTurn", message: "something else", fresh: false });
+    expect(follow.belowFloor).toHaveLength(3);
+    expect(chatReducer(follow, { type: "candidate", data: card(1) }).belowFloor).toEqual([]);
+    const reasked = chatReducer(resumed, { type: "reaskTurn" });
+    expect(reasked.belowFloor).toHaveLength(3);
+    expect(chatReducer(reasked, { type: "candidate", data: card(1) }).belowFloor).toEqual([]);
     expect(chatReducer(resumed, { type: "userTurn", message: "brand new", fresh: true }).droppedByFloor).toBeNull();
   });
 });
