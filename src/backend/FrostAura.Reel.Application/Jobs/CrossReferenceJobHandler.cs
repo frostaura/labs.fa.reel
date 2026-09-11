@@ -74,6 +74,16 @@ public sealed class CrossReferenceJobHandler(
     public const string Unmeasured = "unmeasured";
 
     /// <summary>
+    /// How many verdicts a run must have written before it asks for a rebuild. Every build brings
+    /// a handful of newly scored titles into the pool, so a run over three of them that then asks
+    /// for a build — which brings three more — is the ping-pong the live job table showed: one
+    /// refresh click, four feed builds, four cross-reference runs, each a single call over a few
+    /// titles. A run under the floor keeps its verdicts; the next build the account earns on its
+    /// own reads them.
+    /// </summary>
+    public const int MinJudgedForRebuild = 20;
+
+    /// <summary>
     /// What the pill calls the round. Only the first pass exists today, so the copy names the pass
     /// it is on and promises nothing about passes that are not built — "round 1 of 3" counted to a
     /// total the user would never see reached, which is the opposite of the honest indicator the
@@ -213,11 +223,19 @@ public sealed class CrossReferenceJobHandler(
         job.ProgressPct = 100;
         job.ProgressMessage = CompletionMessage(tally, work.Count);
 
-        // A run that wrote nothing changed nothing, so it asks for nothing. The guard is not
-        // tidiness: an unconditional rebuild request from a run that could not judge would make a
-        // ping-pong out of build → cross-reference → build, each one doing no work and asking for
-        // the next.
-        if (tally.Judged > 0)
+        // A run that wrote nothing changed nothing, so it asks for nothing — and a run that wrote
+        // a handful asks for nothing either (see MinJudgedForRebuild). The guard is not tidiness:
+        // a rebuild request from a run over the few titles the last build brought in makes a
+        // ping-pong out of build → cross-reference → build, each one doing almost no work and
+        // asking for the next.
+        if (tally.Judged > 0 && tally.Judged < MinJudgedForRebuild)
+        {
+            logger.LogInformation(
+                "Cross-reference for {AccountId} judged {Judged}, under the {Floor} that earns a rebuild — the next build reads them.",
+                accountId, tally.Judged, MinJudgedForRebuild);
+        }
+
+        if (tally.Judged >= MinJudgedForRebuild)
         {
             // Preserve-contract rebuild, deliberately NOT the feed-scores-updated frame: that
             // event's contract is {titleId, predictedRating} with no slot for order, and pushing an

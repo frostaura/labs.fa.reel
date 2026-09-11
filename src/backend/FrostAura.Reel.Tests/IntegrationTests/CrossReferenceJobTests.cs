@@ -127,7 +127,8 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
 
         var accountId = await SeedAccountAsync();
         await SeedRatedNeighboursAsync(accountId, 3);
-        var candidates = await SeedCandidatesAsync(accountId, 5, embedded: true);
+        // A rebuild's worth: under MinJudgedForRebuild the run keeps its verdicts and asks for nothing.
+        var candidates = await SeedCandidatesAsync(accountId, CrossReferenceJobHandler.MinJudgedForRebuild, embedded: true);
 
         var judge = new StubJudge();
         var events = new RecordingEventHub();
@@ -199,9 +200,10 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
 
         await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(5, await db.TitleCrossReferenceVerdicts.CountAsync(v => v.AccountId == accountId));
-        // Nothing was judged, so nothing changed, so no rebuild was asked for: an unconditional
-        // request here would make a ping-pong out of build → cross-reference → build.
-        Assert.Equal(1, await db.SyncJobs.CountAsync(j => j.AccountId == accountId && j.Kind == JobKind.BuildFeed));
+        // Neither run asked for a rebuild: the second judged nothing, and the first judged five —
+        // under MinJudgedForRebuild, which is what stops build → cross-reference → build from
+        // ping-ponging over the handful of titles each build brings in.
+        Assert.Equal(0, await db.SyncJobs.CountAsync(j => j.AccountId == accountId && j.Kind == JobKind.BuildFeed));
     }
 
     // ── Failure modes ───────────────────────────────────────────────────────────────────────
@@ -392,6 +394,29 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
     // ── The enqueue point, through the real feed build ──────────────────────────────────────
 
     [Fact]
+    public async Task A_build_the_last_pass_asked_for_does_not_queue_another_pass()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedBuildableAccountAsync();
+        await SeedCandidatesAsync(accountId, 6, embedded: false, scored: false);
+        await RunBuildAsync(accountId);
+        await CompleteCrossReferenceJobsAsync(accountId);
+
+        // The pool is still unjudged, so an ordinary build queues the pass — and does.
+        Assert.True(await SchedulerFiresAsync(accountId));
+        await CompleteCrossReferenceJobsAsync(accountId);
+
+        // The same pool, but the build asking is the one the pass itself requested. Queueing here
+        // is the loop the live job table showed: pass → rebuild → pass, one click, four builds.
+        Assert.False(await SchedulerFiresAsync(accountId, CrossReferenceJobHandler.CrossReferenceRebuildReason));
+        Assert.False(await CrossReferenceQueuedAsync(accountId));
+    }
+
+    [Fact]
     public async Task A_preserve_build_queues_the_pass_when_work_is_pending_and_leaves_it_alone_when_it_is_not()
     {
         if (!Fixture.Available)
@@ -475,7 +500,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
     }
 
     /// <summary>Would the enqueue gate fire right now? The same three brakes the build asks through.</summary>
-    private async Task<bool> SchedulerFiresAsync(Guid accountId)
+    private async Task<bool> SchedulerFiresAsync(Guid accountId, string? buildTriggerReason = null)
     {
         await using var db = Fixture.CreateContext(Scoped(accountId));
         var scheduler = new CrossReferenceScheduler(
@@ -486,7 +511,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
             new StubJudge(),
             NullLogger<CrossReferenceScheduler>.Instance);
         return await scheduler.EnqueueIfWorkPendingAsync(
-            accountId, await ProfileHashAsync(accountId), DateTime.UtcNow, CancellationToken.None);
+            accountId, await ProfileHashAsync(accountId), DateTime.UtcNow, CancellationToken.None, buildTriggerReason);
     }
 
     private async Task<string> ProfileHashAsync(Guid accountId)

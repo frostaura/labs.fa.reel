@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Background;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -115,6 +116,60 @@ public class SyncJobTenancyTests(PostgresFixture fixture)
         };
         db.Add(job);
         return job.Id;
+    }
+
+    [Fact]
+    public async Task A_build_is_not_claimed_while_the_accounts_delta_sync_is_pending_or_running()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var unscoped = new AccountContext();
+        var account = await SeedAccountAsync("claim-order-a");
+        var other = await SeedAccountAsync("claim-order-b");
+        Guid sync, build, otherBuild;
+        await using (var db = fixture.CreateContext(unscoped))
+        {
+            // Enqueued in the order the refresh control enqueues them, a tick apart.
+            sync = AddJob(db, account, JobKind.DeltaSync);
+            build = AddJob(db, account, JobKind.BuildFeed);
+            otherBuild = AddJob(db, other, JobKind.BuildFeed);
+            await db.SaveChangesAsync();
+        }
+
+        await using var claimer = fixture.CreateContext(unscoped);
+        var mine = new[] { sync, build, otherBuild };
+        async Task<Guid?> ClaimAsync()
+        {
+            var ids = await claimer.Database.SqlQuery<Guid>(JobRunnerService.ClaimNextSql(DateTime.UtcNow)).ToListAsync();
+            return ids.Count == 0 ? null : ids[0];
+        }
+
+        // Claims that land on rows other tests may have left behind are released, not counted.
+        async Task<Guid?> ClaimMineAsync()
+        {
+            for (var i = 0; i < 50; i++)
+            {
+                var id = await ClaimAsync();
+                if (id is null || mine.Contains(id.Value)) return id;
+                await claimer.SyncJobs.Where(j => j.Id == id.Value)
+                    .ExecuteUpdateAsync(u => u.SetProperty(j => j.Status, JobStatus.Succeeded));
+            }
+            return null;
+        }
+
+        // The sync goes first even though the build is the same priority and only a tick younger;
+        // the other account's build is not held by this account's sync.
+        Assert.Equal(sync, await ClaimMineAsync());
+        Assert.Equal(otherBuild, await ClaimMineAsync());
+        // With the sync running, this account's build stays on the shelf.
+        Assert.Null(await ClaimMineAsync());
+
+        await claimer.SyncJobs.Where(j => j.Id == sync)
+            .ExecuteUpdateAsync(u => u.SetProperty(j => j.Status, JobStatus.Succeeded));
+        Assert.Equal(build, await ClaimMineAsync());
     }
 
     private async Task<Guid> SeedAccountAsync(string prefix)

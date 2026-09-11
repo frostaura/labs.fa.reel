@@ -36,6 +36,12 @@ public sealed class CrossReferenceScheduler(
     ILogger<CrossReferenceScheduler> logger)
 {
     /// <summary>
+    /// The smallest unjudged set worth a run, once the account has a first pass at this key. A
+    /// batch is sixty; ten is a sixth of one call's capacity and a few builds' worth of new titles.
+    /// </summary>
+    public const int MinUnjudgedToQueue = 10;
+
+    /// <summary>
     /// Above <see cref="JobKind.PersonaliseTitles"/> (3) — lens copy for a card the cross-reference
     /// is about to demote is waste — and below a reactive <see cref="JobKind.BuildFeed"/> (1),
     /// because a rating that just landed reshapes the page before anything reasons about it.
@@ -47,8 +53,20 @@ public sealed class CrossReferenceScheduler(
     /// iff a job was added to the tracked context.
     /// </summary>
     public async Task<bool> EnqueueIfWorkPendingAsync(
-        Guid accountId, string profileHash, DateTime now, CancellationToken ct)
+        Guid accountId, string profileHash, DateTime now, CancellationToken ct, string? buildTriggerReason = null)
     {
+        // Brake 0: the build this is running after was itself asked for by a finished pass. The
+        // titles that build brought in wait for the next build the account earns on its own —
+        // otherwise pass → rebuild → pass is a loop with no natural end, because every rebuild
+        // scores a few more titles. This is the deterministic half of the anti-ping-pong; the
+        // judged-count floor in the handler is the other.
+        if (buildTriggerReason == Jobs.CrossReferenceJobHandler.CrossReferenceRebuildReason)
+        {
+            logger.LogInformation(
+                "Cross-reference not queued for {AccountId}: this build was itself asked for by the last pass.", accountId);
+            return false;
+        }
+
         if (!judge.IsAvailable)
         {
             logger.LogInformation("Cross-reference not queued for {AccountId}: no judge is configured.", accountId);
@@ -91,18 +109,29 @@ public sealed class CrossReferenceScheduler(
 
         // Brake 3: is there anything to judge at THIS key? A fingerprint move makes every verdict a
         // different key, which is what re-judges a moved profile without ever deleting a row.
-        var pending = await verdicts.AnyUnjudgedAsync(
-            accountId,
-            CrossReferencePool.Judgeable(db, eligibility, accountId, artifact),
-            profileHash,
-            judge.PromptVersion,
-            CrossReferenceRound.First,
-            ct);
-        if (!pending)
+        // The pool is the scored shortlist — a few hundred ids — so it is read once here and both
+        // brakes below count against the same list.
+        var pool = await CrossReferencePool.Judgeable(db, eligibility, accountId, artifact).ToListAsync(ct);
+        var unjudged = await verdicts.UnjudgedAsync(
+            accountId, pool, profileHash, judge.PromptVersion, CrossReferenceRound.First, ct);
+        if (unjudged.Count == 0)
         {
             logger.LogInformation(
                 "Cross-reference not queued for {AccountId}: nothing unjudged at fingerprint {ProfileHash} (prompt v{Version}).",
                 accountId, profileHash, judge.PromptVersion);
+            return false;
+        }
+
+        // Brake 4: a batch's worth, or a first pass. Every build brings a few newly scored titles
+        // into the pool; a run per build over three of them is a provider call per build for
+        // almost nothing, and it was one half of the build ↔ cross-reference ping-pong. A key
+        // nothing has been judged at is a first pass and goes regardless of size.
+        var poolSize = pool.Count;
+        if (unjudged.Count < MinUnjudgedToQueue && unjudged.Count < poolSize)
+        {
+            logger.LogInformation(
+                "Cross-reference not queued for {AccountId}: {Unjudged} unjudged of {Pool}, under the {Floor} that earns a pass.",
+                accountId, unjudged.Count, poolSize, MinUnjudgedToQueue);
             return false;
         }
 

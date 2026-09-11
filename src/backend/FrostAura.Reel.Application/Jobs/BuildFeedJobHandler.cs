@@ -366,7 +366,7 @@ public class BuildFeedJobHandler(
         // would starve the pass on exactly the quiet days it exists to work through. Its own three
         // brakes — nothing in flight, headroom left today, and something genuinely unjudged at this
         // fingerprint — decide whether anything is actually queued.
-        await EnqueueCrossReferenceIfWorkPendingAsync(accountId, profileHash, now, ct);
+        await EnqueueCrossReferenceIfWorkPendingAsync(accountId, profileHash, job.TriggerReason, now, ct);
 
         if (snapshot is null)
         {
@@ -666,7 +666,7 @@ public class BuildFeedJobHandler(
     /// the same reason: a feed that is already assembled must never fail over a follow-up job.
     /// </summary>
     private async Task EnqueueCrossReferenceIfWorkPendingAsync(
-        Guid accountId, string? profileHash, DateTime now, CancellationToken ct)
+        Guid accountId, string? profileHash, string? triggerReason, DateTime now, CancellationToken ct)
     {
         if (crossReference is null || profileHash is null)
         {
@@ -675,7 +675,7 @@ public class BuildFeedJobHandler(
 
         try
         {
-            await crossReference.EnqueueIfWorkPendingAsync(accountId, profileHash, now, ct);
+            await crossReference.EnqueueIfWorkPendingAsync(accountId, profileHash, now, ct, triggerReason);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
