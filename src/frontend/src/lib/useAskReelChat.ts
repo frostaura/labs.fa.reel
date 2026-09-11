@@ -148,6 +148,48 @@ export function showMoodPresets(turnCount: number, cardCount: number, streaming:
   return turnCount === 0 && cardCount === 0 && !streaming;
 }
 
+/**
+ * One conversation as `GET /api/search/conversations/{id}` returns it — the transcript AND the
+ * answer as it should look now, which is the whole of what Phase 1 added to a resume.
+ *
+ * Every field below `turns` is optional because `/conversations/latest` on an older server, and a
+ * thread stored before cards were kept, answer with less. The client's job is to render what it
+ * was given without inventing the rest: `lastCardsAt: null` is "transcript only", which is a
+ * different fact from a turn that honestly returned nothing.
+ */
+export interface ConversationPayload {
+  id: string;
+  title?: string | null;
+  /** When this thread last stored cards. Null = it predates stored results entirely. */
+  lastCardsAt?: string | null;
+  turns: { sequence?: number; role: string; text: string; kind?: string; status?: string }[];
+  /** The answer, in the order the server committed to storage as `Rank`. Never re-sorted. */
+  cards?: AskCard[];
+  reason?: string | null;
+  /** Stored cards the eligibility re-filter dropped since the turn ran. */
+  removed?: number;
+  lastQuery?: string | null;
+  /** The media filter that turn ran under, in request tokens ("movie" / "tv"). */
+  mediaTypes?: string[];
+  /** The whole conversation's no-repeat set — informational; the server applies its own. */
+  shown?: number[];
+}
+
+/**
+ * The browse toggle a resumed answer was produced under.
+ *
+ * The toggle and the grid have to agree. A restored answer that ran under "Movies" sitting beside
+ * a control reading "All" is a control lying about what produced what is underneath it — and the
+ * next re-ask would then go out under a constraint the user never chose. Anything unrecognised,
+ * and both tokens together, mean no constraint: a guess here re-scopes someone's thread silently.
+ */
+export function mediaFilterFor(tokens: string[] | undefined): "all" | "movie" | "show" {
+  if (!tokens || tokens.length !== 1) return "all";
+  if (tokens[0] === "movie") return "movie";
+  if (tokens[0] === "tv") return "show";
+  return "all";
+}
+
 export type BootstrapAction = "seed" | "resume" | "none";
 
 /**
@@ -215,6 +257,53 @@ export function formatFloor(floor: number | null | undefined): string | null {
   return typeof floor === "number" && Number.isFinite(floor) ? FLOOR_FORMAT.format(floor) : null;
 }
 
+/**
+ * The account's quality bar, applied on the client to cards from a turn that never finished.
+ *
+ * The floor is the SERVER's job and it runs at `done`. Stop a page ten seconds in and `done` never
+ * arrives, so the cards that already streamed keep whatever score they had — and nine sub-floor
+ * picks sat in the recommended grid with a tray directly beneath them announcing that seventeen
+ * picks had been held back for being under the 6.0 bar. Three numbers on one screen that cannot
+ * all be true. This does not rank (the client cannot, and does not try): it only enforces the one
+ * standing condition the user set, on the cards they can see.
+ *
+ * The comparison is made on the number the BADGE prints — one decimal — not on the value behind
+ * it. A card scored 5.96 displays as "6.0", and holding it back would put a card badged 6.0 inside
+ * a tray labelled "under your 6.0 bar", which is the same contradiction wearing the other hat.
+ *
+ * A card with no prediction, and an account with no bar, are both evidence of nothing: never held
+ * back. Order is preserved within each half, because a stopped turn has no ranking to assert.
+ */
+export function floorPartition(
+  cards: AskCard[],
+  floor: number | null | undefined,
+): { kept: AskCard[]; held: AskCard[] } {
+  if (typeof floor !== "number" || !Number.isFinite(floor)) return { kept: cards, held: [] };
+  const kept: AskCard[] = [];
+  const held: AskCard[] = [];
+  for (const c of cards) {
+    const rating = c.predictedRating;
+    const under = typeof rating === "number" && Number.isFinite(rating) && Math.round(rating * 10) / 10 < floor;
+    (under ? held : kept).push(c);
+  }
+  return { kept, held };
+}
+
+/**
+ * The stored rows that are actually a transcript.
+ *
+ * A turn in flight is a row with no text yet, and a failed one keeps its empty text for good.
+ * Rendering those puts blank bubbles on screen — an assistant that said nothing, under a question
+ * it never answered — so they are dropped here rather than in the page, which would have to know
+ * about row lifecycles to do it. The rows still count for `lastQuery`, because the question a
+ * failed turn never answered is precisely the one a retry replays.
+ */
+export function transcriptOf(rows: { role: string; text: string }[]): ChatTurn[] {
+  return rows
+    .filter((t) => t.text.trim().length > 0 && (t.role === "user" || t.role === "assistant"))
+    .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
+}
+
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
 export function lastUserQuery(turns: ChatTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -271,6 +360,19 @@ interface State {
    * to mean "arrived before you stopped" rather than "on screen".
    */
   arrived: number;
+  /**
+   * How many stored cards the server dropped from a resumed or replayed answer because the account
+   * has since interacted with the title. Said out loud rather than absorbed: a card that silently
+   * disappears between two views of the same answer is indistinguishable from a bug, and the
+   * founder-locked "never show things I've already seen" rule is why it went.
+   */
+  removed: number;
+  /**
+   * When this thread last stored cards, as the server reports it. `null` means it never did — a
+   * thread from before results were kept, which is the ONLY state that may say "transcript only".
+   * Reporting that on a thread seventeen seconds old is what made the copy a lie.
+   */
+  lastCardsAt: string | null;
 }
 
 export type ChatAction =
@@ -279,7 +381,7 @@ export type ChatAction =
   | { type: "reaskTurn" }
   | { type: "phase"; data: PhaseData }
   | { type: "conversation"; data: ConversationData }
-  | { type: "resume"; turns: ChatTurn[]; conversationId: string; shown?: number[] }
+  | { type: "resume"; payload: ConversationPayload }
   | { type: "assistant"; data: { text: string } }
   | { type: "candidate"; data: AskCard }
   | { type: "scored"; data: { titleId: string; predictedRating: number | null } }
@@ -287,6 +389,7 @@ export type ChatAction =
   | { type: "conflict"; message: string }
   | { type: "done"; data: DoneData }
   | { type: "stop" }
+  | { type: "reset" }
   | { type: "turnInProgress" }
   | { type: "conversationGone" }
   | { type: "error"; reason?: ErrorReason };
@@ -319,7 +422,7 @@ export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false,
   conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
-  holdingPrevious: false, arrived: 0,
+  holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null,
 };
 
 /**
@@ -409,18 +512,35 @@ export function chatReducer(state: State, action: ChatAction): State {
       };
     case "conversation":
       return { ...state, conversationId: action.data.id };
-    case "resume":
+    case "resume": {
       // NOT `done`: see the Status doc-comment. `lastQuery` comes back with the transcript so the
       // media toggle and the retry have something to replay — without it, a resumed thread's chips
       // were inert until the user typed again.
+      const p = action.payload;
+      const turns = transcriptOf(p.turns);
+      const cards = p.cards ?? [];
+      const byId: Record<string, AskCard> = {};
+      for (const c of cards) byId[c.titleId] = c;
       return {
         ...initialChatState,
-        turns: action.turns,
-        conversationId: action.conversationId,
+        turns,
+        conversationId: p.id,
         status: "resumed",
-        lastQuery: lastUserQuery(action.turns),
-        shown: action.shown ?? [],
+        // The server's own `lastQuery` first: it reads the last USER row, including one whose
+        // answer never landed, which is exactly the question a retry has to replay.
+        lastQuery: p.lastQuery ?? lastUserQuery(turns),
+        shown: p.shown ?? [],
+        byId,
+        // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
+        // answer frame by frame; a stored answer HAS an order — the ranks the server committed —
+        // and re-deriving it from a rounded blend is how the same question comes back looking
+        // different on every reload.
+        order: cards.map((c) => c.titleId),
+        reason: p.reason ?? null,
+        removed: p.removed ?? 0,
+        lastCardsAt: p.lastCardsAt ?? null,
       };
+    }
     case "assistant":
       // Paging replays the last message, so the model replies again — suppress it rather than
       // stuttering the same answer into the transcript on every scroll.
@@ -498,6 +618,10 @@ export function chatReducer(state: State, action: ChatAction): State {
       // over a transcript rendered literally nothing — no cards, no message, no retry, no way back.
       // Never an error either; they asked for this.
       return { ...state, status: "stopped", phase: null, appending: false };
+    case "reset":
+      // `+ New`. Everything goes, including the conversation id — the whole point is that the next
+      // question opens a thread of its own rather than extending one the user has finished with.
+      return initialChatState;
     case "turnInProgress":
       // 409. This exact question is already being answered — by another tab, or by a turn this one
       // abandoned before the server noticed. NOTHING on screen is cleared, because nothing on
@@ -728,13 +852,34 @@ export function useAskReelChat() {
     dispatch({ type: "stop" });
   }, [clearWatchdog]);
 
-  const resume = useCallback((turns: ChatTurn[], conversationId: string, shown?: number[]) => {
-    if (turns.length === 0) return;
+  /**
+   * Put a stored conversation back on screen — transcript, cards, order, reason and all.
+   *
+   * Gated on there being a transcript: `/conversations/latest` answers `{id: null, turns: []}` for
+   * an account that has never asked anything, and resuming that would replace a cold start's mood
+   * presets with an empty thread.
+   */
+  const resume = useCallback((payload: ConversationPayload) => {
+    if (!payload.id || payload.turns.length === 0) return;
     // A resumed thread is this tab's thread from now on, so it is remembered on the same terms as
-    // one started here — otherwise a cold visit that resumed would still have nothing stored.
-    storeConversationId(conversationId);
-    dispatch({ type: "resume", turns, conversationId, shown });
+    // one started here — otherwise a cold visit that resumed would still have nothing stored, and
+    // the NEXT reload would fall back to the account's newest thread instead of this one.
+    storeConversationId(payload.id);
+    dispatch({ type: "resume", payload });
   }, []);
+
+  /**
+   * Forget this thread and start over — what `+ New` does. The stored id goes with it, so a reload
+   * lands on a cold start rather than resurrecting the conversation the user just left.
+   */
+  const startNew = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    turnIdRef.current = null;
+    clearWatchdog();
+    storeConversationId(null);
+    dispatch({ type: "reset" });
+  }, [clearWatchdog]);
 
   useEffect(() => {
     const guard = createMountGuard(() => {
@@ -784,7 +929,7 @@ export function useAskReelChat() {
   const belowFloor = applyScoreOverrides(state.belowFloor, overrides);
   return {
     turns: state.turns, status: state.status, phase: state.phase, cards, outsideCards, reason: state.reason,
-    send, resume, loadMore, reask, retryTurn, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+    send, resume, startNew, loadMore, reask, retryTurn, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
     /** The server's note that this question collides with a standing exclusion; not an error. */
     conflict: state.conflict,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
@@ -808,10 +953,22 @@ export function useAskReelChat() {
     /** Cards this turn streamed before it ended. What the stopped state counts. */
     arrived: state.arrived,
     /**
-     * The thread this hook is on, mirrored into `localStorage` as it changes. Nothing reads it back
-     * yet — `/conversations/latest` is still the only way in — but it is what a per-tab resume and
-     * a conversation list will both be built on.
+     * The thread this hook is on, mirrored into `localStorage` as it changes and read back by
+     * {@link resumeTarget} on the next cold load — so a tab resumes ITS conversation rather than
+     * the account's newest one.
      */
     conversationId: state.conversationId,
+    /**
+     * How many stored cards the server dropped out of a resumed answer because the account has
+     * since rated, watched, saved or dismissed the title. Rendered as a one-line note: a card that
+     * silently disappears between two views of the same answer looks exactly like a bug.
+     */
+    removed: state.removed,
+    /**
+     * When this thread last stored cards. `null` is the ONLY state that may claim the thread
+     * predates saved picks — it was previously the only branch a resume could reach at all, which
+     * is how a seventeen-second-old conversation was told it was too old to have any.
+     */
+    lastCardsAt: state.lastCardsAt,
   };
 }
