@@ -24,6 +24,13 @@ import type { BrowseFilter } from "../../lib/browseFilter";
  *
  * The feed keeps its cap, and keeps the inert `+N more` with it: `ConditionSummary` is a foreign
  * component and the span is its to fix. Reported rather than forked.
+ *
+ * 3. **The one interactive control in the strip meets 44 px** — from here, not from inside
+ *    `PickConditionsButton`. R5-05: the twelve chips are inert `DIV`s and the single button that
+ *    opens the editor measured 139 × 34 at both 375 and 1440, landing under the bar the same pair
+ *    of commits raised for the composer and the `Recent` row. The button is a foreign component
+ *    shared with the feed header, so the height is applied to it HERE, scoped to this strip, and
+ *    the global fix is owed upstream in `components/rec/PickConditionsButton.tsx`.
  */
 export default function SearchConditions({
   className = "",
@@ -41,7 +48,10 @@ export default function SearchConditions({
   // the reason this is a sibling of it rather than a wrapper around it.
   if (!filters || summaryChips(filters, browse).length === 0) return null;
   return (
-    <div className={`flex flex-wrap items-center gap-x-3 gap-y-2 ${className}`} data-testid="askreel-conditions">
+    <div
+      className={`flex flex-wrap items-center gap-x-3 gap-y-2 [&_[data-testid=open-conditions]]:min-h-11 ${className}`}
+      data-testid="askreel-conditions"
+    >
       <ConditionSummary filters={filters} browse={browse} onBrowseChange={onBrowseChange} />
       <PickConditionsButton />
     </div>
