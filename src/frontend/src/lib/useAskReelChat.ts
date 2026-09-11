@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type AssistantMessageData, type ConflictData, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
+import { AskStreamError, isCard, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type AssistantMessageData, type ConflictData, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
 
 /**
  * `resumed` is a fourth state, not a flavour of `done`: the transcript came back from the server
@@ -213,8 +213,18 @@ export interface ConversationPayload {
   }[];
   /** The answer, in the order the server committed to storage as `Rank`. Never re-sorted. */
   cards?: AskCard[];
+  /**
+   * The tray — the cards the account's own rating floor pushed under the "Show the N under your
+   * bar" fence, stored as rows of their own and handed back separately. Same card shape as
+   * `cards`, and **never merged into it**: these were displayed and explicitly not recommended.
+   *
+   * Optional because an older server sends no such field. Absent and empty are different facts:
+   * absent is silence, empty is a server saying the floor cut nothing — see the `resume` case,
+   * which is what keeps the tray's label from claiming a number it was never told.
+   */
+  belowFloor?: AskCard[];
   reason?: string | null;
-  /** Stored cards the eligibility re-filter dropped since the turn ran. */
+  /** Stored cards the eligibility re-filter dropped since the turn ran, across BOTH lists. */
   removed?: number;
   lastQuery?: string | null;
   /** The media filter that turn ran under, in request tokens ("movie" / "tv"). */
@@ -919,6 +929,15 @@ export function chatReducer(state: State, action: ChatAction): State {
       const cards = p.cards ?? [];
       const byId: Record<string, AskCard> = {};
       for (const c of cards) byId[c.titleId] = c;
+      // The tray, restored as a tray. It came back on the payload all along and was dropped on the
+      // floor here, so a reloaded thread lost the "Show the N under your bar" fence it had been
+      // left with — the picks the user's OWN bar held back simply ceased to exist across a reload,
+      // which is the one cut on the screen they can act on (it names a number they chose).
+      //
+      // Through `isCard` rather than cast: these rows go straight into a render, the guard is the
+      // same one every streamed card passes, and a malformed entry would otherwise reach
+      // `ResultCard` as a keyless undefined.
+      const tray = (p.belowFloor ?? []).filter(isCard);
       return {
         ...initialChatState,
         turns,
@@ -936,6 +955,13 @@ export function chatReducer(state: State, action: ChatAction): State {
         order: cards.map((c) => c.titleId),
         // All of it is finished work — a resumed answer is never re-ordered by anything.
         settled: cards.length,
+        belowFloor: tray,
+        // The tray IS the count on a resume: the server hands the whole stored block back, so
+        // `belowFloor.length` is what the fence can be opened and counted against. A payload that
+        // carried the field and an empty array is a server saying the floor cut nothing; one that
+        // carried no field at all said nothing, and `null` is how {@link floorHeldBack} tells the
+        // two apart — a zero there would suppress a fence that an older server still owes us.
+        droppedByFloor: p.belowFloor ? tray.length : null,
         reason: p.reason ?? null,
         // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread that was paged it
         // describes one page and the restored grid is several, which is R1-03 arriving by the

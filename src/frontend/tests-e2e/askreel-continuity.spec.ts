@@ -838,6 +838,67 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
   });
 });
 
+/**
+ * The tray survives a reload — or the quality floor is a live-turn decoration.
+ *
+ * The server has stored below-floor cards as rows of their own since the turn record landed, and
+ * hands them back on the resume payload precisely so a thread comes back whole. The client read
+ * `cards` and dropped `belowFloor` on the floor, so the fence the user was left with —
+ * "Show the 3 under your 6.0 bar", quoting a number they set themselves — was there before a
+ * reload and gone after it, with the picks it accounted for gone with it.
+ *
+ * Three fixtures one field apart, because absent / empty / populated are three different
+ * statements from the server and only the middle one is a zero.
+ */
+test.describe("Ask Reel — the tray comes back with the thread", () => {
+  const UNDER = card("d4", "Under Bar", { predictedRating: 5.2, blend: 0.1 });
+  const WAY_UNDER = card("e5", "Way Under", { predictedRating: 4.9, blend: 0.1 });
+  const BARELY = card("f6", "Barely Under", { predictedRating: 5.8, blend: 0.1 });
+
+  test("a reloaded thread restores the fence, its three cards, and keeps them out of the grid", async ({ page }) => {
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, belowFloor: [UNDER, WAY_UNDER, BARELY] },
+    });
+
+    // The grid is exactly the answer, in stored rank order. The tray's three are NOT in it: they
+    // did not clear the bar, and merging them would make the floor decorative on every resume.
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    for (const name of ["Under Bar", "Way Under", "Barely Under"]) {
+      await expect(page.getByTestId("semantic-results").getByText(name)).toHaveCount(0);
+    }
+
+    // …and the fence reads exactly as it did before the reload, counting its own contents against
+    // the bar out of the account's own conditions.
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6.0 bar");
+    await tray.locator("summary").click();
+    // `p.truncate`, not a text match: each card's why-line repeats its name.
+    await expect(tray.locator("a > p.truncate")).toHaveText(["Under Bar", "Way Under", "Barely Under"]);
+  });
+
+  test("an empty tray and no tray at all both render no fence, and neither invents one", async ({ page }) => {
+    // The probe's other two rungs. `belowFloor: []` is a server saying the floor cut nothing;
+    // omitting the field is an older server saying nothing at all. Both render no fence — the
+    // distinction they must NOT collapse into is a fence labelled with a count from somewhere else.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, belowFloor: [] },
+    });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+
+  test("a payload with no belowFloor field at all still resumes clean", async ({ page }) => {
+    // RESUME_PAYLOAD verbatim — today's server, before FX6's field reaches every path.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+});
+
 test.describe("Ask Reel — continuity on a phone", () => {
   test.use({ viewport: { width: 375, height: 812 } });
 
