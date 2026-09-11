@@ -1604,3 +1604,115 @@ test.describe("a resumed thread with a stopped tail can still be paged", () => {
     await expect(page.getByTestId("askreel-page-refused")).toHaveCount(0);
   });
 });
+
+/**
+ * R5-02 — a turn that did not finish says so wherever it sits in the thread.
+ *
+ * The failure row was read off the LAST row of the resumed transcript, so it existed only while the
+ * stopped turn was the tail. Page the kept answer, or ask anything else, and it went: the reload
+ * rendered a bare user bubble with nothing under it, and live the page kept the `assistant-message`
+ * that had streamed before the abort and presented it as that turn's answer — a promise, over zero
+ * cards, with `Status='Failed'` in the database and nothing on screen saying it had not been kept.
+ */
+test.describe("a stopped turn that is no longer the tail", () => {
+  test("a failure in the middle of a thread is still a failure", async ({ page }) => {
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...RESUME_PAYLOAD,
+        turns: [
+          { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+          { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Failed" },
+          { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted", id: "turn-sea" },
+          { sequence: 4, role: "user", text: "something older", kind: "ask", status: "Completed" },
+          { sequence: 5, role: "assistant", text: "Two older ones.", kind: "ask", status: "Completed", id: "turn-older" },
+        ],
+        lastQuery: "something older",
+      },
+    });
+
+    const failed = page.getByTestId("askreel-failed-turn");
+    // Exactly one, and it is the middle turn's — not the thread's, and not the tail's.
+    await expect(failed).toHaveCount(1);
+    await expect(failed).toContainText("didn’t finish before you left");
+    // In the MIDDLE: after the question it is about, before the one that followed it.
+    const order = await page.getByTestId("askreel-transcript").evaluate((el) =>
+      [...el.querySelectorAll('[data-testid="askreel-user-bubble"], [data-testid="askreel-reply"], [data-testid="askreel-failed-turn"]')]
+        .map((n) => `${n.getAttribute("data-testid")}:${(n.textContent ?? "").slice(0, 24)}`));
+    expect(order.map((r) => r.split(":")[0])).toEqual([
+      "askreel-user-bubble", "askreel-reply", "askreel-user-bubble", "askreel-failed-turn",
+      "askreel-user-bubble", "askreel-reply",
+    ]);
+
+    // …and its "Ask again" replays ITS question, not the thread's newest one.
+    await failed.getByTestId("askreel-retry").click();
+    await waitForAsk(page);
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    expect(requests[0].query).toBe("something tense set at sea");
+  });
+
+  test("a thread where nothing failed grows no such row", async ({ page }) => {
+    // Fixture variation, ONE field: the middle assistant row's status, plus the text a completed
+    // turn would carry. That text is the point — dropping empty rows looked correct precisely
+    // because a finished turn always has some.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...RESUME_PAYLOAD,
+        turns: [
+          { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+          { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Completed" },
+          { sequence: 3, role: "assistant", text: "Here’s a tense sea-set pick.", kind: "ask", status: "Completed", id: "turn-sea" },
+        ],
+        lastQuery: "something tense set at sea",
+      },
+    });
+
+    await expect(page.getByTestId("askreel-reply")).toHaveCount(2);
+    await expect(page.getByTestId("askreel-failed-turn")).toHaveCount(0);
+  });
+
+  test("a Stop does not leave the half-written reply on screen as the answer", async ({ page }) => {
+    // R5-02 live. The `assistant-message` landed at 2 578 ms and the abort at 4 118 ms, and the
+    // transcript read "Reel said: Here's a tense sea-set pick…" over a turn with zero cards.
+    await boot(page, { resume: "none" });
+    await page.getByTestId("askreel-composer").fill("a 90s romantic comedy");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-romcom", sequence: 1 });
+    await askPush(page, "assistant-message", { text: "Three that fit." });
+    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByTestId("askreel-composer").fill("something tense set at sea");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-sea", sequence: 3 });
+    await askPush(page, "assistant-message", { text: "Here’s a tense sea-set pick that stays in your lane." });
+    await expect(page.getByTestId("askreel-reply")).toHaveCount(2);
+    await page.getByTestId("askreel-stop").click();
+
+    // The promise is gone. The kept answer's own reply is still there — one reply, not two.
+    await expect(page.getByTestId("askreel-stopped")).toBeVisible();
+    await expect(page.getByTestId("askreel-transcript")).not.toContainText("stays in your lane");
+    await expect(page.getByTestId("askreel-reply")).toHaveCount(1);
+    // Exactly one retry: the stopped card's. The transcript row stands down while that card is up.
+    await expect(page.getByTestId("askreel-retry")).toHaveCount(1);
+    await expect(page.getByTestId("askreel-failed-turn")).toHaveCount(0);
+
+    // …and the moment the kept answer is paged, the stopped turn speaks for itself instead.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 3);
+    await askPush(page, "done", { results: [], kept: 0, reason: "Nothing more on this one." });
+    await askEnd(page);
+    const failed = page.getByTestId("askreel-failed-turn");
+    await expect(failed).toHaveCount(1);
+    await expect(failed).toContainText("didn’t finish");
+    await expect(page.getByTestId("askreel-transcript")).not.toContainText("stays in your lane");
+  });
+});

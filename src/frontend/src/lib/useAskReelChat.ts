@@ -45,6 +45,19 @@ export interface ChatTurn {
    * the qualified text, which is the part that had to survive.
    */
   conflict?: boolean;
+  /**
+   * Assistant rows only: this turn did not finish. The row has no answer and never will, so it is
+   * rendered as the failure it is rather than as a bubble — see {@link showsInlineFailure}.
+   *
+   * R5-02. Only the TAIL of a resumed thread was ever named as failed (`resumedTail`), so a
+   * stopped turn with anything after it — a page of the kept answer, a later question — came back
+   * as a bare user bubble with nothing under it, and live it kept the `assistant-message` that had
+   * streamed before the abort, presented as that turn's answer. A turn nobody waited for is still
+   * a turn that happened.
+   */
+  failed?: boolean;
+  /** The server's `FailureCode` for a {@link ChatTurn.failed} row. See {@link failedTurnMessage}. */
+  failureCode?: string | null;
 }
 
 /**
@@ -707,8 +720,61 @@ export function skeletonCount(phase: PhaseData | null): number {
 export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
   return rows
     .filter((t) => t.kind !== "page")
-    .filter((t) => t.text.trim().length > 0 && (t.role === "user" || t.role === "assistant"))
-    .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
+    .filter((t) => t.role === "user" || t.role === "assistant")
+    // …and a FAILED assistant row survives the empty-text filter, because its emptiness is the
+    // fact rather than an artefact of timing (R5-02). A `Pending` one does not: it has no text
+    // YET, and rendering it would put a blank bubble under a question the server is still working
+    // on — which `resumedTail` says out loud instead.
+    .filter((t) => t.text.trim().length > 0 || (t.role === "assistant" && t.status === "Failed"))
+    .map((t) =>
+      t.role === "assistant" && t.status === "Failed"
+        ? { role: "assistant" as const, text: "", failed: true, failureCode: t.failureCode ?? null }
+        : { role: t.role as "user" | "assistant", text: t.text },
+    );
+}
+
+/**
+ * The transcript after a Stop — the abandoned turn recorded as the failure it is.
+ *
+ * R5-02's live half. `assistant-message` arrives long before `done` (2 578 ms against an abort at
+ * 4 118 ms in R5's own capture), so a Stop left the model's opening sentence on screen as that
+ * turn's answer: "Here's a tense sea-set pick that stays in your thriller/action lane." over zero
+ * cards, with `Status='Failed'` in the database and nothing on the page saying the promise had not
+ * been kept. The sentence is replaced rather than kept, because a reply to a question that was
+ * never answered is not a reply — and the row stays, because the turn happened.
+ *
+ * A row is ADDED when nothing was said at all, so the stopped question is answered by something
+ * even when the model never got a word out. It is the same row either way, which is what makes the
+ * live screen and the next resume agree.
+ *
+ * `appending` is the one case that changes nothing: a page writes no transcript row, so the
+ * trailing assistant row belongs to the answer the page was extending — finished work, and not the
+ * thing that was abandoned.
+ */
+export function stoppedTranscript(turns: ChatTurn[], appending: boolean): ChatTurn[] {
+  if (appending || turns.length === 0) return turns;
+  const row: ChatTurn = { role: "assistant", text: "", failed: true, failureCode: "client_aborted" };
+  return turns.at(-1)?.role === "assistant" ? [...turns.slice(0, -1), row] : [...turns, row];
+}
+
+/**
+ * Does this transcript row render its own failure line?
+ *
+ * Every failed row does, wherever it sits — that is R5-02 — with one exception: the turn the
+ * `stopped` card is currently about. That card is the same fact with the same retry beside it, and
+ * two "Ask again" buttons for one gesture is what F4-04 was filed to stop. The moment anything
+ * happens after that turn (a page of the kept answer, another question, a reload) the card is gone
+ * and the row speaks for itself.
+ */
+export function showsInlineFailure(turn: ChatTurn, isTail: boolean, status: ChatStatus): boolean {
+  if (!turn.failed) return false;
+  return !(isTail && status === "stopped");
+}
+
+/** The question a transcript row is about — the nearest user row above it. */
+export function questionFor(turns: ChatTurn[], index: number): string {
+  for (let i = index - 1; i >= 0; i--) if (turns[i].role === "user") return turns[i].text;
+  return "";
 }
 
 /**
@@ -1712,7 +1778,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       //
       // `lastQuery` is deliberately NOT restored: the abandoned question is what "Ask again"
       // replays. `pageQuery` already holds the one the grid answers, which is what a page extends.
-      return { ...state, status: "stopped", phase: null, appending: false, holdingPrevious: false };
+      //
+      // …and the abandoned turn is recorded in the transcript as a failure rather than leaving its
+      // half-written reply on screen as an answer (R5-02). See {@link stoppedTranscript}.
+      return {
+        ...state, status: "stopped", phase: null, appending: false, holdingPrevious: false,
+        turns: stoppedTranscript(state.turns, state.appending),
+      };
     case "reset":
       // `+ New`. Everything goes, including the conversation id — the whole point is that the next
       // question opens a thread of its own rather than extending one the user has finished with.

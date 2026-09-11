@@ -23,7 +23,8 @@ import {
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
   pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
-  COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage,
+  COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage, showsInlineFailure,
+  questionFor,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -569,6 +570,30 @@ function AskReel() {
         {turns.map((turn, i) =>
           turn.role === "user" ? (
             <UserBubble key={i} text={turn.text} />
+          ) : turn.failed ? (
+            /* R5-02. A turn that did not finish is a row, not an absence. It used to be named only
+               while it was the TAIL (`resumedTail`), so paging the kept answer or asking anything
+               else made it vanish: the reload rendered a bare user bubble with nothing under it,
+               and live it kept the sentence that had streamed before the abort, presented as that
+               turn's answer over zero cards. Suppressed for exactly one turn — the one the
+               `askreel-stopped` card is currently about, which says the same thing with the same
+               retry beside it (see `showsInlineFailure`).
+
+               "Ask again" replays THIS row's question. On the tail that is `lastQuery` and `reask`
+               replaces the answer in place; further back it is a question the thread has moved
+               past, so asking it is a new ask and says so with a bubble of its own. */
+            showsInlineFailure(turn, i === turns.length - 1, status) ? (
+              <div key={i} className="flex flex-wrap items-center gap-3" data-testid="askreel-failed-turn">
+                <p className="fa-caption text-fa-frost-dim">{failedTurnMessage(turn.failureCode ?? null)}</p>
+                {(i === turns.length - 1 ? canRetry : questionFor(turns, i).length > 0) && (
+                  <RetryButton
+                    onRetry={i === turns.length - 1 ? reask : () => send(questionFor(turns, i), false)}
+                    disabled={streaming}
+                    label="Ask again"
+                  />
+                )}
+              </div>
+            ) : null
           ) : (
             <div key={i} className="space-y-2 max-w-[85%]">
               <div className="flex items-start gap-3" data-testid="askreel-reply">
@@ -603,19 +628,10 @@ function AskReel() {
           ),
         )}
 
-        {/* SB-03. The last question of a resumed thread may never have been answered — the user
-            pressed Stop, or the turn crashed — and the server correctly replays the last COMPLETED
-            answer instead. Without this row the page read "You said: something surreal and
-            dreamlike" and then, directly under it, someone else's answer, with nothing anywhere
-            saying the question had gone unanswered. It sits at the END of the transcript because
-            that is where the question it is about is. */}
-        {resumedTail?.status === "failed" && (
-          <div className="flex flex-wrap items-center gap-3" data-testid="askreel-failed-turn">
-            <p className="fa-caption text-fa-frost-dim">{failedTurnMessage(resumedTail.failureCode)}</p>
-            {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
-          </div>
-        )}
-        {/* …and the other half of the same fact: the turn is not finished, it is still running.
+        {/* SB-03's failed half used to sit HERE, read off `resumedTail` — the last row — which is
+            why it disappeared the moment anything came after it (R5-02). It is now the transcript's
+            own, rendered at the row it is about, above. What stays here is the other half: a turn
+            that is not finished, it is still running.
             Nothing to retry and nothing to apologise for — the page just has to find out, which is
             what the poll above does. */}
         {resumedTail?.status === "pending" && (

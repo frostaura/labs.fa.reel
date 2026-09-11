@@ -39,6 +39,8 @@ import {
   answeredTurnId,
   resumedPageTarget,
   pageRefusalMessage,
+  stoppedTranscript,
+  showsInlineFailure,
   failedTurnMessage,
   RECENT_LIMIT,
   OLDER_LIMIT,
@@ -2367,10 +2369,13 @@ describe("chatReducer — a resumed thread with an unfinished tail", () => {
     // The grid belongs to the first question; the retry replays the second.
     expect(state.answeredQuery).toBe("quiet character dramas");
     expect(state.lastQuery).toBe("something surreal and dreamlike");
-    // …and the unanswered question is still in the transcript, because it is still what was asked.
+    // …and the unanswered question is still in the transcript, because it is still what was asked —
+    // followed by the turn that never answered it. That row used to be dropped for having no text
+    // (R5-02), which left the failure visible only while it was the tail.
     expect(state.turns.map((t) => t.text)).toEqual([
-      "quiet character dramas", "Three that fit.", "something surreal and dreamlike",
+      "quiet character dramas", "Three that fit.", "something surreal and dreamlike", "",
     ]);
+    expect(state.turns.at(-1)).toEqual({ role: "assistant", text: "", failed: true, failureCode: "client_aborted" });
   });
 
   it("says_nothing_of_the_kind_on_an_ordinary_resume", () => {
@@ -2919,5 +2924,145 @@ describe("chatReducer — a refused page keeps the answer whole", () => {
   it("says_what_happened_in_words_the_refusal_can_support", () => {
     expect(pageRefusalMessage("mismatch")).toBe("That page no longer matches its answer — ask again.");
     expect(pageRefusalMessage(null)).toBeNull();
+  });
+});
+
+/**
+ * R5-02 — a turn that did not finish says so wherever it sits, not only at the end.
+ *
+ * `transcriptOf` dropped every empty-text row on the floor, and a failed turn keeps its empty text
+ * for good — so the only thing that ever named a failure was `resumedTail`, which reads the LAST
+ * row. Page the kept answer, or ask anything else, and the stopped turn stopped being the tail: the
+ * reload then rendered a bare user bubble with nothing under it at all, and live it rendered the
+ * `assistant-message` that had streamed before the abort, presented as that turn's answer. The
+ * database said `Failed` / `client_aborted` / zero cards; the product showed a promise and never
+ * said it was not kept.
+ */
+describe("transcriptOf — a failed turn is a row, not an absence", () => {
+  const rows = [
+    { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+    { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+    { sequence: 4, role: "user", text: "something older", kind: "ask", status: "Completed" },
+    { sequence: 5, role: "assistant", text: "Two older ones.", kind: "ask", status: "Completed" },
+  ];
+
+  it("keeps_a_failed_row_in_the_middle_of_a_thread", () => {
+    const turns = transcriptOf(rows);
+    expect(turns.map((t) => t.text)).toEqual([
+      "a 90s romantic comedy", "Three that fit.", "something tense set at sea", "", "something older", "Two older ones.",
+    ]);
+    expect(turns[3]).toEqual({ role: "assistant", text: "", failed: true, failureCode: "client_aborted" });
+    // …and only that one. A completed answer is not a failure however quiet its sentence is.
+    expect(turns.filter((t) => t.failed)).toHaveLength(1);
+  });
+
+  it("says_nothing_of_the_kind_when_that_turn_completed", () => {
+    // Fixture variation, ONE field: the middle assistant row's status. It gains the text a
+    // completed turn would have, which is exactly what makes the old behaviour indistinguishable —
+    // dropping empty rows happened to be right whenever the turn had finished.
+    const settled = rows.map((r, i) =>
+      i === 2 ? { ...r, status: "Completed" }
+        : i === 3 ? { ...r, text: "Here’s a tense sea-set pick.", status: "Completed", failureCode: null }
+          : r);
+    const turns = transcriptOf(settled);
+    expect(turns.filter((t) => t.failed)).toHaveLength(0);
+    expect(turns[3].text).toBe("Here’s a tense sea-set pick.");
+  });
+
+  it("still_drops_a_page_row_and_a_turn_with_nothing_to_say", () => {
+    // The two rules this must not have broken: a `page` writes an assistant row for a question two
+    // bubbles up (SB-04), and a `Pending` row has no text YET rather than for good.
+    const turns = transcriptOf([
+      ...rows.slice(0, 2),
+      { sequence: 2, role: "assistant", text: "Three more.", kind: "page", status: "Completed" },
+      { sequence: 3, role: "user", text: "something older", kind: "ask", status: "Pending" },
+      { sequence: 4, role: "assistant", text: "", kind: "ask", status: "Pending" },
+    ]);
+    expect(turns.map((t) => t.text)).toEqual(["a 90s romantic comedy", "Three that fit.", "something older"]);
+  });
+});
+
+describe("stoppedTranscript — the reply that streamed before the abort is not the answer", () => {
+  it("turns_the_half_written_reply_into_the_failure_it_is", () => {
+    // R5-02, live: the `assistant-message` arrived at 2 578 ms and the abort at 4 118 ms, and the
+    // transcript read "Reel said: Here's a tense sea-set pick…" over a turn with zero cards.
+    const turns: ChatTurn[] = [
+      { role: "user", text: "a 90s romantic comedy" },
+      { role: "assistant", text: "Three that fit." },
+      { role: "user", text: "something tense set at sea" },
+      { role: "assistant", text: "Here’s a tense sea-set pick." },
+    ];
+    expect(stoppedTranscript(turns, false)).toEqual([
+      ...turns.slice(0, 3),
+      { role: "assistant", text: "", failed: true, failureCode: "client_aborted" },
+    ]);
+  });
+
+  it("records_the_failure_even_when_nothing_was_said_at_all", () => {
+    const turns: ChatTurn[] = [{ role: "user", text: "something tense set at sea" }];
+    expect(stoppedTranscript(turns, false)).toEqual([
+      ...turns,
+      { role: "assistant", text: "", failed: true, failureCode: "client_aborted" },
+    ]);
+  });
+
+  it("leaves_the_transcript_alone_when_a_page_was_stopped", () => {
+    // A page adds no transcript row, so the trailing assistant row belongs to the answer it was
+    // extending — finished work, and not the thing that was abandoned.
+    const turns: ChatTurn[] = [
+      { role: "user", text: "a 90s romantic comedy" },
+      { role: "assistant", text: "Three that fit." },
+    ];
+    expect(stoppedTranscript(turns, true)).toEqual(turns);
+  });
+});
+
+describe("chatReducer — a stopped turn's reply is not presented as an answer", () => {
+  const asked = chatReducer(initialChatState, { type: "userTurn", message: "something tense set at sea", fresh: true });
+
+  it("replaces_the_reply_with_the_failure_row", () => {
+    const replied = chatReducer(asked, { type: "assistant", data: { text: "Here’s a tense sea-set pick.", conflict: false } });
+    expect(replied.turns.at(-1)).toEqual({ role: "assistant", text: "Here’s a tense sea-set pick.", conflict: false });
+    const stopped = chatReducer(replied, { type: "stop" });
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.turns.map((t) => t.text)).toEqual(["something tense set at sea", ""]);
+    expect(stopped.turns.at(-1)?.failed).toBe(true);
+  });
+
+  it("does_not_touch_a_previous_answer_when_a_page_is_stopped", () => {
+    // Fixture variation: the same Stop, one field of state apart — `appending`.
+    const paging = chatReducer(
+      { ...asked, turns: [{ role: "user", text: "a 90s romantic comedy" }, { role: "assistant", text: "Three that fit." }], order: ["a"], settled: 1 },
+      { type: "moreTurn" },
+    );
+    const stopped = chatReducer(paging, { type: "stop" });
+    expect(stopped.turns.map((t) => t.text)).toEqual(["a 90s romantic comedy", "Three that fit."]);
+    expect(stopped.turns.some((t) => t.failed)).toBe(false);
+  });
+});
+
+describe("showsInlineFailure", () => {
+  const ok: ChatTurn = { role: "assistant", text: "Three that fit." };
+  const failed: ChatTurn = { role: "assistant", text: "", failed: true, failureCode: "client_aborted" };
+
+  it("renders_a_failed_row_wherever_it_sits", () => {
+    expect(showsInlineFailure(failed, false, "resumed")).toBe(true);
+    expect(showsInlineFailure(failed, true, "resumed")).toBe(true);
+    expect(showsInlineFailure(failed, true, "done")).toBe(true);
+  });
+
+  it("stands_down_while_the_stopped_card_is_saying_the_same_thing", () => {
+    // A live Stop puts `askreel-stopped` on screen — its own row, its own count, its own retry.
+    // A second copy of that in the transcript is two "Ask again" buttons for one gesture.
+    expect(showsInlineFailure(failed, true, "stopped")).toBe(false);
+    // …but only for the turn that card is about. An older failure is still the transcript's.
+    expect(showsInlineFailure(failed, false, "stopped")).toBe(true);
+  });
+
+  it("never_fires_on_a_turn_that_finished", () => {
+    expect(showsInlineFailure(ok, false, "resumed")).toBe(false);
+    expect(showsInlineFailure(ok, true, "done")).toBe(false);
   });
 });
