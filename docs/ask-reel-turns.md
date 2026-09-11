@@ -94,7 +94,8 @@ The resume payload:
 {
   "id": "…", "title": "…", "lastCardsAt": null,
   "lastTurnAt": "2026-09-11T00:54:21.301Z",
-  "turns":   [{ "sequence": 0, "role": "user", "text": "…", "kind": "ask", "status": "Completed" }],
+  "turns":   [{ "id": "…", "sequence": 0, "role": "user", "text": "…",
+                "kind": "ask", "status": "Completed", "failureCode": null }],
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
   "reason":  "…",        // the newest replayed turn's reason, verbatim
@@ -104,6 +105,15 @@ The resume payload:
   "shown": [603, 27205]  // the whole conversation's no-repeat set, tray included
 }
 ```
+
+Each turn carries its own `id` and, when it failed, its `failureCode`. The id is what makes a
+transcript row addressable: a `Pending` row is polled through `GET /api/search/turns/{id}`, which is
+the whole reconnect path, and without an id a resumed thread could see a turn still running and have
+no handle to name it. The code is `null` on every status but `Failed` — read through the status
+rather than off the column, so a cause can never outlive the failure it described. It is what
+separates a turn the user stopped themselves (`client_aborted`) from one that hit a snag; without
+it, both render the same and the page either apologises for a deliberate stop or stays quiet about a
+real failure.
 
 `lastCardsAt: null` means **transcript only** — a conversation that predates stored results. Render
 that as its own state; it is a different fact from a turn that honestly returned nothing.

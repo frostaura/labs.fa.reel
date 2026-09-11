@@ -621,6 +621,126 @@ public class AskReelEndpointTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// A resumed transcript hands back a row's <c>id</c> and, when it failed, its
+    /// <c>failureCode</c> — the two things a client needs to do anything but guess.
+    ///
+    /// <para>Without the code, every unfinished turn renders the same: a thread the user stopped
+    /// themselves (<c>client_aborted</c>) is indistinguishable from one that hit a snag, so the
+    /// page either apologises for something the user did on purpose or stays silent about a real
+    /// failure. Without the id there is no handle at all — a <c>Pending</c> row cannot be polled
+    /// through <c>GET /api/search/turns/{id}</c>, which is the whole reconnect path, and the client
+    /// is left waiting on a turn it cannot name.</para>
+    ///
+    /// <para>The code travels only on a <c>Failed</c> row, deliberately: a cause outliving the
+    /// failure it described is worse than no cause, because it reads as current.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_resumed_transcript_carries_each_turns_id_and_a_failed_turns_code()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync(api, $"turn-resume-ids-{Guid.NewGuid():N}");
+        using (client)
+        {
+            // Sequences 0/1: the completed ask that still owns the replayed block.
+            var conversationId = await SeedCompletedTurnAsync(accountId, cards: 2);
+
+            // Sequences 2/3: a turn the user walked away from. 4/5: one still running.
+            var abortedTurnId = Guid.NewGuid();
+            var pendingTurnId = Guid.NewGuid();
+            await using (var db = ScopedContext(accountId))
+            {
+                var now = DateTime.UtcNow;
+                db.SearchTurns.AddRange(
+                    UserTurn(accountId, conversationId, 2, "one I stopped", now),
+                    new SearchTurn
+                    {
+                        Id = abortedTurnId,
+                        AccountId = accountId,
+                        ConversationId = conversationId,
+                        Role = "assistant",
+                        Text = string.Empty,
+                        CreatedAt = now,
+                        Sequence = 3,
+                        ClientTurnId = Guid.NewGuid(),
+                        Kind = SearchTurnKind.Ask,
+                        Status = SearchTurnStatus.Failed,
+                        FailureCode = "client_aborted",
+                    },
+                    UserTurn(accountId, conversationId, 4, "one still running", now),
+                    new SearchTurn
+                    {
+                        Id = pendingTurnId,
+                        AccountId = accountId,
+                        ConversationId = conversationId,
+                        Role = "assistant",
+                        Text = string.Empty,
+                        CreatedAt = now,
+                        Sequence = 5,
+                        ClientTurnId = Guid.NewGuid(),
+                        Kind = SearchTurnKind.Ask,
+                        Status = SearchTurnStatus.Pending,
+                    });
+                await db.SaveChangesAsync();
+            }
+
+            using var response = await client.GetAsync($"/api/search/conversations/{conversationId}");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var turns = payload.RootElement.GetProperty("turns").EnumerateArray().ToList();
+            Assert.Equal(6, turns.Count);
+
+            // Every row is addressable, not just the interesting ones: the id is what makes a
+            // transcript row a thing the client can ask about.
+            foreach (var turn in turns)
+            {
+                Assert.True(turn.TryGetProperty("id", out var id), "a resumed turn carries no id.");
+                Assert.NotEqual(Guid.Empty, id.GetGuid());
+            }
+
+            var aborted = turns.Single(t => t.GetProperty("sequence").GetInt32() == 3);
+            Assert.Equal(abortedTurnId, aborted.GetProperty("id").GetGuid());
+            // Status and code asserted together so a failure names what it actually found.
+            Assert.Equal(
+                "Failed/client_aborted",
+                $"{aborted.GetProperty("status").GetString()}/{aborted.GetProperty("failureCode").GetString()}");
+
+            // The running turn is the one worth polling, so it is the one that most needs its id —
+            // and it has no cause, because nothing has gone wrong yet.
+            var pending = turns.Single(t => t.GetProperty("sequence").GetInt32() == 5);
+            Assert.Equal(pendingTurnId, pending.GetProperty("id").GetGuid());
+            Assert.Equal(SearchTurnStatus.Pending, pending.GetProperty("status").GetString());
+            Assert.Equal(JsonValueKind.Null, pending.GetProperty("failureCode").ValueKind);
+
+            // A turn that finished says nothing about causes either — present-but-null, one shape.
+            var completed = turns.Single(t => t.GetProperty("sequence").GetInt32() == 1);
+            Assert.Equal(JsonValueKind.Null, completed.GetProperty("failureCode").ValueKind);
+
+            // The failed turn stored no cards, so it never became the block that replays.
+            Assert.Equal(2, payload.RootElement.GetProperty("cards").GetArrayLength());
+        }
+    }
+
+    /// <summary>One transcript row, the half of a pair the user wrote.</summary>
+    private static SearchTurn UserTurn(Guid accountId, Guid conversationId, int sequence, string text, DateTime now) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            ConversationId = conversationId,
+            Role = "user",
+            Text = text,
+            CreatedAt = now,
+            Sequence = sequence,
+            Kind = SearchTurnKind.Ask,
+            Status = SearchTurnStatus.Completed,
+            CompletedAt = now,
+        };
+
     // ── The artifact on the turn ────────────────────────────────────────────────────────────
 
     /// <summary>

@@ -261,10 +261,13 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
             Assert.Equal("user", turns[0].GetProperty("role").GetString());
             Assert.Equal(question, turns[0].GetProperty("text").GetString());
             Assert.Equal(0, turns[0].GetProperty("sequence").GetInt32());
-            // Five fields, and the set is pinned rather than the count: a client renders the
-            // transcript off role/text, and orders and states it off the other three.
+            // Seven fields, and the SET is pinned rather than the count: a client renders the
+            // transcript off role/text, orders and states it off kind/sequence/status, polls a
+            // still-running row through `id`, and tells a turn the user stopped from one that hit a
+            // snag through `failureCode`. Every row carries both of the last two — present-but-null
+            // on a turn that did not fail, so the client has one shape to read.
             Assert.All(turns, turn => Assert.Equal(
-                ["kind", "role", "sequence", "status", "text"],
+                ["failureCode", "id", "kind", "role", "sequence", "status", "text"],
                 turn.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)));
 
             // The alias answers the same shape as /conversations/{id} — that is what makes it an

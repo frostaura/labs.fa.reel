@@ -784,11 +784,25 @@ public static class SearchEndpoints
             lastTurnAt = conversation.LastTurnAt,
             turns = turns.Select(t => new
             {
+                // The row's own id, so a transcript row is something the client can ASK about
+                // rather than only render. A Pending row is the case that needs it: polling
+                // GET /api/search/turns/{id} is the entire reconnect path, and without an id here
+                // a resumed thread could see a turn still running and had no handle to name it.
+                id = t.Id,
                 sequence = t.Sequence,
                 role = t.Role,
                 text = t.Text,
                 kind = t.Kind,
                 status = t.Status,
+                // Why it failed, and ONLY when it failed. `client_aborted` is the user's own stop
+                // and reads as "you ended this"; anything else is a snag and reads as "try again".
+                // Without the code both render identically, so the page either apologises for
+                // something the user did deliberately or says nothing about a real failure.
+                //
+                // Read through the status rather than straight off the column, so a code can never
+                // outlive the failure it described — a stale cause is worse than no cause, because
+                // it reads as the current one.
+                failureCode = t.Status == Domain.Search.SearchTurnStatus.Failed ? t.FailureCode : null,
             }),
             cards = replay.Cards,
             // The tray, restored as a tray. It is never merged into `cards` — these cards did not
