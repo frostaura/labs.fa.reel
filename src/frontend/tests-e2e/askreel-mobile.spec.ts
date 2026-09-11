@@ -14,6 +14,12 @@ import { SESSION_FOUNDER, mockJson, stubAskReel, stubEventSource } from "./helpe
  *
  * Also locks the transcript's `log` landmark: Ask Reel's replies arrive asynchronously, so a
  * screen-reader user hears them only if the region announces itself.
+ *
+ * …and the two controls the 44 px sweep missed. `dca1ed3` raised every Ask Reel control this page
+ * owns to 44 px and deliberately excluded the "foreign" ones — the card overlay and
+ * `BrowseFilters` — as other people's files. They are still real tap targets on a phone, and they
+ * measured 27 x 27 and 23 px tall. This file asserts them because it is the phone file: the
+ * exclusion was about who edits the component, and the user cannot tell the difference.
  */
 
 // The reference phone. `test.use` per file rather than a second Playwright project, so CI's
@@ -61,6 +67,86 @@ async function expectComposerReachable(page: Page, label: string) {
   expect(send.ok, `${label}: a tap on Send lands on "${send.hit}"`).toBe(true);
   const input = await hitTest(page, "askreel-composer");
   expect(input.ok, `${label}: a tap on the input lands on "${input.hit}"`).toBe(true);
+}
+
+/** WCAG 2.1 AA, success criterion 2.5.5 target size. Not a house style — the published minimum. */
+const TOUCH_MIN = 44;
+
+const CONVERSATION = "5c0a1b2c-0000-4000-8000-000000000001";
+
+function answerCard(n: number) {
+  return {
+    titleId: `00000000-0000-0000-0000-00000000000${n}`,
+    mediaType: "Movie",
+    tmdbId: 900 + n,
+    name: `Title ${n}`,
+    year: 2021,
+    posterPath: null,
+    genres: ["thriller"],
+    similarity: 0.5,
+    predictedRating: 7.2,
+    why: "Because.",
+    seen: false,
+  };
+}
+
+/**
+ * /search with an ANSWER on it — the only state in which either offender exists. The card overlay
+ * needs cards, and the media segment is gated on `turns.length > 0`, so a cold page can measure
+ * neither. Resuming a stored thread reaches both in one fixture.
+ */
+async function bootAnswered(page: Page) {
+  await stubEventSource(page);
+  await stubAskReel(page);
+  await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+  await mockJson(page, "**/api/sync/status", {
+    pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+    lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+  });
+  const resume = {
+    id: CONVERSATION,
+    title: "something tense",
+    lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+    turns: [
+      { sequence: 0, role: "user", text: "something tense", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+    ],
+    cards: [answerCard(1), answerCard(2)],
+    reason: "2 picks ranked for you, from 40 pulled.",
+    removed: 0,
+    lastQuery: "something tense",
+    mediaTypes: [],
+    shown: [],
+  };
+  await page.route(
+    (u) => u.pathname === "/api/search/conversations",
+    (route) => route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await page.route(
+    (u) => u.pathname.startsWith("/api/search/conversations/"),
+    (route) => {
+      const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop()!);
+      return id === CONVERSATION
+        ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resume) })
+        : route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    },
+  );
+  await page.addInitScript((id) => localStorage.setItem("reel.ask.conversationId", id as string), CONVERSATION);
+  await page.goto("/search");
+  await expect(page.getByTestId("semantic-results")).toBeVisible();
+}
+
+/** Every box, named, so a failure reports the control and its measured size rather than `false`. */
+async function boxesOf(page: Page, selector: string) {
+  return page.evaluate((sel) => {
+    return Array.from(document.querySelectorAll(sel)).map((el) => {
+      const r = el.getBoundingClientRect();
+      return {
+        label: el.getAttribute("data-testid") ?? el.getAttribute("aria-label") ?? el.tagName.toLowerCase(),
+        x: r.x, y: r.y, width: r.width, height: r.height,
+      };
+    });
+  }, selector);
 }
 
 test.describe("Ask Reel on a phone", () => {
@@ -139,6 +225,60 @@ test.describe("Ask Reel on a phone", () => {
     // …and the field is empty and back at its resting height for the next question.
     expect(await composer.inputValue()).toBe("");
     expect(await composer.evaluate((el) => el.getBoundingClientRect().height)).toBe(44);
+  });
+
+  test("the card overlay and the media segment are 44 px targets too", async ({ page }) => {
+    // The two `dca1ed3` left behind, measured headed at this exact viewport: the three card quick
+    // actions at 27 x 27 and each media segment button at 23 px tall. Both are foreign components
+    // — which is why the sweep skipped them and why nothing has caught them since.
+    await bootAnswered(page);
+
+    const actions = await boxesOf(page, '[data-testid="semantic-results"] button');
+    // The fixture is two cards x three actions; a zero here would make the loop below vacuous.
+    expect(actions.length).toBe(6);
+    for (const b of actions) {
+      expect(b.height, `${b.label} is ${Math.round(b.width)} x ${Math.round(b.height)}`).toBeGreaterThanOrEqual(TOUCH_MIN);
+      expect(b.width, `${b.label} is ${Math.round(b.width)} x ${Math.round(b.height)}`).toBeGreaterThanOrEqual(TOUCH_MIN);
+    }
+
+    const segment = await boxesOf(page, '[data-testid="browse-filters"] button');
+    expect(segment.length).toBe(3);
+    for (const b of segment) {
+      expect(b.height, `${b.label} is ${Math.round(b.height)} px tall`).toBeGreaterThanOrEqual(TOUCH_MIN);
+    }
+  });
+
+  test("growing the card overlay does not stack it on itself or push it off the poster", async ({ page }) => {
+    // The other half of the fix: 44 px boxes in a column inside a ~163 px poster is the shape that
+    // goes wrong. Three overlapping targets are worse than three small ones — the top one eats the
+    // taps meant for the others — and one that hangs off the poster covers the card beneath it.
+    await bootAnswered(page);
+
+    const overlay = (await boxesOf(page, '[data-testid="card-quick-actions"]'))[0];
+    const poster = (await boxesOf(page, '[data-testid="semantic-results"] > a > div'))[0];
+    expect(poster, "no poster box").toBeTruthy();
+
+    const actions = (await boxesOf(page, '[data-testid="semantic-results"] > a:first-child button'));
+    expect(actions.length).toBe(3);
+    for (let i = 1; i < actions.length; i++) {
+      const above = actions[i - 1];
+      expect(
+        actions[i].y,
+        `${actions[i].label} starts at ${Math.round(actions[i].y)}, above it ends at ${Math.round(above.y + above.height)}`,
+      ).toBeGreaterThanOrEqual(above.y + above.height - 0.5);
+    }
+
+    const bottom = actions[actions.length - 1];
+    expect(overlay.x, "overlay starts left of the poster").toBeGreaterThanOrEqual(poster.x - 0.5);
+    expect(overlay.y, "overlay starts above the poster").toBeGreaterThanOrEqual(poster.y - 0.5);
+    expect(
+      bottom.y + bottom.height,
+      `the stack ends at ${Math.round(bottom.y + bottom.height)}, the poster at ${Math.round(poster.y + poster.height)}`,
+    ).toBeLessThanOrEqual(poster.y + poster.height + 0.5);
+    expect(
+      Math.max(...actions.map((a) => a.x + a.width)),
+      "an action spills off the right edge of the poster",
+    ).toBeLessThanOrEqual(poster.x + poster.width + 0.5);
   });
 
   test("transcript is a log landmark with speaker labels", async ({ page }) => {

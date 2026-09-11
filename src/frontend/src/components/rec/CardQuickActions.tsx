@@ -30,6 +30,16 @@ const LONG_PRESS_MS = 450;
  * Link, `e.preventDefault()` so the tap acts instead of navigating, revealed on hover/focus. On
  * coarse pointers there is no hover, so the buttons idle at reduced opacity instead of invisible.
  *
+ * TARGET SIZE. On a phone these are the smallest real controls in the app — they measured 26 x 26
+ * against WCAG 2.1 AA's 44 x 44 — and the fix cannot simply be a bigger pill, because the pill is
+ * jewellery on a 163 px poster and a 44 px disc over the artwork reads as a badge, not a control.
+ * So the hit area and the glyph are separated below `md`: the `<button>` is a transparent
+ * `min-h-11 min-w-11` box, the visible pill is a `<span>` centred inside it, and the icon does not
+ * change size at all. The column's own gap goes to zero there because each box already carries
+ * ~9 px of its own margin — three 44 px boxes stack to 132 px inside a 245 px poster with no
+ * overlap and no spill, which `askreel-mobile.spec.ts` asserts rather than assumes. From `md` up
+ * every one of those classes is reverted and the overlay is unchanged.
+ *
  * Both actions remove the card from every suggestion surface through the existing
  * `removedTitlesSlice` flow — the mutations dispatch `titleRemoved` on success — so there is no
  * un-save toggle here: a saved card is gone from the rail by design (it lives on /saved, where
@@ -74,9 +84,15 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   if (tmdbId == null) return null;
 
   const large = size === "lg";
+  // Below `md` the BUTTON is the tap target and the `<span>` inside it is the thing you can see:
+  // a transparent 44 x 44 box centred on a pill that stays exactly poster-sized. From `md` up the
+  // box collapses back onto the pill (`md:min-h-0 md:min-w-0`) and the overlay is pixel-for-pixel
+  // what it has always been on a desktop.
   const buttonClass =
-    `pointer-events-auto rounded-full bg-fa-ink/70 ${large ? "p-2" : "p-1.5"} text-fa-frost-dim backdrop-blur-sm transition ` +
+    "pointer-events-auto inline-flex min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center " +
+    "rounded-full text-fa-frost-dim transition " +
     "opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60";
+  const pillClass = `flex items-center justify-center rounded-full bg-fa-ink/70 ${large ? "p-2" : "p-1.5"} backdrop-blur-sm`;
   const iconClass = large ? "h-4 w-4" : "h-3.5 w-3.5";
   const ref = { titleId, mediaType: mediaType.toLowerCase(), tmdbId };
 
@@ -100,7 +116,11 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
 
   return (
     <div
-      className={`absolute ${large ? "left-3 top-3 gap-2" : "left-1.5 top-1.5 gap-1.5"} flex flex-col`}
+      className={`absolute flex flex-col ${
+        large
+          ? "left-1 top-1 gap-0 md:left-3 md:top-3 md:gap-2"
+          : "left-0 top-0 gap-0 md:left-1.5 md:top-1.5 md:gap-1.5"
+      }`}
       data-testid="card-quick-actions"
     >
       <Popover open={reasonsOpen} onOpenChange={setReasonsOpen}>
@@ -140,7 +160,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100" : ""}`}
             data-testid="quick-not-interested"
           >
-            <EyeOff className={iconClass} />
+            <span className={pillClass}>
+              <EyeOff className={iconClass} />
+            </span>
           </button>
         </PopoverAnchor>
         <PopoverContent
@@ -179,7 +201,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
         className={`${buttonClass} hover:text-fa-frost-bright`}
         data-testid="quick-save"
       >
-        <Bookmark className={iconClass} />
+        <span className={pillClass}>
+              <Bookmark className={iconClass} />
+            </span>
       </button>
       <Popover open={rateOpen} onOpenChange={setRateOpen}>
         <PopoverAnchor asChild>
@@ -196,7 +220,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100" : ""}`}
             data-testid="quick-rate"
           >
-            <Star className={iconClass} />
+            <span className={pillClass}>
+              <Star className={iconClass} />
+            </span>
           </button>
         </PopoverAnchor>
         <PopoverContent align="start" side="right" className="w-auto p-2" data-testid="quick-rate-picker">

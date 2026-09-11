@@ -385,6 +385,25 @@ public static class SearchEndpoints
             {
                 var existing = await db.SearchTurns.FirstOrDefaultAsync(
                     t => t.ConversationId == conversation.Id && t.ClientTurnId == clientTurnId, ct);
+
+                // The key's own turn, dead. A Pending row older than StalePendingAfter belongs to a
+                // process that is gone — nothing in THIS one is streaming it and nothing ever will —
+                // so the 409 below would be a lie the thread never recovers from: the same key is
+                // exactly what "Try again" resends, and it would be refused for as long as the row
+                // exists. It is closed, and the retry is allowed to buy a real turn.
+                //
+                // The KEY is released with it. `(ConversationId, ClientTurnId)` is a partial UNIQUE
+                // index, so leaving it on the corpse would collide with the retry's own assistant
+                // row on insert and turn a wedged thread into a 500. The row itself stays in the
+                // transcript as Failed/turn_timed_out: the question was asked, it was not answered,
+                // and that is precisely what the transcript is for.
+                if (existing is not null && ExpireIfStale(existing, DateTime.UtcNow))
+                {
+                    existing.ClientTurnId = null;
+                    await db.SaveChangesAsync(ct);
+                    existing = null;
+                }
+
                 if (existing is not null)
                 {
                     // Still running: 409 rather than a second stream. Two streams for one turn
@@ -423,13 +442,31 @@ public static class SearchEndpoints
 
                 // A DIFFERENT turn is already in flight. The unique (ConversationId, Sequence)
                 // index is the race backstop; this is the answer a person gets rather than a 500.
-                if (await db.SearchTurns.AnyAsync(
-                        t => t.ConversationId == conversation.Id && t.Status == Domain.Search.SearchTurnStatus.Pending, ct))
+                //
+                // Rows rather than AnyAsync, because the stale ones have to be CLOSED and not merely
+                // counted. One Pending row whose process died holds the whole conversation shut
+                // against every question anyone asks in it, forever — a new key does not help,
+                // because this guard never looked at keys. The 409 survives for a turn that is
+                // genuinely live, which is the case it was written for.
+                var inFlight = await db.SearchTurns
+                    .Where(t => t.ConversationId == conversation.Id
+                        && t.Status == Domain.Search.SearchTurnStatus.Pending)
+                    .ToListAsync(ct);
+                if (inFlight.Count > 0)
                 {
-                    return AskError(
-                        StatusCodes.Status409Conflict,
-                        "There's already a question in flight on this thread — one moment.",
-                        "turn_in_progress");
+                    var askedAt = DateTime.UtcNow;
+                    // Every stale row, not just the first: a conversation that outlived two restarts
+                    // has two of them, and one left behind is the same wedge again.
+                    var live = inFlight.Count(stuck => !ExpireIfStale(stuck, askedAt));
+                    await db.SaveChangesAsync(ct);
+
+                    if (live > 0)
+                    {
+                        return AskError(
+                            StatusCodes.Status409Conflict,
+                            "There's already a question in flight on this thread — one moment.",
+                            "turn_in_progress");
+                    }
                 }
             }
 
@@ -625,7 +662,9 @@ public static class SearchEndpoints
                 // recorded failure for the row: a turn nobody waited for is still a turn that
                 // happened, and the transcript has to be able to say so.
                 outcome = LiveSearchExpansionService.TurnOutcome.Crashed(
-                    assistantText: null, "the answer was interrupted", "client_aborted");
+                    assistantText: null,
+                    "the answer was interrupted",
+                    Domain.Search.SearchTurnFailure.ClientAborted);
             }
             finally
             {
@@ -701,20 +740,33 @@ public static class SearchEndpoints
                 return AskError(StatusCodes.Status404NotFound, "That turn isn't here any more.", "turn_not_found");
             }
 
+            // 202 means "ask again in a moment", so it is only honest while there is something to
+            // wait for. A Pending row older than StalePendingAfter has no process behind it, and a
+            // poller told 202 about it polls until the user closes the tab.
+            //
+            // The row is CLOSED here rather than merely reported closed. This is a read route that
+            // writes, deliberately: the alternative is a turn the poller has been told is Failed
+            // sitting Pending in the table, where it still reads as in-flight to everything else.
+            // One rule, one state, and whichever surface notices first heals the conversation.
             if (turn.Status == Domain.Search.SearchTurnStatus.Pending)
             {
-                return Results.Json(
-                    new
-                    {
-                        status = turn.Status,
-                        reason = (string?)null,
-                        conflict = (object?)null,
-                        failureCode = (string?)null,
-                        cards = Array.Empty<object>(),
-                        // Present-but-empty, so a poller renders one shape on both status codes.
-                        belowFloor = Array.Empty<object>(),
-                    },
-                    statusCode: StatusCodes.Status202Accepted);
+                if (!ExpireIfStale(turn, DateTime.UtcNow))
+                {
+                    return Results.Json(
+                        new
+                        {
+                            status = turn.Status,
+                            reason = (string?)null,
+                            conflict = (object?)null,
+                            failureCode = (string?)null,
+                            cards = Array.Empty<object>(),
+                            // Present-but-empty, so a poller renders one shape on both status codes.
+                            belowFloor = Array.Empty<object>(),
+                        },
+                        statusCode: StatusCodes.Status202Accepted);
+                }
+
+                await db.SaveChangesAsync(ct);
             }
 
             var replay = await ReplayAsync(db, eligibility, scorer, accountId, [turn], ct);
@@ -1450,6 +1502,35 @@ public static class SearchEndpoints
     /// user's; the code is the client's, and it is what B2 switches on — matching on copy is how a
     /// UI ends up rendering a crash message for an honest refusal.
     /// </summary>
+    /// <summary>
+    /// Stamps a Pending turn that has outlived <c>StalePendingAfter</c> as
+    /// <c>Failed/turn_timed_out</c>, in memory. Returns whether it did — the caller decides whether
+    /// that changes its answer, and the caller saves.
+    ///
+    /// <para><b>One rule, three gates.</b> The stale test is asked at the ask gate (both the
+    /// idempotent-replay arm and the one-in-flight arm) and at the reconnect poll, and all three
+    /// have to agree: a row the poll calls Failed while <c>/ask</c> still calls it live is the wedge
+    /// again, wearing a different status code. Keeping the transition in one place is also what
+    /// keeps the code it writes in one place.</para>
+    ///
+    /// <para><b>It does not save.</b> Two of the three callers batch this into a write they were
+    /// already making, and the third has exactly one row to flush; a helper that saved would make
+    /// the ask gate write twice for one decision and would hide the write from the site that has to
+    /// reason about ordering.</para>
+    /// </summary>
+    private static bool ExpireIfStale(Domain.Search.SearchTurn turn, DateTime utcNow)
+    {
+        if (!Domain.Search.SearchTurnFailure.IsStalePending(turn, utcNow))
+        {
+            return false;
+        }
+
+        turn.Status = Domain.Search.SearchTurnStatus.Failed;
+        turn.FailureCode = Domain.Search.SearchTurnFailure.TurnTimedOut;
+        turn.CompletedAt = utcNow;
+        return true;
+    }
+
     private static IResult AskError(int statusCode, string error, string code) =>
         Results.Json(new { error, code }, statusCode: statusCode);
 

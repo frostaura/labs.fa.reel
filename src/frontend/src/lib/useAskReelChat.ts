@@ -183,6 +183,43 @@ export function mintTurnId(): string {
 }
 
 /**
+ * The hand-offs this DOCUMENT has minted and not yet acted on.
+ *
+ * Module state, deliberately: it dies with the document, which is the whole point. A hand-off is
+ * carried in `location.state`, and `location.state` lives in the HISTORY ENTRY — so it survives a
+ * reload, and it survives Back onto the entry the search box pushed. The page then received a
+ * question nobody had just typed and asked it again; the server, seeing the same text as the
+ * conversation's last user turn, filed the result as a PAGE of it, and a phantom billed turn
+ * appended cards to an answer the reader was in the middle of.
+ *
+ * A restored entry cannot be in this set — the set was created with the document that is reading
+ * it — so `claimHandoff` answers false and the visit resumes instead of asking.
+ */
+const documentHandoffs = new Set<string>();
+
+/**
+ * Mint the id for a question being handed to /search, and record it as this document's.
+ *
+ * The id is the turn's own idempotency key as well: a hand-off that does get re-sent (a genuine
+ * remount inside the same document) is replayed by the server from the stored turn rather than run
+ * and billed twice.
+ */
+export function mintHandoff(registry: Set<string> = documentHandoffs): string {
+  const id = mintTurnId();
+  registry.add(id);
+  return id;
+}
+
+/**
+ * Is this hand-off live — minted by this document and not yet acted on? True at most ONCE per
+ * minted id; every later reader (a reload, a Back, a second mount reading the same entry) gets
+ * false and must treat the question as a leftover rather than an instruction.
+ */
+export function claimHandoff(id: string | undefined, registry: Set<string> = documentHandoffs): boolean {
+  return id != null && registry.delete(id);
+}
+
+/**
  * Which run a frame belongs to — the label every frame of one `/ask` stream carries.
  *
  * F6-01 is what a screen looks like without one. `Recent ▾` was live while a turn streamed, so
@@ -413,21 +450,46 @@ export function mediaFilterFor(tokens: string[] | undefined): "all" | "movie" | 
 export type BootstrapAction = "seed" | "resume" | "none";
 
 /**
- * How /search should start on this render, given the `?q=` seed and whatever the page has already
- * acted on (`null` = nothing yet). The page consumes the seed and clears the param, which brings
- * it straight back here with an empty seed — so "no seed" must only mean "resume the last
- * conversation" on the very first pass. Getting this wrong is what made a mid-conversation reload
- * replay turn one and throw away every refinement.
+ * How /search should start on this render, given the question handed over in the navigation and
+ * whatever the page has already acted on (`null` = nothing yet). The page consumes the seed and
+ * clears the router state, which brings it straight back here with an empty seed — so "no seed"
+ * must only mean "resume the last conversation" on the very first pass. Getting this wrong is what
+ * made a mid-conversation reload replay turn one and throw away every refinement.
  *
- * Returns the next `handled` value alongside the action so the caller just stores what it is given.
+ * `live` answers the one question a seed cannot answer about itself: did this document navigate
+ * here, or did the question merely come back with the history entry? `location.state` lives in the
+ * HISTORY ENTRY, so it outlives the navigation that created it — reload /search, or press Back
+ * onto the entry the search box pushed, and the same question is handed to a page that has never
+ * asked it. It was fired again as though it had just been typed, and because the text matched the
+ * conversation's last user turn the server filed the result as a PAGE of it: a phantom billed turn
+ * appending cards nobody asked for. See {@link claimHandoff}, which is what the caller passes; it
+ * answers true at most once per hand-off, so a seed can be consumed exactly once and no more.
+ *
+ * It is a callback rather than a boolean because claiming a hand-off SPENDS it: the predicate is
+ * consulted only on the pass that actually decides, never on the re-renders around it.
+ *
+ * Returns the next `handled` value alongside the action so the caller just stores what it is
+ * given, and `clear` — whether the router state must be wiped on this pass. Clearing is the
+ * caller's first act, not its last: the state has to be gone BEFORE the request goes out, or a
+ * reload landing in between inherits the question all over again.
  */
-export function nextBootstrap(seed: string, handled: string | null): { action: BootstrapAction; handled: string } {
-  // A seed is live until it is consumed; the only reason to skip one is that it is the exact seed
-  // already in flight (a StrictMode double-invoke, or a render before the param clear lands).
-  if (seed) return { action: handled === seed ? "none" : "seed", handled: seed };
+export function nextBootstrap(
+  seed: string,
+  handled: string | null,
+  live: () => boolean = () => true,
+): { action: BootstrapAction; handled: string; clear: boolean } {
+  if (seed) {
+    // Already acted on — a StrictMode double-invoke, or a render before the state clear lands.
+    // Checked FIRST so the hand-off is not spent a second time on a pass that decides nothing.
+    if (handled === seed) return { action: "none", handled: seed, clear: false };
+    // A seed this document did not navigate with is a leftover, not a question. Thrown away, and
+    // the visit falls back to the resume every other cold landing on /search gets.
+    if (!live()) return { action: "resume", handled: seed, clear: true };
+    return { action: "seed", handled: seed, clear: true };
+  }
   // Empty seed: either a cold landing on /search (resume) or the settling render after a consumed
   // seed. Settling resets `handled` to "", so searching the same phrase again still starts a turn.
-  return { action: handled === null ? "resume" : "none", handled: "" };
+  return { action: handled === null ? "resume" : "none", handled: "", clear: false };
 }
 
 /**
@@ -1916,11 +1978,16 @@ export function chatReducer(state: State, action: ChatAction): State {
  * `schedule` / `cancel` are injectable so this is testable as a pure state machine — the hook
  * itself cannot be, since vitest here runs in node with no renderer.
  */
+export interface MountGuard {
+  mount: () => void;
+  unmount: () => void;
+}
+
 export function createMountGuard(
   abort: () => void,
   schedule: (fn: () => void) => unknown = (fn) => setTimeout(fn, 0),
   cancel: (handle: unknown) => void = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-): { mount: () => void; unmount: () => void } {
+): MountGuard {
   let mounted = false;
   let pending: unknown = null;
   return {
@@ -1940,6 +2007,51 @@ export function createMountGuard(
       });
     },
   };
+}
+
+/**
+ * The ONE guard a hook instance owns, kept in the caller's ref box.
+ *
+ * The deferral above only works if the mount that cancels it is the same guard that scheduled it.
+ * The effect used to call {@link createMountGuard} in its own body, so StrictMode's cleanup
+ * scheduled the abort on guard #1 and the remount then cancelled guard #2's empty queue — while
+ * guard #1's timer, still closed over `mounted === false`, killed the request the first mount had
+ * just started. That is the Home → /search hand-off: one `POST /api/search/ask` aborted by the
+ * page itself, and `nextBootstrap` refusing to restart a seed already recorded as handled.
+ *
+ * Per INSTANCE, not per module: a genuine unmount leaves its guard behind with the component, and
+ * the next mount of /search gets a fresh box and a fresh guard, so the old one's abort still runs.
+ */
+export function guardFor(
+  box: { current: MountGuard | null },
+  abort: () => void,
+  schedule?: (fn: () => void) => unknown,
+  cancel?: (handle: unknown) => void,
+): MountGuard {
+  box.current ??= createMountGuard(abort, schedule, cancel);
+  return box.current;
+}
+
+/**
+ * Why a run was cut short, when the page itself did the cutting.
+ *
+ * Every deliberate abort names itself, so the one kind that has no name — a request killed by
+ * something the page did not do — can be told apart from the six that are already accounted for.
+ */
+export type AbortCause = "stop" | "replaced" | "resume" | "reset" | "timeout" | "hidden" | "unmount";
+
+/**
+ * What the page owes the user when its own request ends in an abort.
+ *
+ * The rejection used to be swallowed on `signal.aborted` alone, which is right for a Stop (the
+ * reducer already has its own state), for the abort `run` fires at the head of a replacement turn,
+ * for a resume, a `+ New`, the idle watchdog, the hidden-tab cut and a real unmount — and wrong
+ * for everything else, because "wrong" here means the reducer stays in `streaming` under a
+ * progress bar with no error, no retry and no way out but a reload. An unclaimed abort is a
+ * failure and is stated as one.
+ */
+export function abortFallout(cause: AbortCause | null): ChatAction | null {
+  return cause === null ? { type: "error", reason: null } : null;
 }
 
 /**
@@ -1964,6 +2076,10 @@ export function useAskReelChat() {
     stateRef.current = state;
   }, [state]);
   const abortRef = useRef<AbortController | null>(null);
+  // Why each controller was aborted, read by the stream's own `catch`. A WeakMap rather than a
+  // field on the ref: the rejection arrives a tick or more after `abortRef` has moved on, so the
+  // answer has to be attached to the CONTROLLER that was cut, not to whatever is current.
+  const abortCauses = useRef(new WeakMap<AbortController, AbortCause>());
   // The id of the exchange in flight. Kept so a 409 can be answered by re-sending the SAME turn —
   // the server then replays the stored answer instead of running the question a second time.
   const turnIdRef = useRef<string | null>(null);
@@ -1987,6 +2103,18 @@ export function useAskReelChat() {
     }
   }, []);
 
+  /**
+   * Abort the run in flight and SAY WHY, so {@link abortFallout} can tell a deliberate cut from a
+   * request that died on its own. Every abort in this hook goes through here or names its cause on
+   * the controller directly; one that does not is, correctly, reported to the user as a failure.
+   */
+  const abortActive = useCallback((cause: AbortCause) => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    abortCauses.current.set(controller, cause);
+    controller.abort();
+  }, []);
+
   const run = useCallback((
     msg: string,
     fresh: boolean,
@@ -1994,7 +2122,9 @@ export function useAskReelChat() {
     turnId?: string,
     pageOf?: string | null,
   ) => {
-    abortRef.current?.abort();
+    // The turn already running is being replaced by this one — a re-ask, a filter toggle, a
+    // follow-up typed over a live stream. Named, so its rejection is not mistaken for a failure.
+    abortActive("replaced");
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -2004,6 +2134,7 @@ export function useAskReelChat() {
     const armWatchdog = () => {
       clearWatchdog();
       watchdogRef.current = setTimeout(() => {
+        abortCauses.current.set(controller, "timeout");
         controller.abort();
         if (abortRef.current === controller) abortRef.current = null;
         dispatch({ type: "error", reason: "timeout" });
@@ -2065,7 +2196,13 @@ export function useAskReelChat() {
       })
       .catch((err: unknown) => {
         clearWatchdog();
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+          // An abort this page asked for already has its own state; one it did not ask for used to
+          // leave the reducer streaming forever behind a progress bar. See {@link abortFallout}.
+          const fallout = abortFallout(abortCauses.current.get(controller) ?? null);
+          if (fallout) dispatch(fallout);
+          return;
+        }
         const failure = failureFor(err);
         // Forgotten HERE rather than in the reducer, which stays pure: the stored id is what the
         // next cold load resumes from, and leaving a 404'd id in localStorage means every visit
@@ -2073,13 +2210,13 @@ export function useAskReelChat() {
         if (failure.type === "conversationGone") storeConversationId(null);
         dispatch(failure);
       });
-  }, [clearWatchdog]);
+  }, [clearWatchdog, abortActive]);
 
   /**
    * Ask a question. `turnId` is for a caller that has already minted one and needs THIS send to be
-   * the same exchange as a previous attempt — the seeded first turn, whose id rides in the router
-   * state so that a StrictMode remount (which resets every ref in this component) re-sends the
-   * same id and is replayed server-side rather than billed a second time.
+   * the same exchange as a previous attempt — the reconnect after a 409, and the seeded first
+   * turn, whose id rides in the router state so that any send that does go out twice is replayed
+   * server-side from the stored turn rather than run and billed again.
    */
   const send = useCallback((message: string, fresh = false, turnId?: string) => {
     const msg = message.trim();
@@ -2140,11 +2277,11 @@ export function useAskReelChat() {
   /** Abandon the turn in flight, keeping whatever it already produced. */
   const stop = useCallback(() => {
     clearWatchdog();
-    abortRef.current?.abort();
+    abortActive("stop");
     abortRef.current = null;
     activeStreamRef.current = 0;
     dispatch({ type: "stop" });
-  }, [clearWatchdog]);
+  }, [clearWatchdog, abortActive]);
 
   /**
    * Put a stored conversation back on screen — transcript, cards, order, reason and all.
@@ -2159,7 +2296,7 @@ export function useAskReelChat() {
     // about from here. Aborted rather than merely ignored: the reducer's tag check already makes a
     // stale frame inert, but a run left open keeps a reader, a watchdog and the server's turn
     // alive for a conversation nobody is looking at (F6-01).
-    abortRef.current?.abort();
+    abortActive("resume");
     abortRef.current = null;
     activeStreamRef.current = 0;
     turnIdRef.current = null;
@@ -2169,7 +2306,7 @@ export function useAskReelChat() {
     // the NEXT reload would fall back to the account's newest thread instead of this one.
     storeConversationId(payload.id);
     dispatch({ type: "resume", payload });
-  }, [clearWatchdog]);
+  }, [clearWatchdog, abortActive]);
 
   /**
    * Forget this thread and start over — what `+ New` does.
@@ -2181,23 +2318,28 @@ export function useAskReelChat() {
    * real id.
    */
   const startNew = useCallback(() => {
-    abortRef.current?.abort();
+    abortActive("reset");
     abortRef.current = null;
     activeStreamRef.current = 0;
     turnIdRef.current = null;
     clearWatchdog();
     storeConversationId(FRESH_CONVERSATION);
     dispatch({ type: "reset" });
-  }, [clearWatchdog]);
+  }, [clearWatchdog, abortActive]);
 
+  // ONE guard for the life of this hook instance — see {@link guardFor}. Rebuilding it inside the
+  // effect body is what made StrictMode's fake unmount fatal: the remount cancelled a different
+  // guard's empty queue while the first guard's timer aborted the request the first mount had just
+  // started, and the Home → /search hand-off never recovered from it.
+  const guardBox = useRef<MountGuard | null>(null);
   useEffect(() => {
-    const guard = createMountGuard(() => {
-      abortRef.current?.abort();
+    const guard = guardFor(guardBox, () => {
+      abortActive("unmount");
       if (watchdogRef.current !== null) clearTimeout(watchdogRef.current);
     });
     guard.mount();
     return () => guard.unmount();
-  }, []);
+  }, [abortActive]);
 
   // A backgrounded tab holds the stream open indefinitely — the server keeps a turn alive and the
   // reader keeps a connection for a page nobody is looking at. A minute out of sight is the line;
@@ -2216,7 +2358,7 @@ export function useAskReelChat() {
         hiddenTimer = null;
         if (stateRef.current.status !== "streaming") return;
         clearWatchdog();
-        abortRef.current?.abort();
+        abortActive("hidden");
         abortRef.current = null;
         dispatch({ type: "error", reason: "timeout" });
       }, HIDDEN_ABORT_MS);
@@ -2226,7 +2368,7 @@ export function useAskReelChat() {
       if (hiddenTimer !== null) clearTimeout(hiddenTimer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [clearWatchdog]);
+  }, [clearWatchdog, abortActive]);
 
   // NO render-time sort: `order` is the state's stream-stable order, so rows only ever move when
   // the reducer re-sorts it (phase / done) — sorting here is what made cards jump on every event.

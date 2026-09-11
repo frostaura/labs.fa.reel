@@ -28,6 +28,69 @@ public static class SearchTurnStatus
 }
 
 /// <summary>
+/// The closed vocabulary for <see cref="SearchTurn.FailureCode"/>, plus the one rule that decides
+/// when a <see cref="SearchTurnStatus.Pending"/> row has stopped being a turn in flight and become
+/// a corpse.
+///
+/// <para><b>Why the rule has to exist at all.</b> Both writers of a terminal status — the persist
+/// step after <c>done</c> and the catch around the stream — live inside the request pipeline. A
+/// process that dies mid-stream (a crash, a deploy restart, an OOM kill) therefore leaves the row
+/// <see cref="SearchTurnStatus.Pending"/> with no <see cref="SearchTurn.CompletedAt"/> and no code,
+/// and there is no path left anywhere that would ever close it. That is not a cosmetic leftover:
+/// <c>/ask</c> refuses a new turn while one is Pending on the conversation, so the thread is wedged
+/// <b>permanently</b> — every retry, every "Try again" and every new question in it answers
+/// <c>409 turn_in_progress</c>, and <c>GET /turns/{id}</c> answers <c>202</c> forever. A
+/// conversation the product can never speak in again is a worse record than a turn that admits it
+/// died.</para>
+///
+/// <para><b>Two codes close it, and they are deliberately not one.</b> A restart is a fact the
+/// server knows about ITSELF and can state precisely at boot; a timeout is an INFERENCE drawn at the
+/// gate from a clock. Collapsing them would lose the only distinction that matters when reading a
+/// stuck conversation back — whether the process died under the turn, or the turn simply never
+/// returned while the process stayed up.</para>
+/// </summary>
+public static class SearchTurnFailure
+{
+    /// <summary>The user navigated away or pressed stop: the stream was cancelled from their side.</summary>
+    public const string ClientAborted = "client_aborted";
+
+    /// <summary>
+    /// The API process died while the turn was streaming, and the row was closed by the startup
+    /// reconciliation of the process that replaced it. A fact, stated at boot.
+    /// </summary>
+    public const string ServerRestarted = "server_restarted";
+
+    /// <summary>
+    /// The row was still Pending <see cref="StalePendingAfter"/> after it was written, so the gate
+    /// treated it as dead rather than letting it keep the conversation shut. The inference, as
+    /// opposed to <see cref="ServerRestarted"/>'s fact.
+    /// </summary>
+    public const string TurnTimedOut = "turn_timed_out";
+
+    /// <summary>
+    /// How long a Pending row is given before the gate stops believing in it.
+    ///
+    /// <para>Three minutes, against measured turns of 8–30 seconds — an order of magnitude of head
+    /// room, on purpose. The two errors cost wildly different amounts: expiring a turn that was
+    /// genuinely still running loses an answer someone is waiting for and lets a second stream write
+    /// cards under a colliding <c>(TurnId, Rank)</c>, while waiting three minutes on a row that is
+    /// already dead costs one more "one moment" message. This is not a latency budget and must not
+    /// be tuned towards p99.</para>
+    /// </summary>
+    public static readonly TimeSpan StalePendingAfter = TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// Whether <paramref name="turn"/> is a Pending row old enough to be treated as dead.
+    ///
+    /// <para>Measured off <see cref="SearchTurn.CreatedAt"/> — when the row was written Pending,
+    /// and the only timestamp a turn that never finished has. <see cref="SearchTurn.CompletedAt"/>
+    /// is null by definition on exactly the rows this question is asked about.</para>
+    /// </summary>
+    public static bool IsStalePending(SearchTurn turn, DateTime utcNow) =>
+        turn.Status == SearchTurnStatus.Pending && utcNow - turn.CreatedAt >= StalePendingAfter;
+}
+
+/// <summary>
 /// The closed vocabulary for <see cref="SearchTurn.Kind"/>. Server-derived, never client-supplied:
 /// the client cannot be trusted to say whether a request is a new question or another page of the
 /// last one, because a filter toggle and an impatient re-tap look identical from its side.
@@ -121,10 +184,15 @@ public class SearchTurn : IAccountScoped
     public string Status { get; set; } = SearchTurnStatus.Completed;
 
     /// <summary>
-    /// Why the turn failed, when it did: <c>client_aborted</c> for a cancelled stream, otherwise
-    /// the pipeline's own code or the exception type. Null on every other status. A failed turn is
+    /// Why the turn failed, when it did: one of <see cref="SearchTurnFailure"/>, otherwise the
+    /// pipeline's own code or the exception type. Null on every other status. A failed turn is
     /// a recoverable record — the client can show what happened and offer a retry — which is the
     /// whole reason a failure is persisted rather than left as a missing row.
+    ///
+    /// <para>Two of those codes are written by nothing in the request pipeline at all:
+    /// <see cref="SearchTurnFailure.ServerRestarted"/> at boot and
+    /// <see cref="SearchTurnFailure.TurnTimedOut"/> at the gate, because a process that dies
+    /// mid-stream leaves a Pending row no request-scoped code path can ever reach again.</para>
     /// </summary>
     public string? FailureCode { get; set; }
 
