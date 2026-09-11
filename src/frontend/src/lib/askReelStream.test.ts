@@ -305,3 +305,56 @@ describe("streamAskReel — the turn record", () => {
     expect((err as AskStreamError).code).toBeNull();
   });
 });
+
+/**
+ * R1-05 — the malformed-frame guard closed `year` and `tmdbId` and left `why`.
+ *
+ * The commit that added the guard named the right rule — "the grid renders both directly, so those
+ * are exactly the two the tolerant-on-purpose rule must not cover" — and then applied it to two of
+ * the three fields that meet it. `ResultCard` renders `{card.why}` raw, one line below the `year`
+ * it fixed, so `why: {t:1}` cleared validation and threw the identical "Objects are not valid as a
+ * React child" in the identical component. `isReranked` DID type-check `why`, so the
+ * `candidate-reranked` path was guarded and the `candidate` / `done` path was not.
+ *
+ * `outsideRequest` and `seen` are here for a different reason: they are not printed, they ROUTE.
+ * A truthy non-boolean `outsideRequest` silently moves a card out of the recommended grid into the
+ * "outside your request" fence, and `seen` decides whether a card gets quick actions or a pill. A
+ * wrong type there produces a wrong screen rather than a crash, which is the harder one to notice.
+ */
+describe("isCard — the fields the grid renders and routes on", () => {
+  it("rejects_an_object_why_on_a_candidate_and_inside_a_done", async () => {
+    // The exact frame R1-05 probed, and the one that reached render.
+    expect(await collect([frame("candidate", card(1, { why: { t: 1 } as unknown as string }))])).toEqual([]);
+    expect(await collect([
+      frame("done", { results: [{ ...card(1), why: { t: 1 } }], reason: "1 pick" }),
+    ])).toEqual([]);
+  });
+
+  it("rejects_a_bad_card_arriving_in_the_below_floor_tray", async () => {
+    // R2's note: the guard protects the frame, not the title — the same title came back inside
+    // `done` and rendered in the tray. The tray's cards go through the same `isCard`, so a `done`
+    // whose `belowFloor` carries one is refused whole rather than half-rendered.
+    expect(await collect([
+      frame("done", { results: [card(1)], reason: "1 pick", belowFloor: [{ ...card(2), why: { t: 1 } }] }),
+    ])).toEqual([]);
+  });
+
+  it("rejects_a_non_boolean_outsideRequest_or_seen", async () => {
+    // Fixture variation, one field at a time. A string "false" is the dangerous one: it is truthy,
+    // so the card would be fenced off under "Outside your request" by a value that says otherwise.
+    for (const bad of [{ outsideRequest: "false" }, { outsideRequest: 1 }, { seen: "yes" }, { seen: {} }]) {
+      expect(await collect([frame("candidate", { ...card(1), ...bad })])).toEqual([]);
+    }
+  });
+
+  it("stays_tolerant_of_absence_which_is_what_an_older_server_sends", async () => {
+    // The controls. None of the three is required: a null why (not reranked yet), an absent
+    // outsideRequest and an absent seen are every ordinary card on the wire today.
+    expect(await collect([frame("candidate", card(1, { why: null }))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1, { why: "Because it is tense." }))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1, { outsideRequest: true, seen: false }))])).toHaveLength(1);
+    // …and a field the client has never heard of still costs the card nothing.
+    expect(await collect([frame("candidate", { ...card(1), somethingNew: { a: 1 } })])).toHaveLength(1);
+  });
+});

@@ -314,6 +314,11 @@ function isNumberOrNull(v: unknown): boolean {
   return v == null || (typeof v === "number" && Number.isFinite(v));
 }
 
+/** A flag the client acts on, or nothing at all. Absent is a real answer; a truthy string is not. */
+function isBooleanOrAbsent(v: unknown): boolean {
+  return v == null || typeof v === "boolean";
+}
+
 export function isPhase(data: unknown): data is PhaseData {
   return (
     isRecord(data) &&
@@ -339,16 +344,30 @@ export function isConversation(data: unknown): data is ConversationData {
 }
 
 /**
- * Two classes of field, and the difference matters. Required: the ones the grid cannot render
- * without (`titleId`, `mediaType`, `name`). Type-checked but optional: the ones the grid renders
- * DIRECTLY as a value — `year` into a paragraph, `tmdbId` into the card's href. Absent is fine for
- * those (an older server, a title with no release year); the wrong TYPE is not, because
- * `{year: {oops: true}}` cleared this guard, reached `<p>{card.year}</p>` and threw "Objects are
- * not valid as a React child" three modules away from the frame that caused it. The error boundary
- * caught it, which is what a last resort is for — it is not the plan.
+ * Three classes of field, and the differences matter.
+ *
+ * **Required:** the ones the grid cannot render without — `titleId`, `mediaType`, `name`.
+ *
+ * **Type-checked but optional — RENDERED directly as a value:** `year` into a paragraph, `tmdbId`
+ * into the card's href, `why` into a paragraph and a `title` attribute. Absent is fine for all
+ * three (an older server, a title with no release year, a card the rerank has not reached); the
+ * wrong TYPE is not, because `{year: {oops: true}}` cleared this guard, reached `<p>{card.year}</p>`
+ * and threw "Objects are not valid as a React child" three modules away from the frame that caused
+ * it. `why` is the same field in the same component one line below, and it was left open until
+ * R1-05 probed it — `isReranked` type-checked it, so the `candidate-reranked` path was guarded and
+ * this one was not.
+ *
+ * **Type-checked but optional — ROUTING:** `outsideRequest` and `seen`. Neither is printed; each
+ * decides WHERE a card goes. A truthy non-boolean `outsideRequest` (a string `"false"`, say)
+ * silently moves a card out of the recommended grid into the fenced "outside your request"
+ * channel, and `seen` chooses between the quick actions and a "Seen" pill. A wrong type there
+ * produces a wrong screen rather than a crash, which is the harder failure to notice.
  *
  * Everything else stays tolerant on purpose: a server that adds a field, or omits one an older
  * client thought mandatory, must not cost the user a card.
+ *
+ * The tray gets this for free — `isDone` runs every `belowFloor` card through here too, so a
+ * malformed card cannot arrive by the side door the grid's own guard closed.
  */
 export function isCard(data: unknown): data is AskCard {
   return (
@@ -358,7 +377,10 @@ export function isCard(data: unknown): data is AskCard {
     (data.mediaType === "Movie" || data.mediaType === "Show") &&
     typeof data.name === "string" &&
     isNumberOrNull(data.year) &&
-    isNumberOrNull(data.tmdbId)
+    isNumberOrNull(data.tmdbId) &&
+    (data.why == null || typeof data.why === "string") &&
+    isBooleanOrAbsent(data.outsideRequest) &&
+    isBooleanOrAbsent(data.seen)
   );
 }
 
