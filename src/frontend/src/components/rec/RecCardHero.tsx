@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import type { FeedCard } from "../../store/feedTypes";
 import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
@@ -57,6 +57,16 @@ export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: Hero
   // collapse with it, or the dots promise scroll positions that do not exist.
   const isMdUp = useMinWidth(MD_BREAKPOINT_PX);
   const rowsInEffect = heroRowsInEffect(rows, isMdUp);
+  const scroller = useRef<HTMLDivElement>(null);
+  // A re-sort (a tonight-mood chip, the availability toggle) puts a different card first. Chrome's
+  // snap-target tracking would otherwise follow the previously snapped card to its new column, and
+  // the new number-one pick ends up half off-screen to the left — so when the lead changes, start
+  // from the start. Paging appends, so it never trips this.
+  const leadId = cards[0]?.titleId;
+  useEffect(() => {
+    scroller.current?.scrollTo({ left: 0, behavior: "instant" as ScrollBehavior });
+    setActive(0);
+  }, [leadId]);
 
   if (cards.length === 0) {
     return null;
@@ -75,7 +85,7 @@ export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: Hero
           {reachingNote}
         </p>
       )}
-      <div className={heroContainerClass(rows)}
+      <div ref={scroller} className={heroContainerClass(rows)}
         data-testid="hero-carousel"
         onScroll={(e) => {
           const el = e.currentTarget;

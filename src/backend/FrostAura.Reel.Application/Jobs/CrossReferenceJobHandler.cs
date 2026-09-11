@@ -74,12 +74,17 @@ public sealed class CrossReferenceJobHandler(
     public const string Unmeasured = "unmeasured";
 
     /// <summary>
-    /// How many rounds the finished design has — round 1 rules out, round 2 re-examines the
-    /// survivors with different neighbours, round 3 is the existing pre-assembly fit pass. Only
-    /// round 1 exists today; the copy says "of 3" because that is what the pass is part of, and a
-    /// number that grows later would read as the feature getting slower.
+    /// What the pill calls the round. Only the first pass exists today, so the copy names the pass
+    /// it is on and promises nothing about passes that are not built — "round 1 of 3" counted to a
+    /// total the user would never see reached, which is the opposite of the honest indicator the
+    /// feature was asked for. When round 2 ships it gets its own name here, not a denominator.
     /// </summary>
-    public const int TotalRounds = 3;
+    public static string RoundLabel(CrossReferenceRound round) => round switch
+    {
+        CrossReferenceRound.First => "first pass",
+        CrossReferenceRound.Second => "second pass",
+        _ => "deep pass",
+    };
 
     /// <summary>
     /// The soft budget, checked between batches. Eight minutes leaves four before the runner's
@@ -379,7 +384,7 @@ public sealed class CrossReferenceJobHandler(
         var pct = total <= 0 ? 100m : Math.Clamp(Math.Round(100m * tally.Processed / total, 0), 1m, 99m);
         var message = string.Create(
             CultureInfo.InvariantCulture,
-            $"Cross-referencing {total:N0} titles · round {(int)round} of {TotalRounds} · {tally.RuledOut:N0} ruled out so far");
+            $"Cross-referencing {total:N0} titles · {RoundLabel(round)} · {tally.RuledOut:N0} ruled out so far");
 
         job.ProgressPct = pct;
         job.ProgressMessage = message;

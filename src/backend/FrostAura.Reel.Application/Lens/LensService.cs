@@ -220,7 +220,7 @@ public sealed class LensService(
                 var verdict = deterministic is not null
                     ? new LensVerdict(note, deterministic, [])
                     : await verifier.VerifyAsync(
-                        accountId, note, built.CreditedNames.GetValueOrDefault(title.TitleId) ?? [], batchCt);
+                        accountId, title.Name, note, built.CreditedNames.GetValueOrDefault(title.TitleId) ?? [], batchCt);
 
                 if (verdict.StrippedAnchors.Count > 0)
                 {

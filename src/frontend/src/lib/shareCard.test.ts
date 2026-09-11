@@ -29,6 +29,7 @@ const payload = (overrides: Partial<TasteDnaPayload> = {}): TasteDnaPayload => (
   topActors: [],
   histogram: [],
   drift: [],
+  clusters: [],
   ...overrides,
 });
 

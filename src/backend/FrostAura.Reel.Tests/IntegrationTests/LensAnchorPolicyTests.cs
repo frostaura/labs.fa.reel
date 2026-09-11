@@ -72,7 +72,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         // The exact four anchors in the two live Rejected rows. Every one is a title the account
         // has an opinion about, and every one was called an invention.
         var verdict = await new LensVerifier(db).VerifyAsync(
-            accountId, Note("Frontera", "Lawless", "The Girl with All the Gifts"), [], default);
+            accountId, "The Subject", Note("Frontera", "Lawless", "The Girl with All the Gifts"), [], default);
 
         Assert.Null(verdict.Reason);
         Assert.Empty(verdict.StrippedAnchors);
@@ -90,7 +90,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         var accountId = await SeedLibraryAsync();
         await using var db = fixture.CreateContext(Scoped(accountId));
 
-        var verdict = await new LensVerifier(db).VerifyAsync(accountId, Note("The Amateur"), [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "The Subject", Note("The Amateur"), [], default);
 
         Assert.Null(verdict.Reason);
         Assert.Empty(verdict.StrippedAnchors);
@@ -111,7 +111,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         // Widening the library from ratings to ratings ∪ watched ∪ reacted widens what is
         // ACCEPTED. It must not widen it across the tenancy boundary — the second account here
         // holds its own rows and nothing of the first account's.
-        var verdict = await new LensVerifier(db).VerifyAsync(theirs, Note("Frontera"), [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(theirs, "The Subject", Note("Frontera"), [], default);
 
         Assert.NotEqual(mine, theirs);
         Assert.Null(verdict.Reason);
@@ -137,7 +137,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         // matched. Every case here failed before.
         foreach (var written in new[] { "Amateur", "Frontera (2014)", "lawless", "Frontiera" })
         {
-            var verdict = await verifier.VerifyAsync(accountId, Note(written), [], default);
+            var verdict = await verifier.VerifyAsync(accountId, "The Subject", Note(written), [], default);
             Assert.True(
                 verdict.Reason is null && verdict.StrippedAnchors.Count == 0,
                 $"'{written}' names a title in this account's library and must resolve.");
@@ -158,7 +158,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         await using var db = fixture.CreateContext(Scoped(accountId));
 
         var verdict = await new LensVerifier(db).VerifyAsync(
-            accountId, Note("Frontera", "Emily in Paris"), [], default);
+            accountId, "The Subject", Note("Frontera", "Emily in Paris"), [], default);
 
         // The prose was never wrong. Refusing four sentences over one droppable comparison is what
         // took the on-demand path to a hundred percent rejection.
@@ -179,7 +179,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         await using var db = fixture.CreateContext(Scoped(accountId));
 
         var verdict = await new LensVerifier(db).VerifyAsync(
-            accountId, Note("Emily in Paris", "Some Film Nobody Rated"), [], default);
+            accountId, "The Subject", Note("Emily in Paris", "Some Film Nobody Rated"), [], default);
 
         Assert.Null(verdict.Reason);
         Assert.Empty(verdict.Note.Anchors);
@@ -204,9 +204,34 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
             Lens = "It moves the way Blade Runner did, and it keeps the pressure on without ever "
                 + "raising its voice.",
         };
-        var verdict = await new LensVerifier(db).VerifyAsync(accountId, note, [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "The Subject", note, [], default);
 
         Assert.Equal("invented-anchor:Blade Runner", verdict.Reason);
+    }
+
+    [Fact]
+    public async Task The_subject_title_named_in_its_own_prose_is_not_an_invented_anchor()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedLibraryAsync();
+        await using var db = fixture.CreateContext(Scoped(accountId));
+
+        // The live failure: "Killer Elite gives you…" refused as invented-anchor:Killer Elite. The
+        // subject is in the catalogue and, by construction, not in the library — it is the film the
+        // note is recommending. Naming it is not a fabricated connection to the viewer's history.
+        var note = Note() with
+        {
+            Lens = "Blade Runner gives you a slow, rain-soaked hunt that keeps the pressure on "
+                + "without ever raising its voice.",
+        };
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "Blade Runner", note, [], default);
+
+        Assert.Null(verdict.Reason);
+        Assert.Empty(verdict.StrippedAnchors);
     }
 
     [Fact]
@@ -231,7 +256,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
             Lens = "Where Blade Runner drifted, this one keeps the pressure on without ever "
                 + "raising its voice.",
         };
-        var verdict = await new LensVerifier(db).VerifyAsync(accountId, note, [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "The Subject", note, [], default);
 
         Assert.Null(verdict.Reason);
     }
@@ -255,7 +280,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
             Lens = "A cold night in Little Whinging, and it keeps the pressure on without ever "
                 + "raising its voice.",
         };
-        var verdict = await new LensVerifier(db).VerifyAsync(accountId, note, [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "The Subject", note, [], default);
 
         Assert.Null(verdict.Reason);
     }
@@ -276,7 +301,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
             Lens = "Where Lawless swaggered, this one keeps the pressure on without ever raising "
                 + "its voice.",
         };
-        var verdict = await new LensVerifier(db).VerifyAsync(accountId, note, [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "The Subject", note, [], default);
 
         Assert.Null(verdict.Reason);
     }
@@ -297,7 +322,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
             Lens = "This is Denis Villeneuve territory, and it keeps the pressure on without ever "
                 + "raising its voice.",
         };
-        var verdict = await new LensVerifier(db).VerifyAsync(accountId, note, [], default);
+        var verdict = await new LensVerifier(db).VerifyAsync(accountId, "The Subject", note, [], default);
 
         Assert.Equal("invented-person:Denis Villeneuve", verdict.Reason);
     }
@@ -361,7 +386,7 @@ public class LensAnchorPolicyTests(PostgresFixture fixture)
         Assert.NotEmpty(candidates);
         foreach (var candidate in candidates)
         {
-            var verdict = await verifier.VerifyAsync(accountId, Note(candidate.Name), [], default);
+            var verdict = await verifier.VerifyAsync(accountId, "The Subject", Note(candidate.Name), [], default);
             Assert.True(
                 verdict.Reason is null && verdict.StrippedAnchors.Count == 0,
                 $"The prompt offers '{candidate.Name}' as an anchor and the guard refused it.");

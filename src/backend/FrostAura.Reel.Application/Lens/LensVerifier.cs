@@ -61,11 +61,18 @@ public sealed class LensVerifier(IReelDbContext db)
     private const int MaxCandidates = 24;
 
     /// <summary>
-    /// Verifies one note. <paramref name="creditedNames"/> is the exact credit list the prompt was
-    /// given for this title.
+    /// Verifies one note. <paramref name="subjectTitle"/> is the name of the title the note is
+    /// about, and <paramref name="creditedNames"/> is the exact credit list the prompt was given
+    /// for it.
+    ///
+    /// <para>The subject is excluded from the invented-title scan by name. A lens that opens
+    /// "Killer Elite gives you…" names the film it describes — the most natural sentence the
+    /// writer can produce — and the account has, by construction, not watched it yet. Before this
+    /// exclusion that sentence was refused as <c>invented-anchor:Killer Elite</c>; on the live
+    /// account it was 29 of the 48 refusals, and every one of them was sound copy.</para>
     /// </summary>
     public async Task<LensVerdict> VerifyAsync(
-        Guid accountId, LensNote note, IReadOnlyCollection<string> creditedNames, CancellationToken ct)
+        Guid accountId, string subjectTitle, LensNote note, IReadOnlyCollection<string> creditedNames, CancellationToken ct)
     {
         var library = await LibraryIndexAsync(accountId, ct);
 
@@ -89,7 +96,7 @@ public sealed class LensVerifier(IReelDbContext db)
         // Prose is checked on the TRIMMED note: an anchor that has been dropped is no longer part
         // of the copy, and its relation clause must not be able to convict the note it left.
         var invented = await InventedPeopleAsync(trimmed, creditedNames, ct);
-        var inventedTitles = await InventedProseTitlesAsync(trimmed, creditedNames, library, ct);
+        var inventedTitles = await InventedProseTitlesAsync(trimmed, subjectTitle, creditedNames, library, ct);
         var reason = LensGuards.InspectProvenance(invented, inventedTitles);
 
         return new LensVerdict(trimmed, reason, stripped);
@@ -160,12 +167,14 @@ public sealed class LensVerifier(IReelDbContext db)
     /// </summary>
     private async Task<IReadOnlyCollection<string>> InventedProseTitlesAsync(
         LensNote note,
+        string subjectTitle,
         IReadOnlyCollection<string> creditedNames,
         IReadOnlyCollection<string> library,
         CancellationToken ct)
     {
         var proseOnly = note with { Anchors = [] };
         var candidates = LensGuards.CandidateNames(proseOnly)
+            .Where(n => !string.Equals(n, subjectTitle.Trim(), StringComparison.OrdinalIgnoreCase))
             .Where(n => !creditedNames.Contains(n, StringComparer.OrdinalIgnoreCase))
             .Where(n => !LensGuards.MatchesLibrary(n, library))
             .Take(MaxCandidates)
@@ -183,6 +192,9 @@ public sealed class LensVerifier(IReelDbContext db)
 
         // Re-checked against the library after the catalogue lookup: the catalogue's own spelling
         // may differ from the model's, and a title the account owns must never convict it.
-        return known.Where(n => !LensGuards.MatchesLibrary(n, library)).ToList();
+        return known
+            .Where(n => !string.Equals(n, subjectTitle.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Where(n => !LensGuards.MatchesLibrary(n, library))
+            .ToList();
     }
 }

@@ -118,6 +118,16 @@ export interface FilterCostReport {
   suggestions: FilterCostSuggestion[];
 }
 
+/** One pocket of taste — a cluster over the account's loved and rewatched titles (Ml/TasteClusterer). */
+export interface TasteCluster {
+  ordinal: number;
+  /** Share of the account's loved-title weight this pocket holds, 0–1. */
+  share: number;
+  titleCount: number;
+  /** The account's own titles nearest the pocket's centre — never recommendations. */
+  exemplars: { name: string; year: number | null; posterPath: string | null }[];
+}
+
 export interface TasteDnaPayload {
   userMean: number;
   contrarianScore: number;
@@ -131,6 +141,8 @@ export interface TasteDnaPayload {
   topActors: { personId: string; name: string; profilePath: string | null; rating: number }[];
   histogram: { rating: number; count: number }[];
   drift: { year: number; shares: Record<string, number> }[];
+  /** Empty below the clusterer's input floor (30 loved titles) and for accounts with no embeddings. */
+  clusters: TasteCluster[];
 }
 
 /** Pipeline stages as reported by the backend (Account.PipelineStage). */

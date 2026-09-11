@@ -20,6 +20,7 @@ import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
 import ShareCard from "../components/dna/ShareCard";
 import DislikePanel from "../components/dna/DislikePanel";
 import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
+import TastePockets from "../components/dna/TastePockets";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -195,6 +196,9 @@ export default function TasteDna() {
           </ResponsiveContainer>
         </section>
       </div>
+
+      {/* The pockets retrieval actually pulls from — the answer to "does it know I also like X". */}
+      <TastePockets clusters={data.clusters} />
 
       {/* What you've said no to — the strongest negative signal, made legible and revocable. */}
       <DislikePanel />

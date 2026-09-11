@@ -165,7 +165,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         Assert.Equal(candidates.Count, progress["current"]);
         Assert.Equal(candidates.Count, progress["total"]);
         Assert.Equal(
-            $"Cross-referencing {candidates.Count} titles · round 1 of 3 · 0 ruled out so far",
+            $"Cross-referencing {candidates.Count} titles · first pass · 0 ruled out so far",
             progress["message"]);
 
         var completed = Assert.Single(events.Completed);
