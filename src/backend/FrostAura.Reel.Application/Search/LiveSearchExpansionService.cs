@@ -316,8 +316,37 @@ public sealed class LiveSearchExpansionService(
                 agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct, standingSummary);
             }
 
-            assistantText = agentReply.Reply;
-            await emit("assistant-message", new { text = agentReply.Reply });
+            // ── The collision, computed from the words the user typed ────────────────────────
+            // Rungs 1 and 2 of the filter-collision ladder: NAME the collision and show the
+            // conditions. Rung 3 — a per-turn "ignore my filters" override — is deliberately not
+            // built; an exclusion stays airtight and reopening that is the founder's call.
+            //
+            // Computed HERE, before the reply goes out, rather than beside the frame that reports
+            // it: the reply is written by a model that has seen no candidates and used to promise
+            // the very thing the conditions were about to remove ("here are gritty 90s action
+            // picks" above seven post-2000 titles). It reads agentReply.Requested — the
+            // interpreter's free reading of the user's own sentence — because the intent has been
+            // through a prompt that was told about these exclusions and has already dropped them.
+            var collidingGenres = AskReelStandingFilters.CollidingGenres(
+                standingRules, agentReply.Intent, agentReply.Requested);
+            var collidingKeywords = AskReelStandingFilters.CollidingKeywords(
+                standingRules, agentReply.Intent, agentReply.Requested);
+            var yearCollides = AskReelStandingFilters.YearWindowCollides(
+                standingRules, agentReply.Intent, agentReply.Requested);
+            var hasConflict = collidingGenres.Count > 0 || collidingKeywords.Count > 0 || yearCollides;
+
+            // Qualified before it is emitted AND before it is persisted, so the transcript cannot
+            // record a promise the same turn then broke.
+            assistantText = hasConflict
+                ? AskReelStandingFilters.Qualify(
+                    agentReply.Reply, collidingGenres, collidingKeywords, yearCollides, standingRules)
+                : agentReply.Reply;
+
+            // `conflict` is always present as a key so the client has ONE shape to render, and the
+            // frame stays where it is: moving the reply after discovery would buy honesty with the
+            // turn's only early frame. It is the same fact the `conflict` frame carries in full —
+            // this flag just arrives early enough to style the sentence it qualifies.
+            await emit("assistant-message", new { text = assistantText, conflict = hasConflict });
 
             // A named-person query ("all movies Nolan directs") is a lookup: it relaxes the
             // unseen-only rule (ContentFilteredTitles keeps watched titles, badged) so the
@@ -446,6 +475,32 @@ public sealed class LiveSearchExpansionService(
             // indistinguishable in production. One count per turn, ~16 ms on the live catalogue.
             var eligiblePoolSize = await baseQuery.CountAsync(ct);
 
+            // The collision itself was decided before the reply went out (see above) — this is the
+            // frame that reports it, emitted here because poolSize is only knowable once discovery
+            // has run. One computation, two readers, so the sentence in the reply and the sentence
+            // in the frame can never disagree.
+            //
+            // BEFORE the empty-pool return, deliberately. A turn that asks for the one genre the
+            // account has permanently excluded is the likeliest turn in the product to come back
+            // with nothing — and reporting the collision only on turns that found something meant
+            // the user was told least exactly when the explanation was worth most.
+            if (hasConflict)
+            {
+                await emit("conflict", new
+                {
+                    excludedGenres = collidingGenres,
+                    // Additive: the excluded thing is not always a genre. "anime" and "musical" are
+                    // avoid-keywords, and a turn asking for one got no notice at all until this.
+                    excludedKeywords = collidingKeywords,
+                    poolSize = eligiblePoolSize,
+                    catalogueSize = await db.Titles.CountAsync(ct),
+                    // The only prose in the frame. Every number the client renders travels beside it
+                    // as raw JSON so the copy is the client's to shape, not the server's to format.
+                    message = AskReelStandingFilters.Message(
+                        collidingGenres, collidingKeywords, yearCollides, standingRules),
+                });
+            }
+
             if (eligible.Count == 0)
             {
                 logger.LogInformation(
@@ -547,24 +602,6 @@ public sealed class LiveSearchExpansionService(
             // Their caption is the deterministic statement of which exclusion they trip, streamed
             // as a candidate-reranked frame so live cards pick it up the same way clean cards pick
             // up their LLM why.
-            // Rungs 1 and 2 of the filter-collision ladder: NAME the collision and show the
-            // conditions. Rung 3 — a per-turn "ignore my filters" override — is deliberately not
-            // built; an exclusion stays airtight and reopening that is the founder's call.
-            var collidingGenres = AskReelStandingFilters.CollidingGenres(standingRules, intent);
-            var yearCollides = AskReelStandingFilters.YearWindowCollides(standingRules, intent);
-            if (collidingGenres.Count > 0 || yearCollides)
-            {
-                await emit("conflict", new
-                {
-                    excludedGenres = collidingGenres,
-                    poolSize = eligiblePoolSize,
-                    catalogueSize = await db.Titles.CountAsync(ct),
-                    // The only prose in the frame. Every number the client renders travels beside it
-                    // as raw JSON so the copy is the client's to shape, not the server's to format.
-                    message = AskReelStandingFilters.Message(collidingGenres, yearCollides, standingRules),
-                });
-            }
-
             await emit("phase", new { stage = "ranking", found = returned.Count, scored = sliceIds.Count });
 
             // When the turn named comparison titles, tell the rerank model so the why-lines can

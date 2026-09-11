@@ -98,7 +98,7 @@ public class OpenRouterSearchAgent(
         var intentFallback = interpreter.Heuristic(message);
         if (StubMode)
         {
-            return new AgentReply(StubReply(message, intentFallback), intentFallback);
+            return new AgentReply(StubReply(message, intentFallback), intentFallback, intentFallback);
         }
 
         try
@@ -118,7 +118,11 @@ public class OpenRouterSearchAgent(
                 var reply = root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } s
                     ? CapReply(s) : StubReply(message, intentFallback);
                 var intent = SearchIntentParser.FromJson(root, message, intentFallback);
-                return new AgentReply(reply, intent);
+                // The heuristic rides along as the UNLAUNDERED reading of the turn. `intent` has
+                // been through a prompt that was told what this account permanently excludes, so a
+                // well-behaved model has already removed the excluded genre from it — and the
+                // collision rung downstream cannot find what the model helpfully took out.
+                return new AgentReply(reply, intent, intentFallback);
             }
 
             logger.LogWarning("Agent interpret returned no content for '{Message}'; asking the interpreter.", message);
@@ -137,7 +141,7 @@ public class OpenRouterSearchAgent(
         // prompt honours and this one does not is invisible until a user is told about a title
         // their own filters exclude.
         var recovered = await interpreter.InterpretAsync(message, ct, standingFilters);
-        return new AgentReply(StubReply(message, recovered), recovered);
+        return new AgentReply(StubReply(message, recovered), recovered, intentFallback);
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
