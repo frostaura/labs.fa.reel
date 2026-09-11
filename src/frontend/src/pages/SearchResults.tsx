@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useNavigate } from "react-router-dom";
@@ -18,7 +18,8 @@ import {
   floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
-  PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS,
+  PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
+  scrollTargetFor,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -225,6 +226,21 @@ function AskReel() {
   const removedSet = new Set(useSelector(selectRemovedKeys));
   const streaming = status === "streaming";
 
+  // F6-02. The page never moved: `scrollY` stayed at 0 for a whole 19.4-second turn, so a long
+  // question filled the viewport and the banner, the narration, the progress bar and every card
+  // were below the fold for the entire time. These two anchors are what "the live turn" and "what
+  // the Stop left you with" mean as positions on the page; `scrollTargetFor` decides which of them
+  // (if either) this status is about, and keying the effect on THAT rather than on the status keeps
+  // it to the two transitions that change what the page is about.
+  const liveRef = useRef<HTMLDivElement>(null);
+  const settledRef = useRef<HTMLDivElement>(null);
+  const scrollTarget = scrollTargetFor(status);
+  useEffect(() => {
+    if (!scrollTarget) return;
+    const el = scrollTarget === "live" ? liveRef.current : settledRef.current;
+    el?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
+  }, [scrollTarget]);
+
   // The floor, on a turn that never reached `done`.
   //
   // Ranking and the floor are the server's, and they run when the turn completes. Stop a page ten
@@ -392,12 +408,7 @@ function AskReel() {
       <div className="space-y-3" data-testid="askreel-transcript" role="log" aria-live="polite">
         {turns.map((turn, i) =>
           turn.role === "user" ? (
-            <div key={i} className="flex justify-end">
-              <p className="fa-body bg-fa-frost/15 text-fa-frost-bright rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]">
-                <span className="sr-only">You said</span>
-                {turn.text}
-              </p>
-            </div>
+            <UserBubble key={i} text={turn.text} />
           ) : (
             <div key={i} className="space-y-2 max-w-[85%]">
               <div className="flex items-start gap-3" data-testid="askreel-reply">
@@ -494,6 +505,12 @@ function AskReel() {
           )}
         </div>
       )}
+
+      {/* Where the page scrolls to when a turn starts (F6-02). Zero-height on purpose — it marks
+          the boundary between "what you said" and "what Reel is doing about it", and everything
+          below it is the live turn. `scroll-mt` clears the sticky header, which would otherwise
+          sit on top of the banner the scroll exists to reveal. */}
+      <div ref={liveRef} className="scroll-mt-20" aria-hidden data-testid="askreel-live-anchor" />
 
       {/* 409 — the same question is already being answered, here or on another device. Nothing on
           screen is wrong, so nothing on screen is cleared; this is not the error card, because
@@ -627,7 +644,8 @@ function AskReel() {
           the previous answer) stays where it is instead of being replaced by an explanation. */}
       {status === "stopped" && (
         <div
-          className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center"
+          ref={settledRef}
+          className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center scroll-mt-20"
           data-testid="askreel-stopped"
         >
           <p className="fa-caption text-fa-frost-dim">{stoppedMessage}</p>
@@ -875,6 +893,58 @@ function AskReel() {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/**
+ * One question the user asked, capped at six lines.
+ *
+ * F6-02's other half. The bubble has no maximum height, so a 1 000-character question — the length
+ * the server accepts and the history keeps — renders ~1 100 px tall and hides the entire answer
+ * below it. Six lines is enough to recognise a question you just asked; the rest is one tap away,
+ * and the toggle is offered only when there IS a rest, measured rather than inferred from the
+ * character count (the same 400 characters are four lines wide and eight narrow).
+ *
+ * The latch matters: expanding removes the clamp, so a re-measure would find no overflow and take
+ * the "Show less" away with it. Measured only while collapsed.
+ */
+function UserBubble({ text }: { text: string }) {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clampable, setClampable] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el || expanded) return;
+    setClampable(bubbleOverflows(el.scrollHeight, el.clientHeight));
+  }, [text, expanded]);
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <p
+        className="fa-body bg-fa-frost/15 text-fa-frost-bright rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]"
+        data-testid="askreel-user-bubble"
+      >
+        <span className="sr-only">You said</span>
+        {/* The two classes are exclusive rather than combined: `line-clamp-6` sets
+            `display: -webkit-box`, so a `block` sitting beside it can win on stylesheet order and
+            silently un-clamp the bubble. */}
+        <span ref={textRef} className={expanded ? "block whitespace-pre-wrap" : "whitespace-pre-wrap line-clamp-6"}>
+          {text}
+        </span>
+      </p>
+      {clampable && (
+        <button
+          type="button"
+          data-testid="askreel-bubble-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+          className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }

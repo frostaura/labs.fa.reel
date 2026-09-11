@@ -199,6 +199,52 @@ export function mintStreamId(): number {
 }
 
 /**
+ * What the page should bring into view for this status, or `null` to leave the scroll where the
+ * reader put it.
+ *
+ * F6-02: `scrollY` stayed at **0** for the whole of a 19.4-second turn. A 1 000-character question
+ * makes a bubble ~1 100 px tall, so the viewport held nothing but the user's own words — no banner,
+ * no narration, no progress bar, no reply, no cards — and four screenshots taken at 400 ms, 1 s,
+ * 3 s and 8 s of the next turn were pixel-identical for the same reason. The only evidence anything
+ * was happening was the Send arrow greying out.
+ *
+ * Two moments, not every render. A turn STARTING is the page changing what it is about, and a Stop
+ * is the same thing in reverse — the kept answer is below a transcript that may already fill the
+ * screen. `done` is deliberately absent: by then the reader is reading, and snapping the page under
+ * them at the moment the answer settles is the opposite of the fix.
+ */
+export type ScrollTarget = "live" | "settled" | null;
+
+export function scrollTargetFor(status: ChatStatus): ScrollTarget {
+  if (status === "streaming") return "live";
+  if (status === "stopped") return "settled";
+  return null;
+}
+
+/**
+ * Has a clamped question bubble actually been cut short?
+ *
+ * Measured rather than guessed from the character count, because the same 400 characters are four
+ * lines on a desktop bubble and eight on a phone — a length threshold would offer "Show more" on a
+ * bubble showing everything, and withhold it on one that is cut. The tolerance absorbs the
+ * sub-pixel rounding `line-height` leaves behind, which otherwise reports a one-line bubble as
+ * overflowing on some zoom levels.
+ */
+export function bubbleOverflows(scrollHeight: number, clientHeight: number): boolean {
+  return scrollHeight - clientHeight > 4;
+}
+
+/** Whether this browser has asked for motion to be kept to a minimum. Absent `matchMedia` = no. */
+export function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether the preset mood chips ("Under 90 minutes, feel-good", …) should show: only on a
  * genuinely fresh Ask Reel — no transcript, no cards on screen, nothing streaming. The moment a
  * conversation exists (including one resumed from a previous visit) the presets yield to the

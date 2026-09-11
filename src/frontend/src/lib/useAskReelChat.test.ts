@@ -34,6 +34,9 @@ import {
   transcriptOf,
   staleFrame,
   mintStreamId,
+  scrollTargetFor,
+  bubbleOverflows,
+  prefersReducedMotion,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -1993,5 +1996,57 @@ describe("mintStreamId", () => {
     expect(new Set(ids).size).toBe(3);
     for (const id of ids) expect(id).toBeGreaterThan(0);
     expect(ids[1]).toBeGreaterThan(ids[0]);
+  });
+});
+
+/**
+ * F6-02 — the page that never scrolled. `scrollY` stayed at 0 for a whole 19.4-second turn, so a
+ * 1 000-character question filled the viewport and the banner, the narration, the progress bar and
+ * every card sat below the fold for the entire time.
+ */
+describe("scrollTargetFor", () => {
+  it("moves_the_page_when_a_turn_starts_and_when_a_stop_ends_one", () => {
+    expect(scrollTargetFor("streaming")).toBe("live");
+    expect(scrollTargetFor("stopped")).toBe("settled");
+  });
+
+  it("leaves_the_scroll_alone_everywhere_else", () => {
+    // `done` is the one that matters here: by then the reader IS reading, and snapping the page
+    // under them at the moment the answer settles is the opposite of the fix. The rest are states
+    // the page enters without changing what it is about.
+    for (const status of ["idle", "done", "resumed", "blocked", "error"] as const) {
+      expect(scrollTargetFor(status)).toBeNull();
+    }
+  });
+});
+
+describe("bubbleOverflows", () => {
+  it("ignores_sub_pixel_rounding_and_reports_a_real_cut", () => {
+    // A bubble showing everything, with `line-height` rounding against it.
+    expect(bubbleOverflows(240, 240)).toBe(false);
+    expect(bubbleOverflows(243, 240)).toBe(false);
+    // The 1 000-character question: ~1 100 px of text inside six lines of box.
+    expect(bubbleOverflows(1104, 144)).toBe(true);
+    // One line over — the smallest cut a reader would notice, and still a cut.
+    expect(bubbleOverflows(168, 144)).toBe(true);
+  });
+});
+
+describe("prefersReducedMotion", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("answers_no_where_matchMedia_is_absent_or_throws", () => {
+    // vitest runs in node: `window` may be missing entirely, present without `matchMedia`, or —
+    // in an older embedded webview — present with one that throws on an unknown feature query.
+    // A scroll must never be taken down by any of the three.
+    expect(prefersReducedMotion()).toBe(false);
+    vi.stubGlobal("window", {});
+    expect(prefersReducedMotion()).toBe(false);
+    vi.stubGlobal("window", { matchMedia: () => { throw new Error("nope"); } });
+    expect(prefersReducedMotion()).toBe(false);
+    vi.stubGlobal("window", { matchMedia: (q: string) => ({ matches: q.includes("reduce") }) });
+    expect(prefersReducedMotion()).toBe(true);
   });
 });

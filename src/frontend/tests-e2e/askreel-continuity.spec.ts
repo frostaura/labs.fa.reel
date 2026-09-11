@@ -1126,3 +1126,69 @@ test.describe("Ask Reel — a thread switch never adopts a running answer", () =
     expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe(OTHER_CONVERSATION);
   });
 });
+
+/**
+ * F6-02 — the page that never scrolled to the turn it was running.
+ *
+ * At 375 a 1 000-character question (the length the server accepts and the history keeps) renders a
+ * bubble ~1 100 px tall. `scrollY` stayed at 0 for the whole 19.4-second turn, so the viewport held
+ * nothing but the user's own words — no banner, no narration, no progress bar, no reply, no cards —
+ * and four frames captured at 400 ms, 1 s, 3 s and 8 s of the NEXT turn were pixel-identical for
+ * exactly the same reason. The only evidence anything was happening anywhere was the Send arrow
+ * greying out.
+ */
+test.describe("Ask Reel — the live turn is on screen", () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  /** The cap the history keeps, to the character. */
+  const LONG_QUESTION = `${"a slow-burn heist with a great ensemble and a twist I will not see coming, ".repeat(14)}please`.slice(0, 1000);
+
+  test("a 1000-character question does not hide the turn it started", async ({ page }) => {
+    await boot(page);
+    expect(LONG_QUESTION).toHaveLength(1000);
+
+    await page.getByTestId("askreel-composer").fill(LONG_QUESTION);
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-1", sequence: 1 });
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+
+    // The thing the finder could not see for nineteen seconds.
+    await expect(page.getByTestId("askreel-banner")).toBeInViewport();
+    await expect(page.getByTestId("askreel-narration")).toBeInViewport();
+
+    // …and the bubble is capped rather than 1 100 px tall, which is the half that makes the scroll
+    // survive a second long question further down the thread.
+    const bubble = page.getByTestId("askreel-user-bubble");
+    const clamped = (await bubble.boundingBox())!.height;
+    expect(clamped).toBeLessThan(300);
+
+    // The rest is one tap away, and the tap is offered only because there IS a rest.
+    await expect(page.getByTestId("askreel-bubble-toggle")).toHaveText("Show more");
+    await page.getByTestId("askreel-bubble-toggle").click();
+    expect((await bubble.boundingBox())!.height).toBeGreaterThan(clamped);
+    await expect(page.getByTestId("askreel-bubble-toggle")).toHaveText("Show less");
+    await page.getByTestId("askreel-bubble-toggle").click();
+    expect((await bubble.boundingBox())!.height).toBeCloseTo(clamped, 0);
+  });
+
+  test("an ordinary question gets no toggle, and Stop brings the kept answer back into view", async ({ page }) => {
+    // Fixture variation on the length: the clamp must be invisible on the questions people
+    // actually ask, or every bubble in the transcript grows a control.
+    await boot(page);
+    await askAndAnswer(page);
+    await expect(page.getByTestId("askreel-bubble-toggle")).toHaveCount(0);
+
+    // Now the other scroll: a new question, a Stop before anything arrives, and the answer the
+    // user was reading is below a transcript that already fills the screen.
+    await page.getByTestId("askreel-composer").fill(LONG_QUESTION);
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await expect(page.getByTestId("askreel-banner")).toBeInViewport();
+    await page.getByTestId("askreel-stop").click();
+
+    await expect(page.getByTestId("askreel-stopped")).toBeInViewport();
+    await expect(page.getByTestId("askreel-stopped")).toContainText("Stopped before any picks arrived");
+  });
+});
