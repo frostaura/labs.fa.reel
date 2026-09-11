@@ -714,6 +714,41 @@ test.describe("Ask Reel — a resumed thread says what happened, once", () => {
     expect(conversationCalls).toBeGreaterThan(2);
   });
 
+  test("a paged answer keeps its running count when the question after it was stopped", async ({ page }) => {
+    // R6-01. Fixture variation, one row against the test above: the same paged thread with a
+    // STOPPED question on the end of it. The server replays from the last COMPLETED ask, so the
+    // grid is byte-identical to the one above — and `wasPaged` anchored on the last ask of ANY
+    // status, walked past the answer on screen, found no page after it and withdrew the prefix.
+    // The same grid then read "1 pick ranked for you, from 22 pulled" over three cards: R1-03,
+    // reached by stopping a turn.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...RESUME_PAYLOAD,
+        turns: [
+          ...PAGED_TURNS,
+          { sequence: 3, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+          { sequence: 4, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+        ],
+        lastQuery: "something surreal and dreamlike",
+        reason: "1 pick ranked for you, from 22 pulled.",
+      },
+    });
+
+    // The stopped turn is on the page as the failure it is, and the paged answer is kept under it.
+    await expect(page.getByTestId("askreel-failed-turn")).toBeVisible();
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks so far · last page: 1 pick ranked for you, from 22 pulled.");
+
+    // …and the number in that line is the grid, checked against the grid rather than against the
+    // fixture — the defect was a sentence that described a different number of cards than the one
+    // beside it, and only this comparison can fail on that.
+    const footnoteText = await page.getByTestId("askreel-footnote").innerText();
+    expect(Number(/^(\d+) picks? so far/.exec(footnoteText)?.[1])).toBe(await gridNames(page).count());
+  });
+
   test("a restored PAGED answer accounts for the grid, not for its last page", async ({ page }) => {
     // Fixture variation, one row: the same payload plus the `page` turn the server writes. The
     // server's sentence describes that page and the grid is two turns' work — R1-03 reaching the

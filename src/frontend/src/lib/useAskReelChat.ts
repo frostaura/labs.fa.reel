@@ -860,15 +860,36 @@ export function lastTurnOutcome(rows: ConversationPayload["turns"]): ResumedTail
  *
  * The grid a resume restores is the last completed ask plus whatever paged onto it, so the
  * question is not "did this thread ever page" but "did anything page onto the answer on screen".
- * An `ask` writes a user row and an assistant row together; a `page` writes an assistant row
- * alone — so the rule is a `page` row after the last `ask` row. `kind` is optional on the wire and
- * absent has always meant `ask`, which matters: reading absent as "not an ask" would leave the
- * cursor at -1 and make every page row in the thread count again.
+ *
+ * R6-01: that word COMPLETED was the whole rule and the anchor here ignored it, walking to the
+ * last `ask` row of any status while the server replays from the last one that finished. Stop a
+ * question on a paged thread and the cursor moved past the answer actually on screen, found no
+ * page after it, and dropped the running count — the same 49-card grid printing "4 picks ranked
+ * for you, from 79 pulled" as a description of itself, which is the exact R1-03 sentence `paged`
+ * exists to prevent. And it persisted: `paged` is carried across later pages, so the wrong line
+ * survived every subsequent one.
+ *
+ * The anchor is {@link answeredTurnIndex} — the same row {@link answeredQuestion} reads the
+ * question off and {@link resumedPageTarget} names as `pageOf`, which is the server's own
+ * `ResumeAsync` rule. Within one resume the grid is then read and described by one rule instead of
+ * two. The block the server builds off that anchor is COMPLETED assistant rows, so a page counts
+ * on the same terms: one that failed added no cards, and counting it would put the composite line
+ * over a single turn's work.
+ *
+ * The fallback is the previous behaviour verbatim, for a server that carries no `status` on its
+ * turn rows: no row can be read as the completed ask, so the cursor goes back to the last `ask` of
+ * any status. `kind` is optional on the wire there and absent has always meant `ask`, which
+ * matters — reading absent as "not an ask" would leave the cursor at -1 and make every page row in
+ * the thread count again.
  */
 export function wasPaged(rows: ConversationPayload["turns"]): boolean {
-  let lastAsk = -1;
-  for (let i = 0; i < rows.length; i++) if ((rows[i].kind ?? "ask") === "ask") lastAsk = i;
-  return rows.slice(lastAsk + 1).some((t) => t.kind === "page");
+  const answered = answeredTurnIndex(rows);
+  if (answered < 0) {
+    let lastAsk = -1;
+    for (let i = 0; i < rows.length; i++) if ((rows[i].kind ?? "ask") === "ask") lastAsk = i;
+    return rows.slice(lastAsk + 1).some((t) => t.kind === "page");
+  }
+  return rows.slice(answered + 1).some((t) => t.kind === "page" && t.status === "Completed");
 }
 
 /**

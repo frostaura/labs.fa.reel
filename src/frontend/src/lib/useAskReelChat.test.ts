@@ -1914,6 +1914,30 @@ describe("chatReducer — a resumed thread knows whether it was paged", () => {
     expect(footnote(state.reason, 3, state.paged)).toBe("2 picks ranked for you, from 65 pulled");
   });
 
+  it("keeps_the_running_count_when_the_question_after_the_page_was_stopped", () => {
+    // R6-01, through the reducer. Fixture variation, one field against
+    // `forgets_a_page_that_a_later_question_replaced` above: the tail ask's status. There, a
+    // COMPLETED question replaced the answer and the page went with it. Here it was stopped, so
+    // nothing replaced anything — the server replays the paged block, hands back the same grid,
+    // and the line under it must still account for all of it.
+    const stoppedAfterPage = {
+      ...base,
+      turns: [
+        ...askTurns,
+        { sequence: 2, role: "assistant", text: "Three more.", kind: "page", status: "Completed" },
+        { sequence: 3, role: "user", text: "something tenser", kind: "ask", status: "Failed" },
+        { sequence: 4, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+      ],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: stoppedAfterPage });
+    expect(state.paged).toBe(true);
+    // The grid is the three cards the payload carries, and the count in the line is that grid —
+    // not the 2 the server's own sentence, written for one page, happens to name.
+    expect(state.order).toHaveLength(3);
+    expect(footnote(state.reason, 3, state.paged))
+      .toBe("3 picks so far · last page: 2 picks ranked for you, from 65 pulled");
+  });
+
   it("still_accounts_for_the_grid_when_the_newest_answer_is_the_paged_one", () => {
     // Fixture variation, one row's position: the page row moves to AFTER the second ask. The grid
     // on screen really is several pages now, so the composite line is the true one again.
@@ -1943,6 +1967,15 @@ describe("wasPaged", () => {
     { sequence: sequence + 1, role: "assistant", text: "a", kind: "ask", status: "Completed" },
   ];
   const page = (sequence: number) => ({ sequence, role: "assistant", text: "a", kind: "page", status: "Completed" });
+  /** A stopped question: the user row and the assistant row that never got written (R5-02). */
+  const stoppedAsk = (sequence: number) => [
+    { sequence, role: "user", text: "q", kind: "ask", status: "Failed" },
+    { sequence: sequence + 1, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+  ];
+  const pendingAsk = (sequence: number) => [
+    { sequence, role: "user", text: "q", kind: "ask", status: "Pending" },
+    { sequence: sequence + 1, role: "assistant", text: "", kind: "ask", status: "Pending" },
+  ];
 
   it("is_false_on_an_empty_or_single_ask_transcript", () => {
     expect(wasPaged([])).toBe(false);
@@ -1953,6 +1986,32 @@ describe("wasPaged", () => {
     expect(wasPaged([...ask(0), page(2)])).toBe(true);
     expect(wasPaged([...ask(0), page(2), ...ask(3)])).toBe(false);
     expect(wasPaged([...ask(0), page(2), ...ask(3), page(5)])).toBe(true);
+  });
+
+  it("anchors_on_the_last_COMPLETED_ask,_because_that_is_the_block_the_server_replays", () => {
+    // R6-01. The anchor was the last `ask` row of ANY status, and the server replays from the last
+    // COMPLETED one — so stopping a question on a paged thread moved the cursor past the answer
+    // that is actually on screen, found no page after it, and dropped the running count. The same
+    // 49-card grid then printed "4 picks ranked for you, from 79 pulled" as a description of it.
+    //
+    // The two fixtures differ in ONE field — the tail ask's status — and that field alone must not
+    // change what the grid underneath it is. Completed: the page belongs to the replaced answer
+    // and the thread is un-paged again (F4-03). Failed: nothing replaced anything, the paged
+    // answer is still the one on screen, and the prefix stays.
+    expect(wasPaged([...ask(0), page(2), ...stoppedAsk(3)])).toBe(true);
+    expect(wasPaged([...ask(0), page(2), ...ask(3)])).toBe(false);
+  });
+
+  it("reads_a_pending_tail_the_same_way,_and_ignores_a_page_that_never_landed", () => {
+    // The probe on the same field, through its other two values. `Pending` is "not yet", not
+    // "instead of": the grid on screen still belongs to the completed ask above it, so the page
+    // that landed on it still counts.
+    expect(wasPaged([...ask(0), page(2), ...pendingAsk(3)])).toBe(true);
+    // …and the filter runs on the page rows too, for the same reason it runs on the ask row: the
+    // server's block is COMPLETED assistant rows from the anchor on, so a page that failed added
+    // no cards and the grid is one turn's work. Anchoring right while counting loose would put the
+    // prefix back on a single-page answer.
+    expect(wasPaged([...ask(0), { ...page(2), status: "Failed" }])).toBe(false);
   });
 
   it("treats_a_missing_kind_as_an_ask", () => {
