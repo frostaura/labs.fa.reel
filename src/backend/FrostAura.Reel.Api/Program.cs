@@ -3,6 +3,7 @@ using FrostAura.Reel.Api;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Middleware;
 using FrostAura.Reel.Api.Security;
+using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Infrastructure;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -83,6 +84,14 @@ app.MapGet("/health/ready", async (ReelDbContext db, CancellationToken ct) =>
 });
 
 await DatabaseInitializer.InitializeAsync(app.Services);
+
+// Beside the migration step, and for the same reason it is here rather than in a hosted service:
+// both must finish BEFORE the server listens. A turn is written Pending before its stream opens and
+// stamped terminal after `done`, and both of those writers live in the request pipeline — so a
+// process killed mid-stream leaves a Pending row nothing in the replacement process would ever
+// reach. `/ask` refuses a new turn while one is Pending on the conversation, which turns that
+// leftover into a permanently wedged thread. This closes them all, once, while nothing can race it.
+await PendingTurnReconciliation.RunAsync(app.Services);
 
 app.Run();
 

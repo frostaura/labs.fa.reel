@@ -68,7 +68,7 @@ stored turn.
 | `200` `text/event-stream` | the SSE stream below | a live turn, or the replay of a finished one |
 | `400` | `{ error, code }` | `body_invalid`, `empty_query`, `query_invalid`, `query_too_long`, `client_turn_id_required`, `client_turn_id_invalid`, `conversation_id_invalid`, `page_of_invalid`, `media_type_invalid` |
 | `404` | `{ error, code }` | `conversation_not_found` — an id that is not the caller's, or is gone. **Never a fork.** · `page_of_not_found` — a `pageOf` turn that is not the caller's, is gone, or is not in this conversation |
-| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation · `client_turn_id_reused` — this key already answered a **different** question · `page_of_not_completed` — the named turn did not finish, so there is no answer to extend · `page_query_mismatch` — the query is not the question that turn answers |
+| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is **genuinely** still running on this conversation; see *Stale turns* · `client_turn_id_reused` — this key already answered a **different** question · `page_of_not_completed` — the named turn did not finish, so there is no answer to extend · `page_query_mismatch` — the query is not the question that turn answers |
 
 `code` is stable and is what a client switches on. The prose in `error` is the user's and may
 change; matching on it is how a UI ends up rendering a crash message for an honest refusal.
@@ -160,7 +160,7 @@ not the thing another page would be a page *of*.
 | --- | --- |
 | `GET /api/search/conversations?limit=20` | `[{ id, title, turnCount, lastTurnAt, lastCardsAt }]` |
 | `GET /api/search/conversations/{id}` | the resume payload below; `404` if it is not the caller's |
-| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`** |
+| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`**, unless the row is stale; see *Stale turns* |
 | `DELETE /api/search/conversations/{id}` | `204`. Cards, turns, conversation. **Never exposures.** |
 | `GET /api/search/conversations/latest` | **deprecated** — the same payload for the newest conversation |
 
@@ -195,7 +195,9 @@ no handle to name it. The code is `null` on every status but `Failed` — read t
 rather than off the column, so a cause can never outlive the failure it described. It is what
 separates a turn the user stopped themselves (`client_aborted`) from one that hit a snag; without
 it, both render the same and the page either apologises for a deliberate stop or stays quiet about a
-real failure.
+real failure. `server_restarted` and `turn_timed_out` join it from the two arms described under
+*Stale turns* — neither is written by anything in the request pipeline, because the rows they close
+are exactly the rows no request can reach.
 
 `conflict` is the `conflict` frame that turn emitted, **stored on the turn** and handed back with
 it — `null` on a thread that had no collision, which is most of them. It restores the notice and the
@@ -267,6 +269,47 @@ say.
    upserts and is never saved after the stream.
 9. **Failure** — a crash or an abandoned stream stamps the row `Failed` with a `FailureCode`
    (`client_aborted` on an abort) and stores no cards. A recoverable record, not an orphan.
+
+**Before step 1 of anything — boot.** Every row still `Pending` from the previous process is stamped
+`Failed` / `server_restarted` with a `CompletedAt`, before the API serves its first request. It is
+not a step of a turn, which is the point: it closes the rows no turn can reach. See *Stale turns*.
+
+## Stale turns
+
+Steps 8 and 9 both live in the **request pipeline**. Kill the process mid-stream — a crash, an OOM,
+a deploy restart — and neither runs: the row stays `Pending`, `CompletedAt` null, `FailureCode`
+null, with no code path anywhere that would ever close it. Step 4 then refuses every new turn on
+that conversation, so the thread is not degraded but **finished**: every retry, every "Try again"
+and every new question answers `409 turn_in_progress`, and `GET /turns/{id}` answers `202` forever.
+Reproduced by killing the API 20 seconds into a turn; the conversation never accepted another
+question.
+
+Two arms close it, and they write **different codes on purpose**.
+
+| Code | Written by | Means |
+| --- | --- | --- |
+| `server_restarted` | the boot sweep, step 0 | the process that was streaming this turn is gone. A **fact**: a process that has just started owns no streams, so every `Pending` row it finds belongs to a dead one. No clock is consulted and no live turn can be caught, which is why this arm sweeps regardless of age and across **every** account. |
+| `turn_timed_out` | the `/ask` gate and `GET /turns/{id}` | the row was still `Pending` **3 minutes** after it was written. An **inference** — the threshold is an order of magnitude above measured turns of 8–30 s, deliberately, and is not a latency budget. |
+
+Both arms are needed. A boot that never happens sweeps nothing, and a clock cannot tell a dead
+process from a slow one at the instant it dies. Collapsing the two codes would lose the only
+distinction worth having when a stuck conversation is read back.
+
+Where the gate finds a stale row it **closes it and carries on**, rather than answering 409:
+
+- **A different turn in flight** — every stale `Pending` row on the conversation is closed, not just
+  the first, and the new turn proceeds. A conversation that outlived two restarts has two of them.
+- **The same `clientTurnId`** — the retry **proceeds** rather than replaying the corpse or refusing.
+  The dead row also **gives up its key**: `(ConversationId, ClientTurnId)` is a partial unique index,
+  so a corpse that kept it would collide with the retry's own assistant row and turn a wedged thread
+  into a `500`. The row stays in the transcript as `Failed` / `turn_timed_out`.
+- **The reconnect poll** — a stale row answers `200` as a `Failed` turn with that code, never `202`.
+  It is *closed* by the poll, not merely reported closed, so the table and the poller agree; this is
+  the one read route that writes, and it writes exactly one row.
+
+A `Pending` row **inside** the threshold is untouched and still gets the `409`. That refusal is not
+a nicety: two streams on one turn id would both write cards and collide on the unique
+`(TurnId, Rank)`.
 
 ## Eligibility on replay
 
