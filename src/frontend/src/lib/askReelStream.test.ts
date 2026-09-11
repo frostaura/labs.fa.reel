@@ -106,6 +106,28 @@ describe("streamAskReel", () => {
     expect(good).toHaveLength(1);
   });
 
+  it("rejects_a_card_whose_year_or_tmdbId_is_the_wrong_type", async () => {
+    // The grid renders `year` straight into a paragraph and `tmdbId` straight into the href, so a
+    // frame that clears the guard with the wrong type for either one throws inside render rather
+    // than here. Fixture variation, one field at a time: a stringified year (what a JSON encoder
+    // that quotes numbers produces), an OBJECT year (what actually reached render and threw
+    // "Objects are not valid as a React child"), and a stringified tmdbId — each on an otherwise
+    // perfect card, so the assertion cannot pass for some other reason.
+    for (const bad of [{ year: "1999" }, { year: { oops: true } }, { tmdbId: "550" }]) {
+      const asCandidate = await collect([frame("candidate", { ...card(1), ...bad })]);
+      expect(asCandidate).toEqual([]);
+      // The same card inside a `done` takes the frame down with it — one bad card must not be
+      // rendered, and `isDone` requires every result to pass.
+      const asDone = await collect([frame("done", { results: [{ ...card(1), ...bad }], reason: "1 pick" })]);
+      expect(asDone).toEqual([]);
+    }
+
+    // The controls. A null year is a real title with no release date, and a null tmdbId is a title
+    // Reel knows about that TMDB does not — both must still reach the grid.
+    expect(await collect([frame("candidate", card(1, { year: null }))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1, { tmdbId: null }))])).toHaveLength(1);
+  });
+
   it("throws_an_AskStreamError_carrying_the_status_on_409", async () => {
     // Fixture variation: 409 (the same turn already streaming) and 500 (a real failure). The
     // client has to tell them apart — one keeps the grid, the other offers a retry — which a bare

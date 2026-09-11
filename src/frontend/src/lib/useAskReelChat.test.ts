@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_HISTORY_TURNS,
   MAX_SHOWN_IDS,
@@ -8,7 +8,13 @@ import {
   createMountGuard,
   initialChatState,
   lastUserQuery,
+  CONVERSATION_ID_KEY,
+  floorHeldBack,
+  formatFloor,
+  readStoredConversationId,
+  storeConversationId,
   nextBootstrap,
+  plural,
   showMoodPresets,
   type ChatTurn,
 } from "./useAskReelChat";
@@ -496,6 +502,248 @@ describe("createMountGuard", () => {
     real.guard.unmount();
     real.flush();
     expect(real.aborted()).toBe(1);
+  });
+});
+
+/**
+ * Asking a question used to blank the answer already on screen, immediately, for the fifteen-odd
+ * seconds the next turn takes. Two failures fell out of that: the page was empty while it worked,
+ * and pressing Stop inside that window destroyed an answer the user was still reading in exchange
+ * for one that never arrived. The previous answer is now held until the first `candidate` of the
+ * new turn — the first moment there is anything to put in its place.
+ */
+describe("chatReducer — holding the previous answer", () => {
+  /** A settled two-card answer, the state every hold starts from. */
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "tense heist movie", fresh: true }),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
+  );
+
+  it("a follow-up keeps the previous cards until its own first card arrives", () => {
+    const asking = chatReducer(answered, { type: "userTurn", message: "something quieter", fresh: false });
+    expect(asking.status).toBe("streaming");
+    expect(asking.holdingPrevious).toBe(true);
+    expect(asking.order).toEqual(["t1", "t2"]);
+    expect(asking.arrived).toBe(0);
+
+    // A phase frame is normally the sanctioned re-sort point; a held answer is finished work and
+    // must not shuffle in response to the NEW turn's progress.
+    const phased = chatReducer(asking, { type: "phase", data: { stage: "scoring", found: 9, scored: 0 } });
+    expect(phased.order).toEqual(["t1", "t2"]);
+    expect(phased.holdingPrevious).toBe(true);
+
+    // The swap: the first candidate REPLACES the held answer rather than joining it.
+    const swapped = chatReducer(phased, { type: "candidate", data: card(7) });
+    expect(swapped.holdingPrevious).toBe(false);
+    expect(swapped.order).toEqual(["t7"]);
+    expect(swapped.arrived).toBe(1);
+
+    // …and from there it is an ordinary turn again: the second card appends.
+    expect(chatReducer(swapped, { type: "candidate", data: card(8) }).order).toEqual(["t7", "t8"]);
+    expect(chatReducer(swapped, { type: "candidate", data: card(8) }).arrived).toBe(2);
+  });
+
+  it("holds on a re-ask but never on a fresh turn or a page", () => {
+    // Fixture variation over the three other routes into a stream, because each one wants a
+    // different answer and only the follow-up above shares the rule.
+    // A re-ask (the media toggle, the retry) replaces the same question's answer — hold.
+    const reasked = chatReducer(answered, { type: "reaskTurn" });
+    expect(reasked.holdingPrevious).toBe(true);
+    expect(reasked.order).toEqual(["t1", "t2"]);
+    expect(chatReducer(reasked, { type: "candidate", data: card(7) }).order).toEqual(["t7"]);
+
+    // A FRESH turn is a new conversation and takes the transcript with it, so there is no previous
+    // answer left to hold — cards under a blank transcript answer a question no longer on screen.
+    const fresh = chatReducer(answered, { type: "userTurn", message: "anything", fresh: true });
+    expect(fresh.holdingPrevious).toBe(false);
+    expect(fresh.order).toEqual([]);
+
+    // A page EXTENDS what is on screen, so its first candidate must append. Holding here would
+    // have made "Show me more" delete the answer it was adding to.
+    const paging = chatReducer(answered, { type: "moreTurn" });
+    expect(paging.holdingPrevious).toBe(false);
+    expect(chatReducer(paging, { type: "candidate", data: card(7) }).order).toEqual(["t1", "t2", "t7"]);
+
+    // A follow-up asked with nothing on screen holds nothing — there is no previous answer.
+    const cold = chatReducer(
+      chatReducer(initialChatState, { type: "userTurn", message: "first", fresh: true }),
+      { type: "userTurn", message: "second", fresh: false },
+    );
+    expect(cold.holdingPrevious).toBe(false);
+  });
+
+  it("a done frame ends the hold even when the new answer is empty", () => {
+    // The trap: a turn that returns nothing must not leave the previous answer up under "No
+    // matches for that one", which is a verdict on THIS question.
+    const asking = chatReducer(answered, { type: "userTurn", message: "something quieter", fresh: false });
+    const empty = chatReducer(asking, { type: "done", data: { results: [], reason: "no fresh matches" } });
+    expect(empty.holdingPrevious).toBe(false);
+    expect(empty.order).toEqual([]);
+    expect(empty.status).toBe("done");
+  });
+});
+
+/**
+ * Pressing Stop left the page blank: `status: "idle"` over a transcript matches no render branch
+ * at all, so there were no cards, no message, no retry and no way back to the answer that asking
+ * the question had already cleared. A stopped turn is now its own state, and it keeps everything.
+ */
+describe("chatReducer — stop", () => {
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "tense heist movie", fresh: true }),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
+  );
+
+  it("stopping before the first card keeps the previous answer and says so", () => {
+    // Probe one: Stop at 2.5s, before any candidate — the reported repro, and the case that used
+    // to produce 700px of void.
+    const asking = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    const stopped = chatReducer(chatReducer(asking, { type: "phase", data: { stage: "searching", found: 0, scored: 0 } }), { type: "stop" });
+
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.arrived).toBe(0);
+    // The answer the user was reading is still there — stopping a turn must not cost them one.
+    expect(stopped.order).toEqual(["t1", "t2"]);
+    expect(stopped.holdingPrevious).toBe(true);
+    expect(stopped.phase).toBeNull();
+    expect(stopped.appending).toBe(false);
+    // Something to re-run, which is what "Ask again" needs.
+    expect(stopped.lastQuery).toBe("slow burn detective series");
+  });
+
+  it("stopping after three cards keeps those three and counts them", () => {
+    // Probe two: the same action taken later in the same turn. `arrived` is the whole difference,
+    // and it is what the copy quotes — "3 picks arrived before you stopped" is only true if the
+    // count comes from the turn rather than from what happens to be on screen.
+    let state = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    for (const n of [7, 8, 9]) state = chatReducer(state, { type: "candidate", data: card(n) });
+    const stopped = chatReducer(state, { type: "stop" });
+
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.arrived).toBe(3);
+    expect(stopped.order).toEqual(["t7", "t8", "t9"]);
+    expect(stopped.holdingPrevious).toBe(false);
+  });
+
+  it("counts only the stopped PAGE's cards, not the answer it was extending", () => {
+    // A stopped page is the third shape: the previous cards are legitimately still on screen and
+    // are not what arrived. `order.length` would have said five.
+    let state = chatReducer(answered, { type: "moreTurn" });
+    for (const n of [7, 8, 9]) state = chatReducer(state, { type: "candidate", data: card(n) });
+    const stopped = chatReducer(state, { type: "stop" });
+    expect(stopped.arrived).toBe(3);
+    expect(stopped.order).toEqual(["t1", "t2", "t7", "t8", "t9"]);
+  });
+});
+
+/**
+ * The screen reader announced "1 picks ready." over a one-result turn while the server's own
+ * sentence, rendered two elements below it, was correctly singular. Four count-copy sites on the
+ * page, only some of them agreeing.
+ */
+describe("plural", () => {
+  it("is singular at exactly one and plural everywhere else", () => {
+    // Fixture variation across the boundary AND the degenerate case: zero is plural in English
+    // ("no picks ready"), which a naive `n > 1` check gets wrong in the one direction a spot-check
+    // of 1 and 2 cannot see.
+    expect(plural(1, "pick")).toBe("pick");
+    expect(plural(0, "pick")).toBe("picks");
+    expect(plural(2, "pick")).toBe("picks");
+    expect(plural(17, "title")).toBe("titles");
+  });
+});
+
+/**
+ * The under-floor tray's label. Two independent defects lived in one sentence: the count came from
+ * a scalar beside the cards rather than from the cards ("Show the 2 under your 6 bar" over a tray
+ * holding one title), and the number was formatted with the ambient locale and no minimum fraction
+ * digits, so it read "6" beside the server's own "6.0 bar" — and "6,5" beside "6.5" on a
+ * comma-decimal machine.
+ */
+describe("floorHeldBack", () => {
+  it("counts the tray's own contents, and the server's scalar only when the tray is empty", () => {
+    // Fixture variation on the ONE field that differs between the two sources. The disagreeing
+    // case is the whole point: while they agree — which is what live turns did — a wrong
+    // implementation is indistinguishable from a right one.
+    expect(floorHeldBack(1, 2)).toBe(1);
+    expect(floorHeldBack(3, 3)).toBe(3);
+    // Nothing sent down, but the server counted a cut: the scalar is the honest answer there.
+    expect(floorHeldBack(0, 3)).toBe(3);
+    // Silence is not a count, and neither is a zero. Both leave the tray closed.
+    expect(floorHeldBack(0, null)).toBe(0);
+    expect(floorHeldBack(0, 0)).toBe(0);
+    // Cards but no scalar — an older server that sends the tray and not the count.
+    expect(floorHeldBack(2, null)).toBe(2);
+  });
+});
+
+describe("formatFloor", () => {
+  it("always renders one decimal, matching the server's own sentence", () => {
+    // Fixture variation across the three shapes a saved bar takes: a whole number (the one that
+    // printed "6" beside "6.0"), one that already has a decimal, and one that needs rounding.
+    expect(formatFloor(6)).toBe("6.0");
+    expect(formatFloor(6.5)).toBe("6.5");
+    expect(formatFloor(7.25)).toBe("7.3");
+    // No saved bar is not a bar of zero — the tray falls back to wording rather than "0.0".
+    expect(formatFloor(null)).toBeNull();
+    expect(formatFloor(undefined)).toBeNull();
+  });
+});
+
+/**
+ * The client persisted no conversation id at all, so a reload could only ask for the ACCOUNT's
+ * newest thread — two tabs, or a phone and a laptop, silently converged onto whichever wrote last
+ * and the thread you were reading vanished from the UI. This is the plumbing for the per-tab
+ * resume: the id is remembered, and every failure to remember it is swallowed, because a
+ * convenience must never be able to take a turn down with it.
+ */
+describe("conversation id persistence", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function fakeStorage(initial: Record<string, string> = {}) {
+    const map = new Map(Object.entries(initial));
+    return {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+      removeItem: (k: string) => void map.delete(k),
+      read: () => map.get(CONVERSATION_ID_KEY) ?? null,
+    };
+  }
+
+  it("round-trips an id and clears it on null", () => {
+    const store = fakeStorage();
+    vi.stubGlobal("localStorage", store);
+
+    storeConversationId("c1e0e3a2-0000-0000-0000-000000000001");
+    expect(store.read()).toBe("c1e0e3a2-0000-0000-0000-000000000001");
+    expect(readStoredConversationId()).toBe("c1e0e3a2-0000-0000-0000-000000000001");
+
+    storeConversationId(null);
+    expect(store.read()).toBeNull();
+    expect(readStoredConversationId()).toBeNull();
+  });
+
+  it("survives every way storage can fail, and reads an empty value as nothing", () => {
+    // Fixture variation across the three failures that are real in a browser and one that is real
+    // in a test runner: no localStorage at all (this very suite runs in node), a setItem that
+    // throws (a full quota, or Safari's private mode), a getItem that throws (a blocked origin),
+    // and a stored empty string (a previous write that half-landed).
+    vi.unstubAllGlobals();
+    expect(() => storeConversationId("c1")).not.toThrow();
+    expect(readStoredConversationId()).toBeNull();
+
+    vi.stubGlobal("localStorage", {
+      getItem: () => { throw new Error("blocked"); },
+      setItem: () => { throw new Error("quota"); },
+      removeItem: () => { throw new Error("quota"); },
+    });
+    expect(() => storeConversationId("c1")).not.toThrow();
+    expect(readStoredConversationId()).toBeNull();
+
+    vi.stubGlobal("localStorage", fakeStorage({ [CONVERSATION_ID_KEY]: "" }));
+    expect(readStoredConversationId()).toBeNull();
   });
 });
 

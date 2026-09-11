@@ -11,6 +11,8 @@ import { SESSION_FOUNDER, askEnd, askPush, askPushConflict, askRequests, mockJso
  *    boundary where re-sorting is allowed;
  *  - a fresh /search shows the preset mood chips, and tapping one sends its text as the turn;
  *  - one message costs exactly one /ask request, paging being a button rather than a sentinel;
+ *  - Stop is a state and not an absence: it keeps whatever arrived, keeps the PREVIOUS answer when
+ *    nothing did, names what happened in the live region, and hands the composer back;
  *  - the server's conflict sentence lands above the grid, and the quality floor's cut is
  *    accounted for in its own collapsed tray under it.
  */
@@ -36,6 +38,9 @@ const ALPHA = card("a1", "Alpha Creek", 0.4);
 const BORDER = card("b2", "Border Town", 0.9);
 const CEDAR = card("c3", "Cedar Falls", 0.5);
 const XCLUDED = card("d4", "Xcluded Manor", 0.95, true);
+
+/** Alpha/Border/Cedar as `done` leaves them: blend order, which is not arrival order. */
+const SETTLED_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
 
 /**
  * The account's saved conditions, as `/settings/filters` returns them. `minPredictedRating` is the
@@ -171,6 +176,79 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await askEnd(page);
   });
 
+  test("Stop keeps the cards that arrived, says so, and leaves the composer usable", async ({ page }) => {
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("slow burn detective series");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await askPush(page, "candidate", ALPHA);
+    await askPush(page, "candidate", BORDER);
+    await askPush(page, "candidate", CEDAR);
+    await expect(gridNames(page)).toHaveCount(3);
+
+    await page.getByTestId("askreel-stop").click();
+
+    // The three that arrived are still on screen — Stop abandons the turn, not its results.
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Border Town", "Cedar Falls"]);
+    // …and the page SAYS what happened. Before this the banner simply vanished and every render
+    // branch read the state as "nothing to say", leaving a blank page with no way back.
+    const stopped = page.getByTestId("askreel-stopped");
+    await expect(stopped).toBeVisible();
+    await expect(stopped).toHaveText(/Stopped — 3 picks arrived before you stopped\./);
+    await expect(stopped.getByTestId("askreel-retry")).toBeVisible();
+    // The screen-reader announcement matches the card, rather than staying the empty string.
+    await expect(page.getByTestId("askreel-status")).toHaveText("Stopped — 3 picks arrived before you stopped.");
+    // Neither the empty state nor the error state may claim this turn.
+    await expect(page.getByTestId("semantic-empty")).toHaveCount(0);
+    await expect(page.getByTestId("semantic-error")).toHaveCount(0);
+
+    // The composer is live again: the turn is over, so the next question can go straight out.
+    await expect(page.getByTestId("askreel-banner")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+    await page.getByTestId("askreel-composer").fill("something else then");
+    await expect(page.getByTestId("askreel-send")).toBeEnabled();
+    await expect(page.getByTestId("askreel-chip").first()).toBeEnabled();
+  });
+
+  test("stopping before the first card leaves the previous answer intact", async ({ page }) => {
+    // The reported repro, and the expensive half of it: asking a question used to blank the grid
+    // instantly, so a Stop at 2.5s cost the user the twelve cards they were reading in exchange
+    // for an answer that never arrived. Same control as the test above, one turn earlier.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a tense heist movie");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+    await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+
+    await page.getByTestId("askreel-composer").fill("slow burn detective series");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+
+    // Held, not blanked — and labelled, so it never reads as an answer to the new question.
+    // Blend order, settled by the previous turn's `done`, and unchanged by the phase frame above:
+    // a held answer is finished work and must not re-sort in response to the new turn's progress.
+    await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+    await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
+
+    await page.getByTestId("askreel-stop").click();
+
+    await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+    const stopped = page.getByTestId("askreel-stopped");
+    await expect(stopped).toHaveText(/Stopped before any picks arrived\./);
+    await expect(stopped.getByTestId("askreel-retry")).toBeVisible();
+    // The seam stays, and re-words itself: nothing is being waited for any more.
+    await expect(page.getByTestId("askreel-previous-answer"))
+      .toHaveText("Previous answer — the last question never replaced it.");
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+  });
+
   test("a filter collision is named above the grid, and the floor's cut gets its own tray", async ({ page }) => {
     await bootSearch(page);
 
@@ -212,7 +290,7 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(tray.locator("summary")).toHaveText("Show the 1 pick Reel held back");
   });
 
-  test("the floor tray names the account's own bar when there is one", async ({ page }) => {
+  test("the floor tray names the account's own bar, to one decimal, and counts its own contents", async ({ page }) => {
     // Same tray, one field different from the test above: the account has a saved
     // `minPredictedRating`. That single field is what turns "Reel held some back" into a sentence
     // naming a number the user chose and can go and change.
@@ -222,7 +300,9 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page);
 
-    // Three cut, one card sent down: the label must quote the SERVER's count, not the tray's.
+    // The two sources DISAGREE on purpose: the server says it cut three, and sends one card down.
+    // The label used to quote the scalar, so it read "Show the 2 under your 6 bar" over a tray the
+    // user could open and count to one. A number beside its own contents has to match them.
     await askPush(page, "done", {
       results: [ALPHA, BORDER],
       reason: "2 picks ranked for you, from 40 pulled.",
@@ -233,6 +313,10 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
 
     const tray = page.getByTestId("askreel-below-floor");
     await expect(tray).toBeVisible();
-    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6 bar");
+    // …and "6.0", not "6": `minPredictedRating` is 6, and the server's own sentence beside this
+    // one says "6.0 bar". One number, one rendering, whatever the browser's locale.
+    await expect(tray.locator("summary")).toHaveText("Show the 1 under your 6.0 bar");
+    await tray.locator("summary").click();
+    await expect(tray.locator('a[href*="/title/"]')).toHaveCount(1);
   });
 });

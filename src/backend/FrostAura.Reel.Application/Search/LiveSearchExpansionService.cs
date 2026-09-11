@@ -722,7 +722,7 @@ public sealed class LiveSearchExpansionService(
             // shown. A transcript that paraphrases the footer is a transcript that can be wrong.
             var reason = AskReelReason.Build(
                 blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
-                widened: relaxation > 0, floorRelaxed, floor);
+                widened: relaxation > 0, floorRelaxed, floor, verdict.AboveFloorCount);
 
             // Report what was RETURNED, not what was pulled. The old wording was derived purely
             // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —

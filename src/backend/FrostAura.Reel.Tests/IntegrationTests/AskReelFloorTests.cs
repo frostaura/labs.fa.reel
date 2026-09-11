@@ -133,7 +133,86 @@ public class AskReelFloorTests(PostgresFixture fixture) : EmbeddedCatalogTestBas
 
         Assert.Equal(before.Kept.Count + 1, after.Kept.Count);
         Assert.Equal(before.DroppedByFloor - 1, after.DroppedByFloor);
+        Assert.Equal(before.AboveFloorCount + 1, after.AboveFloorCount);
     }
+
+    /// <summary>
+    /// The count the copy is built from, in the branch where it was previously unavailable. On a
+    /// relaxed turn NOTHING is dropped and everything is kept, so neither of the other two counts
+    /// can distinguish "two cards cleared your bar" from "none did" — which is exactly how a
+    /// threshold came to be reported as an absolute on six of seven observed turns.
+    /// </summary>
+    [Fact]
+    public void A_relaxed_turn_still_knows_how_many_cleared()
+    {
+        var verdict = AskReelFloor.Apply(
+            Picks(6.3m, 6.1m, 5.9m, 5.5m, 5.2m, 5m, 4.4m, 3.9m), [], p => p.Predicted, floor: 6m, minKept: 6);
+
+        Assert.True(verdict.Relaxed);
+        Assert.Equal(8, verdict.Kept.Count);
+        Assert.Equal(0, verdict.DroppedByFloor);
+        Assert.Equal(2, verdict.AboveFloorCount);
+        Assert.Equal(6, verdict.ShownBelowFloor);
+    }
+
+    /// <summary>A turn the floor actually bound has nothing on screen under the bar.</summary>
+    [Fact]
+    public void A_bound_turn_shows_nothing_below_the_bar()
+    {
+        var verdict = AskReelFloor.Apply(
+            Picks(9m, 8m, 7.5m, 7m, 6.5m, 6m, 5.9m, 5m), [], p => p.Predicted, floor: 6m, minKept: 6);
+
+        Assert.False(verdict.Relaxed);
+        Assert.Equal(6, verdict.AboveFloorCount);
+        Assert.Equal(0, verdict.ShownBelowFloor);
+    }
+
+    /// <summary>
+    /// The wiring the defect actually lives in: verdict → copy. Two cards clear a 6.0 bar on a
+    /// relaxed turn, and the sentence under the grid says so, in the exact words the user reads.
+    /// </summary>
+    [Fact]
+    public void A_relaxed_turn_with_two_above_the_bar_says_so_verbatim()
+    {
+        var verdict = AskReelFloor.Apply(
+            Picks(6.3m, 6.1m, 5.9m, 5.5m, 5.2m, 5m, 4.4m, 3.9m), [], p => p.Predicted, floor: 6m, minKept: 6);
+
+        Assert.Equal(
+            "8 picks ranked for you, from 40 pulled · only 2 picks cleared your 6.0 bar, so it was relaxed "
+            + "· 6 picks shown below your 6.0 bar",
+            ReasonFor(verdict, discovered: 40, floor: 6m));
+    }
+
+    /// <summary>
+    /// THE FIXTURE PROBE, on the copy rather than the decision. One card crosses the bar and both
+    /// numbers in the sentence move by one, in opposite directions. A copy built from the relaxed
+    /// FLAG rather than the count is invariant under this move — which is precisely why the old
+    /// wording survived a green suite.
+    /// </summary>
+    [Fact]
+    public void Flipping_one_card_across_the_bar_moves_the_count_in_the_copy_by_one()
+    {
+        var before = ReasonFor(
+            AskReelFloor.Apply(Picks(6.3m, 6.1m, 5.9m, 5m, 4m, 3m, 2m), [], p => p.Predicted, 6m, 6),
+            discovered: 40, floor: 6m);
+        var after = ReasonFor(
+            AskReelFloor.Apply(Picks(6.3m, 6.1m, 6.05m, 5m, 4m, 3m, 2m), [], p => p.Predicted, 6m, 6),
+            discovered: 40, floor: 6m);
+
+        Assert.Contains("only 2 picks cleared your 6.0 bar", before, StringComparison.Ordinal);
+        Assert.Contains("5 picks shown below your 6.0 bar", before, StringComparison.Ordinal);
+        Assert.Contains("only 3 picks cleared your 6.0 bar", after, StringComparison.Ordinal);
+        Assert.Contains("4 picks shown below your 6.0 bar", after, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The turn's sentence, built from the floor's own verdict exactly as the pipeline builds it.
+    /// Every count comes off the decision so the copy cannot drift from the thing it describes.
+    /// </summary>
+    private static string ReasonFor(AskReelFloor.Decision<Pick> verdict, int discovered, decimal floor) =>
+        AskReelReason.Build(
+            verdict.Kept.Count, verdict.KeptOutside.Count, verdict.DroppedByFloor, discovered,
+            widened: false, floorRelaxed: verdict.Relaxed, floor, aboveFloor: verdict.AboveFloorCount);
 
     /// <summary>
     /// A card with no prediction clears the bar, deliberately: a missing prediction means this
