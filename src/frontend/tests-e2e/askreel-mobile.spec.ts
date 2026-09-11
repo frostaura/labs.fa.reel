@@ -87,6 +87,60 @@ test.describe("Ask Reel on a phone", () => {
     await expectComposerReachable(page, "320×568");
   });
 
+  test("the composer wraps and grows to four lines, and stops there", async ({ page }) => {
+    // F6-18. It was a single-line `<input>`, 239 px wide at this viewport — about 36 characters of
+    // a question the server accepts up to 1 000 of. A 200-character question measured
+    // `scrollWidth 1241` and a 1 000-character one `scrollWidth 6101`: the user could not read
+    // back what they were about to send, while the bubble AFTER sending has been readable since
+    // F6-02.
+    await bootSearch(page);
+    const composer = page.getByTestId("askreel-composer");
+    const heightOf = () => composer.evaluate((el) => el.getBoundingClientRect().height);
+    const overflowsSideways = () => composer.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+
+    expect(await heightOf()).toBeGreaterThanOrEqual(44);
+    const resting = await heightOf();
+
+    await composer.fill("a tense thriller with a clever ending, nothing supernatural, and a cast I have not seen before");
+    const grown = await heightOf();
+    expect(grown).toBeGreaterThan(resting);
+    // Wrapped, not scrolled sideways past the edge of the field.
+    expect(await overflowsSideways()).toBe(false);
+
+    // …and it stops. A composer that grows without limit eats the answer it is asking about.
+    await composer.fill("x".repeat(1000).replace(/(.{40})/g, "$1 "));
+    const full = await heightOf();
+    expect(full).toBeGreaterThan(grown);
+    expect(full).toBeLessThanOrEqual(116);
+    expect(await overflowsSideways()).toBe(false);
+
+    // Deleting it back shrinks the field again rather than leaving a four-line box over one word.
+    await composer.fill("short");
+    expect(await heightOf()).toBe(resting);
+  });
+
+  test("Enter sends and Shift+Enter breaks the line", async ({ page }) => {
+    // F3-12. As an `<input>` Shift+Enter "submitted" because there was no second line to make and
+    // the form's default ran — the distinction only became real once the field could hold one.
+    await bootSearch(page);
+    const composer = page.getByTestId("askreel-composer");
+
+    await composer.fill("a tense heist");
+    await composer.press("Shift+Enter");
+    await composer.type("with a clever ending");
+    expect(await composer.inputValue()).toBe("a tense heist\nwith a clever ending");
+    // Nothing was sent by the newline.
+    expect(await page.evaluate(() => (window as unknown as { __ask: { requests: unknown[] } }).__ask.requests.length)).toBe(0);
+
+    await composer.press("Enter");
+    await expect(page.getByTestId("askreel-banner")).toBeVisible();
+    const sent = await page.evaluate(() => (window as unknown as { __ask: { requests: unknown[] } }).__ask.requests);
+    expect((sent as { query: string }[])[0].query).toBe("a tense heist\nwith a clever ending");
+    // …and the field is empty and back at its resting height for the next question.
+    expect(await composer.inputValue()).toBe("");
+    expect(await composer.evaluate((el) => el.getBoundingClientRect().height)).toBe(44);
+  });
+
   test("transcript is a log landmark with speaker labels", async ({ page }) => {
     await bootSearch(page);
 

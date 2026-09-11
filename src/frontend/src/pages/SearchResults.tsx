@@ -23,6 +23,7 @@ import {
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
   pickSummary, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
+  COMPOSER_MIN_PX, composerHeight, composerSends,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -393,6 +394,28 @@ function AskReel() {
     setThreadId(FRESH_CONVERSATION);
     setShouldResume(false);
   };
+
+  /**
+   * The composer's height, measured rather than guessed: the same 400 characters are four lines
+   * wide and eight narrow, so a character count cannot decide this. Released to `auto` first
+   * because a textarea reports `scrollHeight` against its CURRENT height and would otherwise never
+   * shrink back after a deletion. A layout effect, so both writes land in one paint.
+   */
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    // An EMPTY textarea measures its placeholder, not its value: Chromium reports
+    // `scrollHeight: 92` for a resting composer because the placeholder sentence wraps to three
+    // lines at 375 px. Measured rather than assumed (the probe is in the spec), and the empty case
+    // is the one height this component already knows without asking.
+    if (!draft) {
+      el.style.height = `${COMPOSER_MIN_PX}px`;
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${composerHeight(el.scrollHeight)}px`;
+  }, [draft]);
 
   const submit = (text: string) => {
     if (!text.trim()) return;
@@ -1011,14 +1034,34 @@ function AskReel() {
         onSubmit={(e) => { e.preventDefault(); submit(draft); }}
         className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0 inset-x-0 z-30 border-t border-fa-frost/10 bg-background/95 backdrop-blur px-4 py-3"
       >
-        <div className="max-w-3xl mx-auto flex items-center gap-2">
-          <input
+        {/* `items-end` so the mic and Send stay on the composer's last line as it grows, rather
+            than drifting to the middle of a four-line field. */}
+        <div className="max-w-3xl mx-auto flex items-end gap-2">
+          {/* F6-18 + the 44 px audit. A single-line `<input>` 37 px tall: under the touch minimum
+              at every width, and about 36 characters wide on a phone for a question the server
+              takes up to 1 000 of — a 1 000-character one measured `scrollWidth 6101` in it. The
+              bubble has been readable back since F6-02; the field it is typed into was not.
+
+              A textarea wraps, grows to four lines and then scrolls (see `composerHeight`), and it
+              is the only shape in which Enter-sends / Shift+Enter-newline is a real distinction:
+              as an `<input>` Shift+Enter "submitted" because there was no second line to make and
+              the form's default ran (F3-12). `resize-none` because the grip would fight the
+              measured height, and the height is set from content on every keystroke. */}
+          <textarea
+            ref={composerRef}
             data-testid="askreel-composer"
+            rows={1}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (!composerSends(e.key, e.shiftKey, e.nativeEvent.isComposing)) return;
+              e.preventDefault();
+              submit(draft);
+            }}
             aria-label="Ask Reel"
             placeholder="Ask for more, or refine — “something funnier”, “more like the second one”…"
-            className="flex-1 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
+            style={{ height: COMPOSER_MIN_PX }}
+            className="flex-1 min-h-11 resize-none overflow-y-auto rounded-3xl bg-fa-frost/10 px-4 py-2.5 fa-body leading-6 text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
           />
           {speech.supported && (
             <button

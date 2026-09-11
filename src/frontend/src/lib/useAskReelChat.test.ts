@@ -27,6 +27,10 @@ import {
   showsFootnote,
   showsConflictPill,
   pickSummary,
+  composerHeight,
+  composerSends,
+  COMPOSER_MIN_PX,
+  COMPOSER_MAX_PX,
   turnSettled,
   recentListing,
   lastTurnOutcome,
@@ -2084,6 +2088,45 @@ describe("turnSettled", () => {
       expect(turnSettled(previous, "done")).toBe(false);
     }
     expect(turnSettled("streaming", "streaming")).toBe(false);
+  });
+});
+
+/**
+ * F6-18 + the 44 px audit. The composer was a single-line `<input>` 37 px tall — under the touch
+ * minimum at every width, about 36 characters wide on a phone, for a question the server accepts up
+ * to 1 000 of. The arithmetic that replaced it is here because the element is not testable in
+ * vitest: this runner is node with no renderer.
+ */
+describe("composerHeight", () => {
+  it("never_goes_under_the_touch_minimum_or_over_four_lines", () => {
+    // Fixture variation across the three regimes: below the floor, between, above the ceiling.
+    expect(composerHeight(20)).toBe(COMPOSER_MIN_PX);
+    expect(composerHeight(COMPOSER_MIN_PX)).toBe(COMPOSER_MIN_PX);
+    expect(composerHeight(68)).toBe(68);
+    expect(composerHeight(400)).toBe(COMPOSER_MAX_PX);
+    expect(COMPOSER_MIN_PX).toBeGreaterThanOrEqual(44);
+  });
+
+  it("rounds_up_and_survives_a_measurement_that_is_not_a_number", () => {
+    // Sub-pixel line heights are ordinary; a NaN is what an element that has not laid out yet
+    // reports, and falling back to the resting height is better than writing "NaNpx".
+    expect(composerHeight(67.2)).toBe(68);
+    expect(composerHeight(Number.NaN)).toBe(COMPOSER_MIN_PX);
+    expect(composerHeight(Number.POSITIVE_INFINITY)).toBe(COMPOSER_MIN_PX);
+  });
+});
+
+describe("composerSends", () => {
+  it("sends_on_Enter_and_breaks_the_line_on_Shift_Enter", () => {
+    expect(composerSends("Enter", false, false)).toBe(true);
+    expect(composerSends("Enter", true, false)).toBe(false);
+    expect(composerSends("a", false, false)).toBe(false);
+  });
+
+  it("never_sends_the_Enter_that_confirms_an_IME_candidate", () => {
+    // One field different from the sending case. On a Japanese, Chinese or Korean keyboard that
+    // Enter commits the candidate the user is still choosing; sending there submits half a word.
+    expect(composerSends("Enter", false, true)).toBe(false);
   });
 });
 

@@ -214,7 +214,10 @@ export default function ConversationSwitcher({
                     setOpen(false);
                     onOpen(row.id);
                   }}
-                  className="min-w-0 flex-1 text-left"
+                  // 44 px of vertical target inside a 60 px row: the primary way into a thread was
+                  // a 36 px box, eight pixels shy of the touch minimum the row's own delete control
+                  // already meets. `justify-center` keeps the two lines optically where they were.
+                  className="flex min-h-11 min-w-0 flex-1 flex-col justify-center text-left"
                 >
                   {/* The title is the thread's first question, which is what a person recognises a
                       conversation by — never a generated summary they have to decode. */}

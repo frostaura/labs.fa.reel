@@ -829,6 +829,52 @@ export function failedTurnMessage(failureCode: string | null): string {
   return "That one didn’t finish.";
 }
 
+/**
+ * The composer's floor and ceiling in CSS pixels.
+ *
+ * F6-18 + the 44 px audit. The composer was a single-line `<input>` **37 px** tall: under the touch
+ * minimum at every width, and — at 239 px wide on a phone — about 36 characters of a question the
+ * server accepts up to 1 000 of. A 1 000-character question measured `scrollWidth 6101` in it. The
+ * *bubble* has been readable back since F6-02; the field the question is typed into was not, before
+ * it was sent.
+ *
+ * 44 is the target minimum, so it is also the resting height. The ceiling is four lines of the
+ * body face plus its vertical padding: enough to read back a paragraph-length question, and short
+ * enough that a growing composer never eats the answer it is asking about. Past it the field
+ * scrolls rather than growing.
+ */
+export const COMPOSER_MIN_PX = 44;
+export const COMPOSER_MAX_PX = 116;
+
+/**
+ * How tall the composer should be for content of `scrollHeight` — clamped, and total.
+ *
+ * A textarea reports `scrollHeight` for its content, but only once its own height has been released
+ * (the caller sets `height: auto` first), and it never reports less than one line — so the clamp
+ * does both ends. Pure, so the arithmetic is testable where the element is not: vitest here runs in
+ * node with no renderer.
+ */
+export function composerHeight(scrollHeight: number): number {
+  if (!Number.isFinite(scrollHeight)) return COMPOSER_MIN_PX;
+  return Math.min(COMPOSER_MAX_PX, Math.max(COMPOSER_MIN_PX, Math.ceil(scrollHeight)));
+}
+
+/**
+ * Does this keystroke send the question, or break the line?
+ *
+ * A multi-line composer has to answer that explicitly — an `<input>` answered it by having no
+ * second line at all, which is why Shift+Enter "submitted" (F3-12): it never did anything, and the
+ * form's default submit ran. Enter sends because that is the gesture the whole surface is built
+ * around; Shift+Enter is the newline, which is the only reason the field can grow.
+ *
+ * `composing` is the IME guard and is not optional: on a Japanese, Chinese or Korean keyboard the
+ * Enter that CONFIRMS a candidate raises `keydown` with `isComposing` true, and sending there
+ * submits a half-typed word the user was still choosing.
+ */
+export function composerSends(key: string, shiftKey: boolean, composing: boolean): boolean {
+  return key === "Enter" && !shiftKey && !composing;
+}
+
 /** How often a still-running turn is re-checked, and how long that is worth doing for. */
 export const PENDING_TURN_POLL_MS = 5_000;
 export const PENDING_TURN_BUDGET_MS = 60_000;

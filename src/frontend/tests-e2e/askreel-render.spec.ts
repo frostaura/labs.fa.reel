@@ -478,13 +478,19 @@ test.describe("touch targets", () => {
 
   test("the header, the composer and the presets all meet 44 x 44", async ({ page }) => {
     await boot(page);
-    for (const id of ["askreel-new", "askreel-recent", "askreel-preset", "askreel-send", "askreel-mic"]) {
+    // `askreel-composer` is in this list because the commit that added it was titled "every
+    // control on /search is a 44 px target" and left the composer at 37 — the one control on the
+    // page that every single turn goes through.
+    for (const id of ["askreel-new", "askreel-recent", "askreel-preset", "askreel-send", "askreel-mic", "askreel-composer"]) {
       await expectTarget(page, id);
     }
     // The delete control is the smallest of them and the only destructive one — F6-07 measured it
-    // at 26 x 26, eight pixels from the row that opens the thread.
+    // at 26 x 26, eight pixels from the row that opens the thread. The row's own open target was
+    // 36 px inside a 60 px row: the primary way into a thread, under the minimum its delete
+    // control already met.
     await page.getByTestId("askreel-recent").tap();
     await expectTarget(page, "askreel-recent-delete");
+    await expectTarget(page, "askreel-recent-open");
   });
 
   test("the answer's own controls meet 44 x 44 on a resumed thread", async ({ page }) => {
