@@ -15,6 +15,9 @@ import { AskStreamError, streamAskReel, type AskCard, type AskEvent } from "./as
 
 const encoder = new TextEncoder();
 
+/** One exchange's idempotency key. Required on every request now — the server refuses without it. */
+const TURN_ID = "44444444-4444-4444-4444-444444444444";
+
 /** A Response whose body delivers exactly these byte runs, one per `read()`. */
 function streamed(chunks: string[], status = 200): Response {
   const body = new ReadableStream<Uint8Array>({
@@ -41,7 +44,7 @@ function card(n: number, extra: Partial<AskCard> = {}): AskCard {
 async function collect(chunks: string[], status = 200): Promise<AskEvent[]> {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(streamed(chunks, status))));
   const events: AskEvent[] = [];
-  await streamAskReel({ query: "tense thriller" }, (ev) => events.push(ev), new AbortController().signal);
+  await streamAskReel({ query: "tense thriller", clientTurnId: TURN_ID }, (ev) => events.push(ev), new AbortController().signal);
   return events;
 }
 
@@ -134,7 +137,7 @@ describe("streamAskReel", () => {
     // `Error("ask failed: 409")` could only support by parsing its own message.
     for (const status of [409, 500]) {
       vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("{}", { status }))));
-      const err = await streamAskReel({ query: "q" }, () => {}, new AbortController().signal).catch((e: unknown) => e);
+      const err = await streamAskReel({ query: "q", clientTurnId: TURN_ID }, () => {}, new AbortController().signal).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(AskStreamError);
       expect((err as AskStreamError).status).toBe(status);
     }
@@ -167,7 +170,7 @@ describe("streamAskReel", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       const events: AskEvent[] = [];
-      const err = await streamAskReel({ query: "q" }, (ev) => events.push(ev), new AbortController().signal).catch((e: unknown) => e);
+      const err = await streamAskReel({ query: "q", clientTurnId: TURN_ID }, (ev) => events.push(ev), new AbortController().signal).catch((e: unknown) => e);
 
       if (refreshOk) {
         expect(err).toBeUndefined();
@@ -192,5 +195,113 @@ describe("streamAskReel", () => {
 
     const without = await collect([frame("done", { results: [card(1)], reason: "1 pick" })]);
     expect(without).toHaveLength(1);
+  });
+});
+
+/**
+ * The turn record's wire (Phase 1). The server now owns what a conversation is: the client sends
+ * one id for the exchange and nothing else about the past, and the stream says which turn it is
+ * answering. Every test here is about a field the parser previously had no type for, so the
+ * failure mode they close is silent — a field arrives, nothing reads it, and the UI carries on
+ * describing the world it used to live in.
+ */
+describe("streamAskReel — the turn record", () => {
+  /** Captures what the client actually PUT ON THE WIRE, which is the half `collect` throws away. */
+  async function sentBody(request: Parameters<typeof streamAskReel>[0]): Promise<Record<string, unknown>> {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>;
+      return Promise.resolve(streamed([frame("done", { results: [], reason: null })]));
+    }));
+    await streamAskReel(request, () => {}, new AbortController().signal);
+    return body;
+  }
+
+  it("sends_the_turn_id_and_never_the_history_or_the_shown_set", async () => {
+    // Fixture variation: the full request, then the minimum one. `history`, `shownTmdbIds` and
+    // `continuation` were REMOVED, not renamed — a client that still sends them is sending a
+    // transcript the server will not read, and the server's own record is the only one that counts.
+    const full = await sentBody({
+      query: "tense thriller",
+      conversationId: "11111111-1111-1111-1111-111111111111",
+      clientTurnId: "22222222-2222-2222-2222-222222222222",
+      mediaTypes: ["movie"],
+    });
+    expect(full.clientTurnId).toBe("22222222-2222-2222-2222-222222222222");
+    expect(full.conversationId).toBe("11111111-1111-1111-1111-111111111111");
+    expect(Object.keys(full)).not.toContain("history");
+    expect(Object.keys(full)).not.toContain("shownTmdbIds");
+    expect(Object.keys(full)).not.toContain("continuation");
+
+    const minimal = await sentBody({ query: "q", clientTurnId: "33333333-3333-3333-3333-333333333333" });
+    expect(minimal.clientTurnId).toBe("33333333-3333-3333-3333-333333333333");
+    expect(Object.keys(minimal)).not.toContain("history");
+  });
+
+  it("reads_the_turn_id_and_sequence_off_the_conversation_frame", async () => {
+    // Fixture variation: the full frame the server sends now, and the bare `{id}` an older one
+    // sent. Both must survive — the id is what the tab remembers, and losing the frame entirely
+    // because two new fields are missing would cost the conversation, not just the reconnect path.
+    const full = await collect([
+      frame("conversation", { id: "c-1", turnId: "t-9", sequence: 3 }),
+    ]);
+    expect(full).toEqual([{ event: "conversation", data: { id: "c-1", turnId: "t-9", sequence: 3 } }]);
+
+    const bare = await collect([frame("conversation", { id: "c-1" })]);
+    expect(bare).toEqual([{ event: "conversation", data: { id: "c-1" } }]);
+
+    // An id-less frame is not a conversation: remembering "" would send an empty id on the next turn.
+    expect(await collect([frame("conversation", { turnId: "t-9", sequence: 3 })])).toEqual([]);
+  });
+
+  it("carries_replayed_removed_and_the_failure_code_through_a_done_frame", async () => {
+    // The three things only a REPLAY can say. `removed` in particular is a number the user is owed:
+    // cards that silently disappear between two views of the same answer are indistinguishable
+    // from a bug. Fixture variation: a replayed success, then a replayed failure.
+    const ok = await collect([
+      frame("done", { results: [card(1)], reason: "1 pick", replayed: true, removed: 2 }),
+    ]);
+    expect(ok[0].data).toMatchObject({ replayed: true, removed: 2 });
+
+    const failed = await collect([
+      frame("done", { results: [], reason: null, replayed: true, removed: 0, failed: true, failureCode: "client_aborted" }),
+    ]);
+    expect(failed[0].data).toMatchObject({ failed: true, failureCode: "client_aborted" });
+  });
+
+  it("skips_id_lines_and_keepalive_comments_without_losing_the_frame", async () => {
+    // The server writes `id:` first on every frame and a `:keepalive` comment every 10 seconds.
+    // Fixture variation: the id line alone, and an id line whose frame is preceded by a keepalive
+    // glued to it — a parser that treats an unknown field line as data drops the whole frame.
+    const idOnly = await collect([`id: 7\n${frame("phase", { stage: "ranking", found: 3, scored: 3 })}`]);
+    expect(idOnly).toEqual([{ event: "phase", data: { stage: "ranking", found: 3, scored: 3 } }]);
+
+    const withKeepalive = await collect([
+      ":keepalive\n\n",
+      `id: 8\n${frame("done", { results: [card(1)], reason: "1 pick" })}`,
+    ]);
+    expect(withKeepalive.map((e) => e.event)).toEqual(["done"]);
+  });
+
+  it("carries_the_servers_stable_code_on_a_400_404_and_409", async () => {
+    // The prose in `error` is the user's and may change; `code` is the client's and does not.
+    // Fixture variation: the three codes the client acts on differently, plus a body that is not
+    // JSON at all (a proxy's HTML error page) — which must still produce the status, not a throw.
+    for (const [status, code] of [[400, "query_too_long"], [404, "conversation_not_found"], [409, "turn_in_progress"]] as const) {
+      vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(
+        new Response(JSON.stringify({ error: "…", code }), { status }),
+      )));
+      const err = await streamAskReel({ query: "q", clientTurnId: "t" }, () => {}, new AbortController().signal)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AskStreamError);
+      expect((err as AskStreamError).status).toBe(status);
+      expect((err as AskStreamError).code).toBe(code);
+    }
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("<html>502</html>", { status: 502 }))));
+    const err = await streamAskReel({ query: "q", clientTurnId: "t" }, () => {}, new AbortController().signal)
+      .catch((e: unknown) => e);
+    expect((err as AskStreamError).status).toBe(502);
+    expect((err as AskStreamError).code).toBeNull();
   });
 });

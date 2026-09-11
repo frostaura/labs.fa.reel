@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, Eye, Search, Sparkles } from "lucide-react";
 import { useSearchTypeaheadGlobalQuery, useSearchTypeaheadQuery } from "../../store/api";
 import { shouldQueryGlobal } from "../../lib/globalTypeahead";
+import { mintTurnId } from "../../lib/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
 import PredictedRatingBadge from "../rec/PredictedRatingBadge";
 
@@ -86,11 +87,25 @@ export default function SearchBox() {
     activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
+  /**
+   * Hand the question to /search in the navigation itself, not in the URL.
+   *
+   * `?q=` was a round trip through the address bar: the page read the param, fired the turn, then
+   * deleted the param — and a reload landing before that delete re-fired the question as a fresh
+   * conversation, throwing away every refinement made since. Router state is carried by the
+   * history entry instead, so there is nothing to clean up and nothing to re-fire.
+   *
+   * The turn id is minted HERE, with the navigation, for the same reason. It lives in the history
+   * entry, so a StrictMode remount of /search — which resets every ref that would otherwise guard
+   * the send — re-sends the same id and is replayed from the stored turn rather than billed a
+   * second time. One question typed once is one exchange, however many times React mounts it.
+   */
   const askReel = () => {
-    if (query.trim().length === 0) return;
+    const ask = query.trim();
+    if (ask.length === 0) return;
     setOpen(false);
     setActiveIndex(-1);
-    navigate(`/search?q=${encodeURIComponent(query.trim())}`);
+    navigate("/search", { state: { ask, askTurnId: mintTurnId() } });
   };
 
   const go = (option: Option) => {

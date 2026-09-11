@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  MAX_HISTORY_TURNS,
-  MAX_SHOWN_IDS,
-  capHistory,
-  capShown,
+  askRequest,
   chatReducer,
   createMountGuard,
+  failureFor,
+  mintTurnId,
+  resumeTarget,
   initialChatState,
   lastUserQuery,
+  mediaFilterFor,
   CONVERSATION_ID_KEY,
   floorHeldBack,
+  floorPartition,
   formatFloor,
   readStoredConversationId,
   storeConversationId,
@@ -18,7 +20,7 @@ import {
   showMoodPresets,
   type ChatTurn,
 } from "./useAskReelChat";
-import type { AskCard } from "./askReelStream";
+import { AskStreamError, type AskCard } from "./askReelStream";
 
 /**
  * Regression for "reload mid-conversation and lose every refinement". The ?q= seed used to sit in
@@ -142,36 +144,16 @@ describe("chatReducer — a failed done frame", () => {
 });
 
 /**
- * Regression for unbounded payload growth: history and the no-repeat list were sent in full on
- * every request, and both grow with each refinement and each scrolled page.
+ * The caps are GONE, with the fields they trimmed. History and the no-repeat set no longer ride on
+ * the request at all — the server derives both from rows it wrote — so what these tests pin now is
+ * the opposite property: the state this hook carries is allowed to grow, because nothing sends it.
  */
-describe("conversation payload caps", () => {
-  it("sends only the most recent turns — recency is what the next turn is about", () => {
-    const turns: ChatTurn[] = Array.from({ length: MAX_HISTORY_TURNS + 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      text: `turn ${i}`,
-    }));
-    const capped = capHistory(turns);
-    expect(capped).toHaveLength(MAX_HISTORY_TURNS);
-    expect(capped.at(-1)).toEqual({ role: turns.at(-1)!.role, text: `turn ${turns.length - 1}` });
-    expect(capped[0].text).toBe(`turn ${turns.length - MAX_HISTORY_TURNS}`);
-  });
-
-  it("leaves a short transcript untouched", () => {
-    expect(capHistory([{ role: "user", text: "hi" }])).toEqual([{ role: "user", text: "hi" }]);
-  });
-
-  it("sends only the most recent shown ids", () => {
-    const shown = Array.from({ length: MAX_SHOWN_IDS + 50 }, (_, i) => i);
-    const capped = capShown(shown);
-    expect(capped).toHaveLength(MAX_SHOWN_IDS);
-    expect(capped.at(-1)).toBe(shown.at(-1));
-    expect(capped[0]).toBe(shown.length - MAX_SHOWN_IDS);
-  });
-
-  it("caps the ids held in state too, so paging cannot grow the hook without bound", () => {
+describe("the no-repeat set is no longer a payload", () => {
+  it("keeps every id a long thread has shown, without a cap to trim it", () => {
+    // Fixture variation: the old cap was 300, so 20 pages of 30 is well past it — the previous
+    // assertion here was `toHaveLength(300)` and the FIRST 300 ids were silently dropped, which is
+    // how a long thread re-offered a title it had already shown. Same fixture, opposite verdict.
     let state = chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true });
-    // Every page contributes a fresh block of tmdbIds; well past the cap after enough of them.
     for (let page = 0; page < 20; page++) {
       state = chatReducer(state, { type: "moreTurn" });
       state = chatReducer(state, {
@@ -182,7 +164,8 @@ describe("conversation payload caps", () => {
         },
       });
     }
-    expect(state.shown).toHaveLength(MAX_SHOWN_IDS);
+    expect(state.shown).toHaveLength(600);
+    expect(state.shown[0]).toBe(0);
     expect(state.shown.at(-1)).toBe(599);
   });
 });
@@ -292,7 +275,7 @@ describe("chatReducer — resume", () => {
     // conversations; neither is a completed search, and the second is the one that would have
     // tempted a "last turn answered?" heuristic into reporting `done`.
     for (const t of [turns, turns.slice(0, -1)]) {
-      const state = chatReducer(initialChatState, { type: "resume", turns: t, conversationId: "c1" });
+      const state = chatReducer(initialChatState, { type: "resume", payload: { id: "c1", turns: t } });
       expect(state.status).toBe("resumed");
       expect(state.order).toEqual([]);
     }
@@ -301,9 +284,9 @@ describe("chatReducer — resume", () => {
   it("resume_restores_lastQuery_from_the_last_user_turn", () => {
     // Fixture variation: the same two transcripts. The trailing-assistant one is the trap — the
     // last ENTRY is not the last QUESTION, so `turns.at(-1)` would replay the model's own reply.
-    expect(chatReducer(initialChatState, { type: "resume", turns, conversationId: "c1" }).lastQuery)
+    expect(chatReducer(initialChatState, { type: "resume", payload: { id: "c1", turns } }).lastQuery)
       .toBe("something quieter");
-    expect(chatReducer(initialChatState, { type: "resume", turns: turns.slice(0, -1), conversationId: "c1" }).lastQuery)
+    expect(chatReducer(initialChatState, { type: "resume", payload: { id: "c1", turns: turns.slice(0, -1) } }).lastQuery)
       .toBe("something quieter");
     // And an assistant-only transcript has no question to replay — better empty than the reply.
     expect(lastUserQuery([{ role: "assistant", text: "hello" }])).toBe("");
@@ -312,9 +295,9 @@ describe("chatReducer — resume", () => {
   it("keeps the shown ids when the server sends them, so a resumed thread still never repeats", () => {
     // Fixture variation: `shown` provided, and omitted. Omitted must not crash or invent ids —
     // a stored conversation from before cards were persisted has no id list to give back.
-    expect(chatReducer(initialChatState, { type: "resume", turns, conversationId: "c1", shown: [1, 2, 3] }).shown)
+    expect(chatReducer(initialChatState, { type: "resume", payload: { id: "c1", turns, shown: [1, 2, 3] } }).shown)
       .toEqual([1, 2, 3]);
-    expect(chatReducer(initialChatState, { type: "resume", turns, conversationId: "c1" }).shown).toEqual([]);
+    expect(chatReducer(initialChatState, { type: "resume", payload: { id: "c1", turns } }).shown).toEqual([]);
   });
 });
 
@@ -754,3 +737,272 @@ function card(n: number, extra: Partial<AskCard> = {}): AskCard {
     posterPath: null, genres: [], similarity: 0.5, predictedRating: 7, ...extra,
   };
 }
+
+/**
+ * The request, and the four answers the server can give that are not a stream.
+ *
+ * `run()` cannot be tested here — vitest runs in node with no renderer — so the two decisions it
+ * makes are pure functions it calls: what goes on the wire, and what a failure MEANS. Both used to
+ * be inline in the callback, which is why "409" and "the search crashed" were the same screen.
+ */
+describe("askRequest", () => {
+  it("sends_the_turn_id_and_nothing_the_server_already_knows", () => {
+    // Fixture variation: a follow-up inside a thread, and a fresh start. The fresh one differs in
+    // exactly one field — a null conversation id — which is what mints a new thread rather than
+    // forking an existing one.
+    const followUp = askRequest("something lighter", "turn-1", "conv-9", ["movie"]);
+    expect(followUp).toEqual({
+      query: "something lighter", clientTurnId: "turn-1", conversationId: "conv-9", mediaTypes: ["movie"],
+    });
+
+    const fresh = askRequest("something lighter", "turn-2", null, []);
+    expect(fresh.conversationId).toBeNull();
+
+    // The three fields that were REMOVED, not renamed. A client still sending them is sending a
+    // transcript the server will not read — and the server now rejects the request outright.
+    for (const request of [followUp, fresh]) {
+      expect(Object.keys(request).sort()).toEqual(["clientTurnId", "conversationId", "mediaTypes", "query"]);
+    }
+  });
+
+  it("mints_a_different_turn_id_every_time", () => {
+    // Two sends of the SAME question are two exchanges and must be billed as two; only a retry of
+    // one exchange reuses an id, and that path passes the id in rather than minting.
+    expect(mintTurnId()).not.toBe(mintTurnId());
+    expect(mintTurnId().length).toBeGreaterThan(8);
+  });
+});
+
+describe("failureFor", () => {
+  it("tells_the_four_server_answers_apart", () => {
+    // Fixture variation: each status with its code, then each status with the code MISSING (a
+    // proxy's own 404, a gateway's 409). The code is preferred where present because the status is
+    // shared; both must land on the same action, or a client behind a proxy gets a different UI.
+    expect(failureFor(new AskStreamError(409, "turn_in_progress"))).toEqual({ type: "turnInProgress" });
+    expect(failureFor(new AskStreamError(409, null))).toEqual({ type: "turnInProgress" });
+    expect(failureFor(new AskStreamError(404, "conversation_not_found"))).toEqual({ type: "conversationGone" });
+    expect(failureFor(new AskStreamError(404, null))).toEqual({ type: "conversationGone" });
+    expect(failureFor(new AskStreamError(401))).toEqual({ type: "error", reason: "session" });
+    expect(failureFor(new AskStreamError(400, "query_too_long"))).toEqual({ type: "error", reason: "request" });
+    // Anything else, and anything that is not an AskStreamError at all (a network drop), is the
+    // unclassified failure — the only one that may say "search hit a snag".
+    expect(failureFor(new AskStreamError(500))).toEqual({ type: "error", reason: null });
+    expect(failureFor(new TypeError("Failed to fetch"))).toEqual({ type: "error", reason: null });
+  });
+});
+
+describe("chatReducer — 409 turn_in_progress", () => {
+  /** A settled answer with three cards on screen — what a 409 must not cost the user. */
+  function settled() {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "a tense heist", fresh: true });
+    return chatReducer(asked, {
+      type: "done",
+      data: { reason: "3 picks ranked for you.", results: [card(1), card(2), card(3)] },
+    });
+  }
+
+  it("keeps_the_grid_and_is_not_an_error", () => {
+    const blocked = chatReducer(settled(), { type: "turnInProgress" });
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.order).toHaveLength(3);
+    expect(blocked.errorReason).toBeNull();
+    expect(blocked.reason).toBe("3 picks ranked for you.");
+    expect(blocked.appending).toBe(false);
+    expect(blocked.phase).toBeNull();
+  });
+
+  it("keeps_a_HELD_previous_answer_too", () => {
+    // Fixture variation: the 409 arrives on the SECOND question, while the first answer is still
+    // being held on screen. That answer is now the only one there is — a 409 means the new turn
+    // never ran — so clearing it would blank the page for a request that failed to even start.
+    const second = chatReducer(settled(), { type: "userTurn", message: "something lighter", fresh: false });
+    expect(second.holdingPrevious).toBe(true);
+    const blocked = chatReducer(second, { type: "turnInProgress" });
+    expect(blocked.holdingPrevious).toBe(true);
+    expect(blocked.order).toHaveLength(3);
+  });
+});
+
+describe("chatReducer — 404 conversation_not_found", () => {
+  it("forgets_the_thread_so_the_next_turn_starts_a_new_one", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "a tense heist", fresh: true });
+    const inThread = chatReducer(asked, { type: "conversation", data: { id: "conv-9", turnId: "t-1", sequence: 1 } });
+    expect(inThread.conversationId).toBe("conv-9");
+
+    const gone = chatReducer(inThread, { type: "conversationGone" });
+    expect(gone.conversationId).toBeNull();
+    expect(gone.status).toBe("error");
+    expect(gone.errorReason).toBe("conversation");
+    // The transcript stays: it is still what the reader was reading, and the page explains rather
+    // than silently emptying the screen.
+    expect(gone.turns).toHaveLength(1);
+  });
+});
+
+describe("resumeTarget", () => {
+  it("prefers_this_tabs_own_thread_over_the_accounts_newest", () => {
+    // The multi-device steal, in one line. Fixture variation: a stored id, no stored id, and the
+    // empty string a cleared-but-present key leaves behind — the last one used to read as truthy
+    // in the page and send a request for the conversation with no id.
+    expect(resumeTarget("conv-9")).toBe("conv-9");
+    expect(resumeTarget(null)).toBe("latest");
+    expect(resumeTarget("")).toBe("latest");
+  });
+});
+
+/**
+ * Resume, with the answer in it.
+ *
+ * Until the turn record existed, `/conversations/latest` returned turns and nothing else, so the
+ * ONLY branch a resume could reach was "transcript only — this thread predates saved picks" — copy
+ * that states a cause which was never the real one, seen on a thread seventeen seconds old. These
+ * pin the other half: the cards come back, in the server's order, with what changed while the user
+ * was away.
+ */
+describe("chatReducer — resume with stored cards", () => {
+  /** The server's payload, verbatim. `cards` order is the ANSWER's order and is never re-derived. */
+  const payload = {
+    id: "conv-9",
+    title: "a tense heist",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    // Deliberately NOT blend order: card 1 outranks the rest and arrives last. A client that
+    // re-sorts — as it does for a live turn — would put it first and silently show a different
+    // answer from the one the server stored as Rank.
+    cards: [card(3, { blend: 0.2 }), card(2, { blend: 0.4 }), card(1, { blend: 0.9 })],
+    turns: [
+      { sequence: 0, role: "user", text: "a tense heist", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Here are three.", kind: "ask", status: "Completed" },
+    ],
+    reason: "3 picks ranked for you, from 40 pulled.",
+    removed: 2,
+    lastQuery: "a tense heist",
+    mediaTypes: ["movie"],
+    shown: [1, 2, 3, 77],
+  };
+
+  it("takes_the_servers_card_order_verbatim", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.order).toEqual(["t3", "t2", "t1"]);
+    expect(state.byId.t1.blend).toBe(0.9);
+  });
+
+  it("is_resumed_not_done_even_with_a_full_grid", () => {
+    // The distinction the empty-state branch turns on. `done` over a restored answer is what put
+    // "No matches for that one" under a question that had matched plenty.
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.status).toBe("resumed");
+    expect(state.order).toHaveLength(3);
+  });
+
+  it("carries_the_reason_the_removals_and_the_whole_threads_shown_set", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.reason).toBe("3 picks ranked for you, from 40 pulled.");
+    expect(state.removed).toBe(2);
+    expect(state.lastCardsAt).toBe("2026-09-11T09:00:00Z");
+    // The whole conversation's no-repeat set, not just this block's — 77 came from an earlier turn.
+    expect(state.shown).toEqual([1, 2, 3, 77]);
+    expect(state.lastQuery).toBe("a tense heist");
+    expect(state.conversationId).toBe("conv-9");
+  });
+
+  it("resumes_a_transcript_only_thread_with_no_cards_at_all", () => {
+    // Fixture variation: the same payload with `cards` empty and `lastCardsAt` null — a genuinely
+    // old thread. This is the ONLY shape that may render the "predates saved picks" copy, and it
+    // must still restore the transcript and the last query so the thread can be asked again.
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...payload, cards: [], lastCardsAt: null, reason: null, removed: 0, shown: [] },
+    });
+    expect(state.status).toBe("resumed");
+    expect(state.order).toEqual([]);
+    expect(state.lastCardsAt).toBeNull();
+    expect(state.turns).toHaveLength(2);
+    expect(state.lastQuery).toBe("a tense heist");
+  });
+
+  it("never_renders_a_turn_the_server_has_not_written_text_for", () => {
+    // A turn in flight is a row with no text yet, and a failed one keeps its empty text forever.
+    // Rendering them puts blank bubbles in the transcript — an assistant that said nothing.
+    const turns = [
+      ...payload.turns,
+      { sequence: 2, role: "user", text: "something lighter", kind: "ask", status: "Completed" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending" },
+    ];
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...payload, turns, lastQuery: "something lighter" },
+    });
+    expect(state.turns.map((t) => t.text)).toEqual(["a tense heist", "Here are three.", "something lighter"]);
+    // …and the last question is still the one to replay, even though its answer never landed.
+    expect(state.lastQuery).toBe("something lighter");
+
+    // Fixture variation: the same rows with the server's own `lastQuery` withheld (what
+    // `/conversations/latest` returned before Phase 1). The fallback reads the transcript — and it
+    // has to read the FILTERED one, or an empty assistant row would be the last thing it saw.
+    const withoutServerQuery = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...payload, turns, lastQuery: undefined },
+    });
+    expect(withoutServerQuery.lastQuery).toBe("something lighter");
+  });
+});
+
+describe("mediaFilterFor", () => {
+  it("maps_the_wire_tokens_back_to_the_browse_toggle", () => {
+    // The toggle and the answer on screen have to agree: a resumed grid that ran under "Movies"
+    // beside a toggle reading "All" is a control that lies about what produced what is under it.
+    expect(mediaFilterFor(["movie"])).toBe("movie");
+    expect(mediaFilterFor(["tv"])).toBe("show");
+    expect(mediaFilterFor([])).toBe("all");
+    expect(mediaFilterFor(undefined)).toBe("all");
+    // Both, or anything unrecognised, is no constraint — never a guess.
+    expect(mediaFilterFor(["movie", "tv"])).toBe("all");
+    expect(mediaFilterFor(["film"])).toBe("all");
+  });
+});
+
+/**
+ * The floor on a STOPPED page (R2's re-created F3-02).
+ *
+ * The floor is the server's job and runs when the turn completes. Stop a page ten seconds in and
+ * `done` never arrives — so the cards that already streamed keep whatever score they had, and nine
+ * sub-floor picks sat in the recommended grid with a tray directly beneath them saying seventeen
+ * picks were held back for being under the 6.0 bar. Three numbers on one screen that cannot all be
+ * true. The client cannot rank, but it CAN apply the account's own bar to what arrived.
+ */
+describe("floorPartition", () => {
+  const bar = 6;
+
+  it("moves_sub_floor_cards_out_of_the_grid_and_into_the_tray", () => {
+    const cards = [card(1, { predictedRating: 6.4 }), card(2, { predictedRating: 5.2 }), card(3, { predictedRating: 6 })];
+    const { kept, held } = floorPartition(cards, bar);
+    expect(kept.map((c) => c.titleId)).toEqual(["t1", "t3"]);
+    expect(held.map((c) => c.titleId)).toEqual(["t2"]);
+  });
+
+  it("judges_the_number_the_badge_prints_not_the_one_behind_it", () => {
+    // Fixture variation: one field, three values astride the bar — 5.96, 5.94 and 6.04. The badge
+    // rounds to one decimal, so 5.96 PRINTS as "6.0" and holding it back puts a card in the "under
+    // your 6.0 bar" tray badged 6.0. The whole class of contradiction R2 found is a comparison
+    // made against a precision the screen does not show.
+    expect(floorPartition([card(1, { predictedRating: 5.96 })], bar).kept).toHaveLength(1);
+    expect(floorPartition([card(1, { predictedRating: 5.94 })], bar).held).toHaveLength(1);
+    expect(floorPartition([card(1, { predictedRating: 6.04 })], bar).kept).toHaveLength(1);
+  });
+
+  it("never_holds_back_a_card_it_cannot_judge", () => {
+    // Fixture variation: a null rating (streamed before the scoring pass reached it) and no bar at
+    // all (an account that has set none). Neither is evidence a card is under anything, and
+    // hiding a card on an absence would be the same lie in the other direction.
+    expect(floorPartition([card(1, { predictedRating: null })], bar).kept).toHaveLength(1);
+    expect(floorPartition([card(1, { predictedRating: 2 })], null).held).toEqual([]);
+    expect(floorPartition([card(1, { predictedRating: 2 })], undefined).kept).toHaveLength(1);
+  });
+
+  it("keeps_the_order_it_was_given_within_each_half", () => {
+    // Stop does not rank. Whatever order the cards arrived in is the only order there is, and
+    // re-sorting here would invent a ranking the server never produced.
+    const cards = [card(3, { predictedRating: 9 }), card(1, { predictedRating: 7 }), card(2, { predictedRating: 8 })];
+    expect(floorPartition(cards, bar).kept.map((c) => c.titleId)).toEqual(["t3", "t1", "t2"]);
+  });
+});

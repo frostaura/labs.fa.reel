@@ -1,18 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useSelector } from "react-redux";
-import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Mic, RotateCcw, Send, Sparkles, Square } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { AlertTriangle, Mic, Plus, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
-import { useGetFiltersQuery } from "../store/api";
+import { useGetConversationQuery, useGetFiltersQuery } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
+import ConversationSwitcher from "../components/search/ConversationSwitcher";
 import { type BrowseFilter } from "../lib/browseFilter";
+import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import { floorHeldBack, formatFloor, nextBootstrap, plural, showMoodPresets, useAskReelChat } from "../lib/useAskReelChat";
+import {
+  floorHeldBack, floorPartition, formatFloor, mediaFilterFor, nextBootstrap, plural,
+  readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId, useAskReelChat,
+} from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
 
@@ -77,14 +82,22 @@ export default function SearchResults() {
 }
 
 function AskReel() {
-  const [params, setParams] = useSearchParams();
-  const seed = params.get("q") ?? "";
+  const navigate = useNavigate();
+  const location = useLocation();
+  // The question arrives in the navigation, not the URL. `?q=` was a round trip through the
+  // address bar — read the param, fire the turn, delete the param — and a reload landing before
+  // the delete re-fired the question as a FRESH conversation, throwing away every refinement made
+  // since. The turn id rides along from the search box so that a StrictMode remount (which resets
+  // the ref guarding this) re-sends the same exchange and is replayed rather than billed twice.
+  const askState = location.state as { ask?: string; askTurnId?: string } | null;
+  const seed = askState?.ask ?? "";
+  const seedTurnId = askState?.askTurnId;
   const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
   const {
-    turns, status, phase, cards, outsideCards, reason, send, resume, loadMore, reask, stop,
-    setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor, droppedByFloor,
-    holdingPrevious, arrived,
+    turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
+    retryTurn, stop, setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor,
+    droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt, conversationId, errorReason,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -101,47 +114,81 @@ function AskReel() {
     setMediaTypes(mediaTypesFor(filter));
   }, [filter, setMediaTypes]);
 
-  // A search from the header box (?q=) starts a fresh conversation; landing on /search with no
-  // query resumes the most recent one. The seed is CONSUMED — cleared from the URL the moment it
-  // is sent — because it used to sit there for the life of the thread, so a reload three
-  // refinements in re-fired it as a fresh turn and replaced the whole conversation with a
-  // single-turn answer to the original question. `nextBootstrap` holds the "already handled" rule
-  // (and is unit-tested); the ref is what survives a re-render without re-triggering anything.
+  // A search from the header box starts a fresh conversation; landing on /search with nothing to
+  // ask resumes this tab's thread. The seed is CONSUMED — the router state is cleared the moment it
+  // is sent — and `nextBootstrap` holds the "already handled" rule (unit-tested), keyed on the TURN
+  // ID rather than the text, so asking the same phrase twice is two exchanges and a double-invoke
+  // of the same one is not. The ref survives a re-render; a StrictMode REMOUNT resets it, which is
+  // what the shared turn id covers — the second send is the same exchange and the server replays it.
   const handledSeed = useRef<string | null>(null);
   const seedStarted = useRef(false);
+  // What a cold /search resumes: THIS tab's remembered thread, and the account's newest one only
+  // for a browser that has never asked anything. Resuming `/latest` unconditionally is how two
+  // tabs — or a phone and a laptop — silently converged, with a reload dropping the reader into
+  // the other device's conversation. Read once per mount: re-reading on every render would make a
+  // turn that stores a new id re-key this query mid-conversation.
+  const [threadId, setThreadId] = useState(() => readStoredConversationId());
+  const [shouldResume, setShouldResume] = useState(false);
+
   useEffect(() => {
-    const { action, handled } = nextBootstrap(seed, handledSeed.current);
+    const { action, handled } = nextBootstrap(seedTurnId ?? seed, handledSeed.current);
     handledSeed.current = handled;
-    if (action === "seed") {
+    if (action === "seed" && seed) {
       seedStarted.current = true;
-      send(seed, true);
-      setParams((prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete("q");
-        return next;
-      }, { replace: true });
+      send(seed, true, seedTurnId);
+      navigate(".", { replace: true, state: null });
       return;
     }
-    if (action !== "resume") return;
-    fetch("/api/search/conversations/latest", { credentials: "include" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        // Not cancelled on cleanup — a StrictMode remount would drop the only response, and the
-        // resume is what makes a reload durable. Guarded on `seedStarted` instead: once a search
-        // has begun, a late-arriving old conversation must never replace it.
-        if (!seedStarted.current && d?.id && d.turns?.length) resume(d.turns, d.id);
-      })
-      .catch(() => undefined);
-  }, [seed, send, resume, setParams]);
+    if (action === "resume") setShouldResume(true);
+  }, [seed, seedTurnId, send, navigate]);
+
+  const { data: resumed, error: resumeError } = useGetConversationQuery(resumeTarget(threadId), {
+    skip: !shouldResume,
+  });
+
+  useEffect(() => {
+    // Guarded on `seedStarted`, not cancelled on cleanup: once a search has begun, a late-arriving
+    // stored conversation must never replace it.
+    if (!resumed || seedStarted.current) return;
+    resume(resumed);
+    // The toggle and the grid have to agree about what produced what is under it — a restored
+    // answer that ran under "Movies" beside a control reading "All" is a control that lies.
+    const media = mediaFilterFor(resumed.mediaTypes);
+    if (media !== filter.media) setFilter({ ...filter, media });
+    // `filter` is deliberately NOT a dependency: this reconciles the toggle TO the payload once,
+    // and re-running it on every toggle change would fight the user for control of it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumed, resume, setFilter]);
+
+  // A stored id the server does not have any more — deleted from another device, or past
+  // retention. Forget it rather than asking for it on every visit from here.
+  useEffect(() => {
+    if (resumeError && threadId) storeConversationId(null);
+  }, [resumeError, threadId]);
 
   // The media filter is NOT applied here any more. Hiding cards after the fact is what produced
   // "No matches" on a turn that had returned eight perfectly good shows: the server had never been
   // told the user wanted movies, so it had no chance to go and find any. It is now sent upstream
   // and the server narrows discovery, so what arrives already matches.
   const removedSet = new Set(useSelector(selectRemovedKeys));
-  const visible = cards.filter((c) => !removedSet.has(c.titleId));
-  const outsideVisible = outsideCards.filter((c) => !removedSet.has(c.titleId));
   const streaming = status === "streaming";
+
+  // The floor, on a turn that never reached `done`.
+  //
+  // Ranking and the floor are the server's, and they run when the turn completes. Stop a page ten
+  // seconds in and `done` never arrives — so the cards that streamed keep whatever score they had,
+  // and sub-floor picks sat in the RECOMMENDED grid under a tray announcing that picks were held
+  // back for being below the same bar. The client cannot rank, but it can apply the one standing
+  // condition the user set to the cards they can see, so the grid and the tray stop contradicting
+  // each other. Only on a stopped turn: every other state has the server's own answer.
+  const stopped = status === "stopped";
+  const floorBar = accountFilters?.minPredictedRating;
+  const cleanPartition = floorPartition(cards.filter((c) => !removedSet.has(c.titleId)), stopped ? floorBar : null);
+  const outsidePartition = floorPartition(outsideCards.filter((c) => !removedSet.has(c.titleId)), stopped ? floorBar : null);
+  const visible = cleanPartition.kept;
+  const outsideVisible = outsidePartition.kept;
+  /** What a stopped turn moved out of the grid, for the tray to account for. */
+  const stoppedHeldBack = [...cleanPartition.held, ...outsidePartition.held];
 
   // The hook carries the server's sentence verbatim; the page only decides where it goes.
   const conflictMessage = conflict?.trim() ? conflict : null;
@@ -152,9 +199,15 @@ function AskReel() {
   // concerned. The count is the tray's OWN contents wherever it has any (see `floorHeldBack`), and
   // the bar comes from the account's saved conditions — null when the user has set none, which
   // falls back to the unnumbered wording rather than blanking the tray.
-  const belowFloorVisible = belowFloor.filter((c) => !removedSet.has(c.titleId));
-  const heldBack = floorHeldBack(belowFloorVisible.length, droppedByFloor);
-  const floorLabel = formatFloor(accountFilters?.minPredictedRating);
+  const belowFloorVisible = [
+    ...belowFloor.filter((c) => !removedSet.has(c.titleId)),
+    // A stopped turn's sub-floor cards join the tray they belong in rather than staying in the
+    // grid. Appended, so the label counts what the tray actually holds — the previous turn's cut
+    // AND this page's — which is the number a user can open it and verify.
+    ...stoppedHeldBack,
+  ];
+  const heldBack = floorHeldBack(belowFloorVisible.length, stopped ? null : droppedByFloor);
+  const floorLabel = formatFloor(floorBar);
 
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
@@ -178,17 +231,23 @@ function AskReel() {
   // What a stopped turn says, in one place: the sr-only live region and the on-screen card must
   // not be able to disagree, and the count is the turn's OWN — cards held over from the previous
   // answer are still on screen and are explicitly not what arrived before the user stopped.
+  // …and it says what those picks ARE: unranked. Ranking happens at `done`, so cards from a turn
+  // that never got there are in arrival order with whatever score they had when the stream ended.
+  // Presenting them as an answer — a ranked, floored, finished one — is the claim this sentence
+  // withdraws, and the reason the sub-floor ones above are moved to the tray rather than shown.
   const stoppedMessage =
     arrived === 0
       ? "Stopped before any picks arrived."
-      : `Stopped — ${arrived} ${plural(arrived, "pick")} arrived before you stopped.`;
+      : `Stopped — ${arrived} ${plural(arrived, "pick")} arrived before you stopped. Unranked — stopped before Reel finished.`;
   const settled = streaming
     ? ""
     : status === "error"
       ? "Search hit a snag."
-      : status === "stopped"
-        ? stoppedMessage
-        : status === "done"
+      : status === "blocked"
+        ? "That question is still being answered."
+        : status === "stopped"
+          ? stoppedMessage
+          : status === "done"
           ? settledCount === 0
             ? "No matches for that one."
             : `${settledCount} ${plural(settledCount, "pick")} ready.`
@@ -199,9 +258,42 @@ function AskReel() {
     // the last row of cards and the "Show me more" button sit permanently behind the composer.
     <div className="space-y-5 pb-44 md:pb-32">
       <div>
-        <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
-          <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
-        </h1>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-fa-frost" /> Ask Reel
+          </h1>
+          {/* Threads are a thing you can have more than one of, now that the server keeps them.
+              `+ New` is the way OUT of a conversation — without it the only way to stop refining
+              one thread was to reload and hope, since a reload resumes rather than resets. */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="askreel-new"
+              onClick={() => {
+                startNew();
+                setDraft("");
+              }}
+              disabled={streaming}
+              className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" /> New
+            </button>
+            <ConversationSwitcher
+              currentId={conversationId}
+              onOpen={(id) => {
+                // Opening a thread makes it this tab's thread, on the same terms as starting one
+                // here — so the next reload comes back to it rather than to whatever the account
+                // touched last. `seedStarted` is cleared because the guard it holds is about a
+                // question this visit asked, and switching threads is the user saying otherwise.
+                seedStarted.current = false;
+                storeConversationId(id);
+                setThreadId(id);
+                setShouldResume(true);
+              }}
+              onCurrentDeleted={startNew}
+            />
+          </div>
+        </div>
         {/* The same summary the feed carries, for the same reason: every standing condition
             applies to search too, and a thread that quietly obeys a "no documentary" saved on
             another screen is a thread the user cannot reason about. The browse toggle rides along
@@ -239,6 +331,40 @@ function AskReel() {
           ),
         )}
       </div>
+
+      {/* The seam a resume lands on.
+          Returning to a thread should feel like never having left it, and the one thing that
+          honestly cannot be hidden is WHEN you left: a grid restored in silence reads as a live
+          answer to a question you have not asked this visit. Dated, so the answer's age is on
+          screen rather than inferred from the cards. `removed` rides with it because a card that
+          silently disappears between two views of the same answer is indistinguishable from a bug
+          — it went because the account has since watched or rated it, and saying so is cheap. */}
+      {status === "resumed" && lastCardsAt && (
+        <div className="flex flex-wrap items-baseline gap-x-2" data-testid="askreel-seam">
+          <p className="fa-caption text-fa-frost-dim">Picked up where you left off · {relTime(lastCardsAt)}</p>
+          {removed > 0 && (
+            <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-removed">
+              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone — you&apos;ve since watched or rated {removed === 1 ? "it" : "them"}.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* 409 — the same question is already being answered, here or on another device. Nothing on
+          screen is wrong, so nothing on screen is cleared; this is not the error card, because
+          nothing failed. "Check again" re-sends the SAME turn id, which either takes the 409 again
+          or comes back as the finished answer — asking afresh would run and bill it twice. */}
+      {status === "blocked" && (
+        <div
+          className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center"
+          data-testid="askreel-in-progress"
+        >
+          <p className="fa-caption text-fa-frost-dim">
+            That question is already being answered — give it a moment.
+          </p>
+          <RetryButton onRetry={retryTurn} disabled={streaming} label="Check again" />
+        </div>
+      )}
 
       {streaming && (
         <div data-testid="askreel-banner" className="fa-card relative overflow-hidden p-4 flex items-center gap-4">
@@ -371,22 +497,50 @@ function AskReel() {
           "try a different angle" next to "search hit a snag". The hook now classifies that frame
           as an error, so exactly one of these three branches is live, and the failure branch
           finally offers the retry that Ask Reel has never had. */}
-      {status === "error" && cards.length === 0 ? (
+      {status === "error" && errorReason === "conversation" ? (
+        // 404. The thread this tab remembered is gone — deleted from another device, or past
+        // retention. It is NOT a crash and it is NOT a fork: the id has been forgotten, so the next
+        // question opens a new thread, and saying which of those happened is the whole difference
+        // between "Reel is broken" and "that conversation ended".
+        <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="askreel-conversation-gone">
+          <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
+          <p className="fa-body text-fa-frost-bright">That thread isn’t here any more</p>
+          <p className="fa-caption text-fa-frost-dim">
+            It was deleted, or it aged out. Asking again starts a new one.
+          </p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+        </div>
+      ) : status === "error" && cards.length === 0 ? (
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-3" data-testid="semantic-error">
           <AlertTriangle className="h-6 w-6 text-fa-warning mx-auto" />
           <p className="fa-body text-fa-frost-bright">Search hit a snag</p>
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
-      ) : status === "resumed" && visible.length === 0 && outsideVisible.length === 0 ? (
+      ) : status === "resumed" && lastCardsAt == null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
         // "No matches for that one" under the user's own question — the page reporting a verdict
-        // on a search it never ran. Threads from before picks were stored simply have no cards,
-        // and saying so is the honest version.
+        // on a search it never ran.
+        //
+        // The `lastCardsAt == null` gate is the other half, and it is what makes this copy TRUE.
+        // Before the turn record there were no stored cards at all, so this was the only branch a
+        // resume could ever reach — it was seen on a thread seventeen seconds old, asserting a
+        // cause ("predates saved picks") that was never the real one. Now it is reachable only for
+        // a thread that genuinely does predate them.
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-transcript-only">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-caption text-fa-frost-dim">
-            Transcript only — this thread predates saved picks. Ask again to bring it back.
+            Transcript only — this thread predates saved results. Ask again to bring it back.
+          </p>
+          {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+        </div>
+      ) : status === "resumed" && visible.length === 0 && outsideVisible.length === 0 ? (
+        // A thread that DID store cards and has none to show: every one of them was dropped by the
+        // eligibility re-filter, which is a fact about the person, not about the thread's age.
+        <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-all-removed">
+          <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
+          <p className="fa-caption text-fa-frost-dim">
+            You’ve watched or rated everything this thread found. Ask again for a fresh set.
           </p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
@@ -505,8 +659,10 @@ function AskReel() {
       )}
 
       {/* A failure that arrives while cards are already on screen (a page that blew up) must not
-          wipe the reel — it gets a quiet inline retry instead of the full-bleed error card. */}
-      {status === "error" && cards.length > 0 && (
+          wipe the reel — it gets a quiet inline retry instead of the full-bleed error card. NOT for
+          a 404: that has its own card above, and both firing put two "Ask again" buttons under two
+          different explanations of the same thing. */}
+      {status === "error" && errorReason !== "conversation" && cards.length > 0 && (
         <div className="flex flex-col items-center gap-2" data-testid="askreel-page-error">
           <p className="fa-caption text-fa-warning">That last request hit a snag.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}

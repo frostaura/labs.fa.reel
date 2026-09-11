@@ -168,10 +168,14 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     // …and the button still pages, so the capability was moved rather than dropped.
     await page.getByTestId("askreel-more").click();
     await waitForAsk(page, 2);
-    const requests = (await askRequests(page)) as { query: string; continuation?: boolean }[];
+    const requests = (await askRequests(page)) as { query: string; clientTurnId: string; continuation?: boolean }[];
     expect(requests).toHaveLength(2);
     expect(requests[1].query).toBe("tense small-town thriller, no horror");
-    expect(requests[1].continuation).toBe(true);
+    // `continuation` is gone: the server derives ask-vs-page from whether the query equals the
+    // conversation's last user turn, which is a fact it can check rather than one it is told. What
+    // the page carries instead is its OWN turn id — a page is a new exchange, not a replay of one.
+    expect(requests[1].continuation).toBeUndefined();
+    expect(requests[1].clientTurnId).not.toBe(requests[0].clientTurnId);
     await askPush(page, "done", { results: [], reason: null });
     await askEnd(page);
   });
@@ -200,7 +204,11 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(stopped).toHaveText(/Stopped — 3 picks arrived before you stopped\./);
     await expect(stopped.getByTestId("askreel-retry")).toBeVisible();
     // The screen-reader announcement matches the card, rather than staying the empty string.
-    await expect(page.getByTestId("askreel-status")).toHaveText("Stopped — 3 picks arrived before you stopped.");
+    // …including the "unranked" half, which is the claim a stopped turn has to withdraw: ranking
+    // and the quality floor both run at `done`, so what is on screen is arrival order with
+    // whatever score each card had when the stream ended.
+    await expect(page.getByTestId("askreel-status"))
+      .toHaveText("Stopped — 3 picks arrived before you stopped. Unranked — stopped before Reel finished.");
     // Neither the empty state nor the error state may claim this turn.
     await expect(page.getByTestId("semantic-empty")).toHaveCount(0);
     await expect(page.getByTestId("semantic-error")).toHaveCount(0);

@@ -48,6 +48,22 @@ export interface DoneData {
   results: AskCard[];
   reason: string | null;
   /**
+   * True when this `done` is the STORED answer to a `clientTurnId` the server has already
+   * answered — a dropped connection, a StrictMode double-invoke, an impatient second tap. It makes
+   * zero model calls and writes zero rows, and the client uses it to tell "we ran your question
+   * again" apart from "you are looking at the same serve twice".
+   */
+  replayed?: boolean;
+  /**
+   * How many stored cards the eligibility re-filter dropped on the way out — titles the account
+   * has rated, watched, saved or dismissed since the turn ran. Owed to the user as a number: a
+   * card that silently disappears between two views of the same answer is indistinguishable from
+   * a bug.
+   */
+  removed?: number;
+  /** The stored failure's code when a failed turn is replayed (`client_aborted`, an exception type). */
+  failureCode?: string | null;
+  /**
    * Server-side failure marker. Set by the expansion service on a caught exception, which
    * otherwise looks identical on the wire to an honest empty answer (`done`, no results). It stays
    * optional because a replayed turn stored before the field existed will not carry it, and
@@ -86,9 +102,22 @@ export function isFailedDone(data: Pick<DoneData, "results" | "reason" | "failed
   return data.results.length === 0 && data.reason != null && FAILURE_REASON.test(data.reason);
 }
 
+/**
+ * The stream's first frame, and the only one that says where this turn sits. `id` is what the tab
+ * remembers; `turnId` is what `GET /api/search/turns/{id}` is asked about after a dropped
+ * connection; `sequence` is the position in the transcript. The last two are optional because a
+ * frame from an older server carries only the id, and losing the conversation entirely over two
+ * missing fields would cost the thread rather than the reconnect path.
+ */
+export interface ConversationData {
+  id: string;
+  turnId?: string;
+  sequence?: number;
+}
+
 export type AskEvent =
   | { event: "phase"; data: PhaseData }
-  | { event: "conversation"; data: { id: string } }
+  | { event: "conversation"; data: ConversationData }
   | { event: "candidate"; data: AskCard }
   | { event: "candidate-scored"; data: { titleId: string; predictedRating: number | null } }
   | { event: "candidate-reranked"; data: { titleId: string; fit: number | null; why: string | null } }
@@ -97,38 +126,71 @@ export type AskEvent =
   | { event: "done"; data: DoneData };
 
 /**
- * A non-2xx response from /api/search/ask, carrying the status so callers can tell the three
- * cases apart: 401 (rotate the session and retry), 409 (`turn_in_progress` — the same turn is
- * already streaming elsewhere, so keep the grid), anything else (a real failure).
+ * A non-2xx response from /api/search/ask, carrying the status AND the server's stable `code` so
+ * callers can tell the cases apart: 401 (rotate the session and retry), 404
+ * `conversation_not_found` (the remembered thread is gone — forget it and start fresh), 409
+ * `turn_in_progress` (this question is already being answered, so keep the grid and wait), 400
+ * (the request itself was wrong), anything else (a real failure).
+ *
+ * The prose in the body's `error` is the USER's and may change; matching on it is how a UI ends up
+ * rendering a crash message for an honest refusal. `code` is the client's and does not change.
  */
 export class AskStreamError extends Error {
   readonly status: number;
+  /** The server's stable error code, or null when the body was not the house error shape. */
+  readonly code: string | null;
 
-  constructor(status: number, message = `ask failed: ${status}`) {
+  constructor(status: number, code: string | null = null, message = `ask failed: ${status}`) {
     super(message);
     this.name = "AskStreamError";
     this.status = status;
+    this.code = code;
   }
 }
 
+/**
+ * Everything the client is allowed to say about a turn.
+ *
+ * `history`, `shownTmdbIds` and `continuation` were REMOVED, not renamed. A client-carried
+ * transcript is unverifiable, capped, lost on reload and wrong the moment a second tab exists, and
+ * every one of those failures showed up as the product forgetting what it had just said. The
+ * server derives all three from rows it wrote: the history the model reads, the no-repeat set, and
+ * whether this is a new question or another page of the last one.
+ */
 export interface AskReelRequest {
   query: string;
-  history?: { role: string; text: string }[];
-  shownTmdbIds?: number[];
+  /** The thread this belongs to; null or absent mints a new one. An unknown id is a 404, never a fork. */
   conversationId?: string | null;
+  /**
+   * This exchange's id, minted by the client and resent verbatim on a retry. It is the idempotency
+   * key: a dropped connection, a StrictMode double-invoke and an impatient second tap all come
+   * back as the SAME answer instead of three billed turns and three copies in the transcript.
+   */
+  clientTurnId: string;
   /**
    * The movie/TV toggle, as "movie" / "tv". Sent so the SERVER narrows discovery rather than the
    * client hiding cards after the fact — filtering locally meant a turn that returned only shows
    * rendered an empty screen under "Movies".
    */
   mediaTypes?: string[];
-  /**
-   * True when this replays a question already in the transcript — an infinite-scroll page or a
-   * re-ask from the media toggle. The server writes a user+assistant SearchTurn pair per request,
-   * so without this every scroll page and every filter click permanently duplicated the question
-   * in the stored conversation, even though the client hides the repeat on screen.
-   */
-  continuation?: boolean;
+}
+
+/**
+ * The server's stable `code` off an error body, or null. Deliberately total: a proxy's HTML error
+ * page, an empty body and a JSON object with no `code` all mean "no code", and none of them may
+ * turn a refusal the client could have handled into a thrown parse error.
+ */
+async function errorCode(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    if (typeof body === "object" && body !== null && "code" in body) {
+      const code = (body as { code: unknown }).code;
+      return typeof code === "string" && code.length > 0 ? code : null;
+    }
+  } catch {
+    // Not the house error shape — the status is all this response can tell us.
+  }
+  return null;
 }
 
 /** Streams /api/search/ask, invoking onEvent per parsed SSE frame. Resolves when the stream ends. */
@@ -153,7 +215,7 @@ export async function streamAskReel(
     res = await fetch("/api/search/ask", init);
   }
   if (!res.ok || !res.body) {
-    throw new AskStreamError(res.status);
+    throw new AskStreamError(res.status, await errorCode(res));
   }
 
   const reader = res.body.getReader();
@@ -193,10 +255,15 @@ function parseFrame(frame: string): AskEvent | null {
   let data = "";
   for (const line of frame.split("\n")) {
     // `:` starts a comment. Servers and proxies emit bare `:` lines as keepalives to hold the
-    // connection open through an idle stretch; they carry no data and must not look like a frame.
+    // connection open through an idle stretch; ours writes `:keepalive` every 10 seconds. They
+    // carry no data and must not look like a frame.
     if (line.startsWith(":")) continue;
     if (line.startsWith("event:")) event = line.slice(6).trim();
     else if (line.startsWith("data:")) data += line.slice(5).trim();
+    // `id:` is written first on every frame and is deliberately dropped: it exists so a client can
+    // echo it back as Last-Event-ID, and this client reconnects through GET /api/search/turns/{id}
+    // instead. Every other field line is ignored on the same terms — an unknown one must cost the
+    // frame nothing.
   }
   if (!data) return null;
   let parsed: unknown;
@@ -256,8 +323,19 @@ export function isPhase(data: unknown): data is PhaseData {
   );
 }
 
-export function isConversation(data: unknown): data is { id: string } {
-  return isRecord(data) && typeof data.id === "string" && data.id.length > 0;
+/**
+ * The id is required and the other two are not, on purpose. A tab that remembers "" sends an empty
+ * conversation id on its next turn; a tab that cannot name the turn merely loses the reconnect
+ * path, which is a smaller loss than dropping the frame that carries the thread.
+ */
+export function isConversation(data: unknown): data is ConversationData {
+  return (
+    isRecord(data) &&
+    typeof data.id === "string" &&
+    data.id.length > 0 &&
+    (data.turnId == null || typeof data.turnId === "string") &&
+    (data.sequence == null || typeof data.sequence === "number")
+  );
 }
 
 /**
@@ -310,5 +388,10 @@ export function isDone(data: unknown): data is DoneData {
   if (!Array.isArray(data.results) || !data.results.every(isCard)) return false;
   if (data.reason != null && typeof data.reason !== "string") return false;
   if (data.belowFloor != null && (!Array.isArray(data.belowFloor) || !data.belowFloor.every(isCard))) return false;
+  // `removed` is rendered DIRECTLY as a count ("2 picks are gone"), so its type is checked for the
+  // same reason `year` is on a card: the wrong one reaches the page as a typed value and prints
+  // there. Absent stays fine — no server before Phase 1 sent it.
+  if (data.removed != null && typeof data.removed !== "number") return false;
+  if (data.failureCode != null && typeof data.failureCode !== "string") return false;
   return true;
 }

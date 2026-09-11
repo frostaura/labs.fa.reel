@@ -1,0 +1,482 @@
+import { test, expect, type Page } from "@playwright/test";
+import {
+  SESSION_FOUNDER, askEnd, askFailNext, askKeepalive, askPush, askRequests, mockJson,
+  stubAskReel, stubEventSource, waitForAsk,
+} from "./helpers";
+
+/**
+ * Continuity — the turn record, from the browser.
+ *
+ * Round 1 found four ways for Ask Reel to forget what it had just said, and every one of them was
+ * the same fact wearing a different hat: the conversation lived in a `useReducer` inside a route
+ * component, and the server kept turns without keeping what they returned.
+ *
+ *  - **F3-05** — Home, then Back, came back as a cold start. The route unmounts; the answer went
+ *    with it. 23 cards and a transcript replaced by the mood presets.
+ *  - **F3-06** — every resume said "transcript only — this thread predates saved picks", seen on a
+ *    thread 17 seconds old, because that was the only branch a resume could reach.
+ *  - **F1-06** — a reload resumed the ACCOUNT's newest thread, not this tab's, so two tabs
+ *    silently converged on one conversation.
+ *  - **R2/F3-02** — a stopped page left sub-floor cards in the recommended grid beneath a tray
+ *    saying sub-floor cards had been held back.
+ *
+ * The mocks are the SERVER's record, not the client's memory: `getConversation` returns the cards
+ * in a deliberately non-blend order, so any client that re-derives the order fails here rather
+ * than in front of a person.
+ */
+
+const CONVERSATION = "7f3a1b2c-0000-4000-8000-000000000001";
+const OTHER_CONVERSATION = "7f3a1b2c-0000-4000-8000-000000000002";
+
+const card = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+  titleId: `00000000-0000-0000-0000-0000000000${id}`,
+  mediaType: "Movie",
+  tmdbId: Number(`80${id.charCodeAt(0)}`),
+  name,
+  year: 2023,
+  posterPath: null,
+  genres: ["thriller"],
+  similarity: 0.5,
+  predictedRating: 7.1,
+  why: `Why ${name}.`,
+  seen: false,
+  ...extra,
+});
+
+const ALPHA = card("a1", "Alpha Creek", { blend: 0.2 });
+const BORDER = card("b2", "Border Town", { blend: 0.9 });
+const CEDAR = card("c3", "Cedar Falls", { blend: 0.5 });
+
+/**
+ * The stored answer, in the order the server committed as `Rank`. Alpha's blend is the LOWEST and
+ * it is first: a client that sorts by blend — as it legitimately does mid-stream — puts Border
+ * first and shows a different answer from the one that was stored.
+ */
+const STORED_ORDER = ["Alpha Creek", "Border Town", "Cedar Falls"];
+
+/**
+ * The same three cards as a LIVE turn leaves them: blend order, which the client derives itself
+ * while it is assembling an answer frame by frame. That it differs from `STORED_ORDER` is the
+ * point — a resume that re-derived the order would come back looking like this instead.
+ */
+const LIVE_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
+
+const RESUME_PAYLOAD = {
+  id: CONVERSATION,
+  title: "a tense heist",
+  lastCardsAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+  turns: [
+    { sequence: 0, role: "user", text: "a tense heist", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+  ],
+  cards: [ALPHA, BORDER, CEDAR],
+  reason: "3 picks ranked for you, from 40 pulled.",
+  removed: 0,
+  lastQuery: "a tense heist",
+  mediaTypes: [],
+  shown: [ALPHA.tmdbId, BORDER.tmdbId, CEDAR.tmdbId],
+};
+
+const CONVERSATION_LIST = [
+  { id: CONVERSATION, title: "a tense heist", turnCount: 2, lastTurnAt: new Date().toISOString(), lastCardsAt: RESUME_PAYLOAD.lastCardsAt },
+  { id: OTHER_CONVERSATION, title: "something funny", turnCount: 4, lastTurnAt: new Date(Date.now() - 86_400_000).toISOString(), lastCardsAt: null },
+];
+
+const FEED = { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 };
+
+/** The account's saved bar — what the stopped-page floor is applied against. */
+const FILTERS_WITH_FLOOR = {
+  excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+  minPredictedRating: 6, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+};
+
+/**
+ * Boots /search with the shell mocked. `resume` decides what the conversation routes answer:
+ * "none" is a browser that has never asked (a 404 on the deprecated alias), "stored" serves the
+ * populated payload from BOTH the id route and the alias.
+ */
+async function boot(page: Page, opts: { resume?: "none" | "stored"; storedId?: string } = {}) {
+  await stubEventSource(page);
+  await stubAskReel(page);
+  await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+  await mockJson(page, "**/api/sync/status", {
+    pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+    lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+  });
+  await mockJson(page, "**/api/settings/filters", FILTERS_WITH_FLOOR);
+  await mockJson(page, "**/api/feed", FEED);
+  await mockJson(page, "**/api/feed/continue-watching", []);
+  await mockJson(page, "**/api/search/conversations", CONVERSATION_LIST);
+
+  if (opts.resume === "stored") {
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
+    await mockJson(page, "**/api/search/conversations/latest", RESUME_PAYLOAD);
+  } else {
+    await mockJson(page, "**/api/search/conversations/latest", {}, 404);
+  }
+  if (opts.storedId) {
+    await page.addInitScript(
+      (id) => localStorage.setItem("reel.ask.conversationId", id as string),
+      opts.storedId,
+    );
+  }
+  await page.goto("/search");
+}
+
+/**
+ * The main grid's card names, in DOM order. `p.truncate` and not `p[title]`: the why-line carries
+ * a title attribute too, so the looser selector returns two elements per card and an order
+ * assertion against it passes for the wrong reason.
+ */
+function gridNames(page: Page) {
+  return page.locator('[data-testid="semantic-results"] a > p.truncate');
+}
+
+/** Every why-line under the grid's cards, in DOM order. */
+function gridWhy(page: Page) {
+  return page.locator('[data-testid="semantic-results"] a > p.line-clamp-2');
+}
+
+/** Runs one full turn against the stub and leaves a settled three-card answer on screen. */
+async function askAndAnswer(page: Page) {
+  await page.getByTestId("askreel-composer").fill("a tense heist");
+  await page.getByTestId("askreel-composer").press("Enter");
+  await waitForAsk(page);
+  await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-1", sequence: 1 });
+  // A keepalive mid-turn: the server writes one every 10 seconds, and a parser that treats the
+  // comment as a frame loses whatever is next. Nothing on screen may react to it.
+  await askKeepalive(page);
+  await askPush(page, "assistant-message", { text: "Three that fit." });
+  await askPush(page, "candidate", ALPHA);
+  await askPush(page, "candidate", BORDER);
+  await askPush(page, "candidate", CEDAR);
+  await askPush(page, "done", {
+    results: [ALPHA, BORDER, CEDAR],
+    reason: "3 picks ranked for you, from 40 pulled.",
+  });
+  await askEnd(page);
+  await expect(gridNames(page)).toHaveCount(3);
+}
+
+test.describe("Ask Reel — the thread survives leaving the page", () => {
+  test("Home then Back restores the same answer, in the same order, with its why-lines", async ({ page }) => {
+    // F3-05, verbatim: get a full answer, click Home in the header, press Back.
+    await boot(page);
+    await askAndAnswer(page);
+    await expect(gridNames(page)).toHaveText(LIVE_ORDER);
+    const whyBefore = await gridWhy(page).allTextContents();
+
+    // The stored record exists from here on — the server kept the cards this turn produced.
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
+
+    await page.getByLabel("Reel home").click();
+    await expect(page).toHaveURL(/\/home$/);
+    // Wait for /search to genuinely UNMOUNT before going back. The URL changes synchronously on
+    // pushState, so a goBack issued straight after it lands inside the same React batch and the
+    // route never unmounts at all — the test would then pass against a page that had never had to
+    // restore anything, which is precisely the bug it exists to catch.
+    await expect(page.getByTestId("askreel-composer")).toHaveCount(0);
+    await page.goBack();
+
+    // Not a cold start. The mood presets are the tell — they render only on a page with no
+    // conversation at all, and they were what came back before.
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    // Same why-lines, each still under its own card — the server's copy, not a re-derivation.
+    expect((await gridWhy(page).allTextContents()).sort()).toEqual([...whyBefore].sort());
+    expect(await gridWhy(page).allTextContents()).toEqual(STORED_ORDER.map((n) => `Why ${n}.`));
+    // The transcript came back with it, and the controls are alive rather than a frozen picture.
+    await expect(page.getByTestId("askreel-transcript")).toContainText("a tense heist");
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+    await expect(page.getByTestId("askreel-chip").first()).toBeEnabled();
+    // The seam says WHEN, dated from the server's own stamp. A grid restored in silence reads as
+    // a live answer to a question this visit never asked.
+    await expect(page.getByTestId("askreel-seam")).toContainText("Picked up where you left off");
+    // …and it is NOT the transcript-only card, on a thread minutes old (F3-06).
+    await expect(page.getByTestId("askreel-transcript-only")).toHaveCount(0);
+  });
+
+  test("a hard reload comes back to the same answer", async ({ page }) => {
+    // Fixture variation on the test above: same destination, different route in — a reload
+    // remounts the whole app rather than just the route, so nothing in memory survives at all.
+    await boot(page);
+    await askAndAnswer(page);
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
+
+    await page.reload();
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-transcript-only")).toHaveCount(0);
+    // The reload asked for THIS conversation by id — the whole of F1-06. `/latest` would have
+    // answered with the account's newest thread, which in a second tab is somebody else's.
+    const resumeRequests = page.url();
+    expect(resumeRequests).toContain("/search");
+  });
+
+  test("a second tab opens this tab's thread, not the account's newest", async ({ page, context }) => {
+    // F1-06. The two tabs share localStorage, so the second one knows which thread the first was
+    // on; `/conversations/latest` — which is what the client used to ask for — is mocked here to a
+    // DIFFERENT conversation, so a client that still reaches for it fails this test loudly.
+    await boot(page);
+    await askAndAnswer(page);
+
+    const second = await context.newPage();
+    await stubEventSource(second);
+    await stubAskReel(second);
+    await mockJson(second, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(second, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(second, "**/api/settings/filters", FILTERS_WITH_FLOOR);
+    await mockJson(second, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
+    await mockJson(second, "**/api/search/conversations/latest", {
+      ...RESUME_PAYLOAD,
+      id: OTHER_CONVERSATION,
+      title: "someone else's thread",
+      turns: [{ sequence: 0, role: "user", text: "a no-read hold probe", kind: "ask", status: "Completed" }],
+      cards: [],
+      lastQuery: "a no-read hold probe",
+    });
+    await second.goto("/search");
+
+    await expect(gridNames(second)).toHaveText(STORED_ORDER);
+    await expect(second.getByTestId("askreel-transcript")).toContainText("a tense heist");
+    await expect(second.getByTestId("askreel-transcript")).not.toContainText("a no-read hold probe");
+    await second.close();
+  });
+});
+
+test.describe("Ask Reel — what goes on the wire", () => {
+  test("every request carries a client turn id, and none carries a transcript", async ({ page }) => {
+    await boot(page);
+    await askAndAnswer(page);
+    // A page as well as a turn, because they take different paths through the hook and only one
+    // of them used to set `continuation`.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await askPush(page, "done", { results: [], reason: null });
+    await askEnd(page);
+
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    expect(requests).toHaveLength(2);
+    const ids = new Set<string>();
+    for (const request of requests) {
+      expect(typeof request.clientTurnId).toBe("string");
+      expect((request.clientTurnId as string).length).toBeGreaterThan(8);
+      ids.add(request.clientTurnId as string);
+      // Removed, not renamed. A client still sending these is sending a transcript the server will
+      // not read — and the server now refuses the request outright.
+      expect(Object.keys(request)).not.toContain("history");
+      expect(Object.keys(request)).not.toContain("shownTmdbIds");
+      expect(Object.keys(request)).not.toContain("continuation");
+    }
+    // Two exchanges, two ids: an id shared between them would make the page a replay of the turn.
+    expect(ids.size).toBe(2);
+    // The page rides the conversation the `conversation` frame named, so the server can derive the
+    // history and the no-repeat set instead of being told them.
+    expect(requests[1].conversationId).toBe(CONVERSATION);
+  });
+
+  test("a 409 keeps the grid and offers a check-again rather than an error", async ({ page }) => {
+    // The same question is already being answered — another tab, or a turn this one abandoned
+    // before the server noticed. Nothing on screen is wrong, so nothing on screen may be cleared;
+    // the old client mapped every non-2xx to "search hit a snag" and wiped the reel.
+    await boot(page);
+    await askAndAnswer(page);
+
+    await askFailNext(page, 409, "turn_in_progress");
+    await page.getByTestId("askreel-composer").fill("something lighter");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+
+    const blocked = page.getByTestId("askreel-in-progress");
+    await expect(blocked).toBeVisible();
+    await expect(blocked).toContainText("already being answered");
+    // The answer the reader was looking at is still there, and it is NOT the error card.
+    await expect(gridNames(page)).toHaveText(LIVE_ORDER);
+    await expect(page.getByTestId("semantic-error")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-page-error")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+
+    // "Check again" re-sends the SAME turn id — the whole point of an idempotency key. Asking
+    // afresh would run and bill the question a second time.
+    const before = (await askRequests(page)) as Record<string, unknown>[];
+    await blocked.getByTestId("askreel-retry").click();
+    await waitForAsk(page, 3);
+    const after = (await askRequests(page)) as Record<string, unknown>[];
+    expect(after[2].clientTurnId).toBe(before[1].clientTurnId);
+  });
+
+  test("a 404 says the thread ended, and the next question opens a new one", async ({ page }) => {
+    // A stale remembered id — the thread was deleted from another device, or aged out. Never a
+    // fork, and never a crash message: those are three different things for a person to do.
+    await boot(page);
+    await askAndAnswer(page);
+
+    await askFailNext(page, 404, "conversation_not_found");
+    await page.getByTestId("askreel-composer").fill("something lighter");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+
+    await expect(page.getByTestId("askreel-conversation-gone")).toBeVisible();
+    await expect(page.getByTestId("semantic-error")).toHaveCount(0);
+    // ONE message and one offer. The inline page-error retry renders for a failure that arrived
+    // over a live grid, and both firing at once put two "Ask again" buttons under two different
+    // explanations of the same 404.
+    await expect(page.getByTestId("askreel-page-error")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-retry")).toHaveCount(1);
+    // Forgotten, so the next visit does not ask for it again.
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBeNull();
+
+    // …and the next question carries no conversation id at all, which is what mints a new thread.
+    await page.getByTestId("askreel-conversation-gone").getByTestId("askreel-retry").click();
+    await waitForAsk(page, 3);
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    expect(requests[2].conversationId).toBeNull();
+  });
+});
+
+test.describe("Ask Reel — threads are a thing you can have more than one of", () => {
+  test("+ New clears the thread and brings the cold start back", async ({ page }) => {
+    await boot(page);
+    await askAndAnswer(page);
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe(CONVERSATION);
+
+    await page.getByTestId("askreel-new").click();
+
+    await expect(gridNames(page)).toHaveCount(0);
+    await expect(page.getByTestId("askreel-transcript")).toBeEmpty();
+    // The presets are the cold start, and they are the thing that proves this is one.
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+    // The id goes with it, or a reload would resurrect the thread the user just left.
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBeNull();
+  });
+
+  test("Recent lists the account's threads and deleting one removes it", async ({ page }) => {
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByTestId("askreel-recent").click();
+    const rows = page.getByTestId("askreel-recent-row");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("a tense heist");
+    await expect(rows.nth(0)).toContainText("2 turns");
+    await expect(rows.nth(1)).toContainText("something funny");
+    // A thread with no stored cards says so BEFORE it is opened, not after.
+    await expect(rows.nth(1)).toContainText("transcript only");
+
+    // Delete the OTHER thread: the list refetches without it, and the open thread is untouched.
+    await mockJson(page, "**/api/search/conversations", [CONVERSATION_LIST[0]]);
+    let deleted: string | null = null;
+    await page.route(`**/api/search/conversations/${OTHER_CONVERSATION}`, (route) => {
+      if (route.request().method() === "DELETE") deleted = OTHER_CONVERSATION;
+      return route.fulfill({ status: 204, body: "" });
+    });
+    await rows.nth(1).getByTestId("askreel-recent-delete").click();
+
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(1);
+    expect(deleted).toBe(OTHER_CONVERSATION);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+  });
+});
+
+test.describe("Ask Reel — a stopped page leaves nothing under the bar in the grid", () => {
+  test("sub-floor cards from a stopped page go to the tray, and the state says unranked", async ({ page }) => {
+    // R2's F3-02 MOVED. The account's bar is 6.0. Ranking and the floor run at `done`, which a
+    // stopped page never reaches — so without this the 5.2 and the 4.9 sit in the recommended grid
+    // while the tray directly below says picks were held back for being under 6.0.
+    await boot(page);
+    await askAndAnswer(page);
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    const under = card("d4", "Under Bar", { predictedRating: 5.2, blend: 0.3 });
+    const wayUnder = card("e5", "Way Under", { predictedRating: 4.9, blend: 0.3 });
+    const over = card("f6", "Over Bar", { predictedRating: 6.4, blend: 0.6 });
+    for (const c of [under, wayUnder, over]) await askPush(page, "candidate", c);
+    await expect(gridNames(page)).toHaveCount(6);
+
+    await page.getByTestId("askreel-stop").click();
+
+    // Three above the bar from the first turn, plus the one that cleared it here.
+    await expect(gridNames(page)).toHaveText([...LIVE_ORDER, "Over Bar"]);
+    await expect(page.getByTestId("semantic-results").getByText("Under Bar")).toHaveCount(0);
+    await expect(page.getByTestId("semantic-results").getByText("Way Under")).toHaveCount(0);
+
+    // …and they are accounted for rather than vanished. The label counts the tray's own contents,
+    // so it is a number the reader can open it and verify.
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray.locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
+    await tray.locator("summary").click();
+    // `p.truncate` and not a text match: each card's why-line repeats its name, so a text lookup
+    // matches twice and passes (or fails) for reasons that have nothing to do with the tray.
+    await expect(tray.locator("a > p.truncate")).toHaveText(["Under Bar", "Way Under"]);
+
+    // The stopped state withdraws the claim that this is a finished, ranked answer.
+    await expect(page.getByTestId("askreel-stopped")).toContainText("Unranked — stopped before Reel finished.");
+  });
+
+  test("a card that rounds UP to the bar stays in the grid", async ({ page }) => {
+    // Fixture variation, one field: 5.96 instead of 5.2. The badge rounds to one decimal and
+    // prints "6.0", so holding it back would put a card badged 6.0 inside a tray labelled "under
+    // your 6.0 bar" — the same contradiction wearing the other hat.
+    await boot(page);
+    await askAndAnswer(page);
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await askPush(page, "candidate", card("g7", "Rounds Up", { predictedRating: 5.96, blend: 0.3 }));
+    await expect(gridNames(page)).toHaveCount(4);
+
+    await page.getByTestId("askreel-stop").click();
+
+    await expect(gridNames(page)).toHaveText([...LIVE_ORDER, "Rounds Up"]);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+});
+
+test.describe("Ask Reel — continuity on a phone", () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  test("a resumed thread renders its grid, its seam and its controls at 375", async ({ page }) => {
+    // The same continuity, at the width where the composer, the tab bar and the header all
+    // compete for the bottom of the screen. Cold-booted from a STORED id, which is the phone's
+    // normal path back in: it has one tab and it left the app rather than the page.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-seam")).toContainText("Picked up where you left off");
+    await expect(page.getByTestId("askreel-transcript-only")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+    await expect(page.getByTestId("askreel-new")).toBeVisible();
+    await expect(page.getByTestId("askreel-recent")).toBeVisible();
+  });
+
+  test("a thread that really does predate stored results says so, and only then", async ({ page }) => {
+    // F3-06's honest half. Fixture variation on the test above: `lastCardsAt: null` and no cards,
+    // which is the one shape that may claim the thread predates saved results. Everything else
+    // about the payload is identical, so the branch cannot be reached for any other reason.
+    await stubEventSource(page);
+    await stubAskReel(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/settings/filters", FILTERS_WITH_FLOOR);
+    await mockJson(page, "**/api/search/conversations/latest", {
+      ...RESUME_PAYLOAD, cards: [], lastCardsAt: null, reason: null, shown: [],
+    });
+    await page.goto("/search");
+
+    await expect(page.getByTestId("askreel-transcript-only")).toBeVisible();
+    await expect(page.getByTestId("askreel-transcript-only")).toContainText("predates saved results");
+    // Never the empty-answer card: this page ran no search, so it has no verdict to report.
+    await expect(page.getByTestId("semantic-empty")).toHaveCount(0);
+    // The transcript and a way to bring the answer back are both still there.
+    await expect(page.getByTestId("askreel-transcript")).toContainText("a tense heist");
+    await expect(page.getByTestId("askreel-retry")).toBeVisible();
+  });
+});
