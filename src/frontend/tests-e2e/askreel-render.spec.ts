@@ -387,6 +387,50 @@ test.describe("touch targets", () => {
     await expectTarget(page, "askreel-recent-delete");
   });
 
+  test("the answer's own controls meet 44 x 44 on a resumed thread", async ({ page }) => {
+    // The probe, and the reason this case is separate: these five only exist over an ANSWER, so a
+    // cold page can never measure them. One fixture change — a resumed thread with cards, a tray,
+    // a long question and a failed tail — reaches all of them at once.
+    const card = (n: string) => ({
+      titleId: `00000000-0000-0000-0000-0000000000${n}`,
+      mediaType: "Movie", tmdbId: 900 + Number(n), name: `Title ${n}`, year: 2021,
+      posterPath: null, genres: ["thriller"], similarity: 0.5, predictedRating: 7.2,
+      why: "Because.", seen: false,
+    });
+    const server = conversationServer(
+      Array.from({ length: 20 }, (_, i) => ({
+        id: `thread-${i}`, title: `thread ${i}`, turnCount: 2,
+        lastTurnAt: new Date().toISOString(), lastCardsAt: new Date().toISOString(),
+      })),
+    );
+    server.resume = {
+      id: CONVERSATION,
+      title: "long one",
+      lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+      turns: [
+        { sequence: 0, role: "user", text: "a slow-burn detective story ".repeat(20), kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+        { sequence: 2, role: "user", text: "tenser", kind: "ask", status: "Failed" },
+        { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "server_error" },
+      ],
+      cards: [card("11"), card("12")],
+      belowFloor: [card("13")],
+      reason: "2 picks ranked for you, from 40 pulled.",
+      removed: 0,
+      lastQuery: "tenser",
+      mediaTypes: [],
+      shown: [],
+    };
+    await boot(page, { server });
+    await expect(page.getByTestId("semantic-results")).toBeVisible();
+
+    for (const id of ["askreel-more", "askreel-below-floor-toggle", "askreel-retry", "askreel-bubble-toggle"]) {
+      await expectTarget(page, id);
+    }
+    await page.getByTestId("askreel-recent").tap();
+    await expectTarget(page, "askreel-recent-older");
+  });
+
   test("the chips and Stop meet 44 x 44 while a turn runs", async ({ page }) => {
     await boot(page);
     await page.getByTestId("askreel-composer").fill("a heist with a great ensemble");

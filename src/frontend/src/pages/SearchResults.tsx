@@ -389,7 +389,7 @@ function AskReel() {
               data-testid="askreel-new"
               onClick={beginFreshThread}
               disabled={streaming}
-              className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
             >
               <Plus className="h-3.5 w-3.5" /> New
             </button>
@@ -587,7 +587,7 @@ function AskReel() {
             onClick={stop}
             data-testid="askreel-stop"
             aria-label="Stop searching"
-            className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 text-fa-frost-dim shrink-0 hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
+            className="fa-caption inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
           >
             <Square className="h-3 w-3" /> Stop
           </button>
@@ -610,7 +610,7 @@ function AskReel() {
                 type="button"
                 data-testid="askreel-preset"
                 onClick={() => send(preset)}
-                className="fa-caption rounded-full border border-fa-frost/25 px-4 py-1.5 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
+                className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/25 px-4 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
               >
                 {preset}
               </button>
@@ -634,7 +634,7 @@ function AskReel() {
               // just greying out — to pointers and to assistive tech alike.
               title={streaming ? "Wait for the current results to finish" : undefined}
               aria-disabled={streaming}
-              className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 disabled:opacity-40 transition-colors"
+              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/20 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 disabled:opacity-40 transition-colors"
             >
               {chip}
             </button>
@@ -802,7 +802,13 @@ function AskReel() {
               className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
               data-testid="askreel-below-floor"
             >
-              <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
+              {/* `min-h-11` and padding rather than `flex`: a `display: flex` summary loses its
+                  own disclosure marker, and the triangle is the affordance that says the block
+                  opens. The box still measures 44 px, which is what a thumb needs. */}
+              <summary
+                data-testid="askreel-below-floor-toggle"
+                className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
+              >
                 {floorLabel
                   ? `Show the ${heldBack} under your ${floorLabel} bar`
                   : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
@@ -843,7 +849,7 @@ function AskReel() {
               data-testid="askreel-more"
               onClick={loadMore}
               disabled={streaming || appending}
-              className="fa-caption rounded-full border border-fa-frost/30 px-4 py-1.5 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
             >
               {appending ? "Finding more like these…" : "Show me more"}
             </button>
@@ -912,7 +918,7 @@ function AskReel() {
               disabled={streaming}
               aria-label="Voice search"
               data-testid="askreel-mic"
-              className={`rounded-full p-2.5 transition-colors disabled:opacity-40 ${
+              className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                 speech.listening ? "bg-fa-frost/40 text-fa-frost-bright animate-pulse" : "bg-fa-frost/10 text-fa-frost-dim hover:text-fa-frost-bright"
               }`}
             >
@@ -923,7 +929,7 @@ function AskReel() {
             type="submit"
             disabled={!draft.trim() || streaming}
             data-testid="askreel-send"
-            className="rounded-full bg-fa-frost/20 p-2.5 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full bg-fa-frost/20 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
             aria-label="Send"
           >
             <Send className="h-4 w-4" />
@@ -977,7 +983,7 @@ function UserBubble({ text }: { text: string }) {
           data-testid="askreel-bubble-toggle"
           aria-expanded={expanded}
           onClick={() => setExpanded((v) => !v)}
-          className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
+          className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/20 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
@@ -1126,7 +1132,7 @@ function RetryButton({ onRetry, disabled, label = "Try again" }: { onRetry: () =
       onClick={onRetry}
       disabled={disabled}
       data-testid="askreel-retry"
-      className="inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 fa-caption text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+      className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
     >
       <RotateCcw className="h-3.5 w-3.5" /> {label}
     </button>

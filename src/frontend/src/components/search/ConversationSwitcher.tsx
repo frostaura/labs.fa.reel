@@ -280,7 +280,7 @@ export default function ConversationSwitcher({
               data-testid="askreel-recent-older"
               onClick={() => setShowOlder(true)}
               disabled={isFetching}
-              className="w-full border-t border-fa-edge px-3 py-2 text-left fa-caption text-fa-frost-dim hover:text-fa-frost-bright hover:bg-fa-glass disabled:opacity-40 transition-colors"
+              className="fa-caption flex min-h-11 w-full items-center border-t border-fa-edge px-3 text-left text-fa-frost-dim hover:text-fa-frost-bright hover:bg-fa-glass disabled:opacity-40 transition-colors"
             >
               Show older threads
             </button>
