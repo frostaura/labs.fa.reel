@@ -332,6 +332,48 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.True(anchorsBefore.SetEquals(anchorsAfter), "a reaction on a hero pick must not re-deal the rails.");
     }
 
+    [Fact]
+    public async Task A_preserve_rebuild_never_grows_a_rail_the_page_did_not_have()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The generalisation of the defect the hero-vacancy test above catches only when the day's
+        // rotation offset happens to expose it: a rail that was DROPPED for thinness leaves no
+        // FeedItem, so a Preserve rebuild reading its anchors back from the page cannot tell that
+        // slot from one a user action vacated, and re-draws it. The page then GROWS a row — a new
+        // heading and ten new cards — on a background rebuild the user never asked for, which is
+        // precisely what the stable-"tonight" contract exists to prevent.
+        //
+        // Deterministic by construction, with no dependence on which anchor the rotation lands on:
+        // every loved title shares the candidates' genre, so ANY anchor the re-draw picks would
+        // deal a rail. The first build is starved into fewer than three rails by supply alone, more
+        // supply then arrives (a catalogue seed, an enrichment pass — the ordinary case), and the
+        // rebuild must still show the page the user is looking at.
+        var fixtureGenre = $"rail-growth-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await AddContentFilterAsync(accountId, FilterKind.IncludeGenre, fixtureGenre);
+        await SeedLovedTitlesAsync(accountId, 12, genre: fixtureGenre);
+        await SeedEligibleTitlesAsync(22, genre: fixtureGenre);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+        var anchorsBefore = await AnchorsOfActiveSnapshotAsync(accountId);
+        Assert.InRange(anchorsBefore.Count, 0, 2); // starved: this is the dropped-rail state under test
+
+        // Supply arrives between the two builds. Nothing the user did — so nothing on the page moves.
+        await SeedEligibleTitlesAsync(60, genre: fixtureGenre);
+
+        await RunBuildAsync(accountId);
+        var anchorsAfter = await AnchorsOfActiveSnapshotAsync(accountId);
+
+        Assert.True(
+            anchorsBefore.SetEquals(anchorsAfter),
+            $"a Preserve rebuild must not add a rail: had {anchorsBefore.Count}, now {anchorsAfter.Count}.");
+    }
+
     private async Task<(Guid ActiveId, int Count)> ActiveSnapshotIdAndCountAsync(Guid accountId)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
@@ -740,12 +782,12 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     /// treats them as interchangeable and freezes on the highest, whereas the recency-weighted
     /// anchor pool has something to rotate through.
     /// </summary>
-    private async Task SeedLovedTitlesAsync(Guid accountId, int count)
+    private async Task SeedLovedTitlesAsync(Guid accountId, int count, string genre = "drama")
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         for (var i = 0; i < count; i++)
         {
-            var title = NewTitle($"loved {i}", popularity: 1m + (i * 0.01m));
+            var title = NewTitle($"loved {i}", popularity: 1m + (i * 0.01m), genre);
             db.Add(title);
             db.UserRatings.Add(new UserRating
             {
