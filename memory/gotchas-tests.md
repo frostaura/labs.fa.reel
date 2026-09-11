@@ -30,7 +30,7 @@ last_verified: 2026-09-11
   genre, a reserved dimension block or a non-English language will not save you. Inherit the embedded-catalogue base
   class; a source guard fails the build otherwise.
 - **A day-granular fixture built from `DateTime.UtcNow` plus an offset fails deterministically inside the 23:00 UTC
-  hour** — local 01:00–02:00 — and looks exactly like a timezone bug in the product. It cost an evening. The product
+  hour** — local 01:00–02:00 — and looks exactly like a timezone bug in the product. The product
   keys every day-granular thing on UTC correctly; pin fixture instants to fixed hours of one UTC date.
 - **`TenancyModelTests` hard-codes the model's table count.** Any new entity bumps it in the same commit as its
   migration, and two branches that each add a table will both bump it — the integrator sums them rather than taking

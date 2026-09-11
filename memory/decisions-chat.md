@@ -12,7 +12,7 @@ as **delegating the engineering, not the spec**: every question that touched a l
 with the alternative written down so a reversal is one founder decision rather than an archaeology exercise. Each of
 these is still open as a question — `questions.md`.
 
-## The eight delegated questions, and how each was taken
+## The seven delegated questions, and how each was taken
 - **No filter override in chat.** Naming the collision and showing the conditions needed no decision and shipped; a
   per-turn "just this once" override did not.
 - **Conversation delete is built; whole-account erasure is not.** The design for erasure is pseudonymisation —

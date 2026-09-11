@@ -50,11 +50,11 @@ the eligible pool grew by about an order of magnitude; enrichment still drains u
 account with no `Active` model; the boot sweep enqueued the retrain as designed. Verified on the live `reel` database
 2026-09-11: there is again exactly one `Active` artifact, at schema 5. Nothing is owed here.
 
-**Delivered 2026-09-11, in two programmes, each closed by a headed QA walk the founder followed with zero open rows
-at the end:** the Ask Reel chat programme (server-owned turn record, continuity, negation handling, honest cost
-accounting), and the feed programme (two-row hero, taste-cluster retrieval over the whole rating history,
-cross-reference verdicts serving keep-only). What they decided is in the `decisions-*` topics; what they left owed is
-in `watch.md`.
+**Delivered 2026-09-11, in two programmes — Ask Reel chat (server-owned turn record, continuity, negation handling,
+honest cost accounting) and the feed (two-row hero, taste-cluster retrieval over the whole rating history,
+cross-reference verdicts serving keep-only).** Each closed with a headed QA walk the founder followed, and every row
+those walks raised was fixed before they ended — but the fixers' hand-backs were never started, so the walks are
+closed and the surface is not (`decisions-*` for what was decided, `watch.md` for what is owed).
 
 **The dev loop** runs from `~/src/fa.reel`: Vite on 5173, the API on 5054 under plain `dotnet run`, Postgres in
 Docker on 5433, gateway container deliberately stopped. Traps: `gotchas-build.md`.
