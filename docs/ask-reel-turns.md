@@ -93,6 +93,7 @@ The resume payload:
 ```jsonc
 {
   "id": "…", "title": "…", "lastCardsAt": null,
+  "lastTurnAt": "2026-09-11T00:54:21.301Z",
   "turns":   [{ "sequence": 0, "role": "user", "text": "…", "kind": "ask", "status": "Completed" }],
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
@@ -106,6 +107,11 @@ The resume payload:
 
 `lastCardsAt: null` means **transcript only** — a conversation that predates stored results. Render
 that as its own state; it is a different fact from a turn that honestly returned nothing.
+
+`lastTurnAt` is when the thread was last spoken in — the same column the `Recent` list sorts and
+renders on, so the two views cannot disagree about a thread's age. It is present because a
+transcript-only thread has a null `lastCardsAt` **by definition**, and therefore carried no date at
+all: the resumed seam had nothing to say but "picked up where you left off".
 
 `belowFloor` is the tray, restored as a tray. It is never merged into `cards` — see *The tray*
 below.

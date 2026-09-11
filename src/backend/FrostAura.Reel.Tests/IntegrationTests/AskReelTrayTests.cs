@@ -251,6 +251,45 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// <c>lastTurnAt</c> on the resume payload — the only date a transcript-only thread has.
+    ///
+    /// <para><c>lastCardsAt</c> is null for precisely those threads, by design: null is the
+    /// "predates stored results" signal. So without this field a client resuming one had nothing to
+    /// date the seam with, and rendered it undated. It is the same column the Recent list sorts and
+    /// renders on, which is why it is that column and not a fresh one.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_resume_payload_dates_a_transcript_only_thread()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync(api, $"tray-lastturn-{Guid.NewGuid():N}");
+        using (client)
+        {
+            // No cards at all: lastCardsAt stays null and lastTurnAt is the whole story.
+            var conversationId = await SeedTurnWithTrayAsync(accountId, picks: 0, tray: 0);
+            DateTime lastTurnAt;
+            await using (var db = ScopedContext(accountId))
+            {
+                lastTurnAt = await db.SearchConversations
+                    .Where(c => c.Id == conversationId).Select(c => c.LastTurnAt).FirstAsync();
+            }
+
+            using var response = await client.GetAsync($"/api/search/conversations/{conversationId}");
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var root = payload.RootElement;
+
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("lastCardsAt").ValueKind);
+            Assert.Equal(
+                lastTurnAt.ToUniversalTime().ToString("O"),
+                root.GetProperty("lastTurnAt").GetDateTime().ToUniversalTime().ToString("O"));
+        }
+    }
+
     // ── Eligibility governs both lists ──────────────────────────────────────────────────────
 
     /// <summary>

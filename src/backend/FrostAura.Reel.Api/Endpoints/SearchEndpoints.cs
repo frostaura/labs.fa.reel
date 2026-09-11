@@ -729,7 +729,8 @@ public static class SearchEndpoints
     /// a card under the fence is a card on the glass.</para>
     ///
     /// <para><c>belowFloor</c> restores that tray, separately from <c>cards</c> and never merged
-    /// into it.</para>
+    /// into it. <c>lastTurnAt</c> is beside <c>lastCardsAt</c> because a transcript-only thread has
+    /// a null <c>lastCardsAt</c> by definition and would otherwise carry no date at all.</para>
     /// </summary>
     private static async Task<object> ResumeAsync(
         IReelDbContext db,
@@ -775,6 +776,12 @@ public static class SearchEndpoints
             // Null says "transcript only" — this thread predates stored results, which is a
             // different fact from a turn that honestly returned nothing.
             lastCardsAt = conversation.LastCardsAt,
+            // When this thread was last spoken in — the ONLY date a transcript-only thread has.
+            // lastCardsAt is null for exactly those threads, so without this field a resumed
+            // conversation that predates stored results cannot be dated at all, and the client was
+            // reduced to rendering an undated seam. It is the same column the Recent list already
+            // sorts and renders on, so the two views cannot disagree about a thread's age.
+            lastTurnAt = conversation.LastTurnAt,
             turns = turns.Select(t => new
             {
                 sequence = t.Sequence,
