@@ -41,6 +41,7 @@ import {
   pageRefusalMessage,
   stoppedTranscript,
   showsInlineFailure,
+  answerRowIndex,
   failedTurnMessage,
   RECENT_LIMIT,
   OLDER_LIMIT,
@@ -385,16 +386,19 @@ describe("chatReducer — error", () => {
 describe("chatReducer — conflict", () => {
   it("a_conflict_frame_is_stored_and_cleared_by_the_next_turn", () => {
     // Fixture variation: the next turn arrives as a FRESH one and as a follow-up in the same
-    // thread. Fresh resets through initialChatState; the follow-up has to clear it explicitly,
-    // and that is the branch where a stale note would have hung over an unrelated answer.
+    // thread. Fresh resets through initialChatState; the follow-up clears the TURN slot, and with
+    // no answer on screen behind it the answer slot goes too.
     const asked = chatReducer(initialChatState, { type: "userTurn", message: "something scary", fresh: true });
     const conflicted = chatReducer(asked, { type: "conflict", data: { message: "Horror is excluded on this account." } });
-    expect(conflicted.conflict).toBe("Horror is excluded on this account.");
-    // It survives the answer it annotates.
-    expect(chatReducer(conflicted, { type: "done", data: { results: [card(1)], reason: "1 pick" } }).conflict)
-      .toBe("Horror is excluded on this account.");
+    // In flight it is the TURN's, which is what lets a held previous answer keep its own (R5-01).
+    expect(conflicted.turnConflict).toBe("Horror is excluded on this account.");
+    // It survives the answer it annotates, as that answer's own.
+    const answered = chatReducer(conflicted, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
+    expect(answered.conflict).toBe("Horror is excluded on this account.");
+    expect(answered.turnConflict).toBeNull();
 
     expect(chatReducer(conflicted, { type: "userTurn", message: "something funny", fresh: false }).conflict).toBeNull();
+    expect(chatReducer(conflicted, { type: "userTurn", message: "something funny", fresh: false }).turnConflict).toBeNull();
     expect(chatReducer(conflicted, { type: "userTurn", message: "something funny", fresh: true }).conflict).toBeNull();
   });
 });
@@ -1388,12 +1392,19 @@ describe("chatReducer — the conflict flag and the excluded terms", () => {
       type: "conflict",
       data: { message: "Your conditions permanently exclude comedy and anime.", excludedGenres: ["comedy"], excludedKeywords: ["anime"] },
     });
-    expect(conflicted.conflict).toBe("Your conditions permanently exclude comedy and anime.");
-    expect(conflicted.conflictTerms).toEqual(["comedy", "anime"]);
-    // A note belongs to the question that produced it — both halves go with it.
-    const next = chatReducer(conflicted, { type: "userTurn", message: "something else", fresh: false });
-    expect(next.conflict).toBeNull();
-    expect(next.conflictTerms).toEqual([]);
+    // The frame is the running turn's until that turn completes, and then it is the answer's.
+    expect(conflicted.turnConflict).toBe("Your conditions permanently exclude comedy and anime.");
+    expect(conflicted.turnConflictTerms).toEqual(["comedy", "anime"]);
+    const answered = chatReducer(conflicted, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
+    expect(answered.conflict).toBe("Your conditions permanently exclude comedy and anime.");
+    expect(answered.conflictTerms).toEqual(["comedy", "anime"]);
+    // A note belongs to the answer that produced it — both halves go when that answer is replaced,
+    // which is the first candidate of the next turn and not the act of asking (R5-01).
+    const next = chatReducer(answered, { type: "userTurn", message: "something else", fresh: false });
+    expect(next.conflict).toBe("Your conditions permanently exclude comedy and anime.");
+    const replaced = chatReducer(next, { type: "candidate", data: card(9) });
+    expect(replaced.conflict).toBeNull();
+    expect(replaced.conflictTerms).toEqual([]);
   });
 });
 
@@ -2051,13 +2062,20 @@ describe("chatReducer — a resumed thread restores its collision notice", () =>
     expect(state.turns.at(-1)?.conflict).toBeUndefined();
   });
 
-  it("does_not_survive_the_next_question", () => {
-    // A conflict describes the question that produced it. Asking again in the same thread must
-    // clear both the notice and the pill, exactly as the live path already does.
+  it("goes_with_the_answer_it_explains_rather_than_with_the_question", () => {
+    // A conflict describes the question that produced it — and it stays on screen exactly as long
+    // as that question's ANSWER does. Asking again holds the restored grid (it is all that is on
+    // screen for the length of the new turn), so the notice is held with it and released at the
+    // same instant: the first candidate of the new turn. Clearing it at ask-time was R5-01 —
+    // the grid, the tray and the footnote stayed and the explanation left.
     const resumed = chatReducer(initialChatState, { type: "resume", payload });
     const asking = chatReducer(resumed, { type: "userTurn", message: "something else entirely", fresh: false });
-    expect(asking.conflict).toBeNull();
-    expect(asking.conflictTerms).toEqual([]);
+    expect(asking.holdingPrevious).toBe(true);
+    expect(asking.conflict).toBe(payload.conflict.message);
+
+    const replaced = chatReducer(asking, { type: "candidate", data: card(9) });
+    expect(replaced.conflict).toBeNull();
+    expect(replaced.conflictTerms).toEqual([]);
   });
 });
 
@@ -3064,5 +3082,148 @@ describe("showsInlineFailure", () => {
   it("never_fires_on_a_turn_that_finished", () => {
     expect(showsInlineFailure(ok, false, "resumed")).toBe(false);
     expect(showsInlineFailure(ok, true, "done")).toBe(false);
+  });
+});
+
+/**
+ * R5-01 — the collision notice belongs to the answer whose cards are on screen.
+ *
+ * Two wrong states on one thread, one gesture apart. While the kept answer was held after a Stop
+ * the notice was **gone** — `userTurn` cleared it at ask-time while deliberately holding the grid
+ * it explains, so the one part of the turn F4-06 was filed to preserve was the one part the held
+ * state dropped. And once the page landed it came back attached to the **wrong bubble**: "Your
+ * conditions permanently exclude comedy and romance" annotating a sea-thriller question that
+ * collided with nothing, because the anchor was "the newest assistant row" — right on a resume,
+ * wrong the moment a failed turn sits between the answer and the page.
+ */
+describe("answerRowIndex — the row the grid belongs to", () => {
+  it("skips_a_failed_row_to_reach_the_answer", () => {
+    const turns: ChatTurn[] = [
+      { role: "user", text: "a 90s romantic comedy" },
+      { role: "assistant", text: "I can’t do a 90s romantic comedy." },
+      { role: "user", text: "something tense set at sea" },
+      { role: "assistant", text: "", failed: true, failureCode: "client_aborted" },
+    ];
+    expect(answerRowIndex(turns)).toBe(1);
+  });
+
+  it("is_the_newest_assistant_row_when_nothing_failed", () => {
+    // Fixture variation, one field: the tail's `failed` flag. Same rows, same order.
+    const turns: ChatTurn[] = [
+      { role: "user", text: "a 90s romantic comedy" },
+      { role: "assistant", text: "I can’t do a 90s romantic comedy." },
+      { role: "user", text: "something tense set at sea" },
+      { role: "assistant", text: "Here’s a tense sea-set pick." },
+    ];
+    expect(answerRowIndex(turns)).toBe(3);
+  });
+
+  it("is_minus_one_when_no_answer_is_on_screen", () => {
+    expect(answerRowIndex([{ role: "user", text: "a 90s romantic comedy" }])).toBe(-1);
+    expect(answerRowIndex([{ role: "assistant", text: "", failed: true, failureCode: null }])).toBe(-1);
+  });
+});
+
+describe("chatReducer — the notice moves with the grid it explains", () => {
+  /** A settled, colliding answer: two cards, a notice, and the terms behind it. */
+  const answered = chatReducer(
+    chatReducer(
+      chatReducer(initialChatState, { type: "userTurn", message: "a 90s romantic comedy", fresh: true }),
+      { type: "conflict", data: { message: "Your conditions permanently exclude comedy and romance.", excludedGenres: ["comedy", "romance"] } },
+    ),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks ranked for you, from 40 pulled." } },
+  );
+
+  it("lands_on_the_answer_slot_only_when_the_turn_completes", () => {
+    // While the turn is in flight the notice is the TURN's, not the answer's — which is what lets a
+    // held previous answer keep its own.
+    const asking = chatReducer(initialChatState, { type: "userTurn", message: "a 90s romantic comedy", fresh: true });
+    const colliding = chatReducer(asking, { type: "conflict", data: { message: "…comedy and romance." } });
+    expect(colliding.conflict).toBeNull();
+    expect(colliding.turnConflict).toBe("…comedy and romance.");
+    expect(answered.conflict).toBe("Your conditions permanently exclude comedy and romance.");
+    expect(answered.conflictTerms).toEqual(["comedy", "romance"]);
+    expect(answered.turnConflict).toBeNull();
+  });
+
+  it("is_held_with_the_answer_while_the_next_question_runs", () => {
+    // R5-01's first state. The grid, the tray and the footnote are deliberately HELD while a new
+    // turn works; the notice was cleared at ask-time and so left the answer it explains.
+    const asked = chatReducer(answered, { type: "userTurn", message: "something tense set at sea", fresh: false });
+    expect(asked.holdingPrevious).toBe(true);
+    expect(asked.conflict).toBe("Your conditions permanently exclude comedy and romance.");
+    expect(asked.conflictTerms).toEqual(["comedy", "romance"]);
+  });
+
+  it("survives_the_stop_that_never_replaced_the_answer", () => {
+    const asked = chatReducer(answered, { type: "userTurn", message: "something tense set at sea", fresh: false });
+    const stopped = chatReducer(asked, { type: "stop" });
+    expect(stopped.conflict).toBe("Your conditions permanently exclude comedy and romance.");
+    // …and a page of that kept answer does not move it either: the answer did not change.
+    const paged = chatReducer(
+      chatReducer(stopped, { type: "moreTurn" }),
+      { type: "done", data: { results: [card(3)], kept: 1, reason: "1 more from the same angle." } },
+    );
+    expect(paged.conflict).toBe("Your conditions permanently exclude comedy and romance.");
+  });
+
+  it("keeps_the_stopped_turn_s_own_collision_off_the_kept_answer", () => {
+    // Both turns collided. The kept answer keeps its own notice; the abandoned turn's stays in the
+    // turn slot, which is where the stopped card reads it — never anchored under the answer.
+    const asked = chatReducer(answered, { type: "userTurn", message: "something anime", fresh: false });
+    const collided = chatReducer(asked, { type: "conflict", data: { message: "Your conditions exclude anime.", excludedKeywords: ["anime"] } });
+    const stopped = chatReducer(collided, { type: "stop" });
+    expect(stopped.conflict).toBe("Your conditions permanently exclude comedy and romance.");
+    expect(stopped.turnConflict).toBe("Your conditions exclude anime.");
+    expect(stopped.turnConflictTerms).toEqual(["anime"]);
+  });
+
+  it("goes_when_the_answer_it_explains_is_replaced", () => {
+    // The release, and the reason the hold is safe: the first candidate of the new turn is the
+    // moment the grid stops being the old answer, and the accounting goes with it.
+    const asked = chatReducer(answered, { type: "userTurn", message: "something tense set at sea", fresh: false });
+    const replaced = chatReducer(asked, { type: "candidate", data: card(9) });
+    expect(replaced.conflict).toBeNull();
+    expect(replaced.conflictTerms).toEqual([]);
+    expect(replaced.reason).toBeNull();
+  });
+
+  it("never_hangs_over_an_answer_that_collided_with_nothing", () => {
+    // Fixture variation: the same follow-up, but it LANDS instead of being stopped. A new answer
+    // with no conflict frame replaces the notice with nothing at all.
+    const asked = chatReducer(answered, { type: "userTurn", message: "something tense set at sea", fresh: false });
+    const landed = chatReducer(
+      chatReducer(asked, { type: "candidate", data: card(9) }),
+      { type: "done", data: { results: [card(9)], reason: "1 pick ranked for you, from 40 pulled." } },
+    );
+    expect(landed.conflict).toBeNull();
+    expect(landed.conflictTerms).toEqual([]);
+  });
+});
+
+describe("chatReducer — a resumed notice pins to the answer, not the failed tail", () => {
+  it("marks_the_completed_reply_and_leaves_the_stopped_row_alone", () => {
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-r501",
+        lastCardsAt: "2026-09-11T09:00:00Z",
+        turns: [
+          { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "I can’t do a 90s romantic comedy.", kind: "ask", status: "Completed", id: "turn-romcom" },
+          { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Failed" },
+          { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted", id: "turn-sea" },
+        ],
+        cards: [card(1)],
+        reason: "1 pick ranked for you, from 40 pulled",
+        lastQuery: "something tense set at sea",
+        conflict: { message: "Your conditions permanently exclude comedy and romance.", excludedGenres: ["comedy", "romance"] },
+      },
+    });
+    // The pill goes on the answer's bubble — the row `answerRowIndex` names — and nowhere near the
+    // turn that never produced one.
+    expect(state.turns[1].conflict).toBe(true);
+    expect(state.turns[3].conflict).toBeUndefined();
+    expect(state.conflict).toBe("Your conditions permanently exclude comedy and romance.");
   });
 });

@@ -24,7 +24,7 @@ import {
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
   pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
   COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage, showsInlineFailure,
-  questionFor,
+  questionFor, answerRowIndex,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -106,7 +106,8 @@ function AskReel() {
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
-    conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
+    conflictTerms, turnConflict, turnConflictTerms, belowFloor, droppedByFloor, holdingPrevious,
+    arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
     pageQuery, pageRefusal, hasLocalTurn,
   } = useAskReelChat();
@@ -371,7 +372,21 @@ function AskReel() {
   // two statements about the same collision, a control and a banner apart. The `conflict` flag on
   // the reply is what makes the anchor possible; without a reply on screen (a conflict frame
   // arriving before the model's, a resumed thread) it falls back to where it was.
-  const lastAssistantIndex = turns.reduce((last, t, i) => (t.role === "assistant" ? i : last), -1);
+  //
+  // …and the reply it qualifies is the row the GRID belongs to, which is not always the newest
+  // assistant row. R5-01: after a Stop and a page, "Your conditions permanently exclude comedy and
+  // romance" annotated a sea-thriller question that had collided with nothing — while a hard
+  // reload put the same notice back under the romcom reply. `answerRowIndex` skips the failed row
+  // that sits between them, so live and resumed cannot disagree about whose explanation it is.
+  const answerIndex = answerRowIndex(turns);
+  /**
+   * The in-flight turn's OWN collision, which is a different statement from the answer's. It
+   * renders with that turn — under its own reply while it streams, and inside the stopped card
+   * once it is abandoned — never under the answer, which has its own (R5-01).
+   */
+  const turnConflictMessage = turnConflict?.trim() ? turnConflict : null;
+  const liveReplyIndex = turns.at(-1)?.role === "assistant" && !turns.at(-1)?.failed ? turns.length - 1 : -1;
+  const showsTurnConflict = !!turnConflictMessage && streaming && !appending;
 
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
@@ -621,8 +636,16 @@ function AskReel() {
                   )}
                 </p>
               </div>
-              {i === lastAssistantIndex && conflictMessage && (
+              {i === answerIndex && conflictMessage && (
                 <ConflictNotice message={conflictMessage} terms={conflictTerms} />
+              )}
+              {/* …and the running turn's own, under the reply it belongs to. Distinct from the
+                  answer's whenever a previous answer is still being held, which is the case
+                  R5-01 collapsed into one slot and one anchor. On a fresh turn the two rows are
+                  the same row, and only one notice goes on it — the answer's the moment it has
+                  one, this turn's until then. */}
+              {i === liveReplyIndex && showsTurnConflict && !(conflictMessage && i === answerIndex) && (
+                <ConflictNotice message={turnConflictMessage} terms={turnConflictTerms} />
               )}
             </div>
           ),
@@ -824,8 +847,15 @@ function AskReel() {
           under it (see `lastAssistantIndex`), attached to the sentence it explains; here is where
           it goes when there is no reply to attach to — a conflict frame that arrives before the
           model's, or a resumed thread whose assistant row was empty. */}
-      {conflictMessage && lastAssistantIndex < 0 && (
+      {conflictMessage && answerIndex < 0 && (
         <ConflictNotice message={conflictMessage} terms={conflictTerms} />
+      )}
+      {/* The same fallback for the running turn's notice: a `conflict` frame routinely arrives
+          before the model's sentence does, and until then there is no reply of its own to sit
+          under. Suppressed while the answer's notice is already in this position, so one screen
+          never grows two detached banners. */}
+      {showsTurnConflict && liveReplyIndex < 0 && !(conflictMessage && answerIndex < 0) && (
+        <ConflictNotice message={turnConflictMessage} terms={turnConflictTerms} />
       )}
 
       {/* A stopped turn is a state, not an absence. Pressing Stop before the first card used to
@@ -842,6 +872,15 @@ function AskReel() {
         >
           <p className="fa-caption text-fa-frost-dim">{stoppedMessage}</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+          {/* The abandoned turn's own collision, where it had one — with the row it belongs to and
+              nowhere else. R5-01: it used to overwrite the kept answer's notice and then anchor
+              under whichever bubble happened to be newest, so a question that collided with
+              nothing carried the previous question's explanation. */}
+          {turnConflictMessage && (
+            <div className="w-full">
+              <ConflictNotice message={turnConflictMessage} terms={turnConflictTerms} />
+            </div>
+          )}
         </div>
       )}
 

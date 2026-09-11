@@ -778,6 +778,26 @@ export function questionFor(turns: ChatTurn[], index: number): string {
 }
 
 /**
+ * Which transcript row the answer on screen IS — the newest assistant row that is not a failure.
+ *
+ * R5-01. The anchor for the collision notice was "the newest assistant row", which is right on an
+ * ordinary screen and wrong the moment a failed turn sits between the answer and what came after
+ * it: "Your conditions permanently exclude comedy and romance" ended up annotating a sea-thriller
+ * question that collided with nothing, live, while a hard reload put it back under the romcom
+ * reply. One answer, two accounts of which question it explains, a reload apart.
+ *
+ * A failed row is never the answer — it has none, which is the whole point of it — so skipping it
+ * lands on the row whose cards are actually in the grid. -1 when nothing on screen is an answer,
+ * which is where the notice falls back to a block of its own.
+ */
+export function answerRowIndex(turns: ChatTurn[]): number {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === "assistant" && !turns[i].failed) return i;
+  }
+  return -1;
+}
+
+/**
  * What became of a resumed thread's LAST turn, when it was not a completed answer.
  *
  * SB-03: the resume payload has carried `turns[].status` all along and `transcriptOf` dropped it on
@@ -1181,6 +1201,19 @@ interface State {
    * prose; empty when the server named none.
    */
   conflictTerms: string[];
+  /**
+   * The same fact for the turn IN FLIGHT — the collision the running (or abandoned) question
+   * produced, held apart from the answer's until that turn completes.
+   *
+   * R5-01. One slot could not hold both, so a colliding follow-up overwrote the kept answer's
+   * notice and a Stop then left the survivor anchored under the wrong bubble. The turn's notice
+   * renders with the turn — under its own reply while it streams, and with the stopped card once
+   * it is abandoned — and becomes {@link State.conflict} at `done`, when the answer it explains is
+   * what the grid holds.
+   */
+  turnConflict: string | null;
+  /** The terms behind {@link State.turnConflict}, on the same terms as {@link State.conflictTerms}. */
+  turnConflictTerms: string[];
   /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
   belowFloor: AskCard[];
   /**
@@ -1379,7 +1412,8 @@ export function failureFor(err: unknown): ChatAction {
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
-  conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
+  conflict: null, conflictTerms: [], turnConflict: null, turnConflictTerms: [],
+  belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
   pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
@@ -1463,8 +1497,8 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
  * So they now move with the grid: held while the grid is held, and released at the single moment
  * the grid is replaced (the first candidate of the new turn) or completed.
  */
-function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted"> {
-  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false };
+function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted" | "conflict" | "conflictTerms"> {
+  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false, conflict: null, conflictTerms: [] };
 }
 
 export function chatReducer(state: State, action: ChatAction): State {
@@ -1491,9 +1525,14 @@ export function chatReducer(state: State, action: ChatAction): State {
             // Whatever turn was named last belongs to the answer BEFORE this one; this turn's own
             // id arrives on its `conversation` frame, and until it does there is none to adopt.
             activeTurnId: null,
-            // A conflict describes the question that produced it. A new question gets a clean
-            // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, conflictTerms: [], errorReason: null,
+            // A conflict describes the question that produced it — and so does the ANSWER it
+            // explains, which is why this is no longer cleared here. R5-01: the grid, the tray and
+            // the footnote are all deliberately held while the new turn works, and the notice was
+            // cleared at ask-time, so the one part of the turn F4-06 exists to preserve was the one
+            // part the held state dropped. It goes with the grid instead — see
+            // {@link clearedAnswerDescription} — and the new turn's own collision lands in
+            // `turnConflict`, which starts empty.
+            turnConflict: null, turnConflictTerms: [], errorReason: null,
             // The resumed thread's unanswered tail belongs to the visit BEFORE this one. Asking
             // anything replaces it — the retry offer it carries is exactly what was just taken.
             resumedTail: null, answeredQuery: "",
@@ -1526,6 +1565,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         // overwrites it. A page never replaces what is on screen, so a refused one owes the reader
         // the state they were in, footnote and control included (R5-04).
         pagePriorStatus: state.status, pageRefusal: null,
+        // A page extends the answer on screen, so the answer's notice stands. Only the turn slot
+        // resets, ready for whatever this page's own frames say.
+        turnConflict: null, turnConflictTerms: [],
         // `pageTurnId` is deliberately carried — it names the answer this page extends, which is
         // the whole point of the request about to go out. Only the in-flight handle resets.
         activeTurnId: null,
@@ -1540,6 +1582,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       return {
         ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
         appending: false, errorReason: null, activeTurnId: null, pageRefusal: null,
+        turnConflict: null, turnConflictTerms: [],
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
         ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
@@ -1580,13 +1623,14 @@ export function chatReducer(state: State, action: ChatAction): State {
       // …and the pill goes back on the bubble the notice qualifies, which is the newest assistant
       // row — the same row `reason` and the notice itself are about. A warning on every resumed
       // answer would be worse than none, so this is the one row and only when there is a notice.
+      //
+      // …the row `answerRowIndex` names, which is the newest assistant row that is not a FAILURE.
+      // A thread whose tail was stopped carries a failed assistant row now (R5-02), and pinning to
+      // "the newest assistant row" would put the romcom's explanation on a turn that never
+      // produced an answer at all (R5-01).
       if (restoredConflict) {
-        for (let i = turns.length - 1; i >= 0; i--) {
-          if (turns[i].role === "assistant") {
-            turns[i] = { ...turns[i], conflict: true };
-            break;
-          }
-        }
+        const anchor = answerRowIndex(turns);
+        if (anchor >= 0) turns[anchor] = { ...turns[anchor], conflict: true };
       }
       const cards = p.cards ?? [];
       const byId: Record<string, AskCard> = {};
@@ -1690,13 +1734,17 @@ export function chatReducer(state: State, action: ChatAction): State {
       return { ...state, byId: { ...state.byId, [action.data.titleId]: { ...e, fit: action.data.fit, why: action.data.why } } };
     }
     case "conflict":
+      // The TURN's slot, not the answer's. The frame describes the question being asked right now,
+      // and the answer on screen may still be the previous one — held, whole, with a collision of
+      // its own that this must not overwrite (R5-01). It is promoted at `done`, which is the moment
+      // this question's answer becomes the grid.
       return {
         ...state,
-        conflict: action.data.message,
+        turnConflict: action.data.message,
         // The terms travel beside the sentence rather than being parsed back out of it. Two
         // server-side lists, one fact for the reader — and the keyword half is the one a turn
         // colliding with an avoid-keyword ("anime", "musical") had no way to name at all.
-        conflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
+        turnConflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
       };
     case "done": {
       // A caught server exception arrives as `done` with no results. Treat it as the failure it is
@@ -1759,6 +1807,14 @@ export function chatReducer(state: State, action: ChatAction): State {
         // sent the field has not told us it cut nothing, and the tray falls back to counting the
         // cards it was handed in that case, which zero would silently suppress.
         droppedByFloor: sumDropped(state.appending ? state.droppedByFloor : null, action.data.droppedByFloor),
+        // The turn's collision becomes the ANSWER's the moment this turn's cards are the grid. A
+        // fresh answer replaces the notice outright — including with nothing, which is what a
+        // question that collided with nothing is entitled to; a page keeps the one it is extending
+        // unless its own frames said something.
+        conflict: state.turnConflict ?? (state.appending ? state.conflict : null),
+        conflictTerms: state.turnConflict ? state.turnConflictTerms : state.appending ? state.conflictTerms : [],
+        turnConflict: null,
+        turnConflictTerms: [],
       };
     }
     case "stop":
@@ -2173,8 +2229,16 @@ export function useAskReelChat() {
      * say so: the server's sentence describes the turn that produced it, never the accumulation.
      */
     paged: state.paged,
-    /** The server's note that this question collides with a standing exclusion; not an error. */
+    /** The server's note that the question the GRID answers collides with a standing exclusion. */
     conflict: state.conflict,
+    /**
+     * The same note for the turn in flight — or, after a Stop, for the one that was abandoned. Read
+     * beside that turn (its own reply while it streams, the stopped card once it ends) and never
+     * under the answer, which has its own (R5-01).
+     */
+    turnConflict: state.turnConflict,
+    /** The terms behind {@link turnConflict}, ready for {@link listPhrase}. */
+    turnConflictTerms: state.turnConflictTerms,
     /**
      * The terms that note is about — genres and avoid-keywords in one list, ready for
      * {@link listPhrase}. Empty when the server named none, which is every message-only conflict.

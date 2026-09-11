@@ -912,3 +912,104 @@ test.describe("Ask Reel — the grid holds its shape", () => {
     await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
   });
 });
+
+/**
+ * R5-01 — the collision notice belongs to the answer whose cards are on screen.
+ *
+ * Two wrong states on one thread, one gesture apart. While the kept answer was held after a Stop
+ * the notice was GONE — the grid, the tray and the footnote all stayed and the explanation left,
+ * which is the one part of the turn F4-06 was filed to preserve. Once the page landed it came back
+ * attached to the WRONG bubble: DOM order put `askreel-conflict` under the sea-thriller reply, a
+ * question that collided with nothing. A hard reload corrected both, so live state and resumed
+ * state disagreed about which answer the explanation belonged to.
+ */
+test.describe("Ask Reel — the collision notice stays with its answer", () => {
+  const CONV = "1f2e3d4c-0000-4000-8000-000000000077";
+
+  /** Settles a colliding answer: a reply, a notice, three cards. */
+  async function askColliding(page: Page) {
+    await page.getByTestId("askreel-composer").fill("a 90s romantic comedy");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONV, turnId: "turn-romcom", sequence: 1 });
+    await askPush(page, "assistant-message", { text: "I can’t recommend a 90s romantic comedy.", conflict: true });
+    await askPushConflict(page, "Your conditions permanently exclude comedy and romance.", {
+      excludedGenres: ["comedy", "romance"],
+    });
+    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-conflict")).toBeVisible();
+  }
+
+  test("a Stop over a held answer keeps the notice with the answer", async ({ page }) => {
+    await bootSearch(page);
+    await askColliding(page);
+
+    await page.getByTestId("askreel-composer").fill("something tense set at sea");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "conversation", { id: CONV, turnId: "turn-sea", sequence: 3 });
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    // Held, not replaced: the grid is still the romcom answer, so its explanation is still true.
+    await expect(page.getByTestId("askreel-conflict")).toBeVisible();
+
+    await page.getByTestId("askreel-stop").click();
+    await expect(page.getByTestId("askreel-kept-answer")).toBeVisible();
+    const notice = page.getByTestId("askreel-conflict");
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText("permanently exclude comedy and romance");
+    await expect(notice.getByTestId("askreel-conflict-terms")).toHaveText("Rules out comedy and romance.");
+
+    // …and it is under the answer's reply, not under the question that was stopped.
+    const place = await page.evaluate(() => {
+      const replies = [...document.querySelectorAll('[data-testid="askreel-reply"]')];
+      const n = document.querySelector('[data-testid="askreel-conflict"]');
+      return {
+        replies: replies.length,
+        underRomcom: !!n && !!replies[0] && !!(replies[0].compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING),
+      };
+    });
+    // One reply: the stopped turn never produced one, and its half-written sentence is not an answer.
+    expect(place).toEqual({ replies: 1, underRomcom: true });
+
+    // And the page that follows does not move it — the answer did not change.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 3);
+    await askPush(page, "done", { results: [], kept: 0, reason: "Nothing more on this one." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-conflict")).toHaveCount(1);
+    await expect(page.getByTestId("askreel-conflict")).toContainText("permanently exclude comedy and romance");
+    const stillUnderRomcom = await page.evaluate(() => {
+      const reply = document.querySelector('[data-testid="askreel-reply"]');
+      const n = document.querySelector('[data-testid="askreel-conflict"]');
+      const failed = document.querySelector('[data-testid="askreel-failed-turn"]');
+      return {
+        afterReply: !!reply && !!n && !!(reply.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING),
+        beforeTheStoppedTurn: !!failed && !!n && !!(n.compareDocumentPosition(failed) & Node.DOCUMENT_POSITION_FOLLOWING),
+      };
+    });
+    expect(stillUnderRomcom).toEqual({ afterReply: true, beforeTheStoppedTurn: true });
+  });
+
+  test("the stopped turn's own collision is shown with the stopped turn", async ({ page }) => {
+    // Fixture variation: the SECOND question collides too. One slot could not hold both, so the
+    // follow-up's notice overwrote the kept answer's and then anchored under the wrong bubble.
+    await bootSearch(page);
+    await askColliding(page);
+
+    await page.getByTestId("askreel-composer").fill("a funny anime");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "conversation", { id: CONV, turnId: "turn-anime", sequence: 3 });
+    await askPushConflict(page, "Your conditions permanently exclude anime.", { excludedKeywords: ["anime"] });
+    await page.getByTestId("askreel-stop").click();
+
+    // Two notices, each with its own row: the answer keeps its account, the abandoned turn keeps its.
+    const stopped = page.getByTestId("askreel-stopped");
+    await expect(stopped.getByTestId("askreel-conflict")).toContainText("permanently exclude anime");
+    const inTranscript = page.getByTestId("askreel-transcript").getByTestId("askreel-conflict");
+    await expect(inTranscript).toHaveCount(1);
+    await expect(inTranscript).toContainText("permanently exclude comedy and romance");
+    await expect(inTranscript).not.toContainText("anime");
+  });
+});
