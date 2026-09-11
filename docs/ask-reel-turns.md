@@ -22,20 +22,36 @@ row rather than a wire-only artefact — see *The tray*.
   "query": "something tense with a clever ending",    // 1..1000 chars, trimmed
   "conversationId": "1f2e3d4c-…",                     // optional UUID string; null mints a new conversation
   "clientTurnId": "9a8b7c6d-…",                       // REQUIRED UUID string; the idempotency key for this exchange
-  "mediaTypes": ["movie"]                             // optional; "movie" | "movies" | "film" | "tv" | "show" | "series"
+  "mediaTypes": ["movie"],                            // optional; "movie" | "movies" | "film" | "tv" | "show" | "series"
+  "pageOf": "5c4b3a29-…"                              // optional UUID string; the assistant turn this is another page of
 }
 ```
 
 `history`, `shownTmdbIds` and `continuation` **do not exist**. They were removed, not renamed.
 
-**Both ids are UUIDs, not opaque strings.** `SearchTurns.ClientTurnId` and
+**Every id is a UUID, not an opaque string.** `SearchTurns.ClientTurnId`, `SearchTurns.Id` and
 `SearchConversations.Id` are `uuid` columns, so a nanoid or a `${tabId}-${n}` key is unrepresentable
-and is refused — `client_turn_id_invalid` / `conversation_id_invalid`, in the same `{ error, code }`
-shape as every other refusal. They arrive as strings and are parsed by the handler precisely so that
-refusal is a coded one: bound as `Guid` they failed in the JSON binder, before any of the codes
-below could be reached, and the caller got a `text/plain` .NET exception with no `code` at all.
-`"00000000-0000-0000-0000-000000000000"` is well-formed and still invalid — it is the "no id"
-sentinel, and every turn would collide on it.
+and is refused — `client_turn_id_invalid` / `conversation_id_invalid` / `page_of_invalid`, in the
+same `{ error, code }` shape as every other refusal. They arrive as strings and are parsed by the
+handler precisely so that refusal is a coded one: bound as `Guid` they failed in the JSON binder,
+before any of the codes below could be reached, and the caller got a `text/plain` .NET exception with
+no `code` at all. `"00000000-0000-0000-0000-000000000000"` is well-formed and still invalid — it is
+the "no id" sentinel, and every turn would collide on it.
+
+**The body is read as JSON and unpacked field by field, so a field of the wrong TYPE is refused the
+same way a field of the wrong VALUE is.** `{"clientTurnId": 12345}` and
+`{"clientTurnId": {"a":1}}` are `client_turn_id_invalid`; a non-string `query` is `query_invalid`;
+a `mediaTypes` that is not an array is `media_type_invalid`. A body that is not a JSON **object** at
+all — unparseable bytes, a bare string, an array, nothing — is `body_invalid`. Making the ids
+strings alone was not enough: the binder is bypassed for a JSON *string*, so any other type still
+failed inside it and returned five kilobytes of `text/plain` `BadHttpRequestException` naming an
+internal type, on a route any signed-in account can reach.
+
+**The one place `code` is not available is an unmatched ROUTE.** `GET /api/search/turns/not-a-uuid`
+is a bodiless `404`: `{id:guid}` is a route constraint, so an unparseable id matches no route and
+routing refuses it before any handler exists to be reached. That is deliberate — widening the
+constraint would mean claiming a URL space this API does not own — and it is the stated exception to
+"`code` is what a client switches on".
 
 **Every `mediaTypes` token must be one of the six.** An unknown token is `media_type_invalid`, not a
 silently dropped filter: a stale or typo'd token would otherwise be indistinguishable from no filter
@@ -50,9 +66,9 @@ stored turn.
 | Status | Shape | When |
 | --- | --- | --- |
 | `200` `text/event-stream` | the SSE stream below | a live turn, or the replay of a finished one |
-| `400` | `{ error, code }` | `empty_query`, `query_too_long`, `client_turn_id_required`, `client_turn_id_invalid`, `conversation_id_invalid`, `media_type_invalid` |
-| `404` | `{ error, code }` | `conversation_not_found` — an id that is not the caller's, or is gone. **Never a fork.** |
-| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation · `client_turn_id_reused` — this key already answered a **different** question |
+| `400` | `{ error, code }` | `body_invalid`, `empty_query`, `query_invalid`, `query_too_long`, `client_turn_id_required`, `client_turn_id_invalid`, `conversation_id_invalid`, `page_of_invalid`, `media_type_invalid` |
+| `404` | `{ error, code }` | `conversation_not_found` — an id that is not the caller's, or is gone. **Never a fork.** · `page_of_not_found` — a `pageOf` turn that is not the caller's, is gone, or is not in this conversation |
+| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation · `client_turn_id_reused` — this key already answered a **different** question · `page_of_not_completed` — the named turn did not finish, so there is no answer to extend · `page_query_mismatch` — the query is not the question that turn answers |
 
 `code` is stable and is what a client switches on. The prose in `error` is the user's and may
 change; matching on it is how a UI ends up rendering a crash message for an honest refusal.
@@ -98,9 +114,45 @@ re-sending it with a different `query` (compared trimmed and ordinal against the
 turn answers) is `409 client_turn_id_reused` rather than the previous question's answer. Whitespace
 differs freely — that is a retry; anything else is a new question and needs a new key.
 
-**Whether a submission is an `ask` or a `page` is compared trimmed and ORDINAL**, case included. A
-question retyped in different capitals is a new ask and gets its own user row; only a byte-identical
-repeat is another page of the last question.
+## Asks and pages
+
+An **ask** writes two rows — the user's question and Reel's answer. A **page** writes the assistant
+row alone: it is another page of a question that was already asked, so there is no second question
+to record. Which one a submission is has two sources, and they are tried in this order.
+
+**1 — `pageOf`, when the client sends it.** `pageOf` is the **assistant** turn this submission is
+another page of, as a UUID string. It is how a client that is *rendering* an answer says which
+answer its "Show me more" belongs to, rather than leaving the server to infer it. The server
+verifies rather than trusts it, and all four checks are refusals a client can act on:
+
+| Check | Failure |
+| --- | --- |
+| parses as a non-zero UUID | `400 page_of_invalid` |
+| is an assistant turn, is the caller's, and is in this conversation | `404 page_of_not_found` |
+| is `Completed` | `409 page_of_not_completed` |
+| `query` equals the question that turn answers, **trimmed and ordinal** | `409 page_query_mismatch` |
+
+On success the turn is recorded `Kind='page'` extending **that** turn: **no user row is written**,
+the assistant row takes the conversation's next `Sequence`, and the no-repeat set is derived exactly
+as it is for any other turn — the whole conversation's distinct `TmdbId`s, tray included.
+
+`conversationId` may be omitted when `pageOf` is present: the turn is already account-scoped, so its
+own conversation is the only one it could mean, and resolving it that way cannot fork. When both are
+sent they must agree, or it is `page_of_not_found`.
+
+**2 — the comparison, when `pageOf` is absent.** The query is compared **trimmed and ORDINAL**, case
+included, against the question of the **last `Completed` ask** in the conversation — failed and
+pending tails are skipped. A question retyped in different capitals is a new ask and gets its own
+user row; only a byte-identical repeat is another page.
+
+**Why the comparison skips failed tails, and why `pageOf` exists at all.** It used to compare
+against the conversation's last **user** turn, full stop. Stop a turn and the stopped question
+becomes that tail, so pressing "Show me more" on the kept answer no longer matched and was recorded
+as a new **ask**. Three things broke at once: the transcript gained a question the user never typed,
+the stopped turn stopped being the tail and lost its failure row along with "That one didn't finish
+before you left", and the next resume returned only the newest ask's block — 42 of the 66 cards on
+screen vanished on reload. A turn nobody waited for is still a turn that happened, and it is still
+not the thing another page would be a page *of*.
 
 ## The read routes
 
@@ -152,6 +204,21 @@ comedy against standing exclusions on both genres and it came back as four post-
 that question with nothing left on the page saying why. The cards are restored from rows and the
 reason line from a column; the explanation was the one part of the turn the server forgot.
 
+**Which list a colliding term appears in is decided by the list the account's RULE lives in**, never
+by the bucket the interpreter happened to put the word in. An account holding `anime` as an
+`ExcludeGenre` gets it back under `excludedGenres` even though the turn's words read as a keyword;
+an account holding `ghosts` as an `ExcludeKeyword` gets it back under `excludedKeywords`. The two
+lead to different rows in the conditions editor, so a client keying them to different affordances
+has to be told the truth about where to send the user. Both lists are **ordinal-sorted**: row order
+out of Postgres is not guaranteed, and a notice that named its two collisions one way live and the
+other way on the next resume reads as two different answers to one question.
+
+The collision is computed against **everything the turn asked for** — the model's intent, the
+free deterministic reading of the user's own sentence, and the raw sentence's own tokens — each
+expanded through the genre alias table, so "romantic" collides with a standing rule on `romance`.
+Without that expansion "a 90s romantic comedy" named only comedy on the frame while the prose in the
+same bubble named romance and comedy.
+
 It is **stored, not recomputed**, for the same reason `reason` is: the account's conditions can
 change between the turn and the resume — that is the entire point of the Conditions screen the
 notice points at — and a notice re-derived from today's rules would describe an answer produced
@@ -187,9 +254,11 @@ say.
    is a 409. Backed by a partial unique index, not a check-then-act.
 4. **One turn in flight** per conversation — a second is a 409; the unique `(ConversationId,
    Sequence)` index is the race backstop.
+2b. **Resolve `pageOf`**, when one was sent — see *Asks and pages*. Its refusals come before the
+   idempotency check, so a malformed page costs nothing.
 5. **Derive** history (last 8 completed turns by `Sequence`), `shown` (distinct `TmdbId` over the
-   conversation's cards, **tray included** — see *The tray*) and `kind`, all read *before* this
-   turn's own rows exist.
+   conversation's cards, **tray included** — see *The tray*) and `kind` (explicit where `pageOf` was
+   sent, compared otherwise), all read *before* this turn's own rows exist.
 6. **Write the rows Pending** — a user row and an assistant row for an `ask`, the assistant row
    alone for a `page` — then the headers, then `conversation`.
 7. **Stream.**

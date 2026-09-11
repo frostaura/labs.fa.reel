@@ -184,6 +184,89 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
     }
 
     /// <summary>
+    /// F4-07, against the founder's own filter set and on the wire. "a 90s romantic comedy" collides
+    /// with standing <c>ExcludeGenre</c> rows on BOTH romance and comedy, and the frame named one:
+    /// the interpreter collapsed the phrase to comedy and filed "romantic" under keywords, so no
+    /// reading of the turn ever spelled the word "romance" and the intersection had nothing to find.
+    /// The prose in the very same bubble said "your standing filters exclude romance and comedy",
+    /// and the closing clause of that sentence then dropped romance again.
+    ///
+    /// <para>Ordinal order, because Postgres promises no row order and a notice that named its two
+    /// collisions one way live and the other way on a resume reads as two different answers.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_romantic_comedy_names_both_excluded_genres_on_the_frame_and_in_the_reply()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        foreach (var genre in FounderExclusions)
+        {
+            await AddFilterAsync(accountId, FilterKind.ExcludeGenre, genre);
+        }
+
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(74101, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "a 90s romantic comedy", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var conflict = events.Single(e => e.Event == "conflict").Data;
+        Assert.Equal(
+            ["comedy", "romance"],
+            conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+
+        // The clause the user actually reads is built from the same data, so it cannot name a
+        // different pair than the frame does.
+        var reply = events.Single(e => e.Event == "assistant-message").Data.GetProperty("text").GetString()!;
+        Assert.Equal(
+            "Coming up — under your conditions that means no comedy or romance and titles from 2000 on.",
+            reply);
+    }
+
+    /// <summary>
+    /// F5-03's other half. <c>excludedKeywords</c> was empty on every conflict frame ever captured,
+    /// and the reason turned out not to be the producer: the founder's account holds twelve filter
+    /// rows and <b>not one of them is an <c>ExcludeKeyword</c></b>, so the list had no account-side
+    /// input to draw on. An account that does hold one gets it back, under the keyword list, on a
+    /// turn whose words are entirely positive.
+    /// </summary>
+    [Fact]
+    public async Task An_excluded_keyword_rule_fills_the_keyword_list_on_the_frame()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeKeyword, "ghosts");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(74201, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "haunted house with ghosts", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var conflict = events.Single(e => e.Event == "conflict").Data;
+        Assert.Equal(
+            ["ghosts"],
+            conflict.GetProperty("excludedKeywords").EnumerateArray().Select(k => k.GetString()));
+        // And it is NOT mis-filed as a genre: the two lists lead to different rows in the
+        // conditions editor, so a client keying them to different affordances must be told the
+        // truth about which one to open.
+        Assert.Empty(conflict.GetProperty("excludedGenres").EnumerateArray());
+        Assert.Contains("ghosts", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// F4-01, end to end and against the founder's own filter set. A title whose <c>Genres</c> says
     /// drama and whose <c>Keywords</c> say "black comedy" passes <c>EligibilityQueryBuilder</c>'s
     /// exact-match genre filter and then trips this pipeline's richer matcher — which is how three

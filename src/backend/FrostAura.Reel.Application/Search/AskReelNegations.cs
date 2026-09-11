@@ -60,7 +60,7 @@ public sealed record AskReelNegations(
             rules.ExcludeGenres,
             rules.ExcludeKeywords,
             Clean(requested?.ExcludeGenres),
-            Clean(requested?.ExcludeKeywords));
+            Floored(Clean(requested?.ExcludeKeywords)));
 
     /// <summary>
     /// A turn with no standing rules whose user typed these negations — the "no horror please"
@@ -68,7 +68,7 @@ public sealed record AskReelNegations(
     /// </summary>
     public static AskReelNegations FromRequest(
         IReadOnlyList<string>? genres = null, IReadOnlyList<string>? keywords = null) =>
-        new([], [], Clean(genres), Clean(keywords));
+        new([], [], Clean(genres), Floored(Clean(keywords)));
 
     /// <summary>
     /// A turn whose account permanently excludes these — the airtight shape.
@@ -85,6 +85,25 @@ public sealed record AskReelNegations(
         values is null or { Count: 0 }
             ? []
             : values.Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v.Trim()).ToList();
+
+    /// <summary>
+    /// The vocabulary floor, applied to the REQUESTED side only.
+    ///
+    /// <para>A requested negation is quoted straight back at the user — "one that matches ‘set’ —
+    /// which you asked to skip" — so a token the product cannot honestly name is a caption it must
+    /// not print. A live turn containing "nothing <b>set</b> in space" and "not … at <b>all</b>"
+    /// demoted a crime/mystery/drama that answered the request exactly, out of the picks and into
+    /// the reserve channel, for containing the word "set". The scan is floored at source; this is
+    /// the same rule applied where the caption is actually built, so no other route into
+    /// <see cref="RequestedKeywords"/> can reopen it.</para>
+    ///
+    /// <para><b>Standing rules are never floored.</b> They are rows the account wrote in the
+    /// conditions editor behind a PIN. The product does not get to decide a user's own permanent
+    /// rule was too generic to honour — and the sentence it carries ("which your conditions
+    /// exclude") makes no claim about what they typed this turn.</para>
+    /// </summary>
+    private static IReadOnlyList<string> Floored(IReadOnlyList<string> values) =>
+        values.Count == 0 ? values : values.Where(SearchVocabulary.IsNegatable).ToList();
 }
 
 /// <summary>
