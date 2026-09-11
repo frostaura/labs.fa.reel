@@ -64,8 +64,10 @@ public static class AskMediaTypes
     public static string Refusal(IReadOnlyList<string?>? tokens)
     {
         var offender = (tokens ?? []).FirstOrDefault(t => Map(t) is null);
-        var quoted = string.IsNullOrWhiteSpace(offender) ? "that empty filter" : $"\"{offender.Trim()}\"";
-        return $"I don't know the filter {quoted}. Use one of: {string.Join(", ", Tokens)}.";
+        var vocabulary = string.Join(", ", Tokens);
+        return string.IsNullOrWhiteSpace(offender)
+            ? $"I don't know an empty filter. Use one of: {vocabulary}."
+            : $"I don't know the filter \"{offender.Trim()}\". Use one of: {vocabulary}.";
     }
 
     /// <summary>
