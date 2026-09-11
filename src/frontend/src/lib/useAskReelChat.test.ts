@@ -3,6 +3,10 @@ import {
   askRequest,
   chatReducer,
   createMountGuard,
+  guardFor,
+  mintHandoff,
+  claimHandoff,
+  abortFallout,
   failureFor,
   mintTurnId,
   resumeTarget,
@@ -67,9 +71,45 @@ import { AskStreamError, type AskCard } from "./askReelStream";
  * below it could never run, because `seed` was still truthy. The rule these tests pin: a seed is
  * consumed exactly once, and "no seed" only means "resume" on the very first pass.
  */
+/**
+ * A hand-off is a fact about a NAVIGATION, and `location.state` is a fact about a HISTORY ENTRY.
+ * The two come apart the moment the document reloads or the user presses Back, and the page then
+ * asked a question nobody had typed. The registry is what closes the gap: it is created with the
+ * document, so nothing a restored entry carries can ever be in it.
+ */
+describe("mintHandoff / claimHandoff", () => {
+  it("claims a hand-off this document minted — exactly once", () => {
+    const registry = new Set<string>();
+    const id = mintHandoff(registry);
+    expect(claimHandoff(id, registry)).toBe(true);
+    // Back onto the same entry, a second mount reading the same state, a double-invoke: all false.
+    expect(claimHandoff(id, registry)).toBe(false);
+  });
+
+  it("refuses a hand-off restored from a history entry, and one with no id at all", () => {
+    // The reload, modelled exactly: the id was minted by the document that is now gone, so the new
+    // document's registry has never heard of it.
+    const before = new Set<string>();
+    const id = mintHandoff(before);
+    const afterReload = new Set<string>();
+    expect(claimHandoff(id, afterReload)).toBe(false);
+    // …and an entry written before the id existed cannot be a live hand-off either.
+    expect(claimHandoff(undefined, before)).toBe(false);
+  });
+
+  it("keeps two hand-offs apart, so consuming one leaves the other live", () => {
+    const registry = new Set<string>();
+    const first = mintHandoff(registry);
+    const second = mintHandoff(registry);
+    expect(first).not.toEqual(second);
+    expect(claimHandoff(first, registry)).toBe(true);
+    expect(claimHandoff(second, registry)).toBe(true);
+  });
+});
+
 describe("nextBootstrap", () => {
   it("starts a fresh turn on a cold landing with ?q=", () => {
-    expect(nextBootstrap("slow-burn sci-fi", null)).toEqual({ action: "seed", handled: "slow-burn sci-fi" });
+    expect(nextBootstrap("slow-burn sci-fi", null)).toEqual({ action: "seed", handled: "slow-burn sci-fi", clear: true });
   });
 
   it("consumes the seed exactly once — a StrictMode double-invoke must not restart the turn", () => {
@@ -81,11 +121,11 @@ describe("nextBootstrap", () => {
   it("does nothing on the settling render after the ?q= param is cleared", () => {
     // The clear brings us back with an empty seed; resuming here is exactly what would clobber
     // the conversation the seed just started.
-    expect(nextBootstrap("", "slow-burn sci-fi")).toEqual({ action: "none", handled: "" });
+    expect(nextBootstrap("", "slow-burn sci-fi")).toEqual({ action: "none", handled: "", clear: false });
   });
 
   it("resumes the last conversation when the page loads with no seed", () => {
-    expect(nextBootstrap("", null)).toEqual({ action: "resume", handled: "" });
+    expect(nextBootstrap("", null)).toEqual({ action: "resume", handled: "", clear: false });
   });
 
   it("resumes only once, so a StrictMode double-invoke does not double-fetch", () => {
@@ -98,12 +138,53 @@ describe("nextBootstrap", () => {
     // Consume, settle, then search the identical phrase from the header box.
     const consumed = nextBootstrap("arrival", null);
     const settled = nextBootstrap("", consumed.handled);
-    expect(nextBootstrap("arrival", settled.handled)).toEqual({ action: "seed", handled: "arrival" });
+    expect(nextBootstrap("arrival", settled.handled)).toMatchObject({ action: "seed", handled: "arrival" });
   });
 
   it("starts a turn for a new search made while the page is already mounted", () => {
     const consumed = nextBootstrap("arrival", null);
-    expect(nextBootstrap("sicario", consumed.handled)).toEqual({ action: "seed", handled: "sicario" });
+    expect(nextBootstrap("sicario", consumed.handled)).toMatchObject({ action: "seed", handled: "sicario" });
+  });
+
+  /**
+   * A hand-off is a NAVIGATION, and a navigation happens once. React Router keeps `location.state`
+   * in the history entry, so a reload — or a Back onto the entry the search box pushed — hands the
+   * same question back to a document that has never asked it, and the page fires it again as if it
+   * had just been typed. On the wire that is a second ask with the same text, which the server
+   * labels a `page` of the first because the text matches the conversation's last user turn: a
+   * phantom turn, billed, with cards nobody asked for.
+   *
+   * `restored` is the router's own `POP` — the initial render of a freshly loaded document, and
+   * every Back/Forward. A restored seed is consumed and thrown away, and the visit resumes the
+   * thread like any other cold landing.
+   */
+  it("never re-fires a seed restored from the history entry — a reload resumes instead", () => {
+    expect(nextBootstrap("a tense heist", null, () => false)).toEqual({
+      action: "resume", handled: "a tense heist", clear: true,
+    });
+  });
+
+  it("clears the stale seed even when there is nothing to resume, and settles quietly after", () => {
+    const restored = nextBootstrap("a tense heist", null, () => false);
+    // The state is gone by the next render, so the seed cannot come back round.
+    expect(nextBootstrap("", restored.handled)).toEqual({ action: "none", handled: "", clear: false });
+  });
+
+  it("a live hand-off is still a seed, and clears the state as it sends", () => {
+    expect(nextBootstrap("a tense heist", null, () => true)).toEqual({
+      action: "seed", handled: "a tense heist", clear: true,
+    });
+  });
+
+  it("re-renders of a restored entry ask for nothing at all, and never re-spend the claim", () => {
+    let claims = 0;
+    const live = () => { claims += 1; return false; };
+    const restored = nextBootstrap("a tense heist", null, live);
+    expect(nextBootstrap("a tense heist", restored.handled, live)).toEqual({
+      action: "none", handled: "a tense heist", clear: false,
+    });
+    // Claiming a hand-off spends it, so the pass that decides nothing must not consult it at all.
+    expect(claims).toBe(1);
   });
 });
 
@@ -552,6 +633,79 @@ describe("createMountGuard", () => {
     real.guard.unmount();
     real.flush();
     expect(real.aborted()).toBe(1);
+  });
+
+  /**
+   * The guard was correct and the hook still aborted, because the hook built a NEW guard inside
+   * the effect body. StrictMode's cleanup scheduled the abort on guard #1; the remount then called
+   * `mount()` on guard #2, which cancelled its own empty queue while guard #1's timer still saw
+   * `mounted === false` and killed a live request. Every Home → /search hand-off died that way.
+   *
+   * The fixture is the EFFECT, not the guard — mount/unmount/mount driven through whatever the
+   * effect body would construct — because the guard's own test above passes either way. Reusing
+   * one instance per hook is the whole of the fix, so the rebuilt shape is kept here as the
+   * control: it must still abort, or this test is not watching the right difference.
+   */
+  it("one guard per hook instance survives the StrictMode remount; a rebuilt one does not", () => {
+    function effects(build: (abort: () => void, schedule: Sched, cancel: Cancel) => MountGuardShape) {
+      const queue: (() => void)[] = [];
+      let aborted = 0;
+      const schedule: Sched = (fn) => { queue.push(fn); return queue.length - 1; };
+      const cancel: Cancel = (handle) => { queue[handle as number] = () => {}; };
+      // One invocation of the mount effect: build (or reuse) the guard, mount, hand back cleanup.
+      const mount = () => {
+        const guard = build(() => { aborted += 1; }, schedule, cancel);
+        guard.mount();
+        return () => guard.unmount();
+      };
+      return { mount, flush: () => { for (const fn of queue.splice(0)) fn(); }, aborted: () => aborted };
+    }
+
+    // What the hook does now: the instance lives in a ref, so both effect invocations get it.
+    const box: { current: MountGuardShape | null } = { current: null };
+    const kept = effects((abort, schedule, cancel) => guardFor(box, abort, schedule, cancel));
+    kept.mount()();
+    kept.mount();
+    kept.flush();
+    expect(kept.aborted()).toBe(0);
+
+    // What it did before: a fresh guard per invocation, which is the defect itself.
+    const rebuilt = effects((abort, schedule, cancel) => createMountGuard(abort, schedule, cancel));
+    rebuilt.mount()();
+    rebuilt.mount();
+    rebuilt.flush();
+    expect(rebuilt.aborted()).toBe(1);
+
+    // …and a real teardown still aborts through the kept guard — the half that must not regress.
+    const real: { current: MountGuardShape | null } = { current: null };
+    const torn = effects((abort, schedule, cancel) => guardFor(real, abort, schedule, cancel));
+    torn.mount()();
+    torn.flush();
+    expect(torn.aborted()).toBe(1);
+  });
+});
+
+type Sched = (fn: () => void) => unknown;
+type Cancel = (handle: unknown) => void;
+interface MountGuardShape { mount: () => void; unmount: () => void }
+
+/**
+ * An abort the page did not ask for must not read as silence.
+ *
+ * `streamAskReel`'s rejection was swallowed whole whenever the signal was aborted — correct for
+ * Stop, for a re-ask replacing the run, for a resume and for a real unmount, and wrong for
+ * everything else, because "wrong" means the reducer stays in `streaming` with a progress bar and
+ * no way out. The Home → /search hand-off spent its whole life in that hole.
+ */
+describe("abortFallout", () => {
+  it("says nothing when the abort was the page's own doing", () => {
+    for (const cause of ["stop", "replaced", "resume", "reset", "timeout", "hidden", "unmount"] as const) {
+      expect(abortFallout(cause)).toBeNull();
+    }
+  });
+
+  it("errors on an abort nobody claimed, so the page offers a retry instead of a spinner", () => {
+    expect(abortFallout(null)).toEqual({ type: "error", reason: null });
   });
 });
 

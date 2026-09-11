@@ -18,7 +18,8 @@ import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import {
-  floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
+  claimHandoff, floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor,
+  nextBootstrap,
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
@@ -96,11 +97,14 @@ function AskReel() {
   // The question arrives in the navigation, not the URL. `?q=` was a round trip through the
   // address bar — read the param, fire the turn, delete the param — and a reload landing before
   // the delete re-fired the question as a FRESH conversation, throwing away every refinement made
-  // since. The turn id rides along from the search box so that a StrictMode remount (which resets
-  // the ref guarding this) re-sends the same exchange and is replayed rather than billed twice.
+  // since. Router state is not free of that either: it lives in the history ENTRY, so it outlives
+  // its navigation, which is what {@link claimHandoff} is for. The turn id rides along from the
+  // search box as this hand-off's name and as the turn's idempotency key, so a send that genuinely
+  // does go out twice is replayed from the stored turn rather than billed a second time.
   const askState = location.state as { ask?: string; askTurnId?: string } | null;
   const seed = askState?.ask ?? "";
   const seedTurnId = askState?.askTurnId;
+
   const [filter, setFilter] = useBrowseFilter("search");
   const [draft, setDraft] = useState("");
   const {
@@ -128,11 +132,12 @@ function AskReel() {
   }, [filter, setMediaTypes]);
 
   // A search from the header box starts a fresh conversation; landing on /search with nothing to
-  // ask resumes this tab's thread. The seed is CONSUMED — the router state is cleared the moment it
-  // is sent — and `nextBootstrap` holds the "already handled" rule (unit-tested), keyed on the TURN
+  // ask resumes this tab's thread. The seed is CONSUMED — the router state is cleared BEFORE the
+  // turn goes out — and `nextBootstrap` holds the "already handled" rule (unit-tested), keyed on the TURN
   // ID rather than the text, so asking the same phrase twice is two exchanges and a double-invoke
-  // of the same one is not. The ref survives a re-render; a StrictMode REMOUNT resets it, which is
-  // what the shared turn id covers — the second send is the same exchange and the server replays it.
+  // of the same one is not. The ref survives both a re-render and StrictMode's mount → unmount →
+  // remount (which re-runs effects but keeps refs), so the second pass reads `handled` and decides
+  // nothing; the shared turn id is the backstop for a send that does go out twice anyway.
   const handledSeed = useRef<string | null>(null);
   const seedStarted = useRef(false);
   // What a cold /search resumes: THIS tab's remembered thread, and the account's newest one only
@@ -144,12 +149,20 @@ function AskReel() {
   const [shouldResume, setShouldResume] = useState(false);
 
   useEffect(() => {
-    const { action, handled } = nextBootstrap(seedTurnId ?? seed, handledSeed.current);
+    // `claimHandoff` is the liveness test AND the consumption: it answers true at most once per
+    // hand-off, and only for one this document minted. A question restored from the history entry
+    // — a reload, a Back — therefore resumes the thread instead of being asked a second time.
+    const { action, handled, clear } = nextBootstrap(
+      seedTurnId ?? seed, handledSeed.current, () => claimHandoff(seedTurnId),
+    );
     handledSeed.current = handled;
+    // FIRST, not last. `navigate` writes through to `history.replaceState` synchronously, so
+    // clearing before the request goes out leaves no window in which a reload could inherit the
+    // question and ask it a second time. Clearing afterwards left exactly that window open.
+    if (clear) navigate(".", { replace: true, state: null });
     if (action === "seed" && seed) {
       seedStarted.current = true;
       send(seed, true, seedTurnId);
-      navigate(".", { replace: true, state: null });
       return;
     }
     if (action === "resume") setShouldResume(true);
