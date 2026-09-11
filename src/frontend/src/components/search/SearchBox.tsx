@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, Eye, Search, Sparkles } from "lucide-react";
 import { useSearchTypeaheadGlobalQuery, useSearchTypeaheadQuery } from "../../store/api";
 import { shouldQueryGlobal } from "../../lib/globalTypeahead";
-import { mintTurnId } from "../../lib/useAskReelChat";
+import { mintHandoff } from "../../lib/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
 import PredictedRatingBadge from "../rec/PredictedRatingBadge";
 
@@ -95,17 +95,18 @@ export default function SearchBox() {
    * conversation, throwing away every refinement made since. Router state is carried by the
    * history entry instead, so there is nothing to clean up and nothing to re-fire.
    *
-   * The turn id is minted HERE, with the navigation, for the same reason. It lives in the history
-   * entry, so a StrictMode remount of /search — which resets every ref that would otherwise guard
-   * the send — re-sends the same id and is replayed from the stored turn rather than billed a
-   * second time. One question typed once is one exchange, however many times React mounts it.
+   * The turn id is minted HERE, with the navigation, and recorded as THIS document's hand-off —
+   * see {@link mintHandoff}. It does two jobs. It is the turn's idempotency key, so a /search that
+   * genuinely re-sends it is replayed from the stored turn rather than billed a second time; and
+   * it is what lets /search tell a live hand-off from one that merely came back with the history
+   * entry on a reload or a Back, which it used to re-ask as a phantom turn.
    */
   const askReel = () => {
     const ask = query.trim();
     if (ask.length === 0) return;
     setOpen(false);
     setActiveIndex(-1);
-    navigate("/search", { state: { ask, askTurnId: mintTurnId() } });
+    navigate("/search", { state: { ask, askTurnId: mintHandoff() } });
   };
 
   const go = (option: Option) => {

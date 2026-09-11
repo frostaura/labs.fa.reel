@@ -101,6 +101,21 @@ export async function stubAskReel(page: Page): Promise<void> {
     const requests: unknown[] = [];
     const encoder = new TextEncoder();
     const realFetch = window.fetch.bind(window);
+    // Every AbortController the app makes, so a spec can cut the page's OWN request from outside —
+    // a dropped connection, a proxy, a stray cleanup — with no Stop pressed and nothing mocked
+    // into failing. A transparent subclass: it adds a push and changes no behaviour.
+    const controllers: AbortController[] = [];
+    const RealAbortController = window.AbortController;
+    class RecordingAbortController extends RealAbortController {
+      constructor() {
+        super();
+        controllers.push(this);
+      }
+    }
+    window.AbortController = RecordingAbortController as unknown as typeof AbortController;
+    // The signals of the /ask requests, newest last — how `abortLive` finds the right controller
+    // among the several dozen RTK Query makes for an ordinary page load.
+    const askSignals: AbortSignal[] = [];
     // The next N /ask calls answer with this status and code instead of a stream. Queued rather
     // than latched, because the states worth testing are transitions: a 409 followed by the real
     // answer is the whole of "wait, then check again".
@@ -109,6 +124,13 @@ export async function stubAskReel(page: Page): Promise<void> {
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
       if (!url.includes("/api/search/ask")) return realFetch(input, init);
+      // The signal is honoured, not merely accepted. A stub that ignores it cannot fail when the
+      // page aborts its own request — which is precisely the defect the Home → /search hand-off
+      // shipped with: one `POST /api/search/ask` killed by a StrictMode cleanup, and every e2e
+      // spec passing over it because the stub kept streaming into a request the browser had cut.
+      const signal = init?.signal ?? null;
+      if (signal) askSignals.push(signal);
+      if (signal?.aborted) throw new DOMException("The user aborted a request.", "AbortError");
       try {
         requests.push(JSON.parse((init?.body as string) ?? "{}"));
       } catch {
@@ -128,6 +150,16 @@ export async function stubAskReel(page: Page): Promise<void> {
         start(controller) {
           entry.controller = controller;
           streams.push(entry);
+          // An abort errors the body exactly as the browser does, so the pending `reader.read()`
+          // rejects with an AbortError and the client's own catch runs.
+          signal?.addEventListener("abort", () => {
+            entry.open = false;
+            try {
+              controller.error(new DOMException("The user aborted a request.", "AbortError"));
+            } catch {
+              // Already closed or errored — nothing left to cut.
+            }
+          }, { once: true });
         },
         cancel() {
           entry.open = false;
@@ -143,6 +175,13 @@ export async function stubAskReel(page: Page): Promise<void> {
       },
       failNext(status: number, code: string) {
         failures.push({ status, code });
+      },
+      abortLive() {
+        const signal = askSignals.at(-1);
+        const owner = controllers.find((c) => c.signal === signal);
+        if (!owner || owner.signal.aborted) return false;
+        owner.abort();
+        return true;
       },
       push(event: string, data: unknown) {
         const live = streams.filter((s) => s.open).at(-1);
@@ -175,6 +214,7 @@ export async function stubAskReel(page: Page): Promise<void> {
 
 interface AskStub {
   count: () => number;
+  abortLive: () => boolean;
   push: (event: string, data: unknown) => void;
   keepalive: () => void;
   failNext: (status: number, code: string) => void;
@@ -192,6 +232,15 @@ export async function askFailNext(page: Page, status: number, code: string): Pro
     ([s, c]) => (window as unknown as { __ask: AskStub }).__ask.failNext(s as number, c as string),
     [status, code] as const,
   );
+}
+
+/**
+ * Cuts the newest live Ask Reel request at its own AbortController — the page's request dying for
+ * a reason the page did not choose. Returns false when there was nothing live to cut, so a spec
+ * cannot pass by aborting nothing.
+ */
+export async function askAbortLive(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.abortLive());
 }
 
 /** Emits a `:keepalive` comment frame — the thing a parser must skip without losing its place. */
