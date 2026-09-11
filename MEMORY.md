@@ -1,6 +1,6 @@
 # MEMORY — Labs/projects/fa.reel
 
-- [Current state](memory/state.md) — Works end to end for one account, NOT deployed, zero external users — the 5-user kill clock was never evaluable. The iCloud clone is a diverged fork of a pushed main; force-push destroys product work. The model still loses to the baseline.
+- [Current state](memory/state.md) — Works end to end for one account. CI green end to end and images published, but NOT deployed and zero external users — the 5-user kill clock was never evaluable. The model still loses to the popularity baseline.
 - [Live decisions — the Ask Reel chat programme](memory/decisions-chat.md) — Ask Reel was delegated 'as you see fit' and every founder lock was kept: no filter override, delete but no erasure, tier rungs designed not built. The turn is server-owned because a client transcript is a fabrication vector.
 - [Live decisions — engineering and infrastructure](memory/decisions-engineering.md) — Invariant formatting is guarded at source because a comma decimal is a wrong answer TMDB silently accepts. The npm audit gate carries one expiring react-router waiver — reviewing it at expiry is a parent-level call, never a silent renewal.
 - [Live decisions — the model and the eval ledger](memory/decisions-model.md) — The ledger rule was pre-registered and honoured: schema v6 reverted on no lift, so 6 is burned and the next bump is 7. The instrument, not the idea, failed. The calibrator is applied last; the exposure log is append-only.

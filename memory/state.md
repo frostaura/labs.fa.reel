@@ -1,6 +1,6 @@
 ---
 name: fa-reel-state
-description: "Works end to end for one account, NOT deployed, zero external users — the 5-user kill clock was never evaluable. The iCloud clone is a diverged fork of a pushed main; force-push destroys product work. The model still loses to the baseline."
+description: "Works end to end for one account. CI green end to end and images published, but NOT deployed and zero external users — the 5-user kill clock was never evaluable. The model still loses to the popularity baseline."
 type: state
 last_verified: 2026-09-11
 ---
@@ -13,17 +13,16 @@ exactly one account — the founder's. **It is not deployed and has zero externa
 users" gate and the kill criterion built on it have never been evaluable. Deploy is a founder action, not a build
 task: `questions.md`.
 
-**Repo topology — the iCloud clone is a DIVERGED FORK of a published `main` (both clones inspected against GitHub,
-2026-09-11).** One private repo. `~/src/fa.reel` is the dev clone where code, builds and the dev loop live, and it is
-**in sync with `origin/main`** — the founder pushed the Ask Reel CLS and live-search flake work from there. The copy
-under `FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**; it does not contain what was pushed,
-and it carries context commits published `main` has never seen. **A plain push from here is rejected, and `--force`
-would destroy pushed product work — never force.** Reconciling means `git fetch` here, then merging or rebasing the
-context commits onto published `main`, and it raises a **modify/delete conflict**: those commits *delete* the old
-single-file `memory/gotchas.md` and `memory/watch.md` that a pushed commit *modifies*, so the easy answer (take the
-deletion) silently discards real gotcha and watch edits made in the dev clone. **The reconcile is the founder's call** —
-do not fetch, merge, rebase or push on his behalf. **The iCloud clone's `origin/main` ref goes stale between fetches**,
-so an ahead-count taken there is phantom until you `git fetch`.
+**Repo topology — reconciled 2026-09-11, both clones inspected against GitHub.** One private repo. `~/src/fa.reel` is
+the dev clone where code, builds and the dev loop live, and it is **in sync with `origin/main`**. The copy under
+`FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**; it was briefly a diverged fork after the
+founder pushed from the dev clone, and has since been merged back onto published `main` — it is now **ahead-only by
+context commits, nothing behind, and no product file deleted in the range**, so a push from here fast-forwards. The
+push stays the founder's call. **The reconcile is not free and will recur:** the context commits deleted the old
+single-file `memory/gotchas.md` and `memory/watch.md` that the dev clone still edits, so every merge raises a
+modify/delete conflict there; keep the deletion, and fold the dev clone's edits into the split topic files first.
+**Never `--force` from this clone** — it would destroy pushed product work. **The iCloud clone's `origin/main` ref
+goes stale between fetches**, so an ahead-count taken here is phantom until you `git fetch`.
 
 **The test gate is real, and on 2026-09-11 it went green end to end on published `main`** — Backend, Frontend,
 Security, Backend Integration and Frontend E2E all passed on the same run, the first all-green `main` since at least
