@@ -535,15 +535,18 @@ export function answeredQuestion(rows: ConversationPayload["turns"]): string {
 /**
  * What a failed turn says for itself, in one line.
  *
- * Two codes' worth of difference, because they are two different things to have happened: the user
- * pressing Stop is a thing they did, and anything else is a thing that happened to them. Telling
- * someone they abandoned a turn they never touched is the kind of small lie that costs trust in
- * everything else on the page.
+ * Three cases, not two. The user pressing Stop is a thing they DID and a named code
+ * (`client_aborted`); any other code is a thing that happened TO them; and no code at all is
+ * neither, so it claims neither. Telling someone they abandoned a turn they never touched is the
+ * kind of small lie that costs trust in everything else on the page — and the silent case is not
+ * hypothetical: the resume payload projects `sequence`, `role`, `text`, `kind` and `status` and no
+ * `failureCode`, so today every resumed failure arrives unattributed. The wording lights up the
+ * moment the field does.
  */
 export function failedTurnMessage(failureCode: string | null): string {
-  return failureCode === "client_aborted"
-    ? "That one didn’t finish — you stopped it."
-    : "That one didn’t finish — it hit a snag.";
+  if (failureCode === "client_aborted") return "That one didn’t finish — you stopped it.";
+  if (failureCode) return "That one didn’t finish — it hit a snag.";
+  return "That one didn’t finish.";
 }
 
 /** How often a still-running turn is re-checked, and how long that is worth doing for. */

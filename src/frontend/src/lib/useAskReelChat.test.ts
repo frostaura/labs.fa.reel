@@ -1637,8 +1637,15 @@ describe("lastTurnOutcome", () => {
     ];
     expect(lastTurnOutcome(crashed)?.status).toBe("failed");
     expect(failedTurnMessage("HttpRequestException")).toContain("hit a snag");
-    // …and a stored failure from before the code was recorded still gets the honest wording.
-    expect(failedTurnMessage(null)).toContain("hit a snag");
+  });
+
+  it("claims_no_cause_at_all_when_the_server_named_none", () => {
+    // The live case, not a hypothetical: the resume payload projects no `failureCode`, so today
+    // every resumed failure arrives unattributed. Guessing "you stopped it" or "it hit a snag"
+    // there is a coin flip presented as a fact.
+    expect(failedTurnMessage(null)).toBe("That one didn’t finish.");
+    expect(failedTurnMessage(null)).not.toContain("stopped");
+    expect(failedTurnMessage(null)).not.toContain("snag");
   });
 
   it("reports_a_turn_the_server_is_still_working_on", () => {

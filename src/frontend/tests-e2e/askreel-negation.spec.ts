@@ -39,8 +39,17 @@ const BORDER = card("b2", "Border Town", 0.9);
 const CEDAR = card("c3", "Cedar Falls", 0.5);
 const XCLUDED = card("d4", "Xcluded Manor", 0.95, true);
 
-/** Alpha/Border/Cedar as `done` leaves them: blend order, which is not arrival order. */
-const SETTLED_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
+/**
+ * Alpha/Border/Cedar as `done` leaves them: the SERVER's array, verbatim.
+ *
+ * It was blend order until SB-01. The client derives an order while it is assembling one frame by
+ * frame — the phase-boundary settle a few tests down still pins exactly that — but `done` IS the
+ * server's order arriving, and keeping the derived one past it made the same answer render one way
+ * live and another after a reload, which reads back the stored `(Sequence, Rank)`. The `done`
+ * frames below deliberately send arrival order, which is NOT blend order, so a client that
+ * re-derives fails here.
+ */
+const SETTLED_ORDER = ["Alpha Creek", "Border Town", "Cedar Falls"];
 
 /**
  * The account's saved conditions, as `/settings/filters` returns them. `minPredictedRating` is the
@@ -240,8 +249,8 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
 
     // Held, not blanked — and labelled, so it never reads as an answer to the new question.
-    // Blend order, settled by the previous turn's `done`, and unchanged by the phase frame above:
-    // a held answer is finished work and must not re-sort in response to the new turn's progress.
+    // The order the previous turn's `done` committed, unchanged by the phase frame above: a held
+    // answer is finished work and must not re-sort in response to the new turn's progress.
     await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
     await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
 
