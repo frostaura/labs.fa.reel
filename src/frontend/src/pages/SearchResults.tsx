@@ -8,9 +8,12 @@ import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
-import { useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery } from "../store/api";
+import {
+  useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
+} from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
+import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
@@ -224,8 +227,32 @@ function AskReel() {
   // "No matches" on a turn that had returned eight perfectly good shows: the server had never been
   // told the user wanted movies, so it had no chance to go and find any. It is now sent upstream
   // and the server narrows discovery, so what arrives already matches.
-  const removedSet = new Set(useSelector(selectRemovedKeys));
+  // Read as the array the store holds, not as a set built in the render: the same reference across
+  // renders is what lets the save watcher below be a derivation rather than an effect.
+  const removedKeys = useSelector(selectRemovedKeys);
+  const removedSet = new Set(removedKeys);
   const streaming = status === "streaming";
+
+  /**
+   * F4-09. Saving a card takes it out of the answer instantly and said nothing at all: the grid
+   * went 10 → 9, the live region announced a COUNT ("9 picks ready"), and a full-text scan for
+   * anything matching /[Ss]aved/ came back null. A one-tap control with a destructive-looking
+   * effect and no acknowledgement is indistinguishable from a bug, and there was no way back
+   * short of finding the title again on /saved.
+   *
+   * Raised on the tap and confirmed by the CONSEQUENCE rather than by the click: `saveForLater`
+   * dispatches `titleRemoved` only once the server has accepted it, so a card that is in the
+   * removed set is one that really did go. A toast fired optimistically would offer an undo for
+   * something that had not happened.
+   *
+   * A derivation, not an effect — the toast is on screen exactly while the card it names is gone
+   * and the user has not dismissed it, which is a fact about the current render and not a thing
+   * to synchronise. `unsaveForLater` dispatches `titleRestored`, so the undo puts the card back
+   * in the grid by the same route the save took it out.
+   */
+  const [savePending, setSavePending] = useState<AskCard | null>(null);
+  const [unsave] = useUnsaveForLaterMutation();
+  const justSaved = savePending && removedKeys.includes(savePending.titleId) ? savePending : null;
 
   // F6-02. The page never moved: `scrollY` stayed at 0 for a whole 19.4-second turn, so a long
   // question filled the viewport and the banner, the narration, the progress bar and every card
@@ -389,7 +416,7 @@ function AskReel() {
               data-testid="askreel-new"
               onClick={beginFreshThread}
               disabled={streaming}
-              className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
             >
               <Plus className="h-3.5 w-3.5" /> New
             </button>
@@ -491,7 +518,12 @@ function AskReel() {
           answer to a question you have not asked this visit. Dated, so the answer's age is on
           screen rather than inferred from the cards. `removed` rides with it because a card that
           silently disappears between two views of the same answer is indistinguishable from a bug
-          — it went because the account has since watched or rated it, and saying so is cheap.
+          — it went because the account has since acted on it, and saying so is cheap. F4-10: the
+          note named two of the five interactions that cause this ("watched or rated") and the one
+          that actually fired was the third, so a user who had pressed Save was told they had
+          watched something they had not. The three a person does deliberately are named; the
+          other two (dropped, not-interested) take the card away on the spot and need no
+          explanation a reload later.
 
           The date comes from `lastCardsAt`, which is when the thread last stored CARDS — falling
           back to `lastTurnAt`, which is the only stamp a transcript-only thread has. Older servers
@@ -508,11 +540,7 @@ function AskReel() {
           <p className="fa-caption text-fa-frost-dim">
             Picked up where you left off · {relTime((lastCardsAt ?? lastTurnAt) as string)}
           </p>
-          {resumedTail && answeredQuery && (
-            <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-seam-answers">
-              These answer “{answeredQuery}”.
-            </p>
-          )}
+          {resumedTail && answeredQuery && <SeamQuestion question={answeredQuery} />}
           {/* "from this answer", because the count is not the grid's alone.
               `removed` is the eligibility re-filter's total across BOTH stored lists — the picks
               and the below-floor tray — and the tray is now restored beside them, so a note
@@ -525,7 +553,7 @@ function AskReel() {
               {/* `’` and not `&apos;`: every other sentence on this page uses the typographic
                   apostrophe, and the escape rendered a straight quote in the middle of a paragraph
                   whose neighbours are curly. */}
-              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched or rated {removed === 1 ? "it" : "them"}.
+              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched, rated or saved {removed === 1 ? "it" : "them"}.
             </p>
           )}
         </div>
@@ -591,7 +619,7 @@ function AskReel() {
             onClick={stop}
             data-testid="askreel-stop"
             aria-label="Stop searching"
-            className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 text-fa-frost-dim shrink-0 hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
+            className="fa-caption inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 transition-colors"
           >
             <Square className="h-3 w-3" /> Stop
           </button>
@@ -614,7 +642,7 @@ function AskReel() {
                 type="button"
                 data-testid="askreel-preset"
                 onClick={() => send(preset)}
-                className="fa-caption rounded-full border border-fa-frost/25 px-4 py-1.5 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
+                className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/25 px-4 text-fa-frost hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
               >
                 {preset}
               </button>
@@ -638,7 +666,7 @@ function AskReel() {
               // just greying out — to pointers and to assistive tech alike.
               title={streaming ? "Wait for the current results to finish" : undefined}
               aria-disabled={streaming}
-              className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 disabled:opacity-40 transition-colors"
+              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/20 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 disabled:opacity-40 transition-colors"
             >
               {chip}
             </button>
@@ -703,16 +731,23 @@ function AskReel() {
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
-      ) : status === "resumed" && lastCardsAt == null && visible.length === 0 && outsideVisible.length === 0 ? (
+      ) : status === "resumed" && lastCardsAt == null && resumedTail == null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
         // "No matches for that one" under the user's own question — the page reporting a verdict
         // on a search it never ran.
         //
-        // The `lastCardsAt == null` gate is the other half, and it is what makes this copy TRUE.
-        // Before the turn record there were no stored cards at all, so this was the only branch a
-        // resume could ever reach — it was seen on a thread seventeen seconds old, asserting a
-        // cause ("predates saved picks") that was never the real one. Now it is reachable only for
-        // a thread that genuinely does predate them.
+        // The `lastCardsAt == null` gate is half of what makes this copy true, and F4-04 is the
+        // other half arriving late. Before the turn record there were no stored cards at all, so
+        // this was the only branch a resume could ever reach; gating on `lastCardsAt` was supposed
+        // to close that, and did not, because a turn that FAILED before storing anything also
+        // leaves `lastCardsAt` null. A seven-minute-old thread whose only answer was aborted got
+        // the failure row and this card on one screen: two "Ask again" buttons under two mutually
+        // exclusive explanations of the same empty grid.
+        //
+        // `resumedTail == null` is "the last assistant row completed" — the one state in which
+        // "there are no stored cards" really does mean the thread predates them. A failed or
+        // pending tail has its own row in the transcript, which is the correct account and is
+        // already on screen.
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-transcript-only">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-caption text-fa-frost-dim">
@@ -720,9 +755,14 @@ function AskReel() {
           </p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
-      ) : status === "resumed" && visible.length === 0 && outsideVisible.length === 0 ? (
+      ) : status === "resumed" && lastCardsAt != null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A thread that DID store cards and has none to show: every one of them was dropped by the
         // eligibility re-filter, which is a fact about the person, not about the thread's age.
+        //
+        // `lastCardsAt != null` is now stated rather than inherited. It used to be implied by the
+        // branch above having already taken every null case; since F4-04 narrowed that branch, a
+        // failed-before-storing thread would otherwise fall through to here and be told it had
+        // watched or rated away an answer that was never found.
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-all-removed">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-caption text-fa-frost-dim">
@@ -765,7 +805,7 @@ function AskReel() {
             data-testid="semantic-results"
           >
             {visible.map((card) => (
-              <ResultCard key={card.titleId} card={card} />
+              <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
             ))}
             {Array.from({ length: pendingSlots }, (_, i) => (
               <CardSkeleton key={`slot-${i}`} />
@@ -787,7 +827,7 @@ function AskReel() {
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
                 {outsideVisible.map((card) => (
-                  <ResultCard key={card.titleId} card={card} />
+                  <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
                 ))}
               </div>
             </div>
@@ -806,7 +846,13 @@ function AskReel() {
               className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
               data-testid="askreel-below-floor"
             >
-              <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
+              {/* `min-h-11` and padding rather than `flex`: a `display: flex` summary loses its
+                  own disclosure marker, and the triangle is the affordance that says the block
+                  opens. The box still measures 44 px, which is what a thumb needs. */}
+              <summary
+                data-testid="askreel-below-floor-toggle"
+                className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
+              >
                 {floorLabel
                   ? `Show the ${heldBack} under your ${floorLabel} bar`
                   : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
@@ -817,7 +863,7 @@ function AskReel() {
               {belowFloorVisible.length > 0 && (
                 <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
                   {belowFloorVisible.map((card) => (
-                    <ResultCard key={card.titleId} card={card} />
+                    <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
                   ))}
                 </div>
               )}
@@ -847,7 +893,7 @@ function AskReel() {
               data-testid="askreel-more"
               onClick={loadMore}
               disabled={streaming || appending}
-              className="fa-caption rounded-full border border-fa-frost/30 px-4 py-1.5 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+              className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
             >
               {appending ? "Finding more like these…" : "Show me more"}
             </button>
@@ -888,6 +934,21 @@ function AskReel() {
         </p>
       )}
 
+      {justSaved && (
+        <UndoToast
+          id={justSaved.titleId}
+          testId="askreel-save-toast"
+          message={`Saved “${justSaved.name}” — it’s on your Saved list.`}
+          onUndo={() => {
+            if (justSaved.tmdbId != null) {
+              unsave({ titleId: justSaved.titleId, mediaType: justSaved.mediaType.toLowerCase(), tmdbId: justSaved.tmdbId });
+            }
+            setSavePending(null);
+          }}
+          onExpire={() => setSavePending(null)}
+        />
+      )}
+
       {/* Composer.
           It sits ABOVE the mobile tab bar, not under it. Both are `fixed` at `bottom-0` and the
           tab bar is `z-40`, so on every phone width Send and the input were behind it and a tap
@@ -916,7 +977,7 @@ function AskReel() {
               disabled={streaming}
               aria-label="Voice search"
               data-testid="askreel-mic"
-              className={`rounded-full p-2.5 transition-colors disabled:opacity-40 ${
+              className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                 speech.listening ? "bg-fa-frost/40 text-fa-frost-bright animate-pulse" : "bg-fa-frost/10 text-fa-frost-dim hover:text-fa-frost-bright"
               }`}
             >
@@ -927,7 +988,7 @@ function AskReel() {
             type="submit"
             disabled={!draft.trim() || streaming}
             data-testid="askreel-send"
-            className="rounded-full bg-fa-frost/20 p-2.5 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full bg-fa-frost/20 text-fa-frost-bright hover:bg-fa-frost/30 disabled:opacity-40 transition-colors"
             aria-label="Send"
           >
             <Send className="h-4 w-4" />
@@ -981,12 +1042,46 @@ function UserBubble({ text }: { text: string }) {
           data-testid="askreel-bubble-toggle"
           aria-expanded={expanded}
           onClick={() => setExpanded((v) => !v)}
-          className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
+          className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-fa-frost/20 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Which question the restored grid answers — one line of it.
+ *
+ * F6-08: the seam interpolated `answeredQuery` raw, so a resumed thread whose last question was
+ * the 1 000 characters the server accepts rendered the whole thing as one caption. At 375 the seam
+ * alone was taller than the viewport, on the single element whose entire job is to be glanceable.
+ *
+ * Clamped rather than truncated, and that distinction is the whole design: the full question stays
+ * in the DOM and on the `title`, so a hover, a screen reader and a copy-paste all still get the
+ * real thing, and one tap opens it in place. Truncating in JavaScript would have to guess at a
+ * character count that is four lines wide and eight narrow — the same reason {@link UserBubble}
+ * measures instead of counting.
+ *
+ * A `button` rather than a `p` with a handler: it is a real control, it needs to be reachable from
+ * the keyboard, and `aria-expanded` is what tells a screen-reader user that there is more.
+ */
+function SeamQuestion({ question }: { question: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid="askreel-seam-answers"
+      title={question}
+      aria-expanded={expanded}
+      onClick={() => setExpanded((v) => !v)}
+      className={`fa-caption max-w-full text-left text-fa-frost-dim/70 hover:text-fa-frost-dim transition-colors ${
+        expanded ? "" : "truncate"
+      }`}
+    >
+      These answer “{question}”.
+    </button>
   );
 }
 
@@ -1020,7 +1115,7 @@ function ConflictNotice({ message, terms }: { message: string; terms: string[] }
  * One Ask Reel result card — identical for clean picks and the outside-request channel (the only
  * difference between the two is WHERE they render and what their server-written `why` says).
  */
-function ResultCard({ card }: { card: AskCard }) {
+function ResultCard({ card, onSaveTapped }: { card: AskCard; onSaveTapped: (card: AskCard) => void }) {
   const location = useLocation();
   return (
     <Link
@@ -1050,12 +1145,21 @@ function ResultCard({ card }: { card: AskCard }) {
             Seen
           </span>
         ) : (
-          <CardQuickActions
-            titleId={card.titleId}
-            mediaType={card.mediaType}
-            tmdbId={card.tmdbId}
-            name={card.name}
-          />
+          /* The save tap, observed rather than owned. `CardQuickActions` belongs to the rec
+             surfaces and fires the same three actions everywhere; only Ask Reel needs to know
+             that a save happened HERE, because only here does the card vanish out of an answer
+             the page is still explaining in a footnote. `display: contents` so the wrapper adds
+             no box — the overlay stays positioned against the card, not against this span. */
+          <span style={{ display: "contents" }} onClickCapture={(e) => {
+            if ((e.target as Element).closest?.('[data-testid="quick-save"]')) onSaveTapped(card);
+          }}>
+            <CardQuickActions
+              titleId={card.titleId}
+              mediaType={card.mediaType}
+              tmdbId={card.tmdbId}
+              name={card.name}
+            />
+          </span>
         )}
       </div>
       <p className="mt-2 fa-body text-fa-frost-bright truncate" title={card.name}>{card.name}</p>
@@ -1096,7 +1200,7 @@ function RetryButton({ onRetry, disabled, label = "Try again" }: { onRetry: () =
       onClick={onRetry}
       disabled={disabled}
       data-testid="askreel-retry"
-      className="inline-flex items-center gap-1.5 rounded-full border border-fa-frost/30 px-3 py-1 fa-caption text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
+      className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
     >
       <RotateCcw className="h-3.5 w-3.5" /> {label}
     </button>

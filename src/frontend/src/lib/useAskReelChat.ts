@@ -305,6 +305,20 @@ export interface ConversationPayload {
    */
   belowFloor?: AskCard[];
   reason?: string | null;
+  /**
+   * The collision notice the newest replayed turn emitted, stored on the turn and handed back
+   * with it — `null` on a thread that had no collision, which is most of them.
+   *
+   * F4-06: the cards were restored from rows and the reason line from a column, and the
+   * EXPLANATION was the one part of the turn the server forgot. Reload a thread that asked for a
+   * 90s romantic comedy against standing exclusions on both genres and it came back as four
+   * post-2000 dramas under that question with nothing on the page saying why.
+   *
+   * Optional, and treated as untrusted: see {@link resumedConflict}. `poolSize` / `catalogueSize`
+   * are deliberately absent — both count the catalogue at one instant and stop being true
+   * immediately, so a resume replaying them would state a stale number as a current one.
+   */
+  conflict?: PersistedConflict | null;
   /** Stored cards the eligibility re-filter dropped since the turn ran, across BOTH lists. */
   removed?: number;
   lastQuery?: string | null;
@@ -312,6 +326,54 @@ export interface ConversationPayload {
   mediaTypes?: string[];
   /** The whole conversation's no-repeat set — informational; the server applies its own. */
   shown?: number[];
+}
+
+/**
+ * A collision notice as it is STORED — the `conflict` frame minus the two counts that go stale.
+ *
+ * `minYear` / `maxYear` are present only when the YEAR is what collided; an account with a standing
+ * window would otherwise carry them on every turn and put a year on a screen whose collision was
+ * purely a genre. They are accepted and deliberately not rendered as terms: the server's own
+ * `message` already states the window, and the live `conflict` frame carries no such fields, so
+ * naming them here would make a resumed notice say more than the live one it is restoring.
+ */
+export interface PersistedConflict {
+  message: string;
+  excludedGenres?: string[];
+  excludedKeywords?: string[];
+  minYear?: number | null;
+  maxYear?: number | null;
+}
+
+/** Everything in `value` that is a non-blank string, and nothing else. */
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+/**
+ * The collision notice a resumed thread is entitled to render, or null.
+ *
+ * Top-level on the resume payload, which is where the turn record puts it: it is the NEWEST
+ * replayed turn's notice, exactly as `reason` is that turn's sentence, and the two are restored
+ * together or the page explains an answer with half of its own account of it.
+ *
+ * Validated rather than trusted, and the two halves fail independently. `message` is what the card
+ * PRINTS: a warning-styled box reading "undefined" is worse than no box, because it looks like the
+ * product breaking at the precise moment it is explaining itself. The term list is a sentence the
+ * page builds, so junk is dropped out of it without taking the message down.
+ */
+export function resumedConflict(payload: { conflict?: PersistedConflict | null }): { message: string; terms: string[] } | null {
+  const raw: unknown = payload.conflict;
+  if (!raw || typeof raw !== "object") return null;
+  const message = (raw as PersistedConflict).message;
+  if (typeof message !== "string" || !message.trim()) return null;
+  return {
+    message,
+    terms: excludedTerms(
+      stringList((raw as PersistedConflict).excludedGenres),
+      stringList((raw as PersistedConflict).excludedKeywords),
+    ),
+  };
 }
 
 /**
@@ -612,9 +674,10 @@ export interface ResumedTail {
   /** `failed` — the turn ended badly. `pending` — the server is still working on it. */
   status: "failed" | "pending";
   /**
-   * The server's own `FailureCode`, where the payload carries one. `client_aborted` is the user's
-   * own Stop and reads as "you stopped it"; anything else is a snag they did not cause, and
-   * telling a person they abandoned something they did not is worse than saying less.
+   * The server's own `FailureCode`, where the payload carries one. `client_aborted` means the
+   * client's connection went away — a Stop, a reload, a slept phone or a discarded tab, all
+   * indistinguishable from the server's side — and anything else is a snag the user did not cause.
+   * See {@link failedTurnMessage}: the copy may only claim what the code can actually support.
    */
   failureCode: string | null;
   /**
@@ -647,6 +710,29 @@ export function lastTurnOutcome(rows: ConversationPayload["turns"]): ResumedTail
 }
 
 /**
+ * Was the answer a resume restores made of more than one page?
+ *
+ * F4-03: this was `turns.some((t) => t.kind === "page")` — true if the thread had EVER been paged,
+ * for the rest of its life. A fresh question asked in a thread that was paged three turns earlier
+ * came back reading "6 picks so far · last page: 6 picks ranked for you, from 40 pulled": the same
+ * count twice in one sentence, and "last page" over an answer with one page. And it read
+ * differently before and after the reload, because the LIVE `paged` is per-answer and a new ask
+ * clears it — the same answer, two sentences, with a page turn in between flipping it.
+ *
+ * The grid a resume restores is the last completed ask plus whatever paged onto it, so the
+ * question is not "did this thread ever page" but "did anything page onto the answer on screen".
+ * An `ask` writes a user row and an assistant row together; a `page` writes an assistant row
+ * alone — so the rule is a `page` row after the last `ask` row. `kind` is optional on the wire and
+ * absent has always meant `ask`, which matters: reading absent as "not an ask" would leave the
+ * cursor at -1 and make every page row in the thread count again.
+ */
+export function wasPaged(rows: ConversationPayload["turns"]): boolean {
+  let lastAsk = -1;
+  for (let i = 0; i < rows.length; i++) if ((rows[i].kind ?? "ask") === "ask") lastAsk = i;
+  return rows.slice(lastAsk + 1).some((t) => t.kind === "page");
+}
+
+/**
  * The question the restored grid actually answers.
  *
  * The server replays the last COMPLETED `ask` block, so when the newest turn failed the cards on
@@ -669,17 +755,25 @@ export function answeredQuestion(rows: ConversationPayload["turns"]): string {
 /**
  * What a failed turn says for itself, in one line.
  *
- * Three cases, not two. The user pressing Stop is a thing they DID and a named code
- * (`client_aborted`); any other code is a thing that happened TO them; and no code at all is
- * neither, so it claims neither. Telling someone they abandoned a turn they never touched is the
- * kind of small lie that costs trust in everything else on the page — and the silent case is not
- * hypothetical: the resume payload projects `sequence`, `role`, `text`, `kind` and `status` and no
- * `failureCode`, so today every resumed failure arrives unattributed. The wording lights up the
- * moment the field does.
+ * Three cases, not two, and the first of them is narrower than it looks. `client_aborted` is what
+ * the server writes when the client's connection went away — and it goes away identically for a
+ * Stop, a reload, a slept phone and a discarded tab. The server cannot tell those apart, so
+ * neither can this sentence.
+ *
+ * F6-09 is what saying otherwise cost: a finder hard-reloaded a running turn and the resumed
+ * transcript told them "you stopped it", permanently, across two further reloads. The wording was
+ * ACCURATE for a real Stop — verified in the same session — which is exactly what makes the class
+ * dangerous: copy that is right most of the time and asserts a cause the client cannot know. "You
+ * left" is true of all four, and it is still specific enough to be worth reading.
+ *
+ * Any other code is a thing that happened TO them; no code at all is neither, so it claims
+ * neither. The silent case is not hypothetical: the resume payload projects `sequence`, `role`,
+ * `text`, `kind` and `status` and no `failureCode`, so today every resumed failure arrives
+ * unattributed. The wording lights up the moment the field does.
  */
 export function failedTurnMessage(failureCode: string | null): string {
-  if (failureCode === "client_aborted") return "That one didn’t finish — you stopped it.";
-  if (failureCode) return "That one didn’t finish — it hit a snag.";
+  if (failureCode === "client_aborted") return "That one didn’t finish before you left.";
+  if (failureCode) return "That one hit a snag.";
   return "That one didn’t finish.";
 }
 
@@ -1129,7 +1223,26 @@ export function chatReducer(state: State, action: ChatAction): State {
       // media toggle and the retry have something to replay — without it, a resumed thread's chips
       // were inert until the user typed again.
       const p = action.payload;
+      // F4-06. The notice is the account of WHY the answer looks nothing like the question, and it
+      // was stream-only: `askreel-conflict` and `askreel-reply-conflict` were both absent after a
+      // reload, leaving a screen full of post-2000 dramas under "a 90s romantic comedy" with
+      // nothing on it explaining either. Restored here, from the stored object, never recomputed —
+      // the account's conditions can change between the turn and the resume (that is the whole
+      // point of the Conditions screen the notice points at), and a re-derived notice would
+      // describe an answer produced under yesterday's rules.
+      const restoredConflict = resumedConflict(p);
       const turns = transcriptOf(p.turns);
+      // …and the pill goes back on the bubble the notice qualifies, which is the newest assistant
+      // row — the same row `reason` and the notice itself are about. A warning on every resumed
+      // answer would be worse than none, so this is the one row and only when there is a notice.
+      if (restoredConflict) {
+        for (let i = turns.length - 1; i >= 0; i--) {
+          if (turns[i].role === "assistant") {
+            turns[i] = { ...turns[i], conflict: true };
+            break;
+          }
+        }
+      }
       const cards = p.cards ?? [];
       const byId: Record<string, AskCard> = {};
       for (const c of cards) byId[c.titleId] = c;
@@ -1171,11 +1284,13 @@ export function chatReducer(state: State, action: ChatAction): State {
         // two apart — a zero there would suppress a fence that an older server still owes us.
         droppedByFloor: p.belowFloor ? tray.length : null,
         reason: p.reason ?? null,
-        // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread that was paged it
-        // describes one page and the restored grid is several, which is R1-03 arriving by the
-        // resume path. The transcript says which: the server writes a page as a `page` row, and one
-        // of those means the footnote has to account for the grid rather than quote the last page.
-        paged: p.turns.some((t) => t.kind === "page"),
+        conflict: restoredConflict?.message ?? null,
+        conflictTerms: restoredConflict?.terms ?? [],
+        // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread whose answer was
+        // paged it describes one page and the restored grid is several, which is R1-03 arriving by
+        // the resume path. The transcript says which; see {@link wasPaged} for why "ever paged" is
+        // the wrong question and what it cost (F4-03).
+        paged: wasPaged(p.turns),
         removed: p.removed ?? 0,
         lastCardsAt: p.lastCardsAt ?? null,
         lastTurnAt: p.lastTurnAt ?? null,

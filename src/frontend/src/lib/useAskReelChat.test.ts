@@ -39,6 +39,8 @@ import {
   prefersReducedMotion,
   skeletonCount,
   SKELETON_CAP,
+  wasPaged,
+  resumedConflict,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -1692,6 +1694,188 @@ describe("chatReducer — a resumed thread knows whether it was paged", () => {
     expect(footnote(state.reason, 3, state.paged))
       .toBe("3 picks so far · last page: 2 picks ranked for you, from 65 pulled");
   });
+
+  it("forgets_a_page_that_a_later_question_replaced", () => {
+    // F4-03. `paged` was `turns.some(kind === "page")` — true if the thread was EVER paged, for
+    // the rest of its life. So a fresh question asked in a thread that had been paged three turns
+    // earlier resumed reading "6 picks so far · last page: 6 picks ranked for you, from 40
+    // pulled": the same count stated twice in one sentence, and "last page" on an answer with one
+    // page. Worse, it read differently before and after the reload — live, the same answer said
+    // the sentence verbatim, because the LIVE `paged` is per-answer and is cleared by a new ask.
+    //
+    // The grid a resume restores is the last completed ASK plus whatever paged onto it, so the
+    // question is not "did this thread ever page" but "did anything page onto the answer on
+    // screen".
+    const repaged = {
+      ...base,
+      turns: [
+        ...askTurns,
+        { sequence: 2, role: "assistant", text: "Three more.", kind: "page", status: "Completed" },
+        { sequence: 3, role: "user", text: "something tenser", kind: "ask", status: "Completed" },
+        { sequence: 4, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+      ],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: repaged });
+    expect(state.paged).toBe(false);
+    expect(footnote(state.reason, 3, state.paged)).toBe("2 picks ranked for you, from 65 pulled");
+  });
+
+  it("still_accounts_for_the_grid_when_the_newest_answer_is_the_paged_one", () => {
+    // Fixture variation, one row's position: the page row moves to AFTER the second ask. The grid
+    // on screen really is several pages now, so the composite line is the true one again.
+    const pagedAgain = {
+      ...base,
+      turns: [
+        ...askTurns,
+        { sequence: 2, role: "user", text: "something tenser", kind: "ask", status: "Completed" },
+        { sequence: 3, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+        { sequence: 4, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+      ],
+    };
+    expect(chatReducer(initialChatState, { type: "resume", payload: pagedAgain }).paged).toBe(true);
+  });
+});
+
+/**
+ * The rule on its own, because the reducer case can only exercise it through a whole payload.
+ *
+ * An `ask` writes a user row and an assistant row together; a `page` writes an assistant row
+ * alone. So "the answer on screen was paged" is: a `page` row after the last `ask` row — and
+ * `kind` is optional on the wire, where absent has always meant `ask`.
+ */
+describe("wasPaged", () => {
+  const ask = (sequence: number) => [
+    { sequence, role: "user", text: "q", kind: "ask", status: "Completed" },
+    { sequence: sequence + 1, role: "assistant", text: "a", kind: "ask", status: "Completed" },
+  ];
+  const page = (sequence: number) => ({ sequence, role: "assistant", text: "a", kind: "page", status: "Completed" });
+
+  it("is_false_on_an_empty_or_single_ask_transcript", () => {
+    expect(wasPaged([])).toBe(false);
+    expect(wasPaged(ask(0))).toBe(false);
+  });
+
+  it("is_true_only_while_the_page_belongs_to_the_newest_ask", () => {
+    expect(wasPaged([...ask(0), page(2)])).toBe(true);
+    expect(wasPaged([...ask(0), page(2), ...ask(3)])).toBe(false);
+    expect(wasPaged([...ask(0), page(2), ...ask(3), page(5)])).toBe(true);
+  });
+
+  it("treats_a_missing_kind_as_an_ask", () => {
+    // The field is optional on the wire and an older server omits it. Reading absent as "not an
+    // ask" would leave the last-ask cursor at -1 and make every page row count.
+    const untyped = [
+      { sequence: 0, role: "user", text: "q", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "a", status: "Completed" },
+    ];
+    expect(wasPaged(untyped)).toBe(false);
+    expect(wasPaged([...untyped, page(2)])).toBe(true);
+    expect(wasPaged([page(0), ...untyped])).toBe(false);
+  });
+});
+
+/**
+ * F4-06 — the explanation was the one part of a turn that did not survive a reload.
+ *
+ * Ask "a 90s romantic comedy" against standing exclusions on both genres and the reply is honest,
+ * the notice names the collision and the bubble carries a pill. Reload, and the same question comes
+ * back over four post-2000 dramas with `askreel-conflict` and `askreel-reply-conflict` both absent
+ * — a screen with nothing left on it saying why the answer looks nothing like the question. The
+ * cards were restored from rows and the reason line from a column; the account of WHY was stream-
+ * only.
+ *
+ * The server now stores it on the turn and hands it back on the resume payload. These tests pin
+ * the client half — including the shapes an older or half-deployed server sends, because the field
+ * is optional and a client that trusts it will render `undefined` into a warning card.
+ */
+describe("resumedConflict", () => {
+  it("reads_the_stored_notice_and_names_both_kinds_of_excluded_term", () => {
+    const found = resumedConflict({
+      conflict: {
+        message: "Your conditions permanently exclude comedy and anime.",
+        excludedGenres: ["comedy"],
+        excludedKeywords: ["anime"],
+        minYear: 2000,
+        maxYear: null,
+      },
+    });
+    expect(found).toEqual({
+      message: "Your conditions permanently exclude comedy and anime.",
+      terms: ["comedy", "anime"],
+    });
+  });
+
+  it("is_null_when_the_thread_had_no_collision", () => {
+    // Which is most threads, and is also every payload from a server that predates the column.
+    expect(resumedConflict({})).toBeNull();
+    expect(resumedConflict({ conflict: null })).toBeNull();
+  });
+
+  it("refuses_a_malformed_or_empty_notice_rather_than_rendering_it", () => {
+    // Fixture variation on the one field the card actually prints. A warning-styled box reading
+    // "undefined" is worse than no box: it looks like the product failing at the exact moment it
+    // is explaining itself.
+    expect(resumedConflict({ conflict: {} as never })).toBeNull();
+    expect(resumedConflict({ conflict: { message: "   " } })).toBeNull();
+    expect(resumedConflict({ conflict: { message: 7 } as never })).toBeNull();
+    expect(resumedConflict({ conflict: "no" as never })).toBeNull();
+  });
+
+  it("drops_junk_out_of_the_term_list_without_dropping_the_message", () => {
+    // The terms are a sentence the page builds; the message is the server's own. One being
+    // unusable must not take the other down with it.
+    const found = resumedConflict({
+      conflict: { message: "Your conditions rule that out.", excludedGenres: ["comedy", "", 4] as never, excludedKeywords: "anime" as never },
+    });
+    expect(found).toEqual({ message: "Your conditions rule that out.", terms: ["comedy"] });
+  });
+});
+
+describe("chatReducer — a resumed thread restores its collision notice", () => {
+  const payload = {
+    id: "conv-9",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    cards: [card(1)],
+    reason: "1 pick ranked for you, from 40 pulled",
+    lastQuery: "a 90s romantic comedy",
+    turns: [
+      { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "I can't recommend that.", kind: "ask", status: "Completed" },
+    ],
+    conflict: { message: "Your conditions exclude comedy and romance.", excludedGenres: ["comedy", "romance"] },
+  };
+
+  it("puts_the_message_the_terms_and_the_bubble_pill_back", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.conflict).toBe("Your conditions exclude comedy and romance.");
+    expect(state.conflictTerms).toEqual(["comedy", "romance"]);
+    // The pill belongs on the bubble the notice qualifies, which is the newest assistant row —
+    // the same row `reason` and the notice itself are about.
+    expect(state.turns.at(-1)).toEqual({
+      role: "assistant",
+      text: "I can't recommend that.",
+      conflict: true,
+    });
+  });
+
+  it("leaves_a_collision_free_thread_unmarked", () => {
+    // Fixture variation, one field: the notice removed. A pill on every resumed answer would be
+    // worse than none, because it is a warning.
+    const clean = { ...payload, conflict: null };
+    const state = chatReducer(initialChatState, { type: "resume", payload: clean });
+    expect(state.conflict).toBeNull();
+    expect(state.conflictTerms).toEqual([]);
+    expect(state.turns.at(-1)?.conflict).toBeUndefined();
+  });
+
+  it("does_not_survive_the_next_question", () => {
+    // A conflict describes the question that produced it. Asking again in the same thread must
+    // clear both the notice and the pill, exactly as the live path already does.
+    const resumed = chatReducer(initialChatState, { type: "resume", payload });
+    const asking = chatReducer(resumed, { type: "userTurn", message: "something else entirely", fresh: false });
+    expect(asking.conflict).toBeNull();
+    expect(asking.conflictTerms).toEqual([]);
+  });
 });
 
 /**
@@ -1756,14 +1940,18 @@ describe("lastTurnOutcome", () => {
     expect(lastTurnOutcome(completed)).toBeNull();
   });
 
-  it("reports_a_stopped_turn_as_the_users_own_doing", () => {
+  it("reports_an_abandoned_turn_without_claiming_the_user_pressed_anything", () => {
     const stopped = [
       ...completed,
       { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
       { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
     ];
     expect(lastTurnOutcome(stopped)).toEqual({ status: "failed", failureCode: "client_aborted", turnId: null });
-    expect(failedTurnMessage("client_aborted")).toContain("you stopped it");
+    // F6-09. `client_aborted` is written for a Stop AND for a reload, a slept phone and a
+    // discarded tab — the abort reaches the server identically and it cannot tell them apart. The
+    // copy said "you stopped it" for all four, and a finder who only reloaded read it as a lie.
+    expect(failedTurnMessage("client_aborted")).toBe("That one didn’t finish before you left.");
+    expect(failedTurnMessage("client_aborted")).not.toContain("you stopped it");
   });
 
   it("reports_any_other_failure_as_a_snag_the_user_did_not_cause", () => {
@@ -1775,7 +1963,14 @@ describe("lastTurnOutcome", () => {
       { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "HttpRequestException" },
     ];
     expect(lastTurnOutcome(crashed)?.status).toBe("failed");
-    expect(failedTurnMessage("HttpRequestException")).toContain("hit a snag");
+    expect(failedTurnMessage("HttpRequestException")).toBe("That one hit a snag.");
+  });
+
+  it("keeps_the_three_messages_distinguishable_from_each_other", () => {
+    // Three codes, three sentences, and none of them a prefix of another: the whole value of this
+    // function is that a reader can tell which of the three things happened to them.
+    const said = [failedTurnMessage("client_aborted"), failedTurnMessage("timeout"), failedTurnMessage(null)];
+    expect(new Set(said).size).toBe(3);
   });
 
   it("claims_no_cause_at_all_when_the_server_named_none", () => {
