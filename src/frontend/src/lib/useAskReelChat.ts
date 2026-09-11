@@ -45,6 +45,19 @@ export interface ChatTurn {
    * the qualified text, which is the part that had to survive.
    */
   conflict?: boolean;
+  /**
+   * Assistant rows only: this turn did not finish. The row has no answer and never will, so it is
+   * rendered as the failure it is rather than as a bubble — see {@link showsInlineFailure}.
+   *
+   * R5-02. Only the TAIL of a resumed thread was ever named as failed (`resumedTail`), so a
+   * stopped turn with anything after it — a page of the kept answer, a later question — came back
+   * as a bare user bubble with nothing under it, and live it kept the `assistant-message` that had
+   * streamed before the abort, presented as that turn's answer. A turn nobody waited for is still
+   * a turn that happened.
+   */
+  failed?: boolean;
+  /** The server's `FailureCode` for a {@link ChatTurn.failed} row. See {@link failedTurnMessage}. */
+  failureCode?: string | null;
 }
 
 /**
@@ -707,8 +720,81 @@ export function skeletonCount(phase: PhaseData | null): number {
 export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
   return rows
     .filter((t) => t.kind !== "page")
-    .filter((t) => t.text.trim().length > 0 && (t.role === "user" || t.role === "assistant"))
-    .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
+    .filter((t) => t.role === "user" || t.role === "assistant")
+    // …and a FAILED assistant row survives the empty-text filter, because its emptiness is the
+    // fact rather than an artefact of timing (R5-02). A `Pending` one does not: it has no text
+    // YET, and rendering it would put a blank bubble under a question the server is still working
+    // on — which `resumedTail` says out loud instead.
+    .filter((t) => t.text.trim().length > 0 || (t.role === "assistant" && t.status === "Failed"))
+    .map((t) =>
+      t.role === "assistant" && t.status === "Failed"
+        ? { role: "assistant" as const, text: "", failed: true, failureCode: t.failureCode ?? null }
+        : { role: t.role as "user" | "assistant", text: t.text },
+    );
+}
+
+/**
+ * The transcript after a Stop — the abandoned turn recorded as the failure it is.
+ *
+ * R5-02's live half. `assistant-message` arrives long before `done` (2 578 ms against an abort at
+ * 4 118 ms in R5's own capture), so a Stop left the model's opening sentence on screen as that
+ * turn's answer: "Here's a tense sea-set pick that stays in your thriller/action lane." over zero
+ * cards, with `Status='Failed'` in the database and nothing on the page saying the promise had not
+ * been kept. The sentence is replaced rather than kept, because a reply to a question that was
+ * never answered is not a reply — and the row stays, because the turn happened.
+ *
+ * A row is ADDED when nothing was said at all, so the stopped question is answered by something
+ * even when the model never got a word out. It is the same row either way, which is what makes the
+ * live screen and the next resume agree.
+ *
+ * `appending` is the one case that changes nothing: a page writes no transcript row, so the
+ * trailing assistant row belongs to the answer the page was extending — finished work, and not the
+ * thing that was abandoned.
+ */
+export function stoppedTranscript(turns: ChatTurn[], appending: boolean): ChatTurn[] {
+  if (appending || turns.length === 0) return turns;
+  const row: ChatTurn = { role: "assistant", text: "", failed: true, failureCode: "client_aborted" };
+  return turns.at(-1)?.role === "assistant" ? [...turns.slice(0, -1), row] : [...turns, row];
+}
+
+/**
+ * Does this transcript row render its own failure line?
+ *
+ * Every failed row does, wherever it sits — that is R5-02 — with one exception: the turn the
+ * `stopped` card is currently about. That card is the same fact with the same retry beside it, and
+ * two "Ask again" buttons for one gesture is what F4-04 was filed to stop. The moment anything
+ * happens after that turn (a page of the kept answer, another question, a reload) the card is gone
+ * and the row speaks for itself.
+ */
+export function showsInlineFailure(turn: ChatTurn, isTail: boolean, status: ChatStatus): boolean {
+  if (!turn.failed) return false;
+  return !(isTail && status === "stopped");
+}
+
+/** The question a transcript row is about — the nearest user row above it. */
+export function questionFor(turns: ChatTurn[], index: number): string {
+  for (let i = index - 1; i >= 0; i--) if (turns[i].role === "user") return turns[i].text;
+  return "";
+}
+
+/**
+ * Which transcript row the answer on screen IS — the newest assistant row that is not a failure.
+ *
+ * R5-01. The anchor for the collision notice was "the newest assistant row", which is right on an
+ * ordinary screen and wrong the moment a failed turn sits between the answer and what came after
+ * it: "Your conditions permanently exclude comedy and romance" ended up annotating a sea-thriller
+ * question that collided with nothing, live, while a hard reload put it back under the romcom
+ * reply. One answer, two accounts of which question it explains, a reload apart.
+ *
+ * A failed row is never the answer — it has none, which is the whole point of it — so skipping it
+ * lands on the row whose cards are actually in the grid. -1 when nothing on screen is an answer,
+ * which is where the notice falls back to a block of its own.
+ */
+export function answerRowIndex(turns: ChatTurn[]): number {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === "assistant" && !turns[i].failed) return i;
+  }
+  return -1;
 }
 
 /**
@@ -822,6 +908,60 @@ function answeredTurnIndex(rows: ConversationPayload["turns"]): number {
 export function answeredTurnId(rows: ConversationPayload["turns"]): string | null {
   const row = rows[answeredTurnIndex(rows)];
   return row ? row.id ?? row.turnId ?? null : null;
+}
+
+/**
+ * The question and the turn a resumed "Show me more" must name — read off ONE row, deliberately.
+ *
+ * R5-03. The id came from {@link answeredTurnId} (the last completed ask, which is right) and the
+ * query fell back to the payload's `lastQuery`, which the contract defines as the last USER row.
+ * On any thread whose newest question was stopped those are two different turns, so the request
+ * went out carrying the kept answer's id and the abandoned question — and the server refused it
+ * `409 page_query_mismatch`, exactly as it should. Paging was then permanently dead on that
+ * thread: the state is stored, so every reload reproduced it, and there was no gesture that could
+ * clear it.
+ *
+ * Both halves come off `answeredTurnIndex` here, so a request that names one turn's row and
+ * another turn's question is not merely absent — it is unrepresentable. `lastQuery` keeps its own
+ * job untouched: it is the question "Ask again" replays, and after a Stop that is the one nobody
+ * answered.
+ *
+ * The fallback is the previous behaviour verbatim, for the server that carries no `status` on its
+ * turn rows: no row can be read as the completed ask, so the query is the payload's and the id is
+ * null — and the server derives `kind` by comparing the query, which is right on every screen but
+ * this one.
+ */
+export function resumedPageTarget(
+  rows: ConversationPayload["turns"],
+  fallbackQuery: string,
+): { query: string; turnId: string | null } {
+  const index = answeredTurnIndex(rows);
+  if (index < 0) return { query: fallbackQuery, turnId: null };
+  return { query: answeredQuestion(rows) || fallbackQuery, turnId: answeredTurnId(rows) };
+}
+
+/**
+ * Why the page of the answer on screen was refused, where the server named something the reader
+ * can act on. `null` = nothing was refused.
+ *
+ * `mismatch` is `409 page_query_mismatch`: the question this page claims to extend is not the
+ * question that turn answered. It is a refusal, not a failure — nothing on screen is wrong and
+ * nothing was lost, which is why it has a state of its own rather than sharing `blocked`'s.
+ */
+export type PageRefusal = "mismatch" | null;
+
+/**
+ * What a refused page says for itself — one line, beside the control that took the refusal.
+ *
+ * R5-04: every `409` mapped to `turn_in_progress`, so a refused page announced "That question is
+ * still being answered." into a live region while nothing at all was running, and the `blocked`
+ * state it landed on withdrew the footnote and the paging control with it. The contract is
+ * explicit that `code` is what a client switches on, and that matching on anything else "is how a
+ * UI ends up rendering a crash message for an honest refusal".
+ */
+export function pageRefusalMessage(refusal: PageRefusal): string | null {
+  if (refusal === "mismatch") return "That page no longer matches its answer — ask again.";
+  return null;
 }
 
 /**
@@ -1061,6 +1201,19 @@ interface State {
    * prose; empty when the server named none.
    */
   conflictTerms: string[];
+  /**
+   * The same fact for the turn IN FLIGHT — the collision the running (or abandoned) question
+   * produced, held apart from the answer's until that turn completes.
+   *
+   * R5-01. One slot could not hold both, so a colliding follow-up overwrote the kept answer's
+   * notice and a Stop then left the survivor anchored under the wrong bubble. The turn's notice
+   * renders with the turn — under its own reply while it streams, and with the stopped card once
+   * it is abandoned — and becomes {@link State.conflict} at `done`, when the answer it explains is
+   * what the grid holds.
+   */
+  turnConflict: string | null;
+  /** The terms behind {@link State.turnConflict}, on the same terms as {@link State.conflictTerms}. */
+  turnConflictTerms: string[];
   /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
   belowFloor: AskCard[];
   /**
@@ -1159,6 +1312,21 @@ interface State {
    */
   pageTurnId: string | null;
   /**
+   * The server's refusal of the last page of this answer, where it named one — see
+   * {@link PageRefusal}. Cleared by anything that starts a turn, and by a page that lands.
+   *
+   * It is beside the answer rather than instead of it: a refused page changed nothing on screen,
+   * so the grid, the tray, the footnote and the control all stay exactly where they are (R5-04).
+   */
+  pageRefusal: PageRefusal;
+  /**
+   * The status the screen was in when the page in flight started — what it returns to if that page
+   * is refused. A page is the one turn that can fail without costing the user anything: it extends
+   * a finished answer and never replaces it, so "back where you were" is a real destination, and
+   * it is the only way to put the footnote and the control back without a reload.
+   */
+  pagePriorStatus: ChatStatus;
+  /**
    * The turn the stream in flight is writing, as its own `conversation` frame named it. Only a
    * landing place: it becomes {@link State.pageTurnId} at `done`, because a turn that never
    * completed is not an answer anything can be a page of.
@@ -1182,6 +1350,7 @@ export type ChatAction =
   | { type: "stop" }
   | { type: "reset" }
   | { type: "turnInProgress" }
+  | { type: "pageRefused"; refusal: PageRefusal }
   | { type: "conversationGone" }
   | { type: "error"; reason?: ErrorReason };
 
@@ -1225,6 +1394,10 @@ export function staleFrame(state: State, tag: StreamTag | undefined): boolean {
  */
 export function failureFor(err: unknown): ChatAction {
   if (err instanceof AskStreamError) {
+    // …and inside the 409 family, the refusal that changed nothing. R5-04: this fell through to
+    // `turn_in_progress`, so a refused page announced that a turn was running when none was, and
+    // took the footnote and the paging control down with it.
+    if (err.code === "page_query_mismatch") return { type: "pageRefused", refusal: "mismatch" };
     if (err.code === "turn_in_progress" || err.status === 409) return { type: "turnInProgress" };
     if (err.code === "conversation_not_found" || err.status === 404) return { type: "conversationGone" };
     // A 401 here already survived one refresh-and-retry inside streamAskReel, so the session is
@@ -1239,10 +1412,11 @@ export function failureFor(err: unknown): ChatAction {
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
-  conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
+  conflict: null, conflictTerms: [], turnConflict: null, turnConflictTerms: [],
+  belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
-  pageTurnId: null, activeTurnId: null,
+  pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
 };
 
 /**
@@ -1323,8 +1497,8 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
  * So they now move with the grid: held while the grid is held, and released at the single moment
  * the grid is replaced (the first candidate of the new turn) or completed.
  */
-function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted"> {
-  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false };
+function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted" | "conflict" | "conflictTerms"> {
+  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false, conflict: null, conflictTerms: [] };
 }
 
 export function chatReducer(state: State, action: ChatAction): State {
@@ -1345,12 +1519,20 @@ export function chatReducer(state: State, action: ChatAction): State {
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
             appending: false, lastQuery: action.message,
+            // The refusal belonged to a page of the answer being replaced; asking is the "ask
+            // again" it offered, and the offer goes with the gesture (R5-04).
+            pageRefusal: null,
             // Whatever turn was named last belongs to the answer BEFORE this one; this turn's own
             // id arrives on its `conversation` frame, and until it does there is none to adopt.
             activeTurnId: null,
-            // A conflict describes the question that produced it. A new question gets a clean
-            // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, conflictTerms: [], errorReason: null,
+            // A conflict describes the question that produced it — and so does the ANSWER it
+            // explains, which is why this is no longer cleared here. R5-01: the grid, the tray and
+            // the footnote are all deliberately held while the new turn works, and the notice was
+            // cleared at ask-time, so the one part of the turn F4-06 exists to preserve was the one
+            // part the held state dropped. It goes with the grid instead — see
+            // {@link clearedAnswerDescription} — and the new turn's own collision lands in
+            // `turnConflict`, which starts empty.
+            turnConflict: null, turnConflictTerms: [], errorReason: null,
             // The resumed thread's unanswered tail belongs to the visit BEFORE this one. Asking
             // anything replaces it — the retry offer it carries is exactly what was just taken.
             resumedTail: null, answeredQuery: "",
@@ -1379,6 +1561,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       return {
         ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
         settled: state.order.length, resumedTail: null, answeredQuery: "", stream: tag?.id ?? 0,
+        // Where the screen goes back to if this page is refused — read BEFORE the line above
+        // overwrites it. A page never replaces what is on screen, so a refused one owes the reader
+        // the state they were in, footnote and control included (R5-04).
+        pagePriorStatus: state.status, pageRefusal: null,
+        // A page extends the answer on screen, so the answer's notice stands. Only the turn slot
+        // resets, ready for whatever this page's own frames say.
+        turnConflict: null, turnConflictTerms: [],
         // `pageTurnId` is deliberately carried — it names the answer this page extends, which is
         // the whole point of the request about to go out. Only the in-flight handle resets.
         activeTurnId: null,
@@ -1392,7 +1581,8 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
-        appending: false, errorReason: null, activeTurnId: null,
+        appending: false, errorReason: null, activeTurnId: null, pageRefusal: null,
+        turnConflict: null, turnConflictTerms: [],
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
         ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
@@ -1433,13 +1623,14 @@ export function chatReducer(state: State, action: ChatAction): State {
       // …and the pill goes back on the bubble the notice qualifies, which is the newest assistant
       // row — the same row `reason` and the notice itself are about. A warning on every resumed
       // answer would be worse than none, so this is the one row and only when there is a notice.
+      //
+      // …the row `answerRowIndex` names, which is the newest assistant row that is not a FAILURE.
+      // A thread whose tail was stopped carries a failed assistant row now (R5-02), and pinning to
+      // "the newest assistant row" would put the romcom's explanation on a turn that never
+      // produced an answer at all (R5-01).
       if (restoredConflict) {
-        for (let i = turns.length - 1; i >= 0; i--) {
-          if (turns[i].role === "assistant") {
-            turns[i] = { ...turns[i], conflict: true };
-            break;
-          }
-        }
+        const anchor = answerRowIndex(turns);
+        if (anchor >= 0) turns[anchor] = { ...turns[anchor], conflict: true };
       }
       const cards = p.cards ?? [];
       const byId: Record<string, AskCard> = {};
@@ -1453,6 +1644,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // same one every streamed card passes, and a malformed entry would otherwise reach
       // `ResultCard` as a keyless undefined.
       const tray = (p.belowFloor ?? []).filter(isCard);
+      const pageTarget = resumedPageTarget(p.turns, p.lastQuery ?? lastUserQuery(turns));
       return {
         ...initialChatState,
         turns,
@@ -1461,14 +1653,12 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The server's own `lastQuery` first: it reads the last USER row, including one whose
         // answer never landed, which is exactly the question a retry has to replay.
         lastQuery: p.lastQuery ?? lastUserQuery(turns),
-        // The restored grid answers the thread's last completed question, which is what a page of
-        // it replays. Same source as `lastQuery` on an ordinary resume; they part company only
-        // after a Stop.
-        pageQuery: p.lastQuery ?? lastUserQuery(turns),
-        // …and the turn that grid IS, read off the same transcript by the same rule the server
-        // replays by, so a page of a resumed answer names the row it extends rather than leaving
-        // the server to infer it from a question the thread may have moved past (R3-02).
-        pageTurnId: answeredTurnId(p.turns),
+        // The restored grid answers the thread's last COMPLETED ask, and both halves of a page of
+        // it are read off that one row — the question and the id it was asked under. Same answer
+        // as `lastQuery` on an ordinary resume; they part company after a Stop, and reading them
+        // from two places is R5-03. See {@link resumedPageTarget}.
+        pageQuery: pageTarget.query,
+        pageTurnId: pageTarget.turnId,
         shown: p.shown ?? [],
         byId,
         // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
@@ -1544,13 +1734,17 @@ export function chatReducer(state: State, action: ChatAction): State {
       return { ...state, byId: { ...state.byId, [action.data.titleId]: { ...e, fit: action.data.fit, why: action.data.why } } };
     }
     case "conflict":
+      // The TURN's slot, not the answer's. The frame describes the question being asked right now,
+      // and the answer on screen may still be the previous one — held, whole, with a collision of
+      // its own that this must not overwrite (R5-01). It is promoted at `done`, which is the moment
+      // this question's answer becomes the grid.
       return {
         ...state,
-        conflict: action.data.message,
+        turnConflict: action.data.message,
         // The terms travel beside the sentence rather than being parsed back out of it. Two
         // server-side lists, one fact for the reader — and the keyword half is the one a turn
         // colliding with an avoid-keyword ("anime", "musical") had no way to name at all.
-        conflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
+        turnConflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
       };
     case "done": {
       // A caught server exception arrives as `done` with no results. Treat it as the failure it is
@@ -1588,7 +1782,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // above it, so the accounting that was already there stands.
       const emptyPage = state.appending && pageIsExhausted(action.data);
       return {
-        ...state, byId, order, status: "done", shown, appending: false,
+        ...state, byId, order, status: "done", shown, appending: false, pageRefusal: null,
         // This turn is finished work now, so the whole of `order` is frozen: nothing on screen may
         // be re-ordered again until a new turn replaces it.
         settled: order.length,
@@ -1613,6 +1807,14 @@ export function chatReducer(state: State, action: ChatAction): State {
         // sent the field has not told us it cut nothing, and the tray falls back to counting the
         // cards it was handed in that case, which zero would silently suppress.
         droppedByFloor: sumDropped(state.appending ? state.droppedByFloor : null, action.data.droppedByFloor),
+        // The turn's collision becomes the ANSWER's the moment this turn's cards are the grid. A
+        // fresh answer replaces the notice outright — including with nothing, which is what a
+        // question that collided with nothing is entitled to; a page keeps the one it is extending
+        // unless its own frames said something.
+        conflict: state.turnConflict ?? (state.appending ? state.conflict : null),
+        conflictTerms: state.turnConflict ? state.turnConflictTerms : state.appending ? state.conflictTerms : [],
+        turnConflict: null,
+        turnConflictTerms: [],
       };
     }
     case "stop":
@@ -1632,7 +1834,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       //
       // `lastQuery` is deliberately NOT restored: the abandoned question is what "Ask again"
       // replays. `pageQuery` already holds the one the grid answers, which is what a page extends.
-      return { ...state, status: "stopped", phase: null, appending: false, holdingPrevious: false };
+      //
+      // …and the abandoned turn is recorded in the transcript as a failure rather than leaving its
+      // half-written reply on screen as an answer (R5-02). See {@link stoppedTranscript}.
+      return {
+        ...state, status: "stopped", phase: null, appending: false, holdingPrevious: false,
+        turns: stoppedTranscript(state.turns, state.appending),
+      };
     case "reset":
       // `+ New`. Everything goes, including the conversation id — the whole point is that the next
       // question opens a thread of its own rather than extending one the user has finished with.
@@ -1644,6 +1852,20 @@ export function chatReducer(state: State, action: ChatAction): State {
       // they are, and the page offers a check-again that re-sends the SAME turn id (which replays
       // the stored answer the moment it exists) rather than a retry that would take the same 409.
       return { ...state, status: "blocked", phase: null, appending: false };
+    case "pageRefused":
+      // A refusal, not a failure: this page never started, and the answer it was going to extend is
+      // untouched — grid, tray, footnote, paging control and all. So the screen goes back to the
+      // state the page was started FROM rather than to `blocked` (which withdrew the footnote and
+      // the control, so the only recovery was a reload) or to `error` (which would claim something
+      // had gone wrong with the answer on screen). `done` is the fallback for a prior status that
+      // could not be a page's origin; `canPage` refuses the rest anyway.
+      return {
+        ...state,
+        status: state.pagePriorStatus === "streaming" || state.pagePriorStatus === "idle" ? "done" : state.pagePriorStatus,
+        pageRefusal: action.refusal,
+        appending: false,
+        phase: null,
+      };
     case "conversationGone":
       // 404. The thread this tab remembered is not the caller's any more — deleted from another
       // device, or an id that outlived its retention. The id is dropped here so the next turn mints
@@ -2007,8 +2229,16 @@ export function useAskReelChat() {
      * say so: the server's sentence describes the turn that produced it, never the accumulation.
      */
     paged: state.paged,
-    /** The server's note that this question collides with a standing exclusion; not an error. */
+    /** The server's note that the question the GRID answers collides with a standing exclusion. */
     conflict: state.conflict,
+    /**
+     * The same note for the turn in flight — or, after a Stop, for the one that was abandoned. Read
+     * beside that turn (its own reply while it streams, the stopped card once it ends) and never
+     * under the answer, which has its own (R5-01).
+     */
+    turnConflict: state.turnConflict,
+    /** The terms behind {@link turnConflict}, ready for {@link listPhrase}. */
+    turnConflictTerms: state.turnConflictTerms,
     /**
      * The terms that note is about — genres and avoid-keywords in one list, ready for
      * {@link listPhrase}. Empty when the server named none, which is every message-only conflict.
@@ -2059,6 +2289,12 @@ export function useAskReelChat() {
      * abandoned question ("Ask again" replays that one) and this is the answer still on screen.
      */
     pageQuery: state.pageQuery,
+    /**
+     * The server's refusal of the last page, where it named one — see {@link PageRefusal}. Read
+     * beside the paging control, which stays exactly where it is: a refused page changed nothing
+     * on screen, and withdrawing the control left the reader with no way to try again (R5-04).
+     */
+    pageRefusal: state.pageRefusal,
     /**
      * The thread this hook is on, mirrored into `localStorage` as it changes and read back by
      * {@link resumeTarget} on the next cold load — so a tab resumes ITS conversation rather than

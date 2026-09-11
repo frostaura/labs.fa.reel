@@ -502,9 +502,9 @@ test.describe("standing conditions on /search", () => {
     }
     await expect(conditions.getByText("no “anime”", { exact: true })).toBeVisible();
 
-    // …and they are changeable from here, through the same dialog the feed opens. Its SIZE is not
-    // asserted: `PickConditionsButton` is a foreign component (it measures 34 px, and is reported
-    // as such), and a test that fails on someone else's box is a test that gets deleted.
+    // …and they are changeable from here, through the same dialog the feed opens. Its size IS
+    // asserted now — see the touch-target block below, and R5-05 for why: the strip is this file's
+    // and the only interactive thing in it was 34 px tall.
     await page.getByTestId("open-conditions").tap();
     await expect(page.getByTestId("conditions-editor")).toBeVisible();
   });
@@ -544,6 +544,13 @@ test.describe("touch targets", () => {
     for (const id of ["askreel-new", "askreel-recent", "askreel-preset", "askreel-send", "askreel-mic", "askreel-composer"]) {
       await expectTarget(page, id);
     }
+    // `open-conditions` is here for the same reason the composer is. R5-05: it is the ONE
+    // interactive control in the conditions strip this file added — the twelve chips beside it are
+    // inert `DIV`s — and it measured 139 x 34 at both 375 and 1440, in the same merge that raised
+    // the composer and the `Recent` row to 44. The button itself is a foreign component shared with
+    // the feed header, so the height is applied from `SearchConditions`, scoped to this strip; the
+    // feed header's copy is still 34 and is owed a fix upstream.
+    await expectTarget(page, "open-conditions");
     // The delete control is the smallest of them and the only destructive one — F6-07 measured it
     // at 26 x 26, eight pixels from the row that opens the thread. The row's own open target was
     // 36 px inside a 60 px row: the primary way into a thread, under the minimum its delete

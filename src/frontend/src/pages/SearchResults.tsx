@@ -23,7 +23,8 @@ import {
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
   pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
-  COMPOSER_MIN_PX, composerHeight, composerSends,
+  COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage, showsInlineFailure,
+  questionFor, answerRowIndex,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -105,9 +106,10 @@ function AskReel() {
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
-    conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
+    conflictTerms, turnConflict, turnConflictTerms, belowFloor, droppedByFloor, holdingPrevious,
+    arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
-    pageQuery, hasLocalTurn,
+    pageQuery, pageRefusal, hasLocalTurn,
   } = useAskReelChat();
   const storeDispatch = useDispatch();
   // The bar itself is not on the wire and should not be: it is the account's own standing
@@ -370,7 +372,21 @@ function AskReel() {
   // two statements about the same collision, a control and a banner apart. The `conflict` flag on
   // the reply is what makes the anchor possible; without a reply on screen (a conflict frame
   // arriving before the model's, a resumed thread) it falls back to where it was.
-  const lastAssistantIndex = turns.reduce((last, t, i) => (t.role === "assistant" ? i : last), -1);
+  //
+  // …and the reply it qualifies is the row the GRID belongs to, which is not always the newest
+  // assistant row. R5-01: after a Stop and a page, "Your conditions permanently exclude comedy and
+  // romance" annotated a sea-thriller question that had collided with nothing — while a hard
+  // reload put the same notice back under the romcom reply. `answerRowIndex` skips the failed row
+  // that sits between them, so live and resumed cannot disagree about whose explanation it is.
+  const answerIndex = answerRowIndex(turns);
+  /**
+   * The in-flight turn's OWN collision, which is a different statement from the answer's. It
+   * renders with that turn — under its own reply while it streams, and inside the stopped card
+   * once it is abandoned — never under the answer, which has its own (R5-01).
+   */
+  const turnConflictMessage = turnConflict?.trim() ? turnConflict : null;
+  const liveReplyIndex = turns.at(-1)?.role === "assistant" && !turns.at(-1)?.failed ? turns.length - 1 : -1;
+  const showsTurnConflict = !!turnConflictMessage && streaming && !appending;
 
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
@@ -471,9 +487,21 @@ function AskReel() {
     arrived === 0
       ? "Stopped before any picks arrived."
       : `Stopped — ${arrived} ${plural(arrived, "pick")} arrived before you stopped. Unranked — stopped before Reel finished.`;
+  /**
+   * What a refused page says, where the server named a refusal the reader can act on (R5-04).
+   * Nothing on screen changed, so this is a line beside the control rather than a state replacing
+   * the answer — and the control has to still be there to be tried again.
+   */
+  const refusalText = pageRefusalMessage(pageRefusal);
   const settled = streaming
     ? ""
-    : status === "error"
+    // …and the refusal is what the live region says while it stands, because the state underneath
+    // it is the one the screen was already in and announcing THAT again says nothing about the
+    // gesture that just failed. R5-04's announcement was "That question is still being answered."
+    // over a page nothing was running for.
+    : refusalText
+      ? refusalText
+      : status === "error"
       ? "Search hit a snag."
       : status === "blocked"
         ? "That question is still being answered."
@@ -557,6 +585,30 @@ function AskReel() {
         {turns.map((turn, i) =>
           turn.role === "user" ? (
             <UserBubble key={i} text={turn.text} />
+          ) : turn.failed ? (
+            /* R5-02. A turn that did not finish is a row, not an absence. It used to be named only
+               while it was the TAIL (`resumedTail`), so paging the kept answer or asking anything
+               else made it vanish: the reload rendered a bare user bubble with nothing under it,
+               and live it kept the sentence that had streamed before the abort, presented as that
+               turn's answer over zero cards. Suppressed for exactly one turn — the one the
+               `askreel-stopped` card is currently about, which says the same thing with the same
+               retry beside it (see `showsInlineFailure`).
+
+               "Ask again" replays THIS row's question. On the tail that is `lastQuery` and `reask`
+               replaces the answer in place; further back it is a question the thread has moved
+               past, so asking it is a new ask and says so with a bubble of its own. */
+            showsInlineFailure(turn, i === turns.length - 1, status) ? (
+              <div key={i} className="flex flex-wrap items-center gap-3" data-testid="askreel-failed-turn">
+                <p className="fa-caption text-fa-frost-dim">{failedTurnMessage(turn.failureCode ?? null)}</p>
+                {(i === turns.length - 1 ? canRetry : questionFor(turns, i).length > 0) && (
+                  <RetryButton
+                    onRetry={i === turns.length - 1 ? reask : () => send(questionFor(turns, i), false)}
+                    disabled={streaming}
+                    label="Ask again"
+                  />
+                )}
+              </div>
+            ) : null
           ) : (
             <div key={i} className="space-y-2 max-w-[85%]">
               <div className="flex items-start gap-3" data-testid="askreel-reply">
@@ -584,26 +636,25 @@ function AskReel() {
                   )}
                 </p>
               </div>
-              {i === lastAssistantIndex && conflictMessage && (
+              {i === answerIndex && conflictMessage && (
                 <ConflictNotice message={conflictMessage} terms={conflictTerms} />
+              )}
+              {/* …and the running turn's own, under the reply it belongs to. Distinct from the
+                  answer's whenever a previous answer is still being held, which is the case
+                  R5-01 collapsed into one slot and one anchor. On a fresh turn the two rows are
+                  the same row, and only one notice goes on it — the answer's the moment it has
+                  one, this turn's until then. */}
+              {i === liveReplyIndex && showsTurnConflict && !(conflictMessage && i === answerIndex) && (
+                <ConflictNotice message={turnConflictMessage} terms={turnConflictTerms} />
               )}
             </div>
           ),
         )}
 
-        {/* SB-03. The last question of a resumed thread may never have been answered — the user
-            pressed Stop, or the turn crashed — and the server correctly replays the last COMPLETED
-            answer instead. Without this row the page read "You said: something surreal and
-            dreamlike" and then, directly under it, someone else's answer, with nothing anywhere
-            saying the question had gone unanswered. It sits at the END of the transcript because
-            that is where the question it is about is. */}
-        {resumedTail?.status === "failed" && (
-          <div className="flex flex-wrap items-center gap-3" data-testid="askreel-failed-turn">
-            <p className="fa-caption text-fa-frost-dim">{failedTurnMessage(resumedTail.failureCode)}</p>
-            {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
-          </div>
-        )}
-        {/* …and the other half of the same fact: the turn is not finished, it is still running.
+        {/* SB-03's failed half used to sit HERE, read off `resumedTail` — the last row — which is
+            why it disappeared the moment anything came after it (R5-02). It is now the transcript's
+            own, rendered at the row it is about, above. What stays here is the other half: a turn
+            that is not finished, it is still running.
             Nothing to retry and nothing to apologise for — the page just has to find out, which is
             what the poll above does. */}
         {resumedTail?.status === "pending" && (
@@ -796,8 +847,15 @@ function AskReel() {
           under it (see `lastAssistantIndex`), attached to the sentence it explains; here is where
           it goes when there is no reply to attach to — a conflict frame that arrives before the
           model's, or a resumed thread whose assistant row was empty. */}
-      {conflictMessage && lastAssistantIndex < 0 && (
+      {conflictMessage && answerIndex < 0 && (
         <ConflictNotice message={conflictMessage} terms={conflictTerms} />
+      )}
+      {/* The same fallback for the running turn's notice: a `conflict` frame routinely arrives
+          before the model's sentence does, and until then there is no reply of its own to sit
+          under. Suppressed while the answer's notice is already in this position, so one screen
+          never grows two detached banners. */}
+      {showsTurnConflict && liveReplyIndex < 0 && !(conflictMessage && answerIndex < 0) && (
+        <ConflictNotice message={turnConflictMessage} terms={turnConflictTerms} />
       )}
 
       {/* A stopped turn is a state, not an absence. Pressing Stop before the first card used to
@@ -814,6 +872,15 @@ function AskReel() {
         >
           <p className="fa-caption text-fa-frost-dim">{stoppedMessage}</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+          {/* The abandoned turn's own collision, where it had one — with the row it belongs to and
+              nowhere else. R5-01: it used to overwrite the kept answer's notice and then anchor
+              under whichever bubble happened to be newest, so a question that collided with
+              nothing carried the previous question's explanation. */}
+          {turnConflictMessage && (
+            <div className="w-full">
+              <ConflictNotice message={turnConflictMessage} terms={turnConflictTerms} />
+            </div>
+          )}
         </div>
       )}
 
@@ -1012,6 +1079,16 @@ function AskReel() {
           {exhausted && !appending && (
             <p className="fa-caption text-fa-frost-dim text-center">
               That&apos;s everything on this thread — refine it above for a different angle.
+            </p>
+          )}
+          {/* The server refused this page and nothing on screen moved, so the refusal is a line
+              UNDER the control rather than a state replacing the answer. R5-04: every 409 read as
+              `turn_in_progress`, which announced that a turn was running when none was and took
+              the footnote and this control down with it — leaving the user with no gesture at all
+              and a reload as the only recovery, which then reproduced R5-03. */}
+          {refusalText && (
+            <p className="fa-caption text-fa-warning text-center" data-testid="askreel-page-refused">
+              {refusalText}
             </p>
           )}
         </div>
