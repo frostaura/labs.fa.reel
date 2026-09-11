@@ -493,6 +493,12 @@ function AskReel() {
   // Counted off the SCREEN, not off the wire: the line claims what a reader can count, and the
   // eligibility filter and the stopped-turn floor both remove cards the server did send.
   const footnoteText = footnote(reason, pickCount, paged);
+  /**
+   * …and whether it is on screen, which the turn-status slot needs one render EARLIER than the
+   * line itself does — the slot is the banner's box and the provenance line's box, and it holds
+   * its height across the handover between them (F6-04's residual; see the slot).
+   */
+  const showsProvenance = !!footnoteText && showsFootnote(status, appending, settledCount, settledAnswer);
   // What a stopped turn says, in one place: the sr-only live region and the on-screen card must
   // not be able to disagree, and the count is the turn's OWN — cards held over from the previous
   // answer are still on screen and are explicitly not what arrived before the user stopped.
@@ -760,7 +766,23 @@ function AskReel() {
         </div>
       )}
 
-      {streaming && (
+      {/* The turn-status slot — one box, one height, from the first frame of a turn to the last.
+          F6-04's named residual: the banner left flow at `done` and pulled the grid up 98 px (its
+          own 78 px plus the page's `space-y-5`), which scored 0.0995 of CLS on every single turn,
+          fast machine or slow. It was the largest shift left on the page and the one a reader
+          feels, because it fires exactly when they have started reading the answer.
+
+          Reserving the box and leaving it empty would trade a jump for a hole, so the slot hands
+          over instead: while the turn runs it holds the progress banner, and when the turn settles
+          it holds that answer's provenance line — which used to sit at the very bottom of a
+          2 400 px page, under the grid it describes. One sentence, one place, and the grid does
+          not move between the two. `min-h` is the banner's measured height at both breakpoints
+          (the narration truncates to one line, so it does not vary); the settled line is centred
+          in it. The slot itself is gated on there being something to say, so a stopped, failed or
+          empty turn collapses it rather than leaving a band of air above its own explanation. */}
+      {(streaming || showsProvenance) && (
+      <div className="flex min-h-[4.875rem] flex-col justify-center" data-testid="askreel-turn-status">
+      {streaming ? (
         <div data-testid="askreel-banner" className="fa-card relative overflow-hidden p-4 flex items-center gap-4">
           <span className="relative flex h-8 w-8 items-center justify-center shrink-0">
             <span className="absolute inline-flex h-full w-full rounded-full bg-fa-frost/20 animate-ping" />
@@ -803,6 +825,15 @@ function AskReel() {
             <Square className="h-3 w-3" /> Stop
           </button>
         </div>
+      ) : (
+        /* The provenance line ("12 picks ranked for you, from 50 pulled"), in the box the banner
+           just vacated. Only ever shown alongside actual results — on an empty answer it was a
+           second, contradictory message under the empty state — and on a PAGED answer the
+           server's sentence is about one turn while the grid is several, which is R1-03:
+           `footnote` is what reconciles the two. */
+        <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
+      )}
+      </div>
       )}
 
       {/* Cold-start mood presets — a fresh /search with nothing asked yet gets four one-tap
@@ -1002,8 +1033,22 @@ function AskReel() {
             {visible.map((card) => (
               <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
             ))}
+            {/* Keyed by the CELL the placeholder occupies, not by its position among the
+                placeholders — and that is the whole of F6-04's flake.
+
+                With `slot-${i}` the reserve was eight elements keyed 0…7, and a card arriving at
+                the head left seven keyed 0…6 — so React kept the SAME seven DOM nodes and moved
+                every one of them forward by a cell. The last placeholder in a row jumped 180 px
+                sideways, and the one at the end of a row jumped to the start of the next, 305 px
+                down. Four cards arriving in four separate frames did that four times: 0.27 of CLS
+                at 6× CPU throttling, 0.47 at 8×, and nothing at all on a fast machine where the
+                batch coalesced into one layout pass — which is exactly the shape of a CI flake.
+
+                `slot-${visible.length + i}` makes the key the grid index. A card taking cell 0
+                retires the placeholder keyed for cell 0; the rest keep their keys AND their cells,
+                so the reserve is filled in place instead of being shuffled along it. */}
             {Array.from({ length: pendingSlots }, (_, i) => (
-              <CardSkeleton key={`slot-${i}`} />
+              <CardSkeleton key={`slot-${visible.length + i}`} />
             ))}
           </div>
 
@@ -1111,16 +1156,11 @@ function AskReel() {
         </div>
       )}
 
-      {/* The provenance footnote ("12 picks ranked for you, from 50 pulled"). Only ever shown
-          alongside actual results — on an empty answer it was a second, contradictory message
-          under the empty state.
-
-          On a PAGED answer the server's sentence is about one turn and the grid is several, which
-          is R1-03: "24 picks ranked for you, from 60 pulled" sat under 37 cards. `footnote` is
-          what reconciles the two — see it for why neither sentence alone can be true here. */}
-      {footnoteText && showsFootnote(status, appending, settledCount, settledAnswer) && (
-        <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
-      )}
+      {/* The provenance footnote used to sit HERE, under the grid and under the paging control.
+          It now renders in the turn-status slot above the grid — the box the progress banner
+          occupies while the turn runs — because a line that appears here and a banner that
+          disappears up there are two halves of the same 98 px jump. See the slot for the whole
+          argument; `showsProvenance` is the same gate this branch used to apply. */}
 
       {/* A failure that arrives while cards are already on screen (a page that blew up) must not
           wipe the reel — it gets a quiet inline retry instead of the full-bleed error card. NOT for
