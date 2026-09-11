@@ -85,8 +85,30 @@ export interface DoneData {
 export interface ConflictData {
   message: string;
   excludedGenres?: string[];
+  /**
+   * The other half of the collision: the excluded thing is not always a genre. "anime" and
+   * "musical" are avoid-keywords, and a turn asking for one carried an empty `excludedGenres` and
+   * nothing else the client could name. Absent on a server that predates the field.
+   */
+  excludedKeywords?: string[];
   poolSize?: number;
   catalogueSize?: number;
+}
+
+/**
+ * Reel's own sentence for this turn.
+ *
+ * `conflict` says the server REWROTE it before sending: the reply is written by a model that has
+ * seen no candidates, so a question colliding with a standing exclusion got "here are gritty 90s
+ * action picks" above seven post-2000 titles. The server qualifies the sentence at the source and
+ * flags it here, which is what lets the page mark that bubble and put the full notice under it
+ * rather than floating above the grid, detached from what it is about. Optional because an older
+ * server does not send it — and losing a reply over a missing boolean would be the guard doing
+ * more damage than the bug.
+ */
+export interface AssistantMessageData {
+  text: string;
+  conflict?: boolean;
 }
 
 /** The phrase the server uses for a caught exception. See `LiveSearchExpansionService`. */
@@ -121,7 +143,7 @@ export type AskEvent =
   | { event: "candidate"; data: AskCard }
   | { event: "candidate-scored"; data: { titleId: string; predictedRating: number | null } }
   | { event: "candidate-reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { event: "assistant-message"; data: { text: string } }
+  | { event: "assistant-message"; data: AssistantMessageData }
   | { event: "conflict"; data: ConflictData }
   | { event: "done"; data: DoneData };
 
@@ -397,12 +419,27 @@ export function isReranked(data: unknown): data is { titleId: string; fit: numbe
   );
 }
 
-export function isAssistantMessage(data: unknown): data is { text: string } {
-  return isRecord(data) && typeof data.text === "string";
+export function isAssistantMessage(data: unknown): data is AssistantMessageData {
+  // `conflict` decides whether the reply renders an "under your conditions" tag, so a truthy
+  // string would badge an unqualified answer. Absent stays fine — see AssistantMessageData.
+  return isRecord(data) && typeof data.text === "string" && isBooleanOrAbsent(data.conflict);
+}
+
+/** A list of terms the page joins into a sentence, or nothing. Absent is every older server. */
+function isStringListOrAbsent(v: unknown): boolean {
+  return v == null || (Array.isArray(v) && v.every((x) => typeof x === "string"));
 }
 
 export function isConflict(data: unknown): data is ConflictData {
-  return isRecord(data) && typeof data.message === "string" && data.message.length > 0;
+  return (
+    isRecord(data) &&
+    typeof data.message === "string" &&
+    data.message.length > 0 &&
+    // Both lists are joined into a sentence the page prints, so a non-string among them reaches
+    // render as a React child — `why`'s failure, one component over.
+    isStringListOrAbsent(data.excludedGenres) &&
+    isStringListOrAbsent(data.excludedKeywords)
+  );
 }
 
 export function isDone(data: unknown): data is DoneData {

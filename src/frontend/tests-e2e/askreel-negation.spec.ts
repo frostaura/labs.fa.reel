@@ -348,6 +348,80 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(tray.locator("summary")).toHaveText("Show the 1 pick Reel held back");
   });
 
+  test("a qualified reply is tagged, and the notice sits under it naming the excluded terms", async ({ page }) => {
+    // FX3 put two fields on the wire that nothing read: `conflict` on the reply, and
+    // `excludedKeywords` beside `excludedGenres`. The reply is written before a single candidate
+    // exists, so the server rewrites it when the question collides with a standing exclusion — and
+    // the flag is what lets the page mark THAT bubble and anchor the notice to it instead of
+    // floating it above the grid, detached from the sentence it explains.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a funny anime");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    await askPush(page, "assistant-message", {
+      text: "Here are some light picks — under your conditions that means no comedy and anime.",
+      conflict: true,
+    });
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveText("under your conditions");
+
+    // `excludedGenres` and `excludedKeywords` together: the keyword half is the one a turn asking
+    // for an avoid-keyword had no way to name at all, since no genre collides.
+    await askPushConflict(page, "Your conditions permanently exclude comedy and anime, so nothing you asked for there can appear.", {
+      excludedGenres: ["comedy"],
+      excludedKeywords: ["anime"],
+      poolSize: 12,
+      catalogueSize: 40_000,
+    });
+
+    const notice = page.getByTestId("askreel-conflict");
+    await expect(notice).toBeVisible();
+    await expect(notice.getByTestId("askreel-conflict-terms")).toHaveText("Rules out comedy and anime.");
+    // …and it is under the reply, not above the grid. The reply that carries the flag is the
+    // element the notice explains, and the two used to be a banner and a control apart.
+    const noticeFollowsReply = await page.evaluate(() => {
+      const reply = document.querySelector('[data-testid="askreel-reply"]');
+      const n = document.querySelector('[data-testid="askreel-conflict"]');
+      const grid = document.querySelector('[data-testid="semantic-results"]');
+      return {
+        afterReply: !!reply && !!n && !!(reply.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING),
+        insideTranscript: !!n?.closest('[data-testid="askreel-transcript"]'),
+        beforeGrid: !grid || !!(n!.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING),
+      };
+    });
+    expect(noticeFollowsReply).toEqual({ afterReply: true, insideTranscript: true, beforeGrid: true });
+
+    await askPush(page, "done", { results: [ALPHA], reason: "1 pick ranked for you, from 40 pulled." });
+    await askEnd(page);
+    // It survives the answer it annotates — the collision did not stop being true.
+    await expect(notice).toBeVisible();
+    await expect(page.getByTestId("askreel-reply-conflict")).toBeVisible();
+  });
+
+  test("an unqualified reply carries no tag, and a message-only conflict names no terms", async ({ page }) => {
+    // Fixture variation on exactly the two fields the test above turns on: `conflict: false` on
+    // the reply, and a conflict frame with no term lists — the shape an older server sends. The
+    // notice must still render its sentence, and nothing may invent a "Rules out" line from it.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("small-town horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    await askPush(page, "assistant-message", { text: "Three that fit.", conflict: false });
+    await expect(page.getByTestId("askreel-reply")).toBeVisible();
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
+
+    await askPushConflict(page, "You asked for horror, but your saved conditions exclude it.");
+    await expect(page.getByTestId("askreel-conflict"))
+      .toContainText("You asked for horror, but your saved conditions exclude it.");
+    await expect(page.getByTestId("askreel-conflict-terms")).toHaveCount(0);
+
+    await askPush(page, "done", { results: [ALPHA], reason: "1 pick ranked for you, from 40 pulled." });
+    await askEnd(page);
+  });
+
   test("the floor tray names the account's own bar, to one decimal, and counts its own contents", async ({ page }) => {
     // Same tray, one field different from the test above: the account has a saved
     // `minPredictedRating`. That single field is what turns "Reel held some back" into a sentence

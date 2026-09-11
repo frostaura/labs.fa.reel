@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
+import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type AssistantMessageData, type ConflictData, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
 
 /**
  * `resumed` is a fourth state, not a flavour of `done`: the transcript came back from the server
@@ -36,6 +36,15 @@ export type ErrorReason = "session" | "timeout" | "conversation" | "request" | n
 export interface ChatTurn {
   role: "user" | "assistant";
   text: string;
+  /**
+   * Assistant rows only: the server rewrote this sentence because the question collided with a
+   * standing exclusion. The reply is written before a single candidate exists, so an unqualified
+   * one promised "gritty 90s action picks" above seven post-2000 titles — the server qualifies it
+   * at the source and flags it here, which is what lets the page mark THIS bubble and anchor the
+   * full notice to it. Absent on a resumed transcript and on an older server: the stored row keeps
+   * the qualified text, which is the part that had to survive.
+   */
+  conflict?: boolean;
 }
 
 /**
@@ -352,6 +361,36 @@ export function transcriptOf(rows: { role: string; text: string }[]): ChatTurn[]
 }
 
 /**
+ * The excluded terms a conflict is about — the account's excluded genres and its avoid-keywords,
+ * as one list for one sentence.
+ *
+ * They are two lists server-side and one fact to a reader: "your conditions rule out comedy and
+ * anime" does not care which list a term came from. A term can legitimately be in both (a genre
+ * the account excludes AND an avoid-keyword it lists), and naming it twice reads as a bug in the
+ * very place the product is explaining itself — so the merge is case-insensitively deduplicated,
+ * keeping the first spelling. Blanks are dropped: "rules out  and anime" is worse than saying less.
+ */
+export function excludedTerms(genres: string[] | undefined, keywords: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of [...(genres ?? []), ...(keywords ?? [])]) {
+    const term = raw.trim();
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+  }
+  return out;
+}
+
+/** "comedy" · "comedy and anime" · "comedy, anime and musical". A list a person can read. */
+export function listPhrase(items: string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
  * Whether "Show me more" may be offered at all — the question being, whose answer is on screen?
  *
  * A page EXTENDS an answer, so it only makes sense over one: a completed turn of this visit, or a
@@ -415,6 +454,12 @@ interface State {
    * error: the exclusion still holds and the turn still ran.
    */
   conflict: string | null;
+  /**
+   * The excluded terms behind {@link State.conflict}, genres and avoid-keywords merged. Kept as
+   * data so the notice can state them as a list rather than the page re-parsing the server's
+   * prose; empty when the server named none.
+   */
+  conflictTerms: string[];
   /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
   belowFloor: AskCard[];
   /**
@@ -464,11 +509,11 @@ export type ChatAction =
   | { type: "phase"; data: PhaseData }
   | { type: "conversation"; data: ConversationData }
   | { type: "resume"; payload: ConversationPayload }
-  | { type: "assistant"; data: { text: string } }
+  | { type: "assistant"; data: AssistantMessageData }
   | { type: "candidate"; data: AskCard }
   | { type: "scored"; data: { titleId: string; predictedRating: number | null } }
   | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { type: "conflict"; message: string }
+  | { type: "conflict"; data: ConflictData }
   | { type: "done"; data: DoneData }
   | { type: "stop" }
   | { type: "reset" }
@@ -503,7 +548,7 @@ export function failureFor(err: unknown): ChatAction {
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
-  conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
+  conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null,
 };
 
@@ -558,7 +603,7 @@ export function chatReducer(state: State, action: ChatAction): State {
             reason: null, appending: false, lastQuery: action.message, exhausted: false, paged: false,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
+            conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
             // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
             // by the first candidate of this turn, not by the act of asking.
             holdingPrevious: state.order.length > 0, arrived: 0,
@@ -634,7 +679,10 @@ export function chatReducer(state: State, action: ChatAction): State {
       // stuttering the same answer into the transcript on every scroll.
       return state.appending
         ? state
-        : { ...state, turns: [...state.turns, { role: "assistant", text: action.data.text }] };
+        : {
+          ...state,
+          turns: [...state.turns, { role: "assistant", text: action.data.text, conflict: action.data.conflict }],
+        };
     case "candidate": {
       const c = action.data;
       // The swap. The previous answer stayed up while this turn was thinking; this is the first
@@ -660,7 +708,14 @@ export function chatReducer(state: State, action: ChatAction): State {
       return { ...state, byId: { ...state.byId, [action.data.titleId]: { ...e, fit: action.data.fit, why: action.data.why } } };
     }
     case "conflict":
-      return { ...state, conflict: action.message };
+      return {
+        ...state,
+        conflict: action.data.message,
+        // The terms travel beside the sentence rather than being parsed back out of it. Two
+        // server-side lists, one fact for the reader — and the keyword half is the one a turn
+        // colliding with an avoid-keyword ("anime", "musical") had no way to name at all.
+        conflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
+      };
     case "done": {
       // A caught server exception arrives as `done` with no results. Treat it as the failure it is
       // rather than as an empty answer, and keep whatever is already on screen — a page that blew
@@ -869,7 +924,7 @@ export function useAskReelChat() {
         case "candidate": dispatch({ type: "candidate", data: ev.data }); break;
         case "candidate-scored": dispatch({ type: "scored", data: ev.data }); break;
         case "candidate-reranked": dispatch({ type: "reranked", data: ev.data }); break;
-        case "conflict": dispatch({ type: "conflict", message: ev.data.message }); break;
+        case "conflict": dispatch({ type: "conflict", data: ev.data }); break;
         case "done": dispatch({ type: "done", data: ev.data }); break;
         default: break;
       }
@@ -1042,6 +1097,11 @@ export function useAskReelChat() {
     paged: state.paged,
     /** The server's note that this question collides with a standing exclusion; not an error. */
     conflict: state.conflict,
+    /**
+     * The terms that note is about — genres and avoid-keywords in one list, ready for
+     * {@link listPhrase}. Empty when the server named none, which is every message-only conflict.
+     */
+    conflictTerms: state.conflictTerms,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
     belowFloor,
     /**

@@ -15,8 +15,9 @@ import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import {
-  floorHeldBack, floorPartition, footnote, formatFloor, mediaFilterFor, nextBootstrap, plural,
-  readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId, useAskReelChat,
+  floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
+  plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
+  useAskReelChat,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -96,8 +97,9 @@ function AskReel() {
   const [draft, setDraft] = useState("");
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
-    retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict, belowFloor,
-    droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt, conversationId, errorReason,
+    retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
+    conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
+    conversationId, errorReason,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -192,6 +194,12 @@ function AskReel() {
 
   // The hook carries the server's sentence verbatim; the page only decides where it goes.
   const conflictMessage = conflict?.trim() ? conflict : null;
+  // Where it goes is UNDER the reply it qualifies, when there is one. The notice used to float
+  // above the grid with nothing connecting it to the sentence the server had already rewritten —
+  // two statements about the same collision, a control and a banner apart. The `conflict` flag on
+  // the reply is what makes the anchor possible; without a reply on screen (a conflict frame
+  // arriving before the model's, a resumed thread) it falls back to where it was.
+  const lastAssistantIndex = turns.reduce((last, t, i) => (t.role === "assistant" ? i : last), -1);
 
   // The score floor's other half. The server ranks everything it found and then holds back what
   // scored under the bar it keeps for this account — which is a decision made ON the user's behalf
@@ -324,12 +332,28 @@ function AskReel() {
               </p>
             </div>
           ) : (
-            <div key={i} className="flex items-start gap-3 max-w-[85%]" data-testid="askreel-reply">
-              <Sparkles className="h-5 w-5 text-fa-frost shrink-0 mt-1" />
-              <p className="fa-body text-fa-frost-bright">
-                <span className="sr-only">Reel said</span>
-                {turn.text}
-              </p>
+            <div key={i} className="space-y-2 max-w-[85%]">
+              <div className="flex items-start gap-3" data-testid="askreel-reply">
+                <Sparkles className="h-5 w-5 text-fa-frost shrink-0 mt-1" />
+                <p className="fa-body text-fa-frost-bright">
+                  <span className="sr-only">Reel said</span>
+                  {turn.text}
+                  {/* The server rewrote this sentence before sending it, and says so on the frame.
+                      Marking the bubble is the cheap half of the honesty: a reader scanning a
+                      thread can see which answers were constrained without re-reading them. */}
+                  {turn.conflict && (
+                    <span
+                      data-testid="askreel-reply-conflict"
+                      className="fa-caption ml-2 inline-flex items-center rounded-full border border-fa-warning/40 px-2 py-0.5 align-middle text-fa-warning"
+                    >
+                      under your conditions
+                    </span>
+                  )}
+                </p>
+              </div>
+              {i === lastAssistantIndex && conflictMessage && (
+                <ConflictNotice message={conflictMessage} terms={conflictTerms} />
+              )}
             </div>
           ),
         )}
@@ -341,7 +365,14 @@ function AskReel() {
           answer to a question you have not asked this visit. Dated, so the answer's age is on
           screen rather than inferred from the cards. `removed` rides with it because a card that
           silently disappears between two views of the same answer is indistinguishable from a bug
-          — it went because the account has since watched or rated it, and saying so is cheap. */}
+          — it went because the account has since watched or rated it, and saying so is cheap.
+
+          The date comes from `lastCardsAt`, which is when the thread last stored CARDS. A
+          transcript-only thread has none, so it gets no date — it falls through to the
+          `askreel-transcript-only` card below, which states the reason instead of a time. Accepted
+          for now: naming the cause is worth more there than an age, and the only other stamp the
+          server sends for such a thread (`lastTurnAt`, on the conversation LIST) is not in this
+          payload. Revisit if a dated transcript-only resume is ever wanted. */}
       {status === "resumed" && lastCardsAt && (
         <div className="flex flex-wrap items-baseline gap-x-2" data-testid="askreel-seam">
           <p className="fa-caption text-fa-frost-dim">Picked up where you left off · {relTime(lastCardsAt)}</p>
@@ -466,17 +497,15 @@ function AskReel() {
       )}
 
       {/* What the request and the account's standing conditions cannot both have. Named out loud,
-          above the results, because the alternative is a thin answer with no explanation — the
-          user asked for something their own saved exclusions rule out, and only the server can see
-          both halves. Server-written and server-formatted; the page only places it. */}
-      {conflictMessage && (
-        <div
-          className="fa-card border-fa-warning/30 p-4 flex items-start gap-3"
-          data-testid="askreel-conflict"
-        >
-          <AlertTriangle className="h-4 w-4 text-fa-warning shrink-0 mt-0.5" />
-          <p className="fa-caption text-fa-frost-bright">{conflictMessage}</p>
-        </div>
+          because the alternative is a thin answer with no explanation — the user asked for
+          something their own saved exclusions rule out, and only the server can see both halves.
+
+          This is the FALLBACK position. When Reel's reply is on screen the notice renders directly
+          under it (see `lastAssistantIndex`), attached to the sentence it explains; here is where
+          it goes when there is no reply to attach to — a conflict frame that arrives before the
+          model's, or a resumed thread whose assistant row was empty. */}
+      {conflictMessage && lastAssistantIndex < 0 && (
+        <ConflictNotice message={conflictMessage} terms={conflictTerms} />
       )}
 
       {/* A stopped turn is a state, not an absence. Pressing Stop before the first card used to
@@ -735,6 +764,32 @@ function AskReel() {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/**
+ * The collision notice: the server's sentence, and the terms it is about.
+ *
+ * The prose is server-written and rendered verbatim — it knows both halves (what was asked and
+ * what the account has saved) and the page knows neither. The term list beside it is the page's
+ * one addition, and it earns its place by being DATA rather than prose: it is the scannable,
+ * actionable part, it sits next to the pointer at Conditions, and it is the only thing on screen
+ * that can name an avoid-keyword collision ("anime", "musical") — those carry an empty
+ * `excludedGenres`, so before `excludedKeywords` reached the client there was nothing to name.
+ */
+function ConflictNotice({ message, terms }: { message: string; terms: string[] }) {
+  return (
+    <div className="fa-card border-fa-warning/30 p-4 flex items-start gap-3" data-testid="askreel-conflict">
+      <AlertTriangle className="h-4 w-4 text-fa-warning shrink-0 mt-0.5" />
+      <div className="space-y-1">
+        <p className="fa-caption text-fa-frost-bright">{message}</p>
+        {terms.length > 0 && (
+          <p className="fa-caption text-fa-frost-dim/80" data-testid="askreel-conflict-terms">
+            Rules out {listPhrase(terms)}.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

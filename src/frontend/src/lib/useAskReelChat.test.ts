@@ -12,7 +12,9 @@ import {
   CONVERSATION_ID_KEY,
   canPage,
   floorHeldBack,
+  excludedTerms,
   footnote,
+  listPhrase,
   floorPartition,
   formatFloor,
   readStoredConversationId,
@@ -345,7 +347,7 @@ describe("chatReducer — conflict", () => {
     // thread. Fresh resets through initialChatState; the follow-up has to clear it explicitly,
     // and that is the branch where a stale note would have hung over an unrelated answer.
     const asked = chatReducer(initialChatState, { type: "userTurn", message: "something scary", fresh: true });
-    const conflicted = chatReducer(asked, { type: "conflict", message: "Horror is excluded on this account." });
+    const conflicted = chatReducer(asked, { type: "conflict", data: { message: "Horror is excluded on this account." } });
     expect(conflicted.conflict).toBe("Horror is excluded on this account.");
     // It survives the answer it annotates.
     expect(chatReducer(conflicted, { type: "done", data: { results: [card(1)], reason: "1 pick" } }).conflict)
@@ -1198,5 +1200,70 @@ describe("footnote", () => {
     // Nothing on screen to count: fall back to the sentence rather than claiming "0 picks so far".
     expect(footnote("no fresh matches — try another angle", 0, true))
       .toBe("no fresh matches — try another angle");
+  });
+});
+
+/**
+ * FX3 put two fields on the wire that nothing on the client read: a `conflict` flag on the
+ * assistant reply, and `excludedKeywords` beside `excludedGenres` on the conflict frame. Without
+ * the flag the notice could only sit above the grid, detached from the sentence it qualifies;
+ * without the keywords a turn that collided with an avoid-keyword ("anime", "musical") named
+ * nothing at all, because `excludedGenres` was empty.
+ */
+describe("chatReducer — the conflict flag and the excluded terms", () => {
+  it("marks_the_reply_that_was_qualified_and_leaves_the_others_alone", () => {
+    let state = chatReducer(initialChatState, { type: "userTurn", message: "something scary", fresh: true });
+    state = chatReducer(state, { type: "assistant", data: { text: "Three that fit.", conflict: true } });
+    expect(state.turns.at(-1)).toEqual({ role: "assistant", text: "Three that fit.", conflict: true });
+
+    // Fixture variation on the one field: an unqualified reply, and one from a server that sends
+    // no flag. Neither may render the tag.
+    let plain = chatReducer(initialChatState, { type: "userTurn", message: "something funny", fresh: true });
+    plain = chatReducer(plain, { type: "assistant", data: { text: "Here you go.", conflict: false } });
+    expect(plain.turns.at(-1)?.conflict).toBe(false);
+    let older = chatReducer(initialChatState, { type: "userTurn", message: "something funny", fresh: true });
+    older = chatReducer(older, { type: "assistant", data: { text: "Here you go." } });
+    expect(older.turns.at(-1)?.conflict).toBeUndefined();
+  });
+
+  it("keeps_the_excluded_terms_beside_the_message_and_clears_both_together", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "a funny anime", fresh: true });
+    const conflicted = chatReducer(asked, {
+      type: "conflict",
+      data: { message: "Your conditions permanently exclude comedy and anime.", excludedGenres: ["comedy"], excludedKeywords: ["anime"] },
+    });
+    expect(conflicted.conflict).toBe("Your conditions permanently exclude comedy and anime.");
+    expect(conflicted.conflictTerms).toEqual(["comedy", "anime"]);
+    // A note belongs to the question that produced it — both halves go with it.
+    const next = chatReducer(conflicted, { type: "userTurn", message: "something else", fresh: false });
+    expect(next.conflict).toBeNull();
+    expect(next.conflictTerms).toEqual([]);
+  });
+});
+
+/**
+ * The excluded terms, as the notice states them. Genres and avoid-keywords are two server-side
+ * lists and one fact for the reader: "your conditions rule out comedy and anime" is a sentence
+ * about both, and until FX3 the keyword half was not on the wire at all.
+ */
+describe("excludedTerms and listPhrase", () => {
+  it("merges_the_two_lists_without_repeating_a_term", () => {
+    expect(excludedTerms(["comedy"], ["anime"])).toEqual(["comedy", "anime"]);
+    // A term can legitimately be both a genre and an avoid-keyword on the same account; naming it
+    // twice in one sentence reads as a bug in the very place the product is explaining itself.
+    expect(excludedTerms(["comedy"], ["Comedy", "anime"])).toEqual(["comedy", "anime"]);
+    // Either list absent is every older server, and both absent is a message-only conflict.
+    expect(excludedTerms(undefined, ["anime"])).toEqual(["anime"]);
+    expect(excludedTerms(["comedy"], undefined)).toEqual(["comedy"]);
+    expect(excludedTerms(undefined, undefined)).toEqual([]);
+    // Blank entries are not terms; printing "rules out  and anime" is worse than saying less.
+    expect(excludedTerms(["", "  "], ["anime"])).toEqual(["anime"]);
+  });
+
+  it("reads_as_a_sentence_at_one_two_and_three_terms", () => {
+    expect(listPhrase(["comedy"])).toBe("comedy");
+    expect(listPhrase(["comedy", "anime"])).toBe("comedy and anime");
+    expect(listPhrase(["comedy", "anime", "musical"])).toBe("comedy, anime and musical");
+    expect(listPhrase([])).toBe("");
   });
 });

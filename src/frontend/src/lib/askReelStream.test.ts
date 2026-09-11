@@ -358,3 +358,53 @@ describe("isCard — the fields the grid renders and routes on", () => {
     expect(await collect([frame("candidate", { ...card(1), somethingNew: { a: 1 } })])).toHaveLength(1);
   });
 });
+
+/**
+ * The two fields FX3 added to the wire, which nothing on the client read.
+ *
+ * `assistant-message.conflict` is the flag that says THIS reply was qualified before it was sent —
+ * the server rewrites the model's sentence when the question collides with a standing exclusion,
+ * and the flag is what lets the page mark the bubble and anchor the notice to it. It is always
+ * present as a key so the client has one shape to render.
+ *
+ * `conflict.excludedKeywords` is the other half of the collision: the excluded thing is not always
+ * a genre. "anime" and "musical" are avoid-keywords, and a turn asking for one carried an empty
+ * `excludedGenres` and nothing else the client could name.
+ */
+describe("the additive conflict fields", () => {
+  it("carries_the_conflict_flag_on_an_assistant_message", async () => {
+    // Fixture variation on the one field: qualified, not qualified, and an older server that
+    // sends no flag at all. The third must still deliver the reply — losing a bubble over a
+    // missing boolean would be the guard doing more damage than the bug.
+    expect(await collect([frame("assistant-message", { text: "Three that fit.", conflict: true })]))
+      .toEqual([{ event: "assistant-message", data: { text: "Three that fit.", conflict: true } }]);
+    expect(await collect([frame("assistant-message", { text: "Three that fit.", conflict: false })]))
+      .toEqual([{ event: "assistant-message", data: { text: "Three that fit.", conflict: false } }]);
+    expect(await collect([frame("assistant-message", { text: "Three that fit." })])).toHaveLength(1);
+    // A non-boolean flag is refused: it decides whether a "under your conditions" tag renders.
+    expect(await collect([frame("assistant-message", { text: "Three that fit.", conflict: "yes" })])).toEqual([]);
+  });
+
+  it("carries_excluded_keywords_beside_excluded_genres", async () => {
+    const full = {
+      message: "Your conditions permanently exclude comedy and anime.",
+      excludedGenres: ["comedy"],
+      excludedKeywords: ["anime"],
+      poolSize: 12,
+      catalogueSize: 40_000,
+    };
+    expect(await collect([frame("conflict", full)])).toEqual([{ event: "conflict", data: full }]);
+
+    // The keyword-only shape, which is the one that had nothing to show before: no genre collides.
+    const keywordOnly = { message: "Your conditions permanently exclude anime.", excludedGenres: [], excludedKeywords: ["anime"] };
+    expect(await collect([frame("conflict", keywordOnly)])).toEqual([{ event: "conflict", data: keywordOnly }]);
+  });
+
+  it("refuses_a_conflict_whose_term_lists_are_not_lists_of_strings", async () => {
+    // The lists are joined into a sentence the page prints, so an object among them reaches render
+    // as a React child — the same class of failure `why` had, one component over.
+    for (const bad of [{ excludedGenres: "comedy" }, { excludedKeywords: [{ t: 1 }] }, { excludedGenres: [3] }]) {
+      expect(await collect([frame("conflict", { message: "Excluded.", ...bad })])).toEqual([]);
+    }
+  });
+});
