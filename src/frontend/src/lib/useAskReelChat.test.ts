@@ -39,6 +39,7 @@ import {
   prefersReducedMotion,
   skeletonCount,
   SKELETON_CAP,
+  wasPaged,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -1691,6 +1692,84 @@ describe("chatReducer — a resumed thread knows whether it was paged", () => {
     expect(state.paged).toBe(true);
     expect(footnote(state.reason, 3, state.paged))
       .toBe("3 picks so far · last page: 2 picks ranked for you, from 65 pulled");
+  });
+
+  it("forgets_a_page_that_a_later_question_replaced", () => {
+    // F4-03. `paged` was `turns.some(kind === "page")` — true if the thread was EVER paged, for
+    // the rest of its life. So a fresh question asked in a thread that had been paged three turns
+    // earlier resumed reading "6 picks so far · last page: 6 picks ranked for you, from 40
+    // pulled": the same count stated twice in one sentence, and "last page" on an answer with one
+    // page. Worse, it read differently before and after the reload — live, the same answer said
+    // the sentence verbatim, because the LIVE `paged` is per-answer and is cleared by a new ask.
+    //
+    // The grid a resume restores is the last completed ASK plus whatever paged onto it, so the
+    // question is not "did this thread ever page" but "did anything page onto the answer on
+    // screen".
+    const repaged = {
+      ...base,
+      turns: [
+        ...askTurns,
+        { sequence: 2, role: "assistant", text: "Three more.", kind: "page", status: "Completed" },
+        { sequence: 3, role: "user", text: "something tenser", kind: "ask", status: "Completed" },
+        { sequence: 4, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+      ],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: repaged });
+    expect(state.paged).toBe(false);
+    expect(footnote(state.reason, 3, state.paged)).toBe("2 picks ranked for you, from 65 pulled");
+  });
+
+  it("still_accounts_for_the_grid_when_the_newest_answer_is_the_paged_one", () => {
+    // Fixture variation, one row's position: the page row moves to AFTER the second ask. The grid
+    // on screen really is several pages now, so the composite line is the true one again.
+    const pagedAgain = {
+      ...base,
+      turns: [
+        ...askTurns,
+        { sequence: 2, role: "user", text: "something tenser", kind: "ask", status: "Completed" },
+        { sequence: 3, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+        { sequence: 4, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+      ],
+    };
+    expect(chatReducer(initialChatState, { type: "resume", payload: pagedAgain }).paged).toBe(true);
+  });
+});
+
+/**
+ * The rule on its own, because the reducer case can only exercise it through a whole payload.
+ *
+ * An `ask` writes a user row and an assistant row together; a `page` writes an assistant row
+ * alone. So "the answer on screen was paged" is: a `page` row after the last `ask` row — and
+ * `kind` is optional on the wire, where absent has always meant `ask`.
+ */
+describe("wasPaged", () => {
+  const ask = (sequence: number) => [
+    { sequence, role: "user", text: "q", kind: "ask", status: "Completed" },
+    { sequence: sequence + 1, role: "assistant", text: "a", kind: "ask", status: "Completed" },
+  ];
+  const page = (sequence: number) => ({ sequence, role: "assistant", text: "a", kind: "page", status: "Completed" });
+
+  it("is_false_on_an_empty_or_single_ask_transcript", () => {
+    expect(wasPaged([])).toBe(false);
+    expect(wasPaged(ask(0))).toBe(false);
+  });
+
+  it("is_true_only_while_the_page_belongs_to_the_newest_ask", () => {
+    expect(wasPaged([...ask(0), page(2)])).toBe(true);
+    expect(wasPaged([...ask(0), page(2), ...ask(3)])).toBe(false);
+    expect(wasPaged([...ask(0), page(2), ...ask(3), page(5)])).toBe(true);
+  });
+
+  it("treats_a_missing_kind_as_an_ask", () => {
+    // The field is optional on the wire and an older server omits it. Reading absent as "not an
+    // ask" would leave the last-ask cursor at -1 and make every page row count.
+    const untyped = [
+      { sequence: 0, role: "user", text: "q", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "a", status: "Completed" },
+    ];
+    expect(wasPaged(untyped)).toBe(false);
+    expect(wasPaged([...untyped, page(2)])).toBe(true);
+    expect(wasPaged([page(0), ...untyped])).toBe(false);
   });
 });
 

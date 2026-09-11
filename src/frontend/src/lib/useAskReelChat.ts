@@ -648,6 +648,29 @@ export function lastTurnOutcome(rows: ConversationPayload["turns"]): ResumedTail
 }
 
 /**
+ * Was the answer a resume restores made of more than one page?
+ *
+ * F4-03: this was `turns.some((t) => t.kind === "page")` — true if the thread had EVER been paged,
+ * for the rest of its life. A fresh question asked in a thread that was paged three turns earlier
+ * came back reading "6 picks so far · last page: 6 picks ranked for you, from 40 pulled": the same
+ * count twice in one sentence, and "last page" over an answer with one page. And it read
+ * differently before and after the reload, because the LIVE `paged` is per-answer and a new ask
+ * clears it — the same answer, two sentences, with a page turn in between flipping it.
+ *
+ * The grid a resume restores is the last completed ask plus whatever paged onto it, so the
+ * question is not "did this thread ever page" but "did anything page onto the answer on screen".
+ * An `ask` writes a user row and an assistant row together; a `page` writes an assistant row
+ * alone — so the rule is a `page` row after the last `ask` row. `kind` is optional on the wire and
+ * absent has always meant `ask`, which matters: reading absent as "not an ask" would leave the
+ * cursor at -1 and make every page row in the thread count again.
+ */
+export function wasPaged(rows: ConversationPayload["turns"]): boolean {
+  let lastAsk = -1;
+  for (let i = 0; i < rows.length; i++) if ((rows[i].kind ?? "ask") === "ask") lastAsk = i;
+  return rows.slice(lastAsk + 1).some((t) => t.kind === "page");
+}
+
+/**
  * The question the restored grid actually answers.
  *
  * The server replays the last COMPLETED `ask` block, so when the newest turn failed the cards on
@@ -1180,11 +1203,11 @@ export function chatReducer(state: State, action: ChatAction): State {
         // two apart — a zero there would suppress a fence that an older server still owes us.
         droppedByFloor: p.belowFloor ? tray.length : null,
         reason: p.reason ?? null,
-        // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread that was paged it
-        // describes one page and the restored grid is several, which is R1-03 arriving by the
-        // resume path. The transcript says which: the server writes a page as a `page` row, and one
-        // of those means the footnote has to account for the grid rather than quote the last page.
-        paged: p.turns.some((t) => t.kind === "page"),
+        // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread whose answer was
+        // paged it describes one page and the restored grid is several, which is R1-03 arriving by
+        // the resume path. The transcript says which; see {@link wasPaged} for why "ever paged" is
+        // the wrong question and what it cost (F4-03).
+        paged: wasPaged(p.turns),
         removed: p.removed ?? 0,
         lastCardsAt: p.lastCardsAt ?? null,
         lastTurnAt: p.lastTurnAt ?? null,
