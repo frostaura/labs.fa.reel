@@ -164,6 +164,87 @@ export function mintTurnId(): string {
 }
 
 /**
+ * Which run a frame belongs to — the label every frame of one `/ask` stream carries.
+ *
+ * F6-01 is what a screen looks like without one. `Recent ▾` was live while a turn streamed, so
+ * opening another thread mid-stream put THAT thread's question and reply on screen above the
+ * running turn's progress banner and a grid of 34 cards from the question that had just left. The
+ * heist search then landed *in the rom-com thread*, replaced its answer, and pushed its turn count
+ * from 2 to 3 — durably, because the server had already written the rows. Nothing on the client
+ * could tell the two apart: a `done` frame carried no evidence of which conversation it had been
+ * asked for.
+ *
+ * Two independent facts, because neither alone covers the case. `id` is minted per run and is
+ * monotonic, so it separates two runs even when both started before any conversation existed;
+ * `conversationId` is the thread the run was started FOR, and is what catches a frame that belongs
+ * to a thread no longer on screen. Both are checked in {@link staleFrame}.
+ */
+export interface StreamTag {
+  /** This run's own number. Monotonic within the tab; never reused. */
+  id: number;
+  /** The thread this run was started for, or null when the run is opening a new one. */
+  conversationId: string | null;
+}
+
+let streamCounter = 0;
+
+/**
+ * The next run's id. Starts at 1 so that {@link initialChatState}'s `stream: 0` — the value a
+ * reset, a `+ New` and a thread switch all land on — matches no run at all, and every frame still
+ * in flight from the run that was abandoned is stale by construction.
+ */
+export function mintStreamId(): number {
+  streamCounter += 1;
+  return streamCounter;
+}
+
+/**
+ * What the page should bring into view for this status, or `null` to leave the scroll where the
+ * reader put it.
+ *
+ * F6-02: `scrollY` stayed at **0** for the whole of a 19.4-second turn. A 1 000-character question
+ * makes a bubble ~1 100 px tall, so the viewport held nothing but the user's own words — no banner,
+ * no narration, no progress bar, no reply, no cards — and four screenshots taken at 400 ms, 1 s,
+ * 3 s and 8 s of the next turn were pixel-identical for the same reason. The only evidence anything
+ * was happening was the Send arrow greying out.
+ *
+ * Two moments, not every render. A turn STARTING is the page changing what it is about, and a Stop
+ * is the same thing in reverse — the kept answer is below a transcript that may already fill the
+ * screen. `done` is deliberately absent: by then the reader is reading, and snapping the page under
+ * them at the moment the answer settles is the opposite of the fix.
+ */
+export type ScrollTarget = "live" | "settled" | null;
+
+export function scrollTargetFor(status: ChatStatus): ScrollTarget {
+  if (status === "streaming") return "live";
+  if (status === "stopped") return "settled";
+  return null;
+}
+
+/**
+ * Has a clamped question bubble actually been cut short?
+ *
+ * Measured rather than guessed from the character count, because the same 400 characters are four
+ * lines on a desktop bubble and eight on a phone — a length threshold would offer "Show more" on a
+ * bubble showing everything, and withhold it on one that is cut. The tolerance absorbs the
+ * sub-pixel rounding `line-height` leaves behind, which otherwise reports a one-line bubble as
+ * overflowing on some zoom levels.
+ */
+export function bubbleOverflows(scrollHeight: number, clientHeight: number): boolean {
+  return scrollHeight - clientHeight > 4;
+}
+
+/** Whether this browser has asked for motion to be kept to a minimum. Absent `matchMedia` = no. */
+export function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether the preset mood chips ("Under 90 minutes, feel-good", …) should show: only on a
  * genuinely fresh Ask Reel — no transcript, no cards on screen, nothing streaming. The moment a
  * conversation exists (including one resumed from a previous visit) the presets yield to the
@@ -395,9 +476,20 @@ export function recentListing(
  * sentence describes a turn that has not finished, and with nothing on screen it is a claim about
  * a grid that is not there.
  */
-export function showsFootnote(status: ChatStatus, appending: boolean, shownCount: number): boolean {
+export function showsFootnote(
+  status: ChatStatus,
+  appending: boolean,
+  shownCount: number,
+  settledAnswer = false,
+): boolean {
   if (appending || shownCount <= 0) return false;
-  return status === "done" || status === "resumed";
+  if (status === "done" || status === "resumed") return true;
+  // F6-06's third casualty. A Stop over a held answer withdrew the provenance line along with the
+  // tray and the paging, leaving a grid with no account of where it came from — for an answer
+  // nothing had replaced and whose sentence was still perfectly true. Offered only over a settled
+  // answer: a stopped turn's own partial has no finished sentence to print, and `reason` is null
+  // there in any case.
+  return status === "stopped" && settledAnswer;
 }
 
 /**
@@ -432,20 +524,52 @@ export function formatFloor(floor: number | null | undefined): string | null {
  *
  * A card with no prediction, and an account with no bar, are both evidence of nothing: never held
  * back. Order is preserved within each half, because a stopped turn has no ranking to assert.
+ *
+ * `appliesTo` bounds it to the cards of a turn the server has NOT ranked — the ids after the
+ * settled prefix. Without it the same call re-floors finished work: a stopped page would apply the
+ * client's bar to the answer it was extending, and a Stop that hands a previous answer back whole
+ * would strip cards out of a grid the server had already floored and committed. Absent = every
+ * card, which is what a turn with nothing settled behind it wants (F4-08).
  */
 export function floorPartition(
   cards: AskCard[],
   floor: number | null | undefined,
+  appliesTo?: ReadonlySet<string>,
 ): { kept: AskCard[]; held: AskCard[] } {
   if (typeof floor !== "number" || !Number.isFinite(floor)) return { kept: cards, held: [] };
   const kept: AskCard[] = [];
   const held: AskCard[] = [];
   for (const c of cards) {
+    if (appliesTo && !appliesTo.has(c.titleId)) {
+      kept.push(c);
+      continue;
+    }
     const rating = c.predictedRating;
     const under = typeof rating === "number" && Number.isFinite(rating) && Math.round(rating * 10) / 10 < floor;
     (under ? held : kept).push(c);
   }
   return { kept, held };
+}
+
+/**
+ * How many card-shaped placeholders the grid holds open while a turn is working.
+ *
+ * F6-04: the grid was zero-height until the first card, so the document went **837 px → 4 482 px in
+ * a single frame** when the batch landed, and the turn scored **CLS 0.672** against Google's 0.25
+ * "poor" boundary — a page with one "Show me more" on it scored 1.158, in four discrete jumps.
+ * Everything the reader was reaching for moved under them.
+ *
+ * Eight, or the server's own count where it is smaller. Both bounds earn their place: reserving 24
+ * rows for a turn that will keep ten is the same shift pointing downward, and reserving nothing
+ * before `discovered` arrives leaves the first 6–10 seconds of every turn unreserved — which is
+ * most of it. A turn that has found nothing yet gets the full eight, because it is going to fill
+ * the grid either way.
+ */
+export const SKELETON_CAP = 8;
+
+export function skeletonCount(phase: PhaseData | null): number {
+  const found = phase?.found ?? 0;
+  return found > 0 ? Math.min(found, SKELETON_CAP) : SKELETON_CAP;
 }
 
 /**
@@ -615,9 +739,17 @@ export function canPage(
   holdingPrevious: boolean,
   exhausted: boolean,
   cardCount: number,
+  settled = 0,
 ): boolean {
   if (cardCount === 0 || exhausted || holdingPrevious) return false;
-  return status === "done" || status === "resumed";
+  if (status === "done" || status === "resumed") return true;
+  // …and the one stopped screen where paging is honest: a Stop that gave a held previous answer
+  // back whole (F6-06). Every card on it is settled — finished, server-ordered, server-floored work
+  // — and `pageQuery` names the question it answers, so the page extends that answer rather than
+  // the abandoned one. A stopped turn's OWN partial is what the rule above exists for and has
+  // `settled === 0` against a non-zero grid, so it is still refused. R1-04 was not "a stopped state
+  // offered paging"; it was paging sending the question that had never been answered.
+  return status === "stopped" && settled === cardCount;
 }
 
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
@@ -732,26 +864,71 @@ interface State {
    * derives one at all.
    */
   settled: number;
+  /**
+   * The {@link StreamTag} id of the run whose frames this state accepts. `0` — the value
+   * {@link initialChatState} carries, and therefore what a `+ New`, a thread switch and a resume
+   * all land on — matches no run, so every frame still arriving from an abandoned stream is
+   * dropped. See {@link staleFrame}.
+   */
+  stream: number;
+  /**
+   * The question the GRID answers, which is not always the last thing the user said.
+   *
+   * A page replays a question, so it needs the one the cards on screen belong to — and after a Stop
+   * that hands a held previous answer back whole (F6-06) those two differ: `lastQuery` is the
+   * question that was abandoned and is what "Ask again" replays, while this is the question the
+   * restored grid answers and is what "Show me more" extends. Conflating them is R1-04, where
+   * pressing the page control sent the STOPPED question and silently adopted the earlier question's
+   * cards as its page one.
+   */
+  pageQuery: string;
 }
 
 export type ChatAction =
-  | { type: "userTurn"; message: string; fresh: boolean }
-  | { type: "moreTurn" }
-  | { type: "reaskTurn" }
-  | { type: "phase"; data: PhaseData }
-  | { type: "conversation"; data: ConversationData }
+  | { type: "userTurn"; message: string; fresh: boolean; stream?: StreamTag }
+  | { type: "moreTurn"; stream?: StreamTag }
+  | { type: "reaskTurn"; stream?: StreamTag }
+  | { type: "phase"; data: PhaseData; stream?: StreamTag }
+  | { type: "conversation"; data: ConversationData; stream?: StreamTag }
   | { type: "resume"; payload: ConversationPayload }
-  | { type: "assistant"; data: AssistantMessageData }
-  | { type: "candidate"; data: AskCard }
-  | { type: "scored"; data: { titleId: string; predictedRating: number | null } }
-  | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { type: "conflict"; data: ConflictData }
-  | { type: "done"; data: DoneData }
+  | { type: "assistant"; data: AssistantMessageData; stream?: StreamTag }
+  | { type: "candidate"; data: AskCard; stream?: StreamTag }
+  | { type: "scored"; data: { titleId: string; predictedRating: number | null }; stream?: StreamTag }
+  | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null }; stream?: StreamTag }
+  | { type: "conflict"; data: ConflictData; stream?: StreamTag }
+  | { type: "done"; data: DoneData; stream?: StreamTag }
   | { type: "stop" }
   | { type: "reset" }
   | { type: "turnInProgress" }
   | { type: "conversationGone" }
   | { type: "error"; reason?: ErrorReason };
+
+/** The three actions that START a run, and so set the id whose frames the reducer will accept. */
+const TURN_STARTS: ReadonlySet<ChatAction["type"]> = new Set(["userTurn", "moreTurn", "reaskTurn"]);
+
+/**
+ * Does this frame belong to a run that is no longer on screen? F6-01's guard.
+ *
+ * Two checks, and they catch different halves of the same defect. The **run id** catches a frame
+ * from any run this state is not currently listening to — including one started before a
+ * conversation existed at all, where there is no id to compare. The **conversation id** catches a
+ * frame that names a thread other than the one being rendered, which is the durable half: a `done`
+ * for thread A arriving while thread B is on screen is what wrote A's ten cards under B's question
+ * and moved B's turn count.
+ *
+ * Untagged actions pass, deliberately: the reducer is a pure state machine that tests drive
+ * directly, and requiring a tag would make every such dispatch a no-op rather than a test of the
+ * case it is about. The hook tags every frame it forwards.
+ */
+export function staleFrame(state: State, tag: StreamTag | undefined): boolean {
+  if (!tag) return false;
+  if (tag.id !== state.stream) return true;
+  return (
+    tag.conversationId != null &&
+    state.conversationId != null &&
+    tag.conversationId !== state.conversationId
+  );
+}
 
 /**
  * What a failed `/ask` means, as an action.
@@ -782,7 +959,7 @@ export const initialChatState: State = {
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
-  lastTurnAt: null, resumedTail: null, answeredQuery: "",
+  lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
 };
 
 /**
@@ -849,7 +1026,31 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
   return (carried ?? 0) + (incoming ?? 0);
 }
 
+/**
+ * Everything on screen that DESCRIBES the answer rather than being it — the provenance sentence,
+ * whether it is more than one turn's work, the under-floor tray, the tray's own count, and whether
+ * the server has said there is no more.
+ *
+ * F6-06: these were cleared the instant a new question was asked, while the cards they describe
+ * were deliberately held. A Stop three seconds later therefore left the user with the grid and none
+ * of its accounting — 16 tray picks that had been one tap away simply ceased to exist, the footnote
+ * went, and "Show me more" went with it. Reloading the page brought all of it back, which is how it
+ * was known to be a client-side loss rather than a server one.
+ *
+ * So they now move with the grid: held while the grid is held, and released at the single moment
+ * the grid is replaced (the first candidate of the new turn) or completed.
+ */
+function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted"> {
+  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false };
+}
+
 export function chatReducer(state: State, action: ChatAction): State {
+  const tag = "stream" in action ? action.stream : undefined;
+  // F6-01. A frame from a run this screen has moved on from changes NOTHING — not the grid, not
+  // the transcript, not the conversation id, and above all not the turn count of the thread now on
+  // screen. Checked once here rather than in each of the eight frame cases, because the one case
+  // that forgot the check would be the one that wrote the damage.
+  if (!TURN_STARTS.has(action.type) && staleFrame(state, tag)) return state;
   switch (action.type) {
     case "userTurn": {
       const turn: ChatTurn = { role: "user", text: action.message };
@@ -857,19 +1058,22 @@ export function chatReducer(state: State, action: ChatAction): State {
       // answer left to hold: cards under a blank transcript belong to a question no longer on
       // screen. A follow-up in the same thread is the opposite case, and it keeps its answer up.
       return action.fresh
-        ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message }
+        ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message, stream: tag?.id ?? 0 }
         : {
-            ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
-            reason: null, appending: false, lastQuery: action.message, exhausted: false, paged: false,
+            ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
+            appending: false, lastQuery: action.message,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
+            conflict: null, conflictTerms: [], errorReason: null,
             // The resumed thread's unanswered tail belongs to the visit BEFORE this one. Asking
             // anything replaces it — the retry offer it carries is exactly what was just taken.
             resumedTail: null, answeredQuery: "",
             // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
             // by the first candidate of this turn, not by the act of asking.
             holdingPrevious: state.order.length > 0, arrived: 0,
+            // …and neither is the answer's own accounting, on exactly the same terms. See
+            // {@link clearedAnswerDescription}.
+            ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
           };
     }
     case "moreTurn":
@@ -888,7 +1092,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // itself brings (SB-01).
       return {
         ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
-        settled: state.order.length, resumedTail: null, answeredQuery: "",
+        settled: state.order.length, resumedTail: null, answeredQuery: "", stream: tag?.id ?? 0,
       };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
@@ -898,11 +1102,11 @@ export function chatReducer(state: State, action: ChatAction): State {
       // Stop, a timeout or a failed re-ask cost the user the answer they were reading.
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
-        ...state, turns, status: "streaming", phase: null,
-        reason: null, appending: false, exhausted: false, paged: false,
-        belowFloor: [], droppedByFloor: null, errorReason: null,
+        ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
+        appending: false, errorReason: null,
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
+        ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
       };
     }
     case "phase":
@@ -946,6 +1150,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The server's own `lastQuery` first: it reads the last USER row, including one whose
         // answer never landed, which is exactly the question a retry has to replay.
         lastQuery: p.lastQuery ?? lastUserQuery(turns),
+        // The restored grid answers the thread's last completed question, which is what a page of
+        // it replays. Same source as `lastQuery` on an ordinary resume; they part company only
+        // after a Stop.
+        pageQuery: p.lastQuery ?? lastUserQuery(turns),
         shown: p.shown ?? [],
         byId,
         // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
@@ -994,7 +1202,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       if (state.holdingPrevious) {
         // The previous turn's block goes with it, so nothing is settled any more: what is on
         // screen from here is this turn's stream, and it settles at phase boundaries like any other.
-        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1, settled: 0 };
+        return {
+          ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1, settled: 0,
+          // The previous answer is gone at this exact moment, so its accounting goes with it —
+          // this is the release {@link clearedAnswerDescription} is held for.
+          ...clearedAnswerDescription(),
+          pageQuery: state.lastQuery,
+        };
       }
       if (state.byId[c.titleId]) return state;
       return {
@@ -1068,6 +1282,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         // A page that added cards makes the answer a paged one, and it stays paged until the next
         // question replaces it — the footnote needs to know the grid is more than one turn's work.
         paged: state.appending ? state.paged || !emptyPage : false,
+        // The grid now answers THIS question, so that is what a page of it must replay. A page
+        // leaves it alone: it extends the answer it found, it does not become it.
+        pageQuery: state.appending ? state.pageQuery : state.lastQuery,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
@@ -1085,7 +1302,17 @@ export function chatReducer(state: State, action: ChatAction): State {
       // claim a complete answer and print "N picks ranked for you" over a partial one, and `idle`
       // over a transcript rendered literally nothing — no cards, no message, no retry, no way back.
       // Never an error either; they asked for this.
-      return { ...state, status: "stopped", phase: null, appending: false };
+      //
+      // …and the HOLD ends here (F6-06). "Held until the new one arrives" is only true while
+      // something is still coming, and after a Stop nothing is: what is on screen is the previous
+      // answer, whole and finished, not a placeholder for one. Leaving the hold latched is what
+      // left the kept grid at 40 % opacity as a resting state, under a label about a question that
+      // would never be answered, with its tray, its footnote and its paging all withdrawn — every
+      // one of which came back on a reload, because the server had them all along.
+      //
+      // `lastQuery` is deliberately NOT restored: the abandoned question is what "Ask again"
+      // replays. `pageQuery` already holds the one the grid answers, which is what a page extends.
+      return { ...state, status: "stopped", phase: null, appending: false, holdingPrevious: false };
     case "reset":
       // `+ New`. Everything goes, including the conversation id — the whole point is that the next
       // question opens a thread of its own rather than extending one the user has finished with.
@@ -1178,6 +1405,10 @@ export function useAskReelChat() {
   // the server then replays the stored answer instead of running the question a second time.
   const turnIdRef = useRef<string | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The run this hook is still listening to, set synchronously so a side effect fired from inside
+  // a frame handler (writing the remembered conversation id) can tell live from abandoned before
+  // the reducer's own commit has landed. `0` = nothing is running that this screen still owns.
+  const activeStreamRef = useRef(0);
 
   // The active media filter, kept in a ref so `send`/`loadMore` stay referentially stable while
   // still reading the current value — a filter change re-sends rather than hiding cards locally.
@@ -1221,28 +1452,42 @@ export function useAskReelChat() {
     // server answers it from the stored turn instead of running and billing it twice.
     const clientTurnId = turnId ?? mintTurnId();
     turnIdRef.current = clientTurnId;
+    // The label every frame of THIS run carries, so the reducer can tell them from the frames of a
+    // run the user has already walked away from (F6-01). Minted before the first dispatch, because
+    // the turn-start action is what tells the reducer which id to listen to.
+    const stream: StreamTag = { id: mintStreamId(), conversationId };
+    activeStreamRef.current = stream.id;
     dispatch(
-      kind === "more" ? { type: "moreTurn" }
-        : kind === "reask" ? { type: "reaskTurn" }
-          : { type: "userTurn", message: msg, fresh },
+      kind === "more" ? { type: "moreTurn", stream }
+        : kind === "reask" ? { type: "reaskTurn", stream }
+          : { type: "userTurn", message: msg, fresh, stream },
     );
 
     streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current), (ev) => {
       armWatchdog();
       switch (ev.event) {
-        case "phase": dispatch({ type: "phase", data: ev.data }); break;
+        case "phase": dispatch({ type: "phase", data: ev.data, stream }); break;
         case "conversation":
           // Remembered as it arrives, not at the end of the turn: an abandoned or failed stream
           // still happened, and the thread it opened is still this tab's.
-          storeConversationId(ev.data.id);
-          dispatch({ type: "conversation", data: ev.data });
+          //
+          // …unless this run has been abandoned. A stale `conversation` frame would otherwise
+          // overwrite localStorage with the thread the user just left, so the NEXT cold load
+          // resumes it — the durable half of F6-01, one layer below the reducer. Read off a ref
+          // set synchronously by `run` rather than off `stateRef`, which is synced in an effect
+          // and so still holds the PREVIOUS run's id when this frame (the stream's first, and
+          // usually its fastest) lands before the commit.
+          if (activeStreamRef.current === stream.id) {
+            storeConversationId(ev.data.id);
+          }
+          dispatch({ type: "conversation", data: ev.data, stream });
           break;
-        case "assistant-message": dispatch({ type: "assistant", data: ev.data }); break;
-        case "candidate": dispatch({ type: "candidate", data: ev.data }); break;
-        case "candidate-scored": dispatch({ type: "scored", data: ev.data }); break;
-        case "candidate-reranked": dispatch({ type: "reranked", data: ev.data }); break;
-        case "conflict": dispatch({ type: "conflict", data: ev.data }); break;
-        case "done": dispatch({ type: "done", data: ev.data }); break;
+        case "assistant-message": dispatch({ type: "assistant", data: ev.data, stream }); break;
+        case "candidate": dispatch({ type: "candidate", data: ev.data, stream }); break;
+        case "candidate-scored": dispatch({ type: "scored", data: ev.data, stream }); break;
+        case "candidate-reranked": dispatch({ type: "reranked", data: ev.data, stream }); break;
+        case "conflict": dispatch({ type: "conflict", data: ev.data, stream }); break;
+        case "done": dispatch({ type: "done", data: ev.data, stream }); break;
         default: break;
       }
     }, controller.signal)
@@ -1282,8 +1527,11 @@ export function useAskReelChat() {
     // The authoritative guard, here rather than only in the render: this is what issues the
     // request, and a page over a held or abandoned answer is a billed turn for a question the
     // user never got an answer to (R1-04). See {@link canPage} for what each state means.
-    if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length) || !s.lastQuery) return;
-    run(s.lastQuery, false, "more");
+    // `pageQuery`, not `lastQuery`: after a Stop that handed the previous answer back whole they
+    // are two different questions, and the one this page must replay is the one the grid answers.
+    const query = s.pageQuery || s.lastQuery;
+    if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length, s.settled) || !query) return;
+    run(query, false, "more");
   }, [run]);
 
   /**
@@ -1320,6 +1568,7 @@ export function useAskReelChat() {
     clearWatchdog();
     abortRef.current?.abort();
     abortRef.current = null;
+    activeStreamRef.current = 0;
     dispatch({ type: "stop" });
   }, [clearWatchdog]);
 
@@ -1332,12 +1581,21 @@ export function useAskReelChat() {
    */
   const resume = useCallback((payload: ConversationPayload) => {
     if (!payload.id || payload.turns.length === 0) return;
+    // Whatever was streaming was streaming for a DIFFERENT thread — this one is what the screen is
+    // about from here. Aborted rather than merely ignored: the reducer's tag check already makes a
+    // stale frame inert, but a run left open keeps a reader, a watchdog and the server's turn
+    // alive for a conversation nobody is looking at (F6-01).
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeStreamRef.current = 0;
+    turnIdRef.current = null;
+    clearWatchdog();
     // A resumed thread is this tab's thread from now on, so it is remembered on the same terms as
     // one started here — otherwise a cold visit that resumed would still have nothing stored, and
     // the NEXT reload would fall back to the account's newest thread instead of this one.
     storeConversationId(payload.id);
     dispatch({ type: "resume", payload });
-  }, []);
+  }, [clearWatchdog]);
 
   /**
    * Forget this thread and start over — what `+ New` does.
@@ -1351,6 +1609,7 @@ export function useAskReelChat() {
   const startNew = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    activeStreamRef.current = 0;
     turnIdRef.current = null;
     clearWatchdog();
     storeConversationId(FRESH_CONVERSATION);
@@ -1411,7 +1670,7 @@ export function useAskReelChat() {
      * control and the callback can never disagree about whose answer is on screen. False over a
      * held previous answer, a stopped turn, a failure and a 409; see {@link canPage}.
      */
-    pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length),
+    pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length, state.settled),
     /**
      * Whether this answer is more than one turn's work. Read only by the footnote, which has to
      * say so: the server's sentence describes the turn that produced it, never the accumulation.
@@ -1444,6 +1703,31 @@ export function useAskReelChat() {
     holdingPrevious: state.holdingPrevious,
     /** Cards this turn streamed before it ended. What the stopped state counts. */
     arrived: state.arrived,
+    /**
+     * The ids of the cards the SERVER has not ranked yet — everything after the settled prefix.
+     *
+     * The page needs the boundary, not just the count: the account's quality bar may be applied on
+     * the client to a turn still streaming (F4-08 — a card scored under the bar belongs in the tray
+     * the moment it is scored, not eighteen seconds later at `done`), and it must never be applied
+     * to the finished work above it. A stopped page's earlier answer, and a previous answer handed
+     * back whole, are both already floored by the server; re-flooring them here would take cards out
+     * of a grid the server committed.
+     */
+    unsettled: state.order.slice(state.settled),
+    /**
+     * True when everything on screen is a completed answer — server-ordered, server-floored,
+     * nothing of it still streaming and none of it held pending a replacement. What tells a Stop
+     * that gave the previous answer back whole apart from a Stop that kept a half-streamed one
+     * (F6-06); `done` and `resumed` satisfy it too, which is why the footnote's own rule can stay
+     * one expression.
+     */
+    settledAnswer: state.order.length > 0 && state.settled >= state.order.length && !state.holdingPrevious,
+    /**
+     * The question the grid answers — what "Show me more" replays. Equal to the last thing the user
+     * said on every ordinary screen, and deliberately not after a Stop: there, `lastQuery` is the
+     * abandoned question ("Ask again" replays that one) and this is the answer still on screen.
+     */
+    pageQuery: state.pageQuery,
     /**
      * The thread this hook is on, mirrored into `localStorage` as it changes and read back by
      * {@link resumeTarget} on the next cold load — so a tab resumes ITS conversation rather than

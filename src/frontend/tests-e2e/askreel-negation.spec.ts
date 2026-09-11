@@ -230,87 +230,145 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(page.getByTestId("askreel-chip").first()).toBeEnabled();
   });
 
-  test("stopping before the first card leaves the previous answer intact", async ({ page }) => {
-    // The reported repro, and the expensive half of it: asking a question used to blank the grid
-    // instantly, so a Stop at 2.5s cost the user the twelve cards they were reading in exchange
-    // for an answer that never arrived. Same control as the test above, one turn earlier.
-    await bootSearch(page);
+  test("stopping before the first card hands the previous answer back whole", async ({ page }) => {
+    // The reported repro, and both halves of it. Asking a question used to blank the grid
+    // instantly, so a Stop at 2.5s cost the user the twelve cards they were reading in exchange for
+    // an answer that never arrived — that half was fixed by holding the answer. F6-06 is what was
+    // left: the grid survived, and its tray, its footnote and its paging did not, with the whole of
+    // it rendered at 40% opacity as a resting state. Reloading the page brought all of it back.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
 
     await page.getByTestId("askreel-composer").fill("a tense heist movie");
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page);
-    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER, CEDAR],
+      belowFloor: [card("h8", "Held Back", 0.2)],
+      droppedByFloor: 1,
+      reason: "3 picks ranked for you, from 40 pulled · 1 under your 6.0 bar — shown below.",
+    });
     await askEnd(page);
     await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor")).toBeVisible();
+    await expect(page.getByTestId("askreel-footnote")).toBeVisible();
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
 
     await page.getByTestId("askreel-composer").fill("slow burn detective series");
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page, 2);
     await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
 
-    // Held, not blanked — and labelled, so it never reads as an answer to the new question.
-    // The order the previous turn's `done` committed, unchanged by the phase frame above: a held
-    // answer is finished work and must not re-sort in response to the new turn's progress.
+    // While the new turn runs it IS a previous answer: held, labelled and dimmed, so it never reads
+    // as an answer to the question just asked. The order the previous `done` committed is unchanged
+    // by the phase frame — a held answer is finished work and must not re-sort to another turn's
+    // progress.
     await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
     await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
+    await expect(page.getByTestId("semantic-results")).toHaveClass(/opacity-40/);
 
     await page.getByTestId("askreel-stop").click();
 
+    // …and now it is simply the answer again. Nothing is coming, so nothing is being held for.
     await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
     const stopped = page.getByTestId("askreel-stopped");
     await expect(stopped).toHaveText(/Stopped before any picks arrived\./);
     await expect(stopped.getByTestId("askreel-retry")).toBeVisible();
-    // The seam stays, and re-words itself: nothing is being waited for any more.
-    await expect(page.getByTestId("askreel-previous-answer"))
-      .toHaveText("Previous answer — the last question never replaced it.");
+
+    // Full contrast, not 40% of it, and no "previous answer" label over an answer nothing replaced.
+    await expect(page.getByTestId("semantic-results")).not.toHaveClass(/opacity-40/);
+    await expect(page.getByTestId("askreel-previous-answer")).toHaveCount(0);
+    // Instead, the seam that names the question these cards answer — the one directly above them in
+    // the transcript being the one that was abandoned.
+    await expect(page.getByTestId("askreel-kept-answer")).toContainText("a tense heist movie");
+    // The stopped row is ABOVE the grid it is about.
+    const stoppedPrecedesGrid = await page.evaluate(() => {
+      const row = document.querySelector('[data-testid="askreel-stopped"]');
+      const grid = document.querySelector('[data-testid="semantic-results"]');
+      return !!row && !!grid && !!(row.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    expect(stoppedPrecedesGrid).toBe(true);
+
+    // Everything the Stop used to strip. Sixteen tray picks in the measured run.
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 1 under your 6.0 bar");
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks ranked for you, from 40 pulled · 1 under your 6.0 bar — shown below.");
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
     await expect(page.getByTestId("askreel-composer")).toBeEditable();
   });
 
-  test("Show me more is withdrawn over a held answer, and comes back when one completes", async ({ page }) => {
-    // R1-04, from the browser. Same fixture as the test above and one control different: the
-    // reported sequence pressed "Show me more" while the held answer was on screen, and the page
-    // sent the STOPPED question as a page — the 37 held cards dropped their dim and became page
-    // one of a question that had never been answered, with nothing on screen saying so.
-    await bootSearch(page);
+  test("paging follows the answer on screen, never the question that was stopped", async ({ page }) => {
+    // R1-04's actual mechanism, pinned where it lives: the question a page SENDS. The reported
+    // sequence pressed "Show me more" over a held answer and the page sent the STOPPED question —
+    // the 37 held cards dropped their dim and became page one of a question that had never been
+    // answered, with nothing on screen saying so.
+    //
+    // F6-06 puts the control back, because after a Stop the grid is a finished answer that nothing
+    // replaced rather than a placeholder for one. The two facts have to hold together: the button
+    // exists, AND it extends the heist answer on screen rather than the detective question above it.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
 
     await page.getByTestId("askreel-composer").fill("a tense heist movie");
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page);
     await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
     await askEnd(page);
-    // A completed turn IS pageable — the control has to exist before its absence means anything.
+    // A completed turn IS pageable — the control has to exist before its presence means anything.
     await expect(page.getByTestId("askreel-more")).toBeVisible();
 
     await page.getByTestId("askreel-composer").fill("slow burn detective series");
     await page.getByTestId("askreel-composer").press("Enter");
     await waitForAsk(page, 2);
     await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
-    await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
-    await page.getByTestId("askreel-stop").click();
-
-    // The held answer is still there, still seamed and still dimmed — and there is no longer a
-    // control offering to extend it. The stopped card's "Ask again" is the only offer on screen.
-    await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+    // Withdrawn while the answer is genuinely held: those cards are not this question's answer yet,
+    // and nothing on screen can say which question a page of them would extend.
     await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
     await expect(page.getByTestId("askreel-more")).toHaveCount(0);
-    // …and nothing went out. The bug was a billed turn, not just a wrong screen.
+
+    await page.getByTestId("askreel-stop").click();
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
     await page.waitForTimeout(400);
     expect(await askRequests(page)).toHaveLength(2);
 
-    // "Ask again" replays the stopped question and completes it; paging is offered again the
-    // moment there is a finished answer to page — the capability is withdrawn, not lost.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 3);
+    const paged = (await askRequests(page)) as { query: string }[];
+    expect(paged[2].query).toBe("a tense heist movie");
+    await askPush(page, "done", { results: [CEDAR], reason: "1 more from the same angle.", kept: 1 });
+    await askEnd(page);
+    await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+  });
+
+  test("Ask again after a Stop replays the question that was stopped, not the one on screen", async ({ page }) => {
+    // The other half of the same pair, and the reason `lastQuery` is deliberately NOT restored by
+    // the Stop: the two controls on this screen replay two different questions, and a single field
+    // cannot serve both.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+
+    await page.getByTestId("askreel-composer").fill("a tense heist movie");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+
+    await page.getByTestId("askreel-composer").fill("slow burn detective series");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await page.getByTestId("askreel-stop").click();
+
     await page.getByTestId("askreel-stopped").getByTestId("askreel-retry").click();
     await waitForAsk(page, 3);
+    const retried = (await askRequests(page)) as { query: string }[];
+    expect(retried[2].query).toBe("slow burn detective series");
+
     await askPush(page, "done", { results: [ALPHA, BORDER], reason: "2 picks ranked for you, from 40 pulled." });
     await askEnd(page);
-    await expect(page.getByTestId("askreel-previous-answer")).toHaveCount(0);
+    // The seam goes with the answer it named: the grid is now this question's own.
+    await expect(page.getByTestId("askreel-kept-answer")).toHaveCount(0);
     await expect(page.getByTestId("askreel-more")).toBeVisible();
-
     await page.getByTestId("askreel-more").click();
     await waitForAsk(page, 4);
     const requests = (await askRequests(page)) as { query: string }[];
-    // The page carries the question that was actually ANSWERED — not the one that was stopped and
-    // then re-asked under a different id, and never the earlier heist turn whose cards it extends.
     expect(requests[3].query).toBe("slow burn detective series");
     await askPush(page, "done", { results: [], reason: null });
     await askEnd(page);
@@ -459,5 +517,189 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(tray.locator("summary")).toHaveText("Show the 1 under your 6.0 bar");
     await tray.locator("summary").click();
     await expect(tray.locator('a[href*="/title/"]')).toHaveCount(1);
+  });
+});
+
+/**
+ * F6-04 and F4-08 — the grid that jumped, and the cards that were taken away.
+ *
+ * One ordinary turn scored **CLS 0.672** against Google's 0.25 "poor" boundary; the same page with
+ * one "Show me more" on top scored **1.158** in four discrete jumps. The document went 837 px →
+ * 4 482 px in a single frame when the first card batch landed, and 4 482 → 4 851 again when `done`
+ * retired cards into the tray. Anything the reader was reaching for moved under them.
+ *
+ * Half of that shift budget is F4-08: 23–24 posters sat on screen for 11.5–18.6 seconds and then
+ * collapsed to 10, with no transition, no announcement, and the remainder folded into a collapsed
+ * `<details>`. On relaxed turns nothing vanished at all, so the behaviour differed turn to turn with
+ * nothing on screen explaining why.
+ */
+test.describe("Ask Reel — the grid holds its shape", () => {
+  // 375, because that is where the finder measured and where a grid arriving below a banner moves
+  // the most of what is already on screen.
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  /** 24 candidates, the count the finder watched arrive before `done` kept 10. */
+  const STREAMED = Array.from({ length: 24 }, (_, i) =>
+    card(String.fromCharCode(97 + (i % 26)) + String(i), `Streamed ${String(i).padStart(2, "0")}`, 0.5 + i / 100),
+  );
+  /** What `done` keeps, and what it retires under the fence — F4-08's 10 + 14. */
+  const KEPT = STREAMED.slice(0, 10);
+  const RETIRED = STREAMED.slice(10);
+
+  /** Accumulates `layout-shift` values the way CLS is defined: unbuffered, `hadRecentInput` out. */
+  async function startCls(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      const w = window as unknown as { __cls: number };
+      w.__cls = 0;
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const shift = entry as PerformanceEntry & { value: number; hadRecentInput: boolean };
+          if (!shift.hadRecentInput) w.__cls += shift.value;
+        }
+      }).observe({ type: "layout-shift", buffered: false });
+    });
+  }
+
+  /** The height the page occupies — the number that went 837 → 4 482 px in a single frame. */
+  async function docHeight(page: Page): Promise<number> {
+    return page.evaluate(() => Math.round(document.documentElement.scrollHeight));
+  }
+
+  /** Layout-shift entries are queued, so the observer needs a couple of frames to have them all. */
+  async function readCls(page: Page): Promise<number> {
+    await page.waitForTimeout(400);
+    return page.evaluate(() => (window as unknown as { __cls: number }).__cls);
+  }
+
+  test("a 24-candidate turn that settles on 10 never shows 24, and the page does not jump", async ({ page }) => {
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+    await startCls(page);
+
+    await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Paced, with a paint between batches. Pushing all 24 frames back-to-back collapses the whole
+    // turn into one layout pass and scores ~0.02 whatever the page does, which measures the stub
+    // rather than the product.
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await page.waitForTimeout(120);
+    await askPush(page, "phase", { stage: "discovered", found: 24, scored: 0 });
+    await page.waitForTimeout(150);
+    const reserved = await docHeight(page);
+
+    for (let i = 0; i < STREAMED.length; i += 4) {
+      for (const c of STREAMED.slice(i, i + 4)) await askPush(page, "candidate", c);
+      await page.waitForTimeout(120);
+    }
+    // …and the scoring pass the real server runs over every candidate. Ten clear the account's 6.0
+    // bar and fourteen do not, which is exactly the split `done` is about to commit.
+    for (const c of KEPT) await askPush(page, "candidate-scored", { titleId: c.titleId, predictedRating: 7.4 });
+    for (const c of RETIRED) await askPush(page, "candidate-scored", { titleId: c.titleId, predictedRating: 5.1 });
+    await page.waitForTimeout(200);
+
+    // F4-08, as one assertion: the grid never holds a card it is about to take away. Before this,
+    // 23–24 posters sat here for between 11.5 and 18.6 seconds and then collapsed to ten.
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(10);
+    const peak = await docHeight(page);
+
+    await askPush(page, "done", {
+      results: KEPT,
+      belowFloor: RETIRED,
+      streamed: 24,
+      kept: 10,
+      droppedByFloor: 14,
+      reason: "10 picks ranked for you, from 94 pulled · 14 under your 6.0 bar — shown below.",
+    });
+    await askEnd(page);
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(10);
+    await expect(page.getByTestId("askreel-below-floor")).toContainText("Show the 14 under your 6.0 bar");
+
+    const settledHeight = await docHeight(page);
+    const cls = await readCls(page);
+    console.log(`CLS[one-turn]=${cls.toFixed(3)} reserved=${reserved}px peak=${peak}px settled=${settledHeight}px`);
+
+    // Three assertions, and the height ones are the load-bearing pair.
+    //
+    // The document no longer triples and then shrinks: 812 → 4 401 → 2 340 px on this fixture
+    // before the reserve (the finder measured 837 → 4 482 → 4 851 against a real build), and
+    // 1 960 → 2 328 → 2 340 after it. Monotone is the property — nothing the reader is reaching for
+    // moves up when the answer settles.
+    expect(reserved).toBeGreaterThan(1500);
+    expect(settledHeight).toBeGreaterThanOrEqual(peak - 1);
+
+    // CLS is the weaker signal HERE and is asserted at Google's "poor" boundary rather than at the
+    // 0.1 "good" one, deliberately. Most of the 24 → 10 collapse this fixture removes happened
+    // below the fold, where CLS never counted it, so the harness scores ~0.08 before and ~0.10
+    // after; the residual is almost entirely one shift — the progress banner leaving flow at `done`
+    // and pulling the grid up 86 px, which is 0.085 of it. The finder's 0.672 came from a real
+    // build whose posters load asynchronously. Kept as a regression guard at the boundary that was
+    // actually breached, with the number printed so a change in it is visible in the run log.
+    expect(cls).toBeLessThan(0.25);
+  });
+
+  test("a discovered phase reserves the grid before the first card lands", async ({ page }) => {
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+    await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+
+    // Before the server has found anything, the reserve is the default eight — the grid is going to
+    // be filled either way, and a zero-height grid is what made the document triple in one frame.
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(8);
+
+    // A turn that will return fewer reserves fewer: over-reserving is its own shift, downward.
+    await askPush(page, "phase", { stage: "discovered", found: 3, scored: 0 });
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(3);
+
+    // …and a big turn is capped at eight rather than reserving 24 rows of nothing.
+    await askPush(page, "phase", { stage: "discovered", found: 24, scored: 0 });
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(8);
+
+    // Cards fill the reserved space rather than adding to it: eight slots, two of them now real.
+    await askPush(page, "candidate", STREAMED[0]);
+    await askPush(page, "candidate", STREAMED[1]);
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(6);
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(2);
+
+    // Nothing of the reserve survives the answer.
+    await askPush(page, "done", { results: [STREAMED[0], STREAMED[1]], reason: "2 picks ranked for you, from 9 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-skeleton")).toHaveCount(0);
+  });
+
+  test("a card scored under the account's own bar goes to the tray as it is scored", async ({ page }) => {
+    // F4-08's mechanism, at the frame level: the grid must not show a card it is about to demote.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+    await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "candidate", ALPHA);
+    await askPush(page, "candidate", BORDER);
+    await askPush(page, "candidate", CEDAR);
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Border Town", "Cedar Falls"]);
+
+    // Unscored cards are evidence of nothing and stay in the grid; a score under the bar is the
+    // first moment the client knows, so it acts then rather than 18 seconds later at `done`.
+    await askPush(page, "candidate-scored", { titleId: BORDER.titleId, predictedRating: 5.2 });
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Cedar Falls"]);
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray).toContainText("Show the 1 under your 6.0 bar");
+
+    // Badge precision, not the raw value: 5.96 prints as "6.0", and a card badged 6.0 inside a tray
+    // labelled "under your 6.0 bar" is the same contradiction wearing the other hat.
+    await askPush(page, "candidate-scored", { titleId: CEDAR.titleId, predictedRating: 5.96 });
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Cedar Falls"]);
+
+    // The server stays authoritative. Its `done` puts Border back in the answer — a relaxed floor
+    // does exactly this — and the client's provisional demotion yields to it without argument.
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER, CEDAR],
+      reason: "3 picks ranked for you, from 40 pulled · relaxed to fill the answer.",
+    });
+    await askEnd(page);
+    await expect(gridNames(page)).toHaveText(["Alpha Creek", "Border Town", "Cedar Falls"]);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
   });
 });

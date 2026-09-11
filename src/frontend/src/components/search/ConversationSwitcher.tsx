@@ -21,11 +21,23 @@ export default function ConversationSwitcher({
   currentId,
   onOpen,
   onCurrentDeleted,
+  disabled = false,
 }: {
   /** The thread on screen, so the list can mark it and the delete knows when to reset the page. */
   currentId: string | null;
   onOpen: (id: string) => void;
   onCurrentDeleted: () => void;
+  /**
+   * Closed and inert while a turn is streaming, on exactly the terms `+ New` already was.
+   *
+   * F6-01: `+ New` was disabled and this was not, so the one gesture that could leave a running
+   * turn behind was the one still live. Switching mid-stream put the new thread's question and
+   * reply above the old thread's progress banner and 34 of its cards, and the in-flight answer
+   * then landed in the thread the user had switched TO — durably, with its turn count moved. The
+   * client-side guards against a stale frame are the backstop; not offering the gesture while a
+   * turn is running is the fix.
+   */
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // Set once by "Show older" and kept: the user has said they want the longer list, and making
@@ -39,6 +51,13 @@ export default function ConversationSwitcher({
   // /search load for it.
   const { data: conversations, isFetching } = useListConversationsQuery(listing.limit, { skip: !open });
   const [deleteConversation] = useDeleteConversationMutation();
+
+  // A turn starting while the menu is open closes it, rather than leaving a live-looking list of
+  // threads above a button that has just gone inert.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- follows an external prop change
+    if (disabled) setOpen(false);
+  }, [disabled]);
 
   // Close on an outside click, same as the search box's dropdown.
   useEffect(() => {
@@ -63,8 +82,10 @@ export default function ConversationSwitcher({
         data-testid="askreel-recent"
         aria-expanded={open}
         aria-haspopup="menu"
+        disabled={disabled}
+        title={disabled ? "Wait for the current results to finish" : undefined}
         onClick={() => setOpen((v) => !v)}
-        className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
+        className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 disabled:hover:text-fa-frost-dim transition-colors"
       >
         Recent <ChevronDown className="h-3.5 w-3.5" />
       </button>

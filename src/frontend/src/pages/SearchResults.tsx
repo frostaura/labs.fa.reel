@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useSelector } from "react-redux";
 import { Link, useLocation, useNavigate } from "react-router-dom";
@@ -18,7 +18,8 @@ import {
   floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
-  PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS,
+  PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
+  scrollTargetFor, skeletonCount,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -100,7 +101,8 @@ function AskReel() {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
-    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason,
+    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
+    pageQuery,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -225,6 +227,21 @@ function AskReel() {
   const removedSet = new Set(useSelector(selectRemovedKeys));
   const streaming = status === "streaming";
 
+  // F6-02. The page never moved: `scrollY` stayed at 0 for a whole 19.4-second turn, so a long
+  // question filled the viewport and the banner, the narration, the progress bar and every card
+  // were below the fold for the entire time. These two anchors are what "the live turn" and "what
+  // the Stop left you with" mean as positions on the page; `scrollTargetFor` decides which of them
+  // (if either) this status is about, and keying the effect on THAT rather than on the status keeps
+  // it to the two transitions that change what the page is about.
+  const liveRef = useRef<HTMLDivElement>(null);
+  const settledRef = useRef<HTMLDivElement>(null);
+  const scrollTarget = scrollTargetFor(status);
+  useEffect(() => {
+    if (!scrollTarget) return;
+    const el = scrollTarget === "live" ? liveRef.current : settledRef.current;
+    el?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
+  }, [scrollTarget]);
+
   // The floor, on a turn that never reached `done`.
   //
   // Ranking and the floor are the server's, and they run when the turn completes. Stop a page ten
@@ -235,12 +252,30 @@ function AskReel() {
   // each other. Only on a stopped turn: every other state has the server's own answer.
   const stopped = status === "stopped";
   const floorBar = accountFilters?.minPredictedRating;
-  const cleanPartition = floorPartition(cards.filter((c) => !removedSet.has(c.titleId)), stopped ? floorBar : null);
-  const outsidePartition = floorPartition(outsideCards.filter((c) => !removedSet.has(c.titleId)), stopped ? floorBar : null);
+  // …and on a turn that is still streaming, which is F4-08. The server scores every candidate and
+  // only reveals the split at `done`, so 23–24 posters sat on screen for between 11.5 and 18.6
+  // seconds and then collapsed to 10 with no transition and no announcement — half of F6-04's shift
+  // budget, and the reason the document went 4 482 → 4 851 px on a frame nobody asked for. A card
+  // whose score comes back under the bar the user set belongs under the fence from that moment.
+  //
+  // Bounded to `unsettled` — the ids the server has NOT ranked. The same call over the whole grid
+  // would re-floor finished work: the answer a stopped PAGE was extending, and a previous answer
+  // handed back whole, are both already floored and committed server-side.
+  const unsettledIds = new Set(unsettled);
+  const clientFloor = streaming || stopped ? floorBar : null;
+  const cleanPartition = floorPartition(cards.filter((c) => !removedSet.has(c.titleId)), clientFloor, unsettledIds);
+  const outsidePartition = floorPartition(outsideCards.filter((c) => !removedSet.has(c.titleId)), clientFloor, unsettledIds);
   const visible = cleanPartition.kept;
   const outsideVisible = outsidePartition.kept;
-  /** What a stopped turn moved out of the grid, for the tray to account for. */
-  const stoppedHeldBack = [...cleanPartition.held, ...outsidePartition.held];
+  /** What the client's own pass moved out of the grid, for the tray to account for. */
+  const clientHeldBack = [...cleanPartition.held, ...outsidePartition.held];
+  /**
+   * How much of the grid is still being held open for this turn. Placeholders sit AFTER the cards
+   * that have arrived and shrink as they do, so the grid's height is monotone from the first frame
+   * instead of being zero until the batch lands (F6-04). Never over a held previous answer — that
+   * grid is finished work and is not the one being filled.
+   */
+  const pendingSlots = streaming && !holdingPrevious ? Math.max(0, skeletonCount(phase) - visible.length) : 0;
 
   // The hook carries the server's sentence verbatim; the page only decides where it goes.
   const conflictMessage = conflict?.trim() ? conflict : null;
@@ -259,10 +294,10 @@ function AskReel() {
   // falls back to the unnumbered wording rather than blanking the tray.
   const belowFloorVisible = [
     ...belowFloor.filter((c) => !removedSet.has(c.titleId)),
-    // A stopped turn's sub-floor cards join the tray they belong in rather than staying in the
-    // grid. Appended, so the label counts what the tray actually holds — the previous turn's cut
-    // AND this page's — which is the number a user can open it and verify.
-    ...stoppedHeldBack,
+    // A streaming or stopped turn's sub-floor cards join the tray they belong in rather than
+    // staying in the grid. Appended, so the label counts what the tray actually holds — the
+    // previous turn's cut AND this one's — which is the number a user can open it and verify.
+    ...clientHeldBack,
   ];
   const heldBack = floorHeldBack(belowFloorVisible.length, stopped ? null : droppedByFloor);
   const floorLabel = formatFloor(floorBar);
@@ -302,6 +337,12 @@ function AskReel() {
   // The settled outcome, announced once the stream stops. Kept separate from the streaming
   // narration below so the two live regions never talk over each other.
   const settledCount = visible.length + outsideVisible.length;
+  /**
+   * A Stop that gave the previous answer back whole — nothing of the abandoned turn arrived, and
+   * what is on screen is the finished answer it was going to replace (F6-06). Distinct from a Stop
+   * that kept a half-streamed partial, which is unranked, unfloored and says so.
+   */
+  const keptWholeAnswer = stopped && arrived === 0 && settledAnswer && settledCount > 0;
   // Counted off the SCREEN, not off the wire: the line claims what a reader can count, and the
   // eligibility filter and the stopped-turn floor both remove cards the server did send.
   const footnoteText = footnote(reason, settledCount, paged);
@@ -354,6 +395,10 @@ function AskReel() {
             </button>
             <ConversationSwitcher
               currentId={conversationId}
+              // On the same terms as `+ New` beside it. F6-01: this was the one control that could
+              // walk away from a running turn, and doing so bound the in-flight answer to the
+              // thread the user had just arrived in.
+              disabled={streaming}
               onOpen={(id) => {
                 // Opening a thread makes it this tab's thread, on the same terms as starting one
                 // here — so the next reload comes back to it rather than to whatever the account
@@ -388,12 +433,7 @@ function AskReel() {
       <div className="space-y-3" data-testid="askreel-transcript" role="log" aria-live="polite">
         {turns.map((turn, i) =>
           turn.role === "user" ? (
-            <div key={i} className="flex justify-end">
-              <p className="fa-body bg-fa-frost/15 text-fa-frost-bright rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]">
-                <span className="sr-only">You said</span>
-                {turn.text}
-              </p>
-            </div>
+            <UserBubble key={i} text={turn.text} />
           ) : (
             <div key={i} className="space-y-2 max-w-[85%]">
               <div className="flex items-start gap-3" data-testid="askreel-reply">
@@ -490,6 +530,12 @@ function AskReel() {
           )}
         </div>
       )}
+
+      {/* Where the page scrolls to when a turn starts (F6-02). Zero-height on purpose — it marks
+          the boundary between "what you said" and "what Reel is doing about it", and everything
+          below it is the live turn. `scroll-mt` clears the sticky header, which would otherwise
+          sit on top of the banner the scroll exists to reveal. */}
+      <div ref={liveRef} className="scroll-mt-20" aria-hidden data-testid="askreel-live-anchor" />
 
       {/* 409 — the same question is already being answered, here or on another device. Nothing on
           screen is wrong, so nothing on screen is cleared; this is not the error card, because
@@ -623,7 +669,8 @@ function AskReel() {
           the previous answer) stays where it is instead of being replaced by an explanation. */}
       {status === "stopped" && (
         <div
-          className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center"
+          ref={settledRef}
+          className="fa-card p-4 flex flex-wrap items-center justify-center gap-3 text-center scroll-mt-20"
           data-testid="askreel-stopped"
         >
           <p className="fa-caption text-fa-frost-dim">{stoppedMessage}</p>
@@ -703,12 +750,25 @@ function AskReel() {
                 : "Previous answer — the last question never replaced it."}
             </p>
           )}
+          {/* …and the Stop's own seam (F6-06). The hold ends when the turn does, so this grid is no
+              longer "previous" and is no longer dimmed — it is the answer, whole, at full contrast,
+              with its tray and its footnote back. What it still owes the reader is WHICH question
+              it answers, because the one directly above it in the transcript is the one that was
+              abandoned. */}
+          {keptWholeAnswer && pageQuery && (
+            <p className="fa-caption text-fa-frost-dim" data-testid="askreel-kept-answer">
+              Still your answer to “{pageQuery}” — the question you stopped never replaced it.
+            </p>
+          )}
           <div
             className={`grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
             data-testid="semantic-results"
           >
             {visible.map((card) => (
               <ResultCard key={card.titleId} card={card} />
+            ))}
+            {Array.from({ length: pendingSlots }, (_, i) => (
+              <CardSkeleton key={`slot-${i}`} />
             ))}
           </div>
 
@@ -741,8 +801,11 @@ function AskReel() {
               account's own conditions, formatted to the one decimal the server's sentence uses:
               naming it turns "Reel held some back" into something the user can act on, because
               the number in it is one they chose and can change. */}
-          {heldBack > 0 && !streaming && (
-            <details className="border-t border-fa-frost/10 pt-5" data-testid="askreel-below-floor">
+          {heldBack > 0 && (
+            <details
+              className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+              data-testid="askreel-below-floor"
+            >
               <summary className="fa-body text-fa-frost-dim cursor-pointer marker:text-fa-frost/40 hover:text-fa-frost-bright">
                 {floorLabel
                   ? `Show the ${heldBack} under your ${floorLabel} bar`
@@ -804,7 +867,7 @@ function AskReel() {
           On a PAGED answer the server's sentence is about one turn and the grid is several, which
           is R1-03: "24 picks ranked for you, from 60 pulled" sat under 37 cards. `footnote` is
           what reconciles the two — see it for why neither sentence alone can be true here. */}
-      {footnoteText && showsFootnote(status, appending, settledCount) && (
+      {footnoteText && showsFootnote(status, appending, settledCount, settledAnswer) && (
         <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
       )}
 
@@ -871,6 +934,58 @@ function AskReel() {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/**
+ * One question the user asked, capped at six lines.
+ *
+ * F6-02's other half. The bubble has no maximum height, so a 1 000-character question — the length
+ * the server accepts and the history keeps — renders ~1 100 px tall and hides the entire answer
+ * below it. Six lines is enough to recognise a question you just asked; the rest is one tap away,
+ * and the toggle is offered only when there IS a rest, measured rather than inferred from the
+ * character count (the same 400 characters are four lines wide and eight narrow).
+ *
+ * The latch matters: expanding removes the clamp, so a re-measure would find no overflow and take
+ * the "Show less" away with it. Measured only while collapsed.
+ */
+function UserBubble({ text }: { text: string }) {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clampable, setClampable] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el || expanded) return;
+    setClampable(bubbleOverflows(el.scrollHeight, el.clientHeight));
+  }, [text, expanded]);
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <p
+        className="fa-body bg-fa-frost/15 text-fa-frost-bright rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%]"
+        data-testid="askreel-user-bubble"
+      >
+        <span className="sr-only">You said</span>
+        {/* The two classes are exclusive rather than combined: `line-clamp-6` sets
+            `display: -webkit-box`, so a `block` sitting beside it can win on stylesheet order and
+            silently un-clamp the bubble. */}
+        <span ref={textRef} className={expanded ? "block whitespace-pre-wrap" : "whitespace-pre-wrap line-clamp-6"}>
+          {text}
+        </span>
+      </p>
+      {clampable && (
+        <button
+          type="button"
+          data-testid="askreel-bubble-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+          className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/40 transition-colors"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }
@@ -949,6 +1064,23 @@ function ResultCard({ card }: { card: AskCard }) {
         <p className="fa-caption text-fa-frost/80 line-clamp-2" title={card.why}>{card.why}</p>
       )}
     </Link>
+  );
+}
+
+/**
+ * A card-shaped hole in the grid, at the size a card will fill.
+ *
+ * Poster, name and year — deliberately not the why-line, which arrives with the rerank and which a
+ * streaming card does not have either. `aria-hidden` because it says nothing: the live region and
+ * the banner's narration are what tell a screen-reader user the turn is working.
+ */
+function CardSkeleton() {
+  return (
+    <div aria-hidden data-testid="askreel-skeleton">
+      <div className="reel-poster reel-shimmer" />
+      <p className="mt-2 fa-body select-none">&nbsp;</p>
+      <p className="fa-caption select-none">&nbsp;</p>
+    </div>
   );
 }
 

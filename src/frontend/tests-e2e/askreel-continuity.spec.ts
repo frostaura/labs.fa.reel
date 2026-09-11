@@ -866,11 +866,19 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     const wayUnder = card("e5", "Way Under", { predictedRating: 4.9, blend: 0.3 });
     const over = card("f6", "Over Bar", { predictedRating: 6.4, blend: 0.6 });
     for (const c of [under, wayUnder, over]) await askPush(page, "candidate", c);
-    await expect(gridNames(page)).toHaveCount(6);
+
+    // The demotion happens as the cards arrive, not at the Stop (F4-08). The page's two sub-floor
+    // picks never enter the grid at all — before this they sat in it for as long as the turn ran,
+    // which for the measured turns was between 11.5 and 18.6 seconds. The three cards of the
+    // answer this page is EXTENDING are untouched: the server already floored and committed them,
+    // and the client's bar is bounded to the ids it has not ranked.
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
 
     await page.getByTestId("askreel-stop").click();
 
-    // Three above the bar from the first turn, plus the one that cleared it here.
+    // …and the Stop changes none of it: three above the bar from the first turn, plus the one that
+    // cleared it here.
     await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
     await expect(page.getByTestId("semantic-results").getByText("Under Bar")).toHaveCount(0);
     await expect(page.getByTestId("semantic-results").getByText("Way Under")).toHaveCount(0);
@@ -898,7 +906,10 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     await page.getByTestId("askreel-more").click();
     await waitForAsk(page, 2);
     await askPush(page, "candidate", card("g7", "Rounds Up", { predictedRating: 5.96, blend: 0.3 }));
+    // In the grid while the page streams, and still there after the Stop — the rounding rule has to
+    // hold at both moments now that the bar is applied as cards arrive.
     await expect(gridNames(page)).toHaveCount(4);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
 
     await page.getByTestId("askreel-stop").click();
 
@@ -1043,5 +1054,220 @@ test.describe("Ask Reel — continuity on a phone", () => {
     // The transcript and a way to bring the answer back are both still there.
     await expect(page.getByTestId("askreel-transcript")).toContainText("a tense heist");
     await expect(page.getByTestId("askreel-retry")).toBeVisible();
+  });
+});
+
+/**
+ * F6-01 — the thread switch that bound a running answer to the wrong question.
+ *
+ * Seen at 375: `+ New` was `disabled` while streaming and `Recent ▾` was not, so opening another
+ * thread mid-stream put THAT thread's question and reply above the old thread's progress banner and
+ * 34 of its cards, with no seam, no dim and no label. Fourteen seconds later the in-flight results
+ * landed *in the new thread* and replaced its answer; re-opening it from a clean context showed the
+ * damage was durable — turn count 2 → 3, ten foreign cards under the question, and the question that
+ * had actually been asked existing nowhere at all.
+ *
+ * Both halves are pinned here: the gesture is not offered while a turn runs, and a frame that
+ * arrives anyway changes nothing.
+ */
+test.describe("Ask Reel — a thread switch never adopts a running answer", () => {
+  /** The other thread, served whole — its own question, its own reply, its own single card. */
+  const OTHER_PAYLOAD = {
+    id: OTHER_CONVERSATION,
+    title: "a 90s romantic comedy",
+    lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+    turns: [
+      { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "One that fits.", kind: "ask", status: "Completed" },
+    ],
+    cards: [card("z9", "Zither Lane")],
+    reason: "1 pick ranked for you, from 12 pulled.",
+    removed: 0,
+    lastQuery: "a 90s romantic comedy",
+    mediaTypes: [],
+    shown: [],
+  };
+
+  test("Recent is inert while a turn streams, exactly as + New is", async ({ page }) => {
+    await boot(page);
+    await page.getByTestId("askreel-composer").fill("a heist with a great ensemble");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-1", sequence: 1 });
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+
+    // The measured asymmetry, as an assertion: `{newDisabled: true, recentDisabled: false}`.
+    await expect(page.getByTestId("askreel-banner")).toBeVisible();
+    await expect(page.getByTestId("askreel-new")).toBeDisabled();
+    await expect(page.getByTestId("askreel-recent")).toBeDisabled();
+    // Inert to a real tap, not merely styled as such — the menu must not open.
+    await page.getByTestId("askreel-recent").click({ force: true });
+    await expect(page.getByTestId("askreel-recent-menu")).toHaveCount(0);
+
+    // …and it comes back the moment the turn settles, or the control would be a one-way door.
+    await askPush(page, "done", { results: [ALPHA], reason: "1 pick ranked for you, from 9 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-recent")).toBeEnabled();
+  });
+
+  test("the switch, once the turn settles, leaves nothing of the old run behind", async ({ page }) => {
+    // The other side of the same gesture. `Recent ▾` is a one-way door if it never comes back, so
+    // the switch is taken the moment the turn is done — and the arriving thread must be whole, with
+    // no card, no reply and no footnote from the turn that just finished somewhere else.
+    //
+    // The reducer's own guard against a frame from an abandoned run is pinned in
+    // `useAskReelChat.test.ts` ("a stale stream's frames change nothing"); it cannot be driven from
+    // here, because React refuses to dispatch a click to an element whose props say `disabled` —
+    // which is the fix working.
+    await boot(page);
+    await mockJson(page, `**/api/search/conversations/${OTHER_CONVERSATION}`, OTHER_PAYLOAD);
+    await askAndAnswer(page);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByTestId("askreel-recent").click();
+    await page.getByTestId("askreel-recent-row").nth(1).getByTestId("askreel-recent-open").click();
+
+    await expect(page.getByTestId("askreel-transcript")).toContainText("a 90s romantic comedy");
+    await expect(gridNames(page)).toHaveText(["Zither Lane"]);
+    await expect(page.getByTestId("askreel-transcript")).not.toContainText("a tense heist");
+    await expect(page.getByTestId("askreel-footnote")).toContainText("1 pick ranked for you");
+    await expect(page.getByTestId("askreel-banner")).toHaveCount(0);
+    // No stream left open for a thread nobody is looking at.
+    expect(await page.evaluate(() => (window as unknown as { __ask: { count: () => number } }).__ask.count())).toBe(0);
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe(OTHER_CONVERSATION);
+  });
+});
+
+/**
+ * F6-02 — the page that never scrolled to the turn it was running.
+ *
+ * At 375 a 1 000-character question (the length the server accepts and the history keeps) renders a
+ * bubble ~1 100 px tall. `scrollY` stayed at 0 for the whole 19.4-second turn, so the viewport held
+ * nothing but the user's own words — no banner, no narration, no progress bar, no reply, no cards —
+ * and four frames captured at 400 ms, 1 s, 3 s and 8 s of the NEXT turn were pixel-identical for
+ * exactly the same reason. The only evidence anything was happening anywhere was the Send arrow
+ * greying out.
+ */
+test.describe("Ask Reel — the live turn is on screen", () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  /** The cap the history keeps, to the character. */
+  const LONG_QUESTION = `${"a slow-burn heist with a great ensemble and a twist I will not see coming, ".repeat(14)}please`.slice(0, 1000);
+
+  test("a 1000-character question does not hide the turn it started", async ({ page }) => {
+    await boot(page);
+    expect(LONG_QUESTION).toHaveLength(1000);
+
+    await page.getByTestId("askreel-composer").fill(LONG_QUESTION);
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-1", sequence: 1 });
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+
+    // The thing the finder could not see for nineteen seconds.
+    await expect(page.getByTestId("askreel-banner")).toBeInViewport();
+    await expect(page.getByTestId("askreel-narration")).toBeInViewport();
+
+    // …and the bubble is capped rather than 1 100 px tall, which is the half that makes the scroll
+    // survive a second long question further down the thread.
+    const bubble = page.getByTestId("askreel-user-bubble");
+    const clamped = (await bubble.boundingBox())!.height;
+    expect(clamped).toBeLessThan(300);
+
+    // The rest is one tap away, and the tap is offered only because there IS a rest.
+    await expect(page.getByTestId("askreel-bubble-toggle")).toHaveText("Show more");
+    await page.getByTestId("askreel-bubble-toggle").click();
+    expect((await bubble.boundingBox())!.height).toBeGreaterThan(clamped);
+    await expect(page.getByTestId("askreel-bubble-toggle")).toHaveText("Show less");
+    await page.getByTestId("askreel-bubble-toggle").click();
+    expect((await bubble.boundingBox())!.height).toBeCloseTo(clamped, 0);
+  });
+
+  test("an ordinary question gets no toggle, and Stop brings the kept answer back into view", async ({ page }) => {
+    // Fixture variation on the length: the clamp must be invisible on the questions people
+    // actually ask, or every bubble in the transcript grows a control.
+    await boot(page);
+    await askAndAnswer(page);
+    await expect(page.getByTestId("askreel-bubble-toggle")).toHaveCount(0);
+
+    // Now the other scroll: a new question, a Stop before anything arrives, and the answer the
+    // user was reading is below a transcript that already fills the screen.
+    await page.getByTestId("askreel-composer").fill(LONG_QUESTION);
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await expect(page.getByTestId("askreel-banner")).toBeInViewport();
+    await page.getByTestId("askreel-stop").click();
+
+    await expect(page.getByTestId("askreel-stopped")).toBeInViewport();
+    await expect(page.getByTestId("askreel-stopped")).toContainText("Stopped before any picks arrived");
+  });
+});
+
+/**
+ * F6-03 — Home, then browser Back, reported as a dead end.
+ *
+ * The finder measured `location.pathname === "/home"` after Back from a settled answer, and read it
+ * as the header's home link pointing at `/` and the `/` → `/home` redirect consuming the history
+ * entry. Pinned here at the width where the browser's own back gesture is the primary one, through
+ * BOTH ways out of /search: the mobile tab bar and the header mark.
+ */
+test.describe("Ask Reel — Back from Home returns to the answer", () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  for (const route of ["tab bar", "header mark"] as const) {
+    test(`Back after leaving via the ${route} lands on /search with the same cards`, async ({ page }) => {
+      // Entered the way a phone enters: the app root first, which is the redirect under suspicion,
+      // then /search. If that redirect pushed rather than replaced, Back from /home re-redirects
+      // forward and the answer is unreachable by the gesture entirely.
+      await boot(page, { resume: "stored", storedId: CONVERSATION });
+      await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+      if (route === "tab bar") {
+        await page.getByTestId("mobile-tabbar").getByRole("link", { name: "Home" }).click();
+      } else {
+        await page.getByLabel("Reel home").click();
+      }
+      await expect(page).toHaveURL(/\/home$/);
+      // Wait for /search to genuinely UNMOUNT. The URL changes synchronously on pushState, so a
+      // goBack issued straight after `toHaveURL` lands inside the same React batch and the route
+      // never unmounts — and `history.back()` is itself asynchronous, so reading `pathname`
+      // immediately after it can still report the page being left. Both traps are the reason the
+      // original report is asserted here rather than in a console probe.
+      await expect(page.getByTestId("askreel-composer")).toHaveCount(0);
+
+      await page.goBack();
+      await expect(page).toHaveURL(/\/search$/);
+      await expect(gridNames(page)).toHaveText(STORED_ORDER);
+      await expect(page.getByTestId("askreel-transcript")).toContainText("a tense heist");
+      await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+    });
+  }
+
+  test("the app root is replaced, not pushed, so Back is never a redirect loop", async ({ page }) => {
+    // The reported mechanism, isolated. `/` renders the landing page, which bounces a signed-in
+    // visitor onward — and if that bounce consumed a history entry of its own, Back from /home
+    // would land on `/` and be redirected straight forward again, which is what "Back is inert"
+    // means. Entered the way a returning phone enters: the root first, then the answer.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await page.addInitScript(() => localStorage.setItem("reel.hasSession", "1"));
+
+    await page.goto("/");
+    await expect(page).toHaveURL(/\/home$/);
+    await page.goto("/search");
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByLabel("Reel home").click();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("askreel-composer")).toHaveCount(0);
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    // One more step back: the entry before /search is the REPLACED root, so this reaches /home
+    // once and settles there rather than bouncing between `/` and `/home`.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/home$/);
   });
 });
