@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes, matchPath, useLocation, type Location } from "react-router-dom";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
+import RequireFounder from "./components/RequireFounder";
 import Landing from "./pages/Landing";
 import TraktCallback from "./pages/TraktCallback";
 import Onboarding from "./pages/Onboarding";
@@ -60,7 +61,14 @@ function AppRoutes() {
           <Route path="/rate" element={<RatePicker />} />
           <Route path="/blend" element={<Blend />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/lab" element={<Lab />} />
+          <Route
+            path="/lab"
+            element={
+              <RequireFounder>
+                <Lab />
+              </RequireFounder>
+            }
+          />
         </Route>
         <Route path="*" element={<Navigate to="/home" replace />} />
       </Routes>

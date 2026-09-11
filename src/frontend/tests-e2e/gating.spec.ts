@@ -41,6 +41,27 @@ test.describe("entitlement gating", () => {
     await expect(page.getByText(/paid feed unlocks every row/i)).toBeVisible();
   });
 
+  test("free tier typing /lab lands on home — the model lab is a founder instrument", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", { ...SESSION_FOUNDER, tier: "Free" });
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/feed/continue-watching", []);
+    await mockJson(page, "**/api/feed", {
+      generatedAt: new Date().toISOString(),
+      hero: [card(1), card(2), card(3)],
+      rows: [],
+      lockedRowCount: 3,
+    });
+
+    await page.goto("/lab");
+
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("hero-card")).toHaveCount(3);
+  });
+
   test("founder tier renders rows without the upsell", async ({ page }) => {
     await stubEventSource(page);
     await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
