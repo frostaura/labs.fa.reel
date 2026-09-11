@@ -1,6 +1,6 @@
 ---
 name: fa-reel-state
-description: "Works end to end for one account, NOT deployed, zero external users — the 5-user kill clock was never evaluable. The two clones on this Mac have DIVERGED; reconcile before any push. The model still loses to the popularity baseline."
+description: "Works end to end for one account, NOT deployed, zero external users — the 5-user kill clock was never evaluable. The iCloud clone is a diverged fork of a pushed main; force-push destroys product work. The model still loses to the baseline."
 type: state
 last_verified: 2026-09-11
 ---
@@ -13,23 +13,29 @@ exactly one account — the founder's. **It is not deployed and has zero externa
 users" gate and the kill criterion built on it have never been evaluable. Deploy is a founder action, not a build
 task: `questions.md`.
 
-**Repo topology — the two clones have DIVERGED from each other (both inspected against GitHub, 2026-09-11).** One
-private repo; `~/src/fa.reel` is the dev clone where code, builds and the dev loop live, and the copy under
-`FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**. Both sit directly on published `main`, but
-the dev clone holds unpushed **product** commits (the Ask Reel layout-shift fix and its merge) and the iCloud clone
-holds the unpushed context commit that split this memory store — **neither holds the other's**. **So "fully pushed" is
-false**, and a push from either leaves the other a diverged fork. Reconcile first, deliberately: the context commit
-*deletes* memory files the dev clone's commits *modify*, so the reconcile raises a modify/delete conflict whose easy
-answer (take the deletion) silently discards real gotcha and watch edits. Neither clone is behind `origin` and no
-product file is deleted in either unpushed range; the clones exchange commits by pulling from each other's local path,
-and the push stays the founder's call. **The iCloud clone's `origin/main` ref goes stale between fetches**, so an
-ahead-count taken there is phantom until you `git fetch`.
+**Repo topology — the iCloud clone is a DIVERGED FORK of a published `main` (both clones inspected against GitHub,
+2026-09-11).** One private repo. `~/src/fa.reel` is the dev clone where code, builds and the dev loop live, and it is
+**in sync with `origin/main`** — the founder pushed the Ask Reel CLS and live-search flake work from there. The copy
+under `FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**; it does not contain what was pushed,
+and it carries context commits published `main` has never seen. **A plain push from here is rejected, and `--force`
+would destroy pushed product work — never force.** Reconciling means `git fetch` here, then merging or rebasing the
+context commits onto published `main`, and it raises a **modify/delete conflict**: those commits *delete* the old
+single-file `memory/gotchas.md` and `memory/watch.md` that a pushed commit *modifies*, so the easy answer (take the
+deletion) silently discards real gotcha and watch edits made in the dev clone. **The reconcile is the founder's call** —
+do not fetch, merge, rebase or push on his behalf. **The iCloud clone's `origin/main` ref goes stale between fetches**,
+so an ahead-count taken there is phantom until you `git fetch`.
 
-**The test gate is real.** Backend xUnit and frontend vitest both ran green on `main` on 2026-09-11, at the commit
-the published branch now sits on — before the dev clone's unpushed commits. CI runs a separate integration job against
-a real `pgvector/pgvector:pg16` service with `REEL_REQUIRE_INTEGRATION=1`, so a suite that silently skips its database
-tests fails the build rather than reporting green. `dotnet format`, dual coverage ratchets, `npm audit` and
-`dotnet list package --vulnerable` are all build-failing gates.
+**The test gate is real, and on 2026-09-11 it went green end to end on published `main`** — Backend, Frontend,
+Security, Backend Integration and Frontend E2E all passed on the same run, the first all-green `main` since at least
+early August. CI runs its integration job against a real `pgvector/pgvector:pg16` service with
+`REEL_REQUIRE_INTEGRATION=1`, so a suite that silently skips its database tests fails the build rather than reporting
+green; `dotnet format`, dual coverage ratchets, `npm audit` and `dotnet list package --vulnerable` are all
+build-failing gates.
+
+**Multi-arch images are published; nothing is deployed.** That run built and pushed backend and frontend images to
+Docker Hub, and the Portainer redeploy step was **skipped, not failed**: the repo has no `DEPLOY_ENABLED` variable and
+no `PORTAINER_STACK_ID` secret (the other Portainer secrets exist). So the deploy is two settings and a founder
+decision away, not an engineering task — `questions.md`.
 
 ## Where it stands, by half
 
@@ -53,8 +59,8 @@ account with no `Active` model; the boot sweep enqueued the retrain as designed.
 **Delivered 2026-09-11, in two programmes — Ask Reel chat (server-owned turn record, continuity, negation handling,
 honest cost accounting) and the feed (two-row hero, taste-cluster retrieval over the whole rating history,
 cross-reference verdicts serving keep-only).** Each closed with a headed QA walk the founder followed, and every row
-those walks raised was fixed before they ended — but the fixers' hand-backs were never started, so the walks are
-closed and the surface is not (`decisions-*` for what was decided, `watch.md` for what is owed).
+those walks raised was fixed before they ended — but the follow-ups the QA walks raised are mostly still unstarted, so
+the walks are closed and the surface is not (`decisions-*` for what was decided, `watch.md` for what is owed).
 
 **The dev loop** runs from `~/src/fa.reel`: Vite on 5173, the API on 5054 under plain `dotnet run`, Postgres in
 Docker on 5433, gateway container deliberately stopped. Traps: `gotchas-build.md`.

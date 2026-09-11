@@ -14,8 +14,10 @@ to act before an answer existed, it took the conservative side and recorded the 
 ## Blocking everything else
 - **Deploy date.** The deploy was decided 2026-07-24 and has never been executed, and it is what makes the "≥5
   external users" criterion evaluable at all. The external-user count is zero and the 60-day clock has passed on
-  either anchor. Deploy and re-anchor at the first external serve, or apply the criterion as written and kill. The
-  deploy-file defect that used to block this is fixed.
+  either anchor. Deploy and re-anchor at the first external serve, or apply the criterion as written and kill.
+  **Nothing technical is left in the way:** CI is green on `main` on all five gates and publishes multi-arch images to
+  Docker Hub; the redeploy step is skipped only because the repo carries no `DEPLOY_ENABLED` variable and no
+  `PORTAINER_STACK_ID` secret (`state.md`). Setting those two is the deploy.
 
 ## Existential, and not ours to decide
 - **Trakt commercial terms.** An open milestone-5 gate that could end the product outright — Reel's identity, history

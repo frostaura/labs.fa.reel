@@ -1,6 +1,6 @@
 ---
 name: fa-reel-gotchas-tests
-description: "A bare WebApplicationFactory boots with live credentials and bills real money — ReelApiFactory exists for that. The integration fixture DROPS the database it is pointed at. One order-dependent flake is left, and it is upstream."
+description: "A bare WebApplicationFactory boots with live credentials and bills real money — ReelApiFactory exists for that. The integration fixture DROPS the database it is pointed at. A vector flake that looks order-dependent is a VACUUM problem."
 type: gotcha
 last_verified: 2026-09-11
 ---
@@ -21,14 +21,17 @@ last_verified: 2026-09-11
   copies cost is a watch item.
 - **CI's integration job filters on the `IntegrationTests` namespace.** A DB-backed test written anywhere else
   silently never runs in CI and reports green from the unit job.
-- **The `LiveSearchExpansionTests` semantic-arm pair is an ORDER flake**, roughly one full run in four, always green
-  alone and in a class-only run. The cause is the HNSW index shared across collections and it is upstream. **Classify
-  by re-running the class alone before touching anything** — this one has been misdiagnosed as a product regression
-  more than once.
-- **Embedding contamination lives inside the shared HNSW index, where eligibility isolation cannot reach it.** A
-  fixture's leftover vectors change which rows an unrelated account's search ever gets to filter, so a synthetic
-  genre, a reserved dimension block or a non-English language will not save you. Inherit the embedded-catalogue base
-  class; a source guard fails the build otherwise.
+- **A DELETE leaves the element in pgvector's HNSW graph until `VACUUM`, and `hnsw.iterative_scan` cannot reach past
+  it.** This is what the `LiveSearchExpansionTests` "semantic-arm order flake" actually was: dead entries left by
+  `EmbeddedCatalogTestBase.DisposeAsync` crowded the candidate window for the next class, so a test was green alone and
+  red in a full run. Fixed by `RepairSharedVectorIndexAsync` — `VACUUM "TitleEmbeddings"` — on every teardown;
+  `EnrichCatalogJobHandlerTests` and `CatalogFollowThroughTests` inherit the base for it, and `FilteredAnnRecallTests`
+  carries the regression test. **A vector-index flake that looks order-dependent is a VACUUM problem before it is a
+  product regression.**
+- **Never seed `TitleEmbeddings` without `EmbeddedCatalogTestBase`.** A fixture's leftover vectors change which rows an
+  unrelated account's search ever gets to filter, so a synthetic genre, a reserved dimension block or a non-English
+  language will not save you; eligibility isolation cannot reach inside the shared index. The source guard now matches
+  any mention of the table, so going around the base class fails the build.
 - **A day-granular fixture built from `DateTime.UtcNow` plus an offset fails deterministically inside the 23:00 UTC
   hour** — local 01:00–02:00 — and looks exactly like a timezone bug in the product. The product
   keys every day-granular thing on UTC correctly; pin fixture instants to fixed hours of one UTC date.

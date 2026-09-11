@@ -54,3 +54,5 @@ last_verified: 2026-09-11
 - **Negation is a design contract, not an implementation detail** — three parts hold it together and undoing any one
   of them quietly stops negations working. The contract and the reasoning behind each part:
   [`decisions-retrieval.md`](decisions-retrieval.md).
+
+_Layout-shift traps — what scores CLS on a results grid and what does not — are in [`gotchas-layout.md`](gotchas-layout.md)._

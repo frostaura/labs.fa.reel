@@ -35,9 +35,13 @@ last_verified: 2026-09-11
   hour, so build p95 is unattributed; `hnsw.ef_search` is still at its default while cluster pulls ask for hundreds.
 - **The 50-read human review bar for lens copy has not been met.** The audit endpoint exists, the reads have not
   happened, and the latest prompt version restarted the count. No prompt reaches anyone but the founder until it is.
-- **Ask Reel follow-ups handed back by the fixers, none started:** the "done" reason still has two shapes on the
-  lexical and filmography paths; the ranking-seed embedding is bought per turn; the residual layout shift is the
-  banner leaving flow; the conditions summary's "+N more" is inert on the feed.
+- **Of the follow-ups the QA walks raised, three are still unstarted:** the "done" reason still has two shapes on the
+  lexical and filmography paths; the ranking-seed embedding is bought per turn; the conditions summary's "+N more" is
+  inert on the feed. The fourth — the banner's residual layout shift — was fixed and pushed on 2026-09-11.
+- **Two layout shifts are left on `/search`, both outside the turn, both wanting a design call first.** Page load still
+  shifts as the conditions strip arrives and pushes the page down; a late `reranked` frame can grow a card by its
+  why-line and move every row under it. Reserving a strip whose height only the response knows, and fixing a uniform
+  two-line why-box on every card, are product calls — which is why neither was taken.
 - **Extraction-era pollution is still draining.** Tone and era on the oldest attribute rows are untrustworthy and
   gated off by a minimum trusted extractor version; watch the stale-extractor count reach zero before surfacing either
   field.
@@ -48,9 +52,8 @@ last_verified: 2026-09-11
 - **The QA walks' probe conversations are still in the live database**, and their ids were never written down: list
   them with `GET /api/search/conversations` and delete each through the UI or `DELETE /api/search/conversations/{id}`
   — never SQL, which leaves the turn record and the usage ledger disagreeing.
-- **A pile of throwaway `reel_test_*` databases sits on port 5433**, including the QA copy that ran a whole walk with
-  background jobs on and spent real provider calls. Drop them.
-- **One upstream test red is left** — the semantic-arm order flake (`gotchas-tests.md`).
+- **`reel_test_w9` is still sitting on port 5433** — the QA-walk copies have been dropped. Drop it too; a throwaway
+  copy with background jobs on spends real provider calls.
 - **Interleaving is off and stays off until it is worth three months** of comparison at this traffic.
 
 ## Standing
