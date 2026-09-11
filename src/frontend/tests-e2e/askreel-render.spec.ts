@@ -86,7 +86,12 @@ const RESUME_PAYLOAD = {
 
 async function boot(
   page: Page,
-  opts: { conversations?: unknown[]; server?: ReturnType<typeof conversationServer> } = {},
+  opts: {
+    conversations?: unknown[];
+    server?: ReturnType<typeof conversationServer>;
+    /** Overrides the account's saved conditions — what the conditions strip is rendered from. */
+    filters?: Record<string, unknown>;
+  } = {},
 ) {
   await stubEventSource(page);
   await stubAskReel(page);
@@ -95,7 +100,7 @@ async function boot(
     pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
-  await mockJson(page, "**/api/settings/filters", FILTERS);
+  await mockJson(page, "**/api/settings/filters", opts.filters ?? FILTERS);
   await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 });
   await mockJson(page, "**/api/feed/continue-watching", []);
   const server = opts.server;
@@ -464,6 +469,61 @@ test.describe("saving a card out of an answer", () => {
   });
 });
 
+/**
+ * F6-17 / F4-12. `/search` rendered the feed's conditions summary capped at six chips, and counted
+ * the rest as a bare `<span>` reading "+6 more" — `tabIndex: -1`, `role: null`, `cursor: auto`,
+ * 41 x 15 px, no handler. Half the account's standing exclusions were named as existing and were
+ * unreachable from the page they shape.
+ */
+test.describe("standing conditions on /search", () => {
+  /** Twelve conditions — twice the cap that produced the inert "+6 more". */
+  const MANY = {
+    excludeGenres: ["comedy", "documentary", "horror", "musical", "romance", "war", "western"],
+    includeGenres: ["thriller"],
+    excludeKeywords: ["anime"],
+    maturityCeiling: "R",
+    minPredictedRating: 6,
+    languages: ["en"],
+    minCrowdRating: 6.5,
+    minYear: 2000,
+    maxYear: null,
+  };
+
+  test("every condition is named, and the editor is one tap away", async ({ page }) => {
+    await boot(page, { filters: MANY });
+
+    const conditions = page.getByTestId("askreel-conditions");
+    await expect(conditions).toBeVisible();
+    // No counted overflow: a control that names conditions it will not show is the defect.
+    await expect(conditions).not.toContainText("more");
+    // Every excluded genre is on screen by name, including the seven the cap hid four of.
+    for (const genre of ["comedy", "documentary", "horror", "musical", "romance", "war", "western"]) {
+      await expect(conditions.getByText(`no ${genre}`, { exact: true })).toBeVisible();
+    }
+    await expect(conditions.getByText("no “anime”", { exact: true })).toBeVisible();
+
+    // …and they are changeable from here, through the same dialog the feed opens. Its SIZE is not
+    // asserted: `PickConditionsButton` is a foreign component (it measures 34 px, and is reported
+    // as such), and a test that fails on someone else's box is a test that gets deleted.
+    await page.getByTestId("open-conditions").tap();
+    await expect(page.getByTestId("conditions-editor")).toBeVisible();
+  });
+
+  test("an account with nothing set gets no strip at all", async ({ page }) => {
+    // Fixture variation, one field at a time: no saved conditions, so there is nothing to name and
+    // the page does not grow a row saying so. (`minPredictedRating: 0` is "no bar", not "a bar of
+    // nought" — the chip list is what decides whether this renders.)
+    await boot(page, {
+      filters: {
+        excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+        minPredictedRating: 0, languages: ["*"], minCrowdRating: null, minYear: null, maxYear: null,
+      },
+    });
+    await expect(page.getByTestId("askreel-composer")).toBeVisible();
+    await expect(page.getByTestId("askreel-conditions")).toHaveCount(0);
+  });
+});
+
 test.describe("touch targets", () => {
   /**
    * Every Ask Reel control this fixer owns, at the reference phone width. Foreign components
@@ -478,13 +538,19 @@ test.describe("touch targets", () => {
 
   test("the header, the composer and the presets all meet 44 x 44", async ({ page }) => {
     await boot(page);
-    for (const id of ["askreel-new", "askreel-recent", "askreel-preset", "askreel-send", "askreel-mic"]) {
+    // `askreel-composer` is in this list because the commit that added it was titled "every
+    // control on /search is a 44 px target" and left the composer at 37 — the one control on the
+    // page that every single turn goes through.
+    for (const id of ["askreel-new", "askreel-recent", "askreel-preset", "askreel-send", "askreel-mic", "askreel-composer"]) {
       await expectTarget(page, id);
     }
     // The delete control is the smallest of them and the only destructive one — F6-07 measured it
-    // at 26 x 26, eight pixels from the row that opens the thread.
+    // at 26 x 26, eight pixels from the row that opens the thread. The row's own open target was
+    // 36 px inside a 60 px row: the primary way into a thread, under the minimum its delete
+    // control already met.
     await page.getByTestId("askreel-recent").tap();
     await expectTarget(page, "askreel-recent-delete");
+    await expectTarget(page, "askreel-recent-open");
   });
 
   test("the answer's own controls meet 44 x 44 on a resumed thread", async ({ page }) => {

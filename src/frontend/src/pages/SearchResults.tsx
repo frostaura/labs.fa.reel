@@ -1,18 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, Mic, Plus, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
-import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import {
-  useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
+  api, useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
 } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
+import SearchConditions from "../components/search/SearchConditions";
 import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
@@ -22,10 +22,12 @@ import {
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  scrollTargetFor, skeletonCount,
+  pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
+  COMPOSER_MIN_PX, composerHeight, composerSends,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
+import type { ConversationPayload } from "../lib/useAskReelChat";
 
 /**
  * "Ask Reel" — a conversational discovery agent. The first turn comes from the search box (?q=);
@@ -105,8 +107,9 @@ function AskReel() {
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
-    pageQuery,
+    pageQuery, hasLocalTurn,
   } = useAskReelChat();
+  const storeDispatch = useDispatch();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
   // Reading it from the one source keeps the tray's number and the conditions summary from ever
@@ -154,14 +157,70 @@ function AskReel() {
   // rather than clearing its id, so the reload lands on the cold start instead of falling through
   // to `/conversations/latest` and resurrecting the thread the user had just left (SB-02).
   const resumeFrom = resumeTarget(threadId);
+  /**
+   * Whether this page is asking for a conversation at all — `+ New`, and a deleted current thread,
+   * both say no. Named once and read twice: RTK Query's `data` survives a skip (it is "the latest
+   * result this hook has seen", not "the result for this argument"), so an effect that reads it
+   * without re-checking the skip condition is reading the thread the page has just left. That put
+   * the transcript of a DELETED thread back on screen one render after `+ New` had cleared it.
+   */
+  const resumeSkipped = !shouldResume || resumeFrom === NO_RESUME;
   const { data: resumed, error: resumeError, refetch: refetchConversation } = useGetConversationQuery(resumeFrom, {
-    skip: !shouldResume || resumeFrom === NO_RESUME,
+    skip: resumeSkipped,
+    // R3-03's backstop. The invalidation below keeps the cache warm while the tab is here, but a
+    // turn answered in ANOTHER tab, or a fetch that never landed because the user navigated away
+    // mid-flight, leaves this entry describing a thread that has moved on — and the entry outlives
+    // the route by `keepUnusedDataFor`. A mount is the one moment the page has nothing of its own
+    // to lose by asking again.
+    refetchOnMountOrArgChange: true,
   });
+
+  /**
+   * R3-03. A completed `/ask` streams outside RTK Query, so nothing invalidated the conversation it
+   * had just changed: leave `/search` by the header mark or the tab bar and come back with Back,
+   * and the route re-mounted onto the payload from the LAST fetch — 21 + 21 cards on screen came
+   * back as 14 + 10, under the footnote of a turn two pages earlier, and it did not self-correct.
+   *
+   * Invalidated on every exit from a turn rather than on `done` alone — see {@link turnSettled} —
+   * and by the bare tag, which reaches the thread list and every `getConversation` entry whatever
+   * argument keyed it (a thread resumed through the deprecated `latest` alias is cached under that
+   * word, not under its id).
+   */
+  const settledFrom = useRef(status);
+  useEffect(() => {
+    const previous = settledFrom.current;
+    settledFrom.current = status;
+    if (turnSettled(previous, status)) storeDispatch(api.util.invalidateTags(["Conversation"]));
+  }, [status, storeDispatch]);
+
+  /**
+   * The payload this page has already decided about, and the argument it arrived under.
+   *
+   * Both halves are load-bearing. The ARGUMENT is what separates "the user asked for a different
+   * thread" from "the fetch we just invalidated came back" — an explicit switch re-keys the query.
+   * The PAYLOAD is what keeps the decision to one per payload: the effect below now depends on
+   * more than the data (it has to read `hasLocalTurn`), so an unrelated re-render would otherwise
+   * re-apply a payload still sitting in the cache — which resurrected the transcript of a thread
+   * the user had just deleted, one render after `+ New` had cleared it.
+   */
+  const decided = useRef<{ arg: string; payload: ConversationPayload } | null>(null);
 
   useEffect(() => {
     // Guarded on `seedStarted`, not cancelled on cleanup: once a search has begun, a late-arriving
     // stored conversation must never replace it.
-    if (!resumed || seedStarted.current) return;
+    if (!resumed || resumeSkipped || seedStarted.current) return;
+    // One decision per payload. Anything already ruled on is inert however many times an unrelated
+    // dependency re-fires this effect.
+    const seen = decided.current;
+    if (seen?.payload === resumed && seen.arg === resumeFrom) return;
+    // …and once a turn of THIS visit has produced what is on screen, the reducer is ahead of the
+    // payload. The invalidation above makes a refetch land while that answer is up, and applying it
+    // would replace a live twenty-one-card answer with the server's account of it — correct data,
+    // arriving as a state change nobody asked for, mid-read. A thread the user explicitly switched
+    // to is a different argument and is never blocked by this.
+    const reducerIsAhead = hasLocalTurn && seen?.arg === resumeFrom;
+    decided.current = { arg: resumeFrom, payload: resumed };
+    if (reducerIsAhead) return;
     resume(resumed);
     // The toggle and the grid have to agree about what produced what is under it — a restored
     // answer that ran under "Movies" beside a control reading "All" is a control that lies.
@@ -170,7 +229,7 @@ function AskReel() {
     // `filter` is deliberately NOT a dependency: this reconciles the toggle TO the payload once,
     // and re-running it on every toggle change would fight the user for control of it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumed, resume, setFilter]);
+  }, [resumed, resume, setFilter, hasLocalTurn, resumeFrom, resumeSkipped]);
 
   // A stored id the server does not have any more — deleted from another device, or past
   // retention. Forget it rather than asking for it on every visit from here.
@@ -355,6 +414,28 @@ function AskReel() {
     setShouldResume(false);
   };
 
+  /**
+   * The composer's height, measured rather than guessed: the same 400 characters are four lines
+   * wide and eight narrow, so a character count cannot decide this. Released to `auto` first
+   * because a textarea reports `scrollHeight` against its CURRENT height and would otherwise never
+   * shrink back after a deletion. A layout effect, so both writes land in one paint.
+   */
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    // An EMPTY textarea measures its placeholder, not its value: Chromium reports
+    // `scrollHeight: 92` for a resting composer because the placeholder sentence wraps to three
+    // lines at 375 px. Measured rather than assumed (the probe is in the spec), and the empty case
+    // is the one height this component already knows without asking.
+    if (!draft) {
+      el.style.height = `${COMPOSER_MIN_PX}px`;
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${composerHeight(el.scrollHeight)}px`;
+  }, [draft]);
+
   const submit = (text: string) => {
     if (!text.trim()) return;
     setDraft("");
@@ -363,7 +444,13 @@ function AskReel() {
 
   // The settled outcome, announced once the stream stops. Kept separate from the streaming
   // narration below so the two live regions never talk over each other.
-  const settledCount = visible.length + outsideVisible.length;
+  //
+  // Two counts, because they mean two different things and folding them together is F4-05. A
+  // **pick** is a card that matched everything the user asked for — the server's own `kept`, and
+  // what the accumulated footnote counts. The outside-request channel is on screen and is
+  // explicitly NOT that, so it is counted where it is named and nowhere else.
+  const pickCount = visible.length;
+  const settledCount = pickCount + outsideVisible.length;
   /**
    * A Stop that gave the previous answer back whole — nothing of the abandoned turn arrived, and
    * what is on screen is the finished answer it was going to replace (F6-06). Distinct from a Stop
@@ -372,7 +459,7 @@ function AskReel() {
   const keptWholeAnswer = stopped && arrived === 0 && settledAnswer && settledCount > 0;
   // Counted off the SCREEN, not off the wire: the line claims what a reader can count, and the
   // eligibility filter and the stopped-turn floor both remove cards the server did send.
-  const footnoteText = footnote(reason, settledCount, paged);
+  const footnoteText = footnote(reason, pickCount, paged);
   // What a stopped turn says, in one place: the sr-only live region and the on-screen card must
   // not be able to disagree, and the count is the turn's OWN — cards held over from the previous
   // answer are still on screen and are explicitly not what arrived before the user stopped.
@@ -393,10 +480,14 @@ function AskReel() {
         : status === "stopped"
           ? stoppedMessage
           : status === "done"
-          ? settledCount === 0
-            ? "No matches for that one."
-            : `${settledCount} ${plural(settledCount, "pick")} ready.`
-          : "";
+            ? pickSummary(pickCount, outsideVisible.length)
+            // F6-15. Silent on every resumed landing — cold open, thread switch, hard reload —
+            // while a seam, a grid, a tray, a footnote and a conflict notice were all on screen.
+            // The one state where the most appears without the user doing anything was the one
+            // state this region said nothing about.
+            : status === "resumed"
+              ? resumeAnnouncement(pickCount, outsideVisible.length)
+              : "";
 
   return (
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise
@@ -440,11 +531,16 @@ function AskReel() {
             />
           </div>
         </div>
-        {/* The same summary the feed carries, for the same reason: every standing condition
+        {/* The same conditions the feed carries, for the same reason: every standing condition
             applies to search too, and a thread that quietly obeys a "no documentary" saved on
             another screen is a thread the user cannot reason about. The browse toggle rides along
-            and stays dismissible from here. */}
-        <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={changeFilter} />
+            and stays dismissible from here.
+
+            `SearchConditions` and not the feed's summary — F6-17: the capped version named six
+            conditions and counted the rest as an inert "+6 more" span, so half the account's
+            exclusions were named as existing and unreachable from the page they shape. Here they
+            are all chips, and the editor is one tap away. */}
+        <SearchConditions className="mt-2" browse={filter} onBrowseChange={changeFilter} />
       </div>
 
       {/* Always mounted so it is a live region by the time it has something to say. Announces the
@@ -470,8 +566,15 @@ function AskReel() {
                   {turn.text}
                   {/* The server rewrote this sentence before sending it, and says so on the frame.
                       Marking the bubble is the cheap half of the honesty: a reader scanning a
-                      thread can see which answers were constrained without re-reading them. */}
-                  {turn.conflict && (
+                      thread can see which answers were constrained without re-reading them.
+
+                      …unless the sentence already says it. F4-06: the server's rewrite ENDS in the
+                      clause the pill carries, so the bubble read "— under your conditions that
+                      means no comedy and titles from 2000 on.under your conditions" — the
+                      annotation repeating what it annotates, with no space between them. One of
+                      the two has to go, and the sentence is the one that says something. See
+                      {@link showsConflictPill} for why the pill survives at all. */}
+                  {turn.conflict && showsConflictPill(turn.text) && (
                     <span
                       data-testid="askreel-reply-conflict"
                       className="fa-caption ml-2 inline-flex items-center rounded-full border border-fa-warning/40 px-2 py-0.5 align-middle text-fa-warning"
@@ -547,13 +650,21 @@ function AskReel() {
               sitting next to a grid of six and reading "2 picks are gone" invited exactly one
               reading: count the grid, find six, and conclude two of the eight it should hold are
               missing. Two may have gone from under the fence. Naming the answer rather than the
-              grid is the whole of the fix; the cause is unchanged and is the same for both. */}
+              grid is the whole of the fix; the cause is unchanged and is the same for both.
+
+              …and the cause is stated as the whole set (F4-10). The contract's drop set is "rated,
+              watched, saved, dropped, marked not-interested" and this sentence named three of the
+              five, unconditionally — so a card dropped because the user marked it NOT INTERESTED,
+              the one destructive-feeling quick action on every card, was described back to them as
+              something they had watched, rated or saved. "Dismissed" is the house word for the
+              other two (`State.removed` and `DoneData.removed` both use it) and is the smallest
+              wording that cannot be wrong. */}
           {removed > 0 && (
             <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-removed">
               {/* `’` and not `&apos;`: every other sentence on this page uses the typographic
                   apostrophe, and the escape rendered a straight quote in the middle of a paragraph
                   whose neighbours are curly. */}
-              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched, rated or saved {removed === 1 ? "it" : "them"}.
+              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since rated, watched, saved or dismissed {removed === 1 ? "it" : "them"}.
             </p>
           )}
         </div>
@@ -961,14 +1072,34 @@ function AskReel() {
         onSubmit={(e) => { e.preventDefault(); submit(draft); }}
         className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0 inset-x-0 z-30 border-t border-fa-frost/10 bg-background/95 backdrop-blur px-4 py-3"
       >
-        <div className="max-w-3xl mx-auto flex items-center gap-2">
-          <input
+        {/* `items-end` so the mic and Send stay on the composer's last line as it grows, rather
+            than drifting to the middle of a four-line field. */}
+        <div className="max-w-3xl mx-auto flex items-end gap-2">
+          {/* F6-18 + the 44 px audit. A single-line `<input>` 37 px tall: under the touch minimum
+              at every width, and about 36 characters wide on a phone for a question the server
+              takes up to 1 000 of — a 1 000-character one measured `scrollWidth 6101` in it. The
+              bubble has been readable back since F6-02; the field it is typed into was not.
+
+              A textarea wraps, grows to four lines and then scrolls (see `composerHeight`), and it
+              is the only shape in which Enter-sends / Shift+Enter-newline is a real distinction:
+              as an `<input>` Shift+Enter "submitted" because there was no second line to make and
+              the form's default ran (F3-12). `resize-none` because the grip would fight the
+              measured height, and the height is set from content on every keystroke. */}
+          <textarea
+            ref={composerRef}
             data-testid="askreel-composer"
+            rows={1}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (!composerSends(e.key, e.shiftKey, e.nativeEvent.isComposing)) return;
+              e.preventDefault();
+              submit(draft);
+            }}
             aria-label="Ask Reel"
             placeholder="Ask for more, or refine — “something funnier”, “more like the second one”…"
-            className="flex-1 rounded-full bg-fa-frost/10 px-4 py-2 fa-body text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
+            style={{ height: COMPOSER_MIN_PX }}
+            className="flex-1 min-h-11 resize-none overflow-y-auto rounded-3xl bg-fa-frost/10 px-4 py-2.5 fa-body leading-6 text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
           />
           {speech.supported && (
             <button

@@ -338,6 +338,73 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
   });
 
+  test("Show me more after a Stop names the turn it extends, not just the question", async ({ page }) => {
+    // R3-02, the client half. The fix above made the page send the ANSWERED question — correct for
+    // the user's intent, and the server then read `kind` off the conversation's last USER turn,
+    // which the Stop had just made "something tense set at sea". So it wrote a second `ask`: the
+    // client rendered an append, the server stored a new answer, and on the next reload 42 of the
+    // 66 cards on screen were gone, the transcript carried a question nobody typed, and the stopped
+    // turn lost its own explanation.
+    //
+    // `pageOf` names the row instead of leaving it to be inferred. The two halves travel together —
+    // the question the grid answers, and the turn that grid IS.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+
+    await page.getByTestId("askreel-composer").fill("a 90s romantic comedy");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: "1f2e3d4c-0000-4000-8000-000000000001", turnId: "assistant-turn-1", sequence: 1 });
+    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+
+    // The follow-up opens a turn of its own — and it is that turn's id the page must NOT send.
+    await page.getByTestId("askreel-composer").fill("something tense set at sea");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "conversation", { id: "1f2e3d4c-0000-4000-8000-000000000001", turnId: "assistant-turn-2", sequence: 3 });
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await page.getByTestId("askreel-stop").click();
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 3);
+    const paged = (await askRequests(page)) as Record<string, unknown>[];
+    expect(paged[2].query).toBe("a 90s romantic comedy");
+    expect(paged[2].pageOf).toBe("assistant-turn-1");
+    // The two ordinary turns carry no such field: R3 measured every body as exactly four keys, and
+    // an `ask` that claimed to extend something would be the same disagreement in reverse.
+    expect(Object.keys(paged[0])).not.toContain("pageOf");
+    expect(Object.keys(paged[1])).not.toContain("pageOf");
+  });
+
+  test("a page of a page still extends the answer the whole grid belongs to", async ({ page }) => {
+    // Fixture variation on the test above: no Stop, two pages instead of one. The second page must
+    // name the ASK's turn — the row the question was asked in — rather than the first page's, so
+    // `pageOf` and `query` keep pointing at the same turn however many pages are stacked on it.
+    await bootSearch(page, FILTERS_WITH_FLOOR);
+
+    await page.getByTestId("askreel-composer").fill("a 90s romantic comedy");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: "1f2e3d4c-0000-4000-8000-000000000001", turnId: "assistant-turn-1", sequence: 1 });
+    await askPush(page, "done", { results: [ALPHA, BORDER], reason: "2 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await askPush(page, "conversation", { id: "1f2e3d4c-0000-4000-8000-000000000001", turnId: "assistant-turn-2", sequence: 2 });
+    await askPush(page, "done", { results: [CEDAR], reason: "1 more from the same angle.", kept: 1 });
+    await askEnd(page);
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 3);
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    expect(requests[1].pageOf).toBe("assistant-turn-1");
+    expect(requests[2].pageOf).toBe("assistant-turn-1");
+    expect(requests[2].query).toBe("a 90s romantic comedy");
+  });
+
   test("Ask again after a Stop replays the question that was stopped, not the one on screen", async ({ page }) => {
     // The other half of the same pair, and the reason `lastQuery` is deliberately NOT restored by
     // the Stop: the two controls on this screen replay two different questions, and a single field
@@ -431,7 +498,16 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
       text: "Here are some light picks — under your conditions that means no comedy and anime.",
       conflict: true,
     });
-    await expect(page.getByTestId("askreel-reply-conflict")).toHaveText("under your conditions");
+    // F4-06's first half. The server's rewrite ENDS in the clause the pill carries, so rendering
+    // both printed "…no comedy and anime.under your conditions" — the annotation repeating the
+    // sentence it annotates, with no space between them. The sentence keeps it; the pill stands
+    // down. What is left is one statement, read once.
+    await expect(page.getByTestId("askreel-reply")).toContainText("under your conditions that means no comedy and anime.");
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
+    const clauses = await page.getByTestId("askreel-reply").evaluate(
+      (el) => (el.textContent ?? "").match(/under your conditions/gi)?.length ?? 0,
+    );
+    expect(clauses).toBe(1);
 
     // `excludedGenres` and `excludedKeywords` together: the keyword half is the one a turn asking
     // for an avoid-keyword had no way to name at all, since no genre collides.
@@ -463,7 +539,59 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await askEnd(page);
     // It survives the answer it annotates — the collision did not stop being true.
     await expect(notice).toBeVisible();
-    await expect(page.getByTestId("askreel-reply-conflict")).toBeVisible();
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
+  });
+
+  test("the accumulated count is picks, and the outside channel is counted where it is named", async ({ page }) => {
+    // F4-05. A paged answer carrying an outside-request channel read "12 picks so far · last page:
+    // 3 picks matched everything you asked · 3 closest-but-outside shown separately" over 9 picks
+    // and 3 outside cards — the 12 folding in the very cards the clause beside it had just called
+    // not-matching, in the same sentence.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a tense thriller, no horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER, XCLUDED],
+      reason: "2 picks matched everything you asked · 1 closest-but-outside shown separately",
+      kept: 2,
+    });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-outside")).toBeVisible();
+    // Un-paged: the server's own sentence, verbatim, with no accumulated prefix to get wrong.
+    await expect(page.getByTestId("askreel-status"))
+      .toHaveText("2 picks ready. 1 closest-but-outside shown separately.");
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await askPush(page, "done", { results: [CEDAR], reason: "1 pick matched everything you asked", kept: 1 });
+    await askEnd(page);
+
+    // Three picks on screen and one outside card. Four is the number that was printed.
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks so far · last page: 1 pick matched everything you asked");
+    await expect(page.getByTestId("askreel-status"))
+      .toHaveText("3 picks ready. 1 closest-but-outside shown separately.");
+  });
+
+  test("a reply qualified without saying so still gets the pill", async ({ page }) => {
+    // Fixture variation on one field of the test above: the same `conflict: true` over a reply
+    // that does NOT carry the clause — an older server, and a row stored before the rewrite
+    // existed. Dropping the pill outright would leave those bubbles unmarked, which is the state
+    // F4-06's other half was about; the pill is scanned out, not deleted.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a funny anime");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "assistant-message", { text: "I can’t recommend a funny anime.", conflict: true });
+
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveText("under your conditions");
+    const clauses = await page.getByTestId("askreel-reply").evaluate(
+      (el) => (el.textContent ?? "").match(/under your conditions/gi)?.length ?? 0,
+    );
+    expect(clauses).toBe(1);
   });
 
   test("an unqualified reply carries no tag, and a message-only conflict names no terms", async ({ page }) => {

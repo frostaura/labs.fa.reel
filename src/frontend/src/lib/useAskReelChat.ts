@@ -64,8 +64,14 @@ export function askRequest(
   clientTurnId: string,
   conversationId: string | null,
   mediaTypes: string[],
+  pageOf?: string | null,
 ): AskReelRequest {
-  return { query, clientTurnId, conversationId, mediaTypes };
+  // Added rather than always present: R3 measured every body as exactly these four keys, and a
+  // `pageOf: null` on a fresh ask would be a fifth field on every turn claiming to extend nothing.
+  // The field is the page's, and only when the client can actually name the turn.
+  return pageOf
+    ? { query, clientTurnId, conversationId, mediaTypes, pageOf }
+    : { query, clientTurnId, conversationId, mediaTypes };
 }
 
 /**
@@ -482,11 +488,58 @@ export function pageIsExhausted(data: Pick<DoneData, "results" | "kept">): boole
  *
  * A count of zero falls back to the sentence alone: "0 picks so far" is a claim about a screen
  * with no grid on it, and the branch that renders this only fires when there are cards anyway.
+ *
+ * The count is PICKS — see {@link pickSummary}. It folded in the outside-request channel until
+ * F4-05, so the accumulated line claimed as matching the very cards the server's own sentence,
+ * forty pixels to its right, had just called closest-but-outside.
  */
-export function footnote(reason: string | null, shownCount: number, paged: boolean): string | null {
+export function footnote(reason: string | null, pickCount: number, paged: boolean): string | null {
   if (!reason) return null;
-  if (!paged || shownCount <= 0) return reason;
-  return `${shownCount} ${plural(shownCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+  if (!paged || pickCount <= 0) return reason;
+  return `${pickCount} ${plural(pickCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+}
+
+/**
+ * What the settled live region announces, and the vocabulary the footnote counts in.
+ *
+ * F4-05. "N picks so far" folded in the outside-request cards — the ones the sentence beside it has
+ * just called not-matching. Turn 10 read
+ *
+ *   12 picks so far · last page: 3 picks matched everything you asked ·
+ *   3 closest-but-outside shown separately · 6 under your 6.0 bar
+ *
+ * over 9 picks and 3 outside cards: the 12 is 9 + 3, in the same line as "3 picks matched
+ * everything you asked". A **pick** is a card that matched, which is the server's own `kept`; a
+ * closest-but-outside card is shown precisely because it did not, and is counted where it is named.
+ *
+ * Zero picks and zero outside is the honest empty answer. Zero picks WITH an outside channel is
+ * not — "No matches" over three cards on screen is the same conflation in reverse.
+ */
+export function pickSummary(pickCount: number, outsideCount: number): string {
+  const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
+  if (pickCount === 0 && outsideCount === 0) return "No matches for that one.";
+  if (pickCount === 0) return `No picks matched everything you asked.${outside}`;
+  return `${pickCount} ${plural(pickCount, "pick")} ready.${outside}`;
+}
+
+/**
+ * What the live region says when a thread is RESTORED rather than answered. F6-15.
+ *
+ * `askreel-status` was the empty string on every resumed landing — cold open, thread switch, hard
+ * reload, second tab — while a seam, a grid, a tray, a footnote, three refine chips and a conflict
+ * notice were all on screen. The same region is correct on a completed turn ("14 picks ready.") and
+ * after a Stop, so a screen-reader user was told about every state of this page except the one
+ * where the most appeared without them doing anything.
+ *
+ * It says what the seam says, because the seam IS the sighted version of this: "picked up where you
+ * left off", and then how much came back. A thread with nothing stored says so rather than
+ * announcing a silent zero — that is the transcript-only state, and it is a fact about the thread
+ * rather than an empty answer.
+ */
+export function resumeAnnouncement(pickCount: number, outsideCount: number): string {
+  if (pickCount === 0 && outsideCount === 0) return "Picked up where you left off · no saved picks.";
+  const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
+  return `Picked up where you left off · ${pickCount} ${plural(pickCount, "pick")}.${outside}`;
 }
 
 /**
@@ -742,14 +795,33 @@ export function wasPaged(rows: ConversationPayload["turns"]): boolean {
  * completed assistant `ask` row, and the nearest user row above it.
  */
 export function answeredQuestion(rows: ConversationPayload["turns"]): string {
-  const answer = rows.reduce(
-    (found, t, i) => (t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" ? i : found),
-    -1,
-  );
+  const answer = answeredTurnIndex(rows);
   for (let i = answer - 1; i >= 0; i--) {
     if (rows[i].role === "user") return rows[i].text;
   }
   return "";
+}
+
+/** Where the last completed assistant `ask` row sits, or -1. The row a resumed grid belongs to. */
+function answeredTurnIndex(rows: ConversationPayload["turns"]): number {
+  return rows.reduce(
+    (found, t, i) => (t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" ? i : found),
+    -1,
+  );
+}
+
+/**
+ * The id of the turn the restored grid belongs to — what a page of it must name as `pageOf`.
+ *
+ * Exactly the row {@link answeredQuestion} reads the question off, so the two halves of a page
+ * request can never name different turns: the query is that row's question and this is that row's
+ * id. Null where the payload carries no ids (an older server), which is why `pageOf` is optional —
+ * the server then falls back to comparing the query, which is right on every screen except the one
+ * R3-02 found.
+ */
+export function answeredTurnId(rows: ConversationPayload["turns"]): string | null {
+  const row = rows[answeredTurnIndex(rows)];
+  return row ? row.id ?? row.turnId ?? null : null;
 }
 
 /**
@@ -777,6 +849,52 @@ export function failedTurnMessage(failureCode: string | null): string {
   return "That one didn’t finish.";
 }
 
+/**
+ * The composer's floor and ceiling in CSS pixels.
+ *
+ * F6-18 + the 44 px audit. The composer was a single-line `<input>` **37 px** tall: under the touch
+ * minimum at every width, and — at 239 px wide on a phone — about 36 characters of a question the
+ * server accepts up to 1 000 of. A 1 000-character question measured `scrollWidth 6101` in it. The
+ * *bubble* has been readable back since F6-02; the field the question is typed into was not, before
+ * it was sent.
+ *
+ * 44 is the target minimum, so it is also the resting height. The ceiling is four lines of the
+ * body face plus its vertical padding: enough to read back a paragraph-length question, and short
+ * enough that a growing composer never eats the answer it is asking about. Past it the field
+ * scrolls rather than growing.
+ */
+export const COMPOSER_MIN_PX = 44;
+export const COMPOSER_MAX_PX = 116;
+
+/**
+ * How tall the composer should be for content of `scrollHeight` — clamped, and total.
+ *
+ * A textarea reports `scrollHeight` for its content, but only once its own height has been released
+ * (the caller sets `height: auto` first), and it never reports less than one line — so the clamp
+ * does both ends. Pure, so the arithmetic is testable where the element is not: vitest here runs in
+ * node with no renderer.
+ */
+export function composerHeight(scrollHeight: number): number {
+  if (!Number.isFinite(scrollHeight)) return COMPOSER_MIN_PX;
+  return Math.min(COMPOSER_MAX_PX, Math.max(COMPOSER_MIN_PX, Math.ceil(scrollHeight)));
+}
+
+/**
+ * Does this keystroke send the question, or break the line?
+ *
+ * A multi-line composer has to answer that explicitly — an `<input>` answered it by having no
+ * second line at all, which is why Shift+Enter "submitted" (F3-12): it never did anything, and the
+ * form's default submit ran. Enter sends because that is the gesture the whole surface is built
+ * around; Shift+Enter is the newline, which is the only reason the field can grow.
+ *
+ * `composing` is the IME guard and is not optional: on a Japanese, Chinese or Korean keyboard the
+ * Enter that CONFIRMS a candidate raises `keydown` with `isComposing` true, and sending there
+ * submits a half-typed word the user was still choosing.
+ */
+export function composerSends(key: string, shiftKey: boolean, composing: boolean): boolean {
+  return key === "Enter" && !shiftKey && !composing;
+}
+
 /** How often a still-running turn is re-checked, and how long that is worth doing for. */
 export const PENDING_TURN_POLL_MS = 5_000;
 export const PENDING_TURN_BUDGET_MS = 60_000;
@@ -802,6 +920,39 @@ export function excludedTerms(genres: string[] | undefined, keywords: string[] |
     out.push(term);
   }
   return out;
+}
+
+/**
+ * The clause the server writes into a reply it has qualified — and the whole reason the pill is
+ * conditional.
+ *
+ * `AskReelStandingFilters` rewrites the model's sentence as "… — under your conditions that means
+ * no comedy and titles from 2000 on." and sets `conflict` on the same frame. The pill renders off
+ * that flag, so the bubble read, verbatim:
+ *
+ *   … under your conditions that means no comedy and titles from 2000 on.**under your conditions**
+ *
+ * — the annotation repeating the sentence it annotates, with no space between them.
+ */
+const CONFLICT_CLAUSE = /under your conditions/i;
+
+/**
+ * Should the qualified-reply pill render on THIS bubble? F4-06's first half.
+ *
+ * The flag says the server rewrote the sentence; it does not say what the rewrite looks like. When
+ * the sentence already carries the clause, the pill is a second copy of it and the reader gets the
+ * same three words twice in a row — so the sentence keeps it and the pill stands down. The pill
+ * survives for the case it was actually useful in: a reply that is marked as qualified without
+ * saying so in its own words, which is what an older server and a stored row from before the
+ * rewrite both look like. Scanning the reply rather than dropping the pill outright is what keeps
+ * THAT bubble marked.
+ *
+ * Case-insensitive and position-free on purpose: the clause is mid-sentence today ("— under your
+ * conditions that means …") and was sentence-final before, and a rule that only recognised one of
+ * those would put the duplicate back the next time the copy moves.
+ */
+export function showsConflictPill(text: string): boolean {
+  return !CONFLICT_CLAUSE.test(text);
 }
 
 /** "comedy" · "comedy and anime" · "comedy, anime and musical". A list a person can read. */
@@ -844,6 +995,27 @@ export function canPage(
   // `settled === 0` against a non-zero grid, so it is still refused. R1-04 was not "a stopped state
   // offered paging"; it was paging sending the question that had never been answered.
   return status === "stopped" && settled === cardCount;
+}
+
+/**
+ * Did a turn just finish — in any of the ways a turn can finish?
+ *
+ * R3-03. A completed `/ask` streams outside RTK Query and so invalidated nothing: `getConversation`
+ * provides `{type:"Conversation", id}` and only `deleteConversation` ever invalidated it, so every
+ * client-side remount of `/search` re-rendered the payload from the last fetch. Page an answer to
+ * 21 + 21, press Home, press Back, and 14 + 10 came back — the thread as it was when the page last
+ * asked the server, under the footnote of a turn two pages ago. A hard reload restored all 42,
+ * which is what pinned it to the client rather than to the record.
+ *
+ * Every exit counts, not just `done`: a Stop and a failure both write a row (`Failed`, with its
+ * code), and a `page` that completes changes what the thread's newest answer is. Each of the three
+ * leaves the cached payload describing a conversation that has moved on.
+ *
+ * `blocked` is in as well — a 409 means another turn is writing this conversation right now, so the
+ * cached copy is if anything staler than after a turn of this tab's own.
+ */
+export function turnSettled(previous: ChatStatus, next: ChatStatus): boolean {
+  return previous === "streaming" && next !== "streaming";
 }
 
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
@@ -976,6 +1148,22 @@ interface State {
    * cards as its page one.
    */
   pageQuery: string;
+  /**
+   * The id of the assistant turn the GRID is, which is what a page of it names as `pageOf`. Set
+   * from the `conversation` frame of the turn that produced the answer, or from the resumed
+   * transcript; null until one arrives, and on a server that sends no turn id at all.
+   *
+   * It moves with {@link State.pageQuery} and for the same reason — the two are the question and
+   * the row it was asked in, and a request carrying one without the other is R3-02 from the other
+   * side.
+   */
+  pageTurnId: string | null;
+  /**
+   * The turn the stream in flight is writing, as its own `conversation` frame named it. Only a
+   * landing place: it becomes {@link State.pageTurnId} at `done`, because a turn that never
+   * completed is not an answer anything can be a page of.
+   */
+  activeTurnId: string | null;
 }
 
 export type ChatAction =
@@ -1054,6 +1242,7 @@ export const initialChatState: State = {
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
+  pageTurnId: null, activeTurnId: null,
 };
 
 /**
@@ -1156,6 +1345,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
             appending: false, lastQuery: action.message,
+            // Whatever turn was named last belongs to the answer BEFORE this one; this turn's own
+            // id arrives on its `conversation` frame, and until it does there is none to adopt.
+            activeTurnId: null,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
             conflict: null, conflictTerms: [], errorReason: null,
@@ -1187,6 +1379,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       return {
         ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
         settled: state.order.length, resumedTail: null, answeredQuery: "", stream: tag?.id ?? 0,
+        // `pageTurnId` is deliberately carried — it names the answer this page extends, which is
+        // the whole point of the request about to go out. Only the in-flight handle resets.
+        activeTurnId: null,
       };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
@@ -1197,7 +1392,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
-        appending: false, errorReason: null,
+        appending: false, errorReason: null, activeTurnId: null,
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
         ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
@@ -1217,7 +1412,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         order: state.holdingPrevious ? state.order : streamOrder(state.order, state.byId, state.settled),
       };
     case "conversation":
-      return { ...state, conversationId: action.data.id };
+      // The turn id is remembered as well as the conversation's: it is the handle a later "Show me
+      // more" puts on the wire as `pageOf` (R3-02). Held aside rather than adopted, because the
+      // frame arrives BEFORE the turn has produced anything — see {@link State.activeTurnId}.
+      return { ...state, conversationId: action.data.id, activeTurnId: action.data.turnId ?? null };
     case "resume": {
       // NOT `done`: see the Status doc-comment. `lastQuery` comes back with the transcript so the
       // media toggle and the retry have something to replay — without it, a resumed thread's chips
@@ -1267,6 +1465,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         // it replays. Same source as `lastQuery` on an ordinary resume; they part company only
         // after a Stop.
         pageQuery: p.lastQuery ?? lastUserQuery(turns),
+        // …and the turn that grid IS, read off the same transcript by the same rule the server
+        // replays by, so a page of a resumed answer names the row it extends rather than leaving
+        // the server to infer it from a question the thread may have moved past (R3-02).
+        pageTurnId: answeredTurnId(p.turns),
         shown: p.shown ?? [],
         byId,
         // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
@@ -1400,6 +1602,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The grid now answers THIS question, so that is what a page of it must replay. A page
         // leaves it alone: it extends the answer it found, it does not become it.
         pageQuery: state.appending ? state.pageQuery : state.lastQuery,
+        // …and the row that question was asked in, on exactly the same terms. Together they are
+        // the whole of what a page request says about what it extends (R3-02).
+        pageTurnId: state.appending ? state.pageTurnId : state.activeTurnId,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
@@ -1539,7 +1744,13 @@ export function useAskReelChat() {
     }
   }, []);
 
-  const run = useCallback((msg: string, fresh: boolean, kind: "turn" | "more" | "reask", turnId?: string) => {
+  const run = useCallback((
+    msg: string,
+    fresh: boolean,
+    kind: "turn" | "more" | "reask",
+    turnId?: string,
+    pageOf?: string | null,
+  ) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1578,7 +1789,7 @@ export function useAskReelChat() {
           : { type: "userTurn", message: msg, fresh, stream },
     );
 
-    streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current), (ev) => {
+    streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current, pageOf), (ev) => {
       armWatchdog();
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data, stream }); break;
@@ -1646,7 +1857,12 @@ export function useAskReelChat() {
     // are two different questions, and the one this page must replay is the one the grid answers.
     const query = s.pageQuery || s.lastQuery;
     if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length, s.settled) || !query) return;
-    run(query, false, "more");
+    // …and `pageTurnId` names the row that question was asked in, so the server extends THAT turn
+    // rather than deriving `kind` from whatever was said last. Both halves or neither: after a
+    // Stop the question the grid answers is no longer the conversation's last user turn, and a
+    // page sent without the id was recorded as a second ask (R3-02) — the transcript grew a
+    // question nobody typed and the next reload replayed one turn's cards instead of two.
+    run(query, false, "more", undefined, s.pageTurnId);
   }, [run]);
 
   /**
@@ -1878,5 +2094,18 @@ export function useAskReelChat() {
      * by the seam alongside {@link ResumedTail}; empty on an ordinary resume.
      */
     answeredQuery: state.answeredQuery,
+    /**
+     * Has a turn of THIS visit produced what is on screen?
+     *
+     * The page reads it before applying a conversation payload: a reducer that has run a turn is
+     * ahead of anything the server has been asked for since, and R3-03's fix (invalidating the
+     * `Conversation` tag when a turn settles) means a refetch can now land WHILE that answer is on
+     * screen. Without the check the refetch would replace a live, paged, twenty-one-card answer
+     * with the server's account of it — correct data, arriving as a state change nobody asked for.
+     *
+     * `stream` is the run id the reducer is listening to, and it is non-zero from the moment a turn
+     * starts until a resume or a `+ New` clears it — which is exactly "this visit owns the screen".
+     */
+    hasLocalTurn: state.stream !== 0,
   };
 }
