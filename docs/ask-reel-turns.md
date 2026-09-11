@@ -19,14 +19,27 @@ row rather than a wire-only artefact — see *The tray*.
 
 ```jsonc
 {
-  "query": "something tense with a clever ending",  // 1..1000 chars, trimmed
-  "conversationId": "…",                            // optional; null mints a new conversation
-  "clientTurnId": "…",                              // REQUIRED; the idempotency key for this exchange
-  "mediaTypes": ["movie"]                           // optional; "movie" | "movies" | "film" | "tv" | "show" | "series"
+  "query": "something tense with a clever ending",    // 1..1000 chars, trimmed
+  "conversationId": "1f2e3d4c-…",                     // optional UUID string; null mints a new conversation
+  "clientTurnId": "9a8b7c6d-…",                       // REQUIRED UUID string; the idempotency key for this exchange
+  "mediaTypes": ["movie"]                             // optional; "movie" | "movies" | "film" | "tv" | "show" | "series"
 }
 ```
 
 `history`, `shownTmdbIds` and `continuation` **do not exist**. They were removed, not renamed.
+
+**Both ids are UUIDs, not opaque strings.** `SearchTurns.ClientTurnId` and
+`SearchConversations.Id` are `uuid` columns, so a nanoid or a `${tabId}-${n}` key is unrepresentable
+and is refused — `client_turn_id_invalid` / `conversation_id_invalid`, in the same `{ error, code }`
+shape as every other refusal. They arrive as strings and are parsed by the handler precisely so that
+refusal is a coded one: bound as `Guid` they failed in the JSON binder, before any of the codes
+below could be reached, and the caller got a `text/plain` .NET exception with no `code` at all.
+`"00000000-0000-0000-0000-000000000000"` is well-formed and still invalid — it is the "no id"
+sentinel, and every turn would collide on it.
+
+**Every `mediaTypes` token must be one of the six.** An unknown token is `media_type_invalid`, not a
+silently dropped filter: a stale or typo'd token would otherwise be indistinguishable from no filter
+at all, and the turn would be billed regardless.
 
 The client mints one `clientTurnId` per user message and resends it verbatim on a retry — a dropped
 connection, a StrictMode double-invoke, an impatient second tap. All three are answered from the
@@ -37,7 +50,7 @@ stored turn.
 | Status | Shape | When |
 | --- | --- | --- |
 | `200` `text/event-stream` | the SSE stream below | a live turn, or the replay of a finished one |
-| `400` | `{ error, code }` | `empty_query`, `query_too_long`, `client_turn_id_required` |
+| `400` | `{ error, code }` | `empty_query`, `query_too_long`, `client_turn_id_required`, `client_turn_id_invalid`, `conversation_id_invalid`, `media_type_invalid` |
 | `404` | `{ error, code }` | `conversation_not_found` — an id that is not the caller's, or is gone. **Never a fork.** |
 | `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation |
 

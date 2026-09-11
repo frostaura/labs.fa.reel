@@ -190,12 +190,57 @@ public static class SearchEndpoints
                 return AskError(StatusCodes.Status400BadRequest, refusal, "query_too_long");
             }
 
-            if (request.ClientTurnId == Guid.Empty)
+            // The two ids are STRINGS on the wire and are parsed here, deliberately. Bound as
+            // Guid / Guid? on the record they never reached this handler at all: a non-UUID, a
+            // 300-character key, a JSON null or an empty string failed JSON binding first, and the
+            // caller got five kilobytes of text/plain BadHttpRequestException — no `code` for a
+            // client to switch on, and the internal type name on a route any signed-in account can
+            // reach. A malformed id is this handler's refusal to make, in the house shape, like
+            // every other refusal above it.
+            if (string.IsNullOrWhiteSpace(request.ClientTurnId))
             {
                 return AskError(
                     StatusCodes.Status400BadRequest,
                     "That request is missing its turn id — refresh the page and try again.",
                     "client_turn_id_required");
+            }
+
+            // All-zeros is well-formed and is nonetheless the "no id" sentinel, so it is INVALID
+            // rather than missing: the client did send something, and it cannot be an idempotency
+            // key — every retry of every turn would collide on it.
+            if (!Guid.TryParse(request.ClientTurnId.Trim(), out var clientTurnId) || clientTurnId == Guid.Empty)
+            {
+                return AskError(
+                    StatusCodes.Status400BadRequest,
+                    "That request's turn id isn't a valid id — refresh the page and try again.",
+                    "client_turn_id_invalid");
+            }
+
+            Guid? requestedConversationId = null;
+            if (request.ConversationId is not null)
+            {
+                if (!Guid.TryParse(request.ConversationId.Trim(), out var parsedConversationId)
+                    || parsedConversationId == Guid.Empty)
+                {
+                    return AskError(
+                        StatusCodes.Status400BadRequest,
+                        "That thread id isn't a valid id — start a new one.",
+                        "conversation_id_invalid");
+                }
+
+                requestedConversationId = parsedConversationId;
+            }
+
+            // Every media-type token has to be one this server can honour. An unknown token used to
+            // be dropped in silence, so a typo'd or stale filter was indistinguishable from no
+            // filter — and the turn was billed anyway. Refused before the spend, with the token
+            // named, because the client cannot fix what it is not told.
+            if (AskMediaTypes.Resolve(request.MediaTypes) is not { } mediaFilter)
+            {
+                return AskError(
+                    StatusCodes.Status400BadRequest,
+                    AskMediaTypes.Refusal(request.MediaTypes),
+                    "media_type_invalid");
             }
 
             // ── 2. Resolve the conversation. An unknown id NEVER forks ──────────────────────
@@ -204,7 +249,7 @@ public static class SearchEndpoints
             // silently became two. The lookup is account-scoped, so "not mine" and "not there" are
             // the same 404 and neither leaks the difference.
             Domain.Search.SearchConversation? conversation = null;
-            if (request.ConversationId is { } conversationId)
+            if (requestedConversationId is { } conversationId)
             {
                 conversation = await db.SearchConversations
                     .FirstOrDefaultAsync(c => c.Id == conversationId && c.AccountId == accountId, ct);
@@ -223,7 +268,7 @@ public static class SearchEndpoints
             if (conversation is not null)
             {
                 var existing = await db.SearchTurns.FirstOrDefaultAsync(
-                    t => t.ConversationId == conversation.Id && t.ClientTurnId == request.ClientTurnId, ct);
+                    t => t.ConversationId == conversation.Id && t.ClientTurnId == clientTurnId, ct);
                 if (existing is not null)
                 {
                     // Still running: 409 rather than a second stream. Two streams for one turn
@@ -323,15 +368,6 @@ public static class SearchEndpoints
             // client-supplied flag is why a resumed transcript showed the same question five times.
             var kind = Domain.Search.SearchTurnKind.Derive(lastUserText, message);
 
-            var mediaFilter = (request.MediaTypes ?? [])
-                .Select(m => m?.Trim().ToLowerInvariant())
-                .Select(m => m is "movie" or "movies" or "film" ? MediaType.Movie
-                    : m is "tv" or "show" or "series" ? MediaType.Show : (MediaType?)null)
-                .Where(m => m is not null)
-                .Select(m => m!.Value)
-                .Distinct()
-                .ToList();
-
             // ── 5. The rows, before the stream ──────────────────────────────────────────────
             var now = DateTime.UtcNow;
             if (conversation is null)
@@ -374,7 +410,7 @@ public static class SearchEndpoints
                 Text = string.Empty,
                 CreatedAt = now,
                 Sequence = nextSequence,
-                ClientTurnId = request.ClientTurnId,
+                ClientTurnId = clientTurnId,
                 Kind = kind,
                 Status = Domain.Search.SearchTurnStatus.Pending,
                 MediaFilter = mediaFilter.Count > 0
@@ -700,15 +736,24 @@ public static class SearchEndpoints
     /// <c>SearchTurns</c> / <c>SearchTurnCards</c>. A client cannot carry state it loses on reload,
     /// cannot be trusted about what it has already been shown, and cannot tell a filter toggle from
     /// a new question — and every one of those showed up as the product forgetting itself.</para>
+    ///
+    /// <para><b>Both ids are strings, and that is not laziness.</b> Bound as <c>Guid?</c> /
+    /// <c>Guid</c> they were parsed by the JSON binder, BEFORE the handler ran — so a non-UUID, an
+    /// over-long key, a JSON <c>null</c> or an empty string skipped every coded refusal the
+    /// contract documents and came back as a <c>text/plain</c> <c>BadHttpRequestException</c>
+    /// naming this very type. A client switching on <c>code</c>, as the contract tells it to, got
+    /// <c>undefined</c> and rendered a crash message for its own typo. Parsing here means the
+    /// refusal is the handler's, in the house shape, and the UUID requirement is stated in
+    /// <c>docs/ask-reel-turns.md</c> rather than discovered through a stack trace.</para>
     /// </summary>
     /// <param name="Query">The question, 1–<see cref="AskRequestLimits.MaxQueryChars"/> characters trimmed.</param>
-    /// <param name="ConversationId">The thread this belongs to; null mints a new one. An unknown id is a 404, never a fork.</param>
-    /// <param name="ClientTurnId">The client's id for THIS exchange — the idempotency key. Resent verbatim on a retry.</param>
-    /// <param name="MediaTypes">An explicit UI filter, which outranks whatever the model infers from the prose.</param>
+    /// <param name="ConversationId">The thread this belongs to, as a UUID string; null mints a new one. An unknown id is a 404, never a fork; an unparseable one is a 400.</param>
+    /// <param name="ClientTurnId">The client's id for THIS exchange, as a UUID string — the idempotency key. Resent verbatim on a retry.</param>
+    /// <param name="MediaTypes">An explicit UI filter, which outranks whatever the model infers from the prose. Every token must be one <see cref="AskMediaTypes"/> knows.</param>
     public record AskRequest(
         string Query,
-        Guid? ConversationId,
-        Guid ClientTurnId,
+        string? ConversationId,
+        string? ClientTurnId,
         List<string>? MediaTypes);
 
     /// <summary>How many prior turns the interpret prompt reads. The tail is what carries context.</summary>
