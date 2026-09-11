@@ -212,12 +212,16 @@ describe("chatReducer — stream-stable ordering", () => {
     expect(phased.order).toEqual(["t2", "t1"]);
   });
 
-  it("re-sorts on done", () => {
+  it("takes the server's order on done, whatever the client had settled on", () => {
+    // Was "re-sorts on done", and that was SB-01: the client's blend order is a stand-in for a
+    // server order that has not arrived yet, and `done` IS that order arriving. `results` puts the
+    // weak card first — against the client's own settled order — and the client yields to it,
+    // which is what makes a reload of this turn render the identical array.
     const done = chatReducer(streamed, {
       type: "done",
       data: { reason: "2 picks", results: [weak, strong] },
     });
-    expect(done.order).toEqual(["t2", "t1"]);
+    expect(done.order).toEqual(["t1", "t2"]);
   });
 
   it("never interleaves outside cards among clean ones, however strong their blend", () => {
@@ -228,11 +232,15 @@ describe("chatReducer — stream-stable ordering", () => {
     const phased = chatReducer(withOutside, { type: "phase", data: { stage: "ranking", found: 3, scored: 3 } });
     expect(phased.order).toEqual(["t2", "t1", "t3"]);
 
+    // On `done` the partition is the SERVER's to make, and it made it: the outside card trails in
+    // `results`. The client takes the array as sent rather than re-deriving a second partition —
+    // and nothing on screen depends on it either way, because the page renders the two channels
+    // from `outsideRequest` and a filter preserves relative order whatever the array looks like.
     const done = chatReducer(withOutside, {
       type: "done",
       data: { reason: "2 picks matched everything you asked; 1 closest-but-outside shown separately.", results: [weak, strong, outside] },
     });
-    expect(done.order).toEqual(["t2", "t1", "t3"]);
+    expect(done.order).toEqual(["t1", "t2", "t3"]);
   });
 });
 
@@ -1265,5 +1273,102 @@ describe("excludedTerms and listPhrase", () => {
     expect(listPhrase(["comedy", "anime"])).toBe("comedy and anime");
     expect(listPhrase(["comedy", "anime", "musical"])).toBe("comedy, anime and musical");
     expect(listPhrase([])).toBe("");
+  });
+});
+
+/**
+ * SB-01 — the server's order is the contract, and a reload has to reproduce the screen.
+ *
+ * Wave-B watched a page turn re-sort the answer ALREADY on screen: `partitionedOrder` ran over the
+ * whole merged array on every `phase` frame, so page-two's picks interleaved into page-one's
+ * answer by blend, and the hard reload that followed rendered the same 34 cards in the stored
+ * `(Sequence, Rank)` order instead — the same answer, two orders, one gesture apart.
+ *
+ * The rule these pin: mid-stream ordering may settle the cards of the turn CURRENTLY streaming and
+ * nothing else, and a turn that has reached `done` is frozen in the order the server sent. That is
+ * what makes the live screen and the stored record the same object.
+ */
+describe("chatReducer — server order is the contract", () => {
+  // Turn one's answer as the server committed it — deliberately NOT blend order. `t1` carries the
+  // WEAKEST blend and is first, so any re-derivation is visible in the first assertion.
+  const first = [card(1, { blend: 0.1 }), card(2, { blend: 0.9 }), card(3, { blend: 0.5 })];
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "quiet character dramas", fresh: true }),
+    { type: "done", data: { results: first, reason: "3 picks ranked for you, from 40 pulled" } },
+  );
+  /** The page, out of blend order on the wire so a settle at the boundary is observable. */
+  const page = [card(4, { blend: 0.2 }), card(5, { blend: 0.99 })];
+
+  /** Streams `page` as candidates over the settled answer and takes one phase frame. */
+  function pageInFlight() {
+    let state = chatReducer(answered, { type: "moreTurn" });
+    for (const c of page) state = chatReducer(state, { type: "candidate", data: c });
+    return chatReducer(state, { type: "phase", data: { stage: "ranking", found: 5, scored: 5 } });
+  }
+
+  it("takes_the_servers_results_order_verbatim_on_done", () => {
+    expect(answered.order).toEqual(["t1", "t2", "t3"]);
+  });
+
+  it("a_pages_phase_frames_never_touch_the_answer_already_on_screen", () => {
+    const phased = pageInFlight();
+    expect(phased.order.slice(0, 3)).toEqual(["t1", "t2", "t3"]);
+    // …while the IN-FLIGHT block still settles at the boundary, which is what the rhythm is for.
+    expect(phased.order.slice(3)).toEqual(["t5", "t4"]);
+  });
+
+  it("a_page_appends_after_the_previous_turn_in_the_servers_order", () => {
+    const done = chatReducer(pageInFlight(), {
+      type: "done",
+      data: { results: page, reason: "2 picks ranked for you, from 65 pulled", kept: 2 },
+    });
+    expect(done.order).toEqual(["t1", "t2", "t3", "t4", "t5"]);
+  });
+
+  it("a_reload_reproduces_exactly_what_was_on_screen", () => {
+    const done = chatReducer(pageInFlight(), {
+      type: "done",
+      data: { results: page, reason: "2 picks ranked for you, from 65 pulled", kept: 2 },
+    });
+    // The server stores `(Sequence, Rank)` — turn one's block, then turn two's, each in the order
+    // it sent. Resuming that payload must land on the identical array.
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-1",
+        lastCardsAt: "2026-09-11T09:00:00Z",
+        cards: [...first, ...page],
+        turns: [
+          { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "Five that fit.", kind: "ask", status: "Completed" },
+        ],
+        reason: "2 picks ranked for you, from 65 pulled",
+        lastQuery: "quiet character dramas",
+      },
+    });
+    expect(resumed.order).toEqual(done.order);
+  });
+
+  it("a_page_keeps_only_what_its_own_done_kept", () => {
+    // Fixture variation, one field: the page streams a THIRD candidate the server's `done` then
+    // drops (the quality floor cut it). A fresh turn already drops those — `order = incoming` —
+    // and a page has to agree, or the screen carries a card the stored record does not.
+    let state = chatReducer(answered, { type: "moreTurn" });
+    for (const c of [...page, card(6, { blend: 0.4 })]) state = chatReducer(state, { type: "candidate", data: c });
+    const done = chatReducer(state, {
+      type: "done",
+      data: { results: page, reason: "2 picks ranked for you, from 65 pulled", kept: 2 },
+    });
+    expect(done.order).toEqual(["t1", "t2", "t3", "t4", "t5"]);
+  });
+
+  it("a_new_question_settles_nothing_until_its_own_answer_lands", () => {
+    // The held previous answer is frozen by `holdingPrevious`; once the first candidate of the new
+    // turn replaces it, the screen is a live stream again and phase frames may settle all of it.
+    const asking = chatReducer(answered, { type: "userTurn", message: "something older", fresh: false });
+    let state = chatReducer(asking, { type: "candidate", data: card(7, { blend: 0.1 }) });
+    state = chatReducer(state, { type: "candidate", data: card(8, { blend: 0.9 }) });
+    const phased = chatReducer(state, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } });
+    expect(phased.order).toEqual(["t8", "t7"]);
   });
 });

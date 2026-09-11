@@ -48,18 +48,19 @@ const BORDER = card("b2", "Border Town", { blend: 0.9 });
 const CEDAR = card("c3", "Cedar Falls", { blend: 0.5 });
 
 /**
- * The stored answer, in the order the server committed as `Rank`. Alpha's blend is the LOWEST and
- * it is first: a client that sorts by blend — as it legitimately does mid-stream — puts Border
- * first and shows a different answer from the one that was stored.
+ * The answer, in the order the server committed as `Rank` — which is the order on screen from the
+ * moment `done` arrives, live or resumed. Alpha's blend is the LOWEST and it is first: a client
+ * that sorts by blend puts Border first and shows a different answer from the one that was stored.
  */
 const STORED_ORDER = ["Alpha Creek", "Border Town", "Cedar Falls"];
 
 /**
- * The same three cards as a LIVE turn leaves them: blend order, which the client derives itself
- * while it is assembling an answer frame by frame. That it differs from `STORED_ORDER` is the
- * point — a resume that re-derived the order would come back looking like this instead.
+ * What a client that re-derived the order would show instead. Asserted NEGATIVELY: the client does
+ * derive exactly this while a turn is still streaming and it has no server order to use, and SB-01
+ * was that derivation surviving `done` — so the same answer rendered one way live and the other
+ * way after a reload, with the page turn in between flipping it.
  */
-const LIVE_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
+const BLEND_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
 
 const RESUME_PAYLOAD = {
   id: CONVERSATION,
@@ -163,7 +164,7 @@ test.describe("Ask Reel — the thread survives leaving the page", () => {
     // F3-05, verbatim: get a full answer, click Home in the header, press Back.
     await boot(page);
     await askAndAnswer(page);
-    await expect(gridNames(page)).toHaveText(LIVE_ORDER);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
     const whyBefore = await gridWhy(page).allTextContents();
 
     // The stored record exists from here on — the server kept the cards this turn produced.
@@ -247,6 +248,58 @@ test.describe("Ask Reel — the thread survives leaving the page", () => {
   });
 });
 
+test.describe("Ask Reel — the server's order is the contract", () => {
+  test("a page never re-orders the answer it extends, and the reload reproduces the screen", async ({ page }) => {
+    // SB-01, both halves in one run. Wave-B pressed `Show me more` and watched page-two's picks
+    // interleave into page-one's answer by blend — then hard-reloaded and got the stored
+    // `(Sequence, Rank)` order instead. Same 34 cards, two orders, one gesture apart.
+    await boot(page);
+    await askAndAnswer(page);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    // …and NOT the order the client derives while it is still assembling one.
+    await expect(gridNames(page)).not.toHaveText(BLEND_ORDER);
+
+    // Delta outranks every card of turn one on blend; Echo is below all of them. If the page's
+    // frames re-sort the merged array, Delta jumps to the very top and Echo to the very bottom —
+    // the exact interleave the smoke recorded.
+    const delta = card("d4", "Delta Ridge", { blend: 0.95 });
+    const echo = card("e5", "Echo Point", { blend: 0.1 });
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    // Arrival order is the weaker card first, so the settle at the phase boundary is observable:
+    // the page's OWN two cards may move, and nothing above them may.
+    await askPush(page, "candidate", echo);
+    await askPush(page, "candidate", delta);
+    await askPush(page, "phase", { stage: "ranking", found: 5, scored: 5 });
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Delta Ridge", "Echo Point"]);
+
+    await askPush(page, "done", {
+      results: [delta, echo],
+      reason: "2 picks ranked for you, from 65 pulled.",
+      kept: 2,
+    });
+    await askEnd(page);
+    const onScreen = await gridNames(page).allTextContents();
+    expect(onScreen).toEqual([...STORED_ORDER, "Delta Ridge", "Echo Point"]);
+
+    // The record the server now holds: turn one's block then turn two's, each in the order it was
+    // sent — which is what `(Sequence, Rank)` means. A reload must land on the identical array.
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, {
+      ...RESUME_PAYLOAD,
+      cards: [ALPHA, BORDER, CEDAR, delta, echo],
+      turns: [
+        ...RESUME_PAYLOAD.turns,
+        { sequence: 2, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+      ],
+      reason: "2 picks ranked for you, from 65 pulled.",
+    });
+    await page.reload();
+
+    await expect(gridNames(page)).toHaveText(onScreen);
+  });
+});
+
 test.describe("Ask Reel — what goes on the wire", () => {
   test("every request carries a client turn id, and none carries a transcript", async ({ page }) => {
     await boot(page);
@@ -294,7 +347,7 @@ test.describe("Ask Reel — what goes on the wire", () => {
     await expect(blocked).toBeVisible();
     await expect(blocked).toContainText("already being answered");
     // The answer the reader was looking at is still there, and it is NOT the error card.
-    await expect(gridNames(page)).toHaveText(LIVE_ORDER);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
     await expect(page.getByTestId("semantic-error")).toHaveCount(0);
     await expect(page.getByTestId("askreel-page-error")).toHaveCount(0);
     await expect(page.getByTestId("askreel-composer")).toBeEditable();
@@ -455,7 +508,7 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     await page.getByTestId("askreel-stop").click();
 
     // Three above the bar from the first turn, plus the one that cleared it here.
-    await expect(gridNames(page)).toHaveText([...LIVE_ORDER, "Over Bar"]);
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
     await expect(page.getByTestId("semantic-results").getByText("Under Bar")).toHaveCount(0);
     await expect(page.getByTestId("semantic-results").getByText("Way Under")).toHaveCount(0);
 
@@ -486,7 +539,7 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
 
     await page.getByTestId("askreel-stop").click();
 
-    await expect(gridNames(page)).toHaveText([...LIVE_ORDER, "Rounds Up"]);
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Rounds Up"]);
     await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
   });
 });

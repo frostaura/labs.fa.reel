@@ -500,6 +500,18 @@ interface State {
    * Reporting that on a thread seventeen seconds old is what made the copy a lie.
    */
   lastCardsAt: string | null;
+  /**
+   * How many leading ids of `order` belong to turns that already reached `done` — the part of the
+   * screen that is finished work and is frozen in the order the server sent it (SB-01).
+   *
+   * Without this the client had one order for a live screen and another for the same answer after
+   * a reload: a page's `phase` frames re-sorted the WHOLE grid by blend, including the answer the
+   * page was extending, while the stored record kept `(Sequence, Rank)`. The contract's rule —
+   * "array order is the contract, never re-sort by blend" — applies to every turn the moment it
+   * completes; a turn still streaming has no server order yet, which is the only reason the client
+   * derives one at all.
+   */
+  settled: number;
 }
 
 export type ChatAction =
@@ -549,7 +561,7 @@ export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
-  holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null,
+  holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
 };
 
 /**
@@ -565,11 +577,15 @@ function blend(c: AskCard): number {
 }
 
 /**
- * The stream-stable order: clean ids before outside ids, each block sorted by the personal blend.
- * Applied ONLY when a `phase` or `done` frame arrives — `candidate` appends and `scored`/`reranked`
- * update card data in place, so rows stop jumping under the cursor on every SSE event (the old
- * behaviour re-sorted at render time, live). Array.sort is stable, so equal blends keep arrival
- * order and identical inputs render identically.
+ * The stream-stable order for the cards of ONE turn still in flight: clean ids before outside ids,
+ * each block sorted by the personal blend. Applied only at a `phase` boundary — `candidate` appends
+ * and `scored`/`reranked` update card data in place, so rows stop jumping under the cursor on every
+ * SSE event (the old behaviour re-sorted at render time, live). Array.sort is stable, so equal
+ * blends keep arrival order and identical inputs render identically.
+ *
+ * It is NOT the answer's order. A turn that has reached `done` has a server order, and this is the
+ * client assembling one it does not have yet — see {@link streamOrder} for the boundary between
+ * the two, and the `done` case for why the server's array wins the moment it arrives.
  */
 export function partitionedOrder(order: string[], byId: Record<string, AskCard>): string[] {
   const present = order.filter((id) => byId[id]);
@@ -577,6 +593,29 @@ export function partitionedOrder(order: string[], byId: Record<string, AskCard>)
   return [
     ...present.filter((id) => !byId[id].outsideRequest).sort(byBlend),
     ...present.filter((id) => byId[id].outsideRequest).sort(byBlend),
+  ];
+}
+
+/**
+ * The on-screen order mid-stream: a settled prefix carried verbatim, and only the in-flight tail
+ * settled by blend.
+ *
+ * SB-01 is what happens without the split. `partitionedOrder` used to run over the whole merged
+ * array on every `phase` frame, so a page's progress re-sorted the answer ALREADY on screen —
+ * page-two's picks interleaved into page-one's — and the reload that followed rendered the same
+ * cards in the stored `(Sequence, Rank)` order instead. One answer, two orders, one gesture apart,
+ * and the contract is explicit that the array is the order: `blend` is rounded for display and
+ * carries a tiebreak the rounded number cannot reproduce.
+ *
+ * `settled` is how many leading ids belong to turns that already have a `done`. Those are finished
+ * work with a server order of their own and are never touched again; everything after them is this
+ * turn's, and settling it at a phase boundary is the rhythm that keeps rows from jumping.
+ */
+export function streamOrder(order: string[], byId: Record<string, AskCard>, settled: number): string[] {
+  const cut = Math.max(0, Math.min(settled, order.length));
+  return [
+    ...order.slice(0, cut).filter((id) => byId[id]),
+    ...partitionedOrder(order.slice(cut), byId),
   ];
 }
 
@@ -619,7 +658,14 @@ export function chatReducer(state: State, action: ChatAction): State {
       // of an earlier question became page one of the stopped one without a word on screen.
       // `canPage` now stops such a page being started at all; this is the backstop, and it fails
       // the honest way — the previous answer stays labelled as previous.
-      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0 };
+      //
+      // Everything on screen at the moment a page starts belongs to a turn that has finished, so
+      // the whole of `order` is settled: the page's own frames may settle only what the page
+      // itself brings (SB-01).
+      return {
+        ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
+        settled: state.order.length,
+      };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
       // page it adds no transcript entry (the user said it once; echoing their bubble on every
@@ -639,9 +685,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       // partitionedOrder) — a settle-then-shuffle rhythm instead of jumping on every event. A held
       // previous answer is exempt: it is finished work, and reshuffling it while a new turn runs
       // would animate the OLD answer in response to the NEW one's progress.
+      //
+      // …and so is every OTHER turn's block, held or not. `streamOrder` settles this turn's cards
+      // and carries the settled prefix verbatim: a page that re-sorted the answer it was extending
+      // is SB-01, and the reload afterwards proved the two disagreed.
       return {
         ...state, status: "streaming", phase: action.data,
-        order: state.holdingPrevious ? state.order : partitionedOrder(state.order, state.byId),
+        order: state.holdingPrevious ? state.order : streamOrder(state.order, state.byId, state.settled),
       };
     case "conversation":
       return { ...state, conversationId: action.data.id };
@@ -669,6 +719,8 @@ export function chatReducer(state: State, action: ChatAction): State {
         // and re-deriving it from a rounded blend is how the same question comes back looking
         // different on every reload.
         order: cards.map((c) => c.titleId),
+        // All of it is finished work — a resumed answer is never re-ordered by anything.
+        settled: cards.length,
         reason: p.reason ?? null,
         removed: p.removed ?? 0,
         lastCardsAt: p.lastCardsAt ?? null,
@@ -689,7 +741,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       // moment there is something to put in its place, so it is replaced now rather than having
       // been blanked when the question was asked.
       if (state.holdingPrevious) {
-        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1 };
+        // The previous turn's block goes with it, so nothing is settled any more: what is on
+        // screen from here is this turn's stream, and it settles at phase boundaries like any other.
+        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1, settled: 0 };
       }
       if (state.byId[c.titleId]) return state;
       return {
@@ -731,19 +785,31 @@ export function chatReducer(state: State, action: ChatAction): State {
       // derived from its own cards, so an uncapped list here can no longer grow a request.
       const shown = Array.from(new Set([...state.shown, ...newTmdb]));
       const incoming = action.data.results.map((c) => c.titleId);
-      // Appending keeps what is on screen and adds only genuinely new ids. The de-duplication is
-      // bookkeeping and nothing else reads it: what it used to decide — whether the page's own
-      // sentence counted, and whether paging was over — is the SERVER's to say, because only the
-      // server knows what is left (see `pageIsExhausted` for the diff that used to decide both).
+      // THE contract line: "array order is the contract … never re-sort by it". `results` is this
+      // turn's answer in the order the server committed to storage as `Rank`, so it is taken
+      // verbatim — the client's own blend ordering was only ever a stand-in for a server order
+      // that had not arrived yet, and keeping it past `done` is what made the same answer render
+      // one way live and another way after a reload (SB-01).
+      //
+      // A page appends AFTER the settled block, which is carried through untouched. Only the
+      // settled prefix is carried — a candidate this page streamed and its own `done` then dropped
+      // (the quality floor cut it) falls out, exactly as it does on a fresh turn, so the screen and
+      // the stored record hold the same cards.
+      const carried = state.appending
+        ? state.order.slice(0, state.settled).filter((id) => byId[id])
+        : [];
       const order = state.appending
-        ? [...state.order, ...incoming.filter((id) => !state.order.includes(id))]
+        ? [...carried, ...incoming.filter((id) => !carried.includes(id))]
         : incoming;
       // A page the server returned nothing for: it is the end of this answer, and it has nothing
       // to say ABOUT the answer. `AskReelReason.Empty` is true of the page and false of the grid
       // above it, so the accounting that was already there stands.
       const emptyPage = state.appending && pageIsExhausted(action.data);
       return {
-        ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
+        ...state, byId, order, status: "done", shown, appending: false,
+        // This turn is finished work now, so the whole of `order` is frozen: nothing on screen may
+        // be re-ordered again until a new turn replaces it.
+        settled: order.length,
         // The answer landed, so there is nothing left being held: `order` above is this turn's.
         holdingPrevious: false,
         reason: emptyPage ? state.reason : action.data.reason,
