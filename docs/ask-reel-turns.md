@@ -10,6 +10,9 @@ as the product forgetting what it had just said.
 This page is the contract. The reasoning behind each decision lives in the doc-comments on
 `SearchTurn`, `SearchTurnCard`, `SearchEndpoints.ReplayAsync` and `SearchConversationRetention`.
 
+The same inversion governs what the user has *seen*, which is why the below-floor tray is a stored
+row rather than a wire-only artefact — see *The tray*.
+
 ## The request
 
 `POST /api/search/ask`
@@ -81,7 +84,7 @@ makes zero model calls, writes zero rows and writes **no exposures**.
 | --- | --- |
 | `GET /api/search/conversations?limit=20` | `[{ id, title, turnCount, lastTurnAt, lastCardsAt }]` |
 | `GET /api/search/conversations/{id}` | the resume payload below; `404` if it is not the caller's |
-| `GET /api/search/turns/{id}` | `{ status, reason, failureCode, cards, removed }` — **`202` while `Pending`** |
+| `GET /api/search/turns/{id}` | `{ status, reason, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`** |
 | `DELETE /api/search/conversations/{id}` | `204`. Cards, turns, conversation. **Never exposures.** |
 | `GET /api/search/conversations/latest` | **deprecated** — the same payload for the newest conversation |
 
@@ -90,18 +93,28 @@ The resume payload:
 ```jsonc
 {
   "id": "…", "title": "…", "lastCardsAt": null,
+  "lastTurnAt": "2026-09-11T00:54:21.301Z",
   "turns":   [{ "sequence": 0, "role": "user", "text": "…", "kind": "ask", "status": "Completed" }],
-  "cards":   [ /* same card shape as done.results */ ],
+  "cards":       [ /* same card shape as done.results */ ],
+  "belowFloor":  [ /* the same card shape again — the tray */ ],
   "reason":  "…",        // the newest replayed turn's reason, verbatim
-  "removed": 0,          // stored cards the eligibility re-filter dropped
+  "removed": 0,          // stored cards the eligibility re-filter dropped, across BOTH lists
   "lastQuery": "…",      // the last user turn
   "mediaTypes": ["tv"],  // the filter that turn ran under, in request tokens
-  "shown": [603, 27205]  // the whole conversation's no-repeat set
+  "shown": [603, 27205]  // the whole conversation's no-repeat set, tray included
 }
 ```
 
 `lastCardsAt: null` means **transcript only** — a conversation that predates stored results. Render
 that as its own state; it is a different fact from a turn that honestly returned nothing.
+
+`lastTurnAt` is when the thread was last spoken in — the same column the `Recent` list sorts and
+renders on, so the two views cannot disagree about a thread's age. It is present because a
+transcript-only thread has a null `lastCardsAt` **by definition**, and therefore carried no date at
+all: the resumed seam had nothing to say but "picked up where you left off".
+
+`belowFloor` is the tray, restored as a tray. It is never merged into `cards` — see *The tray*
+below.
 
 `GET /turns/{id}` is what replaces `Last-Event-ID` replay. The events are gone, but the turn is a
 row, and a row answers the only question a disconnected client has: is it done, and what did it
@@ -116,7 +129,8 @@ say.
 4. **One turn in flight** per conversation — a second is a 409; the unique `(ConversationId,
    Sequence)` index is the race backstop.
 5. **Derive** history (last 8 completed turns by `Sequence`), `shown` (distinct `TmdbId` over the
-   conversation's cards) and `kind`, all read *before* this turn's own rows exist.
+   conversation's cards, **tray included** — see *The tray*) and `kind`, all read *before* this
+   turn's own rows exist.
 6. **Write the rows Pending** — a user row and an assistant row for an `ask`, the assistant row
    alone for a `page` — then the headers, then `conversation`.
 7. **Stream.**
@@ -144,6 +158,37 @@ a stored card on its way out:
 - **`seen` recomputed**, never stored: it is a fact about the person, not about the card.
 
 The **order is never re-derived**. Stored rank is the position the answer had.
+
+## The tray
+
+A card the account's rating floor pushed under the *"Show the N under your bar"* fence is stored as
+a `SearchTurnCard` with **`BelowFloor = true`**, and the rank counter runs across both blocks — the
+picks take `0..n-1` and the tray continues at `n`, so the unique `(TurnId, Rank)` holds.
+
+**Why it is stored: the user saw it.** The founder-locked rule is *never show things I've already
+seen*, and the no-repeat set is `SELECT DISTINCT "TmdbId"` over the conversation's cards. While the
+tray was emitted and then forgotten, that query could not contain it — and a measured smoke run
+watched turn 1 put 14 titles under the bar and turn 2 serve **13 of those same 14** as its
+top-of-grid picks, the user looking at the same titles twice on one screen. The `shown` set is
+therefore **deliberately not filtered by `BelowFloor`**: under the fence is still on the glass.
+
+**It is not a pick, and three things keep knowing that.**
+
+- **Replay keeps it separate.** `ReplayAsync` partitions *after* the shared `(Sequence, Rank)` sort
+  and *after* the eligibility re-filter, so both lists carry one ordering and one guard — and the
+  tray never reaches `cards`. `removed` spans both, because a card that vanished out of the tray is
+  as invisible as one that vanished out of the grid.
+- **No exposure row, ever.** An `ExposureEvent` is evidence that the product *recommended* a title
+  at a rank; a card the account's own floor pushed under the fence was displayed and explicitly not
+  recommended. Logging it would put titles the floor rejected into the denominator of every accuracy
+  number computed from an append-only log, irreversibly. Storing the tray moved the exposure count
+  by exactly zero.
+- **The reason line is unchanged.** Its counts come from the floor's own verdict, never from a row
+  count over `SearchTurnCards`.
+
+A **replay** (`done`) and `GET /turns/{id}` both hand the stored tray back in `belowFloor`, so an
+idempotent retry and a lost-stream reconnect restore the whole answer rather than the half of it
+that cleared the bar. On a replay `streamed = kept + droppedByFloor + removed`.
 
 ## Retention
 

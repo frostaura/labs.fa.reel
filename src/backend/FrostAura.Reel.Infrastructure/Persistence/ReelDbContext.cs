@@ -311,6 +311,11 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(c => c.Blend).HasPrecision(6, 4);
             e.Property(c => c.Why).HasMaxLength(1024);
             e.Property(c => c.WhySource).HasMaxLength(32);
+
+            // A DATABASE-level default, not merely a CLR one. Every row written before the tray was
+            // stored is a pick, and the default is what makes that true of the existing table
+            // without a back-fill — including for any insert that does not name the column.
+            e.Property(c => c.BelowFloor).HasDefaultValue(false);
         });
 
         // ── ML ─────────────────────────────────────────────────────────────────────────────

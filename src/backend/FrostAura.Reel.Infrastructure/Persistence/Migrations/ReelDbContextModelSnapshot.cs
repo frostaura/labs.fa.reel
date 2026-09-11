@@ -2031,6 +2031,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("BelowFloor")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<decimal>("Blend")
                         .HasPrecision(6, 4)
                         .HasColumnType("numeric(6,4)");
