@@ -71,6 +71,15 @@ async function expectComposerReachable(page: Page, label: string) {
 
 /** WCAG 2.1 AA, success criterion 2.5.5 target size. Not a house style — the published minimum. */
 const TOUCH_MIN = 44;
+/**
+ * `getBoundingClientRect` on a box inside a transformed ancestor (the poster wrapper carries a
+ * `group-hover:scale-[1.03]` transition) comes back through a float matrix, and a `min-h-11` box
+ * that IS 44 px measured 43.999969482421875 on the CI runner — once in ten local runs, twice on
+ * GitHub. A target-size rule is about CSS pixels a thumb can hit, and 3e-5 of a pixel is not a
+ * smaller target, so the floor tolerates float noise below a hundredth of a pixel and nothing
+ * more: a genuine 43.5 px box still fails.
+ */
+const TOUCH_TOLERANCE = 0.01;
 
 const CONVERSATION = "5c0a1b2c-0000-4000-8000-000000000001";
 
@@ -237,14 +246,14 @@ test.describe("Ask Reel on a phone", () => {
     // The fixture is two cards x three actions; a zero here would make the loop below vacuous.
     expect(actions.length).toBe(6);
     for (const b of actions) {
-      expect(b.height, `${b.label} is ${Math.round(b.width)} x ${Math.round(b.height)}`).toBeGreaterThanOrEqual(TOUCH_MIN);
-      expect(b.width, `${b.label} is ${Math.round(b.width)} x ${Math.round(b.height)}`).toBeGreaterThanOrEqual(TOUCH_MIN);
+      expect(b.height, `${b.label} is ${Math.round(b.width)} x ${Math.round(b.height)}`).toBeGreaterThanOrEqual(TOUCH_MIN - TOUCH_TOLERANCE);
+      expect(b.width, `${b.label} is ${Math.round(b.width)} x ${Math.round(b.height)}`).toBeGreaterThanOrEqual(TOUCH_MIN - TOUCH_TOLERANCE);
     }
 
     const segment = await boxesOf(page, '[data-testid="browse-filters"] button');
     expect(segment.length).toBe(3);
     for (const b of segment) {
-      expect(b.height, `${b.label} is ${Math.round(b.height)} px tall`).toBeGreaterThanOrEqual(TOUCH_MIN);
+      expect(b.height, `${b.label} is ${Math.round(b.height)} px tall`).toBeGreaterThanOrEqual(TOUCH_MIN - TOUCH_TOLERANCE);
     }
   });
 

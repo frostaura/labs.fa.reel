@@ -755,18 +755,68 @@ test.describe("Ask Reel — the grid holds its shape", () => {
   const KEPT = STREAMED.slice(0, 10);
   const RETIRED = STREAMED.slice(10);
 
-  /** Accumulates `layout-shift` values the way CLS is defined: unbuffered, `hadRecentInput` out. */
+  /**
+   * Accumulates `layout-shift` values the way CLS is defined: unbuffered, `hadRecentInput` out —
+   * and records what moved, so a regression names its own element in the run log instead of
+   * leaving the next reader with a number and a page to re-derive it from.
+   */
   async function startCls(page: Page): Promise<void> {
     await page.evaluate(() => {
-      const w = window as unknown as { __cls: number };
+      const w = window as unknown as { __cls: number; __shifts: { value: number; sources: string[] }[] };
       w.__cls = 0;
+      w.__shifts = [];
+      const describe = (node: Node | null): string => {
+        const el = node as Element | null;
+        if (!el?.tagName) return "(detached)";
+        const testid = el.getAttribute?.("data-testid");
+        return `${el.tagName.toLowerCase()}${testid ? `[${testid}]` : `.${(el.getAttribute?.("class") ?? "").split(/\s+/)[0]}`}`;
+      };
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          const shift = entry as PerformanceEntry & { value: number; hadRecentInput: boolean };
-          if (!shift.hadRecentInput) w.__cls += shift.value;
+          const shift = entry as PerformanceEntry & {
+            value: number;
+            hadRecentInput: boolean;
+            sources?: { node: Node | null }[];
+          };
+          if (shift.hadRecentInput) continue;
+          w.__cls += shift.value;
+          w.__shifts.push({ value: shift.value, sources: (shift.sources ?? []).map((s) => describe(s.node)) });
         }
       }).observe({ type: "layout-shift", buffered: false });
     });
+  }
+
+  /**
+   * Two frames, actually rendered.
+   *
+   * `waitForTimeout` paces the stub in wall-clock time, which is not the same thing as a paint:
+   * on a fast machine several batches coalesce into one layout pass and on a loaded CI runner they
+   * do not, so the number of layout passes per turn — and therefore the number of chances to
+   * shift — used to depend on the runner. A double `requestAnimationFrame` after each batch makes
+   * every batch its own painted frame everywhere, which is the WORST case for CLS and now the
+   * measured one. This is what took the run-to-run spread out of the measurement; it is not what
+   * took the shift out of the page, which is the product fix in `SearchResults.tsx`.
+   */
+  async function painted(page: Page): Promise<void> {
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+    );
+  }
+
+  /**
+   * The page's own load, finished — the account's conditions strip is the last thing
+   * `GET /settings/filters` puts on screen, and it lands about a second after the shell does.
+   *
+   * Measuring from before it folds page load into a number labelled `CLS[one-turn]`: the strip
+   * arriving pushes the page down 81 px for 0.053, every run, throttled or not, and it happens
+   * before the question is even typed. It is a real shift and it is written up in `memory/watch.md`
+   * as its own item — reserving a strip whose height only the response knows is a product decision
+   * about accounts that may have no conditions at all, not a fix to make this assertion pass. What
+   * this test is for is the turn: from here to `done`, nothing may move.
+   */
+  async function pageSettled(page: Page): Promise<void> {
+    await expect(page.getByTestId("askreel-conditions")).toBeVisible();
+    await painted(page);
   }
 
   /** The height the page occupies — the number that went 837 → 4 482 px in a single frame. */
@@ -775,13 +825,18 @@ test.describe("Ask Reel — the grid holds its shape", () => {
   }
 
   /** Layout-shift entries are queued, so the observer needs a couple of frames to have them all. */
-  async function readCls(page: Page): Promise<number> {
+  async function readCls(page: Page): Promise<{ cls: number; shifts: { value: number; sources: string[] }[] }> {
     await page.waitForTimeout(400);
-    return page.evaluate(() => (window as unknown as { __cls: number }).__cls);
+    return page.evaluate(() => ({
+      cls: (window as unknown as { __cls: number }).__cls,
+      shifts: (window as unknown as { __shifts: { value: number; sources: string[] }[] }).__shifts,
+    }));
   }
 
   test("a 24-candidate turn that settles on 10 never shows 24, and the page does not jump", async ({ page }) => {
     await bootSearch(page, FILTERS_WITH_FLOOR);
+    // The window opens where the turn does. See `pageSettled` for why page load is not in it.
+    await pageSettled(page);
     await startCls(page);
 
     await page.getByTestId("askreel-composer").fill("a twisty courtroom drama");
@@ -790,22 +845,27 @@ test.describe("Ask Reel — the grid holds its shape", () => {
 
     // Paced, with a paint between batches. Pushing all 24 frames back-to-back collapses the whole
     // turn into one layout pass and scores ~0.02 whatever the page does, which measures the stub
-    // rather than the product.
+    // rather than the product. `painted` is what makes "a paint between batches" true rather than
+    // hoped for — the wall-clock waits alone left the number at the mercy of the runner's speed.
     await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
     await page.waitForTimeout(120);
+    await painted(page);
     await askPush(page, "phase", { stage: "discovered", found: 24, scored: 0 });
     await page.waitForTimeout(150);
+    await painted(page);
     const reserved = await docHeight(page);
 
     for (let i = 0; i < STREAMED.length; i += 4) {
       for (const c of STREAMED.slice(i, i + 4)) await askPush(page, "candidate", c);
       await page.waitForTimeout(120);
+      await painted(page);
     }
     // …and the scoring pass the real server runs over every candidate. Ten clear the account's 6.0
     // bar and fourteen do not, which is exactly the split `done` is about to commit.
     for (const c of KEPT) await askPush(page, "candidate-scored", { titleId: c.titleId, predictedRating: 7.4 });
     for (const c of RETIRED) await askPush(page, "candidate-scored", { titleId: c.titleId, predictedRating: 5.1 });
     await page.waitForTimeout(200);
+    await painted(page);
 
     // F4-08, as one assertion: the grid never holds a card it is about to take away. Before this,
     // 23–24 posters sat here for between 11.5 and 18.6 seconds and then collapsed to ten.
@@ -825,8 +885,14 @@ test.describe("Ask Reel — the grid holds its shape", () => {
     await expect(page.getByTestId("askreel-below-floor")).toContainText("Show the 14 under your 6.0 bar");
 
     const settledHeight = await docHeight(page);
-    const cls = await readCls(page);
+    const { cls, shifts } = await readCls(page);
     console.log(`CLS[one-turn]=${cls.toFixed(3)} reserved=${reserved}px peak=${peak}px settled=${settledHeight}px`);
+    // Whatever did move, named. Silent on a clean turn, and on a dirty one it is the first line of
+    // the diagnosis rather than the start of it — both regressions this test has caught were a
+    // single element, and neither was guessable from the total.
+    for (const shift of shifts.filter((s) => s.value >= 0.001)) {
+      console.log(`  shift ${shift.value.toFixed(3)} ← ${shift.sources.join(", ")}`);
+    }
 
     // Three assertions, and the height ones are the load-bearing pair.
     //
@@ -837,14 +903,23 @@ test.describe("Ask Reel — the grid holds its shape", () => {
     expect(reserved).toBeGreaterThan(1500);
     expect(settledHeight).toBeGreaterThanOrEqual(peak - 1);
 
-    // CLS is the weaker signal HERE and is asserted at Google's "poor" boundary rather than at the
-    // 0.1 "good" one, deliberately. Most of the 24 → 10 collapse this fixture removes happened
-    // below the fold, where CLS never counted it, so the harness scores ~0.08 before and ~0.10
-    // after; the residual is almost entirely one shift — the progress banner leaving flow at `done`
-    // and pulling the grid up 86 px, which is 0.085 of it. The finder's 0.672 came from a real
-    // build whose posters load asynchronously. Kept as a regression guard at the boundary that was
-    // actually breached, with the number printed so a change in it is visible in the run log.
-    expect(cls).toBeLessThan(0.25);
+    // CLS is now the strongest of the three, because the turn no longer shifts at all: the measured
+    // value is 0.000 unthrottled and 0.000 at 8× CPU throttling, where before the fixes it ran
+    // 0.15 / 0.20 / 0.28 / 0.42 / 0.62 at 1× / 4× / 4× / 6× / 8×. That spread was this test's CI
+    // flake — CI landed on 0.198 one run and 0.423 the next on the same commit — and it had one
+    // cause: the grid's trailing placeholders were keyed by their position among the placeholders
+    // rather than by the CELL they hold, so every card that arrived in its own frame shuffled all
+    // of them forward one cell. A fast machine coalesced the batch into one layout pass and scored
+    // nothing; a loaded runner painted each card and scored up to 0.47. The other two shifts were
+    // real and constant: the progress banner leaving flow at `done` (0.0995 — it now hands its box
+    // to the provenance line) and the progress bar's sweep animating `left` (now a transform).
+    //
+    // Asserted at 0.05 rather than at Google's 0.1 "good" boundary, let alone the 0.25 "poor" one
+    // it used to sit at. Nothing on this page is allowed to shift during a turn any more, so the
+    // budget only has to cover sub-pixel reflow; anything above it is a real element moving and
+    // the loop above will say which. Page load is deliberately outside the window (`pageSettled`)
+    // and carries a 0.053 shift of its own, which is `memory/watch.md`'s to close, not this test's.
+    expect(cls).toBeLessThan(0.05);
   });
 
   test("a discovered phase reserves the grid before the first card lands", async ({ page }) => {

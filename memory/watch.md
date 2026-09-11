@@ -49,9 +49,10 @@ last_verified: 2026-09-11
   `Degraded` — a new enum member plus a frontend case.
 
 ## Debris and hygiene
-- **The QA walks' probe conversations are still in the live database**, and their ids were never written down: list
-  them with `GET /api/search/conversations` and delete each through the UI or `DELETE /api/search/conversations/{id}`
-  — never SQL, which leaves the turn record and the usage ledger disagreeing.
+- **The QA walks' probe conversations are still in the live database.** Most of the panel's ids are in
+  `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`; the rest come from
+  `GET /api/search/conversations`. Delete each through the UI or `DELETE /api/search/conversations/{id}` — never SQL,
+  which leaves the turn record and the usage ledger disagreeing.
 - **`reel_test_w9` is still sitting on port 5433** — the QA-walk copies have been dropped. Drop it too; a throwaway
   copy with background jobs on spends real provider calls.
 - **Interleaving is off and stays off until it is worth three months** of comparison at this traffic.

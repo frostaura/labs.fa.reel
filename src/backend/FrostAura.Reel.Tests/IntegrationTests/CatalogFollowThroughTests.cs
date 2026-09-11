@@ -35,8 +35,13 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// budget reports it has already spent.
 /// </para>
 /// </summary>
+/// <remarks>
+/// Inherits <see cref="EmbeddedCatalogTestBase"/> even though it never writes a
+/// <c>TitleEmbedding</c> itself: the enrichment half of the follow-through embeds what it hydrates,
+/// so this class leaves vectors in the shared HNSW index exactly as a hand-seeding Fixture does.
+/// </remarks>
 [Collection("postgres")]
-public class CatalogFollowThroughTests(PostgresFixture fixture)
+public class CatalogFollowThroughTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     /// <summary>Higher than any real TMDB vote count, so these rows head the supply ordering.</summary>
     private const int TopOfQueueVotes = 9_000_000;
@@ -49,7 +54,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task Global_hydration_takes_the_highest_vote_count_first()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -69,7 +74,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task Recency_breaks_a_vote_count_tie()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -91,7 +96,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task Global_hydration_stops_at_the_daily_title_ceiling()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -115,7 +120,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task A_spent_allowance_buys_nothing_at_all()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -133,7 +138,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task Global_hydration_chains_a_global_enrichment()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -143,7 +148,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
         await SeedUnhydratedAsync(TopOfQueueVotes + 31, 2018);
         await RunGlobalHydrationAsync(extraAllowance: 1);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.True(await db.SyncJobs.AnyAsync(j =>
             j.Kind == JobKind.EnrichCatalog && j.AccountId == null && j.Status == JobStatus.Pending));
     }
@@ -157,14 +162,14 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task The_follow_through_queues_one_hydration_and_dedups_the_next()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
 
         await DemoteEarlierRunsAsync();
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         await ClearGlobalJobsAsync(db);
         await SeedUnhydratedAsync(TopOfQueueVotes + 41, 2017);
 
@@ -185,14 +190,14 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task The_follow_through_queues_no_hydration_once_the_day_is_spent()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
 
         await DemoteEarlierRunsAsync();
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         await ClearGlobalJobsAsync(db);
         await SeedUnhydratedAsync(TopOfQueueVotes + 51, 2016);
 
@@ -212,7 +217,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task The_extract_token_ceiling_stops_extraction_without_touching_embedding()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -227,7 +232,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
 
         Assert.DoesNotContain(title.Id, extractor.TitlesSeen);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.False(await db.TitleAttributes.AnyAsync(a => a.TitleId == title.Id));
         // Embedding has its own ceiling and its own ledger line; extraction running out must not
         // stall a stage that costs two orders of magnitude less.
@@ -238,7 +243,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task With_headroom_the_same_run_extracts()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -258,7 +263,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task The_embed_token_ceiling_stops_embedding()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -272,7 +277,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
             new CountingExtractor("ceiling/embed"),
             embedTokens: await SpentTodayAsync(ApiUsagePurpose.Embed));
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.False(await db.TitleEmbeddings.AnyAsync(e => e.TitleId == title.Id));
     }
 
@@ -283,7 +288,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     [Fact]
     public async Task A_global_enrich_run_takes_the_highest_vote_count_first()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -316,7 +321,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     /// </summary>
     private async Task DemoteEarlierRunsAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         await db.Database.ExecuteSqlAsync(
             $"""
              UPDATE "Titles" SET "TmdbVoteCount" = 0 WHERE "TmdbVoteCount" >= {TopOfQueueVotes}
@@ -325,7 +330,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
 
     private async Task<(Guid Id, long Tmdb)> SeedUnhydratedAsync(int votes, int year)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = NewTitle(votes, year);
         db.Add(title);
         await db.SaveChangesAsync();
@@ -334,7 +339,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
 
     private async Task<(Guid Id, long Tmdb)> SeedHydratedAsync(int votes, int year)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = NewTitle(votes, year);
         title.LastMetadataRefreshAt = DateTime.UtcNow;
         db.Add(title);
@@ -365,7 +370,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     /// </summary>
     private async Task<HydratingTmdb> RunGlobalHydrationAsync(int extraAllowance)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var used = (await Budget(db, 10_000).AllowanceAsync(DateTime.UtcNow, CancellationToken.None)).Used;
         var tmdb = new HydratingTmdb();
         var configuration = Configure(new Dictionary<string, string?>
@@ -404,7 +409,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     private async Task RunEnrichAsync(
         CountingExtractor extractor, long? extractTokens = null, long? embedTokens = null, int cap = 1)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var configuration = Configure(new Dictionary<string, string?>
         {
             [EnrichCatalogJobHandler.MaxTitlesPerRunKey] = cap.ToString(CultureInfo.InvariantCulture),
@@ -442,7 +447,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
     /// <summary>Writes a real ledger row — the gate must read the table the spend lands in.</summary>
     private async Task SpendAsync(string purpose, long tokens)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         db.ExternalApiUsages.Add(new ExternalApiUsage
         {
             Id = Guid.NewGuid(),
@@ -461,7 +466,7 @@ public class CatalogFollowThroughTests(PostgresFixture fixture)
 
     private async Task<long> SpentTodayAsync(string purpose)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var today = DateTime.UtcNow.Date;
         return await db.ExternalApiUsages
             .Where(u => u.Provider == ApiProvider.OpenRouter && u.Purpose == purpose && u.Day == today)

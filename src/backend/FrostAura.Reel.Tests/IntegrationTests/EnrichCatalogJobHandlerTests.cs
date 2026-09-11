@@ -22,13 +22,21 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// Train; with no provider configured it is a clean no-op that still chains Train, so the
 /// pipeline never stalls for want of LLM keys.
 /// </summary>
+/// <remarks>
+/// Inherits <see cref="EmbeddedCatalogTestBase"/> even though it never writes a
+/// <c>TitleEmbedding</c> itself. The sweep under test embeds every hydrated title in the SHARED
+/// catalogue — the ceiling is system-wide, not per-account — so it picks up whatever titles earlier
+/// classes left behind and embeds those too: a thousand vectors into the shared HNSW index on a
+/// measured run, none of them this class's, none of them ever removed. Leftover <c>Title</c> rows
+/// are tolerated by design; the vectors they acquire here are not.
+/// </remarks>
 [Collection("postgres")]
-public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
+public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     [Fact]
     public async Task Populates_embeddings_and_attributes_then_chains_train()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -37,7 +45,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         await RunEnrichAsync(accountId, embeddings: new StubEmbeddingProvider(true), extractor: StubExtractor(stub: true));
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(3, await db.TitleEmbeddings.CountAsync(e => titleIds.Contains(e.TitleId)));
         var attrs = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
         Assert.Equal(3, attrs.Count);
@@ -49,7 +57,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task No_provider_is_a_clean_noop_that_still_chains_train()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -58,7 +66,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         await RunEnrichAsync(accountId, embeddings: new StubEmbeddingProvider(false), extractor: StubExtractor(stub: false));
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(0, await db.TitleEmbeddings.CountAsync(e => titleIds.Contains(e.TitleId)));
         Assert.Equal(0, await db.TitleAttributes.CountAsync(a => titleIds.Contains(a.TitleId)));
         Assert.True(await db.SyncJobs.AnyAsync(j => j.AccountId == accountId && j.Kind == JobKind.Train));
@@ -67,7 +75,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task Second_run_is_idempotent_no_duplicate_embeddings()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -76,7 +84,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(true), StubExtractor(true));
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(true), StubExtractor(true));
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(2, await db.TitleEmbeddings.CountAsync(e => titleIds.Contains(e.TitleId)));
         Assert.Equal(2, await db.TitleAttributes.CountAsync(a => titleIds.Contains(a.TitleId)));
     }
@@ -84,7 +92,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task Switching_extractor_model_re_extracts_stub_rows()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -92,7 +100,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         var (accountId, titleIds) = await SeedLibraryAsync(2);
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), StubExtractor(stub: true));
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             Assert.All(
                 await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync(),
@@ -103,7 +111,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         // not stay frozen. The fake reports a distinct ModelId and writes it onto each row.
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), new RenamingExtractor("openai/gpt-5.4-mini"));
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
             Assert.Equal(2, rows.Count); // upserted in place, not duplicated
@@ -124,7 +132,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task An_unextractable_title_is_never_marked_Done_and_stops_billing_after_the_attempt_budget()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -140,7 +148,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
             await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: titleIds.Count);
         }
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
         Assert.Equal(2, rows.Count);
 
@@ -164,7 +172,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task The_per_run_cap_bounds_how_many_titles_one_run_touches()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -174,14 +182,14 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             Assert.Equal(1, await db.TitleAttributes.CountAsync(a => titleIds.Contains(a.TitleId)));
         }
 
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
             Assert.Equal(2, rows.Count);
@@ -205,7 +213,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task The_sweep_takes_the_accounts_own_titles_before_the_rest_of_the_catalogue()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -218,7 +226,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         Assert.Equal([servedId], extractor.TitlesSeen);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Equal(0, await db.TitleAttributes.CountAsync(a => libraryIds.Contains(a.TitleId)));
     }
 
@@ -231,7 +239,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task A_row_written_by_an_older_prompt_version_is_re_extracted_and_restamped()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -240,7 +248,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         var v1 = new RenamingExtractor("version/test-model", version: 1);
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v1, cap: 1);
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
             Assert.Equal(AttributeExtractionStatus.Done, row.Status);
@@ -254,7 +262,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         Assert.Equal(titleIds, v2.TitlesSeen);
 
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
             Assert.Equal(2, row.ExtractorVersion);
@@ -278,7 +286,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task A_version_bump_reopens_the_attempt_budget_a_failed_row_had_exhausted()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -293,7 +301,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         }
 
         Assert.Equal(2, v1.TitlesSeen.Count(seen => seen == titleIds[0]));
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
             Assert.Equal(2, row.AttemptCount);
@@ -307,7 +315,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), v2, cap: 1);
 
         Assert.Equal(titleIds, v2.TitlesSeen);
-        await using (var db = fixture.CreateContext(new AccountContext()))
+        await using (var db = Fixture.CreateContext(new AccountContext()))
         {
             var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
             Assert.Equal(AttributeExtractionStatus.Done, row.Status);
@@ -324,7 +332,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task A_version_bump_grants_one_fresh_budget_not_an_unlimited_one()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -347,7 +355,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
         Assert.Equal(2, v1.TitlesSeen.Count(seen => seen == titleIds[0]));
         Assert.Equal(2, v2.TitlesSeen.Count(seen => seen == titleIds[0]));
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var row = await db.TitleAttributes.SingleAsync(a => titleIds.Contains(a.TitleId));
         Assert.Equal(2, row.AttemptCount);
         Assert.Equal(2, row.ExtractorVersion);
@@ -362,7 +370,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     [Fact]
     public async Task A_global_run_enriches_without_an_account_and_chains_no_train()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
@@ -372,7 +380,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
         await RunEnrichAsync(accountId: null, new StubEmbeddingProvider(true), extractor, cap: 400);
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         Assert.Contains(titleId, extractor.TitlesSeen);
         Assert.True(await db.TitleEmbeddings.AnyAsync(e => e.TitleId == titleId));
         Assert.Equal(AttributeExtractionStatus.Done,
@@ -403,7 +411,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
             scoped.SetAccount(pinned);
         }
 
-        await using var db = fixture.CreateContext(scoped);
+        await using var db = Fixture.CreateContext(scoped);
         var configuration = Config(cap);
         var handler = new EnrichCatalogJobHandler(
             db, embeddings, extractor, new NoopEventHub(), configuration,
@@ -439,7 +447,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
 
     private async Task<(Guid AccountId, List<Guid> TitleIds)> SeedLibraryAsync(int count)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var account = new Account
         {
             Id = Guid.NewGuid(),
@@ -491,7 +499,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     /// </summary>
     private async Task<Guid> SeedServedTitleAsync(Guid accountId)
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = NewHydratedTitle("Served Title");
         db.Add(title);
         db.FeedItems.Add(new FeedItem
@@ -522,7 +530,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture)
     /// </summary>
     private async Task<Guid> SeedOrphanTitleAsync()
     {
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
         var title = NewHydratedTitle("Orphan Title");
         title.TmdbVoteCount = 8_000_000;
         title.Year = 2999;
