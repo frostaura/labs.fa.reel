@@ -1,7 +1,7 @@
 # fa.reel — Reel
 
 ## Research question
-Can a per-user, content-based classic-ML recommender trained on one user's full Trakt history beat a popularity baseline by ≥20% relative precision@10 on a time-split holdout of that user's own ratings — and can that engine carry a commercial multi-tenant SaaS? The modelling half has an affirmative first answer; the commercial half is the live question.
+Can a per-user, content-based classic-ML recommender trained on one user's full Trakt history beat a popularity baseline by ≥20% relative precision@10 on a time-split holdout of that user's own ratings — and can that engine carry a commercial multi-tenant SaaS? Where each half currently stands, and what the eval ledger can and cannot resolve, is [`MEMORY.md`](MEMORY.md)'s business, not this file's.
 
 ## What this program is
 A multi-tenant movies/TV recommender SaaS built on Trakt. A user links their Trakt profile; Reel ingests everything ever watched plus ratings and in-progress shows, derives LLM tone/pacing/theme attributes and plot embeddings, and trains a **per-user** ML.NET FastTree model that predicts that user's 0–10 rating over an explicitly versioned feature vector (the width lives in `FeatureSchema.cs` and is never typed into prose — it has already been wrong twice). It serves an explainable feed restricted to titles the user has not finished, with live search and where-to-watch provider strips, and writes back to a managed Trakt list ("Reel — Up Next") that syndicates into Plex/Kodi/Infuse. Interesting now because LLM feature extraction makes content-based recommendation viable for a single user from day one — no cross-user data needed at launch.

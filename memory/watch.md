@@ -1,31 +1,60 @@
 ---
 name: fa-reel-watch
-description: "main is ahead of origin (Ask Reel QA-walk fixes 3e232bf + the Programme 2 QA-walk fixes through 395fade, 2026-09-11) — push is the founder's call; the taste fingerprint moves on every in-app reaction and each move re-judges the whole cross-reference pool (~10 of 40 daily calls) and rewrites the lens's top titles — a coarser cross-reference key is the next call; the chat surface still has NO ceilings; 15 probe conversations in the live DB (five deleted); one upstream order flake left; cross-reference keep-only; HeroEligibleCount zero; 50-read lens review owed; interleaving off; drop reel_test_qa1..3 and reel_test_w9"
+description: "The chat surface still has NO ceilings — no rate limiter, no tier check, no budget — and the provider-side spend cap is one unclicked founder action. Every in-app reaction re-judges the whole cross-reference pool at LLM cost."
 type: watch
 last_verified: 2026-09-11
 ---
 
 # Watch list
 
-_Cleared items are deleted here, not struck through — a watch list carrying resolved rows stops being read._
+_Cleared items are deleted here, not struck through — a list carrying resolved rows stops being read._
 
-- **`main` is ahead of `origin/main` and unpushed** (`3e232bf` the Ask Reel QA-walk fixes, then `e702ae8`…`395fade` the Programme 2 QA-walk fixes, 2026-09-11 evening; re-measure with `git rev-list --left-right --count @{u}...HEAD`). Push is the founder's call. The pushed history ends at `db003a9` with eleven migrations; neither walk added one. The deploy itself has still not happened; the live API on 5054 runs `395fade`.
-- **The taste fingerprint moves on every in-app reaction, and each move costs a full cross-reference pass.** `TasteProfileHash` carries the dislike-centroid version and the loved anchors by design (a lens note must not survive a dismissal), so a dismissal or an 8+ rating changes the key; the cross-reference then treats the whole scored pool (~590 titles) as unjudged at the new key — ~10 calls of the 40/day, measured three times on 2026-09-11 evening — and `PersonaliseTitles` rewrites the top 15 lens notes. Budget-bounded and honest, but the dominant LLM cost today; the next call is a coarser key for the verdicts (affinities + texture only, no dislike version or anchors — the neighbours a verdict rests on do not change on a dismissal) or a daily cap on re-judging.
-- **The chat surface still has no ceilings.** Phases 0–1 of the Ask Reel plan are delivered (continuity, mobile, deploy file, honest accounting, `max_tokens`); **Phase 2 is not**: no rate limiter, no tier rungs (Free still gets the full pipeline), no `AskReelBudget`, no kill switch, no narrative fencing, no export/erasure, secrets not rotated. Measured ≈$0.003/turn, ≈$35/h worst case from one account. The provider-side OpenRouter spend cap is one unclicked founder action. Nothing in the plan's Phases 3–4 has started either.
-- **Ten of the panel's 15 test conversations are still in the live DB** (ids in `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`; five obvious probes were deleted through `Recent ▾` on 2026-09-11 evening); delete the rest via the UI or the endpoint. Throwaway copies to drop on :5433: `reel_test_w9`, `reel_test_qa1`, `reel_test_qa2`, `reel_test_qa3`.
-- **One upstream test red is left:** the `LiveSearchExpansionTests` semantic-arm pair (order-dependent, ~1 in 4 full runs, green alone). The hero-slot red was a real Preserve defect and is fixed (`280d8ef`); its original fixture still passes vacuously on most days (loved titles share no genre with the candidates, so both anchor sets are empty) — the new `A_preserve_rebuild_never_grows_a_rail…` carries the rule.
-- **Ask Reel follow-ups handed back by the fixers, none started:** `done` still has two shapes on the lexical and filmography paths; the ranking-seed embedding is bought per turn; the residual layout shift is the banner leaving flow at `done`; `ConditionSummary`'s inert "+N more" on the feed. (The 26 px card actions and the 34 px conditions button were fixed in the QA walk.)
-- **Two product calls surfaced by the QA walk, left to the founder:** a typed negation is soft by contract, so "thrillers, no horror" may show horror under the outside-your-request caption when the clean set is thin — decide whether typed negations should be airtight like standing ones; and the All/Movies/TV control keeps reading All after "only shows" because the words shape the intent rather than the hard filter.
-- **The copy database `reel_test_w9` ran the QA API with background jobs ON** and spent ~800 `extract-attributes` calls on 2026-09-11; drop the copy, and keep `Background__*` off in any QA slot recipe.
-- **The model does not beat the popularity baseline, and that is settled.** Iterations 13 and 14 ran on the *repaired* instrument and both came back non-positive (NDCG 0.09 vs 0.19, then 0.12 vs 0.20, CIs spanning zero). Do not read iterations ≤12 as modelling attempts. Iterations 15–17 stayed non-positive too, v6 being reverted on its own pre-registered rule.
-- **The eval ledger can no longer tell a small win from noise, and this now blocks the modelling programme.** At a ~209-row holdout, two v5 runs over IDENTICAL data returned **0.000 and 0.056**, and a third read 0.02 — a spread wider than any per-iteration effect being looked for, which is why iteration 17's 0.053-vs-0.056 verdict is honestly "unmeasurable", not "no signal". **Do not run another schema bump against this instrument** and do not read a single iteration's number as evidence either way; the next modelling move is a bigger or pooled holdout (or a within-account paired design), not another feature set.
-- **Supply was the binding constraint (25.5% recall ceiling) and the seed has now moved it:** catalogue 35,725, eligible pool 3,780 (was 421 → 2,242 → 3,780 on 2026-09-10), enrichment still draining (6,072 embedded). `HeroEligibleCount` at the 7.5 floor is STILL zero on every build — watch for the first non-zero. Re-run `GET /api/dev/retrieval-recall` once embeddings catch up; the chat answer space under the founder's filters (~544 of ~6,051 on 2026-09-10) needs re-measuring.
-- **The 50-read human review bar for lens copy has not been met.** `GET /api/dev/lens-audit` exists; the reads have not happened. Prompt v4 shipped 2026-09-10 and restarts the count.
-- **The cross-reference job is live at `LLM_XREF_DAILY_CALLS=40` (dev `.env`), keep-only.** Its pool is the titles with a persisted `TitleScore` for the active artifact — the ~220-title shortlist plus spares per build, not the 3,784 eligible — so coverage grows one shortlist at a time; **widening it means persisting first-pass scores for the whole retrieved set (~1,200) and is the next change.** PR4 (round 2, demotion, hero bar) stays gated on an OUT arm that clears Wilson-upper ≤ 15% false-rule-out; v2 is at 21%. The `SemaphoreSlim(1)` gate means a second account's pass can hold a runner slot for the 10-minute ceiling — fine at one account. Read `/api/accuracy.crossReference` weekly: the online block says "not yet answerable" below 20 outcomes per verdict.
-- **B1 gates still owed:** `RetrievalRecallProbe` before/after over a week (the 60 s probe budget now covers ~40 of 147 days — raise the cap or narrow the window); the first cluster-aware Fresh build took 52 s against 27–37 s before, with the pool jumping 2,242 → 3,780 in the same hour, so build p95 is unattributed; `hnsw.ef_search` stays at 40 while cluster pulls can ask for several hundred. B2 (seed sweep over the whole history) waits on 14 days of per-arm `NewlyEligiblePerArmJson`.
-- **Feed composition after a retrain.** The first Fresh build after the schema-v4 retrain was led by a reality show; confirm the profile-conditioned reranker holds over a week of builds.
-- **`Tone` and `Era` on the 2,312 pre-2026-08-07 `TitleAttributes` rows are polluted** — gated off by `MinTrustedExtractorVersion = 2`, draining nightly. Watch `enrichment.staleExtractorVersion` on `GET /api/metrics/pipeline` reach zero before surfacing either field in the UI.
-- **Interleaving is off and stays off until it is worth three months.** `INTERLEAVE_ENABLED=false`; ~3 months per comparison at this traffic.
-- **`PersonAffinities` is role-agnostic**; revisit if person affinity ever becomes a headline feature.
-- **`PipelineStage` has no "not enough ratings" value** — an account below the 10-rating floor is parked as `Degraded`. Fix is a new enum member plus a frontend case.
-- Success metrics for the commercial half are instrumented nowhere — the "≥5 external users" gate has no counter. Four of six exposure surfaces (405 of 436 rows) cannot be joined back to what served them. `docs/product-spec.md` §"FrostAura family look" cites `/docs/brand/assets/`, which does not exist in this repo.
+## Unbounded cost — the sharpest item here
+- **The chat surface has no ceilings.** Ask Reel's phase 0 and 1 shipped; **phase 2 did not**: no rate limiter, no
+  tier rungs (Free gets the whole pipeline), no chat budget, no kill switch, no narrative fencing, no export or
+  erasure, secrets not rotated. At the measured per-turn cost one account can run up tens of dollars an hour. **The
+  provider-side spend cap at OpenRouter is a single unclicked founder action** and is the cheapest mitigation
+  available. Phases 3 and 4 have not started.
+- **Every in-app reaction re-judges the whole cross-reference pool.** The taste profile hash carries the
+  dislike-centroid version and the loved anchors by design — a lens note must not survive a dismissal — so a dismissal
+  or a high rating changes the key, the cross-reference treats the entire scored pool as unjudged at the new key, and
+  the top lens notes are rewritten. Budget-bounded and honest, but the dominant LLM cost today. **The next call is a
+  coarser key for verdicts** (the neighbours a verdict rests on do not change on a dismissal) or a daily cap on
+  re-judging.
+
+## Owed work
+- **The cross-reference pool is shortlist-only.** Verdicts need a persisted score, so a pass covers the current
+  shortlist rather than the whole eligible catalogue and coverage grows one build at a time. **Widening it means
+  persisting first-pass scores for the whole retrieved set, and that is the next change.** PR4 — round 2, any
+  demotion, a hero bar — stays gated on the OUT arm clearing its Wilson-upper threshold (`decisions-retrieval.md`).
+- **Do not run another schema bump against the current eval ledger** — at this holdout size it cannot separate a small
+  win from noise. The next modelling move is a bigger or pooled holdout, or a within-account paired design.
+- **`HeroEligibleCount` at the 7.5 floor is still zero on every build**, even after the catalogue seed. Watch for the
+  first non-zero; until then the hero floor is being relaxed on every build.
+- **The retrieval-recall and build-latency gates are unpaid.** The recall probe needs a before/after over a week and
+  its budget covers only part of the window; the first cluster-aware build was materially slower while the eligible
+  pool jumped in the same hour, so build p95 is unattributed; `hnsw.ef_search` is still at its default while cluster
+  pulls can ask for hundreds. The seed sweep waits on two weeks of per-arm eligibility data.
+- **The 50-read human review bar for lens copy has not been met.** The audit endpoint exists, the reads have not
+  happened, and the latest prompt version restarted the count. No prompt reaches anyone but the founder until it is.
+- **Ask Reel follow-ups handed back by the fixers, none started:** the "done" reason still has two shapes on the
+  lexical and filmography paths; the ranking-seed embedding is bought per turn; the residual layout shift is the
+  banner leaving flow; the conditions summary's "+N more" is inert on the feed.
+- **Extraction-era pollution is still draining.** Tone and era on the oldest attribute rows are untrustworthy and
+  gated off by a minimum trusted extractor version; watch the stale-extractor count reach zero before surfacing either
+  field.
+- **`PipelineStage` has no "not enough ratings" value**, so an account below the ratings floor is parked as `Degraded`
+  — a new enum member plus a frontend case.
+
+## Debris and hygiene
+- **The Ask Reel panel's probe conversations are still in the live database.** Delete them through the UI or the
+  delete endpoint, never SQL. Their ids are in the panel's plan folder.
+- **A pile of throwaway `reel_test_*` databases sits on port 5433**, including the QA copy that ran a whole walk with
+  background jobs on and spent real provider calls. Drop them.
+- **One upstream test red is left** — the semantic-arm order flake (`gotchas-tests.md`).
+- **Interleaving is off and stays off until it is worth three months** of comparison at this traffic.
+
+## Standing
+- **Success metrics for the commercial half are instrumented nowhere.** The "≥5 external users" gate has no counter —
+  the criterion that decides this program's fate is measured by hand. `docs/product-spec.md` also cites a brand-assets
+  path that does not exist in this repo.
