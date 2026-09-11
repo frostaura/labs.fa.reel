@@ -466,27 +466,36 @@ test.describe("Ask Reel — a resumed thread says what happened, once", () => {
 
     let settled = false;
     let turnCalls = 0;
+    let conversationCalls = 0;
     await boot(page, { resume: "stored", storedId: CONVERSATION });
     // Registered after `boot`, so it wins: the conversation answers Pending until the turn does.
     await page.route(
       (u) => u.pathname === `/api/search/conversations/${CONVERSATION}`,
-      (route) => route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(settled ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
-      }),
+      (route) => {
+        conversationCalls += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(settled ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
+        });
+      },
     );
     // 202 while Pending, exactly as the contract specifies, then the finished turn.
     await page.route(
       (u) => u.pathname === "/api/search/turns/turn-77",
       (route) => {
         turnCalls += 1;
-        if (turnCalls > 1) settled = true;
+        // Two 202s before it lands, so there is a window in which the turn is demonstrably being
+        // polled and has demonstrably not settled — which is the only window the assertion below
+        // is about. With a single 202 the settle and the second poll are the same instant, and the
+        // re-read the settle correctly triggers is indistinguishable from the fallback interval.
+        const done = turnCalls > 2;
+        if (done) settled = true;
         return route.fulfill({
-          status: turnCalls > 1 ? 200 : 202,
+          status: done ? 200 : 202,
           contentType: "application/json",
           body: JSON.stringify({
-            status: turnCalls > 1 ? "Completed" : "Pending",
+            status: done ? "Completed" : "Pending",
             reason: null, failureCode: null, cards: [],
           }),
         });
@@ -500,11 +509,71 @@ test.describe("Ask Reel — a resumed thread says what happened, once", () => {
     // The last completed answer stays up underneath it.
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
 
+    // The cheap route is the one being polled. `GET /turns/{id}` is one row; re-reading the
+    // conversation re-runs the whole replay — the eligibility filter, the on-demand re-score and
+    // the card projection — every five seconds for a minute, to learn a single status field. The
+    // id is on the row precisely so the client does not have to do that, so the fallback interval
+    // must be OFF whenever there is one: the thread is read for the resume and then left alone.
+    const whilePending = conversationCalls;
+    await expect.poll(() => turnCalls, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+    expect(conversationCalls).toBe(whilePending);
+
     // …and when it lands, the thread is re-read WHOLE rather than patched row by row.
     await expect(page.getByTestId("askreel-pending-turn")).toHaveCount(0, { timeout: 20_000 });
     await expect(page.getByTestId("askreel-transcript")).toContainText("Two older ones.");
     await expect(page.getByTestId("askreel-seam-answers")).toHaveCount(0);
-    expect(turnCalls).toBeGreaterThan(1);
+    expect(conversationCalls).toBeGreaterThan(whilePending);
+  });
+
+  test("a pending turn with no id on it falls back to re-reading the thread", async ({ page }) => {
+    // The probe, one field: the same payload with `id` gone from the pending assistant row — which
+    // is every server before FX7 projects it. There is then nothing to poll but the conversation,
+    // and the page must still find out rather than sitting on "Still working on that one" forever.
+    // Asserted as a pair with the test above: one field decides which route carries the watch, and
+    // getting it backwards is either a dead page or a replay running every five seconds.
+    const pendingTurns = [
+      ...RESUME_PAYLOAD.turns,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending" },
+    ];
+    const landed = {
+      ...RESUME_PAYLOAD,
+      turns: [
+        ...RESUME_PAYLOAD.turns,
+        { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Completed" },
+        { sequence: 3, role: "assistant", text: "Two older ones.", kind: "ask", status: "Completed" },
+      ],
+      lastQuery: "older, and slower",
+    };
+
+    let conversationCalls = 0;
+    let turnCalls = 0;
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await page.route(
+      (u) => u.pathname === `/api/search/conversations/${CONVERSATION}`,
+      (route) => {
+        conversationCalls += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          // Settles on the third read: the resume, one poll that is still Pending, then the answer.
+          body: JSON.stringify(conversationCalls > 2 ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
+        });
+      },
+    );
+    // Nothing may reach the turn route — there is no id to build one from, and a request to
+    // `/api/search/turns/` or `/turns/undefined` is the shape that bug takes.
+    await page.route((u) => u.pathname.startsWith("/api/search/turns/"), (route) => {
+      turnCalls += 1;
+      return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    });
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-pending-turn")).toContainText("Still working on that one");
+    await expect(page.getByTestId("askreel-pending-turn")).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.getByTestId("askreel-transcript")).toContainText("Two older ones.");
+    expect(turnCalls).toBe(0);
+    expect(conversationCalls).toBeGreaterThan(2);
   });
 
   test("a restored PAGED answer accounts for the grid, not for its last page", async ({ page }) => {
@@ -835,6 +904,100 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
 
     await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Rounds Up"]);
     await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+});
+
+/**
+ * The tray survives a reload — or the quality floor is a live-turn decoration.
+ *
+ * The server has stored below-floor cards as rows of their own since the turn record landed, and
+ * hands them back on the resume payload precisely so a thread comes back whole. The client read
+ * `cards` and dropped `belowFloor` on the floor, so the fence the user was left with —
+ * "Show the 3 under your 6.0 bar", quoting a number they set themselves — was there before a
+ * reload and gone after it, with the picks it accounted for gone with it.
+ *
+ * Three fixtures one field apart, because absent / empty / populated are three different
+ * statements from the server and only the middle one is a zero.
+ */
+test.describe("Ask Reel — the tray comes back with the thread", () => {
+  const UNDER = card("d4", "Under Bar", { predictedRating: 5.2, blend: 0.1 });
+  const WAY_UNDER = card("e5", "Way Under", { predictedRating: 4.9, blend: 0.1 });
+  const BARELY = card("f6", "Barely Under", { predictedRating: 5.8, blend: 0.1 });
+
+  test("a reloaded thread restores the fence, its three cards, and keeps them out of the grid", async ({ page }) => {
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, belowFloor: [UNDER, WAY_UNDER, BARELY] },
+    });
+
+    // The grid is exactly the answer, in stored rank order. The tray's three are NOT in it: they
+    // did not clear the bar, and merging them would make the floor decorative on every resume.
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    for (const name of ["Under Bar", "Way Under", "Barely Under"]) {
+      await expect(page.getByTestId("semantic-results").getByText(name)).toHaveCount(0);
+    }
+
+    // …and the fence reads exactly as it did before the reload, counting its own contents against
+    // the bar out of the account's own conditions.
+    const tray = page.getByTestId("askreel-below-floor");
+    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6.0 bar");
+    await tray.locator("summary").click();
+    // `p.truncate`, not a text match: each card's why-line repeats its name.
+    await expect(tray.locator("a > p.truncate")).toHaveText(["Under Bar", "Way Under", "Barely Under"]);
+  });
+
+  test("an empty tray and no tray at all both render no fence, and neither invents one", async ({ page }) => {
+    // The probe's other two rungs. `belowFloor: []` is a server saying the floor cut nothing;
+    // omitting the field is an older server saying nothing at all. Both render no fence — the
+    // distinction they must NOT collapse into is a fence labelled with a count from somewhere else.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, belowFloor: [] },
+    });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+
+  test("a payload with no belowFloor field at all still resumes clean", async ({ page }) => {
+    // RESUME_PAYLOAD verbatim — today's server, before FX6's field reaches every path.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
+  });
+
+  test("the removals note names the answer, because the tray is part of it", async ({ page }) => {
+    // `removed` is the eligibility re-filter's count across BOTH stored lists. With the tray back
+    // on screen the old wording — "2 picks are gone" beside a grid — read as a claim about the
+    // grid, and a reader counting the grid to check it would be counting the wrong thing.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, removed: 2, belowFloor: [UNDER, WAY_UNDER] },
+    });
+
+    await expect(page.getByTestId("askreel-removed")).toHaveText(
+      "2 picks are gone from this answer — you’ve since watched or rated them.",
+    );
+    // Both lists are on screen, which is the reason the note cannot name just one of them.
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
+  });
+
+  test("one removal is singular, and still about the answer", async ({ page }) => {
+    // Fixture variation, one field: `removed` 2 → 1. Three agreements have to move together —
+    // the noun, the verb and the pronoun — and the sentence is assembled from three separate
+    // ternaries, so a copy edit that touches one of them is invisible until this runs.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, removed: 1, belowFloor: [UNDER] },
+    });
+
+    await expect(page.getByTestId("askreel-removed")).toHaveText(
+      "1 pick is gone from this answer — you’ve since watched or rated it.",
+    );
   });
 });
 

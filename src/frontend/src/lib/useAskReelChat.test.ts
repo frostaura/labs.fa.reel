@@ -1779,3 +1779,88 @@ describe("chatReducer — a resumed thread with an unfinished tail", () => {
     expect(state.lastTurnAt).toBe("2026-09-10T21:00:00Z");
   });
 });
+
+/**
+ * The tray survives a reload, or the floor is decorative across one.
+ *
+ * `belowFloor` has been on the resume payload since the turn record landed — the server stores the
+ * cards its floor cut as rows of their own, precisely so a reloaded thread comes back whole — and
+ * the reducer dropped it. What the user saw was a "Show the 3 under your 6.0 bar" fence on a live
+ * answer and nothing at all on the same answer one reload later: the one cut on the screen they
+ * can act on (it quotes a bar THEY set) quietly stopped being accounted for.
+ *
+ * Three fixtures, one field apart, because absent / empty / populated are three different
+ * statements and only the middle one is a zero. `floorHeldBack` renders the fence off the count,
+ * so an absent field becoming `0` would suppress a fence an older server still owes us, and an
+ * empty array becoming `null` would make the tray fall back to a scalar that is not there either.
+ */
+describe("chatReducer — the tray comes back on a resume", () => {
+  const base = {
+    id: "conv-t",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    cards: [card(1), card(2)],
+    turns: [
+      { sequence: 0, role: "user", text: "something tense", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Two of those.", kind: "ask", status: "Completed" },
+    ],
+    reason: "2 picks ranked for you, from 40 pulled.",
+    lastQuery: "something tense",
+    shown: [1, 2, 8, 9, 10],
+  };
+
+  it("resume_restores_the_tray_and_keeps_it_out_of_the_grid", () => {
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...base, belowFloor: [card(8), card(9), card(10)] },
+    });
+    expect(state.belowFloor.map((c) => c.titleId)).toEqual(["t8", "t9", "t10"]);
+    // The contract's own line: never merged into `cards`. The grid is the two that cleared the bar.
+    expect(state.order).toEqual(["t1", "t2"]);
+    expect(state.byId.t8).toBeUndefined();
+    // The label the fence prints. It is the tray's own contents on a resume, because the server
+    // hands the whole stored block back — a number the user can open the fence and count.
+    expect(state.droppedByFloor).toBe(3);
+    expect(floorHeldBack(state.belowFloor.length, state.droppedByFloor)).toBe(3);
+  });
+
+  it("the_trays_cards_go_through_the_same_guard_every_streamed_card_does", () => {
+    // Fixture variation inside the tray: one good row, one that is not a card at all. A stored row
+    // reaching `ResultCard` without a titleId renders a keyless undefined; the guard is the one the
+    // stream already applies to `done.belowFloor`, so both paths reject the same shapes.
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...base, belowFloor: [card(8), { titleId: "t9" } as unknown as AskCard] },
+    });
+    expect(state.belowFloor.map((c) => c.titleId)).toEqual(["t8"]);
+    // …and the count follows the contents rather than the payload's length, so the fence cannot
+    // promise a card it just threw away.
+    expect(state.droppedByFloor).toBe(1);
+  });
+
+  it("an_empty_tray_is_a_zero_and_an_absent_one_is_silence", () => {
+    // The probe: the same payload with `belowFloor: []`, and with the field gone entirely.
+    const empty = chatReducer(initialChatState, { type: "resume", payload: { ...base, belowFloor: [] } });
+    expect(empty.belowFloor).toEqual([]);
+    // A server that sent the field and no cards has TOLD us the floor cut nothing.
+    expect(empty.droppedByFloor).toBe(0);
+    expect(floorHeldBack(empty.belowFloor.length, empty.droppedByFloor)).toBe(0);
+
+    const silent = chatReducer(initialChatState, { type: "resume", payload: base });
+    expect(silent.belowFloor).toEqual([]);
+    // A server that sent no field has told us nothing, which is not a zero — see `floorHeldBack`.
+    expect(silent.droppedByFloor).toBeNull();
+    expect(floorHeldBack(silent.belowFloor.length, silent.droppedByFloor)).toBe(0);
+  });
+
+  it("asking_anything_clears_the_resumed_tray", () => {
+    // Last question's cut must never label this question's fence. Same rule the live `done` path
+    // keeps; the resumed tray is now subject to it because it is now set at all.
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...base, belowFloor: [card(8), card(9), card(10)] },
+    });
+    expect(chatReducer(resumed, { type: "userTurn", message: "something else", fresh: false }).belowFloor).toEqual([]);
+    expect(chatReducer(resumed, { type: "reaskTurn" }).belowFloor).toEqual([]);
+    expect(chatReducer(resumed, { type: "userTurn", message: "brand new", fresh: true }).droppedByFloor).toBeNull();
+  });
+});
