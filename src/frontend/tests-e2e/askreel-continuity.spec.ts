@@ -130,6 +130,38 @@ async function boot(
 }
 
 /**
+ * Serves `GET /api/search/conversations` the way the server does — honouring the client's own
+ * `limit` against an account of `total` threads — and records every limit that was asked for.
+ *
+ * Registered AFTER `boot`, which matches first in Playwright, so the flat mock there is the
+ * default and this is the opt-in for specs that care how many rows the client requests. The
+ * current thread is row one so the menu's "this is the one you are on" marker still has a target.
+ */
+async function routeThreadList(page: Page, total: number): Promise<number[]> {
+  const limits: number[] = [];
+  const threads = Array.from({ length: total }, (_, i) => ({
+    id: i === 0 ? CONVERSATION : `7f3a1b2c-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    title: i === 0 ? "a tense heist" : `thread ${i}`,
+    turnCount: 2,
+    lastTurnAt: new Date(Date.now() - i * 60_000).toISOString(),
+    lastCardsAt: null,
+  }));
+  await page.route(
+    (u) => u.pathname === "/api/search/conversations",
+    (route) => {
+      const limit = Number(new URL(route.request().url()).searchParams.get("limit") ?? 20);
+      limits.push(limit);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(threads.slice(0, Math.min(limit, total))),
+      });
+    },
+  );
+  return limits;
+}
+
+/**
  * The main grid's card names, in DOM order. `p.truncate` and not `p[title]`: the why-line carries
  * a title attribute too, so the looser selector returns two elements per card and an order
  * assertion against it passes for the wrong reason.
@@ -531,6 +563,40 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
     await expect(page.getByTestId("askreel-recent-row")).toHaveCount(1);
     expect(deleted).toBe(OTHER_CONVERSATION);
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
+  });
+
+  test("Recent asks for a cheap page and offers the rest of the account's threads", async ({ page }) => {
+    // SB-05. The account in the smoke held 51 conversations; the menu rendered 20 and gave no
+    // affordance for the other 31, so a control the code calls "a means of getting back to an
+    // answer" read as a complete list. This route honours `limit` the way the server does, so the
+    // client's own request is what decides how many rows come back.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    const limits = await routeThreadList(page, 51);
+
+    await page.getByTestId("askreel-recent").click();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(20);
+    await page.getByTestId("askreel-recent-older").click();
+
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(51);
+    // One gesture, and no second one on offer: the route takes a limit and no offset, so 100 is
+    // everything this control can reach and a repeatable button would return the same rows.
+    await expect(page.getByTestId("askreel-recent-older")).toHaveCount(0);
+    expect(limits).toEqual([20, 100]);
+    // The thread on screen is still marked in the longer list, and still the current one.
+    await expect(page.getByTestId("askreel-recent-row").first()).toContainText("a tense heist");
+  });
+
+  test("an account with a handful of threads is never offered older ones", async ({ page }) => {
+    // Fixture variation, one number: 12 threads instead of 51. A short page IS the whole list, so
+    // the offer would promise rows that do not exist — and clicking it would spend a request to
+    // return the same twelve.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    const limits = await routeThreadList(page, 12);
+
+    await page.getByTestId("askreel-recent").click();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(12);
+    await expect(page.getByTestId("askreel-recent-older")).toHaveCount(0);
+    expect(limits).toEqual([20]);
   });
 });
 

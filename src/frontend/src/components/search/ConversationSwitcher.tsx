@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Trash2 } from "lucide-react";
 import { useDeleteConversationMutation, useListConversationsQuery } from "../../store/api";
 import { relTime } from "../../lib/format";
-import { plural } from "../../lib/useAskReelChat";
+import { plural, recentListing } from "../../lib/useAskReelChat";
 
 /**
  * `Recent ▾` — the way back into a thread you left.
@@ -28,11 +28,16 @@ export default function ConversationSwitcher({
   onCurrentDeleted: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Set once by "Show older" and kept: the user has said they want the longer list, and making
+  // them ask again on every open would be the control arguing with them. See `recentListing` for
+  // why there are exactly two sizes and no third.
+  const [showOlder, setShowOlder] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+  const listing = recentListing(showOlder, 0);
   // Nothing is fetched until the menu is opened. This list is a control almost nobody touches on a
   // given visit, and a query on mount would put a request on the critical path of every single
   // /search load for it.
-  const { data: conversations, isFetching } = useListConversationsQuery(undefined, { skip: !open });
+  const { data: conversations, isFetching } = useListConversationsQuery(listing.limit, { skip: !open });
   const [deleteConversation] = useDeleteConversationMutation();
 
   // Close on an outside click, same as the search box's dropdown.
@@ -46,6 +51,10 @@ export default function ConversationSwitcher({
   }, [open]);
 
   const rows = conversations ?? [];
+  // Recomputed against what actually came back: the offer is only honest over a FULL page, and a
+  // short one is the whole list. `listing.limit` above is keyed on the toggle alone, which is what
+  // the request needs; this is what the footer needs.
+  const { canShowOlder, atCeiling } = recentListing(showOlder, rows.length);
 
   return (
     <div ref={boxRef} className="relative">
@@ -119,6 +128,26 @@ export default function ConversationSwitcher({
                 </button>
               </div>
             ))
+          )}
+          {/* SB-05. The list is bounded on purpose, but an account with 51 threads saw 20 of them
+              and no hint that the other 31 existed — a small control read as a complete list. One
+              gesture asks for everything the route can return; there is no second one, because
+              `/conversations` takes a `limit` and no `offset`. */}
+          {canShowOlder && (
+            <button
+              type="button"
+              data-testid="askreel-recent-older"
+              onClick={() => setShowOlder(true)}
+              disabled={isFetching}
+              className="w-full border-t border-fa-edge px-3 py-2 text-left fa-caption text-fa-frost-dim hover:text-fa-frost-bright hover:bg-fa-glass disabled:opacity-40 transition-colors"
+            >
+              Show older threads
+            </button>
+          )}
+          {atCeiling && (
+            <p className="border-t border-fa-edge px-3 py-2 fa-caption text-fa-frost-dim/70" data-testid="askreel-recent-ceiling">
+              Showing your {rows.length} most recent threads.
+            </p>
           )}
         </div>
       )}

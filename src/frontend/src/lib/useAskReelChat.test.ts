@@ -25,6 +25,9 @@ import {
   plural,
   showMoodPresets,
   showsFootnote,
+  recentListing,
+  RECENT_LIMIT,
+  OLDER_LIMIT,
   transcriptOf,
   type ChatTurn,
 } from "./useAskReelChat";
@@ -1546,5 +1549,45 @@ describe("chatReducer — a resumed thread knows whether it was paged", () => {
     expect(state.paged).toBe(true);
     expect(footnote(state.reason, 3, state.paged))
       .toBe("3 picks so far · last page: 2 picks ranked for you, from 65 pulled");
+  });
+});
+
+/**
+ * SB-05 — `Recent ▾` showed 20 of the account's 51 threads with no way to reach the rest.
+ *
+ * The menu is deliberately small ("a means of getting back to an answer, not a filing system") and
+ * `?limit=20` matches the contract, so this is not a wrong request — it is a missing affordance.
+ * Anyone reading the menu as a complete thread list is simply wrong, and nothing on screen said so.
+ *
+ * The route takes `limit` (clamped 1..100) and NO offset, so 100 is the ceiling reachable from
+ * here and the menu says so rather than offering a control that cannot go further.
+ */
+describe("recentListing", () => {
+  it("asks_for_the_cheap_page_first", () => {
+    expect(recentListing(false, 0).limit).toBe(RECENT_LIMIT);
+    expect(recentListing(true, 0).limit).toBe(OLDER_LIMIT);
+  });
+
+  it("offers_the_rest_only_when_the_page_came_back_full", () => {
+    // A short page IS the whole list — offering "show older" over it promises threads that do not
+    // exist. A full one is the only evidence the client has that there may be more.
+    expect(recentListing(false, RECENT_LIMIT).canShowOlder).toBe(true);
+    expect(recentListing(false, RECENT_LIMIT - 1).canShowOlder).toBe(false);
+    expect(recentListing(false, 0).canShowOlder).toBe(false);
+  });
+
+  it("stops_offering_once_it_has_asked_for_everything_it_can_reach", () => {
+    // Fixture variation, one field: the same full page, already expanded. The route has no offset,
+    // so there is no second gesture to offer and the control must not reappear.
+    expect(recentListing(true, OLDER_LIMIT).canShowOlder).toBe(false);
+    expect(recentListing(true, 42).canShowOlder).toBe(false);
+  });
+
+  it("says_so_when_it_is_standing_at_the_ceiling", () => {
+    // 100 rows back from a 100-row request means the account has at least that many and the route
+    // cannot page past it. Saying nothing there is how the menu became a list people trusted.
+    expect(recentListing(true, OLDER_LIMIT).atCeiling).toBe(true);
+    expect(recentListing(true, OLDER_LIMIT - 1).atCeiling).toBe(false);
+    expect(recentListing(false, RECENT_LIMIT).atCeiling).toBe(false);
   });
 });

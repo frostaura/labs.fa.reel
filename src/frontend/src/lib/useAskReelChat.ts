@@ -314,6 +314,41 @@ export function footnote(reason: string | null, shownCount: number, paged: boole
 }
 
 /**
+ * How many threads `Recent ▾` asks for on a first open, and after "Show older".
+ *
+ * The route is `GET /api/search/conversations?limit=N`, clamped server-side to 1..100, and it has
+ * **no `offset`** — so 100 is the whole of what this control can reach, and there is no third
+ * gesture to offer. Recorded here rather than discovered again: a "Show older" that keeps
+ * requesting would silently return the same hundred rows forever.
+ */
+export const RECENT_LIMIT = 20;
+export const OLDER_LIMIT = 100;
+
+/**
+ * What the thread menu should request, and what it may offer.
+ *
+ * SB-05 is the missing half of a control that was otherwise correct: the menu showed 20 of an
+ * account's 51 threads, matching the contract's documented `?limit=20`, and said nothing about the
+ * other 31 — so a menu framed as "a means of getting back to an answer" read as a complete list
+ * and was not one. The first page stays cheap (this is a control almost nobody touches on a given
+ * visit); asking for the rest is one deliberate gesture.
+ *
+ * The offer is made only over a FULL page, because a short one is the whole list and promising
+ * older threads over it promises rows that do not exist. At the ceiling the menu says so instead
+ * of offering a gesture the route cannot honour.
+ */
+export function recentListing(
+  showOlder: boolean,
+  rowCount: number,
+): { limit: number; canShowOlder: boolean; atCeiling: boolean } {
+  return {
+    limit: showOlder ? OLDER_LIMIT : RECENT_LIMIT,
+    canShowOlder: !showOlder && rowCount >= RECENT_LIMIT,
+    atCeiling: showOlder && rowCount >= OLDER_LIMIT,
+  };
+}
+
+/**
  * Whether the provenance line belongs on screen.
  *
  * `resumed` is in, and SB-06 is what happened when it was not. The resume payload carries the
