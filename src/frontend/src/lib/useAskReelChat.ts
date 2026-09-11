@@ -829,6 +829,39 @@ export function excludedTerms(genres: string[] | undefined, keywords: string[] |
   return out;
 }
 
+/**
+ * The clause the server writes into a reply it has qualified — and the whole reason the pill is
+ * conditional.
+ *
+ * `AskReelStandingFilters` rewrites the model's sentence as "… — under your conditions that means
+ * no comedy and titles from 2000 on." and sets `conflict` on the same frame. The pill renders off
+ * that flag, so the bubble read, verbatim:
+ *
+ *   … under your conditions that means no comedy and titles from 2000 on.**under your conditions**
+ *
+ * — the annotation repeating the sentence it annotates, with no space between them.
+ */
+const CONFLICT_CLAUSE = /under your conditions/i;
+
+/**
+ * Should the qualified-reply pill render on THIS bubble? F4-06's first half.
+ *
+ * The flag says the server rewrote the sentence; it does not say what the rewrite looks like. When
+ * the sentence already carries the clause, the pill is a second copy of it and the reader gets the
+ * same three words twice in a row — so the sentence keeps it and the pill stands down. The pill
+ * survives for the case it was actually useful in: a reply that is marked as qualified without
+ * saying so in its own words, which is what an older server and a stored row from before the
+ * rewrite both look like. Scanning the reply rather than dropping the pill outright is what keeps
+ * THAT bubble marked.
+ *
+ * Case-insensitive and position-free on purpose: the clause is mid-sentence today ("— under your
+ * conditions that means …") and was sentence-final before, and a rule that only recognised one of
+ * those would put the duplicate back the next time the copy moves.
+ */
+export function showsConflictPill(text: string): boolean {
+  return !CONFLICT_CLAUSE.test(text);
+}
+
 /** "comedy" · "comedy and anime" · "comedy, anime and musical". A list a person can read. */
 export function listPhrase(items: string[]): string {
   if (items.length === 0) return "";

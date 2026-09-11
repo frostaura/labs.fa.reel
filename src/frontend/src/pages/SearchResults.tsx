@@ -22,7 +22,7 @@ import {
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  scrollTargetFor, skeletonCount, turnSettled,
+  scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -509,8 +509,15 @@ function AskReel() {
                   {turn.text}
                   {/* The server rewrote this sentence before sending it, and says so on the frame.
                       Marking the bubble is the cheap half of the honesty: a reader scanning a
-                      thread can see which answers were constrained without re-reading them. */}
-                  {turn.conflict && (
+                      thread can see which answers were constrained without re-reading them.
+
+                      …unless the sentence already says it. F4-06: the server's rewrite ENDS in the
+                      clause the pill carries, so the bubble read "— under your conditions that
+                      means no comedy and titles from 2000 on.under your conditions" — the
+                      annotation repeating what it annotates, with no space between them. One of
+                      the two has to go, and the sentence is the one that says something. See
+                      {@link showsConflictPill} for why the pill survives at all. */}
+                  {turn.conflict && showsConflictPill(turn.text) && (
                     <span
                       data-testid="askreel-reply-conflict"
                       className="fa-caption ml-2 inline-flex items-center rounded-full border border-fa-warning/40 px-2 py-0.5 align-middle text-fa-warning"

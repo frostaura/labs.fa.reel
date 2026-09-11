@@ -498,7 +498,16 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
       text: "Here are some light picks — under your conditions that means no comedy and anime.",
       conflict: true,
     });
-    await expect(page.getByTestId("askreel-reply-conflict")).toHaveText("under your conditions");
+    // F4-06's first half. The server's rewrite ENDS in the clause the pill carries, so rendering
+    // both printed "…no comedy and anime.under your conditions" — the annotation repeating the
+    // sentence it annotates, with no space between them. The sentence keeps it; the pill stands
+    // down. What is left is one statement, read once.
+    await expect(page.getByTestId("askreel-reply")).toContainText("under your conditions that means no comedy and anime.");
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
+    const clauses = await page.getByTestId("askreel-reply").evaluate(
+      (el) => (el.textContent ?? "").match(/under your conditions/gi)?.length ?? 0,
+    );
+    expect(clauses).toBe(1);
 
     // `excludedGenres` and `excludedKeywords` together: the keyword half is the one a turn asking
     // for an avoid-keyword had no way to name at all, since no genre collides.
@@ -530,7 +539,26 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await askEnd(page);
     // It survives the answer it annotates — the collision did not stop being true.
     await expect(notice).toBeVisible();
-    await expect(page.getByTestId("askreel-reply-conflict")).toBeVisible();
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
+  });
+
+  test("a reply qualified without saying so still gets the pill", async ({ page }) => {
+    // Fixture variation on one field of the test above: the same `conflict: true` over a reply
+    // that does NOT carry the clause — an older server, and a row stored before the rewrite
+    // existed. Dropping the pill outright would leave those bubbles unmarked, which is the state
+    // F4-06's other half was about; the pill is scanned out, not deleted.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a funny anime");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "assistant-message", { text: "I can’t recommend a funny anime.", conflict: true });
+
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveText("under your conditions");
+    const clauses = await page.getByTestId("askreel-reply").evaluate(
+      (el) => (el.textContent ?? "").match(/under your conditions/gi)?.length ?? 0,
+    );
+    expect(clauses).toBe(1);
   });
 
   test("an unqualified reply carries no tag, and a message-only conflict names no terms", async ({ page }) => {

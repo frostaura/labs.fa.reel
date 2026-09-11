@@ -25,6 +25,7 @@ import {
   plural,
   showMoodPresets,
   showsFootnote,
+  showsConflictPill,
   turnSettled,
   recentListing,
   lastTurnOutcome,
@@ -1361,6 +1362,38 @@ describe("chatReducer — the conflict flag and the excluded terms", () => {
  * lists and one fact for the reader: "your conditions rule out comedy and anime" is a sentence
  * about both, and until FX3 the keyword half was not on the wire at all.
  */
+/**
+ * F4-06's first half. The pill renders off the `conflict` flag, and the server's rewrite of the
+ * reply ENDS in the very clause the pill carries — so the bubble printed the same three words
+ * twice, running together with no space: "…titles from 2000 on.under your conditions".
+ */
+describe("showsConflictPill", () => {
+  it("stands_down_when_the_reply_already_says_it", () => {
+    // The server's own wording, from `AskReelStandingFilters` — both shapes it produces.
+    expect(showsConflictPill("Coming up — under your conditions that means no comedy and titles from 2000 on."))
+      .toBe(false);
+    expect(showsConflictPill("Coming up — under your conditions that means no comedy or anime."))
+      .toBe(false);
+  });
+
+  it("still_marks_a_bubble_that_was_qualified_without_saying_so", () => {
+    // Fixture variation: the same flag over a reply that does NOT carry the clause — an older
+    // server, and a row stored before the rewrite existed. Dropping the pill outright would leave
+    // those bubbles unmarked, which is the state F4-06's OTHER half was about.
+    expect(showsConflictPill("I can’t recommend a 90s romantic comedy.")).toBe(true);
+    expect(showsConflictPill("")).toBe(true);
+  });
+
+  it("does_not_care_where_in_the_sentence_the_clause_sits_or_how_it_is_cased", () => {
+    // It is mid-sentence today and was sentence-final before. A rule anchored to either end would
+    // put the duplicate back the next time the copy moves.
+    expect(showsConflictPill("Under your conditions, here is the closest fit.")).toBe(false);
+    expect(showsConflictPill("Here is the closest fit, UNDER YOUR CONDITIONS.")).toBe(false);
+    // …and a sentence about something else entirely keeps its pill.
+    expect(showsConflictPill("Under your bar, these were the only ones left.")).toBe(true);
+  });
+});
+
 describe("excludedTerms and listPhrase", () => {
   it("merges_the_two_lists_without_repeating_a_term", () => {
     expect(excludedTerms(["comedy"], ["anime"])).toEqual(["comedy", "anime"]);
