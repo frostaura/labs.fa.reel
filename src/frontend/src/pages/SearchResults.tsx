@@ -508,11 +508,7 @@ function AskReel() {
           <p className="fa-caption text-fa-frost-dim">
             Picked up where you left off · {relTime((lastCardsAt ?? lastTurnAt) as string)}
           </p>
-          {resumedTail && answeredQuery && (
-            <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-seam-answers">
-              These answer “{answeredQuery}”.
-            </p>
-          )}
+          {resumedTail && answeredQuery && <SeamQuestion question={answeredQuery} />}
           {/* "from this answer", because the count is not the grid's alone.
               `removed` is the eligibility re-filter's total across BOTH stored lists — the picks
               and the below-floor tray — and the tray is now restored beside them, so a note
@@ -987,6 +983,40 @@ function UserBubble({ text }: { text: string }) {
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Which question the restored grid answers — one line of it.
+ *
+ * F6-08: the seam interpolated `answeredQuery` raw, so a resumed thread whose last question was
+ * the 1 000 characters the server accepts rendered the whole thing as one caption. At 375 the seam
+ * alone was taller than the viewport, on the single element whose entire job is to be glanceable.
+ *
+ * Clamped rather than truncated, and that distinction is the whole design: the full question stays
+ * in the DOM and on the `title`, so a hover, a screen reader and a copy-paste all still get the
+ * real thing, and one tap opens it in place. Truncating in JavaScript would have to guess at a
+ * character count that is four lines wide and eight narrow — the same reason {@link UserBubble}
+ * measures instead of counting.
+ *
+ * A `button` rather than a `p` with a handler: it is a real control, it needs to be reachable from
+ * the keyboard, and `aria-expanded` is what tells a screen-reader user that there is more.
+ */
+function SeamQuestion({ question }: { question: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid="askreel-seam-answers"
+      title={question}
+      aria-expanded={expanded}
+      onClick={() => setExpanded((v) => !v)}
+      className={`fa-caption max-w-full text-left text-fa-frost-dim/70 hover:text-fa-frost-dim transition-colors ${
+        expanded ? "" : "truncate"
+      }`}
+    >
+      These answer “{question}”.
+    </button>
   );
 }
 

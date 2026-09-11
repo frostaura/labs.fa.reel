@@ -294,6 +294,76 @@ test.describe("deleting a thread", () => {
   });
 });
 
+test.describe("the resume seam", () => {
+  /** The cap the server accepts and the history keeps — and, until now, the seam reproduced. */
+  const LONG = "a slow-burn detective story set in a cold northern city with superb photography, "
+    .repeat(13)
+    .slice(0, 1000);
+
+  /** A thread whose newest turn failed, so the seam has to name which question the grid answers. */
+  function seamPayload(question: string) {
+    return {
+      id: CONVERSATION,
+      title: question.slice(0, 40),
+      lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+      turns: [
+        { sequence: 0, role: "user", text: question, kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+        { sequence: 2, role: "user", text: "something tenser", kind: "ask", status: "Failed" },
+        { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "server_error" },
+      ],
+      cards: [],
+      reason: null,
+      removed: 0,
+      lastQuery: "something tenser",
+      mediaTypes: [],
+      shown: [],
+    };
+  }
+
+  test("a 1 000-character question is one line in the seam, and opens on tap", async ({ page }) => {
+    const server = conversationServer();
+    server.resume = seamPayload(LONG);
+    await boot(page, { server });
+
+    const answers = page.getByTestId("askreel-seam-answers");
+    await expect(answers).toBeVisible();
+
+    // F6-08: the seam rendered the whole thing as one unwrapped caption — at 375 it was taller
+    // than the viewport, on the one element whose entire job is to be glanceable.
+    const collapsed = (await answers.boundingBox())!;
+    expect(collapsed.height, `the seam is ${Math.round(collapsed.height)} px tall`).toBeLessThan(40);
+
+    // Clamped, not truncated: the whole question is still in the DOM and on the title attribute,
+    // so a hover, a screen reader and a copy-paste all still get the real thing.
+    await expect(answers).toHaveAttribute("title", LONG);
+    // Clipped by the box, not cut out of the text — the element overflows its own width, which is
+    // what `truncate` does and what a JavaScript substring would not.
+    const clipped = await answers.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(clipped, "the seam is not actually clamped").toBe(true);
+
+    await answers.tap();
+    const expanded = (await answers.boundingBox())!;
+    expect(expanded.height).toBeGreaterThan(collapsed.height);
+    expect(await answers.innerText()).toContain(LONG.slice(0, 60));
+
+    await answers.tap();
+    expect((await answers.boundingBox())!.height).toBeLessThan(40);
+  });
+
+  test("an ordinary question is unchanged and still readable whole", async ({ page }) => {
+    // The probe: one field — the question's length — moved from 1 000 characters to 24. A clamp
+    // that also hides a short question has traded one defect for a quieter one.
+    const server = conversationServer();
+    server.resume = seamPayload("a tense heist in Lisbon");
+    await boot(page, { server });
+
+    const answers = page.getByTestId("askreel-seam-answers");
+    await expect(answers).toContainText("a tense heist in Lisbon");
+    expect((await answers.boundingBox())!.height).toBeLessThan(40);
+  });
+});
+
 test.describe("touch targets", () => {
   /**
    * Every Ask Reel control this fixer owns, at the reference phone width. Foreign components
