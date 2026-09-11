@@ -7,12 +7,12 @@ import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
-import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import {
   api, useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
 } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
+import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
@@ -27,6 +27,7 @@ import {
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
+import type { ConversationPayload } from "../lib/useAskReelChat";
 
 /**
  * "Ask Reel" — a conversational discovery agent. The first turn comes from the search box (?q=);
@@ -156,8 +157,16 @@ function AskReel() {
   // rather than clearing its id, so the reload lands on the cold start instead of falling through
   // to `/conversations/latest` and resurrecting the thread the user had just left (SB-02).
   const resumeFrom = resumeTarget(threadId);
+  /**
+   * Whether this page is asking for a conversation at all — `+ New`, and a deleted current thread,
+   * both say no. Named once and read twice: RTK Query's `data` survives a skip (it is "the latest
+   * result this hook has seen", not "the result for this argument"), so an effect that reads it
+   * without re-checking the skip condition is reading the thread the page has just left. That put
+   * the transcript of a DELETED thread back on screen one render after `+ New` had cleared it.
+   */
+  const resumeSkipped = !shouldResume || resumeFrom === NO_RESUME;
   const { data: resumed, error: resumeError, refetch: refetchConversation } = useGetConversationQuery(resumeFrom, {
-    skip: !shouldResume || resumeFrom === NO_RESUME,
+    skip: resumeSkipped,
     // R3-03's backstop. The invalidation below keeps the cache warm while the tab is here, but a
     // turn answered in ANOTHER tab, or a fetch that never landed because the user navigated away
     // mid-flight, leaves this entry describing a thread that has moved on — and the entry outlives
@@ -185,23 +194,33 @@ function AskReel() {
   }, [status, storeDispatch]);
 
   /**
-   * Which conversation this page last put on screen from a payload. Read by the guard below: an
-   * explicit thread switch changes the query ARGUMENT, and that is what separates "the user asked
-   * for a different thread" from "the fetch we just invalidated came back".
+   * The payload this page has already decided about, and the argument it arrived under.
+   *
+   * Both halves are load-bearing. The ARGUMENT is what separates "the user asked for a different
+   * thread" from "the fetch we just invalidated came back" — an explicit switch re-keys the query.
+   * The PAYLOAD is what keeps the decision to one per payload: the effect below now depends on
+   * more than the data (it has to read `hasLocalTurn`), so an unrelated re-render would otherwise
+   * re-apply a payload still sitting in the cache — which resurrected the transcript of a thread
+   * the user had just deleted, one render after `+ New` had cleared it.
    */
-  const resumedArg = useRef<string | null>(null);
+  const decided = useRef<{ arg: string; payload: ConversationPayload } | null>(null);
 
   useEffect(() => {
     // Guarded on `seedStarted`, not cancelled on cleanup: once a search has begun, a late-arriving
     // stored conversation must never replace it.
-    if (!resumed || seedStarted.current) return;
+    if (!resumed || resumeSkipped || seedStarted.current) return;
+    // One decision per payload. Anything already ruled on is inert however many times an unrelated
+    // dependency re-fires this effect.
+    const seen = decided.current;
+    if (seen?.payload === resumed && seen.arg === resumeFrom) return;
     // …and once a turn of THIS visit has produced what is on screen, the reducer is ahead of the
     // payload. The invalidation above makes a refetch land while that answer is up, and applying it
     // would replace a live twenty-one-card answer with the server's account of it — correct data,
     // arriving as a state change nobody asked for, mid-read. A thread the user explicitly switched
     // to is a different argument and is never blocked by this.
-    if (hasLocalTurn && resumedArg.current === resumeFrom) return;
-    resumedArg.current = resumeFrom;
+    const reducerIsAhead = hasLocalTurn && seen?.arg === resumeFrom;
+    decided.current = { arg: resumeFrom, payload: resumed };
+    if (reducerIsAhead) return;
     resume(resumed);
     // The toggle and the grid have to agree about what produced what is under it — a restored
     // answer that ran under "Movies" beside a control reading "All" is a control that lies.
@@ -210,7 +229,7 @@ function AskReel() {
     // `filter` is deliberately NOT a dependency: this reconciles the toggle TO the payload once,
     // and re-running it on every toggle change would fight the user for control of it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumed, resume, setFilter, hasLocalTurn, resumeFrom]);
+  }, [resumed, resume, setFilter, hasLocalTurn, resumeFrom, resumeSkipped]);
 
   // A stored id the server does not have any more — deleted from another device, or past
   // retention. Forget it rather than asking for it on every visit from here.
