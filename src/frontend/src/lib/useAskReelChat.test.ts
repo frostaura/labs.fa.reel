@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  MAX_HISTORY_TURNS,
-  MAX_SHOWN_IDS,
-  capHistory,
-  capShown,
+  askRequest,
   chatReducer,
   createMountGuard,
+  failureFor,
+  mintTurnId,
+  resumeTarget,
   initialChatState,
   lastUserQuery,
   CONVERSATION_ID_KEY,
@@ -18,7 +18,7 @@ import {
   showMoodPresets,
   type ChatTurn,
 } from "./useAskReelChat";
-import type { AskCard } from "./askReelStream";
+import { AskStreamError, type AskCard } from "./askReelStream";
 
 /**
  * Regression for "reload mid-conversation and lose every refinement". The ?q= seed used to sit in
@@ -142,36 +142,16 @@ describe("chatReducer — a failed done frame", () => {
 });
 
 /**
- * Regression for unbounded payload growth: history and the no-repeat list were sent in full on
- * every request, and both grow with each refinement and each scrolled page.
+ * The caps are GONE, with the fields they trimmed. History and the no-repeat set no longer ride on
+ * the request at all — the server derives both from rows it wrote — so what these tests pin now is
+ * the opposite property: the state this hook carries is allowed to grow, because nothing sends it.
  */
-describe("conversation payload caps", () => {
-  it("sends only the most recent turns — recency is what the next turn is about", () => {
-    const turns: ChatTurn[] = Array.from({ length: MAX_HISTORY_TURNS + 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      text: `turn ${i}`,
-    }));
-    const capped = capHistory(turns);
-    expect(capped).toHaveLength(MAX_HISTORY_TURNS);
-    expect(capped.at(-1)).toEqual({ role: turns.at(-1)!.role, text: `turn ${turns.length - 1}` });
-    expect(capped[0].text).toBe(`turn ${turns.length - MAX_HISTORY_TURNS}`);
-  });
-
-  it("leaves a short transcript untouched", () => {
-    expect(capHistory([{ role: "user", text: "hi" }])).toEqual([{ role: "user", text: "hi" }]);
-  });
-
-  it("sends only the most recent shown ids", () => {
-    const shown = Array.from({ length: MAX_SHOWN_IDS + 50 }, (_, i) => i);
-    const capped = capShown(shown);
-    expect(capped).toHaveLength(MAX_SHOWN_IDS);
-    expect(capped.at(-1)).toBe(shown.at(-1));
-    expect(capped[0]).toBe(shown.length - MAX_SHOWN_IDS);
-  });
-
-  it("caps the ids held in state too, so paging cannot grow the hook without bound", () => {
+describe("the no-repeat set is no longer a payload", () => {
+  it("keeps every id a long thread has shown, without a cap to trim it", () => {
+    // Fixture variation: the old cap was 300, so 20 pages of 30 is well past it — the previous
+    // assertion here was `toHaveLength(300)` and the FIRST 300 ids were silently dropped, which is
+    // how a long thread re-offered a title it had already shown. Same fixture, opposite verdict.
     let state = chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true });
-    // Every page contributes a fresh block of tmdbIds; well past the cap after enough of them.
     for (let page = 0; page < 20; page++) {
       state = chatReducer(state, { type: "moreTurn" });
       state = chatReducer(state, {
@@ -182,7 +162,8 @@ describe("conversation payload caps", () => {
         },
       });
     }
-    expect(state.shown).toHaveLength(MAX_SHOWN_IDS);
+    expect(state.shown).toHaveLength(600);
+    expect(state.shown[0]).toBe(0);
     expect(state.shown.at(-1)).toBe(599);
   });
 });
@@ -754,3 +735,115 @@ function card(n: number, extra: Partial<AskCard> = {}): AskCard {
     posterPath: null, genres: [], similarity: 0.5, predictedRating: 7, ...extra,
   };
 }
+
+/**
+ * The request, and the four answers the server can give that are not a stream.
+ *
+ * `run()` cannot be tested here — vitest runs in node with no renderer — so the two decisions it
+ * makes are pure functions it calls: what goes on the wire, and what a failure MEANS. Both used to
+ * be inline in the callback, which is why "409" and "the search crashed" were the same screen.
+ */
+describe("askRequest", () => {
+  it("sends_the_turn_id_and_nothing_the_server_already_knows", () => {
+    // Fixture variation: a follow-up inside a thread, and a fresh start. The fresh one differs in
+    // exactly one field — a null conversation id — which is what mints a new thread rather than
+    // forking an existing one.
+    const followUp = askRequest("something lighter", "turn-1", "conv-9", ["movie"]);
+    expect(followUp).toEqual({
+      query: "something lighter", clientTurnId: "turn-1", conversationId: "conv-9", mediaTypes: ["movie"],
+    });
+
+    const fresh = askRequest("something lighter", "turn-2", null, []);
+    expect(fresh.conversationId).toBeNull();
+
+    // The three fields that were REMOVED, not renamed. A client still sending them is sending a
+    // transcript the server will not read — and the server now rejects the request outright.
+    for (const request of [followUp, fresh]) {
+      expect(Object.keys(request).sort()).toEqual(["clientTurnId", "conversationId", "mediaTypes", "query"]);
+    }
+  });
+
+  it("mints_a_different_turn_id_every_time", () => {
+    // Two sends of the SAME question are two exchanges and must be billed as two; only a retry of
+    // one exchange reuses an id, and that path passes the id in rather than minting.
+    expect(mintTurnId()).not.toBe(mintTurnId());
+    expect(mintTurnId().length).toBeGreaterThan(8);
+  });
+});
+
+describe("failureFor", () => {
+  it("tells_the_four_server_answers_apart", () => {
+    // Fixture variation: each status with its code, then each status with the code MISSING (a
+    // proxy's own 404, a gateway's 409). The code is preferred where present because the status is
+    // shared; both must land on the same action, or a client behind a proxy gets a different UI.
+    expect(failureFor(new AskStreamError(409, "turn_in_progress"))).toEqual({ type: "turnInProgress" });
+    expect(failureFor(new AskStreamError(409, null))).toEqual({ type: "turnInProgress" });
+    expect(failureFor(new AskStreamError(404, "conversation_not_found"))).toEqual({ type: "conversationGone" });
+    expect(failureFor(new AskStreamError(404, null))).toEqual({ type: "conversationGone" });
+    expect(failureFor(new AskStreamError(401))).toEqual({ type: "error", reason: "session" });
+    expect(failureFor(new AskStreamError(400, "query_too_long"))).toEqual({ type: "error", reason: "request" });
+    // Anything else, and anything that is not an AskStreamError at all (a network drop), is the
+    // unclassified failure — the only one that may say "search hit a snag".
+    expect(failureFor(new AskStreamError(500))).toEqual({ type: "error", reason: null });
+    expect(failureFor(new TypeError("Failed to fetch"))).toEqual({ type: "error", reason: null });
+  });
+});
+
+describe("chatReducer — 409 turn_in_progress", () => {
+  /** A settled answer with three cards on screen — what a 409 must not cost the user. */
+  function settled() {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "a tense heist", fresh: true });
+    return chatReducer(asked, {
+      type: "done",
+      data: { reason: "3 picks ranked for you.", results: [card(1), card(2), card(3)] },
+    });
+  }
+
+  it("keeps_the_grid_and_is_not_an_error", () => {
+    const blocked = chatReducer(settled(), { type: "turnInProgress" });
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.order).toHaveLength(3);
+    expect(blocked.errorReason).toBeNull();
+    expect(blocked.reason).toBe("3 picks ranked for you.");
+    expect(blocked.appending).toBe(false);
+    expect(blocked.phase).toBeNull();
+  });
+
+  it("keeps_a_HELD_previous_answer_too", () => {
+    // Fixture variation: the 409 arrives on the SECOND question, while the first answer is still
+    // being held on screen. That answer is now the only one there is — a 409 means the new turn
+    // never ran — so clearing it would blank the page for a request that failed to even start.
+    const second = chatReducer(settled(), { type: "userTurn", message: "something lighter", fresh: false });
+    expect(second.holdingPrevious).toBe(true);
+    const blocked = chatReducer(second, { type: "turnInProgress" });
+    expect(blocked.holdingPrevious).toBe(true);
+    expect(blocked.order).toHaveLength(3);
+  });
+});
+
+describe("chatReducer — 404 conversation_not_found", () => {
+  it("forgets_the_thread_so_the_next_turn_starts_a_new_one", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "a tense heist", fresh: true });
+    const inThread = chatReducer(asked, { type: "conversation", data: { id: "conv-9", turnId: "t-1", sequence: 1 } });
+    expect(inThread.conversationId).toBe("conv-9");
+
+    const gone = chatReducer(inThread, { type: "conversationGone" });
+    expect(gone.conversationId).toBeNull();
+    expect(gone.status).toBe("error");
+    expect(gone.errorReason).toBe("conversation");
+    // The transcript stays: it is still what the reader was reading, and the page explains rather
+    // than silently emptying the screen.
+    expect(gone.turns).toHaveLength(1);
+  });
+});
+
+describe("resumeTarget", () => {
+  it("prefers_this_tabs_own_thread_over_the_accounts_newest", () => {
+    // The multi-device steal, in one line. Fixture variation: a stored id, no stored id, and the
+    // empty string a cleared-but-present key leaves behind — the last one used to read as truthy
+    // in the page and send a request for the conversation with no id.
+    expect(resumeTarget("conv-9")).toBe("conv-9");
+    expect(resumeTarget(null)).toBe("latest");
+    expect(resumeTarget("")).toBe("latest");
+  });
+});

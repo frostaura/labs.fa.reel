@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type DoneData, type PhaseData } from "./askReelStream";
+import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
 
 /**
  * `resumed` is a fourth state, not a flavour of `done`: the transcript came back from the server
@@ -16,11 +16,22 @@ import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type DoneDat
  * streamed) or `idle` (when nothing had) — and `idle` over a transcript renders NOTHING at all, so
  * pressing Stop before the first card landed the user on a blank page: no message, no retry, and
  * no way back to the answer the new turn had already cleared.
+ *
+ * `blocked` is a sixth: the server answered 409 `turn_in_progress`, meaning this exact question is
+ * already being answered — by another tab, by a retry that got there first, or by a turn this tab
+ * abandoned without the server noticing yet. Nothing on screen is wrong in that state, so nothing
+ * on screen is cleared; it is not an error, because no request failed and no answer was lost.
  */
-export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "stopped" | "error";
+export type ChatStatus = "idle" | "streaming" | "done" | "resumed" | "stopped" | "blocked" | "error";
 
-/** Why the stream ended badly, where the client can tell. `null` = an unclassified failure. */
-export type ErrorReason = "session" | "timeout" | null;
+/**
+ * Why the stream ended badly, where the client can tell. `null` = an unclassified failure.
+ *
+ * `conversation` is the remembered thread being gone (a 404): recoverable by starting a new one,
+ * which is a different offer from "try again". `request` is a 400 — the client sent something the
+ * server refuses, and repeating it verbatim cannot work.
+ */
+export type ErrorReason = "session" | "timeout" | "conversation" | "request" | null;
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -28,26 +39,48 @@ export interface ChatTurn {
 }
 
 /**
- * Conversation payload caps. Every request replays the transcript and every tmdbId already
- * surfaced, and both grow for the life of the thread — a refine-and-scroll session adds a page of
- * ids on every sentinel hit, so an afternoon on one question would eventually push the request
- * past sane body limits and the model's context window. Both caps keep the MOST RECENT entries,
- * because recency is what the next turn is about ("more like the first one" reaches back a couple
- * of exchanges, never twenty). Trimming `shown` means a very long thread may eventually re-offer
- * a title dropped off the tail — a far cheaper failure than the request falling over.
+ * Everything this client is allowed to say about a turn.
+ *
+ * The caps that used to live here — twelve turns of transcript, three hundred shown ids, both
+ * replayed on every single request — are gone with the fields they trimmed. The server derives the
+ * history the model reads and the no-repeat set from rows it wrote, so there is nothing left to
+ * cap: a client-carried transcript was unverifiable, capped (so a long thread re-offered titles it
+ * had already shown), lost on reload and wrong the moment a second tab existed.
+ *
+ * `clientTurnId` is the one thing the client contributes to the record, and it is an idempotency
+ * key: the same id twice is answered from the stored turn rather than billed twice.
  */
-export const MAX_HISTORY_TURNS = 12;
-export const MAX_SHOWN_IDS = 300;
+export function askRequest(
+  query: string,
+  clientTurnId: string,
+  conversationId: string | null,
+  mediaTypes: string[],
+): AskReelRequest {
+  return { query, clientTurnId, conversationId, mediaTypes };
+}
+
+/**
+ * Which conversation a cold /search should resume.
+ *
+ * This tab's own remembered id, and `/conversations/latest` only when there is nothing remembered
+ * at all. `/latest` is the account's newest thread, not this tab's: with two tabs open, or a phone
+ * and a laptop, reloading tab A dropped the reader into tab B's conversation and the thread they
+ * were reading was gone from the UI. Preferring the stored id is the whole of that fix, and it is
+ * why `latest` is deprecated rather than merely unused.
+ */
+export function resumeTarget(storedId: string | null): string {
+  return storedId && storedId.length > 0 ? storedId : "latest";
+}
 
 /**
  * Where this tab remembers which Ask Reel thread it is on.
  *
- * A reload resumes `/conversations/latest`, which is the account's newest thread and not
- * necessarily this tab's: two tabs, or a phone and a laptop, silently converge — reloading tab A
- * drops you into tab B's conversation and the thread you were reading is gone from the UI. The
- * client persisted no id at all, so it could not even tell that had happened. Writing it here is
- * the plumbing for the fix; the read side stays on `/latest` until the server can serve a
- * conversation by id.
+ * A reload used to resume `/conversations/latest`, which is the account's newest thread and not
+ * necessarily this tab's: two tabs, or a phone and a laptop, silently converged — reloading tab A
+ * dropped you into tab B's conversation and the thread you were reading was gone from the UI. Both
+ * halves are here now: this is written as the `conversation` frame arrives and read back by
+ * {@link resumeTarget} on every cold load, so a tab resumes ITS thread and `/latest` is only ever
+ * the answer for a browser that has never asked anything.
  */
 export const CONVERSATION_ID_KEY = "reel.ask.conversationId";
 
@@ -94,14 +127,15 @@ export const STREAM_IDLE_TIMEOUT_MS = 30_000;
 /** How long a backgrounded tab may hold an open stream before it is abandoned, in milliseconds. */
 export const HIDDEN_ABORT_MS = 60_000;
 
-/** The transcript as the wire wants it, trimmed to the most recent {@link MAX_HISTORY_TURNS}. */
-export function capHistory(turns: ChatTurn[]): { role: string; text: string }[] {
-  return turns.slice(-MAX_HISTORY_TURNS).map((t) => ({ role: t.role, text: t.text }));
-}
-
-/** The no-repeat exclusion list, trimmed to the most recent {@link MAX_SHOWN_IDS}. */
-export function capShown(shown: number[]): number[] {
-  return shown.slice(-MAX_SHOWN_IDS);
+/**
+ * One exchange's idempotency key. `crypto.randomUUID` is present in every browser this app
+ * supports and in node 19+, which is what the tests run on; the fallback exists so a page served
+ * over plain HTTP (where `crypto` is not a secure context on some browsers) still gets an id
+ * rather than sending an empty one and taking a 400.
+ */
+export function mintTurnId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
 /**
@@ -239,12 +273,12 @@ interface State {
   arrived: number;
 }
 
-type Action =
+export type ChatAction =
   | { type: "userTurn"; message: string; fresh: boolean }
   | { type: "moreTurn" }
   | { type: "reaskTurn" }
   | { type: "phase"; data: PhaseData }
-  | { type: "conversation"; data: { id: string } }
+  | { type: "conversation"; data: ConversationData }
   | { type: "resume"; turns: ChatTurn[]; conversationId: string; shown?: number[] }
   | { type: "assistant"; data: { text: string } }
   | { type: "candidate"; data: AskCard }
@@ -253,7 +287,33 @@ type Action =
   | { type: "conflict"; message: string }
   | { type: "done"; data: DoneData }
   | { type: "stop" }
+  | { type: "turnInProgress" }
+  | { type: "conversationGone" }
   | { type: "error"; reason?: ErrorReason };
+
+/**
+ * What a failed `/ask` means, as an action.
+ *
+ * The four statuses the server distinguishes are four different things for a person to do, and
+ * collapsing them into one "search hit a snag" is how a 409 — which means the answer is on its
+ * way — looked exactly like a crash and cost the user the grid they were reading. Pure and
+ * exported so the mapping is testable without a renderer: the hook is not.
+ *
+ * The code is preferred over the status where both are available, because the status is shared
+ * (a 404 from a proxy is not `conversation_not_found`) while the code is ours.
+ */
+export function failureFor(err: unknown): ChatAction {
+  if (err instanceof AskStreamError) {
+    if (err.code === "turn_in_progress" || err.status === 409) return { type: "turnInProgress" };
+    if (err.code === "conversation_not_found" || err.status === 404) return { type: "conversationGone" };
+    // A 401 here already survived one refresh-and-retry inside streamAskReel, so the session is
+    // genuinely gone rather than merely stale — say so, and let the page offer a sign-in rather
+    // than a "try again" that cannot work.
+    if (err.status === 401) return { type: "error", reason: "session" };
+    if (err.status === 400) return { type: "error", reason: "request" };
+  }
+  return { type: "error", reason: null };
+}
 
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
@@ -299,7 +359,7 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
   return (carried ?? 0) + (incoming ?? 0);
 }
 
-export function chatReducer(state: State, action: Action): State {
+export function chatReducer(state: State, action: ChatAction): State {
   switch (action.type) {
     case "userTurn": {
       const turn: ChatTurn = { role: "user", text: action.message };
@@ -359,7 +419,7 @@ export function chatReducer(state: State, action: Action): State {
         conversationId: action.conversationId,
         status: "resumed",
         lastQuery: lastUserQuery(action.turns),
-        shown: action.shown ? capShown(action.shown) : [],
+        shown: action.shown ?? [],
       };
     case "assistant":
       // Paging replays the last message, so the model replies again — suppress it rather than
@@ -404,9 +464,9 @@ export function chatReducer(state: State, action: Action): State {
         byId[c.titleId] = { ...byId[c.titleId], ...c };
         if (c.tmdbId != null) newTmdb.push(c.tmdbId);
       }
-      // Capped here as well as on the wire, so the state this hook carries cannot grow unbounded
-      // either. Newest ids win — see MAX_SHOWN_IDS.
-      const shown = capShown(Array.from(new Set([...state.shown, ...newTmdb])));
+      // Kept for the page's own accounting only — the no-repeat set the SERVER applies is
+      // derived from its own cards, so an uncapped list here can no longer grow a request.
+      const shown = Array.from(new Set([...state.shown, ...newTmdb]));
       const incoming = action.data.results.map((c) => c.titleId);
       // Appending keeps what is on screen and adds only genuinely new ids; a page that adds
       // nothing latches `exhausted` so the scroll sentinel stops asking for more.
@@ -438,6 +498,19 @@ export function chatReducer(state: State, action: Action): State {
       // over a transcript rendered literally nothing — no cards, no message, no retry, no way back.
       // Never an error either; they asked for this.
       return { ...state, status: "stopped", phase: null, appending: false };
+    case "turnInProgress":
+      // 409. This exact question is already being answered — by another tab, or by a turn this one
+      // abandoned before the server noticed. NOTHING on screen is cleared, because nothing on
+      // screen is wrong: the grid, a held previous answer and the transcript all stay exactly where
+      // they are, and the page offers a check-again that re-sends the SAME turn id (which replays
+      // the stored answer the moment it exists) rather than a retry that would take the same 409.
+      return { ...state, status: "blocked", phase: null, appending: false };
+    case "conversationGone":
+      // 404. The thread this tab remembered is not the caller's any more — deleted from another
+      // device, or an id that outlived its retention. The id is dropped here so the next turn mints
+      // a new conversation instead of asking again for one that is gone; the transcript stays on
+      // screen, because it is still what the user was reading and the page says what happened.
+      return { ...state, status: "error", errorReason: "conversation", conversationId: null, phase: null, appending: false };
     case "error":
       // `appending` and `phase` are cleared deliberately. A failed page used to leave `appending`
       // latched true, so the next `done` appended to a grid the user had been told was broken, and
@@ -509,6 +582,9 @@ export function useAskReelChat() {
     stateRef.current = state;
   }, [state]);
   const abortRef = useRef<AbortController | null>(null);
+  // The id of the exchange in flight. Kept so a 409 can be answered by re-sending the SAME turn —
+  // the server then replays the stored answer instead of running the question a second time.
+  const turnIdRef = useRef<string | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The active media filter, kept in a ref so `send`/`loadMore` stay referentially stable while
@@ -525,7 +601,7 @@ export function useAskReelChat() {
     }
   }, []);
 
-  const run = useCallback((msg: string, fresh: boolean, kind: "turn" | "more" | "reask") => {
+  const run = useCallback((msg: string, fresh: boolean, kind: "turn" | "more" | "reask", turnId?: string) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -543,19 +619,23 @@ export function useAskReelChat() {
     };
     armWatchdog();
 
-    // Both payloads are capped — see MAX_HISTORY_TURNS / MAX_SHOWN_IDS. Everything except a fresh
-    // start still carries the no-repeat list, re-ask included: the conversation's promise is that
-    // a title is never offered twice on the same thread.
-    const history = fresh ? [] : capHistory(stateRef.current.turns);
-    const shownTmdbIds = fresh ? [] : capShown(stateRef.current.shown);
+    // The whole request. No transcript, no shown set, no `continuation` flag: the server reads all
+    // three off its own rows, and `kind` — ask or page — is derived there from whether the query
+    // equals the conversation's last user turn. A fresh start deliberately drops the conversation
+    // id rather than asking the server to fork it.
     const conversationId = fresh ? null : stateRef.current.conversationId;
+    // Minted here unless the caller brought one. A caller's id is a RETRY of the same exchange —
+    // the reconnect after a 409, or a seeded turn whose page remounted under StrictMode — and the
+    // server answers it from the stored turn instead of running and billing it twice.
+    const clientTurnId = turnId ?? mintTurnId();
+    turnIdRef.current = clientTurnId;
     dispatch(
       kind === "more" ? { type: "moreTurn" }
         : kind === "reask" ? { type: "reaskTurn" }
           : { type: "userTurn", message: msg, fresh },
     );
 
-    streamAskReel({ query: msg, history, shownTmdbIds, conversationId, mediaTypes: mediaRef.current, continuation: kind !== "turn" }, (ev) => {
+    streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current), (ev) => {
       armWatchdog();
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data }); break;
@@ -580,18 +660,25 @@ export function useAskReelChat() {
       .catch((err: unknown) => {
         clearWatchdog();
         if (controller.signal.aborted) return;
-        // A 401 here already survived one refresh-and-retry inside streamAskReel, so the session
-        // is genuinely gone rather than merely stale — say so, and let the page offer a sign-in
-        // rather than a "try again" that cannot work.
-        const reason: ErrorReason = err instanceof AskStreamError && err.status === 401 ? "session" : null;
-        dispatch({ type: "error", reason });
+        const failure = failureFor(err);
+        // Forgotten HERE rather than in the reducer, which stays pure: the stored id is what the
+        // next cold load resumes from, and leaving a 404'd id in localStorage means every visit
+        // from this tab starts by asking for a conversation that is gone.
+        if (failure.type === "conversationGone") storeConversationId(null);
+        dispatch(failure);
       });
   }, [clearWatchdog]);
 
-  const send = useCallback((message: string, fresh = false) => {
+  /**
+   * Ask a question. `turnId` is for a caller that has already minted one and needs THIS send to be
+   * the same exchange as a previous attempt — the seeded first turn, whose id rides in the router
+   * state so that a StrictMode remount (which resets every ref in this component) re-sends the
+   * same id and is replayed server-side rather than billed a second time.
+   */
+  const send = useCallback((message: string, fresh = false, turnId?: string) => {
     const msg = message.trim();
     if (!msg) return;
-    run(msg, fresh, "turn");
+    run(msg, fresh, "turn", turnId);
   }, [run]);
 
   /**
@@ -615,6 +702,22 @@ export function useAskReelChat() {
     // Deliberately not gated on `streaming`, unlike `loadMore`: this one is always a direct user
     // action, and toggling the filter mid-stream should abort and re-run rather than be swallowed.
     run(s.lastQuery, false, "reask");
+  }, [run]);
+
+  /**
+   * Ask for the SAME exchange again, by its own id — what the 409 state offers.
+   *
+   * This is the one retry that must not mint a new id. A 409 means the question is already being
+   * answered, so asking it again under a new id would run and bill it twice and put two answers in
+   * the transcript; re-sending the same id either takes the 409 again (still running) or is
+   * replayed from the stored turn the moment it completes. A retry after a FAILURE is the opposite
+   * case and goes through `reask`, because the server replays a stored failure verbatim.
+   */
+  const retryTurn = useCallback(() => {
+    const s = stateRef.current;
+    const turnId = turnIdRef.current;
+    if (!turnId || !s.lastQuery) return;
+    run(s.lastQuery, false, "reask", turnId);
   }, [run]);
 
   /** Abandon the turn in flight, keeping whatever it already produced. */
@@ -681,7 +784,7 @@ export function useAskReelChat() {
   const belowFloor = applyScoreOverrides(state.belowFloor, overrides);
   return {
     turns: state.turns, status: state.status, phase: state.phase, cards, outsideCards, reason: state.reason,
-    send, resume, loadMore, reask, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+    send, resume, loadMore, reask, retryTurn, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
     /** The server's note that this question collides with a standing exclusion; not an error. */
     conflict: state.conflict,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
