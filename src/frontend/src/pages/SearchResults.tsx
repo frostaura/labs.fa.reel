@@ -699,16 +699,23 @@ function AskReel() {
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
-      ) : status === "resumed" && lastCardsAt == null && visible.length === 0 && outsideVisible.length === 0 ? (
+      ) : status === "resumed" && lastCardsAt == null && resumedTail == null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
         // "No matches for that one" under the user's own question — the page reporting a verdict
         // on a search it never ran.
         //
-        // The `lastCardsAt == null` gate is the other half, and it is what makes this copy TRUE.
-        // Before the turn record there were no stored cards at all, so this was the only branch a
-        // resume could ever reach — it was seen on a thread seventeen seconds old, asserting a
-        // cause ("predates saved picks") that was never the real one. Now it is reachable only for
-        // a thread that genuinely does predate them.
+        // The `lastCardsAt == null` gate is half of what makes this copy true, and F4-04 is the
+        // other half arriving late. Before the turn record there were no stored cards at all, so
+        // this was the only branch a resume could ever reach; gating on `lastCardsAt` was supposed
+        // to close that, and did not, because a turn that FAILED before storing anything also
+        // leaves `lastCardsAt` null. A seven-minute-old thread whose only answer was aborted got
+        // the failure row and this card on one screen: two "Ask again" buttons under two mutually
+        // exclusive explanations of the same empty grid.
+        //
+        // `resumedTail == null` is "the last assistant row completed" — the one state in which
+        // "there are no stored cards" really does mean the thread predates them. A failed or
+        // pending tail has its own row in the transcript, which is the correct account and is
+        // already on screen.
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-transcript-only">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-caption text-fa-frost-dim">
@@ -716,9 +723,14 @@ function AskReel() {
           </p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
         </div>
-      ) : status === "resumed" && visible.length === 0 && outsideVisible.length === 0 ? (
+      ) : status === "resumed" && lastCardsAt != null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A thread that DID store cards and has none to show: every one of them was dropped by the
         // eligibility re-filter, which is a fact about the person, not about the thread's age.
+        //
+        // `lastCardsAt != null` is now stated rather than inherited. It used to be implied by the
+        // branch above having already taken every null case; since F4-04 narrowed that branch, a
+        // failed-before-storing thread would otherwise fall through to here and be told it had
+        // watched or rated away an answer that was never found.
         <div className="fa-card p-8 text-center max-w-xl mx-auto space-y-2" data-testid="askreel-all-removed">
           <Sparkles className="h-6 w-6 text-fa-frost-dim mx-auto" />
           <p className="fa-caption text-fa-frost-dim">

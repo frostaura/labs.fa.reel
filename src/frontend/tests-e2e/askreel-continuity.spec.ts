@@ -749,8 +749,9 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
     await expect(rows.nth(0)).toContainText("a tense heist");
     await expect(rows.nth(0)).toContainText("2 turns");
     await expect(rows.nth(1)).toContainText("something funny");
-    // A thread with no stored cards says so BEFORE it is opened, not after.
-    await expect(rows.nth(1)).toContainText("transcript only");
+    // A thread with no stored cards says so BEFORE it is opened, not after — and says only what
+    // the list can see (F4-04b): no saved picks, never why there are none.
+    await expect(rows.nth(1)).toContainText("no saved picks");
 
     // Delete the OTHER thread: the list refetches without it, and the open thread is untouched.
     await mockJson(page, "**/api/search/conversations", [CONVERSATION_LIST[0]]);
@@ -1064,6 +1065,75 @@ test.describe("Ask Reel — continuity on a phone", () => {
     // The transcript and a way to bring the answer back are both still there.
     await expect(page.getByTestId("askreel-transcript")).toContainText("a tense heist");
     await expect(page.getByTestId("askreel-retry")).toBeVisible();
+  });
+
+  test("a thread whose only answer failed is not told it predates saved results", async ({ page }) => {
+    // F4-04. Fixture variation, one field on the same payload: the assistant row is `Failed`
+    // rather than `Completed`. `lastCardsAt == null` is true for that too — a turn that never
+    // reached `done` stores no cards — so a seven-minute-old thread got the failure row AND
+    // "Transcript only — this thread predates saved results" on one screen: two "Ask again"
+    // buttons, and two mutually exclusive explanations of the same empty grid.
+    await stubEventSource(page);
+    await stubAskReel(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/settings/filters", FILTERS_WITH_FLOOR);
+    await mockJson(page, "**/api/search/conversations", [
+      { id: CONVERSATION, title: "an abort probe: slow burn desert noir", turnCount: 2, lastTurnAt: new Date().toISOString(), lastCardsAt: null },
+    ]);
+    await mockJson(page, "**/api/search/conversations/latest", {
+      ...RESUME_PAYLOAD,
+      cards: [],
+      lastCardsAt: null,
+      lastTurnAt: new Date(Date.now() - 7 * 60_000).toISOString(),
+      reason: null,
+      shown: [],
+      turns: [
+        { sequence: 0, role: "user", text: "an abort probe: slow burn desert noir", kind: "ask", status: "Failed" },
+        { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+      ],
+    });
+    await page.goto("/search");
+
+    // The transcript row is the right answer and it is already there.
+    await expect(page.getByTestId("askreel-failed-turn")).toBeVisible();
+    await expect(page.getByTestId("askreel-transcript-only")).toHaveCount(0);
+    // …and not the OTHER false explanation either: nothing was watched or rated away, because
+    // nothing was ever found.
+    await expect(page.getByTestId("askreel-all-removed")).toHaveCount(0);
+    await expect(page.getByTestId("semantic-empty")).toHaveCount(0);
+    // Exactly one offer to try again, not two.
+    await expect(page.getByTestId("askreel-retry")).toHaveCount(1);
+
+    // F4-04b, the same claim on the menu: the row said "transcript only", which the contract
+    // defines as a thread that predates stored results. What the list can actually see is that
+    // there are no stored picks, so that is what it says.
+    await page.getByTestId("askreel-recent").click();
+    const row = page.getByTestId("askreel-recent-row").first();
+    await expect(row).toContainText("no saved picks");
+    await expect(row).not.toContainText("transcript only");
+
+    // The probe: the same payload with one field moved — `Failed` to `Pending`. A turn the server
+    // is STILL working on has stored no cards either, and must not be told its thread is old.
+    // Served from BOTH routes because the first resume remembered the id, so the reload asks for
+    // the thread by name rather than through the `/latest` alias.
+    const pendingPayload = {
+      ...RESUME_PAYLOAD,
+      cards: [], lastCardsAt: null, reason: null, shown: [],
+      turns: [
+        { sequence: 0, role: "user", text: "an abort probe: slow burn desert noir", kind: "ask", status: "Pending" },
+        { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Pending" },
+      ],
+    };
+    await mockJson(page, "**/api/search/conversations/latest", pendingPayload);
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, pendingPayload);
+    await page.reload();
+    await expect(page.getByTestId("askreel-pending-turn")).toBeVisible();
+    await expect(page.getByTestId("askreel-transcript-only")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-all-removed")).toHaveCount(0);
   });
 });
 

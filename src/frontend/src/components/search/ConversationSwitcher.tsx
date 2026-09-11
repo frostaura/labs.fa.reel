@@ -224,8 +224,13 @@ export default function ConversationSwitcher({
                   <p className="fa-caption text-fa-frost-dim">
                     {row.turnCount} {plural(row.turnCount, "turn")} · {relTime(row.lastTurnAt)}
                     {/* Said here as well as on the page, so a thread with no restorable answer is
-                        recognisable BEFORE it is opened rather than after. */}
-                    {row.lastCardsAt == null && " · transcript only"}
+                        recognisable BEFORE it is opened rather than after — and said as what the
+                        LIST can actually see (F4-04b). "Transcript only" is defined by the contract
+                        as a thread that predates stored results, and the row read that way over a
+                        thread whose only answer had failed seven minutes earlier. The list has one
+                        field here, `lastCardsAt`, and it means "no picks were ever stored"; why
+                        there are none is the page's business, not this row's. */}
+                    {row.lastCardsAt == null && " · no saved picks"}
                   </p>
                 </button>
                 {confirming === row.id ? (
