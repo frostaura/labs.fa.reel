@@ -327,6 +327,40 @@ test.describe("Ask Reel — a resumed thread says what happened, once", () => {
     await expect(page.getByTestId("askreel-reply")).toHaveCount(1);
     await expect(page.getByTestId("askreel-reply")).toContainText("Three that fit.");
   });
+
+  test("a restored answer still says how it was assembled", async ({ page }) => {
+    // SB-06. The payload carries the sentence, the reducer stores it, and the page gated it on
+    // `status === "done"` — which a resume deliberately is not. A full-text scan of the resumed
+    // page for "picks ranked" came back false, so the only account of a relaxed quality floor went
+    // with it.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...RESUME_PAYLOAD,
+        reason: "3 picks ranked for you, from 40 pulled · only 1 pick cleared your 6.0 bar, so it was relaxed",
+      },
+    });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks ranked for you, from 40 pulled · only 1 pick cleared your 6.0 bar, so it was relaxed");
+  });
+
+  test("a restored PAGED answer accounts for the grid, not for its last page", async ({ page }) => {
+    // Fixture variation, one row: the same payload plus the `page` turn the server writes. The
+    // server's sentence describes that page and the grid is two turns' work — R1-03 reaching the
+    // screen by the resume path rather than the live one.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, turns: PAGED_TURNS, reason: "1 pick ranked for you, from 22 pulled." },
+    });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks so far · last page: 1 pick ranked for you, from 22 pulled.");
+  });
 });
 
 test.describe("Ask Reel — what goes on the wire", () => {

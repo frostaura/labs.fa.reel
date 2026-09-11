@@ -17,7 +17,7 @@ import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import {
   floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
-  useAskReelChat, FRESH_CONVERSATION, NO_RESUME,
+  useAskReelChat, showsFootnote, FRESH_CONVERSATION, NO_RESUME,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -714,7 +714,7 @@ function AskReel() {
           On a PAGED answer the server's sentence is about one turn and the grid is several, which
           is R1-03: "24 picks ranked for you, from 60 pulled" sat under 37 cards. `footnote` is
           what reconciles the two — see it for why neither sentence alone can be true here. */}
-      {footnoteText && status === "done" && !appending && (visible.length > 0 || outsideVisible.length > 0) && (
+      {footnoteText && showsFootnote(status, appending, settledCount) && (
         <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
       )}
 

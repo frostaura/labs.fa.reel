@@ -314,6 +314,25 @@ export function footnote(reason: string | null, shownCount: number, paged: boole
 }
 
 /**
+ * Whether the provenance line belongs on screen.
+ *
+ * `resumed` is in, and SB-06 is what happened when it was not. The resume payload carries the
+ * turn's `reason` verbatim — "24 picks ranked for you, from 81 pulled · widened to find enough ·
+ * only 5 picks cleared your 6.0 bar, so it was relaxed" — the reducer stores it, and the page then
+ * gated the render on `status === "done"`. A resume is deliberately NOT `done` (see the status
+ * doc-comment), so a restored answer lost the only on-screen account of how it was assembled,
+ * including the fact that the quality floor had been relaxed to fill it.
+ *
+ * The other two conditions are unchanged and are about honesty of a different kind: mid-page the
+ * sentence describes a turn that has not finished, and with nothing on screen it is a claim about
+ * a grid that is not there.
+ */
+export function showsFootnote(status: ChatStatus, appending: boolean, shownCount: number): boolean {
+  if (appending || shownCount <= 0) return false;
+  return status === "done" || status === "resumed";
+}
+
+/**
  * The floor, formatted for the tray label — always one decimal, always the same string.
  *
  * `toLocaleString(undefined, { maximumFractionDigits: 1 })` printed "6" in the tray while the
@@ -747,6 +766,11 @@ export function chatReducer(state: State, action: ChatAction): State {
         // All of it is finished work — a resumed answer is never re-ordered by anything.
         settled: cards.length,
         reason: p.reason ?? null,
+        // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread that was paged it
+        // describes one page and the restored grid is several, which is R1-03 arriving by the
+        // resume path. The transcript says which: the server writes a page as a `page` row, and one
+        // of those means the footnote has to account for the grid rather than quote the last page.
+        paged: p.turns.some((t) => t.kind === "page"),
         removed: p.removed ?? 0,
         lastCardsAt: p.lastCardsAt ?? null,
       };

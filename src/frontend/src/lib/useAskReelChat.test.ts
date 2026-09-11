@@ -24,6 +24,7 @@ import {
   nextBootstrap,
   plural,
   showMoodPresets,
+  showsFootnote,
   transcriptOf,
   type ChatTurn,
 } from "./useAskReelChat";
@@ -1475,5 +1476,75 @@ describe("transcriptOf — a page is not a second answer", () => {
       "quiet character dramas",
       "I can keep it quiet and character-driven.",
     ]);
+  });
+});
+
+/**
+ * SB-06 — a resumed answer never rendered its `reason` footnote.
+ *
+ * The payload carries the sentence verbatim ("24 picks ranked for you, from 81 pulled · widened to
+ * find enough · only 5 picks cleared your 6.0 bar, so it was relaxed"), the reducer stores it, and
+ * the page gated the render on `status === "done"`. A resume is `resumed` by design, so a restored
+ * answer lost the only on-screen account of how it was assembled — including the fact that the
+ * user's own quality bar had been relaxed to fill it.
+ */
+describe("showsFootnote", () => {
+  it("renders_the_accounting_for_a_restored_answer_as_well_as_a_live_one", () => {
+    expect(showsFootnote("done", false, 24)).toBe(true);
+    expect(showsFootnote("resumed", false, 24)).toBe(true);
+  });
+
+  it("says_nothing_about_a_screen_with_no_grid_on_it", () => {
+    expect(showsFootnote("resumed", false, 0)).toBe(false);
+    expect(showsFootnote("done", false, 0)).toBe(false);
+  });
+
+  it("waits_for_a_page_to_finish_before_re_describing_the_grid", () => {
+    // Mid-page the sentence on screen describes a turn that has not finished.
+    expect(showsFootnote("done", true, 24)).toBe(false);
+  });
+
+  it("stays_silent_on_every_state_that_has_no_finished_answer_to_describe", () => {
+    for (const status of ["idle", "streaming", "stopped", "blocked", "error"] as const) {
+      expect(showsFootnote(status, false, 24)).toBe(false);
+    }
+  });
+});
+
+/**
+ * …and the sentence it renders has to be true of the GRID. The payload's `reason` is the newest
+ * turn's, so on a thread that was paged it describes one page and the restored grid is several —
+ * R1-03 arriving by the resume path instead of the live one.
+ */
+describe("chatReducer — a resumed thread knows whether it was paged", () => {
+  const base = {
+    id: "conv-6",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    cards: [card(1), card(2), card(3)],
+    reason: "2 picks ranked for you, from 65 pulled",
+    lastQuery: "quiet character dramas",
+  };
+  const askTurns = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+  ];
+
+  it("quotes_the_servers_sentence_verbatim_on_a_single_turn_thread", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload: { ...base, turns: askTurns } });
+    expect(state.paged).toBe(false);
+    expect(footnote(state.reason, 3, state.paged)).toBe("2 picks ranked for you, from 65 pulled");
+  });
+
+  it("accounts_for_the_whole_grid_once_a_page_row_is_in_the_transcript", () => {
+    // Fixture variation, one row: the same payload with the `page` turn the server writes. Nothing
+    // else moves — same cards, same reason — and the line stops claiming the last page is the grid.
+    const paged = {
+      ...base,
+      turns: [...askTurns, { sequence: 2, role: "assistant", text: "Three that fit.", kind: "page", status: "Completed" }],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: paged });
+    expect(state.paged).toBe(true);
+    expect(footnote(state.reason, 3, state.paged))
+      .toBe("3 picks so far · last page: 2 picks ranked for you, from 65 pulled");
   });
 });
