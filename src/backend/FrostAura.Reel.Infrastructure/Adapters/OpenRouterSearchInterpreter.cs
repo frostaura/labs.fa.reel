@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
@@ -140,7 +141,9 @@ public class OpenRouterSearchInterpreter(
     /// </summary>
     private static SearchIntent HeuristicIntent(string query)
     {
-        var lower = query.ToLowerInvariant();
+        // Compounds the tokenizer would destroy are rewritten first: it splits on hyphens, so
+        // "rom-com" arrives as two fragments that mean nothing on their own.
+        var lower = SearchVocabulary.NormaliseCompounds(query.ToLowerInvariant());
         var tokens = Tokenize(lower);
         var (minYear, maxYear) = ParseYearRange(lower);
 
@@ -258,25 +261,46 @@ public class OpenRouterSearchInterpreter(
             var isIesPlural = raw.EndsWith("ies", StringComparison.Ordinal) && raw.Length > 4;
             var token = isIesPlural ? string.Concat(raw.AsSpan(0, raw.Length - 3), "y") : raw.TrimEnd('s');
             var altToken = isIesPlural ? raw[..^1] : null;
-            if (GenreAliases.TryGetValue(raw, out var aliasSlug))
+
+            // Genre words resolve through the shared table — alias, then slug, then the crude
+            // singular — so the scanner and the collision rung agree about what "romantic" means.
+            var slugs = SearchVocabulary.ResolveGenres(raw);
+            if (slugs.Count == 0 && !string.Equals(token, raw, StringComparison.Ordinal))
             {
-                Add(negated ? excludeGenres : genres, aliasSlug);
+                slugs = SearchVocabulary.ResolveGenres(token);
             }
-            else if (TmdbGenres.SlugToIds.ContainsKey(raw))
+
+            if (slugs.Count > 0)
             {
-                Add(negated ? excludeGenres : genres, raw);
+                foreach (var slug in slugs)
+                {
+                    Add(negated ? excludeGenres : genres, slug);
+                }
             }
-            else if (TmdbGenres.SlugToIds.ContainsKey(token))
+            else if (negated)
             {
-                Add(negated ? excludeGenres : genres, token);
+                // THE FLOOR. A negation is a negation only when its object resolves to something
+                // this catalogue can name. The scanner used to accept any token that was not
+                // machinery, so "nothing SET in space" and "not … at ALL" became soft exclusions on
+                // "set" and "all" — captioned to the user as words they had asked to skip, and
+                // matching a large share of every overview, so real answers were demoted out of the
+                // picks by a rejection nobody made. An unresolvable token is dropped outright: it
+                // does NOT fall through to the positive branch either, because searching for the
+                // thing inside a rejection is the original defect negation exists to prevent.
+                foreach (var candidate in new[] { token, altToken })
+                {
+                    if (candidate is { Length: > 2 } && SearchVocabulary.IsNegatableKeyword(candidate))
+                    {
+                        Add(excludeKeywords, candidate);
+                    }
+                }
             }
             else if (raw.Length > 2 && !StopWords.Contains(raw))
             {
-                var target = negated ? excludeKeywords : keywords;
-                Add(target, token.Length > 2 ? token : raw);
+                Add(keywords, token.Length > 2 ? token : raw);
                 if (altToken is { Length: > 2 })
                 {
-                    Add(target, altToken);
+                    Add(keywords, altToken);
                 }
             }
         }
@@ -302,21 +326,9 @@ public class OpenRouterSearchInterpreter(
         }
     }
 
-    private static readonly IReadOnlyDictionary<string, string> GenreAliases = new Dictionary<string, string>
-    {
-        ["scifi"] = "science-fiction",
-        ["sci"] = "science-fiction",
-        ["fi"] = "science-fiction",
-        ["horrors"] = "horror",
-        ["scary"] = "horror",
-        ["funny"] = "comedy",
-        ["comedies"] = "comedy",
-        ["romcom"] = "romance",
-        ["thrillers"] = "thriller",
-        ["docs"] = "documentary",
-        ["doc"] = "documentary",
-        ["animated"] = "animation",
-    };
+    // The genre aliases moved to Application's SearchVocabulary, whole. They were private here, so
+    // the collision rung could not read them — and "a 90s romantic comedy" named only comedy while
+    // the prose in the same bubble named romance and comedy. One table, two readers.
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -432,12 +444,19 @@ public class OpenRouterSearchInterpreter(
         "more", "much", "really", "into", "for", "the", "a", "an", "some", "too",
     };
 
-    /// <summary>Words that open a negation ("less horror", "no ghosts", "I don't want ghosts").</summary>
+    /// <summary>
+    /// Words that open a negation ("less horror", "no ghosts", "I don't want ghosts").
+    ///
+    /// <para>"nothing", "none" and "never" were missing, which is how the live repro's "nothing set
+    /// in space" ran on as a POSITIVE pull for the words inside the rejection. They open a scope
+    /// now; the vocabulary floor below is what keeps that from becoming the opposite defect.</para>
+    /// </summary>
     private static readonly HashSet<string> Negators = new(StringComparer.OrdinalIgnoreCase)
     {
         // "don" and "doesn" are what the tokenizer leaves of "don't"/"doesn't" — it splits on the
         // apostrophe, so the negator never survives as a whole word.
         "less", "fewer", "not", "no", "without", "except", "avoid", "hate", "don", "dont", "doesn",
+        "nothing", "none", "never",
     };
 
     /// <summary>
