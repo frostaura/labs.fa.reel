@@ -1,6 +1,6 @@
 ---
 name: fa-reel-decisions-retrieval
-description: "Cross-reference LLM verdicts nudge UP on Keep only — the OUT arm still hides a sixth of future loves, so nothing is demoted and PR4 stays gated. Retrieval is multi-centroid; a Preserve rebuild may never grow a rail."
+description: "Cross-reference LLM verdicts nudge UP on Keep only — the OUT arm still hides a sixth of future loves, so nothing is demoted and the second verdict round stays gated. Retrieval is multi-centroid; a Preserve rebuild may never grow a rail."
 type: decision
 last_verified: 2026-09-11
 ---
@@ -13,8 +13,8 @@ last_verified: 2026-09-11
   verdict carries real signal — keeps were later loved roughly a third of the time against a base rate near a quarter
   — but its OUTs still catch a sixth of the titles he went on to love, worse than v1's own true-rule-out rate. An OUT
   that removes a future love is permanently unobservable, and eligibility encodes founder-locked USER statements, not
-  opinions. PR4 (round 2, any demotion, a hero bar) stays gated on an OUT arm whose Wilson **upper** bound on false
-  rule-outs clears 15%; v2 does not.
+  opinions. The second verdict round — round 2 over the survivors, any demotion, a hero bar, which the job code calls
+  **PR4** — stays gated on an OUT arm whose Wilson **upper** bound on false rule-outs clears 15%; v2 does not.
 - **`Round` is in the verdict key and the model artifact is not.** *Why:* without the round, round 2 overwrites round
   1 and "two keeps" has nothing to count; with the artifact in the key the whole cache goes cold every retrain night.
   A profile-hash move demotes verdicts to stale at half strength rather than invalidating them, so a hash step costs a
@@ -40,3 +40,12 @@ last_verified: 2026-09-11
   earn a rebuild, and a build triggered by a pass never queues another pass). *Why:* one refresh click was producing
   four builds and four passes — the manual build raced the sync on stale data, and pass → rebuild → pass had no
   natural end.
+
+## Negation in discovery
+- **A negation can only remove something if it shapes DISCOVERY, and three things hold that together — do not undo
+  them piecemeal.** *Why each part exists:* exclusions ride on the provider's without-genre/without-keyword
+  parameters, because filtering after retrieval only shrinks an already-wrong pool; the pool is partitioned
+  clean-versus-contradicting *before* the cut, with contradicting titles kept as a reserve, so a negation can never
+  empty the screen; and the ranking query vector is built from the interpreted POSITIVE signal, never the raw
+  sentence — an embedding model has no notion of "not", so embedding "horror but no ghosts" pulls the vector *toward*
+  ghosts. The tokenizer's clause boundaries are load-bearing for the same reason.

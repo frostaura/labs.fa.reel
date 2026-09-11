@@ -7,8 +7,6 @@ last_verified: 2026-09-11
 
 # Watch list
 
-_Cleared items are deleted here, not struck through — a list carrying resolved rows stops being read._
-
 ## Unbounded cost — the sharpest item here
 - **The chat surface has no ceilings.** Ask Reel's phase 0 and 1 shipped; **phase 2 did not**: no rate limiter, no
   tier rungs (Free gets the whole pipeline), no chat budget, no kill switch, no narrative fencing, no export or
@@ -25,16 +23,16 @@ _Cleared items are deleted here, not struck through — a list carrying resolved
 ## Owed work
 - **The cross-reference pool is shortlist-only.** Verdicts need a persisted score, so a pass covers the current
   shortlist rather than the whole eligible catalogue and coverage grows one build at a time. **Widening it means
-  persisting first-pass scores for the whole retrieved set, and that is the next change.** PR4 — round 2, any
-  demotion, a hero bar — stays gated on the OUT arm clearing its Wilson-upper threshold (`decisions-retrieval.md`).
+  persisting first-pass scores for the whole retrieved set, and that is the next change.** The second verdict round
+  (survivors re-judged, any demotion, a hero bar — the code calls it PR4) stays gated on the OUT arm clearing its
+  Wilson-upper threshold (`decisions-retrieval.md`).
 - **Do not run another schema bump against the current eval ledger** — at this holdout size it cannot separate a small
   win from noise. The next modelling move is a bigger or pooled holdout, or a within-account paired design.
 - **`HeroEligibleCount` at the 7.5 floor is still zero on every build**, even after the catalogue seed. Watch for the
   first non-zero; until then the hero floor is being relaxed on every build.
-- **The retrieval-recall and build-latency gates are unpaid.** The recall probe needs a before/after over a week and
-  its budget covers only part of the window; the first cluster-aware build was materially slower while the eligible
-  pool jumped in the same hour, so build p95 is unattributed; `hnsw.ef_search` is still at its default while cluster
-  pulls can ask for hundreds. The seed sweep waits on two weeks of per-arm eligibility data.
+- **The retrieval-recall and build-latency gates are unpaid.** The recall probe needs a before/after over a week on a
+  budget covering part of it; the first cluster-aware build was slower while the eligible pool jumped in the same
+  hour, so build p95 is unattributed; `hnsw.ef_search` is still at its default while cluster pulls ask for hundreds.
 - **The 50-read human review bar for lens copy has not been met.** The audit endpoint exists, the reads have not
   happened, and the latest prompt version restarted the count. No prompt reaches anyone but the founder until it is.
 - **Ask Reel follow-ups handed back by the fixers, none started:** the "done" reason still has two shapes on the
@@ -43,12 +41,13 @@ _Cleared items are deleted here, not struck through — a list carrying resolved
 - **Extraction-era pollution is still draining.** Tone and era on the oldest attribute rows are untrustworthy and
   gated off by a minimum trusted extractor version; watch the stale-extractor count reach zero before surfacing either
   field.
-- **`PipelineStage` has no "not enough ratings" value**, so an account below the ratings floor is parked as `Degraded`
-  — a new enum member plus a frontend case.
+- **`PipelineStage` has no "not enough ratings" value**, so an account below the ratings floor is parked as
+  `Degraded` — a new enum member plus a frontend case.
 
 ## Debris and hygiene
-- **The Ask Reel panel's probe conversations are still in the live database.** Delete them through the UI or the
-  delete endpoint, never SQL. Their ids are in the panel's plan folder.
+- **The QA walks' probe conversations are still in the live database**, and their ids were never written down: list
+  them with `GET /api/search/conversations` and delete each through the UI or `DELETE /api/search/conversations/{id}`
+  — never SQL, which leaves the turn record and the usage ledger disagreeing.
 - **A pile of throwaway `reel_test_*` databases sits on port 5433**, including the QA copy that ran a whole walk with
   background jobs on and spent real provider calls. Drop them.
 - **One upstream test red is left** — the semantic-arm order flake (`gotchas-tests.md`).

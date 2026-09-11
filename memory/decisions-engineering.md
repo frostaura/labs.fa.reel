@@ -49,7 +49,6 @@ last_verified: 2026-09-11
   a patched transitive. The `security` CI job fails the build otherwise.
 
 ## Deploy
-- **The Portainer stack's nginx `/api` prefix bug is fixed and guarded by a parity test.** *Why it mattered:* a
-  `proxy_pass` carrying a URI replaces the matched location prefix, so `/api/health` reached the backend as `/health`
-  and every API call 404'd — the deployed stack would never have answered a single request. Proven with a stub
-  upstream before the fix. The deploy itself is still a founder action (`decisions-product.md`).
+- **`proxy_pass` in the Portainer stack's nginx config must never carry a URI, and a parity test guards it.** *Why:*
+  a URI on `proxy_pass` replaces the matched location prefix, so `/api/health` arrived as `/health` and the deployed
+  stack would have 404'd every call. The deploy itself is still a founder action (`decisions-product.md`).

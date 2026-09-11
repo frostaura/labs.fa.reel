@@ -51,9 +51,6 @@ last_verified: 2026-09-11
 - **Ask Reel has TWO interpretation prompts, and the live one is the agent's**, not the standalone interpreter's,
   which is only a fallback. A whole session was lost adding a field everywhere except the agent prompt. Whenever a
   field is added to the intent, update both and verify against the running stack.
-- **A negation can only remove something if it shapes DISCOVERY, and three things hold that together — do not undo
-  them piecemeal:** exclusions ride on the provider's without-genre/without-keyword parameters; the pool is
-  partitioned clean-versus-contradicting *before* the cut, with contradicting titles kept only as a reserve so a
-  negation can never empty the screen; and the ranking query vector is built from the interpreted POSITIVE signal,
-  never the raw sentence — an embedding model has no notion of "not", so embedding "horror but no ghosts" pulls the
-  vector *toward* ghosts. The tokenizer's clause boundaries are load-bearing for the same reason.
+- **Negation is a design contract, not an implementation detail** — three parts hold it together and undoing any one
+  of them quietly stops negations working. The contract and the reasoning behind each part:
+  [`decisions-retrieval.md`](decisions-retrieval.md).
