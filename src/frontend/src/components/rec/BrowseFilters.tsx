@@ -52,7 +52,11 @@ function Segment<T extends string>({
           key={key}
           onClick={() => onSelect(key)}
           aria-pressed={value === key}
-          className={`px-3 py-1 rounded-md fa-caption transition ${
+          // The segment is a real tap target on a phone and measured 23 px tall — the browse row is
+          // the one control on /search that the 44 px sweep (`dca1ed3`) skipped as a foreign
+          // component. `min-h-11` below `md` with the padding replaced by centring; from `md` up
+          // the vertical padding comes back and the segment is the size it has always been.
+          className={`inline-flex min-h-11 items-center justify-center rounded-md px-3 md:min-h-0 md:py-1 fa-caption transition ${
             value === key ? "bg-fa-frost/20 text-fa-frost-bright" : "text-fa-frost-dim hover:text-fa-frost"
           }`}
           data-testid={`browse-${key}`}
