@@ -153,6 +153,164 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
     }
 
     /// <summary>
+    /// F5-03. The same turn, with <c>anime</c> held as an excluded GENRE instead — which is how the
+    /// founder's account actually holds it. The heuristic reads "an anime series" as a keyword, so
+    /// intersecting each standing list with its own vocabulary found nothing on either side and the
+    /// turn emitted no frame at all, while the model's prose in the same stream said the filters
+    /// excluded anime. The collision is a fact about the word the user typed, not about which list
+    /// the conditions editor happened to store the rule in.
+    /// </summary>
+    [Fact]
+    public async Task A_standing_genre_the_turn_asked_for_as_a_keyword_is_named()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeGenre, "anime");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(71901, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "an anime series", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var conflict = events.Single(e => e.Event == "conflict").Data;
+        Assert.Equal(["anime"], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        Assert.Contains("anime", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// F4-01, end to end and against the founder's own filter set. A title whose <c>Genres</c> says
+    /// drama and whose <c>Keywords</c> say "black comedy" passes <c>EligibilityQueryBuilder</c>'s
+    /// exact-match genre filter and then trips this pipeline's richer matcher — which is how three
+    /// comedy cards reached the reserve channel underneath a notice reading "Your conditions
+    /// permanently exclude comedy, so nothing you asked for there can appear."
+    ///
+    /// <para>It must appear in NEITHER list. A notice that a filter is absolute, printed above cards
+    /// the filter did not stop, is worse than no notice at all.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_standing_exclusion_the_sql_filter_cannot_see_reaches_neither_channel()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        foreach (var genre in FounderExclusions)
+        {
+            await AddFilterAsync(accountId, FilterKind.ExcludeGenre, genre);
+        }
+
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        // Seeded BEFORE the turn and left out of the seen-set above: the upsert fills only what is
+        // empty, so the keywords survive discovery and the genre array stays innocent.
+        var launderedTmdbId = await SeedLaunderedComedyAsync("Panic", 72901);
+        var tmdb = new ScriptedTmdbClient(
+            [.. Discoverable(72902, 3), LaunderedRow(launderedTmdbId, "Panic")]);
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "a 90s romantic comedy", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = events.Single(e => e.Event == "done").Data;
+        var shown = done.GetProperty("results").EnumerateArray()
+            .Concat(done.GetProperty("belowFloor").EnumerateArray())
+            .Select(c => c.GetProperty("name").GetString())
+            .ToList();
+
+        Assert.DoesNotContain("Panic", shown);
+        // And the notice that makes the promise was emitted on the very same turn.
+        Assert.Contains(
+            "comedy",
+            events.Single(e => e.Event == "conflict").Data.GetProperty("message").GetString()!,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The probe: one field moved. With the comedy exclusion removed and every other rule intact,
+    /// the same seeded title is an ordinary pick — so the exclusion above is what removed it, not
+    /// the year bound, the language default or the fixture.
+    /// </summary>
+    [Fact]
+    public async Task The_same_title_is_an_ordinary_pick_without_the_comedy_exclusion()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        foreach (var genre in FounderExclusions.Where(g => g != "comedy"))
+        {
+            await AddFilterAsync(accountId, FilterKind.ExcludeGenre, genre);
+        }
+
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var launderedTmdbId = await SeedLaunderedComedyAsync("Panic Probe", 73001);
+        var tmdb = new ScriptedTmdbClient(
+            [.. Discoverable(73002, 3), LaunderedRow(launderedTmdbId, "Panic Probe")]);
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "a 90s romantic comedy", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = events.Single(e => e.Event == "done").Data;
+        var shown = done.GetProperty("results").EnumerateArray()
+            .Concat(done.GetProperty("belowFloor").EnumerateArray())
+            .Select(c => c.GetProperty("name").GetString())
+            .ToList();
+
+        Assert.Contains("Panic Probe", shown);
+    }
+
+    /// <summary>The account the whole round was measured against.</summary>
+    private static readonly string[] FounderExclusions =
+        ["anime", "animation", "comedy", "documentary", "history", "music", "musical", "romance"];
+
+    /// <summary>
+    /// A catalogue row the eligibility SQL reads as a drama and this pipeline reads as a comedy —
+    /// the shape of the real divergence between <c>Titles.Genres</c> and <c>Titles.Keywords</c>.
+    /// </summary>
+    private async Task<long> SeedLaunderedComedyAsync(string name, long tmdbId)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        db.Titles.Add(new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = tmdbId,
+            TraktSlug = $"laundered-{tmdbId}",
+            Name = name,
+            Genres = ["drama"],
+            Keywords = ["black comedy", "hitman"],
+            Overview = "A hitman in therapy.",
+            Language = "en",
+            Year = 2000,
+            ReleasedAt = new DateTime(2000, 6, 16, 0, 0, 0, DateTimeKind.Utc),
+            TmdbPopularity = 50m,
+            TmdbVoteAverage = 6.8m,
+            TmdbVoteCount = 900,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        return tmdbId;
+    }
+
+    private static TmdbListItem LaunderedRow(long tmdbId, string name) => new(
+        tmdbId, true, name, "/c.jpg", null, "A hitman in therapy.", 50m, 6.8m, 900,
+        new DateTime(2000, 6, 16, 0, 0, 0, DateTimeKind.Utc), [18], "en");
+
+    /// <summary>
     /// F1-03. The reply is written before a candidate exists, so it promised the excluded thing and
     /// the grid then contradicted it card by card. The clause is appended before the frame goes out
     /// AND before the outcome is handed back for persistence — the transcript says what the user

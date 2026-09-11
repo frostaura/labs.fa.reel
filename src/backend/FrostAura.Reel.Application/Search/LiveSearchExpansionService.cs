@@ -361,13 +361,26 @@ public sealed class LiveSearchExpansionService(
             // picks" above seven post-2000 titles). It reads agentReply.Requested — the
             // interpreter's free reading of the user's own sentence — because the intent has been
             // through a prompt that was told about these exclusions and has already dropped them.
-            var collidingGenres = AskReelStandingFilters.CollidingGenres(
-                standingRules, agentReply.Intent, agentReply.Requested);
-            var collidingKeywords = AskReelStandingFilters.CollidingKeywords(
-                standingRules, agentReply.Intent, agentReply.Requested);
+            //
+            // The two standing lists are both matched against the WHOLE of what the user asked
+            // for — the model's intent, the heuristic's reading, and the raw sentence's own tokens
+            // — rather than each against its own vocabulary. The editor decides which list a rule
+            // lands in and the user decides which word they type, and those two decisions are
+            // unrelated: the founder holds "anime" as an excluded GENRE, the heuristic reads "an
+            // anime series" as a KEYWORD, and a per-list intersection therefore found nothing on
+            // either side. The turn emitted no frame at all while the model's own prose in the same
+            // stream said the filters excluded anime.
+            var askedFor = AskReelStandingFilters.AskedFor(trimmed, agentReply.Intent, agentReply.Requested);
+            var collidingGenres = AskReelStandingFilters.Colliding(standingRules.ExcludeGenres, askedFor);
+            var collidingKeywords = AskReelStandingFilters.Colliding(standingRules.ExcludeKeywords, askedFor);
             var yearCollides = AskReelStandingFilters.YearWindowCollides(
                 standingRules, agentReply.Intent, agentReply.Requested);
             var hasConflict = collidingGenres.Count > 0 || collidingKeywords.Count > 0 || yearCollides;
+
+            // The turn's negation model, built once: the account's permanent rules (airtight) plus
+            // whatever the user's own words ruled out (soft). The model's inferred exclusions are
+            // deliberately absent — see AskReelNegations.
+            var negations = AskReelNegations.For(standingRules, agentReply.Requested);
 
             // Qualified before it is emitted AND before it is persisted, so the transcript cannot
             // record a promise the same turn then broke.
@@ -625,7 +638,7 @@ public sealed class LiveSearchExpansionService(
                 .ThenBy(x => x.Title.Id)
                 .ToList();
 
-            var (ranked, outside) = PartitionByNegation(scoredPool, intent);
+            var (ranked, outside) = PartitionByNegation(scoredPool, negations);
             if (outside.Count > 0)
             {
                 logger.LogInformation(
@@ -694,7 +707,7 @@ public sealed class LiveSearchExpansionService(
                 {
                     titleId = title.Id,
                     fit = (double?)null,
-                    why = OutsideWhy(NegationMatches(title, intent)),
+                    why = OutsideWhy(NegationMatches(title, negations)),
                 });
             }
 
@@ -773,7 +786,7 @@ public sealed class LiveSearchExpansionService(
                 .Select(x => Card(x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why, blend: x.Blend))
                 .Concat(blendedOutside.Select(x => Card(
                     x.Title, x.Sim, x.Predicted, fit: null,
-                    why: OutsideWhy(NegationMatches(x.Title, intent)),
+                    why: OutsideWhy(NegationMatches(x.Title, negations)),
                     outsideRequest: true, blend: x.Blend)))
                 .ToList();
 
@@ -807,7 +820,7 @@ public sealed class LiveSearchExpansionService(
                     Math.Round((decimal)x.Blend, 4, MidpointRounding.AwayFromZero),
                     // The deterministic caption, not an LLM's: an outside card never reaches the
                     // rerank model, and its why-line states which exclusion it trips.
-                    OutsideWhy(NegationMatches(x.Title, intent)),
+                    OutsideWhy(NegationMatches(x.Title, negations)),
                     ExposureWhySource.Templater));
             }
 
@@ -1424,26 +1437,64 @@ public sealed class LiveSearchExpansionService(
     }
 
     /// <summary>
-    /// How much a title contradicts what the user ruled out. Each matched negated genre or keyword
-    /// costs one <see cref="NegationPenalty"/>. Any non-zero value routes the title into the
-    /// flagged outside-request partition (<see cref="PartitionByNegation"/>) — it never reaches
+    /// How much a title contradicts what the user's own words ruled out. Each matched genre or
+    /// keyword costs one <see cref="NegationPenalty"/>. Any non-zero value routes the title into
+    /// the flagged outside-request partition (<see cref="PartitionByNegation"/>) — it never reaches
     /// the screen as an ordinary pick.
+    ///
+    /// <para>It reads ONLY the requested half of <see cref="AskReelNegations"/>. The standing half
+    /// is not a demotion at all: a title tripping one is culled before this runs, because an
+    /// account-level exclusion is airtight and "shown, but flagged" is still shown.</para>
     /// </summary>
-    private static double NegationDemerit(Title title, SearchIntent intent)
+    private static double RequestedDemerit(Title title, AskReelNegations negations)
     {
-        var hits = 0;
-        if (intent.ExcludeGenres is { Count: > 0 } badGenres)
-        {
-            hits += badGenres.Count(bad => TripsExcludedGenre(title, bad));
-        }
-
-        if (intent.ExcludeKeywords is { Count: > 0 } badWords)
+        var hits = negations.RequestedGenres.Count(bad => TripsExcludedGenre(title, bad));
+        if (negations.RequestedKeywords.Count > 0)
         {
             var haystack = KeywordHaystack(title);
-            hits += badWords.Count(w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase));
+            hits += negations.RequestedKeywords.Count(
+                w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase));
         }
 
         return Math.Min(hits * NegationPenalty, 0.66);
+    }
+
+    /// <summary>
+    /// Whether a title trips one of the account's PERMANENT exclusions, under exactly the matching
+    /// <see cref="TripsExcludedGenre"/> uses.
+    ///
+    /// <para><b>Why this exists on top of the eligibility query.</b>
+    /// <c>EligibilityQueryBuilder</c> excludes a genre with <c>t.Genres.Contains(value)</c> — an
+    /// exact match against the genre array, and nothing else. This matcher is deliberately richer:
+    /// it also reads <c>Subgenres</c> and <c>Keywords</c> by containment, because TMDB's TV taxonomy
+    /// has no Horror genre at all and an exclusion blind to those is blind to TV horror. The two
+    /// therefore disagree by construction, and the gap is real on screen: a title whose
+    /// <c>Genres</c> says drama and whose keywords say "black comedy" passes the SQL filter for an
+    /// account that permanently excludes comedy, and then gets captioned by this pipeline as "a
+    /// comedy title". It reached the outside channel under a notice stating that comedy can never
+    /// appear.</para>
+    ///
+    /// <para>Closing it HERE rather than in the SQL is deliberate. The eligibility rule is
+    /// founder-locked and its query is read by every surface in the product; widening it to
+    /// keyword containment would quietly re-cut the feed, the rails and the digest on the strength
+    /// of a defect found in one channel of one surface. The partition is where this turn's screen
+    /// is decided, and it is the last place a standing exclusion can still be honoured.</para>
+    /// </summary>
+    private static bool TripsStandingExclusion(Title title, AskReelNegations negations)
+    {
+        if (negations.StandingGenres.Any(bad => TripsExcludedGenre(title, bad)))
+        {
+            return true;
+        }
+
+        if (negations.StandingKeywords.Count == 0)
+        {
+            return false;
+        }
+
+        var haystack = KeywordHaystack(title);
+        return negations.StandingKeywords.Any(
+            w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -1464,18 +1515,38 @@ public sealed class LiveSearchExpansionService(
         $"{title.Name} {title.Overview} {string.Join(' ', title.Keywords ?? [])} {string.Join(' ', title.Subgenres ?? [])}";
 
     /// <summary>
-    /// Splits the similarity-ordered pool into the picks that honour every negation and the
-    /// flagged "outside your request" reserve. Clean titles fill up to <see cref="ReturnCount"/>;
-    /// contradicting ones are DROPPED whenever the clean set reaches <see cref="MinResults"/>, and
-    /// otherwise top up only to that floor — flagged, never silently mixed in. This is the hard
-    /// guarantee behind "no horror please": a contradicting title can reach the screen only as an
-    /// explicitly-labelled closest-but-outside card.
+    /// Splits the similarity-ordered pool into the picks, the flagged "outside your request"
+    /// reserve — and, before either, drops everything the account permanently excludes.
+    ///
+    /// <para><b>Two rules, not one, because the two sources are not the same kind of fact.</b></para>
+    ///
+    /// <para><b>A standing exclusion is airtight.</b> A title tripping one is removed from the pool
+    /// outright and can appear in neither channel. That is the account's own permanent rule, set
+    /// behind a PIN, and the product says so in as many words: "Your conditions permanently exclude
+    /// comedy, so nothing you asked for there can appear." It was not true. Standing exclusions
+    /// reached this method as ordinary soft negations — the interpret prompt is TOLD about them and
+    /// the model echoes them back on <c>intent.ExcludeGenres</c> — so the very same turn that
+    /// rendered that notice also rendered three comedy cards in the reserve beneath it, each
+    /// captioned by the product as a comedy title. A notice that a filter is absolute, printed above
+    /// cards the filter did not stop, is worse than no notice.</para>
+    ///
+    /// <para><b>A requested negation is soft</b>, and that is the behaviour this method was written
+    /// for: "no horror please" drops contradicting titles whenever the clean set reaches
+    /// <see cref="MinResults"/>, and otherwise tops up only to that floor — flagged, ordered after
+    /// every clean pick, never silently mixed in. An empty screen is not a better answer than a
+    /// labelled near-miss when the user's constraint was a preference they expressed in passing.</para>
+    ///
+    /// <para>The cull can leave a turn with less to show, and that is the correct outcome: it
+    /// removes exactly the titles the account has said it never wants to see.</para>
     /// </summary>
     internal static (List<(Title Title, double Sim)> Ranked, List<(Title Title, double Sim)> Outside) PartitionByNegation(
-        IReadOnlyList<(Title Title, double Sim)> scoredPool, SearchIntent intent)
+        IReadOnlyList<(Title Title, double Sim)> scoredPool, AskReelNegations negations)
     {
-        var contradicts = scoredPool.Where(x => NegationDemerit(x.Title, intent) > 0).ToList();
-        var clean = scoredPool.Where(x => NegationDemerit(x.Title, intent) == 0).ToList();
+        var permitted = negations.HasStanding
+            ? scoredPool.Where(x => !TripsStandingExclusion(x.Title, negations)).ToList()
+            : [.. scoredPool];
+        var contradicts = permitted.Where(x => RequestedDemerit(x.Title, negations) > 0).ToList();
+        var clean = permitted.Where(x => RequestedDemerit(x.Title, negations) == 0).ToList();
         var ranked = clean.Take(ReturnCount).ToList();
         var outside = ranked.Count < MinResults && contradicts.Count > 0
             ? contradicts.Take(MinResults - ranked.Count).ToList()
@@ -1484,29 +1555,36 @@ public sealed class LiveSearchExpansionService(
     }
 
     /// <summary>
-    /// The excluded genres/keywords a title actually trips, phrased for the outside-request
-    /// caption ("a horror title", "one that matches ‘ghosts’"). Mirrors
-    /// <see cref="NegationDemerit"/> exactly, so a title partitioned as contradicting always has
-    /// at least one match to name.
+    /// The exclusions a title actually trips, phrased for the outside-request caption ("a horror
+    /// title", "one that matches ‘ghosts’") and tagged with where each rule came from. Mirrors
+    /// <see cref="RequestedDemerit"/> and <see cref="TripsStandingExclusion"/> exactly, so a title
+    /// in either channel always has at least one match to name.
+    ///
+    /// <para>Standing matches come first, because they are the stronger claim about why the card is
+    /// where it is — and in practice they are unreachable from the outside channel, since
+    /// <see cref="PartitionByNegation"/> culls those titles before the partition. They are still
+    /// computed, because a caption that could silently fall back to "you asked to skip" for a rule
+    /// the user never typed is exactly the defect this distinction closes.</para>
     /// </summary>
-    internal static IReadOnlyList<string> NegationMatches(Title title, SearchIntent intent)
+    internal static IReadOnlyList<NegationMatch> NegationMatches(Title title, AskReelNegations negations)
     {
-        var matches = new List<string>();
-        if (intent.ExcludeGenres is { Count: > 0 } badGenres)
+        var matches = new List<NegationMatch>();
+        var haystack = negations.StandingKeywords.Count > 0 || negations.RequestedKeywords.Count > 0
+            ? KeywordHaystack(title)
+            : string.Empty;
+
+        void Collect(IReadOnlyList<string> genres, IReadOnlyList<string> keywords, bool standing)
         {
-            matches.AddRange(badGenres
+            matches.AddRange(genres
                 .Where(bad => TripsExcludedGenre(title, bad))
-                .Select(bad => $"a {bad.ToLowerInvariant()} title"));
-        }
-
-        if (intent.ExcludeKeywords is { Count: > 0 } badWords)
-        {
-            var haystack = KeywordHaystack(title);
-            matches.AddRange(badWords
+                .Select(bad => new NegationMatch($"a {bad.ToLowerInvariant()} title", standing)));
+            matches.AddRange(keywords
                 .Where(w => w.Length > 2 && haystack.Contains(w, StringComparison.OrdinalIgnoreCase))
-                .Select(w => $"one that matches ‘{w}’"));
+                .Select(w => new NegationMatch($"one that matches ‘{w}’", standing)));
         }
 
+        Collect(negations.StandingGenres, negations.StandingKeywords, standing: true);
+        Collect(negations.RequestedGenres, negations.RequestedKeywords, standing: false);
         return matches;
     }
 
@@ -1514,9 +1592,25 @@ public sealed class LiveSearchExpansionService(
     /// The honest deterministic caption for an outside-request card. Replaces the LLM why — which
     /// cheerfully admitted violations ("exactly what they want to avoid") — with a plain statement
     /// of the first exclusion the title trips.
+    ///
+    /// <para><b>The tail names the right authority.</b> "Which you asked to skip" is a quotation of
+    /// the user, and it was being printed for exclusions the user never made: on one measured
+    /// screen, seven of eleven outside cards told a user who had asked for a 90s romantic comedy
+    /// that they had asked to skip horror — an inference of the model's, phrased as their own
+    /// words. A standing rule gets "which your conditions exclude", which is the other true
+    /// sentence and is also actionable, because Conditions is a screen the user can open.</para>
     /// </summary>
-    internal static string OutsideWhy(IReadOnlyList<string> matches) =>
-        $"Closest match we could find, but it's {(matches.Count > 0 ? matches[0] : "outside what you asked for")} — which you asked to skip.";
+    internal static string OutsideWhy(IReadOnlyList<NegationMatch> matches)
+    {
+        if (matches.Count == 0)
+        {
+            return "Closest match we could find, but it's outside what you asked for — which you asked to skip.";
+        }
+
+        var first = matches[0];
+        var tail = first.Standing ? "which your conditions exclude" : "which you asked to skip";
+        return $"Closest match we could find, but it's {first.Phrase} — {tail}.";
+    }
 
     /// <summary>
     /// The text the ranking query vector is built from — the interpreted POSITIVE signal only
