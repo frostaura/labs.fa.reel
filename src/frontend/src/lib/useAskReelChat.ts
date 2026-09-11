@@ -69,15 +69,31 @@ export function askRequest(
 }
 
 /**
- * Which conversation a cold /search should resume.
+ * What this tab stores instead of an id when the user has explicitly finished with a thread.
  *
- * This tab's own remembered id, and `/conversations/latest` only when there is nothing remembered
- * at all. `/latest` is the account's newest thread, not this tab's: with two tabs open, or a phone
- * and a laptop, reloading tab A dropped the reader into tab B's conversation and the thread they
- * were reading was gone from the UI. Preferring the stored id is the whole of that fix, and it is
- * why `latest` is deprecated rather than merely unused.
+ * "I pressed `+ New`" and "I have never asked anything here" are different facts, and until SB-02
+ * they were the same absent key: `+ New` cleared the id, the reload fell through to
+ * `/conversations/latest`, and the account's newest thread — the one just left — came straight
+ * back. Not a guid, so it can never collide with a real id and can never be sent as one.
+ */
+export const FRESH_CONVERSATION = "new";
+
+/** {@link resumeTarget}'s answer when nothing should be fetched at all. */
+export const NO_RESUME = "none";
+
+/**
+ * Which conversation a cold /search should resume — and whether it should resume one.
+ *
+ * Three states, not two. This tab's own remembered id; nothing at all after an explicit `+ New`;
+ * and `/conversations/latest` only when there is nothing remembered whatsoever. `/latest` is the
+ * account's newest thread, not this tab's: with two tabs open, or a phone and a laptop, reloading
+ * tab A dropped the reader into tab B's conversation and the thread they were reading was gone
+ * from the UI. Preferring the stored id is the whole of that fix, and it is why `latest` is
+ * deprecated rather than merely unused — SB-02 was ordinary use reaching it anyway, because a
+ * cleared key and a never-set one were indistinguishable.
  */
 export function resumeTarget(storedId: string | null): string {
+  if (storedId === FRESH_CONVERSATION) return NO_RESUME;
   return storedId && storedId.length > 0 ? storedId : "latest";
 }
 
@@ -171,7 +187,30 @@ export interface ConversationPayload {
   title?: string | null;
   /** When this thread last stored cards. Null = it predates stored results entirely. */
   lastCardsAt?: string | null;
-  turns: { sequence?: number; role: string; text: string; kind?: string; status?: string }[];
+  /**
+   * When this thread last had a turn of any kind. Optional: it is on the conversation LIST on
+   * every server and only newer ones put it in the resume payload. It is the only stamp a
+   * transcript-only thread has, which is the one case `lastCardsAt` cannot date.
+   */
+  lastTurnAt?: string | null;
+  /**
+   * The transcript. `status` and `failureCode` are what SB-03 turned on: a row can be `Pending`
+   * (the server is still working) or `Failed` (stopped, or a crash), and dropping those left the
+   * previous answer sitting under an unanswered question with nothing saying so. `id` is optional
+   * everywhere — today's payload projects no turn ids — and is what lets a pending turn be polled
+   * by `GET /turns/{id}` rather than by re-reading the whole conversation.
+   */
+  turns: {
+    sequence?: number;
+    role: string;
+    text: string;
+    kind?: string;
+    status?: string;
+    failureCode?: string | null;
+    /** Both spellings accepted: the payload has never carried one, and the SSE frame calls it `turnId`. */
+    id?: string | null;
+    turnId?: string | null;
+  }[];
   /** The answer, in the order the server committed to storage as `Rank`. Never re-sorted. */
   cards?: AskCard[];
   reason?: string | null;
@@ -298,6 +337,60 @@ export function footnote(reason: string | null, shownCount: number, paged: boole
 }
 
 /**
+ * How many threads `Recent ▾` asks for on a first open, and after "Show older".
+ *
+ * The route is `GET /api/search/conversations?limit=N`, clamped server-side to 1..100, and it has
+ * **no `offset`** — so 100 is the whole of what this control can reach, and there is no third
+ * gesture to offer. Recorded here rather than discovered again: a "Show older" that keeps
+ * requesting would silently return the same hundred rows forever.
+ */
+export const RECENT_LIMIT = 20;
+export const OLDER_LIMIT = 100;
+
+/**
+ * What the thread menu should request, and what it may offer.
+ *
+ * SB-05 is the missing half of a control that was otherwise correct: the menu showed 20 of an
+ * account's 51 threads, matching the contract's documented `?limit=20`, and said nothing about the
+ * other 31 — so a menu framed as "a means of getting back to an answer" read as a complete list
+ * and was not one. The first page stays cheap (this is a control almost nobody touches on a given
+ * visit); asking for the rest is one deliberate gesture.
+ *
+ * The offer is made only over a FULL page, because a short one is the whole list and promising
+ * older threads over it promises rows that do not exist. At the ceiling the menu says so instead
+ * of offering a gesture the route cannot honour.
+ */
+export function recentListing(
+  showOlder: boolean,
+  rowCount: number,
+): { limit: number; canShowOlder: boolean; atCeiling: boolean } {
+  return {
+    limit: showOlder ? OLDER_LIMIT : RECENT_LIMIT,
+    canShowOlder: !showOlder && rowCount >= RECENT_LIMIT,
+    atCeiling: showOlder && rowCount >= OLDER_LIMIT,
+  };
+}
+
+/**
+ * Whether the provenance line belongs on screen.
+ *
+ * `resumed` is in, and SB-06 is what happened when it was not. The resume payload carries the
+ * turn's `reason` verbatim — "24 picks ranked for you, from 81 pulled · widened to find enough ·
+ * only 5 picks cleared your 6.0 bar, so it was relaxed" — the reducer stores it, and the page then
+ * gated the render on `status === "done"`. A resume is deliberately NOT `done` (see the status
+ * doc-comment), so a restored answer lost the only on-screen account of how it was assembled,
+ * including the fact that the quality floor had been relaxed to fill it.
+ *
+ * The other two conditions are unchanged and are about honesty of a different kind: mid-page the
+ * sentence describes a turn that has not finished, and with nothing on screen it is a claim about
+ * a grid that is not there.
+ */
+export function showsFootnote(status: ChatStatus, appending: boolean, shownCount: number): boolean {
+  if (appending || shownCount <= 0) return false;
+  return status === "done" || status === "resumed";
+}
+
+/**
  * The floor, formatted for the tray label — always one decimal, always the same string.
  *
  * `toLocaleString(undefined, { maximumFractionDigits: 1 })` printed "6" in the tray while the
@@ -353,12 +446,112 @@ export function floorPartition(
  * it never answered — so they are dropped here rather than in the page, which would have to know
  * about row lifecycles to do it. The rows still count for `lastQuery`, because the question a
  * failed turn never answered is precisely the one a retry replays.
+ *
+ * A `page` row goes with them, and that is SB-04. Paging replays the last question, so the model
+ * replies again and the server stores a second assistant row — with no user row beside it, because
+ * the user said nothing. The live reducer already refuses that reply (`case "assistant"` returns
+ * unchanged while `appending`, with the same reasoning); this is the resume path catching up, and
+ * without it a paged thread came back with three bubbles for two answers, the first two being the
+ * identical sentence twice. The rule is `kind`, never text equality: a page that happens to word
+ * itself differently is still an answer to a question two bubbles up.
  */
-export function transcriptOf(rows: { role: string; text: string }[]): ChatTurn[] {
+export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
   return rows
+    .filter((t) => t.kind !== "page")
     .filter((t) => t.text.trim().length > 0 && (t.role === "user" || t.role === "assistant"))
     .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
 }
+
+/**
+ * What became of a resumed thread's LAST turn, when it was not a completed answer.
+ *
+ * SB-03: the resume payload has carried `turns[].status` all along and `transcriptOf` dropped it on
+ * the floor, so a thread whose last turn was stopped or crashed came back reading
+ *
+ *   You said | **something surreal and dreamlike** | Picked up where you left off | [24 cards]
+ *
+ * — the previous question's answer sitting under a question that never got one, with nothing
+ * anywhere on the page saying so. The grid is correct (the server replays the last COMPLETED turn);
+ * what was missing is the sentence naming which question it answers and what happened to the other.
+ */
+export interface ResumedTail {
+  /** `failed` — the turn ended badly. `pending` — the server is still working on it. */
+  status: "failed" | "pending";
+  /**
+   * The server's own `FailureCode`, where the payload carries one. `client_aborted` is the user's
+   * own Stop and reads as "you stopped it"; anything else is a snag they did not cause, and
+   * telling a person they abandoned something they did not is worse than saying less.
+   */
+  failureCode: string | null;
+  /**
+   * The turn's id, where the payload carries one — what `GET /api/search/turns/{id}` polls while a
+   * turn is still running. Null is the ordinary case on today's server: the resume payload projects
+   * `sequence`, `role`, `text`, `kind` and `status`, and no id, so the pending state falls back to
+   * re-reading the conversation itself.
+   */
+  turnId: string | null;
+}
+
+/**
+ * The outcome of the last stored turn — `null` when it completed, which is the ordinary case.
+ *
+ * The LAST row is the right one to read: an `ask` writes a user row and an assistant row together
+ * before the stream opens, and a `page` writes the assistant row alone, so the newest row of a
+ * conversation is always the assistant's. Only that row can be in flight or failed; every earlier
+ * one has already been decided, and a failure four turns back is history the transcript already
+ * shows rather than a state the page is in.
+ */
+export function lastTurnOutcome(rows: ConversationPayload["turns"]): ResumedTail | null {
+  const last = rows.at(-1);
+  if (!last || last.role !== "assistant") return null;
+  if (last.status !== "Failed" && last.status !== "Pending") return null;
+  return {
+    status: last.status === "Failed" ? "failed" : "pending",
+    failureCode: last.failureCode ?? null,
+    turnId: last.id ?? last.turnId ?? null,
+  };
+}
+
+/**
+ * The question the restored grid actually answers.
+ *
+ * The server replays the last COMPLETED `ask` block, so when the newest turn failed the cards on
+ * screen belong to an earlier question — and the seam, which says only "picked up where you left
+ * off", let them read as the answer to the one directly above them. This is the server's own rule
+ * (`ResumeAsync`'s `lastAsk`) applied to the transcript it sent, so the two cannot drift: the last
+ * completed assistant `ask` row, and the nearest user row above it.
+ */
+export function answeredQuestion(rows: ConversationPayload["turns"]): string {
+  const answer = rows.reduce(
+    (found, t, i) => (t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" ? i : found),
+    -1,
+  );
+  for (let i = answer - 1; i >= 0; i--) {
+    if (rows[i].role === "user") return rows[i].text;
+  }
+  return "";
+}
+
+/**
+ * What a failed turn says for itself, in one line.
+ *
+ * Three cases, not two. The user pressing Stop is a thing they DID and a named code
+ * (`client_aborted`); any other code is a thing that happened TO them; and no code at all is
+ * neither, so it claims neither. Telling someone they abandoned a turn they never touched is the
+ * kind of small lie that costs trust in everything else on the page — and the silent case is not
+ * hypothetical: the resume payload projects `sequence`, `role`, `text`, `kind` and `status` and no
+ * `failureCode`, so today every resumed failure arrives unattributed. The wording lights up the
+ * moment the field does.
+ */
+export function failedTurnMessage(failureCode: string | null): string {
+  if (failureCode === "client_aborted") return "That one didn’t finish — you stopped it.";
+  if (failureCode) return "That one didn’t finish — it hit a snag.";
+  return "That one didn’t finish.";
+}
+
+/** How often a still-running turn is re-checked, and how long that is worth doing for. */
+export const PENDING_TURN_POLL_MS = 5_000;
+export const PENDING_TURN_BUDGET_MS = 60_000;
 
 /**
  * The excluded terms a conflict is about — the account's excluded genres and its avoid-keywords,
@@ -500,6 +693,35 @@ interface State {
    * Reporting that on a thread seventeen seconds old is what made the copy a lie.
    */
   lastCardsAt: string | null;
+  /**
+   * When this thread last had a turn of any kind. The only stamp a transcript-only thread has, so
+   * it is what dates the seam where `lastCardsAt` is null. Absent on an older server.
+   */
+  lastTurnAt: string | null;
+  /**
+   * What became of the last stored turn, when it was not a completed answer — see
+   * {@link ResumedTail}. Set only by a resume, and cleared by anything that starts a turn of this
+   * visit, because from that moment the screen is about the new turn rather than the old one.
+   */
+  resumedTail: ResumedTail | null;
+  /**
+   * The question the restored grid answers, where that is NOT the last thing the user said. Read
+   * by the seam when `resumedTail` is set; empty otherwise, because on an ordinary resume the grid
+   * answers the question directly above it and naming it is noise.
+   */
+  answeredQuery: string;
+  /**
+   * How many leading ids of `order` belong to turns that already reached `done` — the part of the
+   * screen that is finished work and is frozen in the order the server sent it (SB-01).
+   *
+   * Without this the client had one order for a live screen and another for the same answer after
+   * a reload: a page's `phase` frames re-sorted the WHOLE grid by blend, including the answer the
+   * page was extending, while the stored record kept `(Sequence, Rank)`. The contract's rule —
+   * "array order is the contract, never re-sort by blend" — applies to every turn the moment it
+   * completes; a turn still streaming has no server order yet, which is the only reason the client
+   * derives one at all.
+   */
+  settled: number;
 }
 
 export type ChatAction =
@@ -549,7 +771,8 @@ export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
-  holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null,
+  holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
+  lastTurnAt: null, resumedTail: null, answeredQuery: "",
 };
 
 /**
@@ -565,11 +788,15 @@ function blend(c: AskCard): number {
 }
 
 /**
- * The stream-stable order: clean ids before outside ids, each block sorted by the personal blend.
- * Applied ONLY when a `phase` or `done` frame arrives — `candidate` appends and `scored`/`reranked`
- * update card data in place, so rows stop jumping under the cursor on every SSE event (the old
- * behaviour re-sorted at render time, live). Array.sort is stable, so equal blends keep arrival
- * order and identical inputs render identically.
+ * The stream-stable order for the cards of ONE turn still in flight: clean ids before outside ids,
+ * each block sorted by the personal blend. Applied only at a `phase` boundary — `candidate` appends
+ * and `scored`/`reranked` update card data in place, so rows stop jumping under the cursor on every
+ * SSE event (the old behaviour re-sorted at render time, live). Array.sort is stable, so equal
+ * blends keep arrival order and identical inputs render identically.
+ *
+ * It is NOT the answer's order. A turn that has reached `done` has a server order, and this is the
+ * client assembling one it does not have yet — see {@link streamOrder} for the boundary between
+ * the two, and the `done` case for why the server's array wins the moment it arrives.
  */
 export function partitionedOrder(order: string[], byId: Record<string, AskCard>): string[] {
   const present = order.filter((id) => byId[id]);
@@ -577,6 +804,29 @@ export function partitionedOrder(order: string[], byId: Record<string, AskCard>)
   return [
     ...present.filter((id) => !byId[id].outsideRequest).sort(byBlend),
     ...present.filter((id) => byId[id].outsideRequest).sort(byBlend),
+  ];
+}
+
+/**
+ * The on-screen order mid-stream: a settled prefix carried verbatim, and only the in-flight tail
+ * settled by blend.
+ *
+ * SB-01 is what happens without the split. `partitionedOrder` used to run over the whole merged
+ * array on every `phase` frame, so a page's progress re-sorted the answer ALREADY on screen —
+ * page-two's picks interleaved into page-one's — and the reload that followed rendered the same
+ * cards in the stored `(Sequence, Rank)` order instead. One answer, two orders, one gesture apart,
+ * and the contract is explicit that the array is the order: `blend` is rounded for display and
+ * carries a tiebreak the rounded number cannot reproduce.
+ *
+ * `settled` is how many leading ids belong to turns that already have a `done`. Those are finished
+ * work with a server order of their own and are never touched again; everything after them is this
+ * turn's, and settling it at a phase boundary is the rhythm that keeps rows from jumping.
+ */
+export function streamOrder(order: string[], byId: Record<string, AskCard>, settled: number): string[] {
+  const cut = Math.max(0, Math.min(settled, order.length));
+  return [
+    ...order.slice(0, cut).filter((id) => byId[id]),
+    ...partitionedOrder(order.slice(cut), byId),
   ];
 }
 
@@ -604,6 +854,9 @@ export function chatReducer(state: State, action: ChatAction): State {
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
             conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
+            // The resumed thread's unanswered tail belongs to the visit BEFORE this one. Asking
+            // anything replaces it — the retry offer it carries is exactly what was just taken.
+            resumedTail: null, answeredQuery: "",
             // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
             // by the first candidate of this turn, not by the act of asking.
             holdingPrevious: state.order.length > 0, arrived: 0,
@@ -619,7 +872,14 @@ export function chatReducer(state: State, action: ChatAction): State {
       // of an earlier question became page one of the stopped one without a word on screen.
       // `canPage` now stops such a page being started at all; this is the backstop, and it fails
       // the honest way — the previous answer stays labelled as previous.
-      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0 };
+      //
+      // Everything on screen at the moment a page starts belongs to a turn that has finished, so
+      // the whole of `order` is settled: the page's own frames may settle only what the page
+      // itself brings (SB-01).
+      return {
+        ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
+        settled: state.order.length, resumedTail: null, answeredQuery: "",
+      };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
       // page it adds no transcript entry (the user said it once; echoing their bubble on every
@@ -631,6 +891,7 @@ export function chatReducer(state: State, action: ChatAction): State {
         ...state, turns, status: "streaming", phase: null,
         reason: null, appending: false, exhausted: false, paged: false,
         belowFloor: [], droppedByFloor: null, errorReason: null,
+        resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
       };
     }
@@ -639,9 +900,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       // partitionedOrder) — a settle-then-shuffle rhythm instead of jumping on every event. A held
       // previous answer is exempt: it is finished work, and reshuffling it while a new turn runs
       // would animate the OLD answer in response to the NEW one's progress.
+      //
+      // …and so is every OTHER turn's block, held or not. `streamOrder` settles this turn's cards
+      // and carries the settled prefix verbatim: a page that re-sorted the answer it was extending
+      // is SB-01, and the reload afterwards proved the two disagreed.
       return {
         ...state, status: "streaming", phase: action.data,
-        order: state.holdingPrevious ? state.order : partitionedOrder(state.order, state.byId),
+        order: state.holdingPrevious ? state.order : streamOrder(state.order, state.byId, state.settled),
       };
     case "conversation":
       return { ...state, conversationId: action.data.id };
@@ -669,9 +934,21 @@ export function chatReducer(state: State, action: ChatAction): State {
         // and re-deriving it from a rounded blend is how the same question comes back looking
         // different on every reload.
         order: cards.map((c) => c.titleId),
+        // All of it is finished work — a resumed answer is never re-ordered by anything.
+        settled: cards.length,
         reason: p.reason ?? null,
+        // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread that was paged it
+        // describes one page and the restored grid is several, which is R1-03 arriving by the
+        // resume path. The transcript says which: the server writes a page as a `page` row, and one
+        // of those means the footnote has to account for the grid rather than quote the last page.
+        paged: p.turns.some((t) => t.kind === "page"),
         removed: p.removed ?? 0,
         lastCardsAt: p.lastCardsAt ?? null,
+        lastTurnAt: p.lastTurnAt ?? null,
+        // What the server was left holding, and which question the grid above it belongs to.
+        // Both read off the transcript the payload already sends; neither was read before SB-03.
+        resumedTail: lastTurnOutcome(p.turns),
+        answeredQuery: answeredQuestion(p.turns),
       };
     }
     case "assistant":
@@ -689,7 +966,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       // moment there is something to put in its place, so it is replaced now rather than having
       // been blanked when the question was asked.
       if (state.holdingPrevious) {
-        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1 };
+        // The previous turn's block goes with it, so nothing is settled any more: what is on
+        // screen from here is this turn's stream, and it settles at phase boundaries like any other.
+        return { ...state, holdingPrevious: false, byId: { [c.titleId]: c }, order: [c.titleId], arrived: 1, settled: 0 };
       }
       if (state.byId[c.titleId]) return state;
       return {
@@ -731,19 +1010,31 @@ export function chatReducer(state: State, action: ChatAction): State {
       // derived from its own cards, so an uncapped list here can no longer grow a request.
       const shown = Array.from(new Set([...state.shown, ...newTmdb]));
       const incoming = action.data.results.map((c) => c.titleId);
-      // Appending keeps what is on screen and adds only genuinely new ids. The de-duplication is
-      // bookkeeping and nothing else reads it: what it used to decide — whether the page's own
-      // sentence counted, and whether paging was over — is the SERVER's to say, because only the
-      // server knows what is left (see `pageIsExhausted` for the diff that used to decide both).
+      // THE contract line: "array order is the contract … never re-sort by it". `results` is this
+      // turn's answer in the order the server committed to storage as `Rank`, so it is taken
+      // verbatim — the client's own blend ordering was only ever a stand-in for a server order
+      // that had not arrived yet, and keeping it past `done` is what made the same answer render
+      // one way live and another way after a reload (SB-01).
+      //
+      // A page appends AFTER the settled block, which is carried through untouched. Only the
+      // settled prefix is carried — a candidate this page streamed and its own `done` then dropped
+      // (the quality floor cut it) falls out, exactly as it does on a fresh turn, so the screen and
+      // the stored record hold the same cards.
+      const carried = state.appending
+        ? state.order.slice(0, state.settled).filter((id) => byId[id])
+        : [];
       const order = state.appending
-        ? [...state.order, ...incoming.filter((id) => !state.order.includes(id))]
+        ? [...carried, ...incoming.filter((id) => !carried.includes(id))]
         : incoming;
       // A page the server returned nothing for: it is the end of this answer, and it has nothing
       // to say ABOUT the answer. `AskReelReason.Empty` is true of the page and false of the grid
       // above it, so the accounting that was already there stands.
       const emptyPage = state.appending && pageIsExhausted(action.data);
       return {
-        ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
+        ...state, byId, order, status: "done", shown, appending: false,
+        // This turn is finished work now, so the whole of `order` is frozen: nothing on screen may
+        // be re-ordered again until a new turn replaces it.
+        settled: order.length,
         // The answer landed, so there is nothing left being held: `order` above is this turn's.
         holdingPrevious: false,
         reason: emptyPage ? state.reason : action.data.reason,
@@ -1023,15 +1314,20 @@ export function useAskReelChat() {
   }, []);
 
   /**
-   * Forget this thread and start over — what `+ New` does. The stored id goes with it, so a reload
-   * lands on a cold start rather than resurrecting the conversation the user just left.
+   * Forget this thread and start over — what `+ New` does.
+   *
+   * The stored id is REPLACED rather than removed, by {@link FRESH_CONVERSATION}: clearing it left
+   * this tab looking like a browser that had never asked anything, so the reload resumed
+   * `/conversations/latest` and put the user back in the thread they had just left (SB-02). The
+   * marker lives until the first `conversation` frame of the next question overwrites it with the
+   * real id.
    */
   const startNew = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
     turnIdRef.current = null;
     clearWatchdog();
-    storeConversationId(null);
+    storeConversationId(FRESH_CONVERSATION);
     dispatch({ type: "reset" });
   }, [clearWatchdog]);
 
@@ -1140,5 +1436,22 @@ export function useAskReelChat() {
      * is how a seventeen-second-old conversation was told it was too old to have any.
      */
     lastCardsAt: state.lastCardsAt,
+    /**
+     * When this thread last had a turn of any kind — the only stamp a transcript-only thread has,
+     * so it is what dates the seam where `lastCardsAt` is null. Null on an older server.
+     */
+    lastTurnAt: state.lastTurnAt,
+    /**
+     * What became of the resumed thread's last turn, when it was not a completed answer. Null on
+     * every ordinary resume, and cleared the moment this visit asks anything. See
+     * {@link ResumedTail} — without it, a thread whose last question was stopped or crashed came
+     * back showing the PREVIOUS answer under it, with nothing on the page saying so (SB-03).
+     */
+    resumedTail: state.resumedTail,
+    /**
+     * The question the restored grid answers, when that is not the last thing the user said. Read
+     * by the seam alongside {@link ResumedTail}; empty on an ordinary resume.
+     */
+    answeredQuery: state.answeredQuery,
   };
 }

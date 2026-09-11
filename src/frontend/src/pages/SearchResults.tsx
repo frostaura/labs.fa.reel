@@ -8,7 +8,7 @@ import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
-import { useGetConversationQuery, useGetFiltersQuery } from "../store/api";
+import { useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
 import { type BrowseFilter } from "../lib/browseFilter";
@@ -17,7 +17,8 @@ import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import {
   floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
-  useAskReelChat,
+  useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
+  PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -99,7 +100,7 @@ function AskReel() {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
-    conversationId, errorReason,
+    lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
@@ -144,8 +145,12 @@ function AskReel() {
     if (action === "resume") setShouldResume(true);
   }, [seed, seedTurnId, send, navigate]);
 
-  const { data: resumed, error: resumeError } = useGetConversationQuery(resumeTarget(threadId), {
-    skip: !shouldResume,
+  // Three answers, and one of them is "do not ask": a tab that pressed `+ New` stored a marker
+  // rather than clearing its id, so the reload lands on the cold start instead of falling through
+  // to `/conversations/latest` and resurrecting the thread the user had just left (SB-02).
+  const resumeFrom = resumeTarget(threadId);
+  const { data: resumed, error: resumeError, refetch: refetchConversation } = useGetConversationQuery(resumeFrom, {
+    skip: !shouldResume || resumeFrom === NO_RESUME,
   });
 
   useEffect(() => {
@@ -167,6 +172,51 @@ function AskReel() {
   useEffect(() => {
     if (resumeError && threadId) storeConversationId(null);
   }, [resumeError, threadId]);
+
+  // A resumed thread whose last turn is STILL RUNNING — the tab that started it went away before
+  // the stream finished, and the server kept going.
+  //
+  // "Still working on that one…" is only honest if the page then finds out. `GET /turns/{id}` is
+  // what that is for — it answers 202 while Pending and the finished turn afterwards — and this is
+  // its first caller. Today's resume payload projects no turn ids, so the fallback is to re-read
+  // the conversation itself; both land on the same place, which is re-resuming the thread WHOLE
+  // rather than patching one row into a transcript that has cards and a reason hanging off it.
+  //
+  // Bounded at a minute. Past that the honest thing is to stop asking: a turn that has not
+  // finished in sixty seconds is not going to be watched into existence, and a page quietly
+  // polling a dead thread for the length of a visit is worse than one that stops.
+  const watchingPending = resumedTail?.status === "pending";
+  const pendingTurnId = watchingPending ? resumedTail?.turnId ?? null : null;
+  // The budget is spent per WATCH, not per mount, and expiry is derived rather than reset: a
+  // re-read of the thread produces a fresh `resumedTail` every five seconds, so a boolean cleared
+  // in an effect body would restart the minute on every tick (and cascade a render doing it).
+  const watchKey = watchingPending ? pendingTurnId ?? conversationId ?? "thread" : null;
+  const [expiredWatch, setExpiredWatch] = useState<string | null>(null);
+  useEffect(() => {
+    if (!watchKey) return;
+    const budget = setTimeout(() => setExpiredWatch(watchKey), PENDING_TURN_BUDGET_MS);
+    return () => clearTimeout(budget);
+  }, [watchKey]);
+  const watchExpired = watchKey !== null && expiredWatch === watchKey;
+
+  const { data: watchedTurn } = useGetTurnQuery(pendingTurnId ?? "", {
+    skip: !pendingTurnId || watchExpired,
+    pollingInterval: PENDING_TURN_POLL_MS,
+  });
+
+  useEffect(() => {
+    // Settled — Completed or Failed, both worth showing. Re-read the thread rather than splicing
+    // the turn's own cards in beside a grid the server assembled under different rules.
+    if (watchedTurn && watchedTurn.status !== "Pending") refetchConversation();
+  }, [watchedTurn, refetchConversation]);
+
+  useEffect(() => {
+    // No turn id on the payload, which is every server today. The conversation is the only thing
+    // there is to ask, and its resume payload carries the turn's status in `turns[].status`.
+    if (!watchingPending || pendingTurnId || watchExpired) return;
+    const tick = setInterval(() => refetchConversation(), PENDING_TURN_POLL_MS);
+    return () => clearInterval(tick);
+  }, [watchingPending, pendingTurnId, watchExpired, refetchConversation]);
 
   // The media filter is NOT applied here any more. Hiding cards after the fact is what produced
   // "No matches" on a turn that had returned eight perfectly good shows: the server had never been
@@ -227,6 +277,22 @@ function AskReel() {
     reask();
   };
 
+  /**
+   * `+ New`, and what a deleted current thread falls back to.
+   *
+   * Both halves of the fresh state move together: the hook stores the {@link FRESH_CONVERSATION}
+   * marker so a RELOAD lands on the cold start, and this visit's own resume state is cleared so a
+   * later re-render cannot key the resume query back to the thread just left. Clearing the stored
+   * id alone was SB-02 — it made a tab that had asked plenty look like one that never had, and
+   * `/conversations/latest` handed the thread straight back.
+   */
+  const beginFreshThread = () => {
+    startNew();
+    setDraft("");
+    setThreadId(FRESH_CONVERSATION);
+    setShouldResume(false);
+  };
+
   const submit = (text: string) => {
     if (!text.trim()) return;
     setDraft("");
@@ -280,10 +346,7 @@ function AskReel() {
             <button
               type="button"
               data-testid="askreel-new"
-              onClick={() => {
-                startNew();
-                setDraft("");
-              }}
+              onClick={beginFreshThread}
               disabled={streaming}
               className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
             >
@@ -301,7 +364,7 @@ function AskReel() {
                 setThreadId(id);
                 setShouldResume(true);
               }}
-              onCurrentDeleted={startNew}
+              onCurrentDeleted={beginFreshThread}
             />
           </div>
         </div>
@@ -357,6 +420,29 @@ function AskReel() {
             </div>
           ),
         )}
+
+        {/* SB-03. The last question of a resumed thread may never have been answered — the user
+            pressed Stop, or the turn crashed — and the server correctly replays the last COMPLETED
+            answer instead. Without this row the page read "You said: something surreal and
+            dreamlike" and then, directly under it, someone else's answer, with nothing anywhere
+            saying the question had gone unanswered. It sits at the END of the transcript because
+            that is where the question it is about is. */}
+        {resumedTail?.status === "failed" && (
+          <div className="flex flex-wrap items-center gap-3" data-testid="askreel-failed-turn">
+            <p className="fa-caption text-fa-frost-dim">{failedTurnMessage(resumedTail.failureCode)}</p>
+            {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+          </div>
+        )}
+        {/* …and the other half of the same fact: the turn is not finished, it is still running.
+            Nothing to retry and nothing to apologise for — the page just has to find out, which is
+            what the poll above does. */}
+        {resumedTail?.status === "pending" && (
+          <p className="fa-caption text-fa-frost-dim" data-testid="askreel-pending-turn">
+            {watchExpired
+              ? "That one is taking a while. Ask again to start over."
+              : "Still working on that one…"}
+          </p>
+        )}
       </div>
 
       {/* The seam a resume lands on.
@@ -367,15 +453,26 @@ function AskReel() {
           silently disappears between two views of the same answer is indistinguishable from a bug
           — it went because the account has since watched or rated it, and saying so is cheap.
 
-          The date comes from `lastCardsAt`, which is when the thread last stored CARDS. A
-          transcript-only thread has none, so it gets no date — it falls through to the
-          `askreel-transcript-only` card below, which states the reason instead of a time. Accepted
-          for now: naming the cause is worth more there than an age, and the only other stamp the
-          server sends for such a thread (`lastTurnAt`, on the conversation LIST) is not in this
-          payload. Revisit if a dated transcript-only resume is ever wanted. */}
-      {status === "resumed" && lastCardsAt && (
+          The date comes from `lastCardsAt`, which is when the thread last stored CARDS — falling
+          back to `lastTurnAt`, which is the only stamp a transcript-only thread has. Older servers
+          send neither for such a thread, and it then falls through undated to the
+          `askreel-transcript-only` card below, which states the reason instead of a time.
+
+          …and WHICH question the grid answers, when that is not the last one asked. A thread whose
+          newest turn was stopped or crashed replays the last COMPLETED answer, so without naming it
+          the seam let a perfectly good grid read as the answer to a question that never got one
+          (SB-03). Said only in that case: on an ordinary resume the grid answers the question
+          directly above it and naming it would be noise. */}
+      {status === "resumed" && (lastCardsAt ?? lastTurnAt) && (
         <div className="flex flex-wrap items-baseline gap-x-2" data-testid="askreel-seam">
-          <p className="fa-caption text-fa-frost-dim">Picked up where you left off · {relTime(lastCardsAt)}</p>
+          <p className="fa-caption text-fa-frost-dim">
+            Picked up where you left off · {relTime((lastCardsAt ?? lastTurnAt) as string)}
+          </p>
+          {resumedTail && answeredQuery && (
+            <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-seam-answers">
+              These answer “{answeredQuery}”.
+            </p>
+          )}
           {removed > 0 && (
             <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-removed">
               {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone — you&apos;ve since watched or rated {removed === 1 ? "it" : "them"}.
@@ -697,7 +794,7 @@ function AskReel() {
           On a PAGED answer the server's sentence is about one turn and the grid is several, which
           is R1-03: "24 picks ranked for you, from 60 pulled" sat under 37 cards. `footnote` is
           what reconciles the two — see it for why neither sentence alone can be true here. */}
-      {footnoteText && status === "done" && !appending && (visible.length > 0 || outsideVisible.length > 0) && (
+      {footnoteText && showsFootnote(status, appending, settledCount) && (
         <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
       )}
 

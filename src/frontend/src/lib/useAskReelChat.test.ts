@@ -10,6 +10,8 @@ import {
   lastUserQuery,
   mediaFilterFor,
   CONVERSATION_ID_KEY,
+  FRESH_CONVERSATION,
+  NO_RESUME,
   canPage,
   floorHeldBack,
   excludedTerms,
@@ -22,6 +24,14 @@ import {
   nextBootstrap,
   plural,
   showMoodPresets,
+  showsFootnote,
+  recentListing,
+  lastTurnOutcome,
+  answeredQuestion,
+  failedTurnMessage,
+  RECENT_LIMIT,
+  OLDER_LIMIT,
+  transcriptOf,
   type ChatTurn,
 } from "./useAskReelChat";
 import { AskStreamError, type AskCard } from "./askReelStream";
@@ -212,12 +222,16 @@ describe("chatReducer — stream-stable ordering", () => {
     expect(phased.order).toEqual(["t2", "t1"]);
   });
 
-  it("re-sorts on done", () => {
+  it("takes the server's order on done, whatever the client had settled on", () => {
+    // Was "re-sorts on done", and that was SB-01: the client's blend order is a stand-in for a
+    // server order that has not arrived yet, and `done` IS that order arriving. `results` puts the
+    // weak card first — against the client's own settled order — and the client yields to it,
+    // which is what makes a reload of this turn render the identical array.
     const done = chatReducer(streamed, {
       type: "done",
       data: { reason: "2 picks", results: [weak, strong] },
     });
-    expect(done.order).toEqual(["t2", "t1"]);
+    expect(done.order).toEqual(["t1", "t2"]);
   });
 
   it("never interleaves outside cards among clean ones, however strong their blend", () => {
@@ -228,11 +242,15 @@ describe("chatReducer — stream-stable ordering", () => {
     const phased = chatReducer(withOutside, { type: "phase", data: { stage: "ranking", found: 3, scored: 3 } });
     expect(phased.order).toEqual(["t2", "t1", "t3"]);
 
+    // On `done` the partition is the SERVER's to make, and it made it: the outside card trails in
+    // `results`. The client takes the array as sent rather than re-deriving a second partition —
+    // and nothing on screen depends on it either way, because the page renders the two channels
+    // from `outsideRequest` and a filter preserves relative order whatever the array looks like.
     const done = chatReducer(withOutside, {
       type: "done",
       data: { reason: "2 picks matched everything you asked; 1 closest-but-outside shown separately.", results: [weak, strong, outside] },
     });
-    expect(done.order).toEqual(["t2", "t1", "t3"]);
+    expect(done.order).toEqual(["t1", "t2", "t3"]);
   });
 });
 
@@ -1265,5 +1283,499 @@ describe("excludedTerms and listPhrase", () => {
     expect(listPhrase(["comedy", "anime"])).toBe("comedy and anime");
     expect(listPhrase(["comedy", "anime", "musical"])).toBe("comedy, anime and musical");
     expect(listPhrase([])).toBe("");
+  });
+});
+
+/**
+ * SB-01 — the server's order is the contract, and a reload has to reproduce the screen.
+ *
+ * Wave-B watched a page turn re-sort the answer ALREADY on screen: `partitionedOrder` ran over the
+ * whole merged array on every `phase` frame, so page-two's picks interleaved into page-one's
+ * answer by blend, and the hard reload that followed rendered the same 34 cards in the stored
+ * `(Sequence, Rank)` order instead — the same answer, two orders, one gesture apart.
+ *
+ * The rule these pin: mid-stream ordering may settle the cards of the turn CURRENTLY streaming and
+ * nothing else, and a turn that has reached `done` is frozen in the order the server sent. That is
+ * what makes the live screen and the stored record the same object.
+ */
+describe("chatReducer — server order is the contract", () => {
+  // Turn one's answer as the server committed it — deliberately NOT blend order. `t1` carries the
+  // WEAKEST blend and is first, so any re-derivation is visible in the first assertion.
+  const first = [card(1, { blend: 0.1 }), card(2, { blend: 0.9 }), card(3, { blend: 0.5 })];
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "quiet character dramas", fresh: true }),
+    { type: "done", data: { results: first, reason: "3 picks ranked for you, from 40 pulled" } },
+  );
+  /** The page, out of blend order on the wire so a settle at the boundary is observable. */
+  const page = [card(4, { blend: 0.2 }), card(5, { blend: 0.99 })];
+
+  /** Streams `page` as candidates over the settled answer and takes one phase frame. */
+  function pageInFlight() {
+    let state = chatReducer(answered, { type: "moreTurn" });
+    for (const c of page) state = chatReducer(state, { type: "candidate", data: c });
+    return chatReducer(state, { type: "phase", data: { stage: "ranking", found: 5, scored: 5 } });
+  }
+
+  it("takes_the_servers_results_order_verbatim_on_done", () => {
+    expect(answered.order).toEqual(["t1", "t2", "t3"]);
+  });
+
+  it("a_pages_phase_frames_never_touch_the_answer_already_on_screen", () => {
+    const phased = pageInFlight();
+    expect(phased.order.slice(0, 3)).toEqual(["t1", "t2", "t3"]);
+    // …while the IN-FLIGHT block still settles at the boundary, which is what the rhythm is for.
+    expect(phased.order.slice(3)).toEqual(["t5", "t4"]);
+  });
+
+  it("a_page_appends_after_the_previous_turn_in_the_servers_order", () => {
+    const done = chatReducer(pageInFlight(), {
+      type: "done",
+      data: { results: page, reason: "2 picks ranked for you, from 65 pulled", kept: 2 },
+    });
+    expect(done.order).toEqual(["t1", "t2", "t3", "t4", "t5"]);
+  });
+
+  it("a_reload_reproduces_exactly_what_was_on_screen", () => {
+    const done = chatReducer(pageInFlight(), {
+      type: "done",
+      data: { results: page, reason: "2 picks ranked for you, from 65 pulled", kept: 2 },
+    });
+    // The server stores `(Sequence, Rank)` — turn one's block, then turn two's, each in the order
+    // it sent. Resuming that payload must land on the identical array.
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-1",
+        lastCardsAt: "2026-09-11T09:00:00Z",
+        cards: [...first, ...page],
+        turns: [
+          { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "Five that fit.", kind: "ask", status: "Completed" },
+        ],
+        reason: "2 picks ranked for you, from 65 pulled",
+        lastQuery: "quiet character dramas",
+      },
+    });
+    expect(resumed.order).toEqual(done.order);
+  });
+
+  it("a_page_keeps_only_what_its_own_done_kept", () => {
+    // Fixture variation, one field: the page streams a THIRD candidate the server's `done` then
+    // drops (the quality floor cut it). A fresh turn already drops those — `order = incoming` —
+    // and a page has to agree, or the screen carries a card the stored record does not.
+    let state = chatReducer(answered, { type: "moreTurn" });
+    for (const c of [...page, card(6, { blend: 0.4 })]) state = chatReducer(state, { type: "candidate", data: c });
+    const done = chatReducer(state, {
+      type: "done",
+      data: { results: page, reason: "2 picks ranked for you, from 65 pulled", kept: 2 },
+    });
+    expect(done.order).toEqual(["t1", "t2", "t3", "t4", "t5"]);
+  });
+
+  it("a_new_question_settles_nothing_until_its_own_answer_lands", () => {
+    // The held previous answer is frozen by `holdingPrevious`; once the first candidate of the new
+    // turn replaces it, the screen is a live stream again and phase frames may settle all of it.
+    const asking = chatReducer(answered, { type: "userTurn", message: "something older", fresh: false });
+    let state = chatReducer(asking, { type: "candidate", data: card(7, { blend: 0.1 }) });
+    state = chatReducer(state, { type: "candidate", data: card(8, { blend: 0.9 }) });
+    const phased = chatReducer(state, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } });
+    expect(phased.order).toEqual(["t8", "t7"]);
+  });
+});
+
+/**
+ * SB-02 — `+ New` has to survive a reload.
+ *
+ * Clearing the remembered id made this tab look like a browser that had never asked anything, and
+ * `resumeTarget` answers that with `/conversations/latest` — the ACCOUNT's newest thread, which
+ * after a `+ New` is precisely the thread the user just left. The reload undid the gesture and
+ * reached a deprecated route to do it, whose own doc-comment says it is "only ever the answer for
+ * a browser that has never asked anything".
+ *
+ * So "I have finished with that thread" is a fact worth storing, distinct from "I have no idea
+ * which thread this is".
+ */
+describe("resumeTarget — three states, not two", () => {
+  it("resumes_nothing_at_all_after_a_fresh_start", () => {
+    expect(resumeTarget(FRESH_CONVERSATION)).toBe(NO_RESUME);
+  });
+
+  it("still_falls_back_to_latest_only_for_a_browser_that_has_never_asked", () => {
+    expect(resumeTarget(null)).toBe("latest");
+    expect(resumeTarget("")).toBe("latest");
+  });
+
+  it("prefers_this_tabs_own_thread_over_both", () => {
+    expect(resumeTarget("7f3a1b2c-0000-4000-8000-000000000001")).toBe("7f3a1b2c-0000-4000-8000-000000000001");
+  });
+
+  it("round_trips_the_marker_through_storage", () => {
+    // The marker is a stored VALUE, not an absent key — that is the whole of the fix, and it has
+    // to survive the same trip a real id does.
+    const store: Record<string, string> = {};
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => { store[k] = v; },
+      removeItem: (k: string) => { delete store[k]; },
+    });
+    storeConversationId(FRESH_CONVERSATION);
+    expect(store[CONVERSATION_ID_KEY]).toBe(FRESH_CONVERSATION);
+    expect(resumeTarget(readStoredConversationId())).toBe(NO_RESUME);
+
+    // …and the first `conversation` frame of the next question replaces it with the real thread.
+    storeConversationId("7f3a1b2c-0000-4000-8000-000000000009");
+    expect(resumeTarget(readStoredConversationId())).toBe("7f3a1b2c-0000-4000-8000-000000000009");
+  });
+});
+
+/**
+ * SB-04 — a paged thread replays its assistant reply twice.
+ *
+ * Live, the reducer suppresses this deliberately: a page replays the last question, so the model
+ * replies again, and `case "assistant"` drops that second reply rather than stuttering the same
+ * sentence into the transcript. `transcriptOf` had no equivalent filter — it mapped every row with
+ * text and never looked at `kind` — so a resume rendered three bubbles for two real answers, the
+ * first two being the identical sentence back to back.
+ *
+ * The server writes a `page` turn as an assistant row with NO user row beside it, which is the
+ * other half of why it reads as a duplicate: there is no question above it to explain it.
+ */
+describe("transcriptOf — a page is not a second answer", () => {
+  const rows = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "I can keep it quiet and character-driven.", kind: "ask", status: "Completed" },
+    // The page. Identical text, by design — it is the same model answering the same question.
+    { sequence: 2, role: "assistant", text: "I can keep it quiet and character-driven.", kind: "page", status: "Completed" },
+  ];
+
+  it("renders_one_bubble_per_real_answer", () => {
+    expect(transcriptOf(rows).map((t) => t.text)).toEqual([
+      "quiet character dramas",
+      "I can keep it quiet and character-driven.",
+    ]);
+  });
+
+  it("matches_what_the_live_reducer_does_with_the_same_thread", () => {
+    // The parity that was missing. Streaming the same thread — a turn, then a page — puts exactly
+    // one assistant bubble on screen, and a resume of it has to agree.
+    let live = chatReducer(initialChatState, { type: "userTurn", message: "quiet character dramas", fresh: true });
+    live = chatReducer(live, { type: "assistant", data: { text: "I can keep it quiet and character-driven." } });
+    live = chatReducer(live, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
+    live = chatReducer(live, { type: "moreTurn" });
+    live = chatReducer(live, { type: "assistant", data: { text: "I can keep it quiet and character-driven." } });
+    live = chatReducer(live, { type: "done", data: { results: [card(2)], reason: "1 more", kept: 1 } });
+
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { id: "conv-4", turns: rows, cards: [card(1), card(2)], lastQuery: "quiet character dramas" },
+    });
+    expect(resumed.turns.map((t) => t.text)).toEqual(live.turns.map((t) => t.text));
+  });
+
+  it("drops_a_page_row_whose_text_is_not_a_literal_duplicate_either", () => {
+    // Fixture variation, one field: the page's sentence differs. The rule is `kind`, not text
+    // equality — a page has no user row above it, so whatever it says renders as an answer to the
+    // question two bubbles up, which the live path already refuses to do. Matching on duplicate
+    // text instead would pass the test above and still stutter here.
+    const reworded = [rows[0], rows[1], { ...rows[2], text: "Two more in the same vein." }];
+    expect(transcriptOf(reworded).map((t) => t.text)).toEqual([
+      "quiet character dramas",
+      "I can keep it quiet and character-driven.",
+    ]);
+  });
+});
+
+/**
+ * SB-06 — a resumed answer never rendered its `reason` footnote.
+ *
+ * The payload carries the sentence verbatim ("24 picks ranked for you, from 81 pulled · widened to
+ * find enough · only 5 picks cleared your 6.0 bar, so it was relaxed"), the reducer stores it, and
+ * the page gated the render on `status === "done"`. A resume is `resumed` by design, so a restored
+ * answer lost the only on-screen account of how it was assembled — including the fact that the
+ * user's own quality bar had been relaxed to fill it.
+ */
+describe("showsFootnote", () => {
+  it("renders_the_accounting_for_a_restored_answer_as_well_as_a_live_one", () => {
+    expect(showsFootnote("done", false, 24)).toBe(true);
+    expect(showsFootnote("resumed", false, 24)).toBe(true);
+  });
+
+  it("says_nothing_about_a_screen_with_no_grid_on_it", () => {
+    expect(showsFootnote("resumed", false, 0)).toBe(false);
+    expect(showsFootnote("done", false, 0)).toBe(false);
+  });
+
+  it("waits_for_a_page_to_finish_before_re_describing_the_grid", () => {
+    // Mid-page the sentence on screen describes a turn that has not finished.
+    expect(showsFootnote("done", true, 24)).toBe(false);
+  });
+
+  it("stays_silent_on_every_state_that_has_no_finished_answer_to_describe", () => {
+    for (const status of ["idle", "streaming", "stopped", "blocked", "error"] as const) {
+      expect(showsFootnote(status, false, 24)).toBe(false);
+    }
+  });
+});
+
+/**
+ * …and the sentence it renders has to be true of the GRID. The payload's `reason` is the newest
+ * turn's, so on a thread that was paged it describes one page and the restored grid is several —
+ * R1-03 arriving by the resume path instead of the live one.
+ */
+describe("chatReducer — a resumed thread knows whether it was paged", () => {
+  const base = {
+    id: "conv-6",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    cards: [card(1), card(2), card(3)],
+    reason: "2 picks ranked for you, from 65 pulled",
+    lastQuery: "quiet character dramas",
+  };
+  const askTurns = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+  ];
+
+  it("quotes_the_servers_sentence_verbatim_on_a_single_turn_thread", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload: { ...base, turns: askTurns } });
+    expect(state.paged).toBe(false);
+    expect(footnote(state.reason, 3, state.paged)).toBe("2 picks ranked for you, from 65 pulled");
+  });
+
+  it("accounts_for_the_whole_grid_once_a_page_row_is_in_the_transcript", () => {
+    // Fixture variation, one row: the same payload with the `page` turn the server writes. Nothing
+    // else moves — same cards, same reason — and the line stops claiming the last page is the grid.
+    const paged = {
+      ...base,
+      turns: [...askTurns, { sequence: 2, role: "assistant", text: "Three that fit.", kind: "page", status: "Completed" }],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: paged });
+    expect(state.paged).toBe(true);
+    expect(footnote(state.reason, 3, state.paged))
+      .toBe("3 picks so far · last page: 2 picks ranked for you, from 65 pulled");
+  });
+});
+
+/**
+ * SB-05 — `Recent ▾` showed 20 of the account's 51 threads with no way to reach the rest.
+ *
+ * The menu is deliberately small ("a means of getting back to an answer, not a filing system") and
+ * `?limit=20` matches the contract, so this is not a wrong request — it is a missing affordance.
+ * Anyone reading the menu as a complete thread list is simply wrong, and nothing on screen said so.
+ *
+ * The route takes `limit` (clamped 1..100) and NO offset, so 100 is the ceiling reachable from
+ * here and the menu says so rather than offering a control that cannot go further.
+ */
+describe("recentListing", () => {
+  it("asks_for_the_cheap_page_first", () => {
+    expect(recentListing(false, 0).limit).toBe(RECENT_LIMIT);
+    expect(recentListing(true, 0).limit).toBe(OLDER_LIMIT);
+  });
+
+  it("offers_the_rest_only_when_the_page_came_back_full", () => {
+    // A short page IS the whole list — offering "show older" over it promises threads that do not
+    // exist. A full one is the only evidence the client has that there may be more.
+    expect(recentListing(false, RECENT_LIMIT).canShowOlder).toBe(true);
+    expect(recentListing(false, RECENT_LIMIT - 1).canShowOlder).toBe(false);
+    expect(recentListing(false, 0).canShowOlder).toBe(false);
+  });
+
+  it("stops_offering_once_it_has_asked_for_everything_it_can_reach", () => {
+    // Fixture variation, one field: the same full page, already expanded. The route has no offset,
+    // so there is no second gesture to offer and the control must not reappear.
+    expect(recentListing(true, OLDER_LIMIT).canShowOlder).toBe(false);
+    expect(recentListing(true, 42).canShowOlder).toBe(false);
+  });
+
+  it("says_so_when_it_is_standing_at_the_ceiling", () => {
+    // 100 rows back from a 100-row request means the account has at least that many and the route
+    // cannot page past it. Saying nothing there is how the menu became a list people trusted.
+    expect(recentListing(true, OLDER_LIMIT).atCeiling).toBe(true);
+    expect(recentListing(true, OLDER_LIMIT - 1).atCeiling).toBe(false);
+    expect(recentListing(false, RECENT_LIMIT).atCeiling).toBe(false);
+  });
+});
+
+/**
+ * SB-03 — a resumed thread attributed the previous answer to the question that never got one.
+ *
+ * The DB is right and the grid is right: a stopped turn is stored `Failed` / `client_aborted` with
+ * zero cards, and the server replays the last COMPLETED answer. What was missing was any sentence
+ * on the page saying so — a full-text scan for `stopped|failed|didn't finish|Ask again` came back
+ * false — so the screen read "You said: something surreal and dreamlike" and then, directly under
+ * it, 24 cards answering a different question entirely.
+ *
+ * The information was already on the wire: `turns[6].status === "Failed"` was in that very payload.
+ * `transcriptOf` simply never looked at it.
+ */
+describe("lastTurnOutcome", () => {
+  const completed = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+  ];
+
+  it("says_nothing_about_a_thread_that_ended_on_an_answer", () => {
+    expect(lastTurnOutcome(completed)).toBeNull();
+  });
+
+  it("reports_a_stopped_turn_as_the_users_own_doing", () => {
+    const stopped = [
+      ...completed,
+      { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+    ];
+    expect(lastTurnOutcome(stopped)).toEqual({ status: "failed", failureCode: "client_aborted", turnId: null });
+    expect(failedTurnMessage("client_aborted")).toContain("you stopped it");
+  });
+
+  it("reports_any_other_failure_as_a_snag_the_user_did_not_cause", () => {
+    // Fixture variation, one field: the failure code. Telling someone they abandoned a turn they
+    // never touched is a small lie that costs trust in everything else on the page.
+    const crashed = [
+      ...completed,
+      { sequence: 2, role: "user", text: "something surreal", kind: "ask", status: "Failed" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "HttpRequestException" },
+    ];
+    expect(lastTurnOutcome(crashed)?.status).toBe("failed");
+    expect(failedTurnMessage("HttpRequestException")).toContain("hit a snag");
+  });
+
+  it("claims_no_cause_at_all_when_the_server_named_none", () => {
+    // The live case, not a hypothetical: the resume payload projects no `failureCode`, so today
+    // every resumed failure arrives unattributed. Guessing "you stopped it" or "it hit a snag"
+    // there is a coin flip presented as a fact.
+    expect(failedTurnMessage(null)).toBe("That one didn’t finish.");
+    expect(failedTurnMessage(null)).not.toContain("stopped");
+    expect(failedTurnMessage(null)).not.toContain("snag");
+  });
+
+  it("reports_a_turn_the_server_is_still_working_on", () => {
+    const pending = [
+      ...completed,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending", id: "turn-77" },
+    ];
+    expect(lastTurnOutcome(pending)).toEqual({ status: "pending", failureCode: null, turnId: "turn-77" });
+  });
+
+  it("carries_no_turn_id_when_the_payload_has_none", () => {
+    // Today's resume payload projects sequence / role / text / kind / status and no id, so the
+    // pending state has to be renderable — and re-checkable — without one.
+    const pending = [
+      ...completed,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending" },
+    ];
+    expect(lastTurnOutcome(pending)?.turnId).toBeNull();
+  });
+
+  it("ignores_a_failure_the_thread_has_already_moved_past", () => {
+    // A failure four turns back is history the transcript shows; it is not a state the page is in.
+    const recovered = [
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Failed" },
+      { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+      ...completed.map((t, i) => ({ ...t, sequence: i + 2 })),
+    ];
+    expect(lastTurnOutcome(recovered)).toBeNull();
+  });
+});
+
+/** Which question the restored grid belongs to — the server's own `lastAsk` rule, client-side. */
+describe("answeredQuestion", () => {
+  it("names_the_last_question_that_actually_got_an_answer", () => {
+    expect(answeredQuestion([
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+      { sequence: 2, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+      { sequence: 3, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+      { sequence: 4, role: "assistant", text: "", kind: "ask", status: "Failed" },
+    ])).toBe("quiet character dramas");
+  });
+
+  it("skips_a_page_row_the_way_the_server_does", () => {
+    // Fixture variation: the page is the NEWEST completed assistant row, and it has no user row of
+    // its own. The server anchors on the last completed `ask`; anchoring on the newest completed
+    // row of any kind would walk back past the page and name the same question by luck, not rule.
+    expect(answeredQuestion([
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+      { sequence: 2, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+    ])).toBe("quiet character dramas");
+  });
+
+  it("names_nothing_on_a_thread_that_has_never_completed_an_ask", () => {
+    expect(answeredQuestion([
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Failed" },
+      { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed" },
+    ])).toBe("");
+  });
+});
+
+describe("chatReducer — a resumed thread with an unfinished tail", () => {
+  const turns = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+    { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+  ];
+  const payload = {
+    id: "conv-3",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    turns,
+    cards: [card(1), card(2), card(3)],
+    reason: "3 picks ranked for you, from 40 pulled",
+    // The server's `lastQuery` is the last USER row — the question a retry replays — which on this
+    // thread is precisely the one that never got an answer.
+    lastQuery: "something surreal and dreamlike",
+  };
+
+  it("keeps_the_grid_and_names_both_questions", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.order).toHaveLength(3);
+    expect(state.resumedTail).toEqual({ status: "failed", failureCode: "client_aborted", turnId: null });
+    // The grid belongs to the first question; the retry replays the second.
+    expect(state.answeredQuery).toBe("quiet character dramas");
+    expect(state.lastQuery).toBe("something surreal and dreamlike");
+    // …and the unanswered question is still in the transcript, because it is still what was asked.
+    expect(state.turns.map((t) => t.text)).toEqual([
+      "quiet character dramas", "Three that fit.", "something surreal and dreamlike",
+    ]);
+  });
+
+  it("says_nothing_of_the_kind_on_an_ordinary_resume", () => {
+    // Fixture variation, one field: the tail's status. Everything else about the payload is
+    // identical, so the notice cannot be reached for any other reason.
+    const settled = {
+      ...payload,
+      turns: [...turns.slice(0, 2), { ...turns[2], status: "Completed" }, { ...turns[3], text: "Three more.", status: "Completed", failureCode: null }],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: settled });
+    expect(state.resumedTail).toBeNull();
+    expect(state.answeredQuery).toBe("something surreal and dreamlike");
+  });
+
+  it("lets_go_of_the_tail_the_moment_this_visit_asks_anything", () => {
+    // The notice carries a retry offer, and asking IS taking it. Every route into a turn clears it:
+    // a question, a re-ask, and a page over the restored answer.
+    const resumed = chatReducer(initialChatState, { type: "resume", payload });
+    for (const action of [
+      { type: "userTurn", message: "something older", fresh: false },
+      { type: "reaskTurn" },
+      { type: "moreTurn" },
+    ] as const) {
+      const next = chatReducer(resumed, action);
+      expect(next.resumedTail).toBeNull();
+      expect(next.answeredQuery).toBe("");
+    }
+  });
+
+  it("dates_a_transcript_only_thread_from_its_last_turn", () => {
+    // `lastCardsAt` is null on a thread that predates stored results, so it is the one case the
+    // seam cannot date from cards. `lastTurnAt` is the only stamp such a thread has.
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...payload, cards: [], lastCardsAt: null, lastTurnAt: "2026-09-10T21:00:00Z" },
+    });
+    expect(state.lastCardsAt).toBeNull();
+    expect(state.lastTurnAt).toBe("2026-09-10T21:00:00Z");
   });
 });

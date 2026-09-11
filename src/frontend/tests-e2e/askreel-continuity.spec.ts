@@ -48,18 +48,19 @@ const BORDER = card("b2", "Border Town", { blend: 0.9 });
 const CEDAR = card("c3", "Cedar Falls", { blend: 0.5 });
 
 /**
- * The stored answer, in the order the server committed as `Rank`. Alpha's blend is the LOWEST and
- * it is first: a client that sorts by blend — as it legitimately does mid-stream — puts Border
- * first and shows a different answer from the one that was stored.
+ * The answer, in the order the server committed as `Rank` — which is the order on screen from the
+ * moment `done` arrives, live or resumed. Alpha's blend is the LOWEST and it is first: a client
+ * that sorts by blend puts Border first and shows a different answer from the one that was stored.
  */
 const STORED_ORDER = ["Alpha Creek", "Border Town", "Cedar Falls"];
 
 /**
- * The same three cards as a LIVE turn leaves them: blend order, which the client derives itself
- * while it is assembling an answer frame by frame. That it differs from `STORED_ORDER` is the
- * point — a resume that re-derived the order would come back looking like this instead.
+ * What a client that re-derived the order would show instead. Asserted NEGATIVELY: the client does
+ * derive exactly this while a turn is still streaming and it has no server order to use, and SB-01
+ * was that derivation surviving `done` — so the same answer rendered one way live and the other
+ * way after a reload, with the page turn in between flipping it.
  */
-const LIVE_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
+const BLEND_ORDER = ["Border Town", "Cedar Falls", "Alpha Creek"];
 
 const RESUME_PAYLOAD = {
   id: CONVERSATION,
@@ -93,9 +94,13 @@ const FILTERS_WITH_FLOOR = {
 /**
  * Boots /search with the shell mocked. `resume` decides what the conversation routes answer:
  * "none" is a browser that has never asked (a 404 on the deprecated alias), "stored" serves the
- * populated payload from BOTH the id route and the alias.
+ * populated payload from BOTH the id route and the alias. `payload` overrides what "stored"
+ * serves, so a spec can vary one field of the resume shape without restating the whole mock stack.
  */
-async function boot(page: Page, opts: { resume?: "none" | "stored"; storedId?: string } = {}) {
+async function boot(
+  page: Page,
+  opts: { resume?: "none" | "stored"; storedId?: string; payload?: Record<string, unknown> } = {},
+) {
   await stubEventSource(page);
   await stubAskReel(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
@@ -109,8 +114,9 @@ async function boot(page: Page, opts: { resume?: "none" | "stored"; storedId?: s
   await mockJson(page, "**/api/search/conversations", CONVERSATION_LIST);
 
   if (opts.resume === "stored") {
-    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
-    await mockJson(page, "**/api/search/conversations/latest", RESUME_PAYLOAD);
+    const payload = opts.payload ?? RESUME_PAYLOAD;
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, payload);
+    await mockJson(page, "**/api/search/conversations/latest", payload);
   } else {
     await mockJson(page, "**/api/search/conversations/latest", {}, 404);
   }
@@ -121,6 +127,38 @@ async function boot(page: Page, opts: { resume?: "none" | "stored"; storedId?: s
     );
   }
   await page.goto("/search");
+}
+
+/**
+ * Serves `GET /api/search/conversations` the way the server does — honouring the client's own
+ * `limit` against an account of `total` threads — and records every limit that was asked for.
+ *
+ * Registered AFTER `boot`, which matches first in Playwright, so the flat mock there is the
+ * default and this is the opt-in for specs that care how many rows the client requests. The
+ * current thread is row one so the menu's "this is the one you are on" marker still has a target.
+ */
+async function routeThreadList(page: Page, total: number): Promise<number[]> {
+  const limits: number[] = [];
+  const threads = Array.from({ length: total }, (_, i) => ({
+    id: i === 0 ? CONVERSATION : `7f3a1b2c-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    title: i === 0 ? "a tense heist" : `thread ${i}`,
+    turnCount: 2,
+    lastTurnAt: new Date(Date.now() - i * 60_000).toISOString(),
+    lastCardsAt: null,
+  }));
+  await page.route(
+    (u) => u.pathname === "/api/search/conversations",
+    (route) => {
+      const limit = Number(new URL(route.request().url()).searchParams.get("limit") ?? 20);
+      limits.push(limit);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(threads.slice(0, Math.min(limit, total))),
+      });
+    },
+  );
+  return limits;
 }
 
 /**
@@ -163,7 +201,7 @@ test.describe("Ask Reel — the thread survives leaving the page", () => {
     // F3-05, verbatim: get a full answer, click Home in the header, press Back.
     await boot(page);
     await askAndAnswer(page);
-    await expect(gridNames(page)).toHaveText(LIVE_ORDER);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
     const whyBefore = await gridWhy(page).allTextContents();
 
     // The stored record exists from here on — the server kept the cards this turn produced.
@@ -247,6 +285,244 @@ test.describe("Ask Reel — the thread survives leaving the page", () => {
   });
 });
 
+test.describe("Ask Reel — the server's order is the contract", () => {
+  test("a page never re-orders the answer it extends, and the reload reproduces the screen", async ({ page }) => {
+    // SB-01, both halves in one run. Wave-B pressed `Show me more` and watched page-two's picks
+    // interleave into page-one's answer by blend — then hard-reloaded and got the stored
+    // `(Sequence, Rank)` order instead. Same 34 cards, two orders, one gesture apart.
+    await boot(page);
+    await askAndAnswer(page);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    // …and NOT the order the client derives while it is still assembling one.
+    await expect(gridNames(page)).not.toHaveText(BLEND_ORDER);
+
+    // Delta outranks every card of turn one on blend; Echo is below all of them. If the page's
+    // frames re-sort the merged array, Delta jumps to the very top and Echo to the very bottom —
+    // the exact interleave the smoke recorded.
+    const delta = card("d4", "Delta Ridge", { blend: 0.95 });
+    const echo = card("e5", "Echo Point", { blend: 0.1 });
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    // Arrival order is the weaker card first, so the settle at the phase boundary is observable:
+    // the page's OWN two cards may move, and nothing above them may.
+    await askPush(page, "candidate", echo);
+    await askPush(page, "candidate", delta);
+    await askPush(page, "phase", { stage: "ranking", found: 5, scored: 5 });
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Delta Ridge", "Echo Point"]);
+
+    await askPush(page, "done", {
+      results: [delta, echo],
+      reason: "2 picks ranked for you, from 65 pulled.",
+      kept: 2,
+    });
+    await askEnd(page);
+    const onScreen = await gridNames(page).allTextContents();
+    expect(onScreen).toEqual([...STORED_ORDER, "Delta Ridge", "Echo Point"]);
+
+    // The record the server now holds: turn one's block then turn two's, each in the order it was
+    // sent — which is what `(Sequence, Rank)` means. A reload must land on the identical array.
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, {
+      ...RESUME_PAYLOAD,
+      cards: [ALPHA, BORDER, CEDAR, delta, echo],
+      turns: [
+        ...RESUME_PAYLOAD.turns,
+        { sequence: 2, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+      ],
+      reason: "2 picks ranked for you, from 65 pulled.",
+    });
+    await page.reload();
+
+    await expect(gridNames(page)).toHaveText(onScreen);
+  });
+});
+
+test.describe("Ask Reel — a resumed thread says what happened, once", () => {
+  /** An ask, its reply, and the page that replayed it — the shape the smoke reloaded into. */
+  const PAGED_TURNS = [
+    ...RESUME_PAYLOAD.turns,
+    // The server stores a page as an assistant row with NO user row: the user said nothing, the
+    // model was replayed. Its text is identical because it is the same answer to the same question.
+    { sequence: 2, role: "assistant", text: "Three that fit.", kind: "page", status: "Completed" },
+  ];
+
+  test("a paged thread replays one assistant bubble, not two", async ({ page }) => {
+    // SB-04. The DB rows at sequence 1 (`ask`) and 2 (`page`) carry identical `Text`, and the
+    // resumed page rendered three reply bubbles for two real answers.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, turns: PAGED_TURNS },
+    });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-reply")).toHaveCount(1);
+    await expect(page.getByTestId("askreel-reply")).toContainText("Three that fit.");
+  });
+
+  test("a restored answer still says how it was assembled", async ({ page }) => {
+    // SB-06. The payload carries the sentence, the reducer stores it, and the page gated it on
+    // `status === "done"` — which a resume deliberately is not. A full-text scan of the resumed
+    // page for "picks ranked" came back false, so the only account of a relaxed quality floor went
+    // with it.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...RESUME_PAYLOAD,
+        reason: "3 picks ranked for you, from 40 pulled · only 1 pick cleared your 6.0 bar, so it was relaxed",
+      },
+    });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks ranked for you, from 40 pulled · only 1 pick cleared your 6.0 bar, so it was relaxed");
+  });
+
+  /**
+   * The thread after a Stop: a question, and an assistant row that never got written.
+   *
+   * The payload that carries these has to move `lastQuery` with them — the server reads it off the
+   * last USER row, which on this thread is precisely the question that never got an answer, and
+   * that is what "Ask again" replays. A fixture that left it on the older question passed every
+   * render assertion here and silently retried the wrong one.
+   */
+  const STOPPED_TURNS = [
+    ...RESUME_PAYLOAD.turns,
+    { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+  ];
+
+  const STOPPED_PAYLOAD = {
+    ...RESUME_PAYLOAD,
+    turns: STOPPED_TURNS,
+    lastQuery: "something surreal and dreamlike",
+  };
+
+  test("a stopped last turn is on the page, and the grid says whose answer it is", async ({ page }) => {
+    // SB-03. The DB was right (`Failed` / `client_aborted`, zero cards) and the grid was right
+    // (the last COMPLETED answer). What the screen said was: "You said: something surreal and
+    // dreamlike", then 24 cards answering something else, and a full-text scan for
+    // `stopped|failed|didn't finish|Ask again` came back false.
+    await boot(page, { resume: "stored", storedId: CONVERSATION, payload: STOPPED_PAYLOAD });
+
+    // The unanswered question is still in the transcript — it is still what was asked.
+    await expect(page.getByTestId("askreel-transcript")).toContainText("something surreal and dreamlike");
+    const failed = page.getByTestId("askreel-failed-turn");
+    await expect(failed).toBeVisible();
+    await expect(failed).toContainText("you stopped it");
+    await expect(failed.getByTestId("askreel-retry")).toBeVisible();
+
+    // The answer is kept, and the seam now names the question it belongs to.
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-seam-answers")).toContainText("a tense heist");
+    await expect(page.getByTestId("askreel-pending-turn")).toHaveCount(0);
+
+    // "Ask again" replays the question that never got answered, not the one on screen.
+    await failed.getByTestId("askreel-retry").click();
+    await waitForAsk(page);
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    expect(requests[0].query).toBe("something surreal and dreamlike");
+    // …and the notice goes with the gesture: the offer it carried has just been taken.
+    await expect(page.getByTestId("askreel-failed-turn")).toHaveCount(0);
+  });
+
+  test("a turn that crashed is not described as something the user did", async ({ page }) => {
+    // Fixture variation, one field: the failure code. `client_aborted` is the user's own Stop;
+    // anything else happened TO them, and telling someone they abandoned a turn they never touched
+    // is a small lie that costs trust in everything else on the page.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...STOPPED_PAYLOAD,
+        turns: [...STOPPED_TURNS.slice(0, 3), { ...STOPPED_TURNS[3], failureCode: "HttpRequestException" }],
+      },
+    });
+
+    await expect(page.getByTestId("askreel-failed-turn")).toContainText("hit a snag");
+    await expect(page.getByTestId("askreel-failed-turn")).not.toContainText("you stopped it");
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+  });
+
+  test("a turn the server is still working on is watched until it lands", async ({ page }) => {
+    // The other half of SB-03: `Pending` is not a failure, it is "not yet". Saying "still working
+    // on that one" is only honest if the page then finds out — which is what `GET /turns/{id}` is
+    // for, and this is its first caller.
+    const pendingTurns = [
+      ...RESUME_PAYLOAD.turns,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending", id: "turn-77" },
+    ];
+    const landed = {
+      ...RESUME_PAYLOAD,
+      turns: [
+        ...RESUME_PAYLOAD.turns,
+        { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Completed" },
+        { sequence: 3, role: "assistant", text: "Two older ones.", kind: "ask", status: "Completed" },
+      ],
+      lastQuery: "older, and slower",
+    };
+
+    let settled = false;
+    let turnCalls = 0;
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    // Registered after `boot`, so it wins: the conversation answers Pending until the turn does.
+    await page.route(
+      (u) => u.pathname === `/api/search/conversations/${CONVERSATION}`,
+      (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(settled ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
+      }),
+    );
+    // 202 while Pending, exactly as the contract specifies, then the finished turn.
+    await page.route(
+      (u) => u.pathname === "/api/search/turns/turn-77",
+      (route) => {
+        turnCalls += 1;
+        if (turnCalls > 1) settled = true;
+        return route.fulfill({
+          status: turnCalls > 1 ? 200 : 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: turnCalls > 1 ? "Completed" : "Pending",
+            reason: null, failureCode: null, cards: [],
+          }),
+        });
+      },
+    );
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-pending-turn")).toContainText("Still working on that one");
+    // Not a failure: no apology, no retry offer over a turn that may be seconds from landing.
+    await expect(page.getByTestId("askreel-failed-turn")).toHaveCount(0);
+    // The last completed answer stays up underneath it.
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    // …and when it lands, the thread is re-read WHOLE rather than patched row by row.
+    await expect(page.getByTestId("askreel-pending-turn")).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.getByTestId("askreel-transcript")).toContainText("Two older ones.");
+    await expect(page.getByTestId("askreel-seam-answers")).toHaveCount(0);
+    expect(turnCalls).toBeGreaterThan(1);
+  });
+
+  test("a restored PAGED answer accounts for the grid, not for its last page", async ({ page }) => {
+    // Fixture variation, one row: the same payload plus the `page` turn the server writes. The
+    // server's sentence describes that page and the grid is two turns' work — R1-03 reaching the
+    // screen by the resume path rather than the live one.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, turns: PAGED_TURNS, reason: "1 pick ranked for you, from 22 pulled." },
+    });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks so far · last page: 1 pick ranked for you, from 22 pulled.");
+  });
+});
+
 test.describe("Ask Reel — what goes on the wire", () => {
   test("every request carries a client turn id, and none carries a transcript", async ({ page }) => {
     await boot(page);
@@ -294,7 +570,7 @@ test.describe("Ask Reel — what goes on the wire", () => {
     await expect(blocked).toBeVisible();
     await expect(blocked).toContainText("already being answered");
     // The answer the reader was looking at is still there, and it is NOT the error card.
-    await expect(gridNames(page)).toHaveText(LIVE_ORDER);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
     await expect(page.getByTestId("semantic-error")).toHaveCount(0);
     await expect(page.getByTestId("askreel-page-error")).toHaveCount(0);
     await expect(page.getByTestId("askreel-composer")).toBeEditable();
@@ -349,8 +625,45 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
     await expect(page.getByTestId("askreel-transcript")).toBeEmpty();
     // The presets are the cold start, and they are the thing that proves this is one.
     await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
-    // The id goes with it, or a reload would resurrect the thread the user just left.
-    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBeNull();
+    // SB-02: the id is REPLACED by the fresh marker, not removed. A removed key is what a browser
+    // that has never asked anything looks like, and that is answered with `/conversations/latest`
+    // — the account's newest thread, which after a `+ New` is the one just left.
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe("new");
+  });
+
+  test("+ New survives a reload, and the reload asks for no conversation at all", async ({ page }) => {
+    // SB-02, the gesture the smoke actually performed: `+ New`, then refresh. The page came back
+    // inside the thread the user had just finished with, via a route whose own doc-comment says it
+    // is "only ever the answer for a browser that has never asked anything".
+    await boot(page);
+    await askAndAnswer(page);
+    await page.getByTestId("askreel-new").click();
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+
+    // Both resume routes are live and would answer with the thread that was just left — the id
+    // route because `boot` armed it below, and `/latest` because the account has a newest thread.
+    // A correct client asks for neither.
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
+    await mockJson(page, "**/api/search/conversations/latest", RESUME_PAYLOAD);
+    const resumeCalls: string[] = [];
+    page.on("request", (r) => {
+      if (/\/api\/search\/conversations\/[^?]/.test(r.url())) resumeCalls.push(r.url());
+    });
+
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+    await expect(gridNames(page)).toHaveCount(0);
+    await expect(page.getByTestId("askreel-transcript")).toBeEmpty();
+    expect(resumeCalls).toEqual([]);
+    // The marker is still there after the reload — a refresh is not a question, so nothing has
+    // replaced it yet.
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe("new");
+
+    // …and the first `conversation` frame of the next question does replace it, so the thread this
+    // visit starts is remembered on the ordinary terms.
+    await askAndAnswer(page);
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe(CONVERSATION);
   });
 
   test("Recent lists the account's threads and deleting one removes it", async ({ page }) => {
@@ -378,6 +691,40 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
     await expect(page.getByTestId("askreel-recent-row")).toHaveCount(1);
     expect(deleted).toBe(OTHER_CONVERSATION);
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
+  });
+
+  test("Recent asks for a cheap page and offers the rest of the account's threads", async ({ page }) => {
+    // SB-05. The account in the smoke held 51 conversations; the menu rendered 20 and gave no
+    // affordance for the other 31, so a control the code calls "a means of getting back to an
+    // answer" read as a complete list. This route honours `limit` the way the server does, so the
+    // client's own request is what decides how many rows come back.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    const limits = await routeThreadList(page, 51);
+
+    await page.getByTestId("askreel-recent").click();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(20);
+    await page.getByTestId("askreel-recent-older").click();
+
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(51);
+    // One gesture, and no second one on offer: the route takes a limit and no offset, so 100 is
+    // everything this control can reach and a repeatable button would return the same rows.
+    await expect(page.getByTestId("askreel-recent-older")).toHaveCount(0);
+    expect(limits).toEqual([20, 100]);
+    // The thread on screen is still marked in the longer list, and still the current one.
+    await expect(page.getByTestId("askreel-recent-row").first()).toContainText("a tense heist");
+  });
+
+  test("an account with a handful of threads is never offered older ones", async ({ page }) => {
+    // Fixture variation, one number: 12 threads instead of 51. A short page IS the whole list, so
+    // the offer would promise rows that do not exist — and clicking it would spend a request to
+    // return the same twelve.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    const limits = await routeThreadList(page, 12);
+
+    await page.getByTestId("askreel-recent").click();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(12);
+    await expect(page.getByTestId("askreel-recent-older")).toHaveCount(0);
+    expect(limits).toEqual([20]);
   });
 });
 
@@ -455,7 +802,7 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     await page.getByTestId("askreel-stop").click();
 
     // Three above the bar from the first turn, plus the one that cleared it here.
-    await expect(gridNames(page)).toHaveText([...LIVE_ORDER, "Over Bar"]);
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
     await expect(page.getByTestId("semantic-results").getByText("Under Bar")).toHaveCount(0);
     await expect(page.getByTestId("semantic-results").getByText("Way Under")).toHaveCount(0);
 
@@ -486,7 +833,7 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
 
     await page.getByTestId("askreel-stop").click();
 
-    await expect(gridNames(page)).toHaveText([...LIVE_ORDER, "Rounds Up"]);
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Rounds Up"]);
     await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
   });
 });
