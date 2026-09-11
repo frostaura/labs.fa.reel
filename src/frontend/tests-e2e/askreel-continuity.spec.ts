@@ -1492,3 +1492,115 @@ test.describe("Ask Reel — Back from Home returns to the answer", () => {
     await expect(page).toHaveURL(/\/home$/);
   });
 });
+
+/**
+ * R5-03 / R5-04 — paging a thread whose last question was stopped.
+ *
+ * The state R5 found is the ordinary end of an ordinary session: settle an answer, ask a follow-up,
+ * press Stop, come back tomorrow. `pageTurnId` came off the last completed ask and `pageQuery` off
+ * the payload's `lastQuery` — which the contract defines as the last USER row — so "Show me more"
+ * put the kept answer's turn id and the abandoned question on the wire together. The server refused
+ * it `409 page_query_mismatch`, the client read every 409 as `turn_in_progress`, and the screen
+ * announced that a turn was running while deleting the footnote and the control the user had just
+ * pressed. Nothing but a reload restored them, and the reload reproduced the 409.
+ */
+test.describe("a resumed thread with a stopped tail can still be paged", () => {
+  /** The thread as the server stores it: one answered ask, one stopped one, with row ids on both. */
+  const STOPPED_WITH_IDS = [
+    { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed", id: "turn-romcom" },
+    { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted", id: "turn-sea" },
+  ];
+
+  const PAYLOAD = {
+    ...RESUME_PAYLOAD,
+    turns: STOPPED_WITH_IDS,
+    // The server reads this off the last USER row, which on this thread is the stopped question.
+    // A fixture that put the answered question here would pass every assertion below against the
+    // client that shipped R5-03.
+    lastQuery: "something tense set at sea",
+  };
+
+  test("Show me more sends the answered question, not the one that was stopped", async ({ page }) => {
+    await boot(page, { resume: "stored", storedId: CONVERSATION, payload: PAYLOAD });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page);
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    // Both halves name ONE row. R5-03 captured `pageOf` correct and `query` wrong on the wire.
+    expect(requests[0].pageOf).toBe("turn-romcom");
+    expect(requests[0].query).toBe("a 90s romantic comedy");
+    // …and the OTHER control still replays the other question: `lastQuery` keeps its own job, which
+    // is why the two cannot be one field. (The retry itself is covered above and in
+    // `askreel-negation.spec.ts`; what matters here is that the page did not take it over.)
+    expect(requests[0].query).not.toBe(PAYLOAD.lastQuery);
+  });
+
+  test("an ordinary resumed thread pages the same question it always did", async ({ page }) => {
+    // Fixture variation, ONE field: the tail's status. Everything else — the ids, the text, the
+    // ordering, `lastQuery` — is what the thread would carry either way, so this cannot pass for
+    // any reason other than the status being read.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: {
+        ...PAYLOAD,
+        turns: [
+          ...STOPPED_WITH_IDS.slice(0, 2),
+          { ...STOPPED_WITH_IDS[2], status: "Completed" },
+          { ...STOPPED_WITH_IDS[3], text: "Two more.", status: "Completed", failureCode: null },
+        ],
+      },
+    });
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page);
+    const requests = (await askRequests(page)) as Record<string, unknown>[];
+    expect(requests[0].pageOf).toBe("turn-sea");
+    expect(requests[0].query).toBe("something tense set at sea");
+  });
+
+  test("a refused page keeps the footnote, the control and the grid", async ({ page }) => {
+    // R5-04, measured exactly as R5 measured it: the live region, the footnote, the control and
+    // the grid, before and after the 409.
+    await boot(page, { resume: "stored", storedId: CONVERSATION, payload: PAYLOAD });
+    await expect(page.getByTestId("askreel-footnote")).toBeVisible();
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+
+    await askFailNext(page, 409, "page_query_mismatch");
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page);
+
+    // The refusal says what it is, in words that do not claim a turn is running.
+    const refused = page.getByTestId("askreel-page-refused");
+    await expect(refused).toContainText("no longer matches its answer");
+    await expect(page.getByTestId("askreel-status")).not.toContainText("still being answered");
+    // Nothing on screen was lost. All three of these were gone after the 409 and came back only on
+    // a reload — which then reproduced R5-03, so the state did not self-correct at all.
+    await expect(page.getByTestId("askreel-footnote")).toBeVisible();
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    // …and it is not the error card either: nothing failed, and the answer is still the answer.
+    await expect(page.getByTestId("askreel-page-error")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-in-progress")).toHaveCount(0);
+
+    // Recoverable without a reload: the control works, and the refusal goes with the gesture.
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await expect(page.getByTestId("askreel-page-refused")).toHaveCount(0);
+  });
+
+  test("a turn that really is in progress still says so", async ({ page }) => {
+    // Fixture variation, one field: the `code` on the same 409. The two refusals share a status
+    // and mean opposite things, and collapsing them is what R5-04 was.
+    await boot(page, { resume: "stored", storedId: CONVERSATION, payload: PAYLOAD });
+    await askFailNext(page, 409, "turn_in_progress");
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page);
+
+    await expect(page.getByTestId("askreel-in-progress")).toBeVisible();
+    await expect(page.getByTestId("askreel-page-refused")).toHaveCount(0);
+  });
+});

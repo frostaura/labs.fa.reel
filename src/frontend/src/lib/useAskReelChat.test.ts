@@ -37,6 +37,8 @@ import {
   lastTurnOutcome,
   answeredQuestion,
   answeredTurnId,
+  resumedPageTarget,
+  pageRefusalMessage,
   failedTurnMessage,
   RECENT_LIMIT,
   OLDER_LIMIT,
@@ -2751,5 +2753,171 @@ describe("floorPartition — bounded to the turn still streaming", () => {
     // The held-previous-answer state: every card on screen is settled, so the client's own pass is
     // a no-op without the page having to test `holdingPrevious` separately.
     expect(floorPartition(all, 6, new Set()).held).toEqual([]);
+  });
+});
+
+/**
+ * R5-03 — the two halves of a page request must name ONE turn, on a resume as much as live.
+ *
+ * `pageTurnId` came off the last completed ask (correct) while `pageQuery` fell back to
+ * `lastQuery`, which the contract defines as the last USER row — so on any thread whose last
+ * question was stopped, "Show me more" went out carrying the kept answer's turn id and the
+ * ABANDONED question. The server refused it `409 page_query_mismatch`, correctly, and paging was
+ * permanently dead on that thread: every reload reproduced it.
+ *
+ * The two are read off one row here, so the shape that produced R5-03 is unrepresentable rather
+ * than merely absent.
+ */
+describe("resumedPageTarget — the question and the row the grid belongs to", () => {
+  const rows = [
+    { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "I can’t do a 90s romantic comedy.", kind: "ask", status: "Completed", id: "turn-romcom" },
+    { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted", id: "turn-sea" },
+  ];
+
+  it("reads_both_halves_off_the_completed_ask_when_the_tail_failed", () => {
+    expect(resumedPageTarget(rows, "something tense set at sea")).toEqual({
+      query: "a 90s romantic comedy",
+      turnId: "turn-romcom",
+    });
+  });
+
+  it("is_the_last_question_on_an_ordinary_resume", () => {
+    // Fixture variation, ONE field: the tail's status. Nothing else about the thread moves, so a
+    // pass here cannot come from the row's position or its text.
+    const settled = [
+      ...rows.slice(0, 3).map((r, i) => (i === 2 ? { ...r, status: "Completed" } : r)),
+      { ...rows[3], text: "Two that fit.", status: "Completed", failureCode: null },
+    ];
+    expect(resumedPageTarget(settled, "something tense set at sea")).toEqual({
+      query: "something tense set at sea",
+      turnId: "turn-sea",
+    });
+  });
+
+  it("falls_back_to_the_server_s_lastQuery_when_no_ask_completed", () => {
+    // An older server sends no `status` at all, so no row can be read as the completed ask. The
+    // fallback is the previous behaviour exactly — the server then derives `kind` by comparison.
+    const old = rows.map(({ status: _status, ...rest }) => rest);
+    expect(resumedPageTarget(old, "something tense set at sea")).toEqual({
+      query: "something tense set at sea",
+      turnId: null,
+    });
+  });
+});
+
+describe("chatReducer — a resumed page names the answer's own question", () => {
+  const rows = [
+    { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "I can’t do a 90s romantic comedy.", kind: "ask", status: "Completed", id: "turn-romcom" },
+    { sequence: 2, role: "user", text: "something tense set at sea", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted", id: "turn-sea" },
+  ];
+  const payload = {
+    id: "conv-r5",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    turns: rows,
+    cards: [card(1), card(2)],
+    reason: "2 picks ranked for you, from 40 pulled",
+    lastQuery: "something tense set at sea",
+  };
+
+  it("pages_the_answered_question_and_re_asks_the_stopped_one", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    // "Ask again" replays the question that never got an answer…
+    expect(state.lastQuery).toBe("something tense set at sea");
+    // …and "Show me more" pages the one the cards on screen belong to, naming its row.
+    expect(state.pageQuery).toBe("a 90s romantic comedy");
+    expect(state.pageTurnId).toBe("turn-romcom");
+  });
+
+  it("keeps_the_two_halves_on_one_row_when_the_tail_is_pending", () => {
+    // Fixture variation, one field: `Failed` → `Pending`. A turn still running is no more the
+    // thing a page extends than a failed one is.
+    const pending = {
+      ...payload,
+      turns: [
+        ...rows.slice(0, 3).map((r, i) => (i === 2 ? { ...r, status: "Pending" } : r)),
+        { ...rows[3], status: "Pending", failureCode: null },
+      ],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: pending });
+    expect(state.pageQuery).toBe("a 90s romantic comedy");
+    expect(state.pageTurnId).toBe("turn-romcom");
+  });
+});
+
+/**
+ * R5-04 — a 409 is four different refusals, and the client read all of them as one.
+ *
+ * `page_query_mismatch` was announced to the live region as "That question is still being
+ * answered." — nothing was running — and the `blocked` status it landed on withdrew the footnote
+ * AND the paging control, so the user could not even retry. Only a reload restored them, which
+ * reproduced R5-03.
+ */
+describe("failureFor — a refused page is not a turn in progress", () => {
+  it("gives_page_query_mismatch_its_own_action", () => {
+    expect(failureFor(new AskStreamError(409, "page_query_mismatch"))).toEqual({
+      type: "pageRefused", refusal: "mismatch",
+    });
+  });
+
+  it("leaves_turn_in_progress_alone", () => {
+    // The other 409 is unchanged: something really is running, and "Check again" is the right offer.
+    expect(failureFor(new AskStreamError(409, "turn_in_progress"))).toEqual({ type: "turnInProgress" });
+    // …and an uncoded 409 still falls back to it rather than claiming a refusal it cannot name.
+    expect(failureFor(new AskStreamError(409, null))).toEqual({ type: "turnInProgress" });
+  });
+});
+
+describe("chatReducer — a refused page keeps the answer whole", () => {
+  const resumed = chatReducer(initialChatState, {
+    type: "resume",
+    payload: {
+      id: "conv-r5b",
+      lastCardsAt: "2026-09-11T09:00:00Z",
+      turns: [
+        { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed", id: "turn-romcom" },
+      ],
+      cards: [card(1), card(2)],
+      belowFloor: [card(9)],
+      reason: "2 picks ranked for you, from 40 pulled",
+      lastQuery: "a 90s romantic comedy",
+    },
+  });
+
+  it("puts_the_screen_back_where_it_was_with_its_footnote_and_its_control", () => {
+    const paging = chatReducer(resumed, { type: "moreTurn" });
+    const refused = chatReducer(paging, { type: "pageRefused", refusal: "mismatch" });
+    // Back to the state the page was started from — NOT `blocked`, which is what withdrew the
+    // footnote and the control, and not `error`, which would claim the answer had gone.
+    expect(refused.status).toBe("resumed");
+    expect(refused.pageRefusal).toBe("mismatch");
+    expect(refused.appending).toBe(false);
+    // The answer is untouched, all the way down to the tray and the sentence under it.
+    expect(refused.order).toEqual(resumed.order);
+    expect(refused.reason).toBe(resumed.reason);
+    expect(refused.belowFloor).toEqual(resumed.belowFloor);
+    expect(refused.exhausted).toBe(false);
+    // …and the control is offered again, so the refusal is recoverable without a reload.
+    expect(canPage(refused.status, refused.holdingPrevious, refused.exhausted, refused.order.length, refused.settled)).toBe(true);
+  });
+
+  it("clears_the_refusal_the_moment_anything_is_asked", () => {
+    const refused = chatReducer(chatReducer(resumed, { type: "moreTurn" }), { type: "pageRefused", refusal: "mismatch" });
+    for (const action of [
+      { type: "userTurn", message: "something else", fresh: false },
+      { type: "reaskTurn" },
+      { type: "moreTurn" },
+    ] as const) {
+      expect(chatReducer(refused, action).pageRefusal).toBeNull();
+    }
+  });
+
+  it("says_what_happened_in_words_the_refusal_can_support", () => {
+    expect(pageRefusalMessage("mismatch")).toBe("That page no longer matches its answer — ask again.");
+    expect(pageRefusalMessage(null)).toBeNull();
   });
 });

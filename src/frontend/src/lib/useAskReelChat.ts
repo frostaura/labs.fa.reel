@@ -825,6 +825,60 @@ export function answeredTurnId(rows: ConversationPayload["turns"]): string | nul
 }
 
 /**
+ * The question and the turn a resumed "Show me more" must name — read off ONE row, deliberately.
+ *
+ * R5-03. The id came from {@link answeredTurnId} (the last completed ask, which is right) and the
+ * query fell back to the payload's `lastQuery`, which the contract defines as the last USER row.
+ * On any thread whose newest question was stopped those are two different turns, so the request
+ * went out carrying the kept answer's id and the abandoned question — and the server refused it
+ * `409 page_query_mismatch`, exactly as it should. Paging was then permanently dead on that
+ * thread: the state is stored, so every reload reproduced it, and there was no gesture that could
+ * clear it.
+ *
+ * Both halves come off `answeredTurnIndex` here, so a request that names one turn's row and
+ * another turn's question is not merely absent — it is unrepresentable. `lastQuery` keeps its own
+ * job untouched: it is the question "Ask again" replays, and after a Stop that is the one nobody
+ * answered.
+ *
+ * The fallback is the previous behaviour verbatim, for the server that carries no `status` on its
+ * turn rows: no row can be read as the completed ask, so the query is the payload's and the id is
+ * null — and the server derives `kind` by comparing the query, which is right on every screen but
+ * this one.
+ */
+export function resumedPageTarget(
+  rows: ConversationPayload["turns"],
+  fallbackQuery: string,
+): { query: string; turnId: string | null } {
+  const index = answeredTurnIndex(rows);
+  if (index < 0) return { query: fallbackQuery, turnId: null };
+  return { query: answeredQuestion(rows) || fallbackQuery, turnId: answeredTurnId(rows) };
+}
+
+/**
+ * Why the page of the answer on screen was refused, where the server named something the reader
+ * can act on. `null` = nothing was refused.
+ *
+ * `mismatch` is `409 page_query_mismatch`: the question this page claims to extend is not the
+ * question that turn answered. It is a refusal, not a failure — nothing on screen is wrong and
+ * nothing was lost, which is why it has a state of its own rather than sharing `blocked`'s.
+ */
+export type PageRefusal = "mismatch" | null;
+
+/**
+ * What a refused page says for itself — one line, beside the control that took the refusal.
+ *
+ * R5-04: every `409` mapped to `turn_in_progress`, so a refused page announced "That question is
+ * still being answered." into a live region while nothing at all was running, and the `blocked`
+ * state it landed on withdrew the footnote and the paging control with it. The contract is
+ * explicit that `code` is what a client switches on, and that matching on anything else "is how a
+ * UI ends up rendering a crash message for an honest refusal".
+ */
+export function pageRefusalMessage(refusal: PageRefusal): string | null {
+  if (refusal === "mismatch") return "That page no longer matches its answer — ask again.";
+  return null;
+}
+
+/**
  * What a failed turn says for itself, in one line.
  *
  * Three cases, not two, and the first of them is narrower than it looks. `client_aborted` is what
@@ -1159,6 +1213,21 @@ interface State {
    */
   pageTurnId: string | null;
   /**
+   * The server's refusal of the last page of this answer, where it named one — see
+   * {@link PageRefusal}. Cleared by anything that starts a turn, and by a page that lands.
+   *
+   * It is beside the answer rather than instead of it: a refused page changed nothing on screen,
+   * so the grid, the tray, the footnote and the control all stay exactly where they are (R5-04).
+   */
+  pageRefusal: PageRefusal;
+  /**
+   * The status the screen was in when the page in flight started — what it returns to if that page
+   * is refused. A page is the one turn that can fail without costing the user anything: it extends
+   * a finished answer and never replaces it, so "back where you were" is a real destination, and
+   * it is the only way to put the footnote and the control back without a reload.
+   */
+  pagePriorStatus: ChatStatus;
+  /**
    * The turn the stream in flight is writing, as its own `conversation` frame named it. Only a
    * landing place: it becomes {@link State.pageTurnId} at `done`, because a turn that never
    * completed is not an answer anything can be a page of.
@@ -1182,6 +1251,7 @@ export type ChatAction =
   | { type: "stop" }
   | { type: "reset" }
   | { type: "turnInProgress" }
+  | { type: "pageRefused"; refusal: PageRefusal }
   | { type: "conversationGone" }
   | { type: "error"; reason?: ErrorReason };
 
@@ -1225,6 +1295,10 @@ export function staleFrame(state: State, tag: StreamTag | undefined): boolean {
  */
 export function failureFor(err: unknown): ChatAction {
   if (err instanceof AskStreamError) {
+    // …and inside the 409 family, the refusal that changed nothing. R5-04: this fell through to
+    // `turn_in_progress`, so a refused page announced that a turn was running when none was, and
+    // took the footnote and the paging control down with it.
+    if (err.code === "page_query_mismatch") return { type: "pageRefused", refusal: "mismatch" };
     if (err.code === "turn_in_progress" || err.status === 409) return { type: "turnInProgress" };
     if (err.code === "conversation_not_found" || err.status === 404) return { type: "conversationGone" };
     // A 401 here already survived one refresh-and-retry inside streamAskReel, so the session is
@@ -1242,7 +1316,7 @@ export const initialChatState: State = {
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
-  pageTurnId: null, activeTurnId: null,
+  pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
 };
 
 /**
@@ -1345,6 +1419,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
             appending: false, lastQuery: action.message,
+            // The refusal belonged to a page of the answer being replaced; asking is the "ask
+            // again" it offered, and the offer goes with the gesture (R5-04).
+            pageRefusal: null,
             // Whatever turn was named last belongs to the answer BEFORE this one; this turn's own
             // id arrives on its `conversation` frame, and until it does there is none to adopt.
             activeTurnId: null,
@@ -1379,6 +1456,10 @@ export function chatReducer(state: State, action: ChatAction): State {
       return {
         ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
         settled: state.order.length, resumedTail: null, answeredQuery: "", stream: tag?.id ?? 0,
+        // Where the screen goes back to if this page is refused — read BEFORE the line above
+        // overwrites it. A page never replaces what is on screen, so a refused one owes the reader
+        // the state they were in, footnote and control included (R5-04).
+        pagePriorStatus: state.status, pageRefusal: null,
         // `pageTurnId` is deliberately carried — it names the answer this page extends, which is
         // the whole point of the request about to go out. Only the in-flight handle resets.
         activeTurnId: null,
@@ -1392,7 +1473,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
-        appending: false, errorReason: null, activeTurnId: null,
+        appending: false, errorReason: null, activeTurnId: null, pageRefusal: null,
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
         ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
@@ -1453,6 +1534,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // same one every streamed card passes, and a malformed entry would otherwise reach
       // `ResultCard` as a keyless undefined.
       const tray = (p.belowFloor ?? []).filter(isCard);
+      const pageTarget = resumedPageTarget(p.turns, p.lastQuery ?? lastUserQuery(turns));
       return {
         ...initialChatState,
         turns,
@@ -1461,14 +1543,12 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The server's own `lastQuery` first: it reads the last USER row, including one whose
         // answer never landed, which is exactly the question a retry has to replay.
         lastQuery: p.lastQuery ?? lastUserQuery(turns),
-        // The restored grid answers the thread's last completed question, which is what a page of
-        // it replays. Same source as `lastQuery` on an ordinary resume; they part company only
-        // after a Stop.
-        pageQuery: p.lastQuery ?? lastUserQuery(turns),
-        // …and the turn that grid IS, read off the same transcript by the same rule the server
-        // replays by, so a page of a resumed answer names the row it extends rather than leaving
-        // the server to infer it from a question the thread may have moved past (R3-02).
-        pageTurnId: answeredTurnId(p.turns),
+        // The restored grid answers the thread's last COMPLETED ask, and both halves of a page of
+        // it are read off that one row — the question and the id it was asked under. Same answer
+        // as `lastQuery` on an ordinary resume; they part company after a Stop, and reading them
+        // from two places is R5-03. See {@link resumedPageTarget}.
+        pageQuery: pageTarget.query,
+        pageTurnId: pageTarget.turnId,
         shown: p.shown ?? [],
         byId,
         // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
@@ -1588,7 +1668,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // above it, so the accounting that was already there stands.
       const emptyPage = state.appending && pageIsExhausted(action.data);
       return {
-        ...state, byId, order, status: "done", shown, appending: false,
+        ...state, byId, order, status: "done", shown, appending: false, pageRefusal: null,
         // This turn is finished work now, so the whole of `order` is frozen: nothing on screen may
         // be re-ordered again until a new turn replaces it.
         settled: order.length,
@@ -1644,6 +1724,20 @@ export function chatReducer(state: State, action: ChatAction): State {
       // they are, and the page offers a check-again that re-sends the SAME turn id (which replays
       // the stored answer the moment it exists) rather than a retry that would take the same 409.
       return { ...state, status: "blocked", phase: null, appending: false };
+    case "pageRefused":
+      // A refusal, not a failure: this page never started, and the answer it was going to extend is
+      // untouched — grid, tray, footnote, paging control and all. So the screen goes back to the
+      // state the page was started FROM rather than to `blocked` (which withdrew the footnote and
+      // the control, so the only recovery was a reload) or to `error` (which would claim something
+      // had gone wrong with the answer on screen). `done` is the fallback for a prior status that
+      // could not be a page's origin; `canPage` refuses the rest anyway.
+      return {
+        ...state,
+        status: state.pagePriorStatus === "streaming" || state.pagePriorStatus === "idle" ? "done" : state.pagePriorStatus,
+        pageRefusal: action.refusal,
+        appending: false,
+        phase: null,
+      };
     case "conversationGone":
       // 404. The thread this tab remembered is not the caller's any more — deleted from another
       // device, or an id that outlived its retention. The id is dropped here so the next turn mints
@@ -2059,6 +2153,12 @@ export function useAskReelChat() {
      * abandoned question ("Ask again" replays that one) and this is the answer still on screen.
      */
     pageQuery: state.pageQuery,
+    /**
+     * The server's refusal of the last page, where it named one — see {@link PageRefusal}. Read
+     * beside the paging control, which stays exactly where it is: a refused page changed nothing
+     * on screen, and withdrawing the control left the reader with no way to try again (R5-04).
+     */
+    pageRefusal: state.pageRefusal,
     /**
      * The thread this hook is on, mirrored into `localStorage` as it changes and read back by
      * {@link resumeTarget} on the next cold load — so a tab resumes ITS conversation rather than

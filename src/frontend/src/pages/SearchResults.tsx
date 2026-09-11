@@ -23,7 +23,7 @@ import {
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
   pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
-  COMPOSER_MIN_PX, composerHeight, composerSends,
+  COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -107,7 +107,7 @@ function AskReel() {
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
-    pageQuery, hasLocalTurn,
+    pageQuery, pageRefusal, hasLocalTurn,
   } = useAskReelChat();
   const storeDispatch = useDispatch();
   // The bar itself is not on the wire and should not be: it is the account's own standing
@@ -471,9 +471,21 @@ function AskReel() {
     arrived === 0
       ? "Stopped before any picks arrived."
       : `Stopped — ${arrived} ${plural(arrived, "pick")} arrived before you stopped. Unranked — stopped before Reel finished.`;
+  /**
+   * What a refused page says, where the server named a refusal the reader can act on (R5-04).
+   * Nothing on screen changed, so this is a line beside the control rather than a state replacing
+   * the answer — and the control has to still be there to be tried again.
+   */
+  const refusalText = pageRefusalMessage(pageRefusal);
   const settled = streaming
     ? ""
-    : status === "error"
+    // …and the refusal is what the live region says while it stands, because the state underneath
+    // it is the one the screen was already in and announcing THAT again says nothing about the
+    // gesture that just failed. R5-04's announcement was "That question is still being answered."
+    // over a page nothing was running for.
+    : refusalText
+      ? refusalText
+      : status === "error"
       ? "Search hit a snag."
       : status === "blocked"
         ? "That question is still being answered."
@@ -1012,6 +1024,16 @@ function AskReel() {
           {exhausted && !appending && (
             <p className="fa-caption text-fa-frost-dim text-center">
               That&apos;s everything on this thread — refine it above for a different angle.
+            </p>
+          )}
+          {/* The server refused this page and nothing on screen moved, so the refusal is a line
+              UNDER the control rather than a state replacing the answer. R5-04: every 409 read as
+              `turn_in_progress`, which announced that a turn was running when none was and took
+              the footnote and this control down with it — leaving the user with no gesture at all
+              and a reload as the only recovery, which then reproduced R5-03. */}
+          {refusalText && (
+            <p className="fa-caption text-fa-warning text-center" data-testid="askreel-page-refused">
+              {refusalText}
             </p>
           )}
         </div>
