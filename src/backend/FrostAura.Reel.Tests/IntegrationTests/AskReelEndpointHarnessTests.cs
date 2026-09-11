@@ -103,6 +103,44 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
         AssertNoOpenRouterSpend(accountId);
     }
 
+    /// <summary>
+    /// A refusal is a REQUEST-level answer, not a terminal frame.
+    ///
+    /// <para>A finder reported the over-length refusal emitting a <c>done</c> of a different shape
+    /// from every other <c>done</c> — no <c>streamed</c>, no <c>kept</c>, no <c>droppedByFloor</c>,
+    /// no <c>belowFloor</c>, no <c>timingsMs</c>, and no <c>conversation</c> frame in front of it,
+    /// so the client got a terminal frame with no conversation id. That whole path is gone: the
+    /// turn record's lifecycle validates before a header is written and answers 400 with a stable
+    /// <c>code</c>, which is the shape the client already switches on for the other two refusals.
+    /// Pinned here so the divergent frame cannot come back by a side door.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_over_length_query_is_refused_as_a_request_and_writes_no_turn()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync("harness-too-long");
+        using (client)
+        {
+            using var response = await client.PostAsJsonAsync(
+                "/api/search/ask", new { query = new string('q', 1001), clientTurnId = Guid.NewGuid() });
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal("query_too_long", payload.RootElement.GetProperty("code").GetString());
+            // The prose is the half a person can act on, and it never claims something broke.
+            Assert.NotEmpty(payload.RootElement.GetProperty("error").GetString()!);
+        }
+
+        await using var db = ScopedContext(accountId);
+        Assert.Equal(0, await db.SearchTurns.CountAsync());
+        AssertNoOpenRouterSpend(accountId);
+    }
+
     // ── The wire ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
