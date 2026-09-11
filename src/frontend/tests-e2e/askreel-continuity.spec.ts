@@ -1045,3 +1045,84 @@ test.describe("Ask Reel — continuity on a phone", () => {
     await expect(page.getByTestId("askreel-retry")).toBeVisible();
   });
 });
+
+/**
+ * F6-01 — the thread switch that bound a running answer to the wrong question.
+ *
+ * Seen at 375: `+ New` was `disabled` while streaming and `Recent ▾` was not, so opening another
+ * thread mid-stream put THAT thread's question and reply above the old thread's progress banner and
+ * 34 of its cards, with no seam, no dim and no label. Fourteen seconds later the in-flight results
+ * landed *in the new thread* and replaced its answer; re-opening it from a clean context showed the
+ * damage was durable — turn count 2 → 3, ten foreign cards under the question, and the question that
+ * had actually been asked existing nowhere at all.
+ *
+ * Both halves are pinned here: the gesture is not offered while a turn runs, and a frame that
+ * arrives anyway changes nothing.
+ */
+test.describe("Ask Reel — a thread switch never adopts a running answer", () => {
+  /** The other thread, served whole — its own question, its own reply, its own single card. */
+  const OTHER_PAYLOAD = {
+    id: OTHER_CONVERSATION,
+    title: "a 90s romantic comedy",
+    lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+    turns: [
+      { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "One that fits.", kind: "ask", status: "Completed" },
+    ],
+    cards: [card("z9", "Zither Lane")],
+    reason: "1 pick ranked for you, from 12 pulled.",
+    removed: 0,
+    lastQuery: "a 90s romantic comedy",
+    mediaTypes: [],
+    shown: [],
+  };
+
+  test("Recent is inert while a turn streams, exactly as + New is", async ({ page }) => {
+    await boot(page);
+    await page.getByTestId("askreel-composer").fill("a heist with a great ensemble");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-1", sequence: 1 });
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+
+    // The measured asymmetry, as an assertion: `{newDisabled: true, recentDisabled: false}`.
+    await expect(page.getByTestId("askreel-banner")).toBeVisible();
+    await expect(page.getByTestId("askreel-new")).toBeDisabled();
+    await expect(page.getByTestId("askreel-recent")).toBeDisabled();
+    // Inert to a real tap, not merely styled as such — the menu must not open.
+    await page.getByTestId("askreel-recent").click({ force: true });
+    await expect(page.getByTestId("askreel-recent-menu")).toHaveCount(0);
+
+    // …and it comes back the moment the turn settles, or the control would be a one-way door.
+    await askPush(page, "done", { results: [ALPHA], reason: "1 pick ranked for you, from 9 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-recent")).toBeEnabled();
+  });
+
+  test("the switch, once the turn settles, leaves nothing of the old run behind", async ({ page }) => {
+    // The other side of the same gesture. `Recent ▾` is a one-way door if it never comes back, so
+    // the switch is taken the moment the turn is done — and the arriving thread must be whole, with
+    // no card, no reply and no footnote from the turn that just finished somewhere else.
+    //
+    // The reducer's own guard against a frame from an abandoned run is pinned in
+    // `useAskReelChat.test.ts` ("a stale stream's frames change nothing"); it cannot be driven from
+    // here, because React refuses to dispatch a click to an element whose props say `disabled` —
+    // which is the fix working.
+    await boot(page);
+    await mockJson(page, `**/api/search/conversations/${OTHER_CONVERSATION}`, OTHER_PAYLOAD);
+    await askAndAnswer(page);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByTestId("askreel-recent").click();
+    await page.getByTestId("askreel-recent-row").nth(1).getByTestId("askreel-recent-open").click();
+
+    await expect(page.getByTestId("askreel-transcript")).toContainText("a 90s romantic comedy");
+    await expect(gridNames(page)).toHaveText(["Zither Lane"]);
+    await expect(page.getByTestId("askreel-transcript")).not.toContainText("a tense heist");
+    await expect(page.getByTestId("askreel-footnote")).toContainText("1 pick ranked for you");
+    await expect(page.getByTestId("askreel-banner")).toHaveCount(0);
+    // No stream left open for a thread nobody is looking at.
+    expect(await page.evaluate(() => (window as unknown as { __ask: { count: () => number } }).__ask.count())).toBe(0);
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe(OTHER_CONVERSATION);
+  });
+});

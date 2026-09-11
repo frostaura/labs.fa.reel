@@ -164,6 +164,41 @@ export function mintTurnId(): string {
 }
 
 /**
+ * Which run a frame belongs to — the label every frame of one `/ask` stream carries.
+ *
+ * F6-01 is what a screen looks like without one. `Recent ▾` was live while a turn streamed, so
+ * opening another thread mid-stream put THAT thread's question and reply on screen above the
+ * running turn's progress banner and a grid of 34 cards from the question that had just left. The
+ * heist search then landed *in the rom-com thread*, replaced its answer, and pushed its turn count
+ * from 2 to 3 — durably, because the server had already written the rows. Nothing on the client
+ * could tell the two apart: a `done` frame carried no evidence of which conversation it had been
+ * asked for.
+ *
+ * Two independent facts, because neither alone covers the case. `id` is minted per run and is
+ * monotonic, so it separates two runs even when both started before any conversation existed;
+ * `conversationId` is the thread the run was started FOR, and is what catches a frame that belongs
+ * to a thread no longer on screen. Both are checked in {@link staleFrame}.
+ */
+export interface StreamTag {
+  /** This run's own number. Monotonic within the tab; never reused. */
+  id: number;
+  /** The thread this run was started for, or null when the run is opening a new one. */
+  conversationId: string | null;
+}
+
+let streamCounter = 0;
+
+/**
+ * The next run's id. Starts at 1 so that {@link initialChatState}'s `stream: 0` — the value a
+ * reset, a `+ New` and a thread switch all land on — matches no run at all, and every frame still
+ * in flight from the run that was abandoned is stale by construction.
+ */
+export function mintStreamId(): number {
+  streamCounter += 1;
+  return streamCounter;
+}
+
+/**
  * Whether the preset mood chips ("Under 90 minutes, feel-good", …) should show: only on a
  * genuinely fresh Ask Reel — no transcript, no cards on screen, nothing streaming. The moment a
  * conversation exists (including one resumed from a previous visit) the presets yield to the
@@ -732,26 +767,60 @@ interface State {
    * derives one at all.
    */
   settled: number;
+  /**
+   * The {@link StreamTag} id of the run whose frames this state accepts. `0` — the value
+   * {@link initialChatState} carries, and therefore what a `+ New`, a thread switch and a resume
+   * all land on — matches no run, so every frame still arriving from an abandoned stream is
+   * dropped. See {@link staleFrame}.
+   */
+  stream: number;
 }
 
 export type ChatAction =
-  | { type: "userTurn"; message: string; fresh: boolean }
-  | { type: "moreTurn" }
-  | { type: "reaskTurn" }
-  | { type: "phase"; data: PhaseData }
-  | { type: "conversation"; data: ConversationData }
+  | { type: "userTurn"; message: string; fresh: boolean; stream?: StreamTag }
+  | { type: "moreTurn"; stream?: StreamTag }
+  | { type: "reaskTurn"; stream?: StreamTag }
+  | { type: "phase"; data: PhaseData; stream?: StreamTag }
+  | { type: "conversation"; data: ConversationData; stream?: StreamTag }
   | { type: "resume"; payload: ConversationPayload }
-  | { type: "assistant"; data: AssistantMessageData }
-  | { type: "candidate"; data: AskCard }
-  | { type: "scored"; data: { titleId: string; predictedRating: number | null } }
-  | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { type: "conflict"; data: ConflictData }
-  | { type: "done"; data: DoneData }
+  | { type: "assistant"; data: AssistantMessageData; stream?: StreamTag }
+  | { type: "candidate"; data: AskCard; stream?: StreamTag }
+  | { type: "scored"; data: { titleId: string; predictedRating: number | null }; stream?: StreamTag }
+  | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null }; stream?: StreamTag }
+  | { type: "conflict"; data: ConflictData; stream?: StreamTag }
+  | { type: "done"; data: DoneData; stream?: StreamTag }
   | { type: "stop" }
   | { type: "reset" }
   | { type: "turnInProgress" }
   | { type: "conversationGone" }
   | { type: "error"; reason?: ErrorReason };
+
+/** The three actions that START a run, and so set the id whose frames the reducer will accept. */
+const TURN_STARTS: ReadonlySet<ChatAction["type"]> = new Set(["userTurn", "moreTurn", "reaskTurn"]);
+
+/**
+ * Does this frame belong to a run that is no longer on screen? F6-01's guard.
+ *
+ * Two checks, and they catch different halves of the same defect. The **run id** catches a frame
+ * from any run this state is not currently listening to — including one started before a
+ * conversation existed at all, where there is no id to compare. The **conversation id** catches a
+ * frame that names a thread other than the one being rendered, which is the durable half: a `done`
+ * for thread A arriving while thread B is on screen is what wrote A's ten cards under B's question
+ * and moved B's turn count.
+ *
+ * Untagged actions pass, deliberately: the reducer is a pure state machine that tests drive
+ * directly, and requiring a tag would make every such dispatch a no-op rather than a test of the
+ * case it is about. The hook tags every frame it forwards.
+ */
+export function staleFrame(state: State, tag: StreamTag | undefined): boolean {
+  if (!tag) return false;
+  if (tag.id !== state.stream) return true;
+  return (
+    tag.conversationId != null &&
+    state.conversationId != null &&
+    tag.conversationId !== state.conversationId
+  );
+}
 
 /**
  * What a failed `/ask` means, as an action.
@@ -782,7 +851,7 @@ export const initialChatState: State = {
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
-  lastTurnAt: null, resumedTail: null, answeredQuery: "",
+  lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0,
 };
 
 /**
@@ -850,6 +919,12 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
 }
 
 export function chatReducer(state: State, action: ChatAction): State {
+  const tag = "stream" in action ? action.stream : undefined;
+  // F6-01. A frame from a run this screen has moved on from changes NOTHING — not the grid, not
+  // the transcript, not the conversation id, and above all not the turn count of the thread now on
+  // screen. Checked once here rather than in each of the eight frame cases, because the one case
+  // that forgot the check would be the one that wrote the damage.
+  if (!TURN_STARTS.has(action.type) && staleFrame(state, tag)) return state;
   switch (action.type) {
     case "userTurn": {
       const turn: ChatTurn = { role: "user", text: action.message };
@@ -857,9 +932,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       // answer left to hold: cards under a blank transcript belong to a question no longer on
       // screen. A follow-up in the same thread is the opposite case, and it keeps its answer up.
       return action.fresh
-        ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message }
+        ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message, stream: tag?.id ?? 0 }
         : {
-            ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
+            ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
             reason: null, appending: false, lastQuery: action.message, exhausted: false, paged: false,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
@@ -888,7 +963,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // itself brings (SB-01).
       return {
         ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
-        settled: state.order.length, resumedTail: null, answeredQuery: "",
+        settled: state.order.length, resumedTail: null, answeredQuery: "", stream: tag?.id ?? 0,
       };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
@@ -898,7 +973,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       // Stop, a timeout or a failed re-ask cost the user the answer they were reading.
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
-        ...state, turns, status: "streaming", phase: null,
+        ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
         reason: null, appending: false, exhausted: false, paged: false,
         belowFloor: [], droppedByFloor: null, errorReason: null,
         resumedTail: null, answeredQuery: "",
@@ -1178,6 +1253,10 @@ export function useAskReelChat() {
   // the server then replays the stored answer instead of running the question a second time.
   const turnIdRef = useRef<string | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The run this hook is still listening to, set synchronously so a side effect fired from inside
+  // a frame handler (writing the remembered conversation id) can tell live from abandoned before
+  // the reducer's own commit has landed. `0` = nothing is running that this screen still owns.
+  const activeStreamRef = useRef(0);
 
   // The active media filter, kept in a ref so `send`/`loadMore` stay referentially stable while
   // still reading the current value — a filter change re-sends rather than hiding cards locally.
@@ -1221,28 +1300,42 @@ export function useAskReelChat() {
     // server answers it from the stored turn instead of running and billing it twice.
     const clientTurnId = turnId ?? mintTurnId();
     turnIdRef.current = clientTurnId;
+    // The label every frame of THIS run carries, so the reducer can tell them from the frames of a
+    // run the user has already walked away from (F6-01). Minted before the first dispatch, because
+    // the turn-start action is what tells the reducer which id to listen to.
+    const stream: StreamTag = { id: mintStreamId(), conversationId };
+    activeStreamRef.current = stream.id;
     dispatch(
-      kind === "more" ? { type: "moreTurn" }
-        : kind === "reask" ? { type: "reaskTurn" }
-          : { type: "userTurn", message: msg, fresh },
+      kind === "more" ? { type: "moreTurn", stream }
+        : kind === "reask" ? { type: "reaskTurn", stream }
+          : { type: "userTurn", message: msg, fresh, stream },
     );
 
     streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current), (ev) => {
       armWatchdog();
       switch (ev.event) {
-        case "phase": dispatch({ type: "phase", data: ev.data }); break;
+        case "phase": dispatch({ type: "phase", data: ev.data, stream }); break;
         case "conversation":
           // Remembered as it arrives, not at the end of the turn: an abandoned or failed stream
           // still happened, and the thread it opened is still this tab's.
-          storeConversationId(ev.data.id);
-          dispatch({ type: "conversation", data: ev.data });
+          //
+          // …unless this run has been abandoned. A stale `conversation` frame would otherwise
+          // overwrite localStorage with the thread the user just left, so the NEXT cold load
+          // resumes it — the durable half of F6-01, one layer below the reducer. Read off a ref
+          // set synchronously by `run` rather than off `stateRef`, which is synced in an effect
+          // and so still holds the PREVIOUS run's id when this frame (the stream's first, and
+          // usually its fastest) lands before the commit.
+          if (activeStreamRef.current === stream.id) {
+            storeConversationId(ev.data.id);
+          }
+          dispatch({ type: "conversation", data: ev.data, stream });
           break;
-        case "assistant-message": dispatch({ type: "assistant", data: ev.data }); break;
-        case "candidate": dispatch({ type: "candidate", data: ev.data }); break;
-        case "candidate-scored": dispatch({ type: "scored", data: ev.data }); break;
-        case "candidate-reranked": dispatch({ type: "reranked", data: ev.data }); break;
-        case "conflict": dispatch({ type: "conflict", data: ev.data }); break;
-        case "done": dispatch({ type: "done", data: ev.data }); break;
+        case "assistant-message": dispatch({ type: "assistant", data: ev.data, stream }); break;
+        case "candidate": dispatch({ type: "candidate", data: ev.data, stream }); break;
+        case "candidate-scored": dispatch({ type: "scored", data: ev.data, stream }); break;
+        case "candidate-reranked": dispatch({ type: "reranked", data: ev.data, stream }); break;
+        case "conflict": dispatch({ type: "conflict", data: ev.data, stream }); break;
+        case "done": dispatch({ type: "done", data: ev.data, stream }); break;
         default: break;
       }
     }, controller.signal)
@@ -1320,6 +1413,7 @@ export function useAskReelChat() {
     clearWatchdog();
     abortRef.current?.abort();
     abortRef.current = null;
+    activeStreamRef.current = 0;
     dispatch({ type: "stop" });
   }, [clearWatchdog]);
 
@@ -1332,12 +1426,21 @@ export function useAskReelChat() {
    */
   const resume = useCallback((payload: ConversationPayload) => {
     if (!payload.id || payload.turns.length === 0) return;
+    // Whatever was streaming was streaming for a DIFFERENT thread — this one is what the screen is
+    // about from here. Aborted rather than merely ignored: the reducer's tag check already makes a
+    // stale frame inert, but a run left open keeps a reader, a watchdog and the server's turn
+    // alive for a conversation nobody is looking at (F6-01).
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeStreamRef.current = 0;
+    turnIdRef.current = null;
+    clearWatchdog();
     // A resumed thread is this tab's thread from now on, so it is remembered on the same terms as
     // one started here — otherwise a cold visit that resumed would still have nothing stored, and
     // the NEXT reload would fall back to the account's newest thread instead of this one.
     storeConversationId(payload.id);
     dispatch({ type: "resume", payload });
-  }, []);
+  }, [clearWatchdog]);
 
   /**
    * Forget this thread and start over — what `+ New` does.
@@ -1351,6 +1454,7 @@ export function useAskReelChat() {
   const startNew = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    activeStreamRef.current = 0;
     turnIdRef.current = null;
     clearWatchdog();
     storeConversationId(FRESH_CONVERSATION);

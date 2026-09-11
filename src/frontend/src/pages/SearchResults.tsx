@@ -354,6 +354,10 @@ function AskReel() {
             </button>
             <ConversationSwitcher
               currentId={conversationId}
+              // On the same terms as `+ New` beside it. F6-01: this was the one control that could
+              // walk away from a running turn, and doing so bound the in-flight answer to the
+              // thread the user had just arrived in.
+              disabled={streaming}
               onOpen={(id) => {
                 // Opening a thread makes it this tab's thread, on the same terms as starting one
                 // here — so the next reload comes back to it rather than to whatever the account

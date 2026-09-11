@@ -32,7 +32,10 @@ import {
   RECENT_LIMIT,
   OLDER_LIMIT,
   transcriptOf,
+  staleFrame,
+  mintStreamId,
   type ChatTurn,
+  type StreamTag,
 } from "./useAskReelChat";
 import { AskStreamError, type AskCard } from "./askReelStream";
 
@@ -1862,5 +1865,133 @@ describe("chatReducer — the tray comes back on a resume", () => {
     expect(chatReducer(resumed, { type: "userTurn", message: "something else", fresh: false }).belowFloor).toEqual([]);
     expect(chatReducer(resumed, { type: "reaskTurn" }).belowFloor).toEqual([]);
     expect(chatReducer(resumed, { type: "userTurn", message: "brand new", fresh: true }).droppedByFloor).toBeNull();
+  });
+});
+
+/**
+ * F6-01 — a frame from a run the screen has walked away from.
+ *
+ * The observed damage was durable, not cosmetic. `Recent ▾` stayed live while a turn streamed, so
+ * opening another thread mid-stream put that thread's question and reply on screen above the
+ * running turn's banner and 34 cards from the question just left; fourteen seconds later the heist
+ * results landed IN the rom-com thread, replaced its answer, and pushed its turn count from 2 to 3.
+ * Re-opening it from a clean context still showed ten heist cards under a rom-com question, and the
+ * heist question existed nowhere at all.
+ */
+describe("chatReducer — a stale stream's frames change nothing", () => {
+  const A = "conv-a";
+  const B = "conv-b";
+  const tagA: StreamTag = { id: 101, conversationId: A };
+
+  /** Thread A, mid-stream: asked, conversation frame in, two candidates on screen. */
+  function streamingA() {
+    let state = chatReducer(initialChatState, { type: "userTurn", message: "a heist with a great ensemble", fresh: false, stream: tagA });
+    state = chatReducer(state, { type: "conversation", data: { id: A }, stream: tagA });
+    state = chatReducer(state, { type: "candidate", data: card(1), stream: tagA });
+    return chatReducer(state, { type: "candidate", data: card(2), stream: tagA });
+  }
+
+  it("drops_every_frame_of_the_abandoned_run_after_a_thread_switch", () => {
+    const live = streamingA();
+    expect(live.conversationId).toBe(A);
+    expect(live.order).toEqual(["t1", "t2"]);
+
+    // The switch: thread B is put on screen whole, exactly as `resume` does it.
+    const switched = chatReducer(live, {
+      type: "resume",
+      payload: {
+        id: B,
+        turns: [
+          { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "I can't recommend those.", kind: "ask", status: "Completed" },
+        ],
+        cards: [],
+        lastQuery: "a 90s romantic comedy",
+      },
+    });
+    expect(switched.conversationId).toBe(B);
+
+    // …and now every frame the abandoned heist run is still producing. Each is asserted against
+    // the SAME baseline, so a guard that only happens to catch `done` fails here.
+    const after = [
+      chatReducer(switched, { type: "phase", data: { stage: "ranking", found: 34, scored: 34 }, stream: tagA }),
+      chatReducer(switched, { type: "assistant", data: { text: "Seven heists that fit." }, stream: tagA }),
+      chatReducer(switched, { type: "candidate", data: card(9), stream: tagA }),
+      chatReducer(switched, { type: "scored", data: { titleId: "t9", predictedRating: 8.4 }, stream: tagA }),
+      chatReducer(switched, { type: "reranked", data: { titleId: "t9", fit: 0.9, why: "heist" }, stream: tagA }),
+      chatReducer(switched, { type: "conflict", data: { message: "…" }, stream: tagA }),
+      chatReducer(switched, { type: "conversation", data: { id: A }, stream: tagA }),
+      chatReducer(switched, { type: "done", data: { results: [card(9), card(10)], reason: "10 picks" }, stream: tagA }),
+    ];
+    for (const state of after) expect(state).toBe(switched);
+  });
+
+  it("drops_a_run_started_before_any_conversation_existed", () => {
+    // The harder half: a FRESH turn is tagged with a null conversation id, so the id comparison
+    // alone cannot see it. Only the run number can — which is why `initialChatState.stream` is 0
+    // and minted ids start at 1.
+    const fresh: StreamTag = { id: 202, conversationId: null };
+    let live = chatReducer(initialChatState, { type: "userTurn", message: "a heist", fresh: true, stream: fresh });
+    live = chatReducer(live, { type: "candidate", data: card(1), stream: fresh });
+    const switched = chatReducer(live, {
+      type: "resume",
+      payload: {
+        id: B,
+        turns: [{ sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" }],
+        cards: [],
+      },
+    });
+    expect(switched.stream).toBe(0);
+    expect(chatReducer(switched, { type: "done", data: { results: [card(9)], reason: "1 pick" }, stream: fresh })).toBe(switched);
+  });
+
+  it("drops_the_previous_run_when_a_new_turn_takes_over_the_same_thread", () => {
+    // Fixture variation on the route OUT of a run: not a switch but a re-ask. The first run's
+    // `done` must not resurrect the answer the second run is replacing.
+    const live = streamingA();
+    const tagB: StreamTag = { id: 303, conversationId: A };
+    const reasked = chatReducer(live, { type: "reaskTurn", stream: tagB });
+    expect(reasked.stream).toBe(303);
+    expect(chatReducer(reasked, { type: "done", data: { results: [card(5)], reason: "stale" }, stream: tagA })).toBe(reasked);
+    // …and the run that IS current still lands.
+    expect(chatReducer(reasked, { type: "done", data: { results: [card(5)], reason: "live" }, stream: tagB }).reason).toBe("live");
+  });
+
+  it("still_accepts_every_frame_of_the_run_that_is_current", () => {
+    // The guard has to be inert on the happy path, which is every other test in this file: an
+    // untagged dispatch and a correctly-tagged one both go through.
+    const live = streamingA();
+    expect(chatReducer(live, { type: "candidate", data: card(3), stream: tagA }).order).toEqual(["t1", "t2", "t3"]);
+    expect(chatReducer(live, { type: "candidate", data: card(3) }).order).toEqual(["t1", "t2", "t3"]);
+  });
+});
+
+describe("staleFrame", () => {
+  it("is_inert_without_a_tag_and_strict_with_one", () => {
+    const base = { ...initialChatState, stream: 7, conversationId: "conv-a" };
+    // No tag at all — the reducer's own tests dispatch this way and must not be turned into no-ops.
+    expect(staleFrame(base, undefined)).toBe(false);
+    // The run this state is listening to.
+    expect(staleFrame(base, { id: 7, conversationId: "conv-a" })).toBe(false);
+    // A different run.
+    expect(staleFrame(base, { id: 6, conversationId: "conv-a" })).toBe(true);
+    // The right run number naming the wrong thread — the durable half of F6-01. Cannot happen
+    // through `run()`, and is checked anyway because it is the fact that actually matters.
+    expect(staleFrame(base, { id: 7, conversationId: "conv-b" })).toBe(true);
+    // A run that has not learnt its conversation yet is judged on its number alone.
+    expect(staleFrame(base, { id: 7, conversationId: null })).toBe(false);
+    // …and so is a state that has not learnt one.
+    expect(staleFrame({ ...base, conversationId: null }, { id: 7, conversationId: "conv-b" })).toBe(false);
+  });
+});
+
+describe("mintStreamId", () => {
+  it("never_returns_zero_and_never_repeats", () => {
+    // `0` is the "no run" sentinel every reset lands on, so a minted id colliding with it would
+    // make an abandoned stream's frames live again.
+    const ids = [mintStreamId(), mintStreamId(), mintStreamId()];
+    expect(new Set(ids).size).toBe(3);
+    for (const id of ids) expect(id).toBeGreaterThan(0);
+    expect(ids[1]).toBeGreaterThan(ids[0]);
   });
 });
