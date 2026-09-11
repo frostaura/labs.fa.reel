@@ -473,9 +473,19 @@ function AskReel() {
               These answer “{answeredQuery}”.
             </p>
           )}
+          {/* "from this answer", because the count is not the grid's alone.
+              `removed` is the eligibility re-filter's total across BOTH stored lists — the picks
+              and the below-floor tray — and the tray is now restored beside them, so a note
+              sitting next to a grid of six and reading "2 picks are gone" invited exactly one
+              reading: count the grid, find six, and conclude two of the eight it should hold are
+              missing. Two may have gone from under the fence. Naming the answer rather than the
+              grid is the whole of the fix; the cause is unchanged and is the same for both. */}
           {removed > 0 && (
             <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-removed">
-              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone — you&apos;ve since watched or rated {removed === 1 ? "it" : "them"}.
+              {/* `’` and not `&apos;`: every other sentence on this page uses the typographic
+                  apostrophe, and the escape rendered a straight quote in the middle of a paragraph
+                  whose neighbours are curly. */}
+              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched or rated {removed === 1 ? "it" : "them"}.
             </p>
           )}
         </div>

@@ -897,6 +897,39 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
     await expect(page.getByTestId("askreel-below-floor")).toHaveCount(0);
   });
+
+  test("the removals note names the answer, because the tray is part of it", async ({ page }) => {
+    // `removed` is the eligibility re-filter's count across BOTH stored lists. With the tray back
+    // on screen the old wording — "2 picks are gone" beside a grid — read as a claim about the
+    // grid, and a reader counting the grid to check it would be counting the wrong thing.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, removed: 2, belowFloor: [UNDER, WAY_UNDER] },
+    });
+
+    await expect(page.getByTestId("askreel-removed")).toHaveText(
+      "2 picks are gone from this answer — you’ve since watched or rated them.",
+    );
+    // Both lists are on screen, which is the reason the note cannot name just one of them.
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
+  });
+
+  test("one removal is singular, and still about the answer", async ({ page }) => {
+    // Fixture variation, one field: `removed` 2 → 1. Three agreements have to move together —
+    // the noun, the verb and the pronoun — and the sentence is assembled from three separate
+    // ternaries, so a copy edit that touches one of them is invisible until this runs.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, removed: 1, belowFloor: [UNDER] },
+    });
+
+    await expect(page.getByTestId("askreel-removed")).toHaveText(
+      "1 pick is gone from this answer — you’ve since watched or rated it.",
+    );
+  });
 });
 
 test.describe("Ask Reel — continuity on a phone", () => {
