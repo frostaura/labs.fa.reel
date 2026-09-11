@@ -24,6 +24,7 @@ import {
   nextBootstrap,
   plural,
   showMoodPresets,
+  transcriptOf,
   type ChatTurn,
 } from "./useAskReelChat";
 import { AskStreamError, type AskCard } from "./askReelStream";
@@ -1417,5 +1418,62 @@ describe("resumeTarget — three states, not two", () => {
     // …and the first `conversation` frame of the next question replaces it with the real thread.
     storeConversationId("7f3a1b2c-0000-4000-8000-000000000009");
     expect(resumeTarget(readStoredConversationId())).toBe("7f3a1b2c-0000-4000-8000-000000000009");
+  });
+});
+
+/**
+ * SB-04 — a paged thread replays its assistant reply twice.
+ *
+ * Live, the reducer suppresses this deliberately: a page replays the last question, so the model
+ * replies again, and `case "assistant"` drops that second reply rather than stuttering the same
+ * sentence into the transcript. `transcriptOf` had no equivalent filter — it mapped every row with
+ * text and never looked at `kind` — so a resume rendered three bubbles for two real answers, the
+ * first two being the identical sentence back to back.
+ *
+ * The server writes a `page` turn as an assistant row with NO user row beside it, which is the
+ * other half of why it reads as a duplicate: there is no question above it to explain it.
+ */
+describe("transcriptOf — a page is not a second answer", () => {
+  const rows = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "I can keep it quiet and character-driven.", kind: "ask", status: "Completed" },
+    // The page. Identical text, by design — it is the same model answering the same question.
+    { sequence: 2, role: "assistant", text: "I can keep it quiet and character-driven.", kind: "page", status: "Completed" },
+  ];
+
+  it("renders_one_bubble_per_real_answer", () => {
+    expect(transcriptOf(rows).map((t) => t.text)).toEqual([
+      "quiet character dramas",
+      "I can keep it quiet and character-driven.",
+    ]);
+  });
+
+  it("matches_what_the_live_reducer_does_with_the_same_thread", () => {
+    // The parity that was missing. Streaming the same thread — a turn, then a page — puts exactly
+    // one assistant bubble on screen, and a resume of it has to agree.
+    let live = chatReducer(initialChatState, { type: "userTurn", message: "quiet character dramas", fresh: true });
+    live = chatReducer(live, { type: "assistant", data: { text: "I can keep it quiet and character-driven." } });
+    live = chatReducer(live, { type: "done", data: { results: [card(1)], reason: "1 pick" } });
+    live = chatReducer(live, { type: "moreTurn" });
+    live = chatReducer(live, { type: "assistant", data: { text: "I can keep it quiet and character-driven." } });
+    live = chatReducer(live, { type: "done", data: { results: [card(2)], reason: "1 more", kept: 1 } });
+
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { id: "conv-4", turns: rows, cards: [card(1), card(2)], lastQuery: "quiet character dramas" },
+    });
+    expect(resumed.turns.map((t) => t.text)).toEqual(live.turns.map((t) => t.text));
+  });
+
+  it("drops_a_page_row_whose_text_is_not_a_literal_duplicate_either", () => {
+    // Fixture variation, one field: the page's sentence differs. The rule is `kind`, not text
+    // equality — a page has no user row above it, so whatever it says renders as an answer to the
+    // question two bubbles up, which the live path already refuses to do. Matching on duplicate
+    // text instead would pass the test above and still stutter here.
+    const reworded = [rows[0], rows[1], { ...rows[2], text: "Two more in the same vein." }];
+    expect(transcriptOf(reworded).map((t) => t.text)).toEqual([
+      "quiet character dramas",
+      "I can keep it quiet and character-driven.",
+    ]);
   });
 });

@@ -369,9 +369,18 @@ export function floorPartition(
  * it never answered — so they are dropped here rather than in the page, which would have to know
  * about row lifecycles to do it. The rows still count for `lastQuery`, because the question a
  * failed turn never answered is precisely the one a retry replays.
+ *
+ * A `page` row goes with them, and that is SB-04. Paging replays the last question, so the model
+ * replies again and the server stores a second assistant row — with no user row beside it, because
+ * the user said nothing. The live reducer already refuses that reply (`case "assistant"` returns
+ * unchanged while `appending`, with the same reasoning); this is the resume path catching up, and
+ * without it a paged thread came back with three bubbles for two answers, the first two being the
+ * identical sentence twice. The rule is `kind`, never text equality: a page that happens to word
+ * itself differently is still an answer to a question two bubbles up.
  */
-export function transcriptOf(rows: { role: string; text: string }[]): ChatTurn[] {
+export function transcriptOf(rows: { role: string; text: string; kind?: string }[]): ChatTurn[] {
   return rows
+    .filter((t) => t.kind !== "page")
     .filter((t) => t.text.trim().length > 0 && (t.role === "user" || t.role === "assistant"))
     .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
 }

@@ -94,9 +94,13 @@ const FILTERS_WITH_FLOOR = {
 /**
  * Boots /search with the shell mocked. `resume` decides what the conversation routes answer:
  * "none" is a browser that has never asked (a 404 on the deprecated alias), "stored" serves the
- * populated payload from BOTH the id route and the alias.
+ * populated payload from BOTH the id route and the alias. `payload` overrides what "stored"
+ * serves, so a spec can vary one field of the resume shape without restating the whole mock stack.
  */
-async function boot(page: Page, opts: { resume?: "none" | "stored"; storedId?: string } = {}) {
+async function boot(
+  page: Page,
+  opts: { resume?: "none" | "stored"; storedId?: string; payload?: Record<string, unknown> } = {},
+) {
   await stubEventSource(page);
   await stubAskReel(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
@@ -110,8 +114,9 @@ async function boot(page: Page, opts: { resume?: "none" | "stored"; storedId?: s
   await mockJson(page, "**/api/search/conversations", CONVERSATION_LIST);
 
   if (opts.resume === "stored") {
-    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
-    await mockJson(page, "**/api/search/conversations/latest", RESUME_PAYLOAD);
+    const payload = opts.payload ?? RESUME_PAYLOAD;
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, payload);
+    await mockJson(page, "**/api/search/conversations/latest", payload);
   } else {
     await mockJson(page, "**/api/search/conversations/latest", {}, 404);
   }
@@ -297,6 +302,30 @@ test.describe("Ask Reel — the server's order is the contract", () => {
     await page.reload();
 
     await expect(gridNames(page)).toHaveText(onScreen);
+  });
+});
+
+test.describe("Ask Reel — a resumed thread says what happened, once", () => {
+  /** An ask, its reply, and the page that replayed it — the shape the smoke reloaded into. */
+  const PAGED_TURNS = [
+    ...RESUME_PAYLOAD.turns,
+    // The server stores a page as an assistant row with NO user row: the user said nothing, the
+    // model was replayed. Its text is identical because it is the same answer to the same question.
+    { sequence: 2, role: "assistant", text: "Three that fit.", kind: "page", status: "Completed" },
+  ];
+
+  test("a paged thread replays one assistant bubble, not two", async ({ page }) => {
+    // SB-04. The DB rows at sequence 1 (`ask`) and 2 (`page`) carry identical `Text`, and the
+    // resumed page rendered three reply bubbles for two real answers.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, turns: PAGED_TURNS },
+    });
+
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    await expect(page.getByTestId("askreel-reply")).toHaveCount(1);
+    await expect(page.getByTestId("askreel-reply")).toContainText("Three that fit.");
   });
 });
 
