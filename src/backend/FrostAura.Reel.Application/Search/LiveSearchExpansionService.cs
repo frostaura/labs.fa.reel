@@ -136,6 +136,11 @@ public sealed class LiveSearchExpansionService(
     /// <param name="Blend">The server's ranking value — the number <see cref="Rank"/> came from.</param>
     /// <param name="Why">The why-line rendered, verbatim.</param>
     /// <param name="WhySource">How that sentence was produced — an <c>ExposureWhySource</c> value.</param>
+    /// <param name="BelowFloor">
+    /// Whether the rating floor put this card in the tray rather than in the picks. Trailing and
+    /// defaulted because the three turn shapes that cannot have a tray — a filmography, the lexical
+    /// fallback, and every relaxed turn — say nothing about it and mean <c>false</c>.
+    /// </param>
     public readonly record struct TurnCard(
         Guid TitleId,
         long? TmdbId,
@@ -146,7 +151,8 @@ public sealed class LiveSearchExpansionService(
         decimal? LlmFit,
         decimal Blend,
         string? Why,
-        string WhySource);
+        string WhySource,
+        bool BelowFloor = false);
 
     /// <summary>
     /// What the turn was, handed back to whoever has a place to put it.
@@ -742,7 +748,8 @@ public sealed class LiveSearchExpansionService(
             // so the stored rank IS the index in `done.results`. Built here rather than derived from
             // `final` afterwards because `final` is anonymous JSON — re-reading it back into rows
             // would be a second definition of the answer, and two definitions drift.
-            var storedCards = new List<TurnCard>(blended.Count + blendedOutside.Count);
+            var storedCards = new List<TurnCard>(
+                blended.Count + blendedOutside.Count + verdict.BelowFloor.Count);
             foreach (var x in blended)
             {
                 storedCards.Add(new TurnCard(
@@ -779,6 +786,30 @@ public sealed class LiveSearchExpansionService(
                     x.Title, x.Sim, x.Predicted, x.Fit?.Fit, x.Fit?.Why,
                     outsideRequest: blendedOutsideIds.Contains(x.Title.Id), blend: x.Blend))
                 .ToList();
+
+            // The tray, as rows, CONTINUING the same rank counter. The user saw these — they are
+            // one tap away under the fence — so they belong to the conversation's no-repeat set on
+            // exactly the same terms as a pick, and the set is read straight off this table. Before
+            // they were stored, a turn's tray came back as the NEXT turn's top picks: the smoke run
+            // measured 13 of 14 doing precisely that, on screen twice at once.
+            //
+            // Same projection as `belowFloor` above, from the same source in the same order, for
+            // the same reason the picks are built here rather than re-read out of `final`: two
+            // definitions of one answer drift.
+            foreach (var x in verdict.BelowFloor)
+            {
+                storedCards.Add(new TurnCard(
+                    x.Title.Id, x.Title.TmdbId, storedCards.Count,
+                    OutsideRequest: blendedOutsideIds.Contains(x.Title.Id),
+                    x.Sim is { } sim ? Math.Round(sim, 2) : null,
+                    x.Predicted is { } p ? Math.Round(p, 2, MidpointRounding.AwayFromZero) : null,
+                    x.Fit is { } fit ? Math.Round((decimal)fit.Fit, 3, MidpointRounding.AwayFromZero) : null,
+                    Math.Round((decimal)x.Blend, 4, MidpointRounding.AwayFromZero),
+                    x.Fit?.Why,
+                    x.Fit?.Why is { Length: > 0 } ? ExposureWhySource.Llm : ExposureWhySource.Templater,
+                    BelowFloor: true));
+            }
+
             blendStage.Dispose();
 
             using var emitStage = timings.Stage(AskStageTimings.Emit);
@@ -834,6 +865,15 @@ public sealed class LiveSearchExpansionService(
             // A card whose OnDemandScorer had nothing to say carries no prediction, and a card with
             // no prediction is not an exposure worth scoring the model against — those are skipped
             // rather than logged as a fabricated 6.0.
+            //
+            // NO EXPOSURE ROW FOR THE TRAY, deliberately, and the two sources below are the whole
+            // list: `blended` and `blendedOutside`, never `verdict.BelowFloor`. An exposure means
+            // the product RECOMMENDED this title at this rank; a card the account's own rating
+            // floor pushed under the fence was displayed and explicitly NOT recommended. Logging it
+            // would put titles the floor rejected into the denominator of every accuracy number
+            // computed from the log, and nothing downstream could tell them apart afterwards. The
+            // tray's separate record is SearchTurnCard.BelowFloor, which answers a different
+            // question — what was on the glass — and is what the no-repeat set reads.
             var artifactId = await db.ModelArtifacts
                 .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
                 .OrderByDescending(a => a.Version)

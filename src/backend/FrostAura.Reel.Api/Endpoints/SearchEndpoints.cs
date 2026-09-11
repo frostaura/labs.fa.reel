@@ -294,6 +294,13 @@ public static class SearchEndpoints
 
                 // The no-repeat set: what this conversation has actually shown, from the server's
                 // own record of it. One indexed read on (ConversationId, TmdbId).
+                //
+                // DELIBERATELY UNFILTERED BY BelowFloor. The tray is on the glass — under the "Show
+                // the N under your bar" fence, one tap away — so a title that appeared there has
+                // been shown, and the founder-locked rule is about what the user has seen, not
+                // about which half of the answer it sat in. When the tray was not stored at all,
+                // this query could not contain it and the smoke run watched 13 of one turn's 14
+                // tray titles come back as the next turn's top picks.
                 shown = await db.SearchTurnCards
                     .Where(c => c.ConversationId == conversation.Id && c.TmdbId != null)
                     .Select(c => c.TmdbId!.Value)
@@ -512,7 +519,15 @@ public static class SearchEndpoints
             if (turn.Status == Domain.Search.SearchTurnStatus.Pending)
             {
                 return Results.Json(
-                    new { status = turn.Status, reason = (string?)null, failureCode = (string?)null, cards = Array.Empty<object>() },
+                    new
+                    {
+                        status = turn.Status,
+                        reason = (string?)null,
+                        failureCode = (string?)null,
+                        cards = Array.Empty<object>(),
+                        // Present-but-empty, so a poller renders one shape on both status codes.
+                        belowFloor = Array.Empty<object>(),
+                    },
                     statusCode: StatusCodes.Status202Accepted);
             }
 
@@ -523,6 +538,9 @@ public static class SearchEndpoints
                 reason = replay.Reason,
                 failureCode = turn.FailureCode,
                 cards = replay.Cards,
+                // A client that lost the stream lost the tray with it. Reconnecting has to restore
+                // the whole answer, not the half of it that cleared the bar.
+                belowFloor = replay.BelowFloor,
                 removed = replay.Removed,
             });
         });
@@ -707,7 +725,12 @@ public static class SearchEndpoints
     ///
     /// <para><c>shown</c> is the whole conversation's no-repeat set, not the block's — it is what
     /// the SERVER will exclude on the next turn, and the client renders it to explain why. It is
-    /// informational: nothing the client sends back is trusted for it.</para>
+    /// informational: nothing the client sends back is trusted for it. It counts the TRAY, because
+    /// a card under the fence is a card on the glass.</para>
+    ///
+    /// <para><c>belowFloor</c> restores that tray, separately from <c>cards</c> and never merged
+    /// into it. <c>lastTurnAt</c> is beside <c>lastCardsAt</c> because a transcript-only thread has
+    /// a null <c>lastCardsAt</c> by definition and would otherwise carry no date at all.</para>
     /// </summary>
     private static async Task<object> ResumeAsync(
         IReelDbContext db,
@@ -753,6 +776,12 @@ public static class SearchEndpoints
             // Null says "transcript only" — this thread predates stored results, which is a
             // different fact from a turn that honestly returned nothing.
             lastCardsAt = conversation.LastCardsAt,
+            // When this thread was last spoken in — the ONLY date a transcript-only thread has.
+            // lastCardsAt is null for exactly those threads, so without this field a resumed
+            // conversation that predates stored results cannot be dated at all, and the client was
+            // reduced to rendering an undated seam. It is the same column the Recent list already
+            // sorts and renders on, so the two views cannot disagree about a thread's age.
+            lastTurnAt = conversation.LastTurnAt,
             turns = turns.Select(t => new
             {
                 sequence = t.Sequence,
@@ -762,6 +791,12 @@ public static class SearchEndpoints
                 status = t.Status,
             }),
             cards = replay.Cards,
+            // The tray, restored as a tray. It is never merged into `cards` — these cards did not
+            // clear the account's bar and the grid is not where they belong — but it has to come
+            // back, because the user left it open and because the server now counts it in the
+            // no-repeat set. A resume that dropped it would show a thread whose "Show the N under
+            // your bar" fence had silently emptied.
+            belowFloor = replay.BelowFloor,
             reason = replay.Reason,
             removed = replay.Removed,
             lastQuery,
@@ -784,10 +819,21 @@ public static class SearchEndpoints
                 .ToArray();
 
     /// <summary>A replayed block of turns: the cards as they should be rendered NOW, and what changed.</summary>
-    /// <param name="Cards">The stored cards, re-filtered and re-scored, in stored order.</param>
-    /// <param name="Removed">How many stored cards the eligibility re-filter dropped.</param>
+    /// <param name="Cards">The stored PICKS, re-filtered and re-scored, in stored order.</param>
+    /// <param name="BelowFloor">
+    /// The stored TRAY — the cards the account's rating floor put under the fence — re-filtered and
+    /// re-scored on identical terms, in stored order. Kept separate all the way out: merging it into
+    /// <paramref name="Cards"/> would promote cards the floor rejected into the grid, which is the
+    /// one thing the floor exists to prevent.
+    /// </param>
+    /// <param name="Removed">
+    /// How many stored cards the eligibility re-filter dropped, across BOTH lists. One number,
+    /// because the user is owed one honest account of what disappeared from the answer, and a card
+    /// that vanished out of the tray is as invisible as one that vanished out of the grid.
+    /// </param>
     /// <param name="Reason">The reason line of the newest turn in the block, verbatim.</param>
-    private sealed record ReplayedTurns(IReadOnlyList<object> Cards, int Removed, string? Reason);
+    private sealed record ReplayedTurns(
+        IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason);
 
     /// <summary>
     /// THE read projection. Every route that hands a stored turn back to a client goes through
@@ -810,6 +856,13 @@ public static class SearchEndpoints
     /// the log. The ORDER is also never re-derived — stored rank is the position the answer had,
     /// and re-sorting a replay by a rounded blend is how the same question comes back in a
     /// different order.</para>
+    ///
+    /// <para><b>The tray comes back as the tray.</b> Cards stored with
+    /// <c>SearchTurnCard.BelowFloor</c> are partitioned out AFTER the shared sort and AFTER the
+    /// eligibility re-filter, so they are governed by exactly the same founder-locked rule and one
+    /// rank ordering — and they never reach <c>cards</c>. A restored tray is what makes a resumed
+    /// screen the screen the user left; promoting it into the grid would show cards under a bar
+    /// they did not clear.</para>
     /// </summary>
     private static async Task<ReplayedTurns> ReplayAsync(
         IReelDbContext db,
@@ -821,7 +874,7 @@ public static class SearchEndpoints
     {
         if (turns.Count == 0)
         {
-            return new ReplayedTurns([], 0, null);
+            return new ReplayedTurns([], [], 0, null);
         }
 
         var sequenceByTurn = turns.ToDictionary(t => t.Id, t => t.Sequence);
@@ -834,7 +887,7 @@ public static class SearchEndpoints
             .ToList();
         if (stored.Count == 0)
         {
-            return new ReplayedTurns([], 0, turns[^1].Reason);
+            return new ReplayedTurns([], [], 0, turns[^1].Reason);
         }
 
         var titleIds = stored.Select(c => c.TitleId).Distinct().ToList();
@@ -876,11 +929,14 @@ public static class SearchEndpoints
             .ToListAsync(ct);
         var seen = watched.Concat(rated).ToHashSet();
 
-        var cards = survivors
-            .Select(c =>
+        // ONE projection for both lists. A tray card renders with the same fields as a pick — it is
+        // the same card, on the other side of a fence — and a second copy of this object shape is a
+        // second place for the two to drift apart.
+        object Project(Domain.Search.SearchTurnCard c)
+        {
             {
                 var title = titles[c.TitleId];
-                return (object)new
+                return new
                 {
                     titleId = title.Id,
                     mediaType = title.MediaType.ToString(),
@@ -899,10 +955,17 @@ public static class SearchEndpoints
                     blend = (double?)c.Blend,
                     outsideRequest = c.OutsideRequest,
                 };
-            })
-            .ToList();
+            }
+        }
 
-        return new ReplayedTurns(cards, removed, turns[^1].Reason);
+        // Partitioned AFTER the sort and AFTER the eligibility re-filter, so both lists carry one
+        // ordering and one guard. `removed` deliberately spans both: it is the count of cards that
+        // left the answer, and the tray is part of the answer.
+        return new ReplayedTurns(
+            survivors.Where(c => !c.BelowFloor).Select(Project).ToList(),
+            survivors.Where(c => c.BelowFloor).Select(Project).ToList(),
+            removed,
+            turns[^1].Reason);
     }
 
     /// <summary>
@@ -939,10 +1002,15 @@ public static class SearchEndpoints
         await Emit("done", new
         {
             results = replay.Cards,
-            streamed = replay.Cards.Count + replay.Removed,
+            // The same accounting a live turn emits, over what was stored: everything the turn
+            // streamed is a pick, a tray card, or a card eligibility has since taken away.
+            streamed = replay.Cards.Count + replay.BelowFloor.Count + replay.Removed,
             kept = replay.Cards.Count,
-            droppedByFloor = 0,
-            belowFloor = Array.Empty<object>(),
+            droppedByFloor = replay.BelowFloor.Count,
+            // The stored tray, not an empty array. A retry is the same answer as before, and the
+            // tray was part of it — an idempotent replay that dropped it would make the second
+            // delivery of one turn differ from the first.
+            belowFloor = replay.BelowFloor,
             // A failed turn replays as the failure it was. Answering a retry with a cheerful empty
             // result set would tell the client the question succeeded and returned nothing.
             reason = replay.Reason,
@@ -1076,6 +1144,10 @@ public static class SearchEndpoints
                     Blend = card.Blend,
                     Why = card.Why,
                     WhySource = card.WhySource,
+                    // The tray rides the same table, flagged. It was on the glass, so it is in the
+                    // conversation's no-repeat set; it was not recommended, so it is not in the
+                    // exposure log and never replays into `cards`.
+                    BelowFloor = card.BelowFloor,
                     CreatedAt = now,
                 }));
 
