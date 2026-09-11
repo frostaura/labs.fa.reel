@@ -171,6 +171,117 @@ public class AskReelRequestValidationTests(PostgresFixture fixture, ReelApiFacto
     }
 
     /// <summary>
+    /// F5-01, the half that survived into round 2 as <c>R4-01</c>. Making the ids STRINGS only moved
+    /// the leak: the JSON binder is bypassed for a string, so a <c>clientTurnId</c> of any other
+    /// JSON type still failed inside it and still returned <b>five kilobytes of <c>text/plain</c>
+    /// .NET exception</b> naming <c>SearchEndpoints+AskRequest</c>, with no <c>code</c> at all.
+    /// Reachable by any signed-in account with a type-confused client.
+    ///
+    /// <para>The body is read as a <c>JsonDocument</c> and unpacked by hand now, so a field of the
+    /// wrong TYPE lands on exactly the coded 400 a field of the wrong VALUE already did.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("12345", "client_turn_id_invalid")]
+    [InlineData("{\"a\":1}", "client_turn_id_invalid")]
+    [InlineData("true", "client_turn_id_invalid")]
+    [InlineData("[\"a\"]", "client_turn_id_invalid")]
+    public async Task A_client_turn_id_of_the_wrong_json_type_is_the_same_coded_400(
+        string rawJson, string expectedCode)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync($"ask-validate-type-{Guid.NewGuid():N}");
+        using (client)
+        {
+            using var response = await PostRawAsync(
+                client, $$"""{"query":"a tense heist movie","clientTurnId":{{rawJson}}}""");
+
+            await AssertCodedRefusalAsync(response, HttpStatusCode.BadRequest, expectedCode);
+            await AssertNothingWasCreatedAsync(accountId);
+        }
+    }
+
+    /// <summary>The same rule, one field over: a non-string question is a coded refusal too.</summary>
+    [Fact]
+    public async Task A_query_of_the_wrong_json_type_is_a_coded_400()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync($"ask-validate-query-type-{Guid.NewGuid():N}");
+        using (client)
+        {
+            using var response = await PostRawAsync(
+                client, $$"""{"query":{"text":"heist"},"clientTurnId":"{{Guid.NewGuid()}}"}""");
+
+            await AssertCodedRefusalAsync(response, HttpStatusCode.BadRequest, "query_invalid");
+            await AssertNothingWasCreatedAsync(accountId);
+        }
+    }
+
+    /// <summary>
+    /// And a body that is not an object at all — unparseable bytes, a bare string, an array — is
+    /// <c>body_invalid</c> rather than a binder failure. One code per shape, all of them the
+    /// handler's.
+    /// </summary>
+    [Theory]
+    [InlineData("not json at all")]
+    [InlineData("\"just a string\"")]
+    [InlineData("[1,2,3]")]
+    [InlineData("")]
+    public async Task A_body_that_is_not_an_object_is_a_coded_400(string rawJson)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync($"ask-validate-body-{Guid.NewGuid():N}");
+        using (client)
+        {
+            using var response = await PostRawAsync(client, rawJson);
+
+            await AssertCodedRefusalAsync(response, HttpStatusCode.BadRequest, "body_invalid");
+            await AssertNothingWasCreatedAsync(accountId);
+        }
+    }
+
+    /// <summary>
+    /// <c>R4-05</c>, recorded rather than fixed. <c>GET /api/search/turns/{malformed}</c> answers a
+    /// bodiless 404 because <c>{id:guid}</c> is a ROUTE CONSTRAINT: an unparseable id matches no
+    /// route, so routing refuses it before any handler — including the one that would have written
+    /// <c>{ error, code }</c> — exists to be reached. Widening the constraint to catch it would
+    /// mean claiming a URL space this API does not own.
+    ///
+    /// <para>Pinned so the next round reads it as a decision rather than as a hole, and so the
+    /// contract's promise ("<c>code</c> is what a client switches on") keeps its one stated
+    /// exception: an unknown ROUTE is a 404 with no body, exactly as it is for any other unmatched
+    /// path on this server.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_malformed_turn_id_in_the_path_is_an_unmatched_route_not_a_coded_refusal()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (_, client) = await SignInAsync($"ask-validate-route-{Guid.NewGuid():N}");
+        using (client)
+        {
+            using var response = await client.GetAsync("/api/search/turns/not-a-uuid");
+
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Empty(await response.Content.ReadAsStringAsync());
+        }
+    }
+
+    /// <summary>
     /// The house shape, and nothing of ours in it. The internal type name leaking
     /// (<c>FrostAura.Reel.Api.Endpoints.SearchEndpoints+AskRequest</c>) was half of F5-01's
     /// severity: it is a reachable route for any signed-in account.

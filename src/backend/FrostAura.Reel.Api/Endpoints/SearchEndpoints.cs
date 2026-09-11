@@ -155,7 +155,7 @@ public static class SearchEndpoints
         // nothing at all, and a retry of the same ClientTurnId is answered from that row instead of
         // buying a second full-price turn.
         group.MapPost("/ask", async (
-            AskRequest request,
+            AskRequest? request,
             HttpContext http,
             LiveSearchExpansionService expansion,
             IAccountContext accountContext,
@@ -176,6 +176,27 @@ public static class SearchEndpoints
             // A malformed request is refused as a request. Opening a stream to tell a client its
             // own bug is a stream it then has to parse to learn nothing happened, and B2's client
             // maps 400 / 404 / 409 to three different things it can actually do.
+            //
+            // The body is read as a JsonDocument by AskRequest.BindAsync and every field is picked
+            // out by hand, so a field of the WRONG JSON TYPE is a refusal here rather than a binder
+            // failure upstream of this handler. `clientTurnId: 12345` used to return five kilobytes
+            // of text/plain BadHttpRequestException naming this file's internal type, with no
+            // `code` — the contract tells clients to switch on `code`, so they got `undefined` and
+            // rendered a crash message for a type-confused field.
+            if (request is null)
+            {
+                return AskError(
+                    StatusCodes.Status400BadRequest,
+                    "That request wasn't something I could read — refresh the page and try again.",
+                    "body_invalid");
+            }
+
+            if (request.Malformed.Count > 0)
+            {
+                var (prose, code) = AskRequest.RefusalFor(request.Malformed[0]);
+                return AskError(StatusCodes.Status400BadRequest, prose, code);
+            }
+
             var message = (request.Query ?? string.Empty).Trim();
             if (message.Length == 0)
             {
@@ -231,6 +252,21 @@ public static class SearchEndpoints
                 requestedConversationId = parsedConversationId;
             }
 
+            // R3-02. A page is now EXPLICIT where the client knows which answer it is extending.
+            Guid? requestedPageOf = null;
+            if (request.PageOf is not null)
+            {
+                if (!Guid.TryParse(request.PageOf.Trim(), out var parsedPageOf) || parsedPageOf == Guid.Empty)
+                {
+                    return AskError(
+                        StatusCodes.Status400BadRequest,
+                        "That answer id isn't a valid id — ask the question again instead.",
+                        "page_of_invalid");
+                }
+
+                requestedPageOf = parsedPageOf;
+            }
+
             // Every media-type token has to be one this server can honour. An unknown token used to
             // be dropped in silence, so a typo'd or stale filter was indistinguishable from no
             // filter — and the turn was billed anyway. Refused before the spend, with the token
@@ -259,6 +295,72 @@ public static class SearchEndpoints
                         StatusCodes.Status404NotFound,
                         "That conversation isn't here any more — start a new one.",
                         "conversation_not_found");
+                }
+            }
+
+            // ── 2b. Resolve an EXPLICIT page, if the client named one ───────────────────────
+            //
+            // R3-02. `kind` used to be derived only by comparing the query to the conversation's
+            // last USER turn, and after a Stop that is the stopped question — so pressing "Show me
+            // more" on the kept answer was recorded as a brand-new ask. Three things then went
+            // wrong at once: the transcript gained a question nobody typed, the stopped turn stopped
+            // being the tail and lost its failure row, and the next resume returned only the newest
+            // ask's cards — 42 of 66 on screen disappeared on reload. The client knows exactly which
+            // answer its "Show me more" belongs to, because it is rendering it; `pageOf` is that
+            // fact, stated rather than guessed.
+            //
+            // It is verified rather than trusted: the turn must be the caller's, must belong to this
+            // conversation, must be Completed, and must answer the question being re-sent.
+            Domain.Search.SearchTurn? pageOfTurn = null;
+            if (requestedPageOf is { } pageOfId)
+            {
+                pageOfTurn = await db.SearchTurns
+                    .FirstOrDefaultAsync(t => t.Id == pageOfId && t.AccountId == accountId && t.Role == "assistant", ct);
+
+                // "Not yours", "not there" and "not in this thread" are one 404 and none of them
+                // leaks which — the same rule the conversation lookup above follows.
+                if (pageOfTurn is null || (conversation is not null && pageOfTurn.ConversationId != conversation.Id))
+                {
+                    return AskError(
+                        StatusCodes.Status404NotFound,
+                        "That answer isn't here any more — ask the question again.",
+                        "page_of_not_found");
+                }
+
+                // A page EXTENDS an answer. A turn that failed or is still running has no answer to
+                // extend, and appending to it would put cards under a row the transcript renders as
+                // a failure — which is how a stopped turn lost its explanation in the first place.
+                if (pageOfTurn.Status != Domain.Search.SearchTurnStatus.Completed)
+                {
+                    return AskError(
+                        StatusCodes.Status409Conflict,
+                        "That answer didn't finish, so there's nothing to show more of — ask again instead.",
+                        "page_of_not_completed");
+                }
+
+                // The query must be the question that turn answers. A page writes no user row, so a
+                // different question sent as a page would be a question the transcript never
+                // records — invisible in the thread and unanswerable on the next resume.
+                var pagedQuestion = await QuestionBehindAsync(db, pageOfTurn, ct);
+                if (pagedQuestion is null
+                    || !string.Equals(pagedQuestion.Trim(), message, StringComparison.Ordinal))
+                {
+                    return AskError(
+                        StatusCodes.Status409Conflict,
+                        "That's a different question from the one you're showing more of — send it as a new question.",
+                        "page_query_mismatch");
+                }
+
+                // A `pageOf` with no `conversationId` is legitimate and cannot fork: the turn is
+                // already account-scoped, so its own conversation is the only one it could mean.
+                conversation ??= await db.SearchConversations.FirstOrDefaultAsync(
+                    c => c.Id == pageOfTurn.ConversationId && c.AccountId == accountId, ct);
+                if (conversation is null)
+                {
+                    return AskError(
+                        StatusCodes.Status404NotFound,
+                        "That answer isn't here any more — ask the question again.",
+                        "page_of_not_found");
                 }
             }
 
@@ -375,8 +477,26 @@ public static class SearchEndpoints
                     .Distinct()
                     .ToListAsync(ct);
 
+                // The question the inferred fallback compares against: the last user turn that
+                // actually got an ANSWER, not simply the last one typed.
+                //
+                // R3-02. Reading the last user row alone made a Stop change what "Show me more"
+                // means: the stopped question became the tail, so re-sending the ANSWERED question
+                // no longer matched and the page was recorded as a new ask — a question nobody
+                // typed in the transcript, a stopped turn stripped of its failure row, and 42 of 66
+                // cards gone on the next reload. A turn nobody waited for is still a turn that
+                // happened, and it is still not the thing another page would be a page OF.
+                var lastAnsweredAskSequence = await db.SearchTurns
+                    .Where(t => t.ConversationId == conversation.Id
+                        && t.Role == "assistant"
+                        && t.Kind == Domain.Search.SearchTurnKind.Ask
+                        && t.Status == Domain.Search.SearchTurnStatus.Completed)
+                    .MaxAsync(t => (int?)t.Sequence, ct);
+
                 lastUserText = await db.SearchTurns
-                    .Where(t => t.ConversationId == conversation.Id && t.Role == "user")
+                    .Where(t => t.ConversationId == conversation.Id
+                        && t.Role == "user"
+                        && (lastAnsweredAskSequence == null || t.Sequence <= lastAnsweredAskSequence))
                     .OrderByDescending(t => t.Sequence)
                     .Select(t => t.Text)
                     .FirstOrDefaultAsync(ct);
@@ -386,10 +506,16 @@ public static class SearchEndpoints
                     .MaxAsync(t => (int?)t.Sequence, ct) is { } max ? max + 1 : 0;
             }
 
-            // Kind is DERIVED, never sent. A filter toggle, an infinite-scroll page and an
-            // impatient re-tap are indistinguishable from the client's side, and the old
-            // client-supplied flag is why a resumed transcript showed the same question five times.
-            var kind = Domain.Search.SearchTurnKind.Derive(lastUserText, message);
+            // Kind is EXPLICIT where the client named the answer it is extending, and DERIVED
+            // otherwise. A filter toggle, an infinite-scroll page and an impatient re-tap are
+            // indistinguishable from the client's side, and the old client-supplied *flag* is why a
+            // resumed transcript showed the same question five times — but `pageOf` is not that
+            // flag: it names a row, and the row is verified to be the caller's, completed, in this
+            // conversation, and answering exactly the question being re-sent. What is trusted is a
+            // fact the client can prove, not a claim about its own intent.
+            var kind = pageOfTurn is not null
+                ? Domain.Search.SearchTurnKind.Page
+                : Domain.Search.SearchTurnKind.Derive(lastUserText, message);
 
             // ── 5. The rows, before the stream ──────────────────────────────────────────────
             var now = DateTime.UtcNow;
@@ -772,16 +898,156 @@ public static class SearchEndpoints
     /// <c>undefined</c> and rendered a crash message for its own typo. Parsing here means the
     /// refusal is the handler's, in the house shape, and the UUID requirement is stated in
     /// <c>docs/ask-reel-turns.md</c> rather than discovered through a stack trace.</para>
+    ///
+    /// <para><b>And the body is bound BY HAND, for the same reason.</b> Making the ids strings only
+    /// moved the leak: the JSON binder is bypassed for a string, and a <c>clientTurnId</c> of any
+    /// other JSON type — a number, an object — still failed inside it and still returned five
+    /// kilobytes of <c>text/plain</c> <c>BadHttpRequestException</c> with this type's internal name
+    /// and no <c>code</c>. <see cref="BindAsync"/> reads the body as a <c>JsonDocument</c> and picks
+    /// each field out itself, so every malformed SHAPE lands on the same coded 400 the contract
+    /// documents instead of on a stack trace a type-confused client cannot act on.</para>
     /// </summary>
     /// <param name="Query">The question, 1–<see cref="AskRequestLimits.MaxQueryChars"/> characters trimmed.</param>
     /// <param name="ConversationId">The thread this belongs to, as a UUID string; null mints a new one. An unknown id is a 404, never a fork; an unparseable one is a 400.</param>
     /// <param name="ClientTurnId">The client's id for THIS exchange, as a UUID string — the idempotency key. Resent verbatim on a retry.</param>
     /// <param name="MediaTypes">An explicit UI filter, which outranks whatever the model infers from the prose. Every token must be one <see cref="AskMediaTypes"/> knows.</param>
+    /// <param name="PageOf">
+    /// The assistant turn this submission is another PAGE of, as a UUID string; null leaves the
+    /// decision to the server's own comparison. It exists because the comparison cannot always be
+    /// right: after a Stop, the conversation's last user turn is the stopped question, so "Show me
+    /// more" on the kept answer was recorded as a new ask. The client is rendering the answer it is
+    /// extending, so it knows; the server verifies rather than trusts.
+    /// </param>
+    /// <param name="Malformed">
+    /// Fields whose JSON type the contract does not allow, in the order the handler refuses them.
+    /// Populated by <see cref="BindAsync"/> and never by a client — the wire has no such field.
+    /// </param>
     public record AskRequest(
-        string Query,
+        string? Query,
         string? ConversationId,
         string? ClientTurnId,
-        List<string>? MediaTypes);
+        List<string?>? MediaTypes,
+        string? PageOf = null,
+        IReadOnlyList<string>? Malformed = null)
+    {
+        /// <summary>The malformed-field list, never null, in the order the handler refuses them.</summary>
+        public IReadOnlyList<string> Malformed { get; init; } = Malformed ?? [];
+
+        /// <summary>
+        /// The body, read as JSON and unpacked by hand.
+        ///
+        /// <para>Returns <c>null</c> only when the payload is not a JSON OBJECT at all — unparseable
+        /// bytes, a bare string, an array — which the handler answers as <c>body_invalid</c>. Every
+        /// other disagreement with the contract is carried on <see cref="Malformed"/> so the handler
+        /// can refuse it in the documented order, with the documented code.</para>
+        ///
+        /// <para>An absent field and a JSON <c>null</c> are the same thing here, deliberately: both
+        /// already have coded answers further down (<c>empty_query</c>,
+        /// <c>client_turn_id_required</c>, a fresh conversation), and collapsing them keeps those
+        /// answers reachable. A field of the WRONG TYPE is the new case, and it is the one that used
+        /// to escape the handler entirely.</para>
+        /// </summary>
+        public static async ValueTask<AskRequest?> BindAsync(HttpContext context)
+        {
+            System.Text.Json.JsonDocument document;
+            try
+            {
+                var parsed = await System.Text.Json.JsonDocument.ParseAsync(
+                    context.Request.Body, cancellationToken: context.RequestAborted);
+                document = parsed;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
+
+            using (document)
+            {
+                if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                {
+                    return null;
+                }
+
+                // Read in the order the handler refuses them, so the FIRST malformed field a client
+                // is told about is the first one it would have been told about anyway.
+                var malformed = new List<string>();
+                var query = StringField(document.RootElement, "query", malformed);
+                var clientTurnId = StringField(document.RootElement, "clientTurnId", malformed);
+                var conversationId = StringField(document.RootElement, "conversationId", malformed);
+                var pageOf = StringField(document.RootElement, "pageOf", malformed);
+                var mediaTypes = MediaTypesField(document.RootElement, malformed);
+
+                return new AskRequest(query, conversationId, clientTurnId, mediaTypes, pageOf, malformed);
+            }
+        }
+
+        /// <summary>The prose and the stable code for one malformed field.</summary>
+        public static (string Error, string Code) RefusalFor(string field) => field switch
+        {
+            "query" => ("That question wasn't text I could read — try typing it again.", "query_invalid"),
+            "conversationId" => ("That thread id isn't a valid id — start a new one.", "conversation_id_invalid"),
+            "clientTurnId" => (
+                "That request's turn id isn't a valid id — refresh the page and try again.",
+                "client_turn_id_invalid"),
+            "pageOf" => ("That answer id isn't a valid id — ask the question again instead.", "page_of_invalid"),
+            // Deliberately not AskMediaTypes.Refusal: that sentence names the offending TOKEN,
+            // and there is no token here — the container itself was the wrong shape.
+            "mediaTypes" => (
+                $"The filter list has to be a list. Use any of: {string.Join(", ", AskMediaTypes.Tokens)}.",
+                "media_type_invalid"),
+            _ => ("That request wasn't something I could read — refresh the page and try again.", "body_invalid"),
+        };
+
+        /// <summary>
+        /// One string field. Absent and <c>null</c> both answer null; anything that is not a JSON
+        /// string is recorded as malformed, in the order the handler refuses fields.
+        /// </summary>
+        private static string? StringField(
+            System.Text.Json.JsonElement root, string name, List<string> malformed)
+        {
+            if (!root.TryGetProperty(name, out var value)
+                || value.ValueKind == System.Text.Json.JsonValueKind.Null
+                || value.ValueKind == System.Text.Json.JsonValueKind.Undefined)
+            {
+                return null;
+            }
+
+            if (value.ValueKind != System.Text.Json.JsonValueKind.String)
+            {
+                malformed.Add(name);
+                return null;
+            }
+
+            return value.GetString();
+        }
+
+        /// <summary>
+        /// <c>mediaTypes</c>, which must be an array. Its ELEMENTS are not validated here — a
+        /// non-string element becomes a null entry and falls through to
+        /// <see cref="AskMediaTypes"/>'s own refusal, which is already coded and already names the
+        /// six tokens. Only the container's type is this method's business.
+        /// </summary>
+        private static List<string?>? MediaTypesField(
+            System.Text.Json.JsonElement root, List<string> malformed)
+        {
+            if (!root.TryGetProperty("mediaTypes", out var value)
+                || value.ValueKind == System.Text.Json.JsonValueKind.Null
+                || value.ValueKind == System.Text.Json.JsonValueKind.Undefined)
+            {
+                return null;
+            }
+
+            if (value.ValueKind != System.Text.Json.JsonValueKind.Array)
+            {
+                malformed.Add("mediaTypes");
+                return null;
+            }
+
+            return value.EnumerateArray()
+                .Select(e => e.ValueKind == System.Text.Json.JsonValueKind.String ? e.GetString() : null)
+                .ToList();
+        }
+    }
 
     /// <summary>How many prior turns the interpret prompt reads. The tail is what carries context.</summary>
     private const int AskHistoryTurns = 8;
