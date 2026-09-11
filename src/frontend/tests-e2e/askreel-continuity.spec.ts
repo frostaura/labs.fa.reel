@@ -382,6 +382,61 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
 });
 
 test.describe("Ask Reel — a stopped page leaves nothing under the bar in the grid", () => {
+  test("a page keeps paging alive and says what is on screen, not what the page added", async ({ page }) => {
+    // R1-03, faces one and two in one run. The old rule counted ids a page added to `order` that
+    // were not already in it — and a page's `done.results` is a subset of what already streamed as
+    // `candidate` frames, so on the reported turn that count was zero, the page's own sentence was
+    // thrown away and "Show me more" vanished after a page that had just added thirteen cards.
+    await boot(page);
+    await askAndAnswer(page);
+    await expect(page.getByTestId("askreel-footnote")).toHaveText("3 picks ranked for you, from 40 pulled.");
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    const delta = card("d4", "Delta Ridge", { blend: 0.7 });
+    const echo = card("e5", "Echo Point", { blend: 0.6 });
+    // Face two, and the one that broke: BOTH page cards arrive as candidates first, so every id in
+    // the `done` below is already in `order` and the id diff is zero.
+    await askPush(page, "candidate", delta);
+    await askPush(page, "candidate", echo);
+    await askPush(page, "done", {
+      results: [delta, echo],
+      reason: "2 picks ranked for you, from 65 pulled.",
+      kept: 2,
+    });
+    await askEnd(page);
+
+    await expect(gridNames(page)).toHaveCount(5);
+    // The footnote accounts for the GRID and names where the last of it came from. The page's own
+    // sentence alone would claim 2 of the 5; the first turn's would claim 3.
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("5 picks so far · last page: 2 picks ranked for you, from 65 pulled.");
+    // …and paging is still offered, because the server never said there was nothing left.
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+    await expect(page.getByText("That's everything on this thread")).toHaveCount(0);
+  });
+
+  test("a page the server returns nothing for ends paging and leaves the accounting alone", async ({ page }) => {
+    // Face three: the honest exhaustion, which is the only thing that may latch. `kept: 0` with no
+    // results is the server saying there is nothing left under this question — its `reason` is
+    // true of the page and false of the three cards above it, so the existing line stands.
+    await boot(page);
+    await askAndAnswer(page);
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await askPush(page, "done", { results: [], reason: "no fresh matches — try another angle", kept: 0 });
+    await askEnd(page);
+
+    await expect(gridNames(page)).toHaveCount(3);
+    await expect(page.getByTestId("askreel-more")).toHaveCount(0);
+    await expect(page.getByText("That's everything on this thread")).toBeVisible();
+    // The empty page's sentence never reaches the screen: it would describe a grid it is not about.
+    await expect(page.getByTestId("askreel-footnote")).toHaveText("3 picks ranked for you, from 40 pulled.");
+    // …and it is not the empty-answer card either. There are three perfectly good cards on screen.
+    await expect(page.getByTestId("semantic-empty")).toHaveCount(0);
+  });
+
   test("sub-floor cards from a stopped page go to the tray, and the state says unranked", async ({ page }) => {
     // R2's F3-02 MOVED. The account's bar is 6.0. Ranking and the floor run at `done`, which a
     // stopped page never reaches — so without this the 5.2 and the 4.9 sit in the recommended grid

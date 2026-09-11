@@ -305,3 +305,106 @@ describe("streamAskReel — the turn record", () => {
     expect((err as AskStreamError).code).toBeNull();
   });
 });
+
+/**
+ * R1-05 — the malformed-frame guard closed `year` and `tmdbId` and left `why`.
+ *
+ * The commit that added the guard named the right rule — "the grid renders both directly, so those
+ * are exactly the two the tolerant-on-purpose rule must not cover" — and then applied it to two of
+ * the three fields that meet it. `ResultCard` renders `{card.why}` raw, one line below the `year`
+ * it fixed, so `why: {t:1}` cleared validation and threw the identical "Objects are not valid as a
+ * React child" in the identical component. `isReranked` DID type-check `why`, so the
+ * `candidate-reranked` path was guarded and the `candidate` / `done` path was not.
+ *
+ * `outsideRequest` and `seen` are here for a different reason: they are not printed, they ROUTE.
+ * A truthy non-boolean `outsideRequest` silently moves a card out of the recommended grid into the
+ * "outside your request" fence, and `seen` decides whether a card gets quick actions or a pill. A
+ * wrong type there produces a wrong screen rather than a crash, which is the harder one to notice.
+ */
+describe("isCard — the fields the grid renders and routes on", () => {
+  it("rejects_an_object_why_on_a_candidate_and_inside_a_done", async () => {
+    // The exact frame R1-05 probed, and the one that reached render.
+    expect(await collect([frame("candidate", card(1, { why: { t: 1 } as unknown as string }))])).toEqual([]);
+    expect(await collect([
+      frame("done", { results: [{ ...card(1), why: { t: 1 } }], reason: "1 pick" }),
+    ])).toEqual([]);
+  });
+
+  it("rejects_a_bad_card_arriving_in_the_below_floor_tray", async () => {
+    // R2's note: the guard protects the frame, not the title — the same title came back inside
+    // `done` and rendered in the tray. The tray's cards go through the same `isCard`, so a `done`
+    // whose `belowFloor` carries one is refused whole rather than half-rendered.
+    expect(await collect([
+      frame("done", { results: [card(1)], reason: "1 pick", belowFloor: [{ ...card(2), why: { t: 1 } }] }),
+    ])).toEqual([]);
+  });
+
+  it("rejects_a_non_boolean_outsideRequest_or_seen", async () => {
+    // Fixture variation, one field at a time. A string "false" is the dangerous one: it is truthy,
+    // so the card would be fenced off under "Outside your request" by a value that says otherwise.
+    for (const bad of [{ outsideRequest: "false" }, { outsideRequest: 1 }, { seen: "yes" }, { seen: {} }]) {
+      expect(await collect([frame("candidate", { ...card(1), ...bad })])).toEqual([]);
+    }
+  });
+
+  it("stays_tolerant_of_absence_which_is_what_an_older_server_sends", async () => {
+    // The controls. None of the three is required: a null why (not reranked yet), an absent
+    // outsideRequest and an absent seen are every ordinary card on the wire today.
+    expect(await collect([frame("candidate", card(1, { why: null }))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1, { why: "Because it is tense." }))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1))])).toHaveLength(1);
+    expect(await collect([frame("candidate", card(1, { outsideRequest: true, seen: false }))])).toHaveLength(1);
+    // …and a field the client has never heard of still costs the card nothing.
+    expect(await collect([frame("candidate", { ...card(1), somethingNew: { a: 1 } })])).toHaveLength(1);
+  });
+});
+
+/**
+ * The two fields FX3 added to the wire, which nothing on the client read.
+ *
+ * `assistant-message.conflict` is the flag that says THIS reply was qualified before it was sent —
+ * the server rewrites the model's sentence when the question collides with a standing exclusion,
+ * and the flag is what lets the page mark the bubble and anchor the notice to it. It is always
+ * present as a key so the client has one shape to render.
+ *
+ * `conflict.excludedKeywords` is the other half of the collision: the excluded thing is not always
+ * a genre. "anime" and "musical" are avoid-keywords, and a turn asking for one carried an empty
+ * `excludedGenres` and nothing else the client could name.
+ */
+describe("the additive conflict fields", () => {
+  it("carries_the_conflict_flag_on_an_assistant_message", async () => {
+    // Fixture variation on the one field: qualified, not qualified, and an older server that
+    // sends no flag at all. The third must still deliver the reply — losing a bubble over a
+    // missing boolean would be the guard doing more damage than the bug.
+    expect(await collect([frame("assistant-message", { text: "Three that fit.", conflict: true })]))
+      .toEqual([{ event: "assistant-message", data: { text: "Three that fit.", conflict: true } }]);
+    expect(await collect([frame("assistant-message", { text: "Three that fit.", conflict: false })]))
+      .toEqual([{ event: "assistant-message", data: { text: "Three that fit.", conflict: false } }]);
+    expect(await collect([frame("assistant-message", { text: "Three that fit." })])).toHaveLength(1);
+    // A non-boolean flag is refused: it decides whether a "under your conditions" tag renders.
+    expect(await collect([frame("assistant-message", { text: "Three that fit.", conflict: "yes" })])).toEqual([]);
+  });
+
+  it("carries_excluded_keywords_beside_excluded_genres", async () => {
+    const full = {
+      message: "Your conditions permanently exclude comedy and anime.",
+      excludedGenres: ["comedy"],
+      excludedKeywords: ["anime"],
+      poolSize: 12,
+      catalogueSize: 40_000,
+    };
+    expect(await collect([frame("conflict", full)])).toEqual([{ event: "conflict", data: full }]);
+
+    // The keyword-only shape, which is the one that had nothing to show before: no genre collides.
+    const keywordOnly = { message: "Your conditions permanently exclude anime.", excludedGenres: [], excludedKeywords: ["anime"] };
+    expect(await collect([frame("conflict", keywordOnly)])).toEqual([{ event: "conflict", data: keywordOnly }]);
+  });
+
+  it("refuses_a_conflict_whose_term_lists_are_not_lists_of_strings", async () => {
+    // The lists are joined into a sentence the page prints, so an object among them reaches render
+    // as a React child — the same class of failure `why` had, one component over.
+    for (const bad of [{ excludedGenres: "comedy" }, { excludedKeywords: [{ t: 1 }] }, { excludedGenres: [3] }]) {
+      expect(await collect([frame("conflict", { message: "Excluded.", ...bad })])).toEqual([]);
+    }
+  });
+});

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
+import { AskStreamError, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type AssistantMessageData, type ConflictData, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
 
 /**
  * `resumed` is a fourth state, not a flavour of `done`: the transcript came back from the server
@@ -36,6 +36,15 @@ export type ErrorReason = "session" | "timeout" | "conversation" | "request" | n
 export interface ChatTurn {
   role: "user" | "assistant";
   text: string;
+  /**
+   * Assistant rows only: the server rewrote this sentence because the question collided with a
+   * standing exclusion. The reply is written before a single candidate exists, so an unqualified
+   * one promised "gritty 90s action picks" above seven post-2000 titles — the server qualifies it
+   * at the source and flags it here, which is what lets the page mark THIS bubble and anchor the
+   * full notice to it. Absent on a resumed transcript and on an older server: the stored row keeps
+   * the qualified text, which is the part that had to survive.
+   */
+  conflict?: boolean;
 }
 
 /**
@@ -242,6 +251,53 @@ export function floorHeldBack(belowFloorCount: number, droppedByFloor: number | 
 }
 
 /**
+ * What separates clauses in an accounting line. The server's own `AskReelReason.Separator`, so a
+ * client-composed clause sits in the same list as the server's without changing punctuation
+ * halfway through the sentence.
+ */
+const REASON_SEPARATOR = " · ";
+
+/**
+ * Has this page run out? The server's answer, not an id diff.
+ *
+ * The old rule counted how many of a page's ids were not already in `order` and latched
+ * `exhausted` on zero — but a page's `done.results` is always a subset of what already streamed as
+ * `candidate` frames, so that count was usually zero on a page that had just added thirteen cards
+ * (R1-03). It was not ALWAYS zero, and the difference was invisible: `candidate` early-returns on
+ * a title already in `byId`, which still holds every card of every earlier turn including its
+ * below-floor tray, so a page overlapping the previous tray reached `done` with genuinely new ids
+ * and behaved correctly. One gesture, opposite behaviour, decided by tray overlap.
+ *
+ * The server is the only party that can answer this: it derives the no-repeat set from its own
+ * rows, so a page it returns nothing for is a page with nothing left to return. `kept` is the
+ * server's own count of what it kept and equals `results.length` on every path that sends it;
+ * both are required to be empty, so a malformed frame fails towards "ask again" rather than
+ * towards a latch the user cannot undo.
+ */
+export function pageIsExhausted(data: Pick<DoneData, "results" | "kept">): boolean {
+  return data.results.length === 0 && (data.kept == null || data.kept <= 0);
+}
+
+/**
+ * The provenance line under the grid.
+ *
+ * The server's sentence describes ONE turn — "13 picks ranked for you, from 65 pulled". On an
+ * un-paged answer that is the whole truth and it is rendered verbatim. On a paged one it is true
+ * of the last page and false of the grid: R1-03 watched "24 picks ranked for you, from 60 pulled"
+ * sit under 37 cards, and the alternative (the newest page's sentence) would have claimed 13 of
+ * the same 37. Neither is the accumulated set, so the line says both — what is on screen, and
+ * where the last of it came from.
+ *
+ * A count of zero falls back to the sentence alone: "0 picks so far" is a claim about a screen
+ * with no grid on it, and the branch that renders this only fires when there are cards anyway.
+ */
+export function footnote(reason: string | null, shownCount: number, paged: boolean): string | null {
+  if (!reason) return null;
+  if (!paged || shownCount <= 0) return reason;
+  return `${shownCount} ${plural(shownCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+}
+
+/**
  * The floor, formatted for the tray label — always one decimal, always the same string.
  *
  * `toLocaleString(undefined, { maximumFractionDigits: 1 })` printed "6" in the tray while the
@@ -304,6 +360,63 @@ export function transcriptOf(rows: { role: string; text: string }[]): ChatTurn[]
     .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
 }
 
+/**
+ * The excluded terms a conflict is about — the account's excluded genres and its avoid-keywords,
+ * as one list for one sentence.
+ *
+ * They are two lists server-side and one fact to a reader: "your conditions rule out comedy and
+ * anime" does not care which list a term came from. A term can legitimately be in both (a genre
+ * the account excludes AND an avoid-keyword it lists), and naming it twice reads as a bug in the
+ * very place the product is explaining itself — so the merge is case-insensitively deduplicated,
+ * keeping the first spelling. Blanks are dropped: "rules out  and anime" is worse than saying less.
+ */
+export function excludedTerms(genres: string[] | undefined, keywords: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of [...(genres ?? []), ...(keywords ?? [])]) {
+    const term = raw.trim();
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+  }
+  return out;
+}
+
+/** "comedy" · "comedy and anime" · "comedy, anime and musical". A list a person can read. */
+export function listPhrase(items: string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * Whether "Show me more" may be offered at all — the question being, whose answer is on screen?
+ *
+ * A page EXTENDS an answer, so it only makes sense over one: a completed turn of this visit, or a
+ * thread the server handed back whole. Every other state fails for a reason of its own, and R1-04
+ * is what happens when none of them are checked. Get a 37-card answer, ask something new, press
+ * Stop before the first card lands: the previous answer is correctly held and dimmed, and the page
+ * control rendered underneath it with no idea the cards above it belonged to an earlier question.
+ * Pressing it replayed the STOPPED question, the dim came off, and 37 held cards silently stopped
+ * being "the previous answer" and became page one of a different one.
+ *
+ * So: `holdingPrevious` is disqualifying whatever the status — those cards are not this question's
+ * answer. `stopped` is disqualifying because an abandoned turn never reached `done`, which is where
+ * ranking and the quality floor run: extending an unranked, unfloored partial compounds it. `error`
+ * and `blocked` have their own controls ("Ask again", "Check again") saying what to do instead, and
+ * a page from either would be a second, contradictory offer beside them.
+ */
+export function canPage(
+  status: ChatStatus,
+  holdingPrevious: boolean,
+  exhausted: boolean,
+  cardCount: number,
+): boolean {
+  if (cardCount === 0 || exhausted || holdingPrevious) return false;
+  return status === "done" || status === "resumed";
+}
+
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
 export function lastUserQuery(turns: ChatTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -325,14 +438,28 @@ interface State {
   appending: boolean;
   /** The message to replay when paging. Keeps "more" on the same intent as the last real turn. */
   lastQuery: string;
-  /** Latches when a page adds nothing new, so the scroll sentinel stops asking. */
+  /**
+   * Latches when the SERVER returns a page with no cards at all, so the page control stops
+   * offering. Never inferred from an id diff — see {@link pageIsExhausted}.
+   */
   exhausted: boolean;
+  /**
+   * True once this answer has had at least one page appended to it. The footnote needs it: the
+   * server's sentence describes one turn, and on a paged answer that is not the grid.
+   */
+  paged: boolean;
   /**
    * The server's account of a collision between this question and the account's own exclusions —
    * "you asked for horror, and horror is excluded". Shown as a note beside the answer, never as an
    * error: the exclusion still holds and the turn still ran.
    */
   conflict: string | null;
+  /**
+   * The excluded terms behind {@link State.conflict}, genres and avoid-keywords merged. Kept as
+   * data so the notice can state them as a list rather than the page re-parsing the server's
+   * prose; empty when the server named none.
+   */
+  conflictTerms: string[];
   /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
   belowFloor: AskCard[];
   /**
@@ -382,11 +509,11 @@ export type ChatAction =
   | { type: "phase"; data: PhaseData }
   | { type: "conversation"; data: ConversationData }
   | { type: "resume"; payload: ConversationPayload }
-  | { type: "assistant"; data: { text: string } }
+  | { type: "assistant"; data: AssistantMessageData }
   | { type: "candidate"; data: AskCard }
   | { type: "scored"; data: { titleId: string; predictedRating: number | null } }
   | { type: "reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { type: "conflict"; message: string }
+  | { type: "conflict"; data: ConflictData }
   | { type: "done"; data: DoneData }
   | { type: "stop" }
   | { type: "reset" }
@@ -420,8 +547,8 @@ export function failureFor(err: unknown): ChatAction {
 
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
-  conversationId: null, appending: false, lastQuery: "", exhausted: false,
-  conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
+  conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
+  conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null,
 };
 
@@ -473,10 +600,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message }
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
-            reason: null, appending: false, lastQuery: action.message, exhausted: false,
+            reason: null, appending: false, lastQuery: action.message, exhausted: false, paged: false,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
-            conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
+            conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
             // `byId` / `order` deliberately NOT cleared — see `holdingPrevious`. They are replaced
             // by the first candidate of this turn, not by the act of asking.
             holdingPrevious: state.order.length > 0, arrived: 0,
@@ -486,7 +613,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       // A page, not a turn: no transcript entry, and the existing cards stay put. It is explicitly
       // NOT a hold — a page ADDS to what is on screen, so the first candidate must append rather
       // than replace the answer it is extending.
-      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, holdingPrevious: false, arrived: 0 };
+      //
+      // `holdingPrevious` is carried, never cleared. Clearing it unconditionally was R1-04's
+      // mechanism: a page started over a HELD answer dropped the dim and the seam, and the cards
+      // of an earlier question became page one of the stopped one without a word on screen.
+      // `canPage` now stops such a page being started at all; this is the backstop, and it fails
+      // the honest way — the previous answer stays labelled as previous.
+      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0 };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
       // page it adds no transcript entry (the user said it once; echoing their bubble on every
@@ -496,7 +629,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null,
-        reason: null, appending: false, exhausted: false,
+        reason: null, appending: false, exhausted: false, paged: false,
         belowFloor: [], droppedByFloor: null, errorReason: null,
         holdingPrevious: state.order.length > 0, arrived: 0,
       };
@@ -546,7 +679,10 @@ export function chatReducer(state: State, action: ChatAction): State {
       // stuttering the same answer into the transcript on every scroll.
       return state.appending
         ? state
-        : { ...state, turns: [...state.turns, { role: "assistant", text: action.data.text }] };
+        : {
+          ...state,
+          turns: [...state.turns, { role: "assistant", text: action.data.text, conflict: action.data.conflict }],
+        };
     case "candidate": {
       const c = action.data;
       // The swap. The previous answer stayed up while this turn was thinking; this is the first
@@ -572,7 +708,14 @@ export function chatReducer(state: State, action: ChatAction): State {
       return { ...state, byId: { ...state.byId, [action.data.titleId]: { ...e, fit: action.data.fit, why: action.data.why } } };
     }
     case "conflict":
-      return { ...state, conflict: action.message };
+      return {
+        ...state,
+        conflict: action.data.message,
+        // The terms travel beside the sentence rather than being parsed back out of it. Two
+        // server-side lists, one fact for the reader — and the keyword half is the one a turn
+        // colliding with an avoid-keyword ("anime", "musical") had no way to name at all.
+        conflictTerms: excludedTerms(action.data.excludedGenres, action.data.excludedKeywords),
+      };
     case "done": {
       // A caught server exception arrives as `done` with no results. Treat it as the failure it is
       // rather than as an empty answer, and keep whatever is already on screen — a page that blew
@@ -588,18 +731,26 @@ export function chatReducer(state: State, action: ChatAction): State {
       // derived from its own cards, so an uncapped list here can no longer grow a request.
       const shown = Array.from(new Set([...state.shown, ...newTmdb]));
       const incoming = action.data.results.map((c) => c.titleId);
-      // Appending keeps what is on screen and adds only genuinely new ids; a page that adds
-      // nothing latches `exhausted` so the scroll sentinel stops asking for more.
+      // Appending keeps what is on screen and adds only genuinely new ids. The de-duplication is
+      // bookkeeping and nothing else reads it: what it used to decide — whether the page's own
+      // sentence counted, and whether paging was over — is the SERVER's to say, because only the
+      // server knows what is left (see `pageIsExhausted` for the diff that used to decide both).
       const order = state.appending
         ? [...state.order, ...incoming.filter((id) => !state.order.includes(id))]
         : incoming;
-      const gained = order.length - state.order.length;
+      // A page the server returned nothing for: it is the end of this answer, and it has nothing
+      // to say ABOUT the answer. `AskReelReason.Empty` is true of the page and false of the grid
+      // above it, so the accounting that was already there stands.
+      const emptyPage = state.appending && pageIsExhausted(action.data);
       return {
         ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
         // The answer landed, so there is nothing left being held: `order` above is this turn's.
         holdingPrevious: false,
-        reason: state.appending && gained === 0 ? state.reason : action.data.reason,
-        exhausted: state.appending ? gained === 0 : false,
+        reason: emptyPage ? state.reason : action.data.reason,
+        exhausted: state.appending ? pageIsExhausted(action.data) : false,
+        // A page that added cards makes the answer a paged one, and it stays paged until the next
+        // question replaces it — the footnote needs to know the grid is more than one turn's work.
+        paged: state.appending ? state.paged || !emptyPage : false,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
@@ -773,7 +924,7 @@ export function useAskReelChat() {
         case "candidate": dispatch({ type: "candidate", data: ev.data }); break;
         case "candidate-scored": dispatch({ type: "scored", data: ev.data }); break;
         case "candidate-reranked": dispatch({ type: "reranked", data: ev.data }); break;
-        case "conflict": dispatch({ type: "conflict", message: ev.data.message }); break;
+        case "conflict": dispatch({ type: "conflict", data: ev.data }); break;
         case "done": dispatch({ type: "done", data: ev.data }); break;
         default: break;
       }
@@ -811,7 +962,10 @@ export function useAskReelChat() {
    */
   const loadMore = useCallback(() => {
     const s = stateRef.current;
-    if (s.status === "streaming" || s.exhausted || !s.lastQuery || s.order.length === 0) return;
+    // The authoritative guard, here rather than only in the render: this is what issues the
+    // request, and a page over a held or abandoned answer is a billed turn for a question the
+    // user never got an answer to (R1-04). See {@link canPage} for what each state means.
+    if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length) || !s.lastQuery) return;
     run(s.lastQuery, false, "more");
   }, [run]);
 
@@ -930,8 +1084,24 @@ export function useAskReelChat() {
   return {
     turns: state.turns, status: state.status, phase: state.phase, cards, outsideCards, reason: state.reason,
     send, resume, startNew, loadMore, reask, retryTurn, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+    /**
+     * Whether "Show me more" may be offered — the same rule {@link loadMore} enforces, so the
+     * control and the callback can never disagree about whose answer is on screen. False over a
+     * held previous answer, a stopped turn, a failure and a 409; see {@link canPage}.
+     */
+    pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length),
+    /**
+     * Whether this answer is more than one turn's work. Read only by the footnote, which has to
+     * say so: the server's sentence describes the turn that produced it, never the accumulation.
+     */
+    paged: state.paged,
     /** The server's note that this question collides with a standing exclusion; not an error. */
     conflict: state.conflict,
+    /**
+     * The terms that note is about — genres and avoid-keywords in one list, ready for
+     * {@link listPhrase}. Empty when the server named none, which is every message-only conflict.
+     */
+    conflictTerms: state.conflictTerms,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
     belowFloor,
     /**

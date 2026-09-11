@@ -85,8 +85,30 @@ export interface DoneData {
 export interface ConflictData {
   message: string;
   excludedGenres?: string[];
+  /**
+   * The other half of the collision: the excluded thing is not always a genre. "anime" and
+   * "musical" are avoid-keywords, and a turn asking for one carried an empty `excludedGenres` and
+   * nothing else the client could name. Absent on a server that predates the field.
+   */
+  excludedKeywords?: string[];
   poolSize?: number;
   catalogueSize?: number;
+}
+
+/**
+ * Reel's own sentence for this turn.
+ *
+ * `conflict` says the server REWROTE it before sending: the reply is written by a model that has
+ * seen no candidates, so a question colliding with a standing exclusion got "here are gritty 90s
+ * action picks" above seven post-2000 titles. The server qualifies the sentence at the source and
+ * flags it here, which is what lets the page mark that bubble and put the full notice under it
+ * rather than floating above the grid, detached from what it is about. Optional because an older
+ * server does not send it — and losing a reply over a missing boolean would be the guard doing
+ * more damage than the bug.
+ */
+export interface AssistantMessageData {
+  text: string;
+  conflict?: boolean;
 }
 
 /** The phrase the server uses for a caught exception. See `LiveSearchExpansionService`. */
@@ -121,7 +143,7 @@ export type AskEvent =
   | { event: "candidate"; data: AskCard }
   | { event: "candidate-scored"; data: { titleId: string; predictedRating: number | null } }
   | { event: "candidate-reranked"; data: { titleId: string; fit: number | null; why: string | null } }
-  | { event: "assistant-message"; data: { text: string } }
+  | { event: "assistant-message"; data: AssistantMessageData }
   | { event: "conflict"; data: ConflictData }
   | { event: "done"; data: DoneData };
 
@@ -314,6 +336,11 @@ function isNumberOrNull(v: unknown): boolean {
   return v == null || (typeof v === "number" && Number.isFinite(v));
 }
 
+/** A flag the client acts on, or nothing at all. Absent is a real answer; a truthy string is not. */
+function isBooleanOrAbsent(v: unknown): boolean {
+  return v == null || typeof v === "boolean";
+}
+
 export function isPhase(data: unknown): data is PhaseData {
   return (
     isRecord(data) &&
@@ -339,16 +366,30 @@ export function isConversation(data: unknown): data is ConversationData {
 }
 
 /**
- * Two classes of field, and the difference matters. Required: the ones the grid cannot render
- * without (`titleId`, `mediaType`, `name`). Type-checked but optional: the ones the grid renders
- * DIRECTLY as a value — `year` into a paragraph, `tmdbId` into the card's href. Absent is fine for
- * those (an older server, a title with no release year); the wrong TYPE is not, because
- * `{year: {oops: true}}` cleared this guard, reached `<p>{card.year}</p>` and threw "Objects are
- * not valid as a React child" three modules away from the frame that caused it. The error boundary
- * caught it, which is what a last resort is for — it is not the plan.
+ * Three classes of field, and the differences matter.
+ *
+ * **Required:** the ones the grid cannot render without — `titleId`, `mediaType`, `name`.
+ *
+ * **Type-checked but optional — RENDERED directly as a value:** `year` into a paragraph, `tmdbId`
+ * into the card's href, `why` into a paragraph and a `title` attribute. Absent is fine for all
+ * three (an older server, a title with no release year, a card the rerank has not reached); the
+ * wrong TYPE is not, because `{year: {oops: true}}` cleared this guard, reached `<p>{card.year}</p>`
+ * and threw "Objects are not valid as a React child" three modules away from the frame that caused
+ * it. `why` is the same field in the same component one line below, and it was left open until
+ * R1-05 probed it — `isReranked` type-checked it, so the `candidate-reranked` path was guarded and
+ * this one was not.
+ *
+ * **Type-checked but optional — ROUTING:** `outsideRequest` and `seen`. Neither is printed; each
+ * decides WHERE a card goes. A truthy non-boolean `outsideRequest` (a string `"false"`, say)
+ * silently moves a card out of the recommended grid into the fenced "outside your request"
+ * channel, and `seen` chooses between the quick actions and a "Seen" pill. A wrong type there
+ * produces a wrong screen rather than a crash, which is the harder failure to notice.
  *
  * Everything else stays tolerant on purpose: a server that adds a field, or omits one an older
  * client thought mandatory, must not cost the user a card.
+ *
+ * The tray gets this for free — `isDone` runs every `belowFloor` card through here too, so a
+ * malformed card cannot arrive by the side door the grid's own guard closed.
  */
 export function isCard(data: unknown): data is AskCard {
   return (
@@ -358,7 +399,10 @@ export function isCard(data: unknown): data is AskCard {
     (data.mediaType === "Movie" || data.mediaType === "Show") &&
     typeof data.name === "string" &&
     isNumberOrNull(data.year) &&
-    isNumberOrNull(data.tmdbId)
+    isNumberOrNull(data.tmdbId) &&
+    (data.why == null || typeof data.why === "string") &&
+    isBooleanOrAbsent(data.outsideRequest) &&
+    isBooleanOrAbsent(data.seen)
   );
 }
 
@@ -375,12 +419,27 @@ export function isReranked(data: unknown): data is { titleId: string; fit: numbe
   );
 }
 
-export function isAssistantMessage(data: unknown): data is { text: string } {
-  return isRecord(data) && typeof data.text === "string";
+export function isAssistantMessage(data: unknown): data is AssistantMessageData {
+  // `conflict` decides whether the reply renders an "under your conditions" tag, so a truthy
+  // string would badge an unqualified answer. Absent stays fine — see AssistantMessageData.
+  return isRecord(data) && typeof data.text === "string" && isBooleanOrAbsent(data.conflict);
+}
+
+/** A list of terms the page joins into a sentence, or nothing. Absent is every older server. */
+function isStringListOrAbsent(v: unknown): boolean {
+  return v == null || (Array.isArray(v) && v.every((x) => typeof x === "string"));
 }
 
 export function isConflict(data: unknown): data is ConflictData {
-  return isRecord(data) && typeof data.message === "string" && data.message.length > 0;
+  return (
+    isRecord(data) &&
+    typeof data.message === "string" &&
+    data.message.length > 0 &&
+    // Both lists are joined into a sentence the page prints, so a non-string among them reaches
+    // render as a React child — `why`'s failure, one component over.
+    isStringListOrAbsent(data.excludedGenres) &&
+    isStringListOrAbsent(data.excludedKeywords)
+  );
 }
 
 export function isDone(data: unknown): data is DoneData {
