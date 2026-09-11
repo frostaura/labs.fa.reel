@@ -8,9 +8,12 @@ import ScoreBadges from "../components/rec/ScoreBadges";
 import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
-import { useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery } from "../store/api";
+import {
+  useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
+} from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
+import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
@@ -224,8 +227,32 @@ function AskReel() {
   // "No matches" on a turn that had returned eight perfectly good shows: the server had never been
   // told the user wanted movies, so it had no chance to go and find any. It is now sent upstream
   // and the server narrows discovery, so what arrives already matches.
-  const removedSet = new Set(useSelector(selectRemovedKeys));
+  // Read as the array the store holds, not as a set built in the render: the same reference across
+  // renders is what lets the save watcher below be a derivation rather than an effect.
+  const removedKeys = useSelector(selectRemovedKeys);
+  const removedSet = new Set(removedKeys);
   const streaming = status === "streaming";
+
+  /**
+   * F4-09. Saving a card takes it out of the answer instantly and said nothing at all: the grid
+   * went 10 → 9, the live region announced a COUNT ("9 picks ready"), and a full-text scan for
+   * anything matching /[Ss]aved/ came back null. A one-tap control with a destructive-looking
+   * effect and no acknowledgement is indistinguishable from a bug, and there was no way back
+   * short of finding the title again on /saved.
+   *
+   * Raised on the tap and confirmed by the CONSEQUENCE rather than by the click: `saveForLater`
+   * dispatches `titleRemoved` only once the server has accepted it, so a card that is in the
+   * removed set is one that really did go. A toast fired optimistically would offer an undo for
+   * something that had not happened.
+   *
+   * A derivation, not an effect — the toast is on screen exactly while the card it names is gone
+   * and the user has not dismissed it, which is a fact about the current render and not a thing
+   * to synchronise. `unsaveForLater` dispatches `titleRestored`, so the undo puts the card back
+   * in the grid by the same route the save took it out.
+   */
+  const [savePending, setSavePending] = useState<AskCard | null>(null);
+  const [unsave] = useUnsaveForLaterMutation();
+  const justSaved = savePending && removedKeys.includes(savePending.titleId) ? savePending : null;
 
   // F6-02. The page never moved: `scrollY` stayed at 0 for a whole 19.4-second turn, so a long
   // question filled the viewport and the banner, the narration, the progress bar and every card
@@ -491,7 +518,12 @@ function AskReel() {
           answer to a question you have not asked this visit. Dated, so the answer's age is on
           screen rather than inferred from the cards. `removed` rides with it because a card that
           silently disappears between two views of the same answer is indistinguishable from a bug
-          — it went because the account has since watched or rated it, and saying so is cheap.
+          — it went because the account has since acted on it, and saying so is cheap. F4-10: the
+          note named two of the five interactions that cause this ("watched or rated") and the one
+          that actually fired was the third, so a user who had pressed Save was told they had
+          watched something they had not. The three a person does deliberately are named; the
+          other two (dropped, not-interested) take the card away on the spot and need no
+          explanation a reload later.
 
           The date comes from `lastCardsAt`, which is when the thread last stored CARDS — falling
           back to `lastTurnAt`, which is the only stamp a transcript-only thread has. Older servers
@@ -521,7 +553,7 @@ function AskReel() {
               {/* `’` and not `&apos;`: every other sentence on this page uses the typographic
                   apostrophe, and the escape rendered a straight quote in the middle of a paragraph
                   whose neighbours are curly. */}
-              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched or rated {removed === 1 ? "it" : "them"}.
+              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched, rated or saved {removed === 1 ? "it" : "them"}.
             </p>
           )}
         </div>
@@ -773,7 +805,7 @@ function AskReel() {
             data-testid="semantic-results"
           >
             {visible.map((card) => (
-              <ResultCard key={card.titleId} card={card} />
+              <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
             ))}
             {Array.from({ length: pendingSlots }, (_, i) => (
               <CardSkeleton key={`slot-${i}`} />
@@ -795,7 +827,7 @@ function AskReel() {
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
                 {outsideVisible.map((card) => (
-                  <ResultCard key={card.titleId} card={card} />
+                  <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
                 ))}
               </div>
             </div>
@@ -831,7 +863,7 @@ function AskReel() {
               {belowFloorVisible.length > 0 && (
                 <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
                   {belowFloorVisible.map((card) => (
-                    <ResultCard key={card.titleId} card={card} />
+                    <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
                   ))}
                 </div>
               )}
@@ -900,6 +932,21 @@ function AskReel() {
         <p className="fa-caption text-fa-warning text-center" role="alert" data-testid="askreel-mic-error">
           {speech.error}
         </p>
+      )}
+
+      {justSaved && (
+        <UndoToast
+          id={justSaved.titleId}
+          testId="askreel-save-toast"
+          message={`Saved “${justSaved.name}” — it’s on your Saved list.`}
+          onUndo={() => {
+            if (justSaved.tmdbId != null) {
+              unsave({ titleId: justSaved.titleId, mediaType: justSaved.mediaType.toLowerCase(), tmdbId: justSaved.tmdbId });
+            }
+            setSavePending(null);
+          }}
+          onExpire={() => setSavePending(null)}
+        />
       )}
 
       {/* Composer.
@@ -1068,7 +1115,7 @@ function ConflictNotice({ message, terms }: { message: string; terms: string[] }
  * One Ask Reel result card — identical for clean picks and the outside-request channel (the only
  * difference between the two is WHERE they render and what their server-written `why` says).
  */
-function ResultCard({ card }: { card: AskCard }) {
+function ResultCard({ card, onSaveTapped }: { card: AskCard; onSaveTapped: (card: AskCard) => void }) {
   const location = useLocation();
   return (
     <Link
@@ -1098,12 +1145,21 @@ function ResultCard({ card }: { card: AskCard }) {
             Seen
           </span>
         ) : (
-          <CardQuickActions
-            titleId={card.titleId}
-            mediaType={card.mediaType}
-            tmdbId={card.tmdbId}
-            name={card.name}
-          />
+          /* The save tap, observed rather than owned. `CardQuickActions` belongs to the rec
+             surfaces and fires the same three actions everywhere; only Ask Reel needs to know
+             that a save happened HERE, because only here does the card vanish out of an answer
+             the page is still explaining in a footnote. `display: contents` so the wrapper adds
+             no box — the overlay stays positioned against the card, not against this span. */
+          <span style={{ display: "contents" }} onClickCapture={(e) => {
+            if ((e.target as Element).closest?.('[data-testid="quick-save"]')) onSaveTapped(card);
+          }}>
+            <CardQuickActions
+              titleId={card.titleId}
+              mediaType={card.mediaType}
+              tmdbId={card.tmdbId}
+              name={card.name}
+            />
+          </span>
         )}
       </div>
       <p className="mt-2 fa-body text-fa-frost-bright truncate" title={card.name}>{card.name}</p>

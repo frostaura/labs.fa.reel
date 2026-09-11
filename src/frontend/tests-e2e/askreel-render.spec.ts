@@ -364,6 +364,106 @@ test.describe("the resume seam", () => {
   });
 });
 
+test.describe("saving a card out of an answer", () => {
+  const SAVED = {
+    titleId: "00000000-0000-0000-0000-0000000000aa",
+    mediaType: "Movie", tmdbId: 7011, name: "Alpha Creek", year: 2021,
+    posterPath: null, genres: ["thriller"], similarity: 0.5, predictedRating: 7.4,
+    why: "Because.", seen: false,
+  };
+  const KEPT = { ...SAVED, titleId: "00000000-0000-0000-0000-0000000000bb", tmdbId: 7012, name: "Border Town" };
+
+  /** Counts the save and unsave calls, so "the undo actually un-saved" is observable. */
+  async function bootWithAnswer(page: Page) {
+    const calls: string[] = [];
+    await page.route(
+      (u) => u.pathname.endsWith("/reactions/save_for_later"),
+      (route) => {
+        // POST saves, DELETE un-saves — the same route, which is exactly why the method is what
+        // gets recorded.
+        calls.push(route.request().method());
+        return route.fulfill({ status: 204, body: "" });
+      },
+    );
+    const server = conversationServer();
+    server.resume = {
+      id: CONVERSATION, title: "a tense heist",
+      lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+      turns: [
+        { sequence: 0, role: "user", text: "a tense heist", kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+      ],
+      cards: [SAVED, KEPT],
+      reason: "2 picks ranked for you, from 40 pulled.",
+      removed: 0, lastQuery: "a tense heist", mediaTypes: [], shown: [],
+    };
+    await boot(page, { server });
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(2);
+    return calls;
+  }
+
+  test("a save says so, and the undo puts the card back", async ({ page }) => {
+    const calls = await bootWithAnswer(page);
+
+    // `dispatchEvent` rather than a tap: the card overlay is `opacity-0` until hover and belongs
+    // to `CardQuickActions`, which is not this fixer's file. Whether that control is REACHABLE is
+    // its own question and its own owner's; what is under test here is what Ask Reel does once the
+    // save has landed.
+
+    // F4-09: the grid went 10 → 9 instantly with no toast, no snackbar and no undo anywhere —
+    // `document.body.innerText.match(/[Ss]aved…/)` came back null. The only acknowledgement was
+    // the live region changing from "10 picks ready" to "9 picks ready", which announces a count
+    // and never the save.
+    await page.getByTestId("semantic-results").locator("a").first()
+      .getByTestId("quick-save").dispatchEvent("click");
+
+    const toast = page.getByTestId("askreel-save-toast");
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText("Alpha Creek");
+    // The card really did go — the toast is raised by the CONSEQUENCE, not by the tap, so it can
+    // never offer an undo for a save the server refused.
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(1);
+    await expect.poll(() => calls).toEqual(["POST"]);
+
+    await toast.getByTestId("askreel-save-toast-undo").tap();
+    await expect(toast).toHaveCount(0);
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(2);
+    await expect.poll(() => calls).toEqual(["POST", "DELETE"]);
+  });
+
+  test("dismissing the toast keeps the save", async ({ page }) => {
+    // The probe: the same gesture, the opposite decision. Dismiss must mean "yes, I meant it" —
+    // a dismiss that quietly un-saved would be the undo firing on the wrong button.
+    const calls = await bootWithAnswer(page);
+    await page.getByTestId("semantic-results").locator("a").first()
+      .getByTestId("quick-save").dispatchEvent("click");
+    await expect(page.getByTestId("askreel-save-toast")).toBeVisible();
+
+    await page.getByTestId("askreel-save-toast-dismiss").tap();
+    await expect(page.getByTestId("askreel-save-toast")).toHaveCount(0);
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect(calls).toEqual(["POST"]);
+  });
+
+  test("dismissing a card is not announced as a save", async ({ page }) => {
+    // The second probe, one field different: the other one-tap control on the same overlay.
+    // "Not for me" removes the card through the identical `titleRemoved` route, so a watcher
+    // keyed on the removal alone would call it a save and offer to un-save it.
+    const calls = await bootWithAnswer(page);
+    await page.route(
+      (u) => u.pathname.endsWith("/reactions/not_interested"),
+      (route) => route.fulfill({ status: 204, body: "" }),
+    );
+    await page.getByTestId("semantic-results").locator("a").first()
+      .getByTestId("quick-not-interested").dispatchEvent("click");
+
+    await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(1);
+    await expect(page.getByTestId("askreel-save-toast")).toHaveCount(0);
+    expect(calls).toEqual([]);
+  });
+});
+
 test.describe("touch targets", () => {
   /**
    * Every Ask Reel control this fixer owns, at the reference phone width. Foreign components

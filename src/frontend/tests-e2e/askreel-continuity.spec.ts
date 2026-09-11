@@ -993,6 +993,10 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     // `removed` is the eligibility re-filter's count across BOTH stored lists. With the tray back
     // on screen the old wording — "2 picks are gone" beside a grid — read as a claim about the
     // grid, and a reader counting the grid to check it would be counting the wrong thing.
+    //
+    // F4-10 is the other half of the same sentence: the drop set is five interactions and the
+    // copy named two of them, neither of which had to be the one that fired. A finder SAVED a
+    // card and was told on the next load that they had watched or rated it.
     await boot(page, {
       resume: "stored",
       storedId: CONVERSATION,
@@ -1000,7 +1004,7 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     });
 
     await expect(page.getByTestId("askreel-removed")).toHaveText(
-      "2 picks are gone from this answer — you’ve since watched or rated them.",
+      "2 picks are gone from this answer — you’ve since watched, rated or saved them.",
     );
     // Both lists are on screen, which is the reason the note cannot name just one of them.
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
@@ -1018,7 +1022,7 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     });
 
     await expect(page.getByTestId("askreel-removed")).toHaveText(
-      "1 pick is gone from this answer — you’ve since watched or rated it.",
+      "1 pick is gone from this answer — you’ve since watched, rated or saved it.",
     );
   });
 });
