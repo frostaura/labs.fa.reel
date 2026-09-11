@@ -402,8 +402,45 @@ test.describe("Ask Reel — threads are a thing you can have more than one of", 
     await expect(page.getByTestId("askreel-transcript")).toBeEmpty();
     // The presets are the cold start, and they are the thing that proves this is one.
     await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
-    // The id goes with it, or a reload would resurrect the thread the user just left.
-    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBeNull();
+    // SB-02: the id is REPLACED by the fresh marker, not removed. A removed key is what a browser
+    // that has never asked anything looks like, and that is answered with `/conversations/latest`
+    // — the account's newest thread, which after a `+ New` is the one just left.
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe("new");
+  });
+
+  test("+ New survives a reload, and the reload asks for no conversation at all", async ({ page }) => {
+    // SB-02, the gesture the smoke actually performed: `+ New`, then refresh. The page came back
+    // inside the thread the user had just finished with, via a route whose own doc-comment says it
+    // is "only ever the answer for a browser that has never asked anything".
+    await boot(page);
+    await askAndAnswer(page);
+    await page.getByTestId("askreel-new").click();
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+
+    // Both resume routes are live and would answer with the thread that was just left — the id
+    // route because `boot` armed it below, and `/latest` because the account has a newest thread.
+    // A correct client asks for neither.
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, RESUME_PAYLOAD);
+    await mockJson(page, "**/api/search/conversations/latest", RESUME_PAYLOAD);
+    const resumeCalls: string[] = [];
+    page.on("request", (r) => {
+      if (/\/api\/search\/conversations\/[^?]/.test(r.url())) resumeCalls.push(r.url());
+    });
+
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-preset")).toHaveCount(4);
+    await expect(gridNames(page)).toHaveCount(0);
+    await expect(page.getByTestId("askreel-transcript")).toBeEmpty();
+    expect(resumeCalls).toEqual([]);
+    // The marker is still there after the reload — a refresh is not a question, so nothing has
+    // replaced it yet.
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe("new");
+
+    // …and the first `conversation` frame of the next question does replace it, so the thread this
+    // visit starts is remembered on the ordinary terms.
+    await askAndAnswer(page);
+    expect(await page.evaluate(() => localStorage.getItem("reel.ask.conversationId"))).toBe(CONVERSATION);
   });
 
   test("Recent lists the account's threads and deleting one removes it", async ({ page }) => {

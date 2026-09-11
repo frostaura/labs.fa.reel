@@ -69,15 +69,31 @@ export function askRequest(
 }
 
 /**
- * Which conversation a cold /search should resume.
+ * What this tab stores instead of an id when the user has explicitly finished with a thread.
  *
- * This tab's own remembered id, and `/conversations/latest` only when there is nothing remembered
- * at all. `/latest` is the account's newest thread, not this tab's: with two tabs open, or a phone
- * and a laptop, reloading tab A dropped the reader into tab B's conversation and the thread they
- * were reading was gone from the UI. Preferring the stored id is the whole of that fix, and it is
- * why `latest` is deprecated rather than merely unused.
+ * "I pressed `+ New`" and "I have never asked anything here" are different facts, and until SB-02
+ * they were the same absent key: `+ New` cleared the id, the reload fell through to
+ * `/conversations/latest`, and the account's newest thread — the one just left — came straight
+ * back. Not a guid, so it can never collide with a real id and can never be sent as one.
+ */
+export const FRESH_CONVERSATION = "new";
+
+/** {@link resumeTarget}'s answer when nothing should be fetched at all. */
+export const NO_RESUME = "none";
+
+/**
+ * Which conversation a cold /search should resume — and whether it should resume one.
+ *
+ * Three states, not two. This tab's own remembered id; nothing at all after an explicit `+ New`;
+ * and `/conversations/latest` only when there is nothing remembered whatsoever. `/latest` is the
+ * account's newest thread, not this tab's: with two tabs open, or a phone and a laptop, reloading
+ * tab A dropped the reader into tab B's conversation and the thread they were reading was gone
+ * from the UI. Preferring the stored id is the whole of that fix, and it is why `latest` is
+ * deprecated rather than merely unused — SB-02 was ordinary use reaching it anyway, because a
+ * cleared key and a never-set one were indistinguishable.
  */
 export function resumeTarget(storedId: string | null): string {
+  if (storedId === FRESH_CONVERSATION) return NO_RESUME;
   return storedId && storedId.length > 0 ? storedId : "latest";
 }
 
@@ -1089,15 +1105,20 @@ export function useAskReelChat() {
   }, []);
 
   /**
-   * Forget this thread and start over — what `+ New` does. The stored id goes with it, so a reload
-   * lands on a cold start rather than resurrecting the conversation the user just left.
+   * Forget this thread and start over — what `+ New` does.
+   *
+   * The stored id is REPLACED rather than removed, by {@link FRESH_CONVERSATION}: clearing it left
+   * this tab looking like a browser that had never asked anything, so the reload resumed
+   * `/conversations/latest` and put the user back in the thread they had just left (SB-02). The
+   * marker lives until the first `conversation` frame of the next question overwrites it with the
+   * real id.
    */
   const startNew = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
     turnIdRef.current = null;
     clearWatchdog();
-    storeConversationId(null);
+    storeConversationId(FRESH_CONVERSATION);
     dispatch({ type: "reset" });
   }, [clearWatchdog]);
 

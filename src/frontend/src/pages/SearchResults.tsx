@@ -17,7 +17,7 @@ import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import {
   floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor, nextBootstrap,
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
-  useAskReelChat,
+  useAskReelChat, FRESH_CONVERSATION, NO_RESUME,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -144,8 +144,12 @@ function AskReel() {
     if (action === "resume") setShouldResume(true);
   }, [seed, seedTurnId, send, navigate]);
 
-  const { data: resumed, error: resumeError } = useGetConversationQuery(resumeTarget(threadId), {
-    skip: !shouldResume,
+  // Three answers, and one of them is "do not ask": a tab that pressed `+ New` stored a marker
+  // rather than clearing its id, so the reload lands on the cold start instead of falling through
+  // to `/conversations/latest` and resurrecting the thread the user had just left (SB-02).
+  const resumeFrom = resumeTarget(threadId);
+  const { data: resumed, error: resumeError } = useGetConversationQuery(resumeFrom, {
+    skip: !shouldResume || resumeFrom === NO_RESUME,
   });
 
   useEffect(() => {
@@ -227,6 +231,22 @@ function AskReel() {
     reask();
   };
 
+  /**
+   * `+ New`, and what a deleted current thread falls back to.
+   *
+   * Both halves of the fresh state move together: the hook stores the {@link FRESH_CONVERSATION}
+   * marker so a RELOAD lands on the cold start, and this visit's own resume state is cleared so a
+   * later re-render cannot key the resume query back to the thread just left. Clearing the stored
+   * id alone was SB-02 — it made a tab that had asked plenty look like one that never had, and
+   * `/conversations/latest` handed the thread straight back.
+   */
+  const beginFreshThread = () => {
+    startNew();
+    setDraft("");
+    setThreadId(FRESH_CONVERSATION);
+    setShouldResume(false);
+  };
+
   const submit = (text: string) => {
     if (!text.trim()) return;
     setDraft("");
@@ -280,10 +300,7 @@ function AskReel() {
             <button
               type="button"
               data-testid="askreel-new"
-              onClick={() => {
-                startNew();
-                setDraft("");
-              }}
+              onClick={beginFreshThread}
               disabled={streaming}
               className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 transition-colors"
             >
@@ -301,7 +318,7 @@ function AskReel() {
                 setThreadId(id);
                 setShouldResume(true);
               }}
-              onCurrentDeleted={startNew}
+              onCurrentDeleted={beginFreshThread}
             />
           </div>
         </div>

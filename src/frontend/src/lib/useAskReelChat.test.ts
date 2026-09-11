@@ -10,6 +10,8 @@ import {
   lastUserQuery,
   mediaFilterFor,
   CONVERSATION_ID_KEY,
+  FRESH_CONVERSATION,
+  NO_RESUME,
   canPage,
   floorHeldBack,
   excludedTerms,
@@ -1370,5 +1372,50 @@ describe("chatReducer — server order is the contract", () => {
     state = chatReducer(state, { type: "candidate", data: card(8, { blend: 0.9 }) });
     const phased = chatReducer(state, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } });
     expect(phased.order).toEqual(["t8", "t7"]);
+  });
+});
+
+/**
+ * SB-02 — `+ New` has to survive a reload.
+ *
+ * Clearing the remembered id made this tab look like a browser that had never asked anything, and
+ * `resumeTarget` answers that with `/conversations/latest` — the ACCOUNT's newest thread, which
+ * after a `+ New` is precisely the thread the user just left. The reload undid the gesture and
+ * reached a deprecated route to do it, whose own doc-comment says it is "only ever the answer for
+ * a browser that has never asked anything".
+ *
+ * So "I have finished with that thread" is a fact worth storing, distinct from "I have no idea
+ * which thread this is".
+ */
+describe("resumeTarget — three states, not two", () => {
+  it("resumes_nothing_at_all_after_a_fresh_start", () => {
+    expect(resumeTarget(FRESH_CONVERSATION)).toBe(NO_RESUME);
+  });
+
+  it("still_falls_back_to_latest_only_for_a_browser_that_has_never_asked", () => {
+    expect(resumeTarget(null)).toBe("latest");
+    expect(resumeTarget("")).toBe("latest");
+  });
+
+  it("prefers_this_tabs_own_thread_over_both", () => {
+    expect(resumeTarget("7f3a1b2c-0000-4000-8000-000000000001")).toBe("7f3a1b2c-0000-4000-8000-000000000001");
+  });
+
+  it("round_trips_the_marker_through_storage", () => {
+    // The marker is a stored VALUE, not an absent key — that is the whole of the fix, and it has
+    // to survive the same trip a real id does.
+    const store: Record<string, string> = {};
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => { store[k] = v; },
+      removeItem: (k: string) => { delete store[k]; },
+    });
+    storeConversationId(FRESH_CONVERSATION);
+    expect(store[CONVERSATION_ID_KEY]).toBe(FRESH_CONVERSATION);
+    expect(resumeTarget(readStoredConversationId())).toBe(NO_RESUME);
+
+    // …and the first `conversation` frame of the next question replaces it with the real thread.
+    storeConversationId("7f3a1b2c-0000-4000-8000-000000000009");
+    expect(resumeTarget(readStoredConversationId())).toBe("7f3a1b2c-0000-4000-8000-000000000009");
   });
 });
