@@ -60,6 +60,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<Domain.Search.SearchConversation> SearchConversations => Set<Domain.Search.SearchConversation>();
 
     public DbSet<Domain.Search.SearchTurn> SearchTurns => Set<Domain.Search.SearchTurn>();
+
+    public DbSet<Domain.Search.SearchTurnCard> SearchTurnCards => Set<Domain.Search.SearchTurnCard>();
+
     public DbSet<UserTitleReaction> UserTitleReactions => Set<UserTitleReaction>();
     public DbSet<ContentFilter> ContentFilters => Set<ContentFilter>();
 
@@ -255,8 +258,66 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(t => t.Embedding).HasColumnType("vector(1536)");
         });
 
-        modelBuilder.Entity<Domain.Search.SearchConversation>(e => e.HasIndex(c => new { c.AccountId, c.LastTurnAt }));
-        modelBuilder.Entity<Domain.Search.SearchTurn>(e => e.HasIndex(t => new { t.ConversationId, t.CreatedAt }));
+        modelBuilder.Entity<Domain.Search.SearchConversation>(e =>
+        {
+            e.HasIndex(c => new { c.AccountId, c.LastTurnAt });
+            e.Property(c => c.Title).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<Domain.Search.SearchTurn>(e =>
+        {
+            // The transcript read, oldest first.
+            e.HasIndex(t => new { t.ConversationId, t.CreatedAt });
+            // The ordering key, and the concurrency backstop: two turns racing for one conversation
+            // compute the same next sequence and one of them loses here rather than both landing.
+            e.HasIndex(t => new { t.ConversationId, t.Sequence }).IsUnique();
+            // The idempotency key. FILTERED, because ClientTurnId is null on every user row and on
+            // every row that predates the turn record — under a plain unique index the first two
+            // nulls in a conversation would collide, and under NULLS DISTINCT it would admit
+            // duplicates it is meant to stop. Same shape as UserTitleReaction's RevokedAt filter.
+            e.HasIndex(t => new { t.ConversationId, t.ClientTurnId })
+                .IsUnique()
+                .HasFilter("\"ClientTurnId\" IS NOT NULL");
+            e.HasIndex(t => t.AccountId);
+
+            e.Property(t => t.Role).HasMaxLength(16);
+            e.Property(t => t.Kind).HasMaxLength(16);
+            e.Property(t => t.Status).HasMaxLength(16);
+            e.Property(t => t.FailureCode).HasMaxLength(64);
+            e.Property(t => t.MediaFilter).HasMaxLength(64);
+            e.Property(t => t.Reason).HasMaxLength(1024);
+            e.Property(t => t.PromptVersion).HasMaxLength(32);
+            e.Property(t => t.ModelId).HasMaxLength(128);
+            e.Property(t => t.IntentJson).HasColumnType("jsonb");
+            e.Property(t => t.ConflictJson).HasColumnType("jsonb");
+            e.Property(t => t.StageTimingsJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<Domain.Search.SearchTurnCard>(e =>
+        {
+            // The replay read, in the order the user saw. Unique so a turn cannot store two cards
+            // at one position — the rank IS the position on screen.
+            e.HasIndex(c => new { c.TurnId, c.Rank }).IsUnique();
+            // One title appears at most once in a turn.
+            e.HasIndex(c => new { c.TurnId, c.TitleId }).IsUnique();
+            // The no-repeat set: SELECT DISTINCT "TmdbId" WHERE "ConversationId" = @c, on the hot
+            // path of every turn before discovery runs.
+            e.HasIndex(c => new { c.ConversationId, c.TmdbId });
+            e.HasIndex(c => c.AccountId);
+
+            // Mirrors ExposureEvent's precisions exactly, so a card and the exposure row that
+            // describes it can never round to two different numbers.
+            e.Property(c => c.PredictedRating).HasPrecision(4, 2);
+            e.Property(c => c.LlmFit).HasPrecision(4, 3);
+            e.Property(c => c.Blend).HasPrecision(6, 4);
+            e.Property(c => c.Why).HasMaxLength(1024);
+            e.Property(c => c.WhySource).HasMaxLength(32);
+
+            // A DATABASE-level default, not merely a CLR one. Every row written before the tray was
+            // stored is a pick, and the default is what makes that true of the existing table
+            // without a back-fill — including for any insert that does not name the column.
+            e.Property(c => c.BelowFloor).HasDefaultValue(false);
+        });
 
         // ── ML ─────────────────────────────────────────────────────────────────────────────
         modelBuilder.Entity<PersonAffinity>(e => e.HasIndex(a => new { a.AccountId, a.PersonId, a.Role }).IsUnique());
@@ -544,7 +605,30 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // legitimately null on the digest, Ask Reel and similar surfaces, and under the default
             // NULLS DISTINCT those rows would never collide — every RTK refetch inside one minute
             // would insert a fresh duplicate and the calibration denominator would inflate.
-            e.HasIndex(x => new { x.AccountId, x.TitleId, x.Surface, x.FeedSnapshotId, x.MinuteBucket })
+            //
+            // SourceTurnId is the LAST member, and it is what makes the key Ask-Reel-aware. Without
+            // it the key collapsed to (account, title, minute) on every Ask Reel row — FeedSnapshotId
+            // is null there by definition — so two turns in one minute that both recommended a title
+            // wrote ONE row, stamped with the first turn's id. Measured over a thirteen-turn session:
+            // eighteen picks got no exposure row at all, one turn got none of its seven, and the
+            // surviving rows pointed at the wrong turn. Both halves matter — the denominator of
+            // every accuracy number computed from this log was under-counting Ask Reel by whatever
+            // the repeat rate happened to be, and the attribution that did survive was false.
+            //
+            // Every feed surface is untouched by construction: SourceTurnId is null on all of them,
+            // NULLS NOT DISTINCT still makes those nulls collide, and the key they dedupe on is the
+            // same five columns it always was. Nothing is updated and nothing is back-filled — this
+            // changes what a FUTURE insert collides with, which is the only thing an append-only log
+            // permits.
+            e.HasIndex(x => new
+            {
+                x.AccountId,
+                x.TitleId,
+                x.Surface,
+                x.FeedSnapshotId,
+                x.MinuteBucket,
+                x.SourceTurnId,
+            })
                 .IsUnique()
                 .AreNullsDistinct(false);
 

@@ -101,6 +101,10 @@ export async function stubAskReel(page: Page): Promise<void> {
     const requests: unknown[] = [];
     const encoder = new TextEncoder();
     const realFetch = window.fetch.bind(window);
+    // The next N /ask calls answer with this status and code instead of a stream. Queued rather
+    // than latched, because the states worth testing are transitions: a 409 followed by the real
+    // answer is the whole of "wait, then check again".
+    const failures: { status: number; code: string }[] = [];
 
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
@@ -109,6 +113,15 @@ export async function stubAskReel(page: Page): Promise<void> {
         requests.push(JSON.parse((init?.body as string) ?? "{}"));
       } catch {
         requests.push(null);
+      }
+      const failure = failures.shift();
+      if (failure) {
+        // The house error shape — `{ error, code }` — because the client switches on `code` and a
+        // bare status would let a test pass against a client that only reads the number.
+        return new Response(JSON.stringify({ error: "…", code: failure.code }), {
+          status: failure.status,
+          headers: { "Content-Type": "application/json" },
+        });
       }
       const entry = { controller: null as unknown as ReadableStreamDefaultController<Uint8Array>, open: true };
       const stream = new ReadableStream<Uint8Array>({
@@ -128,9 +141,22 @@ export async function stubAskReel(page: Page): Promise<void> {
       count() {
         return streams.filter((s) => s.open).length;
       },
+      failNext(status: number, code: string) {
+        failures.push({ status, code });
+      },
       push(event: string, data: unknown) {
         const live = streams.filter((s) => s.open).at(-1);
-        live?.controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        // `id:` first on every frame, exactly as the server writes it. A parser that treats an
+        // unrecognised field line as data drops the whole frame, and a stub that omits the line
+        // would never catch that — which is how a client can pass every test and then see nothing
+        // at all against the real endpoint.
+        live?.controller.enqueue(
+          encoder.encode(`id: ${streams.length}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+        );
+      },
+      keepalive() {
+        const live = streams.filter((s) => s.open).at(-1);
+        live?.controller.enqueue(encoder.encode(":keepalive\n\n"));
       },
       end() {
         const live = streams.filter((s) => s.open).at(-1);
@@ -150,8 +176,27 @@ export async function stubAskReel(page: Page): Promise<void> {
 interface AskStub {
   count: () => number;
   push: (event: string, data: unknown) => void;
+  keepalive: () => void;
+  failNext: (status: number, code: string) => void;
   end: () => void;
   requests: unknown[];
+}
+
+/**
+ * Makes the next Ask Reel request answer with a status instead of a stream — a 409
+ * `turn_in_progress`, a 404 `conversation_not_found`, a 400. Queued, so a test can script "refused,
+ * then answered" and watch the page move between the two.
+ */
+export async function askFailNext(page: Page, status: number, code: string): Promise<void> {
+  await page.evaluate(
+    ([s, c]) => (window as unknown as { __ask: AskStub }).__ask.failNext(s as number, c as string),
+    [status, code] as const,
+  );
+}
+
+/** Emits a `:keepalive` comment frame — the thing a parser must skip without losing its place. */
+export async function askKeepalive(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.keepalive());
 }
 
 /** Emits one SSE frame on the most recent live Ask Reel stream opened by {@link stubAskReel}. */

@@ -102,6 +102,11 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
     /// same idempotency key are skipped. Returns the entries staged, so a caller that later needs
     /// to abandon them (a guarded save) can detach exactly those.
     /// </summary>
+    /// <param name="sourceTurnId">
+    /// The Ask Reel turn that served these cards, where one did. Trailing and optional because it
+    /// is meaningful on exactly one of the eight write sites: every other surface passes nothing
+    /// and its rows keep the null that honestly says "this surface does not have a turn".
+    /// </param>
     public async Task<IReadOnlyList<EntityEntry<ExposureEvent>>> Stage(
         Guid accountId,
         ExposureSurface surface,
@@ -109,7 +114,8 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
         Guid modelArtifactId,
         DateTime occurredAt,
         IReadOnlyList<ExposureCard> cards,
-        CancellationToken ct)
+        CancellationToken ct,
+        Guid? sourceTurnId = null)
     {
         if (cards.Count == 0)
         {
@@ -122,11 +128,20 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
         // The already-logged set for this exact key. Scoped by the caller's account explicitly as
         // well as by the global filter: this method is also reachable from a background job whose
         // context is unpinned, where the filter admits every tenant.
+        //
+        // SourceTurnId is in the predicate because it is in the index. It was in neither, and on
+        // Ask Reel — where FeedSnapshotId is null by definition — the key therefore collapsed to
+        // (account, title, minute): a second turn in the same minute that recommended a title the
+        // first turn had also recommended found this read already satisfied and staged nothing, so
+        // its picks never reached the log at all. Mirroring the index here is what keeps the cheap
+        // pre-filter and the structural guarantee saying the same thing; a pre-filter that is
+        // stricter than the index silently drops rows the database would have accepted.
         var alreadyLogged = (await db.ExposureEvents
                 .Where(e => e.AccountId == accountId
                     && e.Surface == surface
                     && e.FeedSnapshotId == feedSnapshotId
                     && e.MinuteBucket == minuteBucket
+                    && (sourceTurnId == null ? e.SourceTurnId == null : e.SourceTurnId == sourceTurnId)
                     && titleIds.Contains(e.TitleId))
                 .Select(e => e.TitleId)
                 .ToListAsync(ct))
@@ -177,6 +192,7 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
                 XrefConfidence = card is { XrefVerdict: not null, XrefConfidence: { } confidence }
                     ? Math.Round(confidence, 3, MidpointRounding.AwayFromZero)
                     : null,
+                SourceTurnId = sourceTurnId,
             }));
         }
 
@@ -193,6 +209,7 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
     /// 500. Staged entries are detached on the way out so the caller's context is left exactly as it
     /// was found.</para>
     /// </summary>
+    /// <inheritdoc cref="Stage" path="/param[@name='sourceTurnId']"/>
     public async Task<int> RecordAsync(
         Guid accountId,
         ExposureSurface surface,
@@ -200,12 +217,14 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
         Guid modelArtifactId,
         DateTime occurredAt,
         IReadOnlyList<ExposureCard> cards,
-        CancellationToken ct)
+        CancellationToken ct,
+        Guid? sourceTurnId = null)
     {
         IReadOnlyList<EntityEntry<ExposureEvent>> staged = [];
         try
         {
-            staged = await Stage(accountId, surface, feedSnapshotId, modelArtifactId, occurredAt, cards, ct);
+            staged = await Stage(
+                accountId, surface, feedSnapshotId, modelArtifactId, occurredAt, cards, ct, sourceTurnId);
             if (staged.Count == 0)
             {
                 return 0;

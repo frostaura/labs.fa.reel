@@ -22,6 +22,11 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// of it bills nothing.</para>
 ///
 /// <para>The money gate runs last by construction; see <see cref="MoneyGateLastOrderer"/>.</para>
+///
+/// <para><b>Updated for the turn record.</b> Every ask now carries a <c>clientTurnId</c> — it is
+/// the idempotency key and the endpoint refuses a request without one — and a malformed request is
+/// a 400 in the house error shape rather than a stream that opens only to say nothing happened.
+/// The properties this class pins are unchanged; the wire they are asserted over is not.</para>
 /// </summary>
 [Collection("postgres")]
 [TestCaseOrderer(MoneyGateLastOrderer.TypeName, MoneyGateLastOrderer.AssemblyName)]
@@ -83,17 +88,55 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
         var (accountId, client) = await SignInAsync("harness-empty");
         using (client)
         {
-            var stream = await AskAsync(client, new { query = "   " });
+            using var response = await client.PostAsJsonAsync(
+                "/api/search/ask", new { query = "   ", clientTurnId = Guid.NewGuid() });
 
-            // The endpoint answers — an empty ask degrades, it does not error.
-            var done = Assert.Single(stream.Frames, f => f.Event == "done");
-            Assert.Equal("empty query", done.Data.GetProperty("reason").GetString());
-            // …and it never opened a conversation, so nothing to emit one for.
-            Assert.DoesNotContain(stream.Frames, f => f.Event == "conversation");
+            // Refused as a request, before a header is written: nothing opened, nothing to parse.
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal("empty_query", payload.RootElement.GetProperty("code").GetString());
         }
 
         await using var db = ScopedContext(accountId);
         Assert.Equal(0, await db.SearchConversations.CountAsync());
+        Assert.Equal(0, await db.SearchTurns.CountAsync());
+        AssertNoOpenRouterSpend(accountId);
+    }
+
+    /// <summary>
+    /// A refusal is a REQUEST-level answer, not a terminal frame.
+    ///
+    /// <para>A finder reported the over-length refusal emitting a <c>done</c> of a different shape
+    /// from every other <c>done</c> — no <c>streamed</c>, no <c>kept</c>, no <c>droppedByFloor</c>,
+    /// no <c>belowFloor</c>, no <c>timingsMs</c>, and no <c>conversation</c> frame in front of it,
+    /// so the client got a terminal frame with no conversation id. That whole path is gone: the
+    /// turn record's lifecycle validates before a header is written and answers 400 with a stable
+    /// <c>code</c>, which is the shape the client already switches on for the other two refusals.
+    /// Pinned here so the divergent frame cannot come back by a side door.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_over_length_query_is_refused_as_a_request_and_writes_no_turn()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync("harness-too-long");
+        using (client)
+        {
+            using var response = await client.PostAsJsonAsync(
+                "/api/search/ask", new { query = new string('q', 1001), clientTurnId = Guid.NewGuid() });
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal("query_too_long", payload.RootElement.GetProperty("code").GetString());
+            // The prose is the half a person can act on, and it never claims something broke.
+            Assert.NotEmpty(payload.RootElement.GetProperty("error").GetString()!);
+        }
+
+        await using var db = ScopedContext(accountId);
         Assert.Equal(0, await db.SearchTurns.CountAsync());
         AssertNoOpenRouterSpend(accountId);
     }
@@ -118,7 +161,7 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
         var (_, client) = await SignInAsync("harness-sse");
         using (client)
         {
-            var stream = await AskAsync(client, new { query = "a tense heist with a clever ending" });
+            var stream = await AskAsync(client, new { query = "a tense heist with a clever ending", clientTurnId = Guid.NewGuid() });
 
             Assert.EndsWith("\n\n", stream.Raw, StringComparison.Ordinal);
             Assert.NotEmpty(stream.Frames);
@@ -138,9 +181,10 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
     // ── Tenancy ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Handing account B account A's conversation id must not resume A's conversation, must not
-    /// append to it, and must not 500 — the endpoint scopes the lookup by account, so B simply gets
-    /// a conversation of its own.
+    /// Handing account B account A's conversation id must not resume A's conversation and must not
+    /// append to it. Under the turn record it must not fork one for B either: the lookup is
+    /// account-scoped, so "not yours" and "not there" are the same 404, and B is left with nothing
+    /// — which is the honest answer and the one that cannot split a transcript in two.
     /// </summary>
     [Fact]
     public async Task Another_accounts_conversation_id_is_not_resumed()
@@ -156,31 +200,33 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
         Guid conversationA;
         using (clientA)
         {
-            var streamA = await AskAsync(clientA, new { query = "account A asks about slow-burn thrillers" });
+            var streamA = await AskAsync(clientA, new
+            {
+                query = "account A asks about slow-burn thrillers",
+                clientTurnId = Guid.NewGuid(),
+            });
             conversationA = Assert.Single(streamA.Frames, f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
         }
 
-        Guid conversationB;
         using (clientB)
         {
-            var streamB = await AskAsync(clientB, new
+            using var hijack = await clientB.PostAsJsonAsync("/api/search/ask", new
             {
                 query = "account B tries to hijack the transcript",
                 conversationId = conversationA,
+                clientTurnId = Guid.NewGuid(),
             });
-            conversationB = Assert.Single(streamB.Frames, f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
+            Assert.Equal(HttpStatusCode.NotFound, hijack.StatusCode);
         }
-
-        Assert.NotEqual(conversationA, conversationB);
 
         await using var dbA = ScopedContext(accountA);
         var turnsA = await dbA.SearchTurns.Where(t => t.ConversationId == conversationA).Select(t => t.Text).ToListAsync();
         Assert.DoesNotContain(turnsA, text => text.Contains("hijack", StringComparison.Ordinal));
 
         await using var dbB = ScopedContext(accountB);
-        // B's own conversation is B's, and B can see nothing of A's — the global query filter, not
+        // B's refusal created nothing, and B can see nothing of A's — the global query filter, not
         // the endpoint, is what makes the second assertion true.
-        Assert.Equal(accountB, await dbB.SearchConversations.Where(c => c.Id == conversationB).Select(c => c.AccountId).FirstAsync());
+        Assert.Equal(0, await dbB.SearchConversations.CountAsync());
         Assert.False(await dbB.SearchConversations.AnyAsync(c => c.Id == conversationA));
     }
 
@@ -198,7 +244,7 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
         var (_, client) = await SignInAsync("harness-latest");
         using (client)
         {
-            var ask = await AskAsync(client, new { query = question });
+            var ask = await AskAsync(client, new { query = question, clientTurnId = Guid.NewGuid() });
             var conversationId = Assert.Single(ask.Frames, f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
 
             using var response = await client.GetAsync("/api/search/conversations/latest");
@@ -214,9 +260,22 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
             // Oldest first, and the opening turn is the user's, verbatim.
             Assert.Equal("user", turns[0].GetProperty("role").GetString());
             Assert.Equal(question, turns[0].GetProperty("text").GetString());
-            // Exactly two fields on the wire — role and text. A client that started depending on a
-            // third would break the moment the projection changed.
-            Assert.All(turns, turn => Assert.Equal(2, turn.EnumerateObject().Count()));
+            Assert.Equal(0, turns[0].GetProperty("sequence").GetInt32());
+            // Seven fields, and the SET is pinned rather than the count: a client renders the
+            // transcript off role/text, orders and states it off kind/sequence/status, polls a
+            // still-running row through `id`, and tells a turn the user stopped from one that hit a
+            // snag through `failureCode`. Every row carries both of the last two — present-but-null
+            // on a turn that did not fail, so the client has one shape to read.
+            Assert.All(turns, turn => Assert.Equal(
+                ["failureCode", "id", "kind", "role", "sequence", "status", "text"],
+                turn.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)));
+
+            // The alias answers the same shape as /conversations/{id} — that is what makes it an
+            // alias rather than a second projection to keep in step.
+            foreach (var field in new[] { "cards", "reason", "removed", "lastQuery", "mediaTypes", "shown", "lastCardsAt" })
+            {
+                Assert.True(root.TryGetProperty(field, out _), $"the resume payload is missing {field}");
+            }
         }
     }
 
@@ -246,7 +305,7 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
         var (accountId, client) = await SignInAsync("harness-money-gate");
         using (client)
         {
-            await AskAsync(client, new { query = "surprise me with something clever" });
+            await AskAsync(client, new { query = "surprise me with something clever", clientTurnId = Guid.NewGuid() });
         }
 
         await using var db = fixture.CreateContext(new AccountContext());
@@ -332,7 +391,19 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
                 break;
             }
 
-            var match = Regex.Match(chunk, @"^event: (?<event>[a-z][a-z-]*)\ndata: (?<data>\{.*\})$", RegexOptions.Singleline);
+            // A keepalive is a comment frame and carries no event — a parser that choked on one
+            // would be asserting the opposite of what the keepalive is for.
+            if (chunk.StartsWith(':'))
+            {
+                continue;
+            }
+
+            var match = Regex.Match(
+                chunk,
+                // The id: line is optional and always precedes the event, exactly as /sse/pipeline
+                // writes it. It is never `id: 0` — that would reset a reconnecting client's cursor.
+                @"^(id: (?<id>[1-9]\d*)\n)?event: (?<event>[a-z][a-z-]*)\ndata: (?<data>\{.*\})$",
+                RegexOptions.Singleline);
             Assert.True(match.Success, $"Malformed SSE frame: {chunk}");
             // The payload is one line. System.Text.Json escapes newlines inside strings, so a raw
             // one here means two frames were run together by a missing blank line — which the

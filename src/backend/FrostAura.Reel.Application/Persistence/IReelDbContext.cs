@@ -41,6 +41,8 @@ public interface IReelDbContext
     DbSet<Domain.Search.SearchConversation> SearchConversations { get; }
     DbSet<Domain.Search.SearchTurn> SearchTurns { get; }
 
+    DbSet<Domain.Search.SearchTurnCard> SearchTurnCards { get; }
+
     DbSet<PersonAffinity> PersonAffinities { get; }
     DbSet<TrainingRun> TrainingRuns { get; }
     DbSet<ModelArtifact> ModelArtifacts { get; }

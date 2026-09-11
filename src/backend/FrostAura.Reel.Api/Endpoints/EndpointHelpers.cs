@@ -7,6 +7,34 @@ namespace FrostAura.Reel.Api.Endpoints;
 
 public static class EndpointHelpers
 {
+    /// <summary>
+    /// The house 403. Every tier gate answers through this rather than through
+    /// <c>Results.Forbid()</c>, and the difference is not stylistic.
+    ///
+    /// <para><b>Why <c>Results.Forbid()</c> cannot be used here.</b> It resolves to
+    /// <c>HttpContext.ForbidAsync()</c>, which asks the container for <c>IAuthenticationService</c>
+    /// and dispatches to the default forbid scheme. This app registers no ASP.NET Core
+    /// authentication handler at all — identity is the <c>reel_at</c> cookie, resolved by
+    /// <c>AccountResolutionMiddleware</c> — so that lookup throws
+    /// <c>InvalidOperationException: Unable to find the required 'IAuthenticationService' service</c>
+    /// and the request ends 500. Every founder-only route in this API did exactly that, and nothing
+    /// noticed for the obvious reason: the only account that exercises those routes is Founder
+    /// tier, so the deny branch was unreachable in practice. Pinned by
+    /// <c>IntegrationTests/TierGateTests.cs</c> and by the source guard in
+    /// <c>Tests/Harness/ForbidResultGuardTests.cs</c>.</para>
+    ///
+    /// <para>The shape is the house error envelope — <c>{ "error": "…" }</c>, as
+    /// <c>BillingEndpoints</c> returns for its 409 — written with the same
+    /// <c>Results.Json(…, statusCode:)</c> form, so a client parses one body shape for every
+    /// refusal.</para>
+    ///
+    /// <para>Adding an authentication scheme purely to make <c>Forbid()</c> work is deliberately
+    /// NOT the fix: it would introduce a second, competing identity stack alongside the cookie
+    /// middleware that is actually authoritative here.</para>
+    /// </summary>
+    internal static IResult Forbidden(string code = "forbidden") =>
+        Results.Json(new { error = code }, statusCode: StatusCodes.Status403Forbidden);
+
     /// <summary>401 guard for protected endpoint groups — the account scope must be pinned.</summary>
     public static RouteGroupBuilder RequireAccount(this RouteGroupBuilder group)
     {
@@ -30,11 +58,8 @@ public static class EndpointHelpers
     /// than trusting a claim, because tier lives on the row and is changed by billing without the
     /// session cookie being reissued.</para>
     ///
-    /// <para><b>Hazard, inherited deliberately.</b> <c>Results.Forbid()</c> is the house shape for
-    /// 403 here (eight existing sites use it), but this app registers no ASP.NET Core
-    /// authentication handler, so <c>ForbidAsync</c> has no scheme to dispatch to. Matching the
-    /// house is the right call for a contracts-only change; whoever first WIRES this filter onto a
-    /// route should verify the status code against the running app rather than assume 403.</para>
+    /// <para>The deny answer comes from <see cref="Forbidden"/>, not <c>Results.Forbid()</c> —
+    /// which threw here rather than answering 403. The reasoning is on that helper.</para>
     /// </summary>
     public static RouteGroupBuilder RequireTier(this RouteGroupBuilder group, params AccountTier[] tiers)
     {
@@ -49,7 +74,7 @@ public static class EndpointHelpers
 
             return tiers.Contains(account.Tier)
                 ? await next(context)
-                : Results.Forbid();
+                : Forbidden("tier not permitted");
         });
         return group;
     }

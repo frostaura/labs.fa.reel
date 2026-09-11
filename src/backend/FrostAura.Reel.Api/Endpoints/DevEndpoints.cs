@@ -300,7 +300,7 @@ public static class DevEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             var (queued, job) = await Application.Jobs.CatalogSeedScheduler.EnqueueAsync(db, DateTime.UtcNow, ct);
@@ -329,7 +329,7 @@ public static class DevEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             var report = await progress.RunAsync(extractor.Version, DateTime.UtcNow, ct);
@@ -452,7 +452,7 @@ public static class DevEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             // Exactly the two generations that exist. An unbounded int here would write rows under a
@@ -485,7 +485,7 @@ public static class DevEndpoints
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null || account.Tier != AccountTier.Founder)
             {
-                return Results.Forbid();
+                return EndpointHelpers.Forbidden("founder only");
             }
 
             return runId is { } requested
