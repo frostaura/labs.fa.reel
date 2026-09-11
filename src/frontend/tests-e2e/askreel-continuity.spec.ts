@@ -1192,3 +1192,71 @@ test.describe("Ask Reel — the live turn is on screen", () => {
     await expect(page.getByTestId("askreel-stopped")).toContainText("Stopped before any picks arrived");
   });
 });
+
+/**
+ * F6-03 — Home, then browser Back, reported as a dead end.
+ *
+ * The finder measured `location.pathname === "/home"` after Back from a settled answer, and read it
+ * as the header's home link pointing at `/` and the `/` → `/home` redirect consuming the history
+ * entry. Pinned here at the width where the browser's own back gesture is the primary one, through
+ * BOTH ways out of /search: the mobile tab bar and the header mark.
+ */
+test.describe("Ask Reel — Back from Home returns to the answer", () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  for (const route of ["tab bar", "header mark"] as const) {
+    test(`Back after leaving via the ${route} lands on /search with the same cards`, async ({ page }) => {
+      // Entered the way a phone enters: the app root first, which is the redirect under suspicion,
+      // then /search. If that redirect pushed rather than replaced, Back from /home re-redirects
+      // forward and the answer is unreachable by the gesture entirely.
+      await boot(page, { resume: "stored", storedId: CONVERSATION });
+      await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+      if (route === "tab bar") {
+        await page.getByTestId("mobile-tabbar").getByRole("link", { name: "Home" }).click();
+      } else {
+        await page.getByLabel("Reel home").click();
+      }
+      await expect(page).toHaveURL(/\/home$/);
+      // Wait for /search to genuinely UNMOUNT. The URL changes synchronously on pushState, so a
+      // goBack issued straight after `toHaveURL` lands inside the same React batch and the route
+      // never unmounts — and `history.back()` is itself asynchronous, so reading `pathname`
+      // immediately after it can still report the page being left. Both traps are the reason the
+      // original report is asserted here rather than in a console probe.
+      await expect(page.getByTestId("askreel-composer")).toHaveCount(0);
+
+      await page.goBack();
+      await expect(page).toHaveURL(/\/search$/);
+      await expect(gridNames(page)).toHaveText(STORED_ORDER);
+      await expect(page.getByTestId("askreel-transcript")).toContainText("a tense heist");
+      await expect(page.getByTestId("askreel-preset")).toHaveCount(0);
+    });
+  }
+
+  test("the app root is replaced, not pushed, so Back is never a redirect loop", async ({ page }) => {
+    // The reported mechanism, isolated. `/` renders the landing page, which bounces a signed-in
+    // visitor onward — and if that bounce consumed a history entry of its own, Back from /home
+    // would land on `/` and be redirected straight forward again, which is what "Back is inert"
+    // means. Entered the way a returning phone enters: the root first, then the answer.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await page.addInitScript(() => localStorage.setItem("reel.hasSession", "1"));
+
+    await page.goto("/");
+    await expect(page).toHaveURL(/\/home$/);
+    await page.goto("/search");
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    await page.getByLabel("Reel home").click();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("askreel-composer")).toHaveCount(0);
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    // One more step back: the entry before /search is the REPLACED root, so this reaches /home
+    // once and settles there rather than bouncing between `/` and `/home`.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/home$/);
+  });
+});
