@@ -108,7 +108,7 @@ repeat is another page of the last question.
 | --- | --- |
 | `GET /api/search/conversations?limit=20` | `[{ id, title, turnCount, lastTurnAt, lastCardsAt }]` |
 | `GET /api/search/conversations/{id}` | the resume payload below; `404` if it is not the caller's |
-| `GET /api/search/turns/{id}` | `{ status, reason, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`** |
+| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`** |
 | `DELETE /api/search/conversations/{id}` | `204`. Cards, turns, conversation. **Never exposures.** |
 | `GET /api/search/conversations/latest` | **deprecated** — the same payload for the newest conversation |
 
@@ -123,6 +123,12 @@ The resume payload:
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
   "reason":  "…",        // the newest replayed turn's reason, verbatim
+  "conflict": {          // the collision notice that turn emitted, or null — see below
+    "excludedGenres":   ["comedy"],
+    "excludedKeywords": ["anime"],
+    "minYear": 2000, "maxYear": null,
+    "message": "Your conditions permanently exclude comedy and anime, …"
+  },
   "removed": 0,          // stored cards the eligibility re-filter dropped, across BOTH lists
   "lastQuery": "…",      // the last user turn
   "mediaTypes": ["tv"],  // the filter that turn ran under, in request tokens
@@ -138,6 +144,25 @@ rather than off the column, so a cause can never outlive the failure it describe
 separates a turn the user stopped themselves (`client_aborted`) from one that hit a snag; without
 it, both render the same and the page either apologises for a deliberate stop or stays quiet about a
 real failure.
+
+`conflict` is the `conflict` frame that turn emitted, **stored on the turn** and handed back with
+it — `null` on a thread that had no collision, which is most of them. It restores the notice and the
+"under your conditions" pill, which were stream-only: reload a thread that asked for a 90s romantic
+comedy against standing exclusions on both genres and it came back as four post-2000 dramas under
+that question with nothing left on the page saying why. The cards are restored from rows and the
+reason line from a column; the explanation was the one part of the turn the server forgot.
+
+It is **stored, not recomputed**, for the same reason `reason` is: the account's conditions can
+change between the turn and the resume — that is the entire point of the Conditions screen the
+notice points at — and a notice re-derived from today's rules would describe an answer produced
+under yesterday's.
+
+`poolSize` and `catalogueSize` are on the live frame and deliberately **not** in the stored object:
+both count the catalogue at one instant and stop being true the moment the next title is ingested,
+so replaying them on a resume would state a stale number as a current one. `minYear` / `maxYear` are
+present only when the **year** is what collided — an account with a standing window has one on every
+turn, so storing them unconditionally would put a year chip on a screen whose collision was purely a
+genre.
 
 `lastCardsAt: null` means **transcript only** — a conversation that predates stored results. Render
 that as its own state; it is a different fact from a turn that honestly returned nothing.

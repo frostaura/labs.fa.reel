@@ -114,6 +114,16 @@ public sealed class LiveSearchExpansionService(
     /// </summary>
     private static readonly TimeSpan InterpretTtl = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// camelCase, because the stored notice is handed straight back on the read routes and has to
+    /// arrive spelled exactly as the live <c>conflict</c> frame spells it. The default serializer
+    /// writes the C# property names, and a row that said <c>ExcludedGenres</c> while the wire said
+    /// <c>excludedGenres</c> would give the client two shapes for one fact — which is the whole
+    /// class of defect this notice is being persisted to close.
+    /// </summary>
+    private static readonly System.Text.Json.JsonSerializerOptions ConflictJsonOptions =
+        new(System.Text.Json.JsonSerializerDefaults.Web);
+
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -174,6 +184,13 @@ public sealed class LiveSearchExpansionService(
     /// <param name="ModelArtifactId">The artifact behind the predictions on these cards.</param>
     /// <param name="ModelId">The chat model that produced the reply.</param>
     /// <param name="Cards">The answer, in the order it was returned.</param>
+    /// <param name="ConflictJson">
+    /// The <c>conflict</c> frame this turn emitted, serialised — or null where the turn had no
+    /// collision. It is here rather than derived on read because the notice is the whole account of
+    /// why the answer looks nothing like the question, and the account's conditions can change
+    /// between the turn and the resume: a notice re-derived from today's rules would describe an
+    /// answer produced under yesterday's. Same reasoning as <paramref name="Reason"/>.
+    /// </param>
     public sealed record TurnOutcome(
         string? AssistantText,
         string? Reason,
@@ -185,17 +202,26 @@ public sealed class LiveSearchExpansionService(
         string? IntentJson,
         Guid? ModelArtifactId,
         string? ModelId,
-        IReadOnlyList<TurnCard> Cards)
+        IReadOnlyList<TurnCard> Cards,
+        string? ConflictJson = null)
     {
         /// <summary>A turn that answered without cards — an empty query, a fallback, a filmography.</summary>
         public static TurnOutcome Answered(string? assistantText, string? reason, IReadOnlyList<TurnCard>? cards = null) =>
             new(assistantText, reason, Failed: false, FailureCode: null, Relaxation: null, FloorRelaxed: false,
                 DiscoveredCount: null, IntentJson: null, ModelArtifactId: null, ModelId: null, cards ?? []);
 
-        /// <summary>A turn that fell over. <paramref name="failureCode"/> is what the row records.</summary>
-        public static TurnOutcome Crashed(string? assistantText, string reason, string failureCode) =>
+        /// <summary>
+        /// A turn that fell over. <paramref name="failureCode"/> is what the row records.
+        ///
+        /// <para><paramref name="conflictJson"/> survives the crash for the same reason
+        /// <paramref name="assistantText"/> does: both went out on the wire before it, and a
+        /// transcript that shows the answer but not the notice explaining it is the half-record this
+        /// column exists to prevent.</para>
+        /// </summary>
+        public static TurnOutcome Crashed(
+            string? assistantText, string reason, string failureCode, string? conflictJson = null) =>
             new(assistantText, reason, Failed: true, failureCode, Relaxation: null, FloorRelaxed: false,
-                DiscoveredCount: null, IntentJson: null, ModelArtifactId: null, ModelId: null, []);
+                DiscoveredCount: null, IntentJson: null, ModelArtifactId: null, ModelId: null, [], conflictJson);
     }
 
     /// <summary>
@@ -270,8 +296,10 @@ public sealed class LiveSearchExpansionService(
 
         // Held outside the try so a crash after the reply still records what the user was told:
         // a failed turn that shows the question and the reply is a recoverable record; one that
-        // shows neither is an orphan.
+        // shows neither is an orphan. The collision notice is held on the same terms and for the
+        // same reason — it went out on the wire before the crash, so the transcript owes it.
         string? assistantText = null;
+        string? conflictJson = null;
 
         try
         {
@@ -381,6 +409,30 @@ public sealed class LiveSearchExpansionService(
             // whatever the user's own words ruled out (soft). The model's inferred exclusions are
             // deliberately absent — see AskReelNegations.
             var negations = AskReelNegations.For(standingRules, agentReply.Requested);
+
+            // The notice, as a row. Built HERE, from the same collision data the frame carries, and
+            // handed back for persistence so a resumed thread can restore it: the frame is
+            // stream-only, so reloading a turn that answered "a 90s romantic comedy" with four
+            // post-2000 dramas left a screen with nothing on it saying why. The cards come back from
+            // rows and the reason line from a column; this was the only part of the turn the server
+            // forgot. Pool and catalogue sizes are deliberately NOT stored — they describe the
+            // catalogue at one instant and would be a stale claim on every resume afterwards.
+            //
+            // The year bounds ride only when the YEAR is what collided. They are the account's own
+            // standing window and are always set on such an account, so storing them unconditionally
+            // would have the client render a year chip on a turn whose collision was purely a genre.
+            AskReelConflict? conflict = hasConflict
+                ? new AskReelConflict(
+                    collidingGenres,
+                    collidingKeywords,
+                    yearCollides ? standingRules.MinYear : null,
+                    yearCollides ? standingRules.MaxYear : null,
+                    AskReelStandingFilters.Message(
+                        collidingGenres, collidingKeywords, yearCollides, standingRules))
+                : null;
+            conflictJson = conflict is null
+                ? null
+                : System.Text.Json.JsonSerializer.Serialize(conflict, ConflictJsonOptions);
 
             // Qualified before it is emitted AND before it is persisted, so the transcript cannot
             // record a promise the same turn then broke.
@@ -534,18 +586,28 @@ public sealed class LiveSearchExpansionService(
             // the user was told least exactly when the explanation was worth most.
             if (hasConflict)
             {
+                // Every field the STORED notice carries, plus the two the live frame can say and a
+                // resume cannot. One object behind both, so the notice a user reads live and the
+                // notice they get back after a reload cannot disagree about what was excluded.
                 await emit("conflict", new
                 {
-                    excludedGenres = collidingGenres,
+                    excludedGenres = conflict!.ExcludedGenres,
                     // Additive: the excluded thing is not always a genre. "anime" and "musical" are
                     // avoid-keywords, and a turn asking for one got no notice at all until this.
-                    excludedKeywords = collidingKeywords,
+                    excludedKeywords = conflict.ExcludedKeywords,
+                    // Named explicitly rather than by member shorthand: the frame's field names are
+                    // the contract, and shorthand would spell them from the C# property, which is
+                    // PascalCase and only becomes camelCase through the serializer's options.
+                    minYear = conflict.MinYear,
+                    maxYear = conflict.MaxYear,
+                    // Only on the wire, never in the row: these describe the catalogue at one
+                    // instant, so a resume replaying them would state a size that stopped being true
+                    // the moment the next title was ingested.
                     poolSize = eligiblePoolSize,
                     catalogueSize = await db.Titles.CountAsync(ct),
                     // The only prose in the frame. Every number the client renders travels beside it
                     // as raw JSON so the copy is the client's to shape, not the server's to format.
-                    message = AskReelStandingFilters.Message(
-                        collidingGenres, collidingKeywords, yearCollides, standingRules),
+                    message = conflict.Message,
                 });
             }
 
@@ -979,7 +1041,8 @@ public sealed class LiveSearchExpansionService(
                 System.Text.Json.JsonSerializer.Serialize(intent),
                 artifactId,
                 agent.ModelId,
-                storedCards);
+                storedCards,
+                conflictJson);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1004,7 +1067,7 @@ public sealed class LiveSearchExpansionService(
                 timingsMs = debug ? timings.Snapshot() : null,
                 debug = (object?)null,
             });
-            return TurnOutcome.Crashed(assistantText, reason, ex.GetType().Name);
+            return TurnOutcome.Crashed(assistantText, reason, ex.GetType().Name, conflictJson);
         }
     }
 

@@ -582,6 +582,7 @@ public static class SearchEndpoints
                     {
                         status = turn.Status,
                         reason = (string?)null,
+                        conflict = (object?)null,
                         failureCode = (string?)null,
                         cards = Array.Empty<object>(),
                         // Present-but-empty, so a poller renders one shape on both status codes.
@@ -595,6 +596,9 @@ public static class SearchEndpoints
             {
                 status = turn.Status,
                 reason = replay.Reason,
+                // Beside `reason`, on the same terms: a client that reconnects to a turn gets the
+                // whole answer, and the notice is part of the answer.
+                conflict = replay.Conflict,
                 failureCode = turn.FailureCode,
                 cards = replay.Cards,
                 // A client that lost the stream lost the tray with it. Reconnecting has to restore
@@ -880,6 +884,12 @@ public static class SearchEndpoints
             // your bar" fence had silently emptied.
             belowFloor = replay.BelowFloor,
             reason = replay.Reason,
+            // The collision notice the answer was produced under, restored with the answer. Null on
+            // a thread that had no collision, which is most of them. Without it a resumed screen
+            // full of post-2000 dramas under the question "a 90s romantic comedy" had nothing left
+            // on it saying why — the continuity failure the founder complained about, applied to
+            // the explanation rather than to the cards.
+            conflict = replay.Conflict,
             removed = replay.Removed,
             lastQuery,
             mediaTypes = MediaTypeTokens(mediaFilter),
@@ -914,8 +924,14 @@ public static class SearchEndpoints
     /// that vanished out of the tray is as invisible as one that vanished out of the grid.
     /// </param>
     /// <param name="Reason">The reason line of the newest turn in the block, verbatim.</param>
+    /// <param name="Conflict">
+    /// The newest turn's stored collision notice, as JSON, or null where it had none. It travels
+    /// beside <paramref name="Reason"/> and for the same reason: both are what the user was TOLD,
+    /// and both would be wrong if re-derived from conditions that have since changed.
+    /// </param>
     private sealed record ReplayedTurns(
-        IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason);
+        IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason,
+        object? Conflict = null);
 
     /// <summary>
     /// THE read projection. Every route that hands a stored turn back to a client goes through
@@ -969,7 +985,7 @@ public static class SearchEndpoints
             .ToList();
         if (stored.Count == 0)
         {
-            return new ReplayedTurns([], [], 0, turns[^1].Reason);
+            return new ReplayedTurns([], [], 0, turns[^1].Reason, ConflictOf(turns[^1].ConflictJson));
         }
 
         var titleIds = stored.Select(c => c.TitleId).Distinct().ToList();
@@ -1047,7 +1063,8 @@ public static class SearchEndpoints
             survivors.Where(c => !c.BelowFloor).Select(Project).ToList(),
             survivors.Where(c => c.BelowFloor).Select(Project).ToList(),
             removed,
-            turns[^1].Reason);
+            turns[^1].Reason,
+            ConflictOf(turns[^1].ConflictJson));
     }
 
     /// <summary>
@@ -1065,6 +1082,33 @@ public static class SearchEndpoints
     /// where the conversation has no user row — a shape nothing writes today, and a null is read as
     /// "cannot tell", which lets the replay proceed rather than refusing on a guess.</para>
     /// </summary>
+    /// <summary>
+    /// A stored <c>ConflictJson</c> as a JSON OBJECT on the wire, not as a string.
+    ///
+    /// <para>The column is <c>jsonb</c> and the client reads fields off it; handing back a string
+    /// would make every consumer parse it a second time, and a double-encoded payload is the kind of
+    /// thing that works until somebody's notice renders as a quoted blob. <c>Clone()</c> detaches
+    /// the element from the document being disposed. A malformed row degrades to null rather than
+    /// throwing — a resume must not fail because one historical row cannot be parsed.</para>
+    /// </summary>
+    private static object? ConflictOf(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            return document.RootElement.Clone();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
     private static async Task<string?> QuestionBehindAsync(
         IReelDbContext db, Domain.Search.SearchTurn turn, CancellationToken ct) =>
         await db.SearchTurns
@@ -1228,6 +1272,10 @@ public static class SearchEndpoints
             turn.FloorRelaxed = outcome.FloorRelaxed;
             turn.DiscoveredCount = outcome.DiscoveredCount;
             turn.IntentJson = outcome.IntentJson;
+            // The notice the user read, verbatim, so a resume can restore it. Written on a FAILED
+            // turn too: the frame went out before the crash, and a transcript that shows the answer
+            // without the explanation for it is the half-record this column exists to prevent.
+            turn.ConflictJson = outcome.ConflictJson;
             turn.ModelArtifactId = outcome.ModelArtifactId;
             turn.ModelId = outcome.ModelId;
             turn.PromptVersion = AskReelPromptVersion.Current;

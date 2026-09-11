@@ -176,6 +176,86 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
         }
     }
 
+    /// <summary>
+    /// F4-06, the read half. The client restores the notice and the "under your conditions" pill
+    /// from the same payload that restores the cards, on both routes that hand a stored turn back —
+    /// and as a JSON OBJECT, not a string, so nobody parses it twice.
+    /// </summary>
+    [Fact]
+    public async Task A_resumed_thread_and_a_reconnected_turn_both_carry_the_stored_notice()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync($"replay-conflict-{Guid.NewGuid():N}");
+        using (client)
+        {
+            var (conversationId, _) = await SeedCompletedTurnAsync(accountId, cards: 2, conflict: StoredConflict);
+
+            using var resume = await client.GetAsync($"/api/search/conversations/{conversationId}");
+            Assert.Equal(HttpStatusCode.OK, resume.StatusCode);
+            using var resumed = JsonDocument.Parse(await resume.Content.ReadAsStringAsync());
+            AssertNotice(resumed.RootElement.GetProperty("conflict"));
+
+            var turnId = await NewestAssistantTurnIdAsync(accountId, conversationId);
+            using var reconnect = await client.GetAsync($"/api/search/turns/{turnId}");
+            Assert.Equal(HttpStatusCode.OK, reconnect.StatusCode);
+            using var turn = JsonDocument.Parse(await reconnect.Content.ReadAsStringAsync());
+            AssertNotice(turn.RootElement.GetProperty("conflict"));
+        }
+    }
+
+    /// <summary>The probe: a thread that had no collision carries a null, not an empty object.</summary>
+    [Fact]
+    public async Task A_thread_with_no_collision_resumes_with_a_null_notice()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync($"replay-no-conflict-{Guid.NewGuid():N}");
+        using (client)
+        {
+            var (conversationId, _) = await SeedCompletedTurnAsync(accountId, cards: 2);
+
+            using var resume = await client.GetAsync($"/api/search/conversations/{conversationId}");
+            using var resumed = JsonDocument.Parse(await resume.Content.ReadAsStringAsync());
+
+            Assert.Equal(JsonValueKind.Null, resumed.RootElement.GetProperty("conflict").ValueKind);
+        }
+    }
+
+    /// <summary>The notice as a turn would have stored it — genres, keywords, year bounds, prose.</summary>
+    private const string StoredConflict =
+        """
+        {"excludedGenres":["comedy"],"excludedKeywords":["anime"],"minYear":2000,"maxYear":null,
+         "message":"Your conditions permanently exclude comedy and anime, so nothing you asked for there can appear. You can change that under Conditions."}
+        """;
+
+    private static void AssertNotice(JsonElement conflict)
+    {
+        // An OBJECT, not a string: the column is jsonb and the client reads fields off it. A
+        // double-encoded payload works until somebody's notice renders as a quoted blob.
+        Assert.Equal(JsonValueKind.Object, conflict.ValueKind);
+        Assert.Equal(["comedy"], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        Assert.Equal(["anime"], conflict.GetProperty("excludedKeywords").EnumerateArray().Select(k => k.GetString()));
+        Assert.Equal(2000, conflict.GetProperty("minYear").GetInt32());
+        Assert.Contains("Conditions", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    private async Task<Guid> NewestAssistantTurnIdAsync(Guid accountId, Guid conversationId)
+    {
+        await using var db = ScopedContext(accountId);
+        return await db.SearchTurns
+            .Where(t => t.ConversationId == conversationId && t.Role == "assistant")
+            .OrderByDescending(t => t.Sequence)
+            .Select(t => t.Id)
+            .FirstAsync();
+    }
+
     private static async Task<JsonElement> ReplayDoneAsync(
         HttpClient client, Guid conversationId, Guid clientTurnId, string query)
     {
@@ -219,7 +299,8 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
     /// as an assistant row, and its cards. Seeded rather than driven through the pipeline, because
     /// what is under test is the replay branch and the harness reaches no catalogue.
     /// </summary>
-    private async Task<(Guid ConversationId, Guid ClientTurnId)> SeedCompletedTurnAsync(Guid accountId, int cards)
+    private async Task<(Guid ConversationId, Guid ClientTurnId)> SeedCompletedTurnAsync(
+        Guid accountId, int cards, string? conflict = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var now = DateTime.UtcNow;
@@ -249,6 +330,7 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
             Kind = SearchTurnKind.Ask,
             Status = SearchTurnStatus.Completed,
             Reason = "3 picks ranked for you, from 40 pulled",
+            ConflictJson = conflict,
             CompletedAt = now,
         };
         db.SearchTurns.AddRange(

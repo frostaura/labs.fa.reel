@@ -273,6 +273,102 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
         Assert.Contains("Panic Probe", shown);
     }
 
+    /// <summary>
+    /// F4-06, server half. The notice was a stream-only frame: reload a thread that asked for a 90s
+    /// romantic comedy against standing exclusions on both genres and it came back as four post-2000
+    /// dramas under that question with nothing on the page saying why. The cards are restored from
+    /// rows and the reason line from a column; this was the one part of the turn the server forgot,
+    /// and it is the part a user most needs when the answer surprises them.
+    /// </summary>
+    [Fact]
+    public async Task The_collision_notice_is_persisted_on_the_turn_it_belongs_to()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(73101, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        var outcome = await service.StreamAsync(
+            "a light-hearted romantic comedy from the 1990s", [], [], "US", [], ApiUsagePurpose.RerankAsk,
+            emit, CancellationToken.None);
+
+        Assert.NotNull(outcome.ConflictJson);
+        var stored = JsonDocument.Parse(outcome.ConflictJson!).RootElement;
+        var frame = events.Single(e => e.Event == "conflict").Data;
+
+        // The stored notice says the same thing the live one did — one object behind both, so the
+        // notice a user reads live and the one they get back after a reload cannot disagree.
+        Assert.Equal(
+            frame.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()),
+            stored.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        Assert.Equal(frame.GetProperty("message").GetString(), stored.GetProperty("message").GetString());
+        Assert.Equal(2000, stored.GetProperty("minYear").GetInt32());
+
+        // And the two counts that describe the catalogue at one instant are deliberately NOT in the
+        // row: replaying them on a resume would state a stale number as a current one.
+        Assert.False(stored.TryGetProperty("poolSize", out _));
+        Assert.False(stored.TryGetProperty("catalogueSize", out _));
+    }
+
+    /// <summary>
+    /// The probe: one field moved. A turn whose collision is purely a genre carries no year bounds,
+    /// so a client cannot render a year chip on a screen where the years were never the problem —
+    /// the account has a standing window on every one of its turns.
+    /// </summary>
+    [Fact]
+    public async Task A_genre_only_collision_stores_no_year_bounds()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(73201, 4));
+        var (service, _) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        var outcome = await service.StreamAsync(
+            "I want a comedy tonight", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        Assert.NotNull(outcome.ConflictJson);
+        var stored = JsonDocument.Parse(outcome.ConflictJson!).RootElement;
+        Assert.Equal(JsonValueKind.Null, stored.GetProperty("minYear").ValueKind);
+        Assert.Equal(JsonValueKind.Null, stored.GetProperty("maxYear").ValueKind);
+    }
+
+    /// <summary>A turn with no collision carries no notice at all, rather than an empty one.</summary>
+    [Fact]
+    public async Task A_turn_with_no_collision_stores_no_notice()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(73301, 4));
+        var (service, _) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        var outcome = await service.StreamAsync(
+            "a tense heist movie", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        Assert.Null(outcome.ConflictJson);
+    }
+
     /// <summary>The account the whole round was measured against.</summary>
     private static readonly string[] FounderExclusions =
         ["anime", "animation", "comedy", "documentary", "history", "music", "musical", "romance"];
