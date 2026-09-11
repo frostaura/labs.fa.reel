@@ -523,6 +523,26 @@ export function pickSummary(pickCount: number, outsideCount: number): string {
 }
 
 /**
+ * What the live region says when a thread is RESTORED rather than answered. F6-15.
+ *
+ * `askreel-status` was the empty string on every resumed landing — cold open, thread switch, hard
+ * reload, second tab — while a seam, a grid, a tray, a footnote, three refine chips and a conflict
+ * notice were all on screen. The same region is correct on a completed turn ("14 picks ready.") and
+ * after a Stop, so a screen-reader user was told about every state of this page except the one
+ * where the most appeared without them doing anything.
+ *
+ * It says what the seam says, because the seam IS the sighted version of this: "picked up where you
+ * left off", and then how much came back. A thread with nothing stored says so rather than
+ * announcing a silent zero — that is the transcript-only state, and it is a fact about the thread
+ * rather than an empty answer.
+ */
+export function resumeAnnouncement(pickCount: number, outsideCount: number): string {
+  if (pickCount === 0 && outsideCount === 0) return "Picked up where you left off · no saved picks.";
+  const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
+  return `Picked up where you left off · ${pickCount} ${plural(pickCount, "pick")}.${outside}`;
+}
+
+/**
  * How many threads `Recent ▾` asks for on a first open, and after "Show older".
  *
  * The route is `GET /api/search/conversations?limit=N`, clamped server-side to 1..100, and it has

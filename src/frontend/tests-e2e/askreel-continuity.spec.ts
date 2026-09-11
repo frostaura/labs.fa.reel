@@ -232,6 +232,9 @@ test.describe("Ask Reel — the thread survives leaving the page", () => {
     await expect(page.getByTestId("askreel-seam")).toContainText("Picked up where you left off");
     // …and it is NOT the transcript-only card, on a thread minutes old (F3-06).
     await expect(page.getByTestId("askreel-transcript-only")).toHaveCount(0);
+    // F6-15. The seam is the sighted half; this is the other one. It was the empty string on every
+    // resumed landing, while a seam, a grid, a footnote and three enabled chips were on screen.
+    await expect(page.getByTestId("askreel-status")).toHaveText("Picked up where you left off · 3 picks.");
   });
 
   test("a hard reload comes back to the same answer", async ({ page }) => {

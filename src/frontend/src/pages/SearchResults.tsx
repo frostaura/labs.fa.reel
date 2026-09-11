@@ -22,7 +22,7 @@ import {
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  pickSummary, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
+  pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
   COMPOSER_MIN_PX, composerHeight, composerSends,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
@@ -462,7 +462,13 @@ function AskReel() {
           ? stoppedMessage
           : status === "done"
             ? pickSummary(pickCount, outsideVisible.length)
-            : "";
+            // F6-15. Silent on every resumed landing — cold open, thread switch, hard reload —
+            // while a seam, a grid, a tray, a footnote and a conflict notice were all on screen.
+            // The one state where the most appears without the user doing anything was the one
+            // state this region said nothing about.
+            : status === "resumed"
+              ? resumeAnnouncement(pickCount, outsideVisible.length)
+              : "";
 
   return (
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise

@@ -27,6 +27,7 @@ import {
   showsFootnote,
   showsConflictPill,
   pickSummary,
+  resumeAnnouncement,
   composerHeight,
   composerSends,
   COMPOSER_MIN_PX,
@@ -2127,6 +2128,31 @@ describe("composerSends", () => {
     // One field different from the sending case. On a Japanese, Chinese or Korean keyboard that
     // Enter commits the candidate the user is still choosing; sending there submits half a word.
     expect(composerSends("Enter", false, true)).toBe(false);
+  });
+});
+
+/**
+ * F6-15. `askreel-status` was `""` on every resumed landing — six sampled in R3's session — while a
+ * seam, a grid, a tray, a footnote and a conflict notice were on screen. Correct on a completed
+ * turn and after a Stop; silent on the one state where the most appears unprompted.
+ */
+describe("resumeAnnouncement", () => {
+  it("says_what_came_back_and_how_much_of_it", () => {
+    expect(resumeAnnouncement(21, 0)).toBe("Picked up where you left off · 21 picks.");
+    expect(resumeAnnouncement(1, 0)).toBe("Picked up where you left off · 1 pick.");
+  });
+
+  it("counts_the_outside_channel_where_it_is_named", () => {
+    // The same rule as the live answer (F4-05): a closest-but-outside card is on screen and is
+    // explicitly not a pick, so it is announced as what it is.
+    expect(resumeAnnouncement(9, 3))
+      .toBe("Picked up where you left off · 9 picks. 3 closest-but-outside shown separately.");
+  });
+
+  it("a_thread_with_nothing_stored_says_so_rather_than_announcing_a_zero", () => {
+    // Fixture variation: the transcript-only thread, which is a fact about the THREAD and not an
+    // empty answer — "no matches" would be a verdict on a question this visit never asked.
+    expect(resumeAnnouncement(0, 0)).toBe("Picked up where you left off · no saved picks.");
   });
 });
 
