@@ -44,14 +44,22 @@ public static class SearchTurnKind
     /// The derivation, stated once. A request whose question is the conversation's last question
     /// again is another PAGE of it; anything else is a new ask.
     ///
-    /// <para>Trimmed and case-insensitive, because the same question re-sent by a filter toggle or
-    /// an impatient tap is the same question — and ordinal rather than culture-aware, because two
-    /// strings that are byte-equal must compare equal on every machine this runs on. A conversation
-    /// with no user turn yet has nothing to be a page OF.</para>
+    /// <para>Trimmed, because a filter toggle and an impatient tap resend the same string with
+    /// whatever whitespace the composer had; and ORDINAL — byte-equal, case and all — rather than
+    /// culture-aware or case-insensitive.</para>
+    ///
+    /// <para><b>Case used to be folded away, and it cost the transcript a question.</b> A user who
+    /// retyped their question in capitals got a <c>page</c>: a fresh grid of results with no user
+    /// bubble recorded, and a resumed thread showing one question where five submissions had been
+    /// made. Whitespace is a transport artefact and folding it is safe; capitals are something a
+    /// person typed on purpose, and the conservative reading of "did they ask again" is the one that
+    /// records the asking. A page is the narrower claim, so it takes the stricter test.</para>
+    ///
+    /// <para>A conversation with no user turn yet has nothing to be a page OF.</para>
     /// </summary>
     public static string Derive(string? lastUserText, string message) =>
         lastUserText is not null
-        && string.Equals(lastUserText.Trim(), message.Trim(), StringComparison.OrdinalIgnoreCase)
+        && string.Equals(lastUserText.Trim(), message.Trim(), StringComparison.Ordinal)
             ? Page
             : Ask;
 }

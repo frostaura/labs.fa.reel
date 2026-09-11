@@ -262,6 +262,20 @@ public static class SearchEndpoints
                 }
             }
 
+            var profile = await db.Accounts
+                .Where(a => a.Id == accountId)
+                .Select(a => new { a.Region, a.Tier })
+                .FirstOrDefaultAsync(ct);
+
+            // Founder-only diagnostics, opt-in per request. Not the RequireFounder group filter,
+            // because this route is not founder-only — only one FIELD of its answer is.
+            //
+            // Resolved BEFORE the idempotency branch, because a replay answers on the same terms a
+            // live turn does: the contract's `done` carries `timingsMs` and `debug` as keys that are
+            // ALWAYS present and null when the caller is not entitled to them, and a replay that
+            // omitted them gave the client a second shape to parse for one event name.
+            var debug = EndpointHelpers.AllowsFounderDebug(http.Request.Query["debug"], profile?.Tier);
+
             var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
 
             // ── 3. Idempotency, and one turn in flight per conversation ─────────────────────
@@ -281,10 +295,28 @@ public static class SearchEndpoints
                             "turn_in_progress");
                     }
 
+                    // A key is a key — but it is the key to ONE question, and a client that reuses
+                    // it across two user messages gets the first message's answer for the second
+                    // one, in thirty milliseconds, with nothing on the wire saying the question
+                    // differed. That was measured: A1's key re-sent with "a completely different
+                    // question about westerns" returned A1's crime dramas, `replayed: true`, and
+                    // total confidence. Idempotency means "the same request twice is one request",
+                    // and a different question is not the same request. Refusing is the only answer
+                    // that cannot be wrong; answering the previous question is silently wrong.
+                    var askedBefore = await QuestionBehindAsync(db, existing, ct);
+                    if (askedBefore is not null
+                        && !string.Equals(askedBefore.Trim(), message, StringComparison.Ordinal))
+                    {
+                        return AskError(
+                            StatusCodes.Status409Conflict,
+                            "That turn id has already answered a different question — start a new one.",
+                            "client_turn_id_reused");
+                    }
+
                     // Completed or Failed: replayed from the row. Zero LLM calls, zero new rows,
                     // zero exposures — the user is looking at the same serve again, not a new one.
                     return await ReplayTurnAsStreamAsync(
-                        http, db, eligibility, scorer, accountId, conversation, existing, jsonOptions, ct);
+                        http, db, eligibility, scorer, accountId, conversation, existing, jsonOptions, debug, ct);
                 }
 
                 // A DIFFERENT turn is already in flight. The unique (ConversationId, Sequence)
@@ -298,15 +330,6 @@ public static class SearchEndpoints
                         "turn_in_progress");
                 }
             }
-
-            var profile = await db.Accounts
-                .Where(a => a.Id == accountId)
-                .Select(a => new { a.Region, a.Tier })
-                .FirstOrDefaultAsync(ct);
-
-            // Founder-only diagnostics, opt-in per request. Not the RequireFounder group filter,
-            // because this route is not founder-only — only one FIELD of its answer is.
-            var debug = EndpointHelpers.AllowsFounderDebug(http.Request.Query["debug"], profile?.Tier);
 
             // ── 4. Everything the model reads, derived from rows ────────────────────────────
             // Read BEFORE this turn's own rows are written, so the history the model sees is the
@@ -1032,6 +1055,24 @@ public static class SearchEndpoints
     /// turn uses — so the client has exactly one parser and one code path. Zero model calls, zero
     /// new rows, zero exposures.
     /// </summary>
+    /// <summary>
+    /// The QUESTION a stored assistant turn answers — the newest user row before it.
+    ///
+    /// <para>The assistant row's own <c>Text</c> is Reel's reply, not the question, and a
+    /// <c>page</c> turn has no user row of its own at all: it answers the question already asked.
+    /// So the lookup is "the last user turn at or before this sequence", which is the same rule the
+    /// transcript renders by and the same one <c>SearchTurnKind.Derive</c> compares against. Null
+    /// where the conversation has no user row — a shape nothing writes today, and a null is read as
+    /// "cannot tell", which lets the replay proceed rather than refusing on a guess.</para>
+    /// </summary>
+    private static async Task<string?> QuestionBehindAsync(
+        IReelDbContext db, Domain.Search.SearchTurn turn, CancellationToken ct) =>
+        await db.SearchTurns
+            .Where(t => t.ConversationId == turn.ConversationId && t.Role == "user" && t.Sequence <= turn.Sequence)
+            .OrderByDescending(t => t.Sequence)
+            .Select(t => t.Text)
+            .FirstOrDefaultAsync(ct);
+
     private static async Task<IResult> ReplayTurnAsStreamAsync(
         HttpContext http,
         IReelDbContext db,
@@ -1041,6 +1082,7 @@ public static class SearchEndpoints
         Domain.Search.SearchConversation conversation,
         Domain.Search.SearchTurn turn,
         System.Text.Json.JsonSerializerOptions jsonOptions,
+        bool debug,
         CancellationToken ct)
     {
         var replay = await ReplayAsync(db, eligibility, scorer, accountId, [turn], ct);
@@ -1079,6 +1121,15 @@ public static class SearchEndpoints
             // this many of its cards no longer belong on a suggestion surface.
             replayed = true,
             removed = replay.Removed,
+            // Present, and null. The contract's rule is that a client has ONE shape to render for
+            // one event name, and these two keys carry that rule — a replay that omitted them made
+            // `done` a three-shape event and handed every consumer an `undefined` to guard. There
+            // is nothing honest to put in them: a replay makes no model calls and runs no stages,
+            // so a timings block would be a fabrication and the stored row's own latency describes
+            // a turn that happened minutes ago. `debug` is still gated exactly as it is live, so an
+            // unentitled caller cannot learn anything from the key's presence.
+            timingsMs = (object?)null,
+            debug = debug ? (object?)new { replayed = true, storedTurnId = turn.Id, removed = replay.Removed } : null,
         });
 
         return Results.Empty;

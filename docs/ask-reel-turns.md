@@ -52,7 +52,7 @@ stored turn.
 | `200` `text/event-stream` | the SSE stream below | a live turn, or the replay of a finished one |
 | `400` | `{ error, code }` | `empty_query`, `query_too_long`, `client_turn_id_required`, `client_turn_id_invalid`, `conversation_id_invalid`, `media_type_invalid` |
 | `404` | `{ error, code }` | `conversation_not_found` — an id that is not the caller's, or is gone. **Never a fork.** |
-| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation |
+| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation · `client_turn_id_reused` — this key already answered a **different** question |
 
 `code` is stable and is what a client switches on. The prose in `error` is the user's and may
 change; matching on it is how a UI ends up rendering a crash message for an honest refusal.
@@ -87,9 +87,20 @@ client can explain the order — but it must never re-sort by it: `blend` is rou
 the server's ordering carries a tiebreak the rounded number cannot reproduce.
 
 A **replay** (the same `clientTurnId` again) emits the same grammar — `conversation`, then `done` —
-with three extra fields: `replayed: true`, `removed` (how many stored cards the eligibility
-re-filter dropped since), and `failed` / `failureCode` when the stored turn was a failure. A replay
-makes zero model calls, writes zero rows and writes **no exposures**.
+carrying **every key a live `done` carries**, plus three a live turn cannot state: `replayed: true`,
+`removed` (how many stored cards the eligibility re-filter dropped since), and `failed` /
+`failureCode` when the stored turn was a failure. `timingsMs` and `debug` are present and `null`,
+under the same founder gating as a live turn: one event name, one shape, always. A replay makes zero
+model calls, writes zero rows and writes **no exposures**.
+
+**A replay answers the same question or it answers nothing.** The key identifies one exchange, so
+re-sending it with a different `query` (compared trimmed and ordinal against the question the stored
+turn answers) is `409 client_turn_id_reused` rather than the previous question's answer. Whitespace
+differs freely — that is a retry; anything else is a new question and needs a new key.
+
+**Whether a submission is an `ask` or a `page` is compared trimmed and ORDINAL**, case included. A
+question retyped in different capitals is a new ask and gets its own user row; only a byte-identical
+repeat is another page of the last question.
 
 ## The read routes
 

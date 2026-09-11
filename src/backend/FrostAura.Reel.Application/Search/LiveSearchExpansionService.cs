@@ -988,7 +988,22 @@ public sealed class LiveSearchExpansionService(
             // the only signal was the wording of `reason`, so the UI string-matched "snag" — and a
             // genuine no-match and a server exception rendered two contradictory messages at once.
             const string reason = "search hit a snag — please try again";
-            await emit("done", new { results = Array.Empty<object>(), reason, failed = true });
+            // The SAME key set as every other terminal frame. A crash used to emit three keys where
+            // the ordinary path emits eight, so a client reading `kept`, `droppedByFloor` or
+            // `belowFloor` off the one event it is guaranteed got `undefined` on precisely the turn
+            // it most needed to render something sane.
+            await emit("done", new
+            {
+                results = Array.Empty<object>(),
+                streamed = 0,
+                kept = 0,
+                droppedByFloor = 0,
+                belowFloor = Array.Empty<object>(),
+                reason,
+                failed = true,
+                timingsMs = debug ? timings.Snapshot() : null,
+                debug = (object?)null,
+            });
             return TurnOutcome.Crashed(assistantText, reason, ex.GetType().Name);
         }
     }
