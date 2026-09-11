@@ -540,7 +540,40 @@ public sealed class LiveSearchExpansionService(
                 logger.LogInformation(
                     "Ask Reel '{Query}': nothing survived discovery. {EligiblePool} titles are eligible for this account overall.",
                     trimmed, eligiblePoolSize);
-                await emit("done", new { results = Array.Empty<object>(), reason = AskReelReason.Empty });
+                // The SAME frame shape as every other `done`, deliberately. A client reads one
+                // terminal frame, so a shorter payload here was not a smaller answer — it was an
+                // undefined `kept`, `belowFloor` and `streamed` reaching code entitled to read
+                // them, which is how the honest answer "nothing matched" renders as the dishonest
+                // one "something broke".
+                await emit("done", new
+                {
+                    results = Array.Empty<object>(),
+                    // Genuinely zero, not a placeholder: this branch returns before the first
+                    // `candidate` frame is written, so nothing reached the client to account for.
+                    // streamed == kept + droppedByFloor holds here as it does everywhere else.
+                    streamed = 0,
+                    kept = 0,
+                    droppedByFloor = 0,
+                    belowFloor = Array.Empty<object>(),
+                    reason = AskReelReason.Empty,
+                    // Same entitlement and the same present-but-null shape as the normal path. The
+                    // starved turn is the one a founder most needs the block on: "nothing matched"
+                    // with no eligible-pool count beside it cannot be acted on.
+                    timingsMs = debug ? timings.Snapshot() : null,
+                    debug = debug
+                        ? (object?)new
+                        {
+                            intent,
+                            relaxation,
+                            eligibleCount = 0,
+                            eligiblePoolSize,
+                            streamed = 0,
+                            kept = 0,
+                            droppedByFloor = 0,
+                            timingsMs = timings.Snapshot(),
+                        }
+                        : null,
+                });
                 // A completed turn with no cards, not a failure: the pipeline ran and the honest
                 // answer is nothing. The row records the reason so a reload says the same thing.
                 return TurnOutcome.Answered(assistantText, AskReelReason.Empty);
