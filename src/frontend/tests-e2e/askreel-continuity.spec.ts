@@ -1130,7 +1130,10 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     //
     // F4-10 is the other half of the same sentence: the drop set is five interactions and the
     // copy named two of them, neither of which had to be the one that fired. A finder SAVED a
-    // card and was told on the next load that they had watched or rated it.
+    // card and was told on the next load that they had watched or rated it. It named three of the
+    // five after the first pass, which left the one destructive-feeling quick action on every card
+    // — "not interested" — described back to the user as something they had watched, rated or
+    // saved. The sentence is unconditional, so it may only claim what is true of all five.
     await boot(page, {
       resume: "stored",
       storedId: CONVERSATION,
@@ -1138,7 +1141,7 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     });
 
     await expect(page.getByTestId("askreel-removed")).toHaveText(
-      "2 picks are gone from this answer — you’ve since watched, rated or saved them.",
+      "2 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them.",
     );
     // Both lists are on screen, which is the reason the note cannot name just one of them.
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
@@ -1156,7 +1159,7 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     });
 
     await expect(page.getByTestId("askreel-removed")).toHaveText(
-      "1 pick is gone from this answer — you’ve since watched, rated or saved it.",
+      "1 pick is gone from this answer — you’ve since rated, watched, saved or dismissed it.",
     );
   });
 });

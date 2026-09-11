@@ -650,13 +650,21 @@ function AskReel() {
               sitting next to a grid of six and reading "2 picks are gone" invited exactly one
               reading: count the grid, find six, and conclude two of the eight it should hold are
               missing. Two may have gone from under the fence. Naming the answer rather than the
-              grid is the whole of the fix; the cause is unchanged and is the same for both. */}
+              grid is the whole of the fix; the cause is unchanged and is the same for both.
+
+              …and the cause is stated as the whole set (F4-10). The contract's drop set is "rated,
+              watched, saved, dropped, marked not-interested" and this sentence named three of the
+              five, unconditionally — so a card dropped because the user marked it NOT INTERESTED,
+              the one destructive-feeling quick action on every card, was described back to them as
+              something they had watched, rated or saved. "Dismissed" is the house word for the
+              other two (`State.removed` and `DoneData.removed` both use it) and is the smallest
+              wording that cannot be wrong. */}
           {removed > 0 && (
             <p className="fa-caption text-fa-frost-dim/70" data-testid="askreel-removed">
               {/* `’` and not `&apos;`: every other sentence on this page uses the typographic
                   apostrophe, and the escape rendered a straight quote in the middle of a paragraph
                   whose neighbours are curly. */}
-              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since watched, rated or saved {removed === 1 ? "it" : "them"}.
+              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since rated, watched, saved or dismissed {removed === 1 ? "it" : "them"}.
             </p>
           )}
         </div>
