@@ -167,6 +167,18 @@ public class ExposureEvent : IAccountScoped
     public decimal? XrefConfidence { get; set; }
 
     /// <summary>
+    /// The Ask Reel turn that served this card, where one did.
+    ///
+    /// <para><b>Forward-only and never back-filled</b>, like every other column on this table: rows
+    /// written before the turn record existed stay null, and null means "the surface did not say",
+    /// not "no turn". No index and no foreign key — retention prunes conversations after
+    /// <c>ASK_RETENTION_DAYS</c> and the exposure row outlives them by design, so a dangling id
+    /// here is correct rather than broken. It is an attribution hint for analysis, never a join the
+    /// closed loop depends on.</para>
+    /// </summary>
+    public Guid? SourceTurnId { get; set; }
+
+    /// <summary>
     /// <see cref="OccurredAt"/> truncated to the minute, computed by Postgres itself (a stored
     /// generated column) so it can never disagree with the timestamp it comes from. It exists only
     /// to carry the idempotency index: RTK Query refetches the feed on tag invalidation and on

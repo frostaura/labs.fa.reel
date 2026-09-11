@@ -60,6 +60,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     public DbSet<Domain.Search.SearchConversation> SearchConversations => Set<Domain.Search.SearchConversation>();
 
     public DbSet<Domain.Search.SearchTurn> SearchTurns => Set<Domain.Search.SearchTurn>();
+
+    public DbSet<Domain.Search.SearchTurnCard> SearchTurnCards => Set<Domain.Search.SearchTurnCard>();
+
     public DbSet<UserTitleReaction> UserTitleReactions => Set<UserTitleReaction>();
     public DbSet<ContentFilter> ContentFilters => Set<ContentFilter>();
 
@@ -255,8 +258,60 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(t => t.Embedding).HasColumnType("vector(1536)");
         });
 
-        modelBuilder.Entity<Domain.Search.SearchConversation>(e => e.HasIndex(c => new { c.AccountId, c.LastTurnAt }));
-        modelBuilder.Entity<Domain.Search.SearchTurn>(e => e.HasIndex(t => new { t.ConversationId, t.CreatedAt }));
+        modelBuilder.Entity<Domain.Search.SearchConversation>(e =>
+        {
+            e.HasIndex(c => new { c.AccountId, c.LastTurnAt });
+            e.Property(c => c.Title).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<Domain.Search.SearchTurn>(e =>
+        {
+            // The transcript read, oldest first.
+            e.HasIndex(t => new { t.ConversationId, t.CreatedAt });
+            // The ordering key, and the concurrency backstop: two turns racing for one conversation
+            // compute the same next sequence and one of them loses here rather than both landing.
+            e.HasIndex(t => new { t.ConversationId, t.Sequence }).IsUnique();
+            // The idempotency key. FILTERED, because ClientTurnId is null on every user row and on
+            // every row that predates the turn record — under a plain unique index the first two
+            // nulls in a conversation would collide, and under NULLS DISTINCT it would admit
+            // duplicates it is meant to stop. Same shape as UserTitleReaction's RevokedAt filter.
+            e.HasIndex(t => new { t.ConversationId, t.ClientTurnId })
+                .IsUnique()
+                .HasFilter("\"ClientTurnId\" IS NOT NULL");
+            e.HasIndex(t => t.AccountId);
+
+            e.Property(t => t.Role).HasMaxLength(16);
+            e.Property(t => t.Kind).HasMaxLength(16);
+            e.Property(t => t.Status).HasMaxLength(16);
+            e.Property(t => t.FailureCode).HasMaxLength(64);
+            e.Property(t => t.MediaFilter).HasMaxLength(64);
+            e.Property(t => t.Reason).HasMaxLength(1024);
+            e.Property(t => t.PromptVersion).HasMaxLength(32);
+            e.Property(t => t.ModelId).HasMaxLength(128);
+            e.Property(t => t.IntentJson).HasColumnType("jsonb");
+            e.Property(t => t.StageTimingsJson).HasColumnType("jsonb");
+        });
+
+        modelBuilder.Entity<Domain.Search.SearchTurnCard>(e =>
+        {
+            // The replay read, in the order the user saw. Unique so a turn cannot store two cards
+            // at one position — the rank IS the position on screen.
+            e.HasIndex(c => new { c.TurnId, c.Rank }).IsUnique();
+            // One title appears at most once in a turn.
+            e.HasIndex(c => new { c.TurnId, c.TitleId }).IsUnique();
+            // The no-repeat set: SELECT DISTINCT "TmdbId" WHERE "ConversationId" = @c, on the hot
+            // path of every turn before discovery runs.
+            e.HasIndex(c => new { c.ConversationId, c.TmdbId });
+            e.HasIndex(c => c.AccountId);
+
+            // Mirrors ExposureEvent's precisions exactly, so a card and the exposure row that
+            // describes it can never round to two different numbers.
+            e.Property(c => c.PredictedRating).HasPrecision(4, 2);
+            e.Property(c => c.LlmFit).HasPrecision(4, 3);
+            e.Property(c => c.Blend).HasPrecision(6, 4);
+            e.Property(c => c.Why).HasMaxLength(1024);
+            e.Property(c => c.WhySource).HasMaxLength(32);
+        });
 
         // ── ML ─────────────────────────────────────────────────────────────────────────────
         modelBuilder.Entity<PersonAffinity>(e => e.HasIndex(a => new { a.AccountId, a.PersonId, a.Role }).IsUnique());
