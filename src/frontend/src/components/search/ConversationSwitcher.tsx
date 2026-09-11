@@ -45,6 +45,7 @@ export default function ConversationSwitcher({
   // why there are exactly two sizes and no third.
   const [showOlder, setShowOlder] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const listing = recentListing(showOlder, 0);
   // Nothing is fetched until the menu is opened. This list is a control almost nobody touches on a
   // given visit, and a query on mount would put a request on the critical path of every single
@@ -59,14 +60,29 @@ export default function ConversationSwitcher({
     if (disabled) setOpen(false);
   }, [disabled]);
 
-  // Close on an outside click, same as the search box's dropdown.
+  // Close on an outside click, same as the search box's dropdown — and on Escape, which F6-14
+  // found this component had never listened for: the menu stayed mounted with `aria-expanded`
+  // still true, and the only ways out were a second tap on the button or a tap outside. Escape is
+  // the one gesture a keyboard user has for "I did not mean to open this", and on a panel that is
+  // a bottom sheet at phone widths (below) it is also the fastest way out for anyone at all.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
       if (boxRef.current && !boxRef.current.contains(event.target as Node)) setOpen(false);
     };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      // Focus goes back to the control that opened the panel rather than being left on a node
+      // that is about to be unmounted, which drops it to <body>.
+      triggerRef.current?.focus();
+    };
     document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [open]);
 
   const rows = conversations ?? [];
@@ -78,6 +94,7 @@ export default function ConversationSwitcher({
   return (
     <div ref={boxRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         data-testid="askreel-recent"
         aria-expanded={open}
@@ -85,7 +102,7 @@ export default function ConversationSwitcher({
         disabled={disabled}
         title={disabled ? "Wait for the current results to finish" : undefined}
         onClick={() => setOpen((v) => !v)}
-        className="fa-caption inline-flex items-center gap-1.5 rounded-full border border-fa-frost/25 px-3 py-1 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 disabled:hover:text-fa-frost-dim transition-colors"
+        className="fa-caption inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 disabled:opacity-40 disabled:hover:text-fa-frost-dim transition-colors"
       >
         Recent <ChevronDown className="h-3.5 w-3.5" />
       </button>
@@ -95,7 +112,28 @@ export default function ConversationSwitcher({
           role="menu"
           aria-label="Recent conversations"
           data-testid="askreel-recent-menu"
-          className="absolute right-0 top-9 z-50 w-72 max-h-[60vh] overflow-y-auto rounded-lg border border-fa-edge bg-fa-ink-2/95 backdrop-blur-md shadow-2xl reel-rise"
+          /*
+           * Two shapes, and the breakpoint is where the anchor stops being able to hold it.
+           *
+           * F6-05: below `md` the header wraps, which moves `Recent ▾` inward — and a 288 px panel
+           * pinned to that button's RIGHT edge then starts at x: -114. The document does not
+           * scroll horizontally, so 40% of the control was unreachable by any gesture; every
+           * thread title was cut mid-word on the left. Clamping the WIDTH does not fix it, because
+           * the overflow comes from the anchor, not from the size: at 320 the panel is already
+           * only as wide as the viewport.
+           *
+           * So at phone widths it stops being anchored at all and becomes a bottom sheet —
+           * `fixed`, inset from both edges, above the composer's `z-30` and the tab bar's `z-40`.
+           * That is inside the viewport at ANY width by construction rather than by arithmetic,
+           * and it puts a list whose whole purpose is one-handed navigation under the thumb
+           * instead of up beside the title. From `md` it is the anchored popover again, where the
+           * header does not wrap and the anchor is honest.
+           *
+           * It stays a DOM child of `boxRef` in both shapes, which is what keeps the
+           * tap-outside-to-close handler correct: `fixed` changes where a box paints, not where it
+           * sits in the tree.
+           */
+          className="fixed inset-x-2 bottom-2 z-50 max-h-[55vh] overflow-y-auto rounded-lg border border-fa-edge bg-fa-ink-2/95 backdrop-blur-md shadow-2xl reel-rise md:absolute md:inset-x-auto md:bottom-auto md:right-0 md:top-12 md:w-72 md:max-h-[60vh]"
         >
           {isFetching && rows.length === 0 ? (
             <p className="px-3 py-3 fa-caption text-fa-frost-dim">Loading…</p>
