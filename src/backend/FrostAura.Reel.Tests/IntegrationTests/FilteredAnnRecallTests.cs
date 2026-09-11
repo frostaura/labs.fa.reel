@@ -130,6 +130,215 @@ public class FilteredAnnRecallTests(PostgresFixture fixture) : EmbeddedCatalogTe
     }
 
     /// <summary>
+    /// The SECOND way a filtered ANN pull arrives short, and the one <c>hnsw.iterative_scan</c>
+    /// cannot close: an index still full of rows the suite already deleted.
+    ///
+    /// <para>A <c>DELETE</c> does not remove an element from an HNSW graph. pgvector leaves the
+    /// entry in place until the table is vacuumed; the scan walks it, reads the heap, finds the
+    /// tuple dead and discards it — having already spent it out of the candidate budget. Iterating
+    /// does not rescue that, because iterating resumes a walk through the same dead graph rather
+    /// than reaching live elements it was never linked to. Every embedded fixture in this
+    /// collection deletes its catalogue on the way out, so by the time a small fixture runs the
+    /// index can hold most of a thousand dead entries around its handful of live ones.</para>
+    ///
+    /// <para><b>Measured in situ on 2026-09-11</b>, at the moment <c>LiveSearchExpansionTests</c>
+    /// failed, with 914 dead entries and a 20-row live catalogue. Asking that index for 40
+    /// neighbours of a 20-row eligible set gave
+    /// <c>Index Scan using "IX_TitleEmbeddings_Embedding" … (actual rows=0)</c> on one run and
+    /// <c>rows=10</c> on another — and <c>rows=20</c> on the same connection, same query, same
+    /// forced plan, immediately after <c>VACUUM "TitleEmbeddings"</c>. That is the whole of the
+    /// order flake: it had been read as leftover LIVE vectors and is not, because the victim's
+    /// eligible pool was exactly its own 20 rows and the index was still wrong about them.</para>
+    ///
+    /// <para><b>What this test pins, and what it deliberately does not.</b> The collapse depends on
+    /// the shape of the graph the suite's churn happens to build, and a synthetic churn — several
+    /// hundred vectors inserted and deleted in rounds, on curves or scattered — does NOT reproduce
+    /// it reliably; four attempts came back whole. Pinning a symptom that only sometimes appears
+    /// would be a test that passes for the wrong reason. So this pins the INVARIANT instead: the
+    /// teardown leaves the shared vector index with nothing dead in it, which is the condition
+    /// under which the pull above was measured to be whole and without which it was measured not to
+    /// be. Remove <see cref="EmbeddedCatalogTestBase.RepairSharedVectorIndexAsync"/> and this goes
+    /// red here rather than somewhere else on one run in four.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_teardown_leaves_nothing_dead_in_the_shared_vector_index()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // A sibling class's lifetime, compressed: seed a catalogue and hand it to the base's own
+        // teardown. Driving the real lifecycle rather than a hand-written delete is the point —
+        // a restatement of the cleanup could drift from the cleanup.
+        var churn = new ChurnProbe(Fixture);
+        await churn.InitializeAsync();
+        await SeedEmbeddedTitlesAsync(ChurnSize, ChurnSeedBase);
+        await churn.DisposeAsync();
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var dead = await DeadEntriesAsync(db);
+
+        Assert.True(
+            dead == 0,
+            $"{ChurnSize} embedding rows went through EmbeddedCatalogTestBase's teardown and left "
+            + $"{dead} dead entries in the shared HNSW index. A deleted row stays in the graph until "
+            + "the table is vacuumed, is spent out of the ef_search budget before the query's own "
+            + "predicate ever runs, and hnsw.iterative_scan does not reach past it — so the next "
+            + "small fixture's semantic arm comes back a fraction full, intermittently, for reasons "
+            + "nothing in its own file mentions. RepairSharedVectorIndexAsync is what keeps this at "
+            + "zero.");
+
+        // And the pull the victim makes is whole on the index that teardown left behind. This
+        // passes with or without the repair on a synthetic churn — see the remark — so it is
+        // corroboration, not the assertion carrying the test.
+        var accountId = await SeedVictimAsync();
+        await db.Database.OpenConnectionAsync();
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync("SET enable_seqscan = off");
+            await db.Database.ExecuteSqlRawAsync("SET enable_sort = off");
+            var pulled = await PullAsync(db, accountId, new Vector(Scattered(VictimSeedBase)));
+            Assert.Equal(VictimEligible, pulled.Count);
+        }
+        finally
+        {
+            await db.Database.CloseConnectionAsync();
+        }
+    }
+
+    /// <summary>Dead row versions Postgres is still carrying for the embeddings table — the ones
+    /// whose index entries a vector scan has to walk and throw away.</summary>
+    private static async Task<long> DeadEntriesAsync(ReelDbContext db) =>
+        await db.Database
+            .SqlQueryRaw<long>(
+                "SELECT COALESCE(n_dead_tup, 0) AS \"Value\" FROM pg_stat_user_tables WHERE relname = 'TitleEmbeddings'")
+            .SingleOrDefaultAsync();
+
+    /// <summary>
+    /// A stand-in for any sibling fixture: it exists only to run the base's real
+    /// <c>InitializeAsync</c>/<c>DisposeAsync</c> around a catalogue, so the test churns the index
+    /// the way the suite actually churns it rather than through a hand-written delete that could
+    /// drift from it.
+    /// </summary>
+    private sealed class ChurnProbe(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture);
+
+    /// <summary>How many vectors the churn puts through the index and takes out again — the order
+    /// of magnitude one full integration run actually churns.</summary>
+    private const int ChurnSize = 900;
+
+    /// <summary>
+    /// The victim's whole eligible catalogue — deliberately SMALLER than the window it asks for,
+    /// which is the shape every small embedded fixture in this collection has and the shape that
+    /// makes the damage visible: a pull that cannot be filled has to exhaust the graph, and a graph
+    /// of dead entries is exhausted long before the live rows are found.
+    /// </summary>
+    private const int VictimEligible = Requested / 2;
+
+    /// <summary>Seeds for the churn's vectors, and for the victim's — disjoint, so neither set sits
+    /// on the other's doorstep.</summary>
+    private const int ChurnSeedBase = 10_000;
+
+    /// <inheritdoc cref="ChurnSeedBase"/>
+    private const int VictimSeedBase = 17;
+
+    /// <summary>
+    /// A normalized 1536-vector that is near-orthogonal to every other seed's — the shape an
+    /// EMBEDDED CATALOGUE has, as opposed to the smooth curve <see cref="Unit"/> draws for the
+    /// recall test above. It matters here: a live pocket strung along one curve is trivially
+    /// reachable however damaged the graph is, and scattered live rows among scattered dead ones is
+    /// what the suite actually leaves behind.
+    /// </summary>
+    private static float[] Scattered(int seed)
+    {
+        var v = new float[1536];
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] = (float)Math.Sin(seed + i);
+        }
+
+        var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] /= norm;
+        }
+
+        return v;
+    }
+
+    /// <summary>Embedded titles on scattered directions, owned by nobody.</summary>
+    private async Task<List<Guid>> SeedEmbeddedTitlesAsync(int count, int seedBase)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var ids = new List<Guid>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var title = new Title
+            {
+                Id = Guid.NewGuid(),
+                MediaType = MediaType.Movie,
+                TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+                TraktSlug = string.Empty,
+                Name = $"Ann Recall {i}",
+                Language = "en",
+                PosterPath = "/p.jpg",
+                Genres = ["drama"],
+                CreatedAt = DateTime.UtcNow,
+            };
+            db.Add(title);
+            db.TitleEmbeddings.Add(new TitleEmbedding
+            {
+                TitleId = title.Id,
+                Embedding = new Vector(Scattered(seedBase + i)),
+                EmbeddingModel = "test",
+                SourceTextHash = Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTime.UtcNow,
+            });
+            ids.Add(title.Id);
+        }
+
+        await db.SaveChangesAsync();
+        return ids;
+    }
+
+    /// <summary>
+    /// An account whose eligible pool is exactly <see cref="VictimEligible"/> freshly-embedded
+    /// titles. Everything already in the shared catalogue is marked watched first, the way the
+    /// fixtures that broke do it, so the pull below is asking about these rows and nothing else.
+    /// </summary>
+    private async Task<Guid> SeedVictimAsync()
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var account = new Account
+        {
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"annchurn-{Guid.NewGuid():N}",
+            CreatedAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            PipelineStageChangedAt = DateTime.UtcNow,
+        };
+        db.Add(account);
+        foreach (var titleId in await db.Titles.Select(t => t.Id).ToListAsync())
+        {
+            db.WatchedTitles.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = account.Id,
+                TitleId = titleId,
+                Plays = 1,
+                IsFullyWatched = true,
+                LastWatchedAt = DateTime.UtcNow,
+                FirstSyncedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
+        await SeedEmbeddedTitlesAsync(VictimEligible, VictimSeedBase);
+        return account.Id;
+    }
+
+    /// <summary>
     /// The query <c>LiveSearchExpansionService.SemanticNeighbourIdsAsync</c> emits, written out
     /// here because it is private and because the SHAPE is the thing under test: the account's
     /// eligibility predicate, an <c>ORDER BY</c> on cosine distance, and a <c>Take</c>. Anything
@@ -139,9 +348,12 @@ public class FilteredAnnRecallTests(PostgresFixture fixture) : EmbeddedCatalogTe
     /// has no such key and is what broke. Both are covered by the fix regardless of which plan they
     /// get, which is the point of setting it per connection rather than per query.
     /// </summary>
-    private static Task<List<Guid>> PullAsync(ReelDbContext db, Guid accountId)
+    private static Task<List<Guid>> PullAsync(ReelDbContext db, Guid accountId) =>
+        PullAsync(db, accountId, new Vector(Unit(AnchorPhase)));
+
+    /// <inheritdoc cref="PullAsync(ReelDbContext, Guid)"/>
+    private static Task<List<Guid>> PullAsync(ReelDbContext db, Guid accountId, Vector anchor)
     {
-        var anchor = new Vector(Unit(AnchorPhase));
         var eligibleIds = new EligibilityQueryBuilder(db).EligibleTitles(accountId).Select(t => t.Id);
         return db.TitleEmbeddings
             .Where(e => eligibleIds.Contains(e.TitleId))
