@@ -13,10 +13,10 @@ last_verified: 2026-09-11
   private, then push. **Consequence:** the `LICENSE` file still says MIT while nothing is published, and going public
   again is a fresh founder call needing a recorded stealth exception.
 - **Deploy was decided 2026-07-24 and has never been executed.** *Why it matters:* the external-user kill criterion is
-  evaluated against a *deployed* product, so a kill tripped by a timer on an undeployed product is void. The remaining
-  steps are all founder actions — push, create the Portainer stack from `deploy/portainer-stack.yml`, set
-  `DOCKERHUB_TOKEN` / `PORTAINER_*` and the `DEPLOY_ENABLED` variable, point Cloudflared at `reel.frostaura.net`. The
-  blocking defect in that deploy file has since been fixed (`decisions-engineering.md`).
+  evaluated against a *deployed* product, so a kill tripped by a timer on an undeployed product is void. What is left is
+  a founder action, not an engineering one, and **what specifically is left moves — `state.md` holds it, this file does
+  not.** The blocking defect in `deploy/portainer-stack.yml` has since been fixed
+  (`decisions-engineering.md`), and pointing Cloudflared at `reel.frostaura.net` is the one step outside the repo.
 - **Both halves, model first (2026-09-09).** *Why:* the ledger, a near-zero correlation between served predictions and
   later ratings, and the retro loop all said the engine had no measurable edge. Dean chose to repair the serving
   arithmetic and the evaluation instrument **before** any user-facing number changed, then run the product programme.

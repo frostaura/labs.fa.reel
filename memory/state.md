@@ -18,9 +18,11 @@ the dev clone where code, builds and the dev loop live, and it is **in sync with
 `FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**; it was briefly a diverged fork after the
 founder pushed from the dev clone, and has since been merged back onto published `main` — it is now **ahead-only by
 context commits, nothing behind, and no product file deleted in the range**, so a push from here fast-forwards. The
-push stays the founder's call. **The reconcile is not free and will recur:** the context commits deleted the old
-single-file `memory/gotchas.md` and `memory/watch.md` that the dev clone still edits, so every merge raises a
-modify/delete conflict there; keep the deletion, and fold the dev clone's edits into the split topic files first.
+push stays the founder's call. **The reconcile is not free and will recur:** the context commits deleted the old single-file
+`memory/gotchas.md` and `memory/decisions.md` — those two and no others, verified against the range on 2026-09-11 — while the
+dev clone still edits them, so every merge raises a modify/delete conflict on exactly those paths. Keep the deletion and fold
+the dev clone's edits into the split topics first. **`memory/watch.md` is NOT one of them**: it is live in both clones and was
+merged as a modification, so deleting it destroys a live topic.
 **Never `--force` from this clone** — it would destroy pushed product work. **The iCloud clone's `origin/main` ref
 goes stale between fetches**, so an ahead-count taken here is phantom until you `git fetch`.
 
