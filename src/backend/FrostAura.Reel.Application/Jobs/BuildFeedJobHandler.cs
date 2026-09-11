@@ -966,14 +966,37 @@ public class BuildFeedJobHandler(
             // the loved pool, and only that slot is re-drawn — with today's offset, holding back
             // both yesterday's rows and the anchors being kept, so the replacement is genuinely new.
             anchorIds = previousAnchors.Where(anchorTitles.ContainsKey).Take(AnchorRowCount).ToList();
-            if (anchorIds.Count < AnchorRowCount)
+
+            // The re-draw is capped at the number of rails the page ACTUALLY CARRIES, not at
+            // AnchorRowCount — a Preserve rebuild may lose a rail or replace a vacated one, and may
+            // never grow one.
+            //
+            // `previousAnchors` is read back from FeedItems, so it holds the anchors whose rails
+            // SHIPPED — a rail that assembled below RowMinMembers was dropped and left no trace, and
+            // from here is indistinguishable from a slot the user's own action vacated. Capping at
+            // AnchorRowCount therefore read every dropped rail as a standing vacancy and re-drew it
+            // on every background rebuild, against a loved pool the rebuild's own trigger had just
+            // changed: an in-app rating of 8+ makes its title loved the instant it is written, and
+            // because LovedAnchorPool is recency-weighted that title lands at the HEAD of the pool.
+            // So rating a hero pick could deal a brand-new "Because you loved <the title you just
+            // rated>" rail onto the page — the rails re-dealt by the very reaction the stable-tonight
+            // contract exists to keep them still through. (Whether it did was down to where the
+            // day's rotation offset happened to put the pool's head, which is how it survived as an
+            // intermittent failure rather than an obvious one.)
+            //
+            // A rail is a whole row — its own heading and ten cards — so growing one is never the
+            // "refill exactly the slot that was vacated" the hero does. New loves are real signal and
+            // they get their rails on the next FRESH build, which is at most a day away and which
+            // the user can force from the refresh button at any time.
+            var railsOnThePage = Math.Min(previousAnchors.Count, AnchorRowCount);
+            if (anchorIds.Count < railsOnThePage)
             {
                 var holdBack = new HashSet<Guid>(previousDayAnchors);
                 holdBack.UnionWith(anchorIds);
                 anchorIds.AddRange(AnchorRotation
                     .Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount)
                     .Where(id => !anchorIds.Contains(id))
-                    .Take(AnchorRowCount - anchorIds.Count));
+                    .Take(railsOnThePage - anchorIds.Count));
             }
         }
         else
