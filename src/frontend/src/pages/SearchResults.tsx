@@ -22,7 +22,7 @@ import {
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
+  pickSummary, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -402,7 +402,13 @@ function AskReel() {
 
   // The settled outcome, announced once the stream stops. Kept separate from the streaming
   // narration below so the two live regions never talk over each other.
-  const settledCount = visible.length + outsideVisible.length;
+  //
+  // Two counts, because they mean two different things and folding them together is F4-05. A
+  // **pick** is a card that matched everything the user asked for — the server's own `kept`, and
+  // what the accumulated footnote counts. The outside-request channel is on screen and is
+  // explicitly NOT that, so it is counted where it is named and nowhere else.
+  const pickCount = visible.length;
+  const settledCount = pickCount + outsideVisible.length;
   /**
    * A Stop that gave the previous answer back whole — nothing of the abandoned turn arrived, and
    * what is on screen is the finished answer it was going to replace (F6-06). Distinct from a Stop
@@ -411,7 +417,7 @@ function AskReel() {
   const keptWholeAnswer = stopped && arrived === 0 && settledAnswer && settledCount > 0;
   // Counted off the SCREEN, not off the wire: the line claims what a reader can count, and the
   // eligibility filter and the stopped-turn floor both remove cards the server did send.
-  const footnoteText = footnote(reason, settledCount, paged);
+  const footnoteText = footnote(reason, pickCount, paged);
   // What a stopped turn says, in one place: the sr-only live region and the on-screen card must
   // not be able to disagree, and the count is the turn's OWN — cards held over from the previous
   // answer are still on screen and are explicitly not what arrived before the user stopped.
@@ -432,10 +438,8 @@ function AskReel() {
         : status === "stopped"
           ? stoppedMessage
           : status === "done"
-          ? settledCount === 0
-            ? "No matches for that one."
-            : `${settledCount} ${plural(settledCount, "pick")} ready.`
-          : "";
+            ? pickSummary(pickCount, outsideVisible.length)
+            : "";
 
   return (
     // Bottom padding clears the composer AND, on a phone, the tab bar underneath it — otherwise

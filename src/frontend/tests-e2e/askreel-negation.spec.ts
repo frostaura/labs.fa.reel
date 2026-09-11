@@ -542,6 +542,39 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
   });
 
+  test("the accumulated count is picks, and the outside channel is counted where it is named", async ({ page }) => {
+    // F4-05. A paged answer carrying an outside-request channel read "12 picks so far · last page:
+    // 3 picks matched everything you asked · 3 closest-but-outside shown separately" over 9 picks
+    // and 3 outside cards — the 12 folding in the very cards the clause beside it had just called
+    // not-matching, in the same sentence.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a tense thriller, no horror");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "done", {
+      results: [ALPHA, BORDER, XCLUDED],
+      reason: "2 picks matched everything you asked · 1 closest-but-outside shown separately",
+      kept: 2,
+    });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-outside")).toBeVisible();
+    // Un-paged: the server's own sentence, verbatim, with no accumulated prefix to get wrong.
+    await expect(page.getByTestId("askreel-status"))
+      .toHaveText("2 picks ready. 1 closest-but-outside shown separately.");
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 2);
+    await askPush(page, "done", { results: [CEDAR], reason: "1 pick matched everything you asked", kept: 1 });
+    await askEnd(page);
+
+    // Three picks on screen and one outside card. Four is the number that was printed.
+    await expect(page.getByTestId("askreel-footnote"))
+      .toHaveText("3 picks so far · last page: 1 pick matched everything you asked");
+    await expect(page.getByTestId("askreel-status"))
+      .toHaveText("3 picks ready. 1 closest-but-outside shown separately.");
+  });
+
   test("a reply qualified without saying so still gets the pill", async ({ page }) => {
     // Fixture variation on one field of the test above: the same `conflict: true` over a reply
     // that does NOT carry the clause — an older server, and a row stored before the rewrite

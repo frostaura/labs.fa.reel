@@ -26,6 +26,7 @@ import {
   showMoodPresets,
   showsFootnote,
   showsConflictPill,
+  pickSummary,
   turnSettled,
   recentListing,
   lastTurnOutcome,
@@ -1326,6 +1327,36 @@ describe("footnote", () => {
  * without the keywords a turn that collided with an avoid-keyword ("anime", "musical") named
  * nothing at all, because `excludedGenres` was empty.
  */
+/**
+ * F4-05. The accumulated footnote and the live region both counted the outside-request channel as
+ * picks — the cards the server's own sentence, in the same line, had just called not-matching.
+ */
+describe("pickSummary and the footnote's count", () => {
+  it("counts_picks_and_names_the_outside_channel_separately", () => {
+    // R3's turn 10, verbatim: 9 grid + 3 outside, announced as "12 picks".
+    expect(pickSummary(9, 3)).toBe("9 picks ready. 3 closest-but-outside shown separately.");
+    expect(footnote("3 picks matched everything you asked · 3 closest-but-outside shown separately", 9, true))
+      .toBe("9 picks so far · last page: 3 picks matched everything you asked · 3 closest-but-outside shown separately");
+  });
+
+  it("an_answer_with_no_outside_channel_reads_exactly_as_it_did", () => {
+    // Fixture variation, one field: the same answer with the outside count at zero — which is most
+    // turns, and where the two counts were indistinguishable and the defect survived.
+    expect(pickSummary(21, 0)).toBe("21 picks ready.");
+    expect(pickSummary(1, 0)).toBe("1 pick ready.");
+    expect(footnote("7 picks ranked for you, from 47 pulled", 21, true))
+      .toBe("21 picks so far · last page: 7 picks ranked for you, from 47 pulled");
+  });
+
+  it("says_nothing_matched_only_when_nothing_is_on_screen", () => {
+    // "No matches" over three outside cards is the same conflation in reverse — the empty state is
+    // a claim about the screen, and the screen is not empty.
+    expect(pickSummary(0, 0)).toBe("No matches for that one.");
+    expect(pickSummary(0, 3)).toBe("No picks matched everything you asked. 3 closest-but-outside shown separately.");
+    expect(pickSummary(0, 1)).toBe("No picks matched everything you asked. 1 closest-but-outside shown separately.");
+  });
+});
+
 describe("chatReducer — the conflict flag and the excluded terms", () => {
   it("marks_the_reply_that_was_qualified_and_leaves_the_others_alone", () => {
     let state = chatReducer(initialChatState, { type: "userTurn", message: "something scary", fresh: true });

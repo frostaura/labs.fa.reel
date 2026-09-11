@@ -488,11 +488,38 @@ export function pageIsExhausted(data: Pick<DoneData, "results" | "kept">): boole
  *
  * A count of zero falls back to the sentence alone: "0 picks so far" is a claim about a screen
  * with no grid on it, and the branch that renders this only fires when there are cards anyway.
+ *
+ * The count is PICKS — see {@link pickSummary}. It folded in the outside-request channel until
+ * F4-05, so the accumulated line claimed as matching the very cards the server's own sentence,
+ * forty pixels to its right, had just called closest-but-outside.
  */
-export function footnote(reason: string | null, shownCount: number, paged: boolean): string | null {
+export function footnote(reason: string | null, pickCount: number, paged: boolean): string | null {
   if (!reason) return null;
-  if (!paged || shownCount <= 0) return reason;
-  return `${shownCount} ${plural(shownCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+  if (!paged || pickCount <= 0) return reason;
+  return `${pickCount} ${plural(pickCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+}
+
+/**
+ * What the settled live region announces, and the vocabulary the footnote counts in.
+ *
+ * F4-05. "N picks so far" folded in the outside-request cards — the ones the sentence beside it has
+ * just called not-matching. Turn 10 read
+ *
+ *   12 picks so far · last page: 3 picks matched everything you asked ·
+ *   3 closest-but-outside shown separately · 6 under your 6.0 bar
+ *
+ * over 9 picks and 3 outside cards: the 12 is 9 + 3, in the same line as "3 picks matched
+ * everything you asked". A **pick** is a card that matched, which is the server's own `kept`; a
+ * closest-but-outside card is shown precisely because it did not, and is counted where it is named.
+ *
+ * Zero picks and zero outside is the honest empty answer. Zero picks WITH an outside channel is
+ * not — "No matches" over three cards on screen is the same conflation in reverse.
+ */
+export function pickSummary(pickCount: number, outsideCount: number): string {
+  const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
+  if (pickCount === 0 && outsideCount === 0) return "No matches for that one.";
+  if (pickCount === 0) return `No picks matched everything you asked.${outside}`;
+  return `${pickCount} ${plural(pickCount, "pick")} ready.${outside}`;
 }
 
 /**
