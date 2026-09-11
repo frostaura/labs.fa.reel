@@ -105,6 +105,15 @@ public sealed class LiveSearchExpansionService(
     /// <inheritdoc cref="MinCalendarYear"/>
     private const int MaxCalendarYear = 9999;
 
+    /// <summary>
+    /// How long one question's INTERPRETATION is reused. Short on purpose, and much shorter than
+    /// <see cref="DiscoveryTtl"/>: this caches a conversational reply as well as an intent, so its
+    /// job is to make a re-ask, a double-tap or a reload consistent — not to answer tomorrow's
+    /// question with today's sentence. Ten minutes covers the whole window in which a person is
+    /// still looking at the same screen.
+    /// </summary>
+    private static readonly TimeSpan InterpretTtl = TimeSpan.FromMinutes(10);
+
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -309,15 +318,63 @@ public sealed class LiveSearchExpansionService(
             var standingSummary = AskReelStandingFilters.Describe(standingRules);
 
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
-            var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
+            // Cached on the QUESTION, not on the answer. Every cache below this point — discovery,
+            // the single-flight fetch, the per-title fit — is keyed on the interpreted intent, and
+            // the interpreter is a language model: one byte-identical question asked twice ninety
+            // seconds apart came back with different keywords, hence a different IntentKey, hence a
+            // second full TMDB pull, hence 11 of 24 cards changed between two identical questions.
+            // Keying the interpretation itself on what the user typed is what makes the rest of the
+            // caching machinery reachable, and it stops the repeat re-buying the interpret call.
+            var interpretKey = InterpretKey(accountId, trimmed, standingSummary, mediaFilter, agent.ModelId);
             AgentReply agentReply;
             using (timings.Stage(AskStageTimings.Interpret))
             {
-                agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct, standingSummary);
+                if (cache.TryGetValue<AgentReply>(interpretKey, out var remembered) && remembered is not null)
+                {
+                    agentReply = remembered;
+                    timings.MarkCached(AskStageTimings.Interpret);
+                }
+                else
+                {
+                    // Only read on a miss: it exists solely to be written into the prompt.
+                    var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
+                    agentReply = await agent.InterpretAsync(
+                        history, trimmed, tasteSummary, shownNames, ct, standingSummary);
+                    cache.Set(interpretKey, agentReply, InterpretTtl);
+                }
             }
 
-            assistantText = agentReply.Reply;
-            await emit("assistant-message", new { text = agentReply.Reply });
+            // ── The collision, computed from the words the user typed ────────────────────────
+            // Rungs 1 and 2 of the filter-collision ladder: NAME the collision and show the
+            // conditions. Rung 3 — a per-turn "ignore my filters" override — is deliberately not
+            // built; an exclusion stays airtight and reopening that is the founder's call.
+            //
+            // Computed HERE, before the reply goes out, rather than beside the frame that reports
+            // it: the reply is written by a model that has seen no candidates and used to promise
+            // the very thing the conditions were about to remove ("here are gritty 90s action
+            // picks" above seven post-2000 titles). It reads agentReply.Requested — the
+            // interpreter's free reading of the user's own sentence — because the intent has been
+            // through a prompt that was told about these exclusions and has already dropped them.
+            var collidingGenres = AskReelStandingFilters.CollidingGenres(
+                standingRules, agentReply.Intent, agentReply.Requested);
+            var collidingKeywords = AskReelStandingFilters.CollidingKeywords(
+                standingRules, agentReply.Intent, agentReply.Requested);
+            var yearCollides = AskReelStandingFilters.YearWindowCollides(
+                standingRules, agentReply.Intent, agentReply.Requested);
+            var hasConflict = collidingGenres.Count > 0 || collidingKeywords.Count > 0 || yearCollides;
+
+            // Qualified before it is emitted AND before it is persisted, so the transcript cannot
+            // record a promise the same turn then broke.
+            assistantText = hasConflict
+                ? AskReelStandingFilters.Qualify(
+                    agentReply.Reply, collidingGenres, collidingKeywords, yearCollides, standingRules)
+                : agentReply.Reply;
+
+            // `conflict` is always present as a key so the client has ONE shape to render, and the
+            // frame stays where it is: moving the reply after discovery would buy honesty with the
+            // turn's only early frame. It is the same fact the `conflict` frame carries in full —
+            // this flag just arrives early enough to style the sentence it qualifies.
+            await emit("assistant-message", new { text = assistantText, conflict = hasConflict });
 
             // A named-person query ("all movies Nolan directs") is a lookup: it relaxes the
             // unseen-only rule (ContentFilteredTitles keeps watched titles, badged) so the
@@ -446,6 +503,32 @@ public sealed class LiveSearchExpansionService(
             // indistinguishable in production. One count per turn, ~16 ms on the live catalogue.
             var eligiblePoolSize = await baseQuery.CountAsync(ct);
 
+            // The collision itself was decided before the reply went out (see above) — this is the
+            // frame that reports it, emitted here because poolSize is only knowable once discovery
+            // has run. One computation, two readers, so the sentence in the reply and the sentence
+            // in the frame can never disagree.
+            //
+            // BEFORE the empty-pool return, deliberately. A turn that asks for the one genre the
+            // account has permanently excluded is the likeliest turn in the product to come back
+            // with nothing — and reporting the collision only on turns that found something meant
+            // the user was told least exactly when the explanation was worth most.
+            if (hasConflict)
+            {
+                await emit("conflict", new
+                {
+                    excludedGenres = collidingGenres,
+                    // Additive: the excluded thing is not always a genre. "anime" and "musical" are
+                    // avoid-keywords, and a turn asking for one got no notice at all until this.
+                    excludedKeywords = collidingKeywords,
+                    poolSize = eligiblePoolSize,
+                    catalogueSize = await db.Titles.CountAsync(ct),
+                    // The only prose in the frame. Every number the client renders travels beside it
+                    // as raw JSON so the copy is the client's to shape, not the server's to format.
+                    message = AskReelStandingFilters.Message(
+                        collidingGenres, collidingKeywords, yearCollides, standingRules),
+                });
+            }
+
             if (eligible.Count == 0)
             {
                 logger.LogInformation(
@@ -547,24 +630,6 @@ public sealed class LiveSearchExpansionService(
             // Their caption is the deterministic statement of which exclusion they trip, streamed
             // as a candidate-reranked frame so live cards pick it up the same way clean cards pick
             // up their LLM why.
-            // Rungs 1 and 2 of the filter-collision ladder: NAME the collision and show the
-            // conditions. Rung 3 — a per-turn "ignore my filters" override — is deliberately not
-            // built; an exclusion stays airtight and reopening that is the founder's call.
-            var collidingGenres = AskReelStandingFilters.CollidingGenres(standingRules, intent);
-            var yearCollides = AskReelStandingFilters.YearWindowCollides(standingRules, intent);
-            if (collidingGenres.Count > 0 || yearCollides)
-            {
-                await emit("conflict", new
-                {
-                    excludedGenres = collidingGenres,
-                    poolSize = eligiblePoolSize,
-                    catalogueSize = await db.Titles.CountAsync(ct),
-                    // The only prose in the frame. Every number the client renders travels beside it
-                    // as raw JSON so the copy is the client's to shape, not the server's to format.
-                    message = AskReelStandingFilters.Message(collidingGenres, yearCollides, standingRules),
-                });
-            }
-
             await emit("phase", new { stage = "ranking", found = returned.Count, scored = sliceIds.Count });
 
             // When the turn named comparison titles, tell the rerank model so the why-lines can
@@ -1904,6 +1969,32 @@ public sealed class LiveSearchExpansionService(
         $"-{string.Join(',', (intent.ExcludeGenres ?? []).OrderBy(g => g, StringComparer.Ordinal))}|" +
         $"-{string.Join(',', (intent.ExcludeKeywords ?? []).OrderBy(k => k, StringComparer.Ordinal))}|" +
         $"@{region}");
+
+    /// <summary>
+    /// The identity of one INTERPRETATION: everything that changes what the interpret call is asked,
+    /// and nothing that does not.
+    ///
+    /// <para>The account is on the key and is not optional. This is a process-wide
+    /// <see cref="IMemoryCache"/> in a multi-tenant app, and the cached value is a REPLY written
+    /// against one person's taste summary — handing it to somebody else asking the same thing would
+    /// be a cross-tenant leak in a product whose entire premise is per-user. The standing-filter
+    /// summary rides in whole rather than hashed: it is already short, sorted and deterministic
+    /// (<see cref="AskReelStandingFilters.Describe"/>), and a hash would trade readability for a
+    /// collision class nobody could debug.</para>
+    ///
+    /// <para>Deliberately NOT on the key: the conversation history and the shown-titles list. Both
+    /// move on every turn, so including them would make the key unique per turn and the cache
+    /// unreachable — which is the exact failure being fixed one layer down. The cost of leaving
+    /// them out is that an identical question inside the window gets an identical reply, which is
+    /// the honest answer to an identical question.</para>
+    /// </summary>
+    internal static string InterpretKey(
+        Guid accountId, string query, string? standingSummary, IReadOnlyList<MediaType> mediaFilter, string modelId) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"askreel:intent:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{NormalizeQuery(query)}|" +
+            $"{string.Join(',', mediaFilter.Select(m => m.ToString()).OrderBy(m => m, StringComparer.Ordinal))}|" +
+            $"{standingSummary}");
 
     /// <summary>
     /// The discovered-id cache key. Carries the prompt generation and the model id because the ids

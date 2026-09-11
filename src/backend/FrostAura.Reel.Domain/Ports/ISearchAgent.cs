@@ -3,8 +3,28 @@ namespace FrostAura.Reel.Domain.Ports;
 /// <summary>One turn in an Ask Reel conversation.</summary>
 public sealed record ChatTurn(string Role, string Text);
 
-/// <summary>The agent's response to a turn: a conversational reply + the resolved discovery intent.</summary>
-public sealed record AgentReply(string Reply, SearchIntent Intent);
+/// <summary>
+/// The agent's response to a turn: a conversational reply + the resolved discovery intent.
+///
+/// <para><paramref name="Requested"/> is the FREE deterministic reading of the user's own words —
+/// <see cref="ISearchQueryInterpreter.Heuristic"/> — carried alongside the model's answer rather
+/// than discarded. It exists because <paramref name="Intent"/> is laundered by design: the interpret
+/// prompt is told what the account permanently excludes, so a model that obeys removes the excluded
+/// genre from its answer before returning it. Anything that needs to know what the turn ASKED FOR,
+/// as opposed to what the pipeline was told to go and find, has to read a source the prompt cannot
+/// touch. Null where a caller built a reply by hand; treat null as "no second reading".</para>
+///
+/// <para>Additive with a null default, so every existing construction site — the stubs in a dozen
+/// tests included — stays valid.</para>
+/// </summary>
+public sealed record AgentReply(string Reply, SearchIntent Intent, SearchIntent? Requested = null)
+{
+    /// <summary>
+    /// The genres the user's own words asked for. Empty rather than null, because every caller
+    /// treats "no second reading" and "it named no genre" the same way.
+    /// </summary>
+    public IReadOnlyList<string> RequestedGenres => Requested?.Genres ?? [];
+}
 
 /// <summary>
 /// The half of a candidate the rerank prompt used NOT to carry, and the reason its verdicts were

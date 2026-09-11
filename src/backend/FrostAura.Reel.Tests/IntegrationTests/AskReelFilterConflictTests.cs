@@ -13,10 +13,14 @@ using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
+using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -78,6 +82,134 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
         var rankingIndex = events.FindIndex(e =>
             e.Event == "phase" && e.Data.GetProperty("stage").GetString() == "ranking");
         Assert.True(rankingIndex > conflictIndex, "the collision has to be named before the ranking phase.");
+    }
+
+    /// <summary>
+    /// The turn as it actually arrives in production: the interpret prompt has been told about the
+    /// exclusion, so the model politely moves <c>comedy</c> out of <c>genres</c> and into
+    /// <c>excludeGenres</c> before answering. Intersecting the account's rules with the returned
+    /// intent then finds nothing, on every turn, forever — which is why three finders watched this
+    /// notice never appear. The unlaundered reading of the user's own sentence is what the rung
+    /// reads now.
+    /// </summary>
+    [Fact]
+    public async Task A_genre_the_prompt_laundered_out_of_the_intent_is_still_named()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(71501, 4));
+        var agent = new LaunderingAgent();
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit);
+
+        await service.StreamAsync(
+            "I want a comedy tonight", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var conflict = events.Single(e => e.Event == "conflict").Data;
+        Assert.Equal(["comedy"], conflict.GetProperty("excludedGenres").EnumerateArray().Select(g => g.GetString()));
+        Assert.Contains("comedy", conflict.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        // What the model returned, for the record: the collision is invisible in it.
+        Assert.Empty(agent.Returned.Genres);
+    }
+
+    /// <summary>
+    /// "an anime series" — the same collision one vocabulary down. <c>anime</c> is not a TMDB genre,
+    /// so an account that never wants it holds it as an avoided keyword, and the turn used to get no
+    /// structured notice at all.
+    /// </summary>
+    [Fact]
+    public async Task An_avoided_keyword_the_turn_asked_for_is_named_too()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeKeyword, "anime");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(71601, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "an anime series", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var conflict = events.Single(e => e.Event == "conflict").Data;
+        Assert.Equal(["anime"], conflict.GetProperty("excludedKeywords").EnumerateArray().Select(k => k.GetString()));
+        Assert.Empty(conflict.GetProperty("excludedGenres").EnumerateArray());
+
+        // And it is named on a turn that found NOTHING — the fixture holds only movies, the turn
+        // asked for a series. That is the turn most likely to collide with a standing rule and it
+        // used to return through the empty-pool path without ever emitting this frame.
+        var done = events.Single(e => e.Event == "done").Data;
+        Assert.Empty(done.GetProperty("results").EnumerateArray());
+    }
+
+    /// <summary>
+    /// F1-03. The reply is written before a candidate exists, so it promised the excluded thing and
+    /// the grid then contradicted it card by card. The clause is appended before the frame goes out
+    /// AND before the outcome is handed back for persistence — the transcript says what the user
+    /// read.
+    /// </summary>
+    [Fact]
+    public async Task The_reply_says_what_the_conditions_will_do_before_the_grid_does()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(71701, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        var outcome = await service.StreamAsync(
+            "a light-hearted romantic comedy from the 1990s", [], [], "US", [], ApiUsagePurpose.RerankAsk,
+            emit, CancellationToken.None);
+
+        var reply = events.Single(e => e.Event == "assistant-message").Data;
+        const string Expected =
+            "Coming up — under your conditions that means no comedy and titles from 2000 on.";
+        Assert.Equal(Expected, reply.GetProperty("text").GetString());
+        Assert.True(reply.GetProperty("conflict").GetBoolean());
+        // The persisted half: the assistant row records the qualified sentence, not the promise.
+        Assert.Equal(Expected, outcome.AssistantText);
+    }
+
+    /// <summary>The probe: the same turn with the one exclusion row removed says nothing extra.</summary>
+    [Fact]
+    public async Task A_turn_with_nothing_to_qualify_carries_the_reply_verbatim()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(71801, 4));
+        var (service, events) = BuildService(accountId, tmdb, new LaunderingAgent(), out var emit);
+
+        await service.StreamAsync(
+            "I want a comedy tonight", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var reply = events.Single(e => e.Event == "assistant-message").Data;
+        Assert.Equal("Coming up.", reply.GetProperty("text").GetString());
+        Assert.False(reply.GetProperty("conflict").GetBoolean());
+        Assert.DoesNotContain(events, e => e.Event == "conflict");
     }
 
     /// <summary>The probe: the same turn, with the one filter row removed.</summary>
@@ -216,7 +348,7 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
     public void The_year_message_renders_the_bounds_invariantly()
     {
         var rules = FilterRuleSet.Create(null, null, null, null, null, 2000, null);
-        var message = AskReelStandingFilters.Message([], yearCollides: true, rules);
+        var message = AskReelStandingFilters.Message([], [], yearCollides: true, rules);
 
         Assert.Contains("from 2000 onwards", message, StringComparison.Ordinal);
         Assert.DoesNotContain("2,000", message, StringComparison.Ordinal);
@@ -361,6 +493,67 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>(
                 titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+    }
+
+    /// <summary>
+    /// An agent that behaves like a model which has READ the standing-filter summary: whatever the
+    /// user asked for, the reply is bland and the intent comes back already scrubbed — the asked-for
+    /// genre on the exclusion side, the asked-for decade replaced by the account's own bound. This
+    /// is the shape the wire actually carried on every finder turn, and the shape that made the
+    /// collision rung unreachable.
+    ///
+    /// <para><see cref="AgentReply.Requested"/> is filled from the real deterministic interpreter,
+    /// not hand-written, so the test exercises the same reading production uses.</para>
+    /// </summary>
+    private sealed class LaunderingAgent : ISearchAgent
+    {
+        private readonly ISearchQueryInterpreter _interpreter = StubInterpreter();
+
+        /// <summary>The laundered intent the last call handed back.</summary>
+        public SearchIntent Returned { get; private set; } = new([], [], [], string.Empty, null, null);
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "laundering-agent";
+
+        public Task<AgentReply> InterpretAsync(
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
+            CancellationToken ct = default, string? standingFilters = null)
+        {
+            var requested = _interpreter.Heuristic(message);
+            Returned = new SearchIntent(
+                [],
+                requested.Keywords,
+                requested.MediaTypes,
+                message,
+                // "from 2000 on" — the bound the prompt just told it about, not the decade asked for.
+                requested.MinYear is null ? null : 2000,
+                null,
+                null,
+                // The laundering itself: everything the user asked for, moved to the other side.
+                requested.Genres,
+                []);
+            return Task.FromResult(new AgentReply("Coming up.", Returned, requested));
+        }
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
+            string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<RerankResult>>(
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+
+        private static ISearchQueryInterpreter StubInterpreter()
+        {
+            var config = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["TestHelpers:ModelStubMode"] = "true" })
+                .Build();
+            var scopeFactory = new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+            return new OpenRouterSearchInterpreter(
+                new HttpClient(),
+                new ApiUsageRecorder(scopeFactory, NullLogger<ApiUsageRecorder>.Instance),
+                config,
+                NullLogger<OpenRouterSearchInterpreter>.Instance);
+        }
     }
 
     private sealed class UnitEmbeddingProvider : IEmbeddingProvider
