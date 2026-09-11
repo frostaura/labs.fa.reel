@@ -749,10 +749,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.HasIndex("AccountId", "TitleId", "OccurredAt")
                         .IsDescending(false, false, true);
 
-                    b.HasIndex("AccountId", "TitleId", "Surface", "FeedSnapshotId", "MinuteBucket")
+                    b.HasIndex("AccountId", "TitleId", "Surface", "FeedSnapshotId", "MinuteBucket", "SourceTurnId")
                         .IsUnique();
 
-                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("AccountId", "TitleId", "Surface", "FeedSnapshotId", "MinuteBucket"), false);
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("AccountId", "TitleId", "Surface", "FeedSnapshotId", "MinuteBucket", "SourceTurnId"), false);
 
                     b.ToTable("ExposureEvents");
                 });
@@ -1936,6 +1936,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<DateTime?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ConflictJson")
+                        .HasColumnType("jsonb");
 
                     b.Property<Guid>("ConversationId")
                         .HasColumnType("uuid");

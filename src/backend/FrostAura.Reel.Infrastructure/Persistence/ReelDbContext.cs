@@ -289,6 +289,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(t => t.PromptVersion).HasMaxLength(32);
             e.Property(t => t.ModelId).HasMaxLength(128);
             e.Property(t => t.IntentJson).HasColumnType("jsonb");
+            e.Property(t => t.ConflictJson).HasColumnType("jsonb");
             e.Property(t => t.StageTimingsJson).HasColumnType("jsonb");
         });
 
@@ -604,7 +605,30 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // legitimately null on the digest, Ask Reel and similar surfaces, and under the default
             // NULLS DISTINCT those rows would never collide — every RTK refetch inside one minute
             // would insert a fresh duplicate and the calibration denominator would inflate.
-            e.HasIndex(x => new { x.AccountId, x.TitleId, x.Surface, x.FeedSnapshotId, x.MinuteBucket })
+            //
+            // SourceTurnId is the LAST member, and it is what makes the key Ask-Reel-aware. Without
+            // it the key collapsed to (account, title, minute) on every Ask Reel row — FeedSnapshotId
+            // is null there by definition — so two turns in one minute that both recommended a title
+            // wrote ONE row, stamped with the first turn's id. Measured over a thirteen-turn session:
+            // eighteen picks got no exposure row at all, one turn got none of its seven, and the
+            // surviving rows pointed at the wrong turn. Both halves matter — the denominator of
+            // every accuracy number computed from this log was under-counting Ask Reel by whatever
+            // the repeat rate happened to be, and the attribution that did survive was false.
+            //
+            // Every feed surface is untouched by construction: SourceTurnId is null on all of them,
+            // NULLS NOT DISTINCT still makes those nulls collide, and the key they dedupe on is the
+            // same five columns it always was. Nothing is updated and nothing is back-filled — this
+            // changes what a FUTURE insert collides with, which is the only thing an append-only log
+            // permits.
+            e.HasIndex(x => new
+            {
+                x.AccountId,
+                x.TitleId,
+                x.Surface,
+                x.FeedSnapshotId,
+                x.MinuteBucket,
+                x.SourceTurnId,
+            })
                 .IsUnique()
                 .AreNullsDistinct(false);
 

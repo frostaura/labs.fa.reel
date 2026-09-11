@@ -123,6 +123,26 @@ public class SearchTurn : IAccountScoped
     /// <summary>The interpreted <c>SearchIntent</c> as stored JSON (jsonb). Assistant rows only.</summary>
     public string? IntentJson { get; set; }
 
+    /// <summary>
+    /// The <c>conflict</c> frame this turn emitted, as stored JSON (jsonb) — <c>excludedGenres</c>,
+    /// <c>excludedKeywords</c>, the year bounds and the <c>message</c>. Null on a turn that had no
+    /// collision, which is most of them.
+    ///
+    /// <para><b>It is stored because it is the answer's explanation, and an explanation that does
+    /// not survive a reload is not one.</b> The notice was a stream-only frame: ask for a 90s
+    /// romantic comedy against standing exclusions on both genres, reload, and the thread comes back
+    /// as four post-2000 dramas under that question with nothing left on the page saying why. The
+    /// cards are restored from rows and the reason line is restored from a column; the one sentence
+    /// that accounts for the distance between the question and the answer was the only part of the
+    /// turn the server forgot.</para>
+    ///
+    /// <para>Stored rather than recomputed on read, for the same reason <see cref="Reason"/> is: the
+    /// account's conditions can change between the turn and the resume, and a notice re-derived from
+    /// today's rules would describe an answer that was produced under yesterday's. The transcript
+    /// records what the user was told.</para>
+    /// </summary>
+    public string? ConflictJson { get; set; }
+
     /// <summary>The media filter the turn ran under, comma-separated (<c>Movie,Show</c>); null for "no filter".</summary>
     public string? MediaFilter { get; set; }
 
