@@ -26,6 +26,9 @@ import {
   showMoodPresets,
   showsFootnote,
   recentListing,
+  lastTurnOutcome,
+  answeredQuestion,
+  failedTurnMessage,
   RECENT_LIMIT,
   OLDER_LIMIT,
   transcriptOf,
@@ -1589,5 +1592,183 @@ describe("recentListing", () => {
     expect(recentListing(true, OLDER_LIMIT).atCeiling).toBe(true);
     expect(recentListing(true, OLDER_LIMIT - 1).atCeiling).toBe(false);
     expect(recentListing(false, RECENT_LIMIT).atCeiling).toBe(false);
+  });
+});
+
+/**
+ * SB-03 — a resumed thread attributed the previous answer to the question that never got one.
+ *
+ * The DB is right and the grid is right: a stopped turn is stored `Failed` / `client_aborted` with
+ * zero cards, and the server replays the last COMPLETED answer. What was missing was any sentence
+ * on the page saying so — a full-text scan for `stopped|failed|didn't finish|Ask again` came back
+ * false — so the screen read "You said: something surreal and dreamlike" and then, directly under
+ * it, 24 cards answering a different question entirely.
+ *
+ * The information was already on the wire: `turns[6].status === "Failed"` was in that very payload.
+ * `transcriptOf` simply never looked at it.
+ */
+describe("lastTurnOutcome", () => {
+  const completed = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+  ];
+
+  it("says_nothing_about_a_thread_that_ended_on_an_answer", () => {
+    expect(lastTurnOutcome(completed)).toBeNull();
+  });
+
+  it("reports_a_stopped_turn_as_the_users_own_doing", () => {
+    const stopped = [
+      ...completed,
+      { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+    ];
+    expect(lastTurnOutcome(stopped)).toEqual({ status: "failed", failureCode: "client_aborted", turnId: null });
+    expect(failedTurnMessage("client_aborted")).toContain("you stopped it");
+  });
+
+  it("reports_any_other_failure_as_a_snag_the_user_did_not_cause", () => {
+    // Fixture variation, one field: the failure code. Telling someone they abandoned a turn they
+    // never touched is a small lie that costs trust in everything else on the page.
+    const crashed = [
+      ...completed,
+      { sequence: 2, role: "user", text: "something surreal", kind: "ask", status: "Failed" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "HttpRequestException" },
+    ];
+    expect(lastTurnOutcome(crashed)?.status).toBe("failed");
+    expect(failedTurnMessage("HttpRequestException")).toContain("hit a snag");
+    // …and a stored failure from before the code was recorded still gets the honest wording.
+    expect(failedTurnMessage(null)).toContain("hit a snag");
+  });
+
+  it("reports_a_turn_the_server_is_still_working_on", () => {
+    const pending = [
+      ...completed,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending", id: "turn-77" },
+    ];
+    expect(lastTurnOutcome(pending)).toEqual({ status: "pending", failureCode: null, turnId: "turn-77" });
+  });
+
+  it("carries_no_turn_id_when_the_payload_has_none", () => {
+    // Today's resume payload projects sequence / role / text / kind / status and no id, so the
+    // pending state has to be renderable — and re-checkable — without one.
+    const pending = [
+      ...completed,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending" },
+    ];
+    expect(lastTurnOutcome(pending)?.turnId).toBeNull();
+  });
+
+  it("ignores_a_failure_the_thread_has_already_moved_past", () => {
+    // A failure four turns back is history the transcript shows; it is not a state the page is in.
+    const recovered = [
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Failed" },
+      { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+      ...completed.map((t, i) => ({ ...t, sequence: i + 2 })),
+    ];
+    expect(lastTurnOutcome(recovered)).toBeNull();
+  });
+});
+
+/** Which question the restored grid belongs to — the server's own `lastAsk` rule, client-side. */
+describe("answeredQuestion", () => {
+  it("names_the_last_question_that_actually_got_an_answer", () => {
+    expect(answeredQuestion([
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+      { sequence: 2, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+      { sequence: 3, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+      { sequence: 4, role: "assistant", text: "", kind: "ask", status: "Failed" },
+    ])).toBe("quiet character dramas");
+  });
+
+  it("skips_a_page_row_the_way_the_server_does", () => {
+    // Fixture variation: the page is the NEWEST completed assistant row, and it has no user row of
+    // its own. The server anchors on the last completed `ask`; anchoring on the newest completed
+    // row of any kind would walk back past the page and name the same question by luck, not rule.
+    expect(answeredQuestion([
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+      { sequence: 2, role: "assistant", text: "Two more.", kind: "page", status: "Completed" },
+    ])).toBe("quiet character dramas");
+  });
+
+  it("names_nothing_on_a_thread_that_has_never_completed_an_ask", () => {
+    expect(answeredQuestion([
+      { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Failed" },
+      { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed" },
+    ])).toBe("");
+  });
+});
+
+describe("chatReducer — a resumed thread with an unfinished tail", () => {
+  const turns = [
+    { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Three that fit.", kind: "ask", status: "Completed" },
+    { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
+    { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+  ];
+  const payload = {
+    id: "conv-3",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    turns,
+    cards: [card(1), card(2), card(3)],
+    reason: "3 picks ranked for you, from 40 pulled",
+    // The server's `lastQuery` is the last USER row — the question a retry replays — which on this
+    // thread is precisely the one that never got an answer.
+    lastQuery: "something surreal and dreamlike",
+  };
+
+  it("keeps_the_grid_and_names_both_questions", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.order).toHaveLength(3);
+    expect(state.resumedTail).toEqual({ status: "failed", failureCode: "client_aborted", turnId: null });
+    // The grid belongs to the first question; the retry replays the second.
+    expect(state.answeredQuery).toBe("quiet character dramas");
+    expect(state.lastQuery).toBe("something surreal and dreamlike");
+    // …and the unanswered question is still in the transcript, because it is still what was asked.
+    expect(state.turns.map((t) => t.text)).toEqual([
+      "quiet character dramas", "Three that fit.", "something surreal and dreamlike",
+    ]);
+  });
+
+  it("says_nothing_of_the_kind_on_an_ordinary_resume", () => {
+    // Fixture variation, one field: the tail's status. Everything else about the payload is
+    // identical, so the notice cannot be reached for any other reason.
+    const settled = {
+      ...payload,
+      turns: [...turns.slice(0, 2), { ...turns[2], status: "Completed" }, { ...turns[3], text: "Three more.", status: "Completed", failureCode: null }],
+    };
+    const state = chatReducer(initialChatState, { type: "resume", payload: settled });
+    expect(state.resumedTail).toBeNull();
+    expect(state.answeredQuery).toBe("something surreal and dreamlike");
+  });
+
+  it("lets_go_of_the_tail_the_moment_this_visit_asks_anything", () => {
+    // The notice carries a retry offer, and asking IS taking it. Every route into a turn clears it:
+    // a question, a re-ask, and a page over the restored answer.
+    const resumed = chatReducer(initialChatState, { type: "resume", payload });
+    for (const action of [
+      { type: "userTurn", message: "something older", fresh: false },
+      { type: "reaskTurn" },
+      { type: "moreTurn" },
+    ] as const) {
+      const next = chatReducer(resumed, action);
+      expect(next.resumedTail).toBeNull();
+      expect(next.answeredQuery).toBe("");
+    }
+  });
+
+  it("dates_a_transcript_only_thread_from_its_last_turn", () => {
+    // `lastCardsAt` is null on a thread that predates stored results, so it is the one case the
+    // seam cannot date from cards. `lastTurnAt` is the only stamp such a thread has.
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...payload, cards: [], lastCardsAt: null, lastTurnAt: "2026-09-10T21:00:00Z" },
+    });
+    expect(state.lastCardsAt).toBeNull();
+    expect(state.lastTurnAt).toBe("2026-09-10T21:00:00Z");
   });
 });
