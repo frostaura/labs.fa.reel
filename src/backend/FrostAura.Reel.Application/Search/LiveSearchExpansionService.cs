@@ -105,6 +105,15 @@ public sealed class LiveSearchExpansionService(
     /// <inheritdoc cref="MinCalendarYear"/>
     private const int MaxCalendarYear = 9999;
 
+    /// <summary>
+    /// How long one question's INTERPRETATION is reused. Short on purpose, and much shorter than
+    /// <see cref="DiscoveryTtl"/>: this caches a conversational reply as well as an intent, so its
+    /// job is to make a re-ask, a double-tap or a reload consistent — not to answer tomorrow's
+    /// question with today's sentence. Ten minutes covers the whole window in which a person is
+    /// still looking at the same screen.
+    /// </summary>
+    private static readonly TimeSpan InterpretTtl = TimeSpan.FromMinutes(10);
+
     private static readonly TimeSpan DiscoveryTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -309,11 +318,30 @@ public sealed class LiveSearchExpansionService(
             var standingSummary = AskReelStandingFilters.Describe(standingRules);
 
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
-            var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
+            // Cached on the QUESTION, not on the answer. Every cache below this point — discovery,
+            // the single-flight fetch, the per-title fit — is keyed on the interpreted intent, and
+            // the interpreter is a language model: one byte-identical question asked twice ninety
+            // seconds apart came back with different keywords, hence a different IntentKey, hence a
+            // second full TMDB pull, hence 11 of 24 cards changed between two identical questions.
+            // Keying the interpretation itself on what the user typed is what makes the rest of the
+            // caching machinery reachable, and it stops the repeat re-buying the interpret call.
+            var interpretKey = InterpretKey(accountId, trimmed, standingSummary, mediaFilter, agent.ModelId);
             AgentReply agentReply;
             using (timings.Stage(AskStageTimings.Interpret))
             {
-                agentReply = await agent.InterpretAsync(history, trimmed, tasteSummary, shownNames, ct, standingSummary);
+                if (cache.TryGetValue<AgentReply>(interpretKey, out var remembered) && remembered is not null)
+                {
+                    agentReply = remembered;
+                    timings.MarkCached(AskStageTimings.Interpret);
+                }
+                else
+                {
+                    // Only read on a miss: it exists solely to be written into the prompt.
+                    var shownNames = await ShownTitleNamesAsync(shownTmdbIds, ct);
+                    agentReply = await agent.InterpretAsync(
+                        history, trimmed, tasteSummary, shownNames, ct, standingSummary);
+                    cache.Set(interpretKey, agentReply, InterpretTtl);
+                }
             }
 
             // ── The collision, computed from the words the user typed ────────────────────────
@@ -1941,6 +1969,32 @@ public sealed class LiveSearchExpansionService(
         $"-{string.Join(',', (intent.ExcludeGenres ?? []).OrderBy(g => g, StringComparer.Ordinal))}|" +
         $"-{string.Join(',', (intent.ExcludeKeywords ?? []).OrderBy(k => k, StringComparer.Ordinal))}|" +
         $"@{region}");
+
+    /// <summary>
+    /// The identity of one INTERPRETATION: everything that changes what the interpret call is asked,
+    /// and nothing that does not.
+    ///
+    /// <para>The account is on the key and is not optional. This is a process-wide
+    /// <see cref="IMemoryCache"/> in a multi-tenant app, and the cached value is a REPLY written
+    /// against one person's taste summary — handing it to somebody else asking the same thing would
+    /// be a cross-tenant leak in a product whose entire premise is per-user. The standing-filter
+    /// summary rides in whole rather than hashed: it is already short, sorted and deterministic
+    /// (<see cref="AskReelStandingFilters.Describe"/>), and a hash would trade readability for a
+    /// collision class nobody could debug.</para>
+    ///
+    /// <para>Deliberately NOT on the key: the conversation history and the shown-titles list. Both
+    /// move on every turn, so including them would make the key unique per turn and the cache
+    /// unreachable — which is the exact failure being fixed one layer down. The cost of leaving
+    /// them out is that an identical question inside the window gets an identical reply, which is
+    /// the honest answer to an identical question.</para>
+    /// </summary>
+    internal static string InterpretKey(
+        Guid accountId, string query, string? standingSummary, IReadOnlyList<MediaType> mediaFilter, string modelId) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"askreel:intent:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{NormalizeQuery(query)}|" +
+            $"{string.Join(',', mediaFilter.Select(m => m.ToString()).OrderBy(m => m, StringComparer.Ordinal))}|" +
+            $"{standingSummary}");
 
     /// <summary>
     /// The discovered-id cache key. Carries the prompt generation and the model id because the ids

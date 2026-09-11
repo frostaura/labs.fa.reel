@@ -57,6 +57,16 @@ public sealed class AskStageTimings
         [Interpret, Discover, Eligible, Embed, Score, Rerank, Blend, Emit];
 
     private readonly Dictionary<string, double> _elapsedMs = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _cached = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Records that a stage was answered from cache rather than done. A zero beside a stage that
+    /// normally costs seconds is the single most misread number in this log line — it looks like an
+    /// instrumentation bug, so the reader ends up distrusting the rest of the timings. Saying
+    /// <c>interpret=0ms(cached)</c> makes the zero self-explanatory, and makes hit rate readable
+    /// from the logs without a second counter to keep in step with this one.
+    /// </summary>
+    public void MarkCached(string name) => _cached.Add(name);
 
     /// <summary>
     /// Times everything until the returned handle is disposed, adding it to <paramref name="name"/>'s
@@ -89,7 +99,9 @@ public sealed class AskStageTimings
     /// it rather than a comma decimal separator.
     /// </summary>
     public override string ToString() =>
-        string.Join(' ', Snapshot().Select(kv => string.Create(CultureInfo.InvariantCulture, $"{kv.Key}={kv.Value}ms")));
+        string.Join(' ', Snapshot().Select(kv => string.Create(
+            CultureInfo.InvariantCulture,
+            $"{kv.Key}={kv.Value}ms{(_cached.Contains(kv.Key) ? "(cached)" : string.Empty)}")));
 
     private void Record(string name, double milliseconds) =>
         _elapsedMs[name] = _elapsedMs.GetValueOrDefault(name) + milliseconds;
