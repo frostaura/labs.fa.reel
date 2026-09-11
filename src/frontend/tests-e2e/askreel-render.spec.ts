@@ -55,7 +55,39 @@ const FILTERS = {
   minPredictedRating: 6, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
 };
 
-async function boot(page: Page, opts: { conversations?: unknown[] } = {}) {
+/**
+ * The conversation list as a SERVER, not as a constant.
+ *
+ * The delete tests need the list route and the delete route to agree: a deferred delete that is
+ * cancelled must leave the row there on the next fetch, and one that commits must take it away.
+ * Mocking the list as a frozen array makes both of those unobservable — the row comes back either
+ * way, so an optimistic hide and a real delete look identical.
+ */
+function conversationServer(initial: Record<string, unknown>[] = CONVERSATION_LIST) {
+  return { rows: [...initial], deletes: [] as string[], resume: null as Record<string, unknown> | null };
+}
+
+/** A thread with one answered turn, so `/search` has a conversation id on screen to delete. */
+const RESUME_PAYLOAD = {
+  id: CONVERSATION,
+  title: "a slow-burn detective drama with superb photography",
+  lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+  turns: [
+    { sequence: 0, role: "user", text: "a slow-burn detective drama with superb photography", kind: "ask", status: "Completed" },
+    { sequence: 1, role: "assistant", text: "Two that fit.", kind: "ask", status: "Completed" },
+  ],
+  cards: [],
+  reason: null,
+  removed: 0,
+  lastQuery: "a slow-burn detective drama with superb photography",
+  mediaTypes: [],
+  shown: [],
+};
+
+async function boot(
+  page: Page,
+  opts: { conversations?: unknown[]; server?: ReturnType<typeof conversationServer> } = {},
+) {
   await stubEventSource(page);
   await stubAskReel(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
@@ -66,8 +98,36 @@ async function boot(page: Page, opts: { conversations?: unknown[] } = {}) {
   await mockJson(page, "**/api/settings/filters", FILTERS);
   await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 });
   await mockJson(page, "**/api/feed/continue-watching", []);
-  await mockJson(page, "**/api/search/conversations", opts.conversations ?? CONVERSATION_LIST);
-  await mockJson(page, "**/api/search/conversations/latest", {}, 404);
+  const server = opts.server;
+  if (server) {
+    await page.route(
+      (u) => u.pathname === "/api/search/conversations",
+      (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(server.rows) }),
+    );
+    await page.route(
+      (u) => u.pathname.startsWith("/api/search/conversations/"),
+      (route) => {
+        const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop()!);
+        if (route.request().method() !== "DELETE") {
+          return server.resume && id === server.resume.id
+            ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(server.resume) })
+            : route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+        }
+        server.deletes.push(id);
+        server.rows = server.rows.filter((r) => r.id !== id);
+        return route.fulfill({ status: 204, body: "" });
+      },
+    );
+    if (server.resume) {
+      await page.addInitScript(
+        (id) => localStorage.setItem("reel.ask.conversationId", id as string),
+        server.resume.id as string,
+      );
+    }
+  } else {
+    await mockJson(page, "**/api/search/conversations", opts.conversations ?? CONVERSATION_LIST);
+    await mockJson(page, "**/api/search/conversations/latest", {}, 404);
+  }
   await page.goto("/search");
   await expect(page.getByTestId("askreel-recent")).toBeVisible();
 }
@@ -138,6 +198,99 @@ test.describe("the Recent popover stays inside the viewport", () => {
     // width, so this is the "tapped somewhere else" gesture and nothing more.
     await page.getByRole("heading", { name: "Ask Reel" }).tap();
     await expect(page.getByTestId("askreel-recent-menu")).toHaveCount(0);
+  });
+});
+
+test.describe("deleting a thread", () => {
+  test("the trash asks first, and No leaves the thread alone", async ({ page }) => {
+    const server = conversationServer();
+    await boot(page, { server });
+    await page.getByTestId("askreel-recent").tap();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(2);
+
+    // F6-07: this tap WAS the delete. Now it is a question.
+    await page.getByTestId("askreel-recent-delete").first().tap();
+    await expect(page.getByTestId("askreel-recent-delete-no").first()).toBeVisible();
+    expect(server.deletes, "asking must not delete").toEqual([]);
+
+    await page.getByTestId("askreel-recent-delete-no").first().tap();
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(2);
+    expect(server.deletes).toEqual([]);
+  });
+
+  test("Yes defers the delete behind an undo window, and Undo cancels it outright", async ({ page }) => {
+    const server = conversationServer();
+    await boot(page, { server });
+    await page.getByTestId("askreel-recent").tap();
+    await page.getByTestId("askreel-recent-delete").first().tap();
+    await page.getByTestId("askreel-recent-delete-yes").first().tap();
+
+    // The row goes at once — the answer to "did that work" has to be immediate — but the request
+    // does not. An undo that cannot un-delete is not an undo, and the server cannot restore a
+    // transcript and its cards once they are gone.
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(1);
+    await expect(page.getByTestId("askreel-delete-toast")).toBeVisible();
+    expect(server.deletes, "the delete must not have been sent yet").toEqual([]);
+
+    await page.getByTestId("askreel-delete-toast-undo").tap();
+    await expect(page.getByTestId("askreel-delete-toast")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(2);
+    // …and it is still not sent, now or later.
+    await page.waitForTimeout(1500);
+    expect(server.deletes).toEqual([]);
+  });
+
+  test("left alone, the window closes and the delete commits", async ({ page }) => {
+    const server = conversationServer();
+    await boot(page, { server });
+    await page.getByTestId("askreel-recent").tap();
+    await page.getByTestId("askreel-recent-delete").first().tap();
+    await page.getByTestId("askreel-recent-delete-yes").first().tap();
+    await expect(page.getByTestId("askreel-delete-toast")).toBeVisible();
+
+    // Dismiss is the same commit the clock makes, six seconds sooner — asserted through the button
+    // so the test does not spend six seconds proving a `setTimeout` works.
+    await page.getByTestId("askreel-delete-toast-dismiss").tap();
+    await expect(page.getByTestId("askreel-delete-toast")).toHaveCount(0);
+    await expect.poll(() => server.deletes).toEqual([CONVERSATION]);
+
+    // The RTK invalidation still fires: reopening refetches the list rather than serving the
+    // cached two rows that the optimistic hide was only pretending about.
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(1);
+  });
+
+  /**
+   * The probe: one field changed — the thread being deleted is the one ON SCREEN — and the same
+   * three gestures run again. This is where a deferred delete can go wrong in a way the other
+   * tests cannot see: resetting the page at "Yes" would leave an undo that restores a row into a
+   * list while the transcript it belongs to has already been thrown away.
+   */
+  test("deleting the thread you are reading resets the page only when the delete commits", async ({ page }) => {
+    const server = conversationServer();
+    server.resume = RESUME_PAYLOAD;
+    await boot(page, { server });
+    await expect(page.getByTestId("askreel-user-bubble")).toBeVisible();
+
+    await page.getByTestId("askreel-recent").tap();
+    await page.getByTestId("askreel-recent-delete").first().tap();
+    await page.getByTestId("askreel-recent-delete-yes").first().tap();
+    // Still the thread it was: the transcript is untouched while the window is open.
+    await expect(page.getByTestId("askreel-user-bubble")).toBeVisible();
+
+    await page.getByTestId("askreel-delete-toast-undo").tap();
+    await expect(page.getByTestId("askreel-user-bubble")).toBeVisible();
+    expect(server.deletes).toEqual([]);
+
+    // …and on commit the page does fall back to a fresh thread, because it is now rendering
+    // something the server no longer has. The menu is still open — neither the confirm nor the
+    // toast closes it, both of them being inside the component's own box.
+    await expect(page.getByTestId("askreel-recent-row")).toHaveCount(2);
+    await page.getByTestId("askreel-recent-delete").first().tap();
+    await page.getByTestId("askreel-recent-delete-yes").first().tap();
+    await page.getByTestId("askreel-delete-toast-dismiss").tap();
+    await expect.poll(() => server.deletes).toEqual([CONVERSATION]);
+    await expect(page.getByTestId("askreel-user-bubble")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-preset").first()).toBeVisible();
   });
 });
 

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Trash2, X } from "lucide-react";
 import { useDeleteConversationMutation, useListConversationsQuery } from "../../store/api";
 import { relTime } from "../../lib/format";
 import { plural, recentListing } from "../../lib/useAskReelChat";
+import UndoToast from "./UndoToast";
 
 /**
  * `Recent ▾` — the way back into a thread you left.
@@ -16,6 +17,15 @@ import { plural, recentListing } from "../../lib/useAskReelChat";
  * Deleting removes the transcript and its cards. It never touches the exposure log, which is what
  * every accuracy number on the product is computed from; that promise lives in the endpoint's own
  * doc-comment, and this button is only its front door.
+ *
+ * That front door has two locks on it now, and they do different jobs (F6-07 — the delete was one
+ * 26 px tap, with no dialog, no inline confirm and no undo, sitting eight pixels from the target
+ * that OPENS the thread). The inline "Delete? Yes / No" catches the misfire, which on a phone is
+ * the likely one. The undo window catches the change of mind — and it is real rather than
+ * decorative because the DELETE is not sent until the window closes: the server cannot restore a
+ * transcript and its cards, so an undo that fires after the request is a button that lies. The
+ * cost is six seconds of deferral on the only irreversible control in Ask Reel, which is the right
+ * trade in the only place it is worth paying.
  */
 export default function ConversationSwitcher({
   currentId,
@@ -46,6 +56,15 @@ export default function ConversationSwitcher({
   const [showOlder, setShowOlder] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  /** The row whose trash has been tapped and is now asking. One at a time, by construction. */
+  const [confirming, setConfirming] = useState<string | null>(null);
+  /**
+   * A delete the user has agreed to and the page has not sent. The row is already gone from the
+   * list — the answer to "did that work" has to be immediate — and this is what the undo window
+   * is holding, plus the title, because a toast that says "thread deleted" without naming which
+   * one is useless on an account with fifty of them.
+   */
+  const [pending, setPending] = useState<{ id: string; title: string } | null>(null);
   const listing = recentListing(showOlder, 0);
   // Nothing is fetched until the menu is opened. This list is a control almost nobody touches on a
   // given visit, and a query on mount would put a request on the critical path of every single
@@ -85,7 +104,46 @@ export default function ConversationSwitcher({
     };
   }, [open]);
 
-  const rows = conversations ?? [];
+  // A half-asked question does not survive the panel closing: reopening the list to find one row
+  // already saying "Delete?" is the control remembering something the user walked away from.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- follows an external state change
+    if (!open) setConfirming(null);
+  }, [open]);
+
+  /**
+   * The window closed — send it.
+   *
+   * Also the unmount path, which is the half that is easy to miss: leaving `/search` inside the
+   * six seconds must still delete the thread the user asked to delete, or the undo window becomes
+   * a way to lose a delete rather than to take one back. `commitRef` is what the unmount effect
+   * reads, so it always sees the LATEST pending value rather than the one captured when the
+   * effect was first run.
+   */
+  const commitDelete = async (target: { id: string; title: string }) => {
+    setPending((p) => (p?.id === target.id ? null : p));
+    await deleteConversation(target.id);
+    // Only when it was the one on screen: the page is still rendering a thread the server no
+    // longer has, and its remembered id would resume a 404 on the next visit. Deleting any OTHER
+    // thread must leave the current one untouched.
+    if (target.id === currentId) onCurrentDeleted();
+  };
+  const commitRef = useRef<(() => void) | null>(null);
+  // Written in an effect, not during render — a ref assigned in the render body is the pattern
+  // that goes stale under a bail-out. Two effects rather than one because the unmount handler must
+  // be registered exactly once, and this one has to re-run whenever the pending delete changes.
+  useEffect(() => {
+    commitRef.current = pending ? () => void commitDelete(pending) : null;
+    // `commitDelete` closes over `currentId` and the mutation trigger, both stable enough that
+    // re-keying this on the function identity would only make it run on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending]);
+  useEffect(() => () => commitRef.current?.(), []);
+
+  // The row under an open undo window is already gone as far as the list is concerned. Hiding it
+  // here rather than optimistically patching the RTK cache keeps the cache honest — nothing has
+  // been deleted yet — and an undo is then one piece of local state going away.
+  const rows = (conversations ?? []).filter((row) => row.id !== pending?.id);
   // Recomputed against what actually came back: the offer is only honest over a FULL page, and a
   // short one is the whole list. `listing.limit` above is keyed on the toggle alone, which is what
   // the request needs; this is what the footer needs.
@@ -170,21 +228,45 @@ export default function ConversationSwitcher({
                     {row.lastCardsAt == null && " · transcript only"}
                   </p>
                 </button>
-                <button
-                  type="button"
-                  data-testid="askreel-recent-delete"
-                  aria-label={`Delete conversation: ${row.title?.trim() ? row.title : "untitled"}`}
-                  onClick={async () => {
-                    await deleteConversation(row.id);
-                    // Only when it was the one on screen: the page is still rendering a thread the
-                    // server no longer has, and its remembered id would resume a 404 on the next
-                    // visit. Deleting any OTHER thread must leave the current one untouched.
-                    if (row.id === currentId) onCurrentDeleted();
-                  }}
-                  className="shrink-0 rounded-full p-1.5 text-fa-frost-dim hover:text-fa-warning hover:bg-fa-warning/10 transition-colors"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                {confirming === row.id ? (
+                  // The confirm takes the trash's place rather than floating over the row: a
+                  // dialog on a phone covers the very list the user is deciding about, and a
+                  // second control appearing BESIDE the first is how a misfire becomes two.
+                  <div className="flex shrink-0 items-center gap-1" data-testid="askreel-recent-confirm">
+                    <span className="fa-caption text-fa-warning">Delete?</span>
+                    <button
+                      type="button"
+                      data-testid="askreel-recent-delete-yes"
+                      aria-label={`Confirm delete: ${row.title?.trim() ? row.title : "untitled"}`}
+                      onClick={() => {
+                        setConfirming(null);
+                        setPending({ id: row.id, title: row.title?.trim() ? row.title : "Untitled thread" });
+                      }}
+                      className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-fa-warning transition-colors hover:bg-fa-warning/10"
+                    >
+                      <Check className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="askreel-recent-delete-no"
+                      aria-label="Keep this conversation"
+                      onClick={() => setConfirming(null)}
+                      className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-fa-frost-dim transition-colors hover:text-fa-frost-bright hover:bg-fa-glass"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="askreel-recent-delete"
+                    aria-label={`Delete conversation: ${row.title?.trim() ? row.title : "untitled"}`}
+                    onClick={() => setConfirming(row.id)}
+                    className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full text-fa-frost-dim hover:text-fa-warning hover:bg-fa-warning/10 transition-colors"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                )}
               </div>
             ))
           )}
@@ -209,6 +291,18 @@ export default function ConversationSwitcher({
             </p>
           )}
         </div>
+      )}
+
+      {/* Outside the `open` guard on purpose: closing the menu must not silently cancel the window
+          or silently commit inside it. The toast is the whole of what the user can still act on. */}
+      {pending && (
+        <UndoToast
+          id={pending.id}
+          testId="askreel-delete-toast"
+          message={`Deleted “${pending.title}”.`}
+          onUndo={() => setPending(null)}
+          onExpire={() => void commitDelete(pending)}
+        />
       )}
     </div>
   );
