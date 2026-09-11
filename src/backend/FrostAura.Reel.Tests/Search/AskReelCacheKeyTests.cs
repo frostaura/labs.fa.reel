@@ -150,6 +150,166 @@ public class AskReelCacheKeyTests
         Assert.NotEqual(key, LiveSearchExpansionService.FitKey(accountId, Guid.NewGuid(), "a tense thriller", "openai/gpt-5.4-mini"));
     }
 
+    // ── The interpret key ───────────────────────────────────────────────────────────────────
+    //
+    // The interpretation is a function of the question AND the conversation it was asked in: the
+    // prompt is handed the transcript and the no-repeat set alongside the sentence. The first
+    // version of this key carried only the sentence, and the cost was not a lower hit rate — it was
+    // a confident wrong answer for the whole TTL. Thread A had said "only shows", so "thrillers, no
+    // horror" resolved to shows there; + New, the identical sentence, and the fresh thread was
+    // served thread A's interpretation, reply and all-TV cards.
+
+    /// <summary>A transcript, and the same sentence asked at the end of it.</summary>
+    private static readonly ChatTurn[] ShowsThread =
+    [
+        new("user", "only shows, please"),
+        new("assistant", "Shows it is."),
+    ];
+
+    private static string Interpret(
+        Guid accountId, string query, IReadOnlyList<ChatTurn> history, IReadOnlyList<long>? shown = null) =>
+        LiveSearchExpansionService.InterpretKey(
+            accountId, query, standingSummary: null, mediaFilter: [], "openai/gpt-5.4-mini", history, shown ?? []);
+
+    [Fact]
+    public void The_same_question_in_two_conversations_produces_two_interpret_keys()
+    {
+        var accountId = Guid.NewGuid();
+
+        Assert.NotEqual(
+            Interpret(accountId, "thrillers, no horror", ShowsThread),
+            Interpret(accountId, "thrillers, no horror", []));
+    }
+
+    /// <summary>
+    /// The half that must NOT regress. The cache exists because a byte-identical repeat used to
+    /// re-buy the interpret call and re-pull TMDB behind a drifted intent — ~21 s against ~2.5 s —
+    /// so the same question with the same history behind it still has to be one entry. A fix that
+    /// keyed on the conversation id, or on a clock, would pass the test above and lose this.
+    /// </summary>
+    [Fact]
+    public void The_same_question_with_the_same_history_is_one_interpret_key()
+    {
+        var accountId = Guid.NewGuid();
+        ChatTurn[] copy = [new("user", "only shows, please"), new("assistant", "Shows it is.")];
+
+        Assert.Equal(
+            Interpret(accountId, "thrillers, no horror", ShowsThread),
+            Interpret(accountId, "thrillers, no horror", copy));
+        Assert.Equal(
+            Interpret(accountId, "thrillers, no horror", []),
+            Interpret(accountId, "thrillers, no horror", []));
+    }
+
+    /// <summary>
+    /// Order is part of the context. The model reads a transcript as a sequence, so a key that
+    /// sorted or set-ified it would serve "first they asked for shows, then for thrillers" the
+    /// answer to the reverse conversation.
+    /// </summary>
+    [Fact]
+    public void Reordering_the_history_changes_the_interpret_key()
+    {
+        var accountId = Guid.NewGuid();
+        ChatTurn[] reversed = [ShowsThread[1], ShowsThread[0]];
+
+        Assert.NotEqual(
+            Interpret(accountId, "thrillers, no horror", ShowsThread),
+            Interpret(accountId, "thrillers, no horror", reversed));
+    }
+
+    /// <summary>
+    /// The role is part of a turn's identity — the same words are a request from the user and a
+    /// promise from the assistant, and the prompt labels them as such.
+    /// </summary>
+    [Fact]
+    public void The_speaker_of_a_turn_changes_the_interpret_key()
+    {
+        var accountId = Guid.NewGuid();
+
+        Assert.NotEqual(
+            Interpret(accountId, "thrillers", [new ChatTurn("user", "only shows")]),
+            Interpret(accountId, "thrillers", [new ChatTurn("assistant", "only shows")]));
+    }
+
+    /// <summary>
+    /// The digest is length-prefixed per field, which is the whole difference between a digest and a
+    /// concatenation — and this pair is the proof, not a formality. Concatenated raw, a two-turn
+    /// transcript and a one-turn transcript whose text happens to swallow the next turn's role label
+    /// flatten to the identical byte string: <c>user·xuser·user·y</c> and <c>user·xuserusery</c>.
+    /// Two different conversations, one cache entry — the original defect, one layer down and far
+    /// harder to see. A user can type "xuser" into a chat box; nothing stops them.
+    /// </summary>
+    [Fact]
+    public void A_transcript_that_could_be_reparsed_as_another_still_gets_its_own_key()
+    {
+        var accountId = Guid.NewGuid();
+
+        Assert.NotEqual(
+            Interpret(accountId, "thrillers", [new ChatTurn("user", "xuser"), new ChatTurn("user", "y")]),
+            Interpret(accountId, "thrillers", [new ChatTurn("user", "xuserusery")]));
+    }
+
+    /// <summary>
+    /// "No history" is its own key rather than the digest of an empty transcript, so the commonest
+    /// context in the product is legible in a cache dump — and is still distinct from every
+    /// transcript that has anything in it, including an empty turn.
+    /// </summary>
+    [Fact]
+    public void No_history_is_its_own_distinct_key()
+    {
+        var accountId = Guid.NewGuid();
+        var fresh = Interpret(accountId, "thrillers, no horror", []);
+
+        Assert.Contains("|h=none|", fresh, StringComparison.Ordinal);
+        Assert.NotEqual(fresh, Interpret(accountId, "thrillers, no horror", [new ChatTurn("user", string.Empty)]));
+    }
+
+    /// <summary>
+    /// The no-repeat set is a prompt input too — it arrives as "already shown this session (do not
+    /// repeat; resolve references like 'the second one' against this list)", so it changes both what
+    /// the model is told to avoid and what a pronoun resolves to. Same question, different shown
+    /// set, different answer.
+    /// </summary>
+    [Fact]
+    public void The_shown_set_rides_the_interpret_key()
+    {
+        var accountId = Guid.NewGuid();
+        var nothingShown = Interpret(accountId, "something else like that", [], []);
+
+        Assert.Contains("|s=none", nothingShown, StringComparison.Ordinal);
+        Assert.NotEqual(nothingShown, Interpret(accountId, "something else like that", [], [603L]));
+        Assert.NotEqual(
+            Interpret(accountId, "something else like that", [], [603L]),
+            Interpret(accountId, "something else like that", [], [604L]));
+    }
+
+    /// <summary>
+    /// The shown set is a SET: the endpoint reads it with a <c>Distinct()</c> and no <c>ORDER BY</c>,
+    /// so Postgres owes it no row order at all. Keying on the raw sequence would split one context
+    /// into arbitrarily many entries and silently cost the repeat hit this cache exists for.
+    /// </summary>
+    [Fact]
+    public void The_shown_set_is_order_and_duplicate_insensitive()
+    {
+        var accountId = Guid.NewGuid();
+
+        Assert.Equal(
+            Interpret(accountId, "something else", [], [603L, 604L, 605L]),
+            Interpret(accountId, "something else", [], [605L, 603L, 604L, 603L]));
+    }
+
+    /// <summary>
+    /// The tenancy guarantee the key has always carried, re-asserted through the new signature: a
+    /// reply is written against one person's taste, and this is a process-wide cache.
+    /// </summary>
+    [Fact]
+    public void Another_account_never_shares_an_interpret_key()
+    {
+        Assert.NotEqual(
+            Interpret(Guid.NewGuid(), "thrillers, no horror", ShowsThread),
+            Interpret(Guid.NewGuid(), "thrillers, no horror", ShowsThread));
+    }
+
     /// <summary>
     /// The prompt version is a date so a stale cached answer can be dated at a glance, and so two
     /// branches editing the prompt in the same week collide in review rather than agreeing on "3".

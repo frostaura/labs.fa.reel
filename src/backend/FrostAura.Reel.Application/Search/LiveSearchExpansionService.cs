@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using FrostAura.Reel.Application.Abstractions;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Llm;
@@ -352,14 +354,20 @@ public sealed class LiveSearchExpansionService(
             var standingSummary = AskReelStandingFilters.Describe(standingRules);
 
             // ── Interpret the turn → conversational reply + discovery intent ─────────────────
-            // Cached on the QUESTION, not on the answer. Every cache below this point — discovery,
-            // the single-flight fetch, the per-title fit — is keyed on the interpreted intent, and
-            // the interpreter is a language model: one byte-identical question asked twice ninety
-            // seconds apart came back with different keywords, hence a different IntentKey, hence a
-            // second full TMDB pull, hence 11 of 24 cards changed between two identical questions.
-            // Keying the interpretation itself on what the user typed is what makes the rest of the
+            // Cached on the QUESTION IN ITS CONTEXT, not on the answer. Every cache below this point
+            // — discovery, the single-flight fetch, the per-title fit — is keyed on the interpreted
+            // intent, and the interpreter is a language model: one byte-identical question asked
+            // twice ninety seconds apart came back with different keywords, hence a different
+            // IntentKey, hence a second full TMDB pull, hence 11 of 24 cards changed between two
+            // identical questions. Keying the interpretation itself is what makes the rest of the
             // caching machinery reachable, and it stops the repeat re-buying the interpret call.
-            var interpretKey = InterpretKey(accountId, trimmed, standingSummary, mediaFilter, agent.ModelId);
+            //
+            // "Context" is the operative word and it was missing at first. The prompt is handed the
+            // transcript and the no-repeat set as well as the sentence, so both ride the key — a
+            // fresh thread asking what another thread already asked used to be served that thread's
+            // history-shaped answer. See InterpretKey for the turn that found it.
+            var interpretKey = InterpretKey(
+                accountId, trimmed, standingSummary, mediaFilter, agent.ModelId, history, shownTmdbIds);
             AgentReply agentReply;
             using (timings.Stage(AskStageTimings.Interpret))
             {
@@ -2123,6 +2131,16 @@ public sealed class LiveSearchExpansionService(
         return best;
     }
 
+    /// <summary>
+    /// The names behind the conversation's no-repeat set, for the interpret prompt.
+    ///
+    /// <para>ORDERED before the cut, and that is not cosmetic. This list reaches the prompt and the
+    /// prompt's output is cached under <see cref="ShownDigest"/> of the ids, so an unordered
+    /// <c>Take(20)</c> would let one id set produce different prompts under one cache key whenever
+    /// the planner changed its mind — the same class of bug as the key that omitted the set
+    /// entirely, just quieter. TmdbId is the column the key is built from, so it is the column the
+    /// cut is taken on.</para>
+    /// </summary>
     private async Task<IReadOnlyList<string>> ShownTitleNamesAsync(IReadOnlyList<long> shownTmdbIds, CancellationToken ct)
     {
         if (shownTmdbIds.Count == 0)
@@ -2132,6 +2150,7 @@ public sealed class LiveSearchExpansionService(
 
         return await db.Titles
             .Where(t => t.TmdbId != null && shownTmdbIds.Contains(t.TmdbId.Value))
+            .OrderBy(t => t.TmdbId)
             .Select(t => t.Name)
             .Take(20)
             .ToListAsync(ct);
@@ -2262,19 +2281,133 @@ public sealed class LiveSearchExpansionService(
     /// (<see cref="AskReelStandingFilters.Describe"/>), and a hash would trade readability for a
     /// collision class nobody could debug.</para>
     ///
-    /// <para>Deliberately NOT on the key: the conversation history and the shown-titles list. Both
-    /// move on every turn, so including them would make the key unique per turn and the cache
-    /// unreachable — which is the exact failure being fixed one layer down. The cost of leaving
-    /// them out is that an identical question inside the window gets an identical reply, which is
-    /// the honest answer to an identical question.</para>
+    /// <para><b>The CONVERSATION is on the key, and leaving it off was a defect that shipped.</b>
+    /// The interpret prompt is handed the last turns of the transcript, so the interpretation is a
+    /// function of the question AND the thread it was asked in — not of the question alone. An
+    /// earlier version of this key omitted the history on the reasoning that it "moves on every
+    /// turn", which is true and beside the point: a key that omits an input does not merely miss
+    /// less often, it answers a DIFFERENT question confidently for the whole TTL. The observed
+    /// failure was exactly that. A thread where the user had said "only shows" resolved the next
+    /// sentence, "thrillers, no horror", to <c>MediaTypes: [Show]</c> — correct, history shaped it.
+    /// The same user then pressed + New, typed the identical sentence into a thread with no history
+    /// at all, and was served the first thread's interpretation: same <c>IntentJson</c>, a
+    /// byte-identical reply promising "shows", and an all-TV answer to a question that had asked for
+    /// nothing of the kind. <c>AskReelConversationIsolationTests</c> is that turn, pinned.</para>
+    ///
+    /// <para>The <b>shown set</b> is on the key for the same reason and was missing for the same
+    /// one: it reaches the prompt as "already shown this session (do not repeat; resolve references
+    /// like 'the second one' against this list)", so it changes both what the model is told not to
+    /// return and what a pronoun in the question resolves to. It rides as the raw TMDB ids rather
+    /// than the resolved names so that a cache HIT still costs no database read — the names are a
+    /// function of the ids, and <see cref="ShownTitleNamesAsync"/> orders them so the pair stays
+    /// honest.</para>
+    ///
+    /// <para>Both ride as a SHA-256 digest rather than in full, because a transcript is unbounded
+    /// and a cache key is not; the standing-filter summary still rides whole because it is short,
+    /// sorted and deterministic (<see cref="AskReelStandingFilters.Describe"/>) and a hash would
+    /// trade readability for a collision class nobody could debug. "No history" and "nothing shown"
+    /// are their own literal tokens rather than the digest of an empty string, so the commonest
+    /// context in the product — a brand-new thread — is a value a person can read in a dump.</para>
+    ///
+    /// <para><b>What this deliberately does NOT cost.</b> The reason the cache exists is a
+    /// byte-identical repeat: one question asked twice inside the window used to re-buy the
+    /// interpret call and then re-pull TMDB behind a drifted intent, ~21 s against ~2.5 s. A repeat
+    /// in the SAME context still hits, because the same transcript digests to the same value. What
+    /// no longer hits is a repeat in a different context, which was never the same question.
+    /// Note also what is NOT used here: the conversation id. It would close the leak and throw the
+    /// win away, because two threads with identical (empty) transcripts would stop sharing an
+    /// entry. The key is the context, not the container.</para>
+    ///
+    /// <para>The remaining prompt input that is not on the key is the taste summary, and that is a
+    /// judgement rather than an oversight: it is one person's, the account is already on the key,
+    /// and it can only move inside a ten-minute <see cref="InterpretTtl"/> if that person rates
+    /// something mid-conversation. The cost of being wrong is one slightly stale reply for one
+    /// account for under ten minutes; the cost of keying on it is a miss on every turn after any
+    /// rating. Revisit it if the TTL grows.</para>
     /// </summary>
     internal static string InterpretKey(
-        Guid accountId, string query, string? standingSummary, IReadOnlyList<MediaType> mediaFilter, string modelId) =>
+        Guid accountId,
+        string query,
+        string? standingSummary,
+        IReadOnlyList<MediaType> mediaFilter,
+        string modelId,
+        IReadOnlyList<ChatTurn> history,
+        IReadOnlyList<long> shownTmdbIds) =>
         string.Create(
             CultureInfo.InvariantCulture,
             $"askreel:intent:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{NormalizeQuery(query)}|" +
             $"{string.Join(',', mediaFilter.Select(m => m.ToString()).OrderBy(m => m, StringComparer.Ordinal))}|" +
-            $"{standingSummary}");
+            $"{standingSummary}|h={HistoryDigest(history)}|s={ShownDigest(shownTmdbIds)}");
+
+    /// <summary>
+    /// A stable digest of the transcript the interpreter is handed — every turn, in order, role and
+    /// text.
+    ///
+    /// <para><b>Order is preserved and never sorted.</b> "only shows" then "thrillers, no horror" is
+    /// a different conversation from the reverse, and the model reads them as a sequence.</para>
+    ///
+    /// <para><b>Every field is length-prefixed</b> before it is hashed, which is the whole
+    /// difference between a digest and a concatenation. Without it <c>["ab", ""]</c> and
+    /// <c>["a", "b"]</c> flatten to the same bytes, and two different transcripts share a cache
+    /// entry again — the identical defect, one layer down and far harder to see. The unit separators
+    /// are control characters no transcript contains, and the lengths are formatted invariantly like
+    /// every other number this backend writes.</para>
+    ///
+    /// <para>The WHOLE history is digested, not the slice the prompt keeps (the adapter takes the
+    /// last 8, and the endpoint reads at most 8 rows, so today they are the same list). Digesting
+    /// the superset can only ever cost an extra miss where two transcripts differ solely in turns
+    /// the prompt would have dropped; digesting a guess at the adapter's window would cost a leak
+    /// the day that window changes, and this file cannot see that constant.</para>
+    /// </summary>
+    internal static string HistoryDigest(IReadOnlyList<ChatTurn> history)
+    {
+        if (history.Count == 0)
+        {
+            // Its own token, not the digest of an empty string: "a thread with no history" is the
+            // most common context in the product and is worth being able to read in a cache dump.
+            return "none";
+        }
+
+        var sb = new StringBuilder();
+        foreach (var turn in history)
+        {
+            sb.Append(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{turn.Role.Length}\u001f{turn.Role}\u001f{turn.Text.Length}\u001f{turn.Text}\u001e"));
+        }
+
+        return Digest(sb.ToString());
+    }
+
+    /// <summary>
+    /// A stable digest of the conversation's no-repeat set.
+    ///
+    /// <para>Sorted and de-duplicated first, because the set is what the prompt is a function of and
+    /// the endpoint's <c>Distinct()</c> read carries no ordering guarantee from Postgres — keying on
+    /// the raw row order would turn one context into arbitrarily many keys and quietly cost the
+    /// repeat hit. <see cref="ShownTitleNamesAsync"/> orders by the same column for the same reason,
+    /// so the names the prompt gets are a function of this set rather than of a planner's mood.</para>
+    /// </summary>
+    internal static string ShownDigest(IReadOnlyList<long> shownTmdbIds)
+    {
+        if (shownTmdbIds.Count == 0)
+        {
+            return "none";
+        }
+
+        return Digest(string.Join(
+            ',',
+            shownTmdbIds.Distinct().OrderBy(id => id).Select(id => id.ToString(CultureInfo.InvariantCulture))));
+    }
+
+    /// <summary>
+    /// SHA-256, lower-case hex. Not a security boundary — it is a fixed-width, collision-resistant
+    /// stand-in for an unbounded string in a cache key, chosen over <c>string.GetHashCode</c>
+    /// (randomised per process, so a key would not survive a restart and could not be reasoned about
+    /// across a fleet) and over the raw text (a transcript has no length bound).
+    /// </summary>
+    private static string Digest(string value) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
     /// <summary>
     /// The discovered-id cache key. Carries the prompt generation and the model id because the ids
