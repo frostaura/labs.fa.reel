@@ -64,8 +64,14 @@ export function askRequest(
   clientTurnId: string,
   conversationId: string | null,
   mediaTypes: string[],
+  pageOf?: string | null,
 ): AskReelRequest {
-  return { query, clientTurnId, conversationId, mediaTypes };
+  // Added rather than always present: R3 measured every body as exactly these four keys, and a
+  // `pageOf: null` on a fresh ask would be a fifth field on every turn claiming to extend nothing.
+  // The field is the page's, and only when the client can actually name the turn.
+  return pageOf
+    ? { query, clientTurnId, conversationId, mediaTypes, pageOf }
+    : { query, clientTurnId, conversationId, mediaTypes };
 }
 
 /**
@@ -742,14 +748,33 @@ export function wasPaged(rows: ConversationPayload["turns"]): boolean {
  * completed assistant `ask` row, and the nearest user row above it.
  */
 export function answeredQuestion(rows: ConversationPayload["turns"]): string {
-  const answer = rows.reduce(
-    (found, t, i) => (t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" ? i : found),
-    -1,
-  );
+  const answer = answeredTurnIndex(rows);
   for (let i = answer - 1; i >= 0; i--) {
     if (rows[i].role === "user") return rows[i].text;
   }
   return "";
+}
+
+/** Where the last completed assistant `ask` row sits, or -1. The row a resumed grid belongs to. */
+function answeredTurnIndex(rows: ConversationPayload["turns"]): number {
+  return rows.reduce(
+    (found, t, i) => (t.role === "assistant" && (t.kind ?? "ask") === "ask" && t.status === "Completed" ? i : found),
+    -1,
+  );
+}
+
+/**
+ * The id of the turn the restored grid belongs to — what a page of it must name as `pageOf`.
+ *
+ * Exactly the row {@link answeredQuestion} reads the question off, so the two halves of a page
+ * request can never name different turns: the query is that row's question and this is that row's
+ * id. Null where the payload carries no ids (an older server), which is why `pageOf` is optional —
+ * the server then falls back to comparing the query, which is right on every screen except the one
+ * R3-02 found.
+ */
+export function answeredTurnId(rows: ConversationPayload["turns"]): string | null {
+  const row = rows[answeredTurnIndex(rows)];
+  return row ? row.id ?? row.turnId ?? null : null;
 }
 
 /**
@@ -976,6 +1001,22 @@ interface State {
    * cards as its page one.
    */
   pageQuery: string;
+  /**
+   * The id of the assistant turn the GRID is, which is what a page of it names as `pageOf`. Set
+   * from the `conversation` frame of the turn that produced the answer, or from the resumed
+   * transcript; null until one arrives, and on a server that sends no turn id at all.
+   *
+   * It moves with {@link State.pageQuery} and for the same reason — the two are the question and
+   * the row it was asked in, and a request carrying one without the other is R3-02 from the other
+   * side.
+   */
+  pageTurnId: string | null;
+  /**
+   * The turn the stream in flight is writing, as its own `conversation` frame named it. Only a
+   * landing place: it becomes {@link State.pageTurnId} at `done`, because a turn that never
+   * completed is not an answer anything can be a page of.
+   */
+  activeTurnId: string | null;
 }
 
 export type ChatAction =
@@ -1054,6 +1095,7 @@ export const initialChatState: State = {
   conflict: null, conflictTerms: [], belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
+  pageTurnId: null, activeTurnId: null,
 };
 
 /**
@@ -1156,6 +1198,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null, stream: tag?.id ?? 0,
             appending: false, lastQuery: action.message,
+            // Whatever turn was named last belongs to the answer BEFORE this one; this turn's own
+            // id arrives on its `conversation` frame, and until it does there is none to adopt.
+            activeTurnId: null,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
             conflict: null, conflictTerms: [], errorReason: null,
@@ -1187,6 +1232,9 @@ export function chatReducer(state: State, action: ChatAction): State {
       return {
         ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0,
         settled: state.order.length, resumedTail: null, answeredQuery: "", stream: tag?.id ?? 0,
+        // `pageTurnId` is deliberately carried — it names the answer this page extends, which is
+        // the whole point of the request about to go out. Only the in-flight handle resets.
+        activeTurnId: null,
       };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
@@ -1197,7 +1245,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null, stream: tag?.id ?? 0,
-        appending: false, errorReason: null,
+        appending: false, errorReason: null, activeTurnId: null,
         resumedTail: null, answeredQuery: "",
         holdingPrevious: state.order.length > 0, arrived: 0,
         ...(state.order.length > 0 ? {} : clearedAnswerDescription()),
@@ -1217,7 +1265,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         order: state.holdingPrevious ? state.order : streamOrder(state.order, state.byId, state.settled),
       };
     case "conversation":
-      return { ...state, conversationId: action.data.id };
+      // The turn id is remembered as well as the conversation's: it is the handle a later "Show me
+      // more" puts on the wire as `pageOf` (R3-02). Held aside rather than adopted, because the
+      // frame arrives BEFORE the turn has produced anything — see {@link State.activeTurnId}.
+      return { ...state, conversationId: action.data.id, activeTurnId: action.data.turnId ?? null };
     case "resume": {
       // NOT `done`: see the Status doc-comment. `lastQuery` comes back with the transcript so the
       // media toggle and the retry have something to replay — without it, a resumed thread's chips
@@ -1267,6 +1318,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         // it replays. Same source as `lastQuery` on an ordinary resume; they part company only
         // after a Stop.
         pageQuery: p.lastQuery ?? lastUserQuery(turns),
+        // …and the turn that grid IS, read off the same transcript by the same rule the server
+        // replays by, so a page of a resumed answer names the row it extends rather than leaving
+        // the server to infer it from a question the thread may have moved past (R3-02).
+        pageTurnId: answeredTurnId(p.turns),
         shown: p.shown ?? [],
         byId,
         // Verbatim. `partitionedOrder` is for a live stream, where the client is assembling an
@@ -1400,6 +1455,9 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The grid now answers THIS question, so that is what a page of it must replay. A page
         // leaves it alone: it extends the answer it found, it does not become it.
         pageQuery: state.appending ? state.pageQuery : state.lastQuery,
+        // …and the row that question was asked in, on exactly the same terms. Together they are
+        // the whole of what a page request says about what it extends (R3-02).
+        pageTurnId: state.appending ? state.pageTurnId : state.activeTurnId,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
@@ -1539,7 +1597,13 @@ export function useAskReelChat() {
     }
   }, []);
 
-  const run = useCallback((msg: string, fresh: boolean, kind: "turn" | "more" | "reask", turnId?: string) => {
+  const run = useCallback((
+    msg: string,
+    fresh: boolean,
+    kind: "turn" | "more" | "reask",
+    turnId?: string,
+    pageOf?: string | null,
+  ) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1578,7 +1642,7 @@ export function useAskReelChat() {
           : { type: "userTurn", message: msg, fresh, stream },
     );
 
-    streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current), (ev) => {
+    streamAskReel(askRequest(msg, clientTurnId, conversationId, mediaRef.current, pageOf), (ev) => {
       armWatchdog();
       switch (ev.event) {
         case "phase": dispatch({ type: "phase", data: ev.data, stream }); break;
@@ -1646,7 +1710,12 @@ export function useAskReelChat() {
     // are two different questions, and the one this page must replay is the one the grid answers.
     const query = s.pageQuery || s.lastQuery;
     if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length, s.settled) || !query) return;
-    run(query, false, "more");
+    // …and `pageTurnId` names the row that question was asked in, so the server extends THAT turn
+    // rather than deriving `kind` from whatever was said last. Both halves or neither: after a
+    // Stop the question the grid answers is no longer the conversation's last user turn, and a
+    // page sent without the id was recorded as a second ask (R3-02) — the transcript grew a
+    // question nobody typed and the next reload replayed one turn's cards instead of two.
+    run(query, false, "more", undefined, s.pageTurnId);
   }, [run]);
 
   /**

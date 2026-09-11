@@ -195,6 +195,23 @@ export interface AskReelRequest {
    * rendered an empty screen under "Movies".
    */
   mediaTypes?: string[];
+  /**
+   * The assistant turn this request is another PAGE of — present only on "Show me more", and only
+   * when the client knows the id.
+   *
+   * `kind` is otherwise derived server-side by comparing the query to the conversation's last USER
+   * turn, and R3-02 is what that costs the moment the two disagree: settle an answer, ask a
+   * follow-up, press Stop, then press "Show me more". The page correctly replays the ANSWERED
+   * question — but the last user turn is now the abandoned one, so the server recorded a second
+   * `ask`, the transcript grew a question the user never typed, and the next reload replayed one
+   * turn's cards instead of the two that were on screen. Forty-two of sixty-six cards vanished.
+   *
+   * Naming the turn removes the inference: a page extends THAT completed turn whatever was said
+   * after it. Optional because a client cannot always name it (an older resume payload projects no
+   * turn ids) and because a server that does not know the field ignores it, falling back to the
+   * comparison — so sending it is never worse than not.
+   */
+  pageOf?: string;
 }
 
 /**

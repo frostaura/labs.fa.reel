@@ -28,6 +28,7 @@ import {
   recentListing,
   lastTurnOutcome,
   answeredQuestion,
+  answeredTurnId,
   failedTurnMessage,
   RECENT_LIMIT,
   OLDER_LIMIT,
@@ -827,6 +828,25 @@ describe("askRequest", () => {
     // transcript the server will not read — and the server now rejects the request outright.
     for (const request of [followUp, fresh]) {
       expect(Object.keys(request).sort()).toEqual(["clientTurnId", "conversationId", "mediaTypes", "query"]);
+    }
+  });
+
+  it("carries_pageOf_only_when_the_page_can_name_the_turn_it_extends", () => {
+    // R3-02. Fixture variation: the same page request with and without a known turn id. With one,
+    // the server extends THAT turn whatever was said after it; without one it falls back to
+    // comparing the query, and a `pageOf: null` would be a fifth field on every ordinary ask
+    // claiming to extend nothing.
+    const named = askRequest("a 90s romantic comedy", "turn-9", "conv-1", [], "assistant-turn-1");
+    expect(named.pageOf).toBe("assistant-turn-1");
+    expect(Object.keys(named).sort())
+      .toEqual(["clientTurnId", "conversationId", "mediaTypes", "pageOf", "query"]);
+
+    for (const unnamed of [
+      askRequest("a 90s romantic comedy", "turn-9", "conv-1", []),
+      askRequest("a 90s romantic comedy", "turn-9", "conv-1", [], null),
+      askRequest("a 90s romantic comedy", "turn-9", "conv-1", [], ""),
+    ]) {
+      expect(Object.keys(unnamed)).not.toContain("pageOf");
     }
   });
 
@@ -1659,6 +1679,95 @@ describe("chatReducer — the question a page replays", () => {
 });
 
 /**
+ * R3-02. The question a page replays is only half of what a page has to say about itself.
+ *
+ * `kind` was derived server-side by comparing the query to the conversation's LAST USER TURN, and
+ * the Stop path makes those two disagree: settle an answer, ask a follow-up, press Stop, press
+ * "Show me more". The page correctly replays the answered question — and the server, seeing a
+ * question that is not the last thing the user said, recorded a second `ask`. Sixty-six cards on
+ * screen came back as twenty-four after a reload, the transcript grew a question nobody typed, and
+ * the stopped turn lost its own explanation.
+ *
+ * So the page names the turn as well: the question AND the row it was asked in, which between them
+ * leave the server nothing to infer.
+ */
+describe("chatReducer — the turn a page extends", () => {
+  const conversation = (turnId: string) => ({ type: "conversation" as const, data: { id: "conv-1", turnId } });
+
+  const answered = chatReducer(
+    chatReducer(
+      chatReducer(initialChatState, { type: "userTurn", message: "a 90s romantic comedy", fresh: true }),
+      conversation("turn-1"),
+    ),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
+  );
+
+  it("adopts_the_completed_turns_id_alongside_its_question", () => {
+    expect(answered.pageTurnId).toBe("turn-1");
+    expect(answered.pageQuery).toBe("a 90s romantic comedy");
+  });
+
+  it("a_turn_that_never_completes_is_not_an_answer_to_page", () => {
+    // Fixture variation on the test above: the same frames, stopped instead of finished. The
+    // `conversation` frame arrives before the turn has produced anything, so adopting the id THERE
+    // would let a page name an abandoned turn — which is the whole failure, in mirror image.
+    const asking = chatReducer(answered, { type: "userTurn", message: "something tense set at sea", fresh: false });
+    const opened = chatReducer(asking, conversation("turn-2"));
+    expect(opened.activeTurnId).toBe("turn-2");
+    const stopped = chatReducer(opened, { type: "stop" });
+    // The grid is still the FIRST answer, and so is everything a page of it would say.
+    expect(stopped.pageTurnId).toBe("turn-1");
+    expect(stopped.pageQuery).toBe("a 90s romantic comedy");
+    expect(stopped.lastQuery).toBe("something tense set at sea");
+  });
+
+  it("a_page_extends_the_answer_it_found_rather_than_renaming_it", () => {
+    const paged = chatReducer(
+      chatReducer(chatReducer(answered, { type: "moreTurn" }), conversation("turn-3")),
+      { type: "done", data: { results: [card(3)], reason: "1 more", kept: 1 } },
+    );
+    expect(paged.pageTurnId).toBe("turn-1");
+    expect(paged.pageQuery).toBe("a 90s romantic comedy");
+  });
+
+  it("a_server_that_names_no_turn_leaves_the_field_null_rather_than_guessing", () => {
+    // The frame carries `id` alone on an older server. A page then sends no `pageOf` and the
+    // server falls back to comparing the query — right on every screen except the stopped one.
+    const older = chatReducer(
+      chatReducer(
+        chatReducer(initialChatState, { type: "userTurn", message: "a tense heist", fresh: true }),
+        { type: "conversation", data: { id: "conv-2" } },
+      ),
+      { type: "done", data: { results: [card(1)], reason: "1 pick" } },
+    );
+    expect(older.pageTurnId).toBeNull();
+  });
+
+  it("a_resume_reads_it_off_the_transcript_the_server_replays_by", () => {
+    const resumed = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-3",
+        turns: [
+          { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+          { id: "turn-9", sequence: 1, role: "assistant", text: "Here you go.", kind: "ask", status: "Completed" },
+          { id: "turn-10", sequence: 2, role: "assistant", text: "", kind: "page", status: "Completed" },
+          { sequence: 3, role: "user", text: "something tense set at sea", kind: "ask", status: "Completed" },
+          { id: "turn-11", sequence: 4, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
+        ],
+        cards: [card(1)],
+        lastQuery: "a 90s romantic comedy",
+      },
+    });
+    // The last completed assistant ASK row — not the page after it, and not the failed tail. The
+    // same row `answeredQuestion` reads the question off, so the two halves cannot name different
+    // turns.
+    expect(resumed.pageTurnId).toBe("turn-9");
+    expect(resumed.answeredQuery).toBe("a 90s romantic comedy");
+  });
+});
+
+/**
  * …and the sentence it renders has to be true of the GRID. The payload's `reason` is the newest
  * turn's, so on a thread that was paged it describes one page and the restored grid is several —
  * R1-03 arriving by the resume path instead of the live one.
@@ -2041,6 +2150,34 @@ describe("answeredQuestion", () => {
       { sequence: 0, role: "user", text: "quiet character dramas", kind: "ask", status: "Failed" },
       { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed" },
     ])).toBe("");
+  });
+});
+
+describe("answeredTurnId", () => {
+  it("names_the_row_answeredQuestion_reads_the_question_off", () => {
+    const rows = [
+      { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+      { id: "turn-9", sequence: 1, role: "assistant", text: "Here.", kind: "ask", status: "Completed" },
+      { id: "turn-10", sequence: 2, role: "assistant", text: "", kind: "page", status: "Completed" },
+    ];
+    expect(answeredTurnId(rows)).toBe("turn-9");
+    expect(answeredQuestion(rows)).toBe("a 90s romantic comedy");
+  });
+
+  it("accepts_either_spelling_and_says_null_when_the_server_sends_neither", () => {
+    // Fixture variation: the SSE frame calls it `turnId` and the resume payload calls it `id`, and
+    // an older payload carries neither — where null is the honest answer, because a guessed id
+    // would make the server extend a turn the user is not looking at.
+    const base = [
+      { sequence: 0, role: "user", text: "a tense heist", kind: "ask", status: "Completed" },
+    ];
+    expect(answeredTurnId([...base, { turnId: "turn-4", sequence: 1, role: "assistant", text: "", kind: "ask", status: "Completed" }]))
+      .toBe("turn-4");
+    expect(answeredTurnId([...base, { sequence: 1, role: "assistant", text: "", kind: "ask", status: "Completed" }]))
+      .toBeNull();
+    // Nothing completed at all: there is no answer, so there is nothing to be a page of.
+    expect(answeredTurnId([...base, { id: "turn-5", sequence: 1, role: "assistant", text: "", kind: "ask", status: "Failed" }]))
+      .toBeNull();
   });
 });
 
