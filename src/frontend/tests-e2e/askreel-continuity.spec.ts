@@ -466,27 +466,36 @@ test.describe("Ask Reel — a resumed thread says what happened, once", () => {
 
     let settled = false;
     let turnCalls = 0;
+    let conversationCalls = 0;
     await boot(page, { resume: "stored", storedId: CONVERSATION });
     // Registered after `boot`, so it wins: the conversation answers Pending until the turn does.
     await page.route(
       (u) => u.pathname === `/api/search/conversations/${CONVERSATION}`,
-      (route) => route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(settled ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
-      }),
+      (route) => {
+        conversationCalls += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(settled ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
+        });
+      },
     );
     // 202 while Pending, exactly as the contract specifies, then the finished turn.
     await page.route(
       (u) => u.pathname === "/api/search/turns/turn-77",
       (route) => {
         turnCalls += 1;
-        if (turnCalls > 1) settled = true;
+        // Two 202s before it lands, so there is a window in which the turn is demonstrably being
+        // polled and has demonstrably not settled — which is the only window the assertion below
+        // is about. With a single 202 the settle and the second poll are the same instant, and the
+        // re-read the settle correctly triggers is indistinguishable from the fallback interval.
+        const done = turnCalls > 2;
+        if (done) settled = true;
         return route.fulfill({
-          status: turnCalls > 1 ? 200 : 202,
+          status: done ? 200 : 202,
           contentType: "application/json",
           body: JSON.stringify({
-            status: turnCalls > 1 ? "Completed" : "Pending",
+            status: done ? "Completed" : "Pending",
             reason: null, failureCode: null, cards: [],
           }),
         });
@@ -500,11 +509,71 @@ test.describe("Ask Reel — a resumed thread says what happened, once", () => {
     // The last completed answer stays up underneath it.
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
 
+    // The cheap route is the one being polled. `GET /turns/{id}` is one row; re-reading the
+    // conversation re-runs the whole replay — the eligibility filter, the on-demand re-score and
+    // the card projection — every five seconds for a minute, to learn a single status field. The
+    // id is on the row precisely so the client does not have to do that, so the fallback interval
+    // must be OFF whenever there is one: the thread is read for the resume and then left alone.
+    const whilePending = conversationCalls;
+    await expect.poll(() => turnCalls, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+    expect(conversationCalls).toBe(whilePending);
+
     // …and when it lands, the thread is re-read WHOLE rather than patched row by row.
     await expect(page.getByTestId("askreel-pending-turn")).toHaveCount(0, { timeout: 20_000 });
     await expect(page.getByTestId("askreel-transcript")).toContainText("Two older ones.");
     await expect(page.getByTestId("askreel-seam-answers")).toHaveCount(0);
-    expect(turnCalls).toBeGreaterThan(1);
+    expect(conversationCalls).toBeGreaterThan(whilePending);
+  });
+
+  test("a pending turn with no id on it falls back to re-reading the thread", async ({ page }) => {
+    // The probe, one field: the same payload with `id` gone from the pending assistant row — which
+    // is every server before FX7 projects it. There is then nothing to poll but the conversation,
+    // and the page must still find out rather than sitting on "Still working on that one" forever.
+    // Asserted as a pair with the test above: one field decides which route carries the watch, and
+    // getting it backwards is either a dead page or a replay running every five seconds.
+    const pendingTurns = [
+      ...RESUME_PAYLOAD.turns,
+      { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Pending" },
+      { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Pending" },
+    ];
+    const landed = {
+      ...RESUME_PAYLOAD,
+      turns: [
+        ...RESUME_PAYLOAD.turns,
+        { sequence: 2, role: "user", text: "older, and slower", kind: "ask", status: "Completed" },
+        { sequence: 3, role: "assistant", text: "Two older ones.", kind: "ask", status: "Completed" },
+      ],
+      lastQuery: "older, and slower",
+    };
+
+    let conversationCalls = 0;
+    let turnCalls = 0;
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await page.route(
+      (u) => u.pathname === `/api/search/conversations/${CONVERSATION}`,
+      (route) => {
+        conversationCalls += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          // Settles on the third read: the resume, one poll that is still Pending, then the answer.
+          body: JSON.stringify(conversationCalls > 2 ? landed : { ...RESUME_PAYLOAD, turns: pendingTurns }),
+        });
+      },
+    );
+    // Nothing may reach the turn route — there is no id to build one from, and a request to
+    // `/api/search/turns/` or `/turns/undefined` is the shape that bug takes.
+    await page.route((u) => u.pathname.startsWith("/api/search/turns/"), (route) => {
+      turnCalls += 1;
+      return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    });
+    await page.reload();
+
+    await expect(page.getByTestId("askreel-pending-turn")).toContainText("Still working on that one");
+    await expect(page.getByTestId("askreel-pending-turn")).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.getByTestId("askreel-transcript")).toContainText("Two older ones.");
+    expect(turnCalls).toBe(0);
+    expect(conversationCalls).toBeGreaterThan(2);
   });
 
   test("a restored PAGED answer accounts for the grid, not for its last page", async ({ page }) => {
