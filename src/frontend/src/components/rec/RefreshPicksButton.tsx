@@ -12,7 +12,9 @@ import { useRebuildFeedMutation, useTriggerSyncMutation } from "../../store/api"
  *
  * Renders as a compact square icon button sized to the adjacent BrowseFilters segments
  * (`p-1.5` + `h-4` icon ≈ the segment's `p-0.5` + `py-1` + 11px caption ≈ 30px), mirroring their
- * `rounded-lg border-fa-edge bg-fa-glass` chrome so it reads as a peer control.
+ * `rounded-lg border-fa-edge bg-fa-glass` chrome so it reads as a peer control. Below `md` it
+ * takes the same 44 px floor the segments now take, for the same reason and to stay their peer —
+ * a 30 px square beside a 44 px segment is the mismatch that gives the row away as unfinished.
  *
  * BuildFeed is Founder-gated server-side; a 403 for other tiers is swallowed and the Trakt sync
  * still lands. `busy` covers both the in-flight enqueue calls and any active pipeline job (so a
@@ -44,7 +46,7 @@ export default function RefreshPicksButton({ onRequested }: { onRequested?: () =
       aria-label={busy ? "Refreshing your picks" : "Refresh — sync Trakt and regenerate picks"}
       title="Pull the latest from Trakt, then regenerate tonight's picks"
       data-testid="refresh-picks"
-      className="inline-flex items-center justify-center rounded-lg border border-fa-edge bg-fa-glass p-1.5 text-fa-frost transition hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright disabled:opacity-50 disabled:pointer-events-none"
+      className="inline-flex min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded-lg border border-fa-edge bg-fa-glass p-1.5 text-fa-frost transition hover:border-fa-frost/40 hover:bg-fa-glass-strong hover:text-fa-frost-bright disabled:opacity-50 disabled:pointer-events-none"
     >
       <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
     </button>
