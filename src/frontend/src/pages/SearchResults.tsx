@@ -1,3 +1,4 @@
+import { MD_BREAKPOINT_PX, useMinWidth } from "../lib/useMinWidth";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useDispatch, useSelector } from "react-redux";
@@ -121,6 +122,9 @@ function AskReel() {
   // Reading it from the one source keeps the tray's number and the conditions summary from ever
   // disagreeing about what the user set.
   const { data: accountFilters } = useGetFiltersQuery();
+  // The long placeholder wraps to two clipped lines in a 44 px box on a phone; the examples
+  // are a desktop nicety, not the instruction.
+  const composerWide = useMinWidth(MD_BREAKPOINT_PX);
   const speech = useSpeech((text) => send(text, false));
 
   // The media toggle is per-device and persists across visits, so a resumed thread starts with a
@@ -1187,7 +1191,11 @@ function AskReel() {
               submit(draft);
             }}
             aria-label="Ask Reel"
-            placeholder="Ask for more, or refine — “something funnier”, “more like the second one”…"
+            placeholder={
+              composerWide
+                ? "Ask for more, or refine — “something funnier”, “more like the second one”…"
+                : "Ask for more, or refine…"
+            }
             style={{ height: COMPOSER_MIN_PX }}
             className="flex-1 min-h-11 resize-none overflow-y-auto rounded-3xl bg-fa-frost/10 px-4 py-2.5 fa-body leading-6 text-fa-frost-bright placeholder:text-fa-frost-dim/60 focus:outline-none focus:ring-1 focus:ring-fa-frost/40"
           />

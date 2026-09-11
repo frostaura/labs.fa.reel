@@ -116,7 +116,9 @@ export default function Home() {
           <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={setFilter} />
         </div>
         {!building && (
-          <div className="flex items-center gap-2">
+          // Wraps: at phone width the two browse segments plus the refresh button overran the
+          // viewport, and the overflow made the whole page scroll sideways.
+          <div className="flex flex-wrap items-center gap-2">
             <PickConditionsButton
               onSaved={() => {
                 setAdoptOnNext(true);
@@ -135,8 +137,16 @@ export default function Home() {
                 New picks ready
               </button>
             )}
-            {(feed?.hero.length ?? 0) > 0 && <BrowseFilters value={filter} onChange={setFilter} />}
-            <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+            {/* On a phone the refresh control closes the first line beside the conditions button
+                and the browse segments take their own line; from md the three sit in one row. */}
+            {(feed?.hero.length ?? 0) > 0 && (
+              <div className="order-3 w-full md:order-none md:w-auto">
+                <BrowseFilters value={filter} onChange={setFilter} />
+              </div>
+            )}
+            <div className="order-2 ml-auto md:order-none md:ml-0">
+              <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+            </div>
           </div>
         )}
       </div>

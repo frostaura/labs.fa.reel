@@ -114,7 +114,11 @@ export default function Lab() {
               {num(gate?.ndcgModel, 3)} <span className="text-fa-frost-dim">vs</span> {num(gate?.ndcgBaseline, 3)}
             </p>
             <p className="fa-caption text-fa-frost-dim mt-1">
-              iteration {gate?.iterationsUsed ?? 0} of {gate?.killCriterionAt ?? 3} (kill criterion)
+              {/* "iteration 18 of 3" is arithmetic nonsense once the criterion is breached; past
+                  the limit the caption names the iteration and the red line below carries the breach. */}
+              {gate?.criterionExceeded
+                ? `iteration ${gate.iterationsUsed}`
+                : `iteration ${gate?.iterationsUsed ?? 0} of ${gate?.killCriterionAt ?? 3} (kill criterion)`}
             </p>
             {/* The criterion was hard-coded at 3 while the ledger ran past 12, and the page said
                 nothing. Stating the breach is the whole point of a kill criterion. */}
