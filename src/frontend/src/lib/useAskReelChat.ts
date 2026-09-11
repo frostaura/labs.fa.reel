@@ -612,9 +612,10 @@ export interface ResumedTail {
   /** `failed` — the turn ended badly. `pending` — the server is still working on it. */
   status: "failed" | "pending";
   /**
-   * The server's own `FailureCode`, where the payload carries one. `client_aborted` is the user's
-   * own Stop and reads as "you stopped it"; anything else is a snag they did not cause, and
-   * telling a person they abandoned something they did not is worse than saying less.
+   * The server's own `FailureCode`, where the payload carries one. `client_aborted` means the
+   * client's connection went away — a Stop, a reload, a slept phone or a discarded tab, all
+   * indistinguishable from the server's side — and anything else is a snag the user did not cause.
+   * See {@link failedTurnMessage}: the copy may only claim what the code can actually support.
    */
   failureCode: string | null;
   /**
@@ -669,17 +670,25 @@ export function answeredQuestion(rows: ConversationPayload["turns"]): string {
 /**
  * What a failed turn says for itself, in one line.
  *
- * Three cases, not two. The user pressing Stop is a thing they DID and a named code
- * (`client_aborted`); any other code is a thing that happened TO them; and no code at all is
- * neither, so it claims neither. Telling someone they abandoned a turn they never touched is the
- * kind of small lie that costs trust in everything else on the page — and the silent case is not
- * hypothetical: the resume payload projects `sequence`, `role`, `text`, `kind` and `status` and no
- * `failureCode`, so today every resumed failure arrives unattributed. The wording lights up the
- * moment the field does.
+ * Three cases, not two, and the first of them is narrower than it looks. `client_aborted` is what
+ * the server writes when the client's connection went away — and it goes away identically for a
+ * Stop, a reload, a slept phone and a discarded tab. The server cannot tell those apart, so
+ * neither can this sentence.
+ *
+ * F6-09 is what saying otherwise cost: a finder hard-reloaded a running turn and the resumed
+ * transcript told them "you stopped it", permanently, across two further reloads. The wording was
+ * ACCURATE for a real Stop — verified in the same session — which is exactly what makes the class
+ * dangerous: copy that is right most of the time and asserts a cause the client cannot know. "You
+ * left" is true of all four, and it is still specific enough to be worth reading.
+ *
+ * Any other code is a thing that happened TO them; no code at all is neither, so it claims
+ * neither. The silent case is not hypothetical: the resume payload projects `sequence`, `role`,
+ * `text`, `kind` and `status` and no `failureCode`, so today every resumed failure arrives
+ * unattributed. The wording lights up the moment the field does.
  */
 export function failedTurnMessage(failureCode: string | null): string {
-  if (failureCode === "client_aborted") return "That one didn’t finish — you stopped it.";
-  if (failureCode) return "That one didn’t finish — it hit a snag.";
+  if (failureCode === "client_aborted") return "That one didn’t finish before you left.";
+  if (failureCode) return "That one hit a snag.";
   return "That one didn’t finish.";
 }
 

@@ -1756,14 +1756,18 @@ describe("lastTurnOutcome", () => {
     expect(lastTurnOutcome(completed)).toBeNull();
   });
 
-  it("reports_a_stopped_turn_as_the_users_own_doing", () => {
+  it("reports_an_abandoned_turn_without_claiming_the_user_pressed_anything", () => {
     const stopped = [
       ...completed,
       { sequence: 2, role: "user", text: "something surreal and dreamlike", kind: "ask", status: "Failed" },
       { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "client_aborted" },
     ];
     expect(lastTurnOutcome(stopped)).toEqual({ status: "failed", failureCode: "client_aborted", turnId: null });
-    expect(failedTurnMessage("client_aborted")).toContain("you stopped it");
+    // F6-09. `client_aborted` is written for a Stop AND for a reload, a slept phone and a
+    // discarded tab — the abort reaches the server identically and it cannot tell them apart. The
+    // copy said "you stopped it" for all four, and a finder who only reloaded read it as a lie.
+    expect(failedTurnMessage("client_aborted")).toBe("That one didn’t finish before you left.");
+    expect(failedTurnMessage("client_aborted")).not.toContain("you stopped it");
   });
 
   it("reports_any_other_failure_as_a_snag_the_user_did_not_cause", () => {
@@ -1775,7 +1779,14 @@ describe("lastTurnOutcome", () => {
       { sequence: 3, role: "assistant", text: "", kind: "ask", status: "Failed", failureCode: "HttpRequestException" },
     ];
     expect(lastTurnOutcome(crashed)?.status).toBe("failed");
-    expect(failedTurnMessage("HttpRequestException")).toContain("hit a snag");
+    expect(failedTurnMessage("HttpRequestException")).toBe("That one hit a snag.");
+  });
+
+  it("keeps_the_three_messages_distinguishable_from_each_other", () => {
+    // Three codes, three sentences, and none of them a prefix of another: the whole value of this
+    // function is that a reader can tell which of the three things happened to them.
+    const said = [failedTurnMessage("client_aborted"), failedTurnMessage("timeout"), failedTurnMessage(null)];
+    expect(new Set(said).size).toBe(3);
   });
 
   it("claims_no_cause_at_all_when_the_server_named_none", () => {
