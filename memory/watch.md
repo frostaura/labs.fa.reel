@@ -1,6 +1,6 @@
 ---
 name: fa-reel-watch
-description: "One Mac holds the whole unpushed 2026-09 range, ELEVEN migrations; the chat surface still has NO ceilings (rate limit, tier rungs, budget, kill switch — Phase 2 not built) and the provider spend cap is one unclicked founder action; 15 probe conversations in the live DB; two upstream test reds (semantic-arm order flake, Programme 2 hero test); cross-reference keep-only; HeroEligibleCount zero; 50-read lens review owed; interleaving off"
+description: "origin/main now carries everything through the Ask Reel merge (pushed 2026-09-11); the chat surface still has NO ceilings (rate limit, tier rungs, budget, kill switch — Phase 2 not built) and the provider spend cap is one unclicked founder action; 15 probe conversations in the live DB; two upstream test reds (semantic-arm order flake, Programme 2 hero test); cross-reference keep-only; HeroEligibleCount zero; 50-read lens review owed; interleaving off"
 type: watch
 last_verified: 2026-09-11
 ---
@@ -9,7 +9,7 @@ last_verified: 2026-09-11
 
 _Cleared items are deleted here, not struck through — a watch list carrying resolved rows stops being read._
 
-- **Everything since 2026-09-09 exists on one Mac.** `main` is ahead-only over `origin/main` and unpushed, with **eleven migrations** (Phase 0–4, three Phase 5, then `AskReelTurnModel`, `AskReelTrayCards`, `AskReelExposureTurnKeyAndConflict`) and the whole Phase 0–4 + Programme 2 + Ask Reel body. The push is Dean's call and is the cheapest risk reduction available. Re-measure the range before acting on it.
+- **`origin/main` is current as of the Ask Reel merge (`5d1c22b`, pushed 2026-09-11).** Eleven migrations are in the pushed history; anything committed after this line is unpushed until re-measured with `git rev-list --left-right --count @{u}...HEAD`. The deploy itself has still not happened.
 - **The chat surface still has no ceilings.** Phases 0–1 of the Ask Reel plan are delivered (continuity, mobile, deploy file, honest accounting, `max_tokens`); **Phase 2 is not**: no rate limiter, no tier rungs (Free still gets the full pipeline), no `AskReelBudget`, no kill switch, no narrative fencing, no export/erasure, secrets not rotated. Measured ≈$0.003/turn, ≈$35/h worst case from one account. The provider-side OpenRouter spend cap is one unclicked founder action. Nothing in the plan's Phases 3–4 has started either.
 - **15 test conversations from the panel are in the live DB** (ids in `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`); delete them via `Recent ▾` or the endpoint. The round copies (`reel_test_w9` on :5433) are throwaway and can be dropped.
 - **Two upstream test reds sit in the integration suite:** the `LiveSearchExpansionTests` semantic-arm pair (order-dependent, ~1 in 4 full runs, green alone) and `BuildFeedNeverEmptyTests.Rating_a_hero_title_vacates_only_its_slot…` (deterministic, Programme 2). CI will show them; neither is the chat's.

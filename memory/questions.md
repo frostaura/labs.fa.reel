@@ -18,7 +18,6 @@ All of these are founder-owned. The Ask Reel programme (2026-09-11) took the fou
 - **An API/MCP surface for Gaia** collides with "Sign in with Trakt only". Decide before any demand test.
 - **Ad-hoc lists from chat.** Spec §6: one list per profile with a defined auto-removal contract. Define it for extra lists or refuse.
 - **The panel's test conversations.** 15 sit in the live DB (ids in `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`). The delete endpoint and `Recent ▾` now exist; delete them through the UI or the endpoint, never SQL.
-- **Push.** The whole 2026-09 range — five migrations — exists on one Mac; `main` is ahead-only, a push is a fast-forward. Re-measure with `git rev-list --left-right --count @{u}...HEAD`; never quote a count from here.
 
 ## Standing
 
