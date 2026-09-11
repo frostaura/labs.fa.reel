@@ -863,8 +863,15 @@ public sealed class LiveSearchExpansionService(
             // Named rather than inlined, because the row records the same sentence the user was
             // shown. A transcript that paraphrases the footer is a transcript that can be wrong.
             var reason = AskReelReason.Build(
-                blended.Count, blendedOutside.Count, belowFloor.Count, discovered.Count,
-                widened: relaxation > 0, floorRelaxed, floor, verdict.AboveFloorCount);
+                new TurnCounts(
+                    Picks: blended.Count,
+                    Outside: blendedOutside.Count,
+                    Tray: belowFloor.Count,
+                    Pulled: discovered.Count,
+                    AboveFloor: verdict.AboveFloorCount),
+                widened: relaxation > 0,
+                floorRelaxed,
+                floor);
 
             // Report what was RETURNED, not what was pulled. The old wording was derived purely
             // from the pre-ranking counts, so an empty screen still read "50 pulled; 8 unseen" —
