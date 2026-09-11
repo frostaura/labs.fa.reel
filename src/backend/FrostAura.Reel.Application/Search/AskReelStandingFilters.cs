@@ -148,20 +148,40 @@ public static class AskReelStandingFilters
     /// discarded can still be the one the rule names. Tokens are whole words — never substrings,
     /// which would collide "war" with "warm" — and sub-3-character tokens are dropped as punctuation
     /// debris, exactly as the heuristic's own tokenizer does.</para>
+    ///
+    /// <para><b>Every reading is then expanded through <see cref="SearchVocabulary"/>'s genre
+    /// aliases</b>, which is what closes F4-07. "a 90s romantic comedy" against standing exclusions
+    /// on BOTH romance and comedy named only comedy: nothing in any of the three readings ever
+    /// spelled the word "romance", because the user had written "romantic" — while the prose in the
+    /// same bubble said "your standing filters exclude romance and comedy". The alias table is a
+    /// fact about English, not about which reading found the word, so it belongs to all three.</para>
     /// </summary>
     public static IReadOnlyList<string> AskedFor(string? rawQuery, SearchIntent intent, SearchIntent? requested) =>
-        intent.Genres
-            .Concat(intent.Keywords)
-            .Concat(requested?.Genres ?? [])
-            .Concat(requested?.Keywords ?? [])
-            .Concat(Tokens(rawQuery))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        SearchVocabulary.WithGenreSynonyms(
+            intent.Genres
+                .Concat(intent.Keywords)
+                .Concat(requested?.Genres ?? [])
+                .Concat(requested?.Keywords ?? [])
+                .Concat(Tokens(rawQuery))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
 
     /// <summary>
     /// The intersection of one standing exclusion list with <see cref="AskedFor"/>. Whole-token,
     /// case-insensitive; a multi-word rule ("true crime") is matched as a phrase against the joined
     /// vocabulary instead, because no single token can carry it.
+    ///
+    /// <para><b>Which list a term is reported under is decided by which list the RULE lives in</b>,
+    /// never by which bucket the interpreter happened to put the word in. An account holding
+    /// <c>anime</c> as an <c>ExcludeGenre</c> gets it back under <c>excludedGenres</c> even though
+    /// the heuristic reads "an anime series" as a keyword, and an account holding <c>ghosts</c> as
+    /// an <c>ExcludeKeyword</c> gets it back under <c>excludedKeywords</c>. The frame describes the
+    /// account's own rules, and a client that keys the two lists to different affordances — a
+    /// genre chip and a term chip lead to different rows in the conditions editor — must be told
+    /// the truth about where to send the user.</para>
+    ///
+    /// <para>The result is ORDINAL-SORTED. Row order out of Postgres is not guaranteed, so a turn
+    /// that collides with two rules would otherwise name them in one order on the live frame and
+    /// another on the next resume, for no reason anybody could see.</para>
     /// </summary>
     public static IReadOnlyList<string> Colliding(IReadOnlyList<string> excluded, IReadOnlyList<string> askedFor)
     {
@@ -182,6 +202,7 @@ public static class AskReelStandingFilters
             .Select(rule => askedFor.FirstOrDefault(
                 v => string.Equals(v, rule, StringComparison.OrdinalIgnoreCase)) ?? rule)
             .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 

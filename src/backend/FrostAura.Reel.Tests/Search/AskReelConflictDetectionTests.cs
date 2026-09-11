@@ -175,6 +175,79 @@ public class AskReelConflictDetectionTests
     }
 
     /// <summary>
+    /// F4-07. The same sentence names TWO excluded genres and the frame reported one. The
+    /// interpreter collapsed "romantic comedy" to comedy and filed "romantic" under keywords, and
+    /// no reading of the turn ever spelled the word "romance" — so a standing <c>ExcludeGenre</c>
+    /// on romance could not intersect anything, while the prose in the same bubble said "your
+    /// standing filters exclude romance and comedy". The alias table is a fact about English, not
+    /// about which reading found the word.
+    ///
+    /// <para>Order is ordinal and therefore stable: Postgres does not promise row order, and a turn
+    /// that named its two collisions one way live and the other way on the next resume would look
+    /// like two different answers to the same question.</para>
+    /// </summary>
+    [Fact]
+    public void A_romantic_comedy_names_both_excluded_genres_in_a_stable_order()
+    {
+        var requested = Stub().Heuristic("a 90s romantic comedy");
+        var laundered = new SearchIntent([], [], [], "a 90s romantic comedy", 2000, null);
+
+        Assert.Equal(
+            ["comedy", "romance"],
+            AskReelStandingFilters.CollidingGenres(FounderRules, laundered, requested));
+    }
+
+    /// <summary>The heuristic's half of the same fix: "romantic" is a genre word, not a stray term.</summary>
+    [Theory]
+    [InlineData("a 90s romantic comedy", "romance")]
+    [InlineData("a 90s romantic comedy", "comedy")]
+    [InlineData("a rom-com from the 2010s", "romance")]
+    [InlineData("a rom-com from the 2010s", "comedy")]
+    [InlineData("a romcom", "romance")]
+    public void The_heuristic_resolves_the_romance_vocabulary(string message, string slug)
+    {
+        Assert.Contains(slug, Stub().Heuristic(message).Genres);
+    }
+
+    /// <summary>
+    /// The clause the user reads names both too — it is built from the same collision data as the
+    /// frame, so the two cannot disagree, and F4-07's contradiction was a sentence that named
+    /// romance in its first half and dropped it from its last.
+    /// </summary>
+    [Fact]
+    public void The_clause_names_both_excluded_genres()
+    {
+        var requested = Stub().Heuristic("a 90s romantic comedy");
+        var laundered = new SearchIntent([], [], [], "a 90s romantic comedy", 2000, null);
+        var colliding = AskReelStandingFilters.CollidingGenres(FounderRules, laundered, requested);
+
+        Assert.Equal(
+            "Coming up — under your conditions that means no comedy or romance and titles from 2000 on.",
+            AskReelStandingFilters.Qualify("Coming up.", colliding, [], yearCollides: true, FounderRules));
+    }
+
+    /// <summary>
+    /// F5-03's pivot, stated as a rule. Which list a colliding term is REPORTED under is decided by
+    /// which list the standing rule lives in, never by which bucket the interpreter put the word in.
+    /// The founder's <c>anime</c> is an <c>ExcludeGenre</c> and the heuristic reads "an anime
+    /// series" as a keyword; the frame still owes the client <c>excludedGenres</c>, because a genre
+    /// chip and a term chip lead to different rows in the conditions editor.
+    /// </summary>
+    [Fact]
+    public void A_colliding_term_is_reported_under_the_list_its_rule_lives_in()
+    {
+        var asGenre = FilterRuleSet.Create(["anime"], null, null, null, null, null, null);
+        var asKeyword = FilterRuleSet.Create(null, null, ["anime"], null, null, null, null);
+        var requested = Stub().Heuristic("an anime series");
+
+        Assert.Equal(["anime"], AskReelStandingFilters.CollidingGenres(asGenre, Laundered(), requested));
+        Assert.Empty(AskReelStandingFilters.CollidingKeywords(asGenre, Laundered(), requested));
+
+        Assert.Equal(["anime"], AskReelStandingFilters.CollidingKeywords(asKeyword, Laundered(), requested));
+        Assert.Empty(AskReelStandingFilters.CollidingGenres(asKeyword, Laundered(), requested));
+    }
+
+    /// <summary>
     /// Matching is whole-token, never substring: "war" must not collide with "warm", and a
     /// twelve-rule account would otherwise see the notice on nearly every turn.
     /// </summary>
