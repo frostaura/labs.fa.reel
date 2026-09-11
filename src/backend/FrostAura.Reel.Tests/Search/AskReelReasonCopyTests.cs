@@ -54,7 +54,7 @@ public class AskReelReasonCopyTests
 
         Assert.Equal(
             "10 picks ranked for you, from 40 pulled · nothing cleared your 6.0 bar, so it was relaxed "
-            + "· 10 picks shown below your 6.0 bar",
+            + "· 10 picks on screen under your 6.0 bar",
             AskReelReason.Build(
                 picks: 10, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
                 floor: 6m, aboveFloor: 0));
@@ -72,7 +72,7 @@ public class AskReelReasonCopyTests
     {
         Assert.Equal(
             "24 picks ranked for you, from 80 pulled · only 2 picks cleared your 6.0 bar, so it was relaxed "
-            + "· 22 picks shown below your 6.0 bar",
+            + "· 22 picks on screen under your 6.0 bar",
             AskReelReason.Build(
                 picks: 24, outsideShown: 0, droppedByFloor: 0, discovered: 80, widened: false, floorRelaxed: true,
                 floor: 6m, aboveFloor: 2));
@@ -88,7 +88,7 @@ public class AskReelReasonCopyTests
     {
         Assert.Equal(
             "9 picks ranked for you, from 40 pulled · nothing cleared your 6.0 bar, so it was relaxed "
-            + "· 9 picks shown below your 6.0 bar",
+            + "· 9 picks on screen under your 6.0 bar",
             AskReelReason.Build(
                 picks: 9, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
                 floor: 6m, aboveFloor: 0));
@@ -119,7 +119,7 @@ public class AskReelReasonCopyTests
     {
         Assert.Equal(
             "2 picks ranked for you, from 40 pulled · only 1 pick cleared your 6.0 bar, so it was relaxed "
-            + "· 1 pick shown below your 6.0 bar",
+            + "· 1 pick on screen under your 6.0 bar",
             AskReelReason.Build(
                 picks: 2, outsideShown: 0, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
                 floor: 6m, aboveFloor: 1));
@@ -128,13 +128,19 @@ public class AskReelReasonCopyTests
     /// <summary>
     /// The outside channel counts towards both halves — it is on the screen, so it is under the bar
     /// or over it like anything else, and the relaxed clause pair must not quietly ignore it.
+    ///
+    /// <para><b>But it is not counted as PICKS.</b> These clauses span both channels, and calling
+    /// the total "picks" folded cards the very same sentence had just described as not matching the
+    /// request into the pick count — "21 picks so far" sat against "0 picks matched everything you
+    /// asked" on one measured screen. The noun becomes "cards" the moment an outside channel
+    /// exists.</para>
     /// </summary>
     [Fact]
     public void The_outside_channel_is_counted_by_the_relaxed_clauses()
     {
         Assert.Equal(
             "4 picks matched everything you asked · 3 closest-but-outside shown separately "
-            + "· only 2 picks cleared your 6.0 bar, so it was relaxed · 5 picks shown below your 6.0 bar",
+            + "· only 2 cards cleared your 6.0 bar, so it was relaxed · 5 cards on screen under your 6.0 bar",
             AskReelReason.Build(
                 picks: 4, outsideShown: 3, droppedByFloor: 0, discovered: 40, widened: false, floorRelaxed: true,
                 floor: 6m, aboveFloor: 2));

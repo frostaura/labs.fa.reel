@@ -190,12 +190,57 @@ public static class SearchEndpoints
                 return AskError(StatusCodes.Status400BadRequest, refusal, "query_too_long");
             }
 
-            if (request.ClientTurnId == Guid.Empty)
+            // The two ids are STRINGS on the wire and are parsed here, deliberately. Bound as
+            // Guid / Guid? on the record they never reached this handler at all: a non-UUID, a
+            // 300-character key, a JSON null or an empty string failed JSON binding first, and the
+            // caller got five kilobytes of text/plain BadHttpRequestException — no `code` for a
+            // client to switch on, and the internal type name on a route any signed-in account can
+            // reach. A malformed id is this handler's refusal to make, in the house shape, like
+            // every other refusal above it.
+            if (string.IsNullOrWhiteSpace(request.ClientTurnId))
             {
                 return AskError(
                     StatusCodes.Status400BadRequest,
                     "That request is missing its turn id — refresh the page and try again.",
                     "client_turn_id_required");
+            }
+
+            // All-zeros is well-formed and is nonetheless the "no id" sentinel, so it is INVALID
+            // rather than missing: the client did send something, and it cannot be an idempotency
+            // key — every retry of every turn would collide on it.
+            if (!Guid.TryParse(request.ClientTurnId.Trim(), out var clientTurnId) || clientTurnId == Guid.Empty)
+            {
+                return AskError(
+                    StatusCodes.Status400BadRequest,
+                    "That request's turn id isn't a valid id — refresh the page and try again.",
+                    "client_turn_id_invalid");
+            }
+
+            Guid? requestedConversationId = null;
+            if (request.ConversationId is not null)
+            {
+                if (!Guid.TryParse(request.ConversationId.Trim(), out var parsedConversationId)
+                    || parsedConversationId == Guid.Empty)
+                {
+                    return AskError(
+                        StatusCodes.Status400BadRequest,
+                        "That thread id isn't a valid id — start a new one.",
+                        "conversation_id_invalid");
+                }
+
+                requestedConversationId = parsedConversationId;
+            }
+
+            // Every media-type token has to be one this server can honour. An unknown token used to
+            // be dropped in silence, so a typo'd or stale filter was indistinguishable from no
+            // filter — and the turn was billed anyway. Refused before the spend, with the token
+            // named, because the client cannot fix what it is not told.
+            if (AskMediaTypes.Resolve(request.MediaTypes) is not { } mediaFilter)
+            {
+                return AskError(
+                    StatusCodes.Status400BadRequest,
+                    AskMediaTypes.Refusal(request.MediaTypes),
+                    "media_type_invalid");
             }
 
             // ── 2. Resolve the conversation. An unknown id NEVER forks ──────────────────────
@@ -204,7 +249,7 @@ public static class SearchEndpoints
             // silently became two. The lookup is account-scoped, so "not mine" and "not there" are
             // the same 404 and neither leaks the difference.
             Domain.Search.SearchConversation? conversation = null;
-            if (request.ConversationId is { } conversationId)
+            if (requestedConversationId is { } conversationId)
             {
                 conversation = await db.SearchConversations
                     .FirstOrDefaultAsync(c => c.Id == conversationId && c.AccountId == accountId, ct);
@@ -217,13 +262,27 @@ public static class SearchEndpoints
                 }
             }
 
+            var profile = await db.Accounts
+                .Where(a => a.Id == accountId)
+                .Select(a => new { a.Region, a.Tier })
+                .FirstOrDefaultAsync(ct);
+
+            // Founder-only diagnostics, opt-in per request. Not the RequireFounder group filter,
+            // because this route is not founder-only — only one FIELD of its answer is.
+            //
+            // Resolved BEFORE the idempotency branch, because a replay answers on the same terms a
+            // live turn does: the contract's `done` carries `timingsMs` and `debug` as keys that are
+            // ALWAYS present and null when the caller is not entitled to them, and a replay that
+            // omitted them gave the client a second shape to parse for one event name.
+            var debug = EndpointHelpers.AllowsFounderDebug(http.Request.Query["debug"], profile?.Tier);
+
             var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
 
             // ── 3. Idempotency, and one turn in flight per conversation ─────────────────────
             if (conversation is not null)
             {
                 var existing = await db.SearchTurns.FirstOrDefaultAsync(
-                    t => t.ConversationId == conversation.Id && t.ClientTurnId == request.ClientTurnId, ct);
+                    t => t.ConversationId == conversation.Id && t.ClientTurnId == clientTurnId, ct);
                 if (existing is not null)
                 {
                     // Still running: 409 rather than a second stream. Two streams for one turn
@@ -236,10 +295,28 @@ public static class SearchEndpoints
                             "turn_in_progress");
                     }
 
+                    // A key is a key — but it is the key to ONE question, and a client that reuses
+                    // it across two user messages gets the first message's answer for the second
+                    // one, in thirty milliseconds, with nothing on the wire saying the question
+                    // differed. That was measured: A1's key re-sent with "a completely different
+                    // question about westerns" returned A1's crime dramas, `replayed: true`, and
+                    // total confidence. Idempotency means "the same request twice is one request",
+                    // and a different question is not the same request. Refusing is the only answer
+                    // that cannot be wrong; answering the previous question is silently wrong.
+                    var askedBefore = await QuestionBehindAsync(db, existing, ct);
+                    if (askedBefore is not null
+                        && !string.Equals(askedBefore.Trim(), message, StringComparison.Ordinal))
+                    {
+                        return AskError(
+                            StatusCodes.Status409Conflict,
+                            "That turn id has already answered a different question — start a new one.",
+                            "client_turn_id_reused");
+                    }
+
                     // Completed or Failed: replayed from the row. Zero LLM calls, zero new rows,
                     // zero exposures — the user is looking at the same serve again, not a new one.
                     return await ReplayTurnAsStreamAsync(
-                        http, db, eligibility, scorer, accountId, conversation, existing, jsonOptions, ct);
+                        http, db, eligibility, scorer, accountId, conversation, existing, jsonOptions, debug, ct);
                 }
 
                 // A DIFFERENT turn is already in flight. The unique (ConversationId, Sequence)
@@ -253,15 +330,6 @@ public static class SearchEndpoints
                         "turn_in_progress");
                 }
             }
-
-            var profile = await db.Accounts
-                .Where(a => a.Id == accountId)
-                .Select(a => new { a.Region, a.Tier })
-                .FirstOrDefaultAsync(ct);
-
-            // Founder-only diagnostics, opt-in per request. Not the RequireFounder group filter,
-            // because this route is not founder-only — only one FIELD of its answer is.
-            var debug = EndpointHelpers.AllowsFounderDebug(http.Request.Query["debug"], profile?.Tier);
 
             // ── 4. Everything the model reads, derived from rows ────────────────────────────
             // Read BEFORE this turn's own rows are written, so the history the model sees is the
@@ -323,15 +391,6 @@ public static class SearchEndpoints
             // client-supplied flag is why a resumed transcript showed the same question five times.
             var kind = Domain.Search.SearchTurnKind.Derive(lastUserText, message);
 
-            var mediaFilter = (request.MediaTypes ?? [])
-                .Select(m => m?.Trim().ToLowerInvariant())
-                .Select(m => m is "movie" or "movies" or "film" ? MediaType.Movie
-                    : m is "tv" or "show" or "series" ? MediaType.Show : (MediaType?)null)
-                .Where(m => m is not null)
-                .Select(m => m!.Value)
-                .Distinct()
-                .ToList();
-
             // ── 5. The rows, before the stream ──────────────────────────────────────────────
             var now = DateTime.UtcNow;
             if (conversation is null)
@@ -374,7 +433,7 @@ public static class SearchEndpoints
                 Text = string.Empty,
                 CreatedAt = now,
                 Sequence = nextSequence,
-                ClientTurnId = request.ClientTurnId,
+                ClientTurnId = clientTurnId,
                 Kind = kind,
                 Status = Domain.Search.SearchTurnStatus.Pending,
                 MediaFilter = mediaFilter.Count > 0
@@ -523,6 +582,7 @@ public static class SearchEndpoints
                     {
                         status = turn.Status,
                         reason = (string?)null,
+                        conflict = (object?)null,
                         failureCode = (string?)null,
                         cards = Array.Empty<object>(),
                         // Present-but-empty, so a poller renders one shape on both status codes.
@@ -536,6 +596,9 @@ public static class SearchEndpoints
             {
                 status = turn.Status,
                 reason = replay.Reason,
+                // Beside `reason`, on the same terms: a client that reconnects to a turn gets the
+                // whole answer, and the notice is part of the answer.
+                conflict = replay.Conflict,
                 failureCode = turn.FailureCode,
                 cards = replay.Cards,
                 // A client that lost the stream lost the tray with it. Reconnecting has to restore
@@ -700,15 +763,24 @@ public static class SearchEndpoints
     /// <c>SearchTurns</c> / <c>SearchTurnCards</c>. A client cannot carry state it loses on reload,
     /// cannot be trusted about what it has already been shown, and cannot tell a filter toggle from
     /// a new question — and every one of those showed up as the product forgetting itself.</para>
+    ///
+    /// <para><b>Both ids are strings, and that is not laziness.</b> Bound as <c>Guid?</c> /
+    /// <c>Guid</c> they were parsed by the JSON binder, BEFORE the handler ran — so a non-UUID, an
+    /// over-long key, a JSON <c>null</c> or an empty string skipped every coded refusal the
+    /// contract documents and came back as a <c>text/plain</c> <c>BadHttpRequestException</c>
+    /// naming this very type. A client switching on <c>code</c>, as the contract tells it to, got
+    /// <c>undefined</c> and rendered a crash message for its own typo. Parsing here means the
+    /// refusal is the handler's, in the house shape, and the UUID requirement is stated in
+    /// <c>docs/ask-reel-turns.md</c> rather than discovered through a stack trace.</para>
     /// </summary>
     /// <param name="Query">The question, 1–<see cref="AskRequestLimits.MaxQueryChars"/> characters trimmed.</param>
-    /// <param name="ConversationId">The thread this belongs to; null mints a new one. An unknown id is a 404, never a fork.</param>
-    /// <param name="ClientTurnId">The client's id for THIS exchange — the idempotency key. Resent verbatim on a retry.</param>
-    /// <param name="MediaTypes">An explicit UI filter, which outranks whatever the model infers from the prose.</param>
+    /// <param name="ConversationId">The thread this belongs to, as a UUID string; null mints a new one. An unknown id is a 404, never a fork; an unparseable one is a 400.</param>
+    /// <param name="ClientTurnId">The client's id for THIS exchange, as a UUID string — the idempotency key. Resent verbatim on a retry.</param>
+    /// <param name="MediaTypes">An explicit UI filter, which outranks whatever the model infers from the prose. Every token must be one <see cref="AskMediaTypes"/> knows.</param>
     public record AskRequest(
         string Query,
-        Guid? ConversationId,
-        Guid ClientTurnId,
+        string? ConversationId,
+        string? ClientTurnId,
         List<string>? MediaTypes);
 
     /// <summary>How many prior turns the interpret prompt reads. The tail is what carries context.</summary>
@@ -812,6 +884,12 @@ public static class SearchEndpoints
             // your bar" fence had silently emptied.
             belowFloor = replay.BelowFloor,
             reason = replay.Reason,
+            // The collision notice the answer was produced under, restored with the answer. Null on
+            // a thread that had no collision, which is most of them. Without it a resumed screen
+            // full of post-2000 dramas under the question "a 90s romantic comedy" had nothing left
+            // on it saying why — the continuity failure the founder complained about, applied to
+            // the explanation rather than to the cards.
+            conflict = replay.Conflict,
             removed = replay.Removed,
             lastQuery,
             mediaTypes = MediaTypeTokens(mediaFilter),
@@ -846,8 +924,14 @@ public static class SearchEndpoints
     /// that vanished out of the tray is as invisible as one that vanished out of the grid.
     /// </param>
     /// <param name="Reason">The reason line of the newest turn in the block, verbatim.</param>
+    /// <param name="Conflict">
+    /// The newest turn's stored collision notice, as JSON, or null where it had none. It travels
+    /// beside <paramref name="Reason"/> and for the same reason: both are what the user was TOLD,
+    /// and both would be wrong if re-derived from conditions that have since changed.
+    /// </param>
     private sealed record ReplayedTurns(
-        IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason);
+        IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason,
+        object? Conflict = null);
 
     /// <summary>
     /// THE read projection. Every route that hands a stored turn back to a client goes through
@@ -901,7 +985,7 @@ public static class SearchEndpoints
             .ToList();
         if (stored.Count == 0)
         {
-            return new ReplayedTurns([], [], 0, turns[^1].Reason);
+            return new ReplayedTurns([], [], 0, turns[^1].Reason, ConflictOf(turns[^1].ConflictJson));
         }
 
         var titleIds = stored.Select(c => c.TitleId).Distinct().ToList();
@@ -979,7 +1063,8 @@ public static class SearchEndpoints
             survivors.Where(c => !c.BelowFloor).Select(Project).ToList(),
             survivors.Where(c => c.BelowFloor).Select(Project).ToList(),
             removed,
-            turns[^1].Reason);
+            turns[^1].Reason,
+            ConflictOf(turns[^1].ConflictJson));
     }
 
     /// <summary>
@@ -987,6 +1072,51 @@ public static class SearchEndpoints
     /// turn uses — so the client has exactly one parser and one code path. Zero model calls, zero
     /// new rows, zero exposures.
     /// </summary>
+    /// <summary>
+    /// The QUESTION a stored assistant turn answers — the newest user row before it.
+    ///
+    /// <para>The assistant row's own <c>Text</c> is Reel's reply, not the question, and a
+    /// <c>page</c> turn has no user row of its own at all: it answers the question already asked.
+    /// So the lookup is "the last user turn at or before this sequence", which is the same rule the
+    /// transcript renders by and the same one <c>SearchTurnKind.Derive</c> compares against. Null
+    /// where the conversation has no user row — a shape nothing writes today, and a null is read as
+    /// "cannot tell", which lets the replay proceed rather than refusing on a guess.</para>
+    /// </summary>
+    /// <summary>
+    /// A stored <c>ConflictJson</c> as a JSON OBJECT on the wire, not as a string.
+    ///
+    /// <para>The column is <c>jsonb</c> and the client reads fields off it; handing back a string
+    /// would make every consumer parse it a second time, and a double-encoded payload is the kind of
+    /// thing that works until somebody's notice renders as a quoted blob. <c>Clone()</c> detaches
+    /// the element from the document being disposed. A malformed row degrades to null rather than
+    /// throwing — a resume must not fail because one historical row cannot be parsed.</para>
+    /// </summary>
+    private static object? ConflictOf(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            return document.RootElement.Clone();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<string?> QuestionBehindAsync(
+        IReelDbContext db, Domain.Search.SearchTurn turn, CancellationToken ct) =>
+        await db.SearchTurns
+            .Where(t => t.ConversationId == turn.ConversationId && t.Role == "user" && t.Sequence <= turn.Sequence)
+            .OrderByDescending(t => t.Sequence)
+            .Select(t => t.Text)
+            .FirstOrDefaultAsync(ct);
+
     private static async Task<IResult> ReplayTurnAsStreamAsync(
         HttpContext http,
         IReelDbContext db,
@@ -996,6 +1126,7 @@ public static class SearchEndpoints
         Domain.Search.SearchConversation conversation,
         Domain.Search.SearchTurn turn,
         System.Text.Json.JsonSerializerOptions jsonOptions,
+        bool debug,
         CancellationToken ct)
     {
         var replay = await ReplayAsync(db, eligibility, scorer, accountId, [turn], ct);
@@ -1034,6 +1165,15 @@ public static class SearchEndpoints
             // this many of its cards no longer belong on a suggestion surface.
             replayed = true,
             removed = replay.Removed,
+            // Present, and null. The contract's rule is that a client has ONE shape to render for
+            // one event name, and these two keys carry that rule — a replay that omitted them made
+            // `done` a three-shape event and handed every consumer an `undefined` to guard. There
+            // is nothing honest to put in them: a replay makes no model calls and runs no stages,
+            // so a timings block would be a fabrication and the stored row's own latency describes
+            // a turn that happened minutes ago. `debug` is still gated exactly as it is live, so an
+            // unentitled caller cannot learn anything from the key's presence.
+            timingsMs = (object?)null,
+            debug = debug ? (object?)new { replayed = true, storedTurnId = turn.Id, removed = replay.Removed } : null,
         });
 
         return Results.Empty;
@@ -1132,6 +1272,10 @@ public static class SearchEndpoints
             turn.FloorRelaxed = outcome.FloorRelaxed;
             turn.DiscoveredCount = outcome.DiscoveredCount;
             turn.IntentJson = outcome.IntentJson;
+            // The notice the user read, verbatim, so a resume can restore it. Written on a FAILED
+            // turn too: the frame went out before the crash, and a transcript that shows the answer
+            // without the explanation for it is the half-record this column exists to prevent.
+            turn.ConflictJson = outcome.ConflictJson;
             turn.ModelArtifactId = outcome.ModelArtifactId;
             turn.ModelId = outcome.ModelId;
             turn.PromptVersion = AskReelPromptVersion.Current;

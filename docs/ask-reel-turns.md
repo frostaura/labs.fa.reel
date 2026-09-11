@@ -19,14 +19,27 @@ row rather than a wire-only artefact — see *The tray*.
 
 ```jsonc
 {
-  "query": "something tense with a clever ending",  // 1..1000 chars, trimmed
-  "conversationId": "…",                            // optional; null mints a new conversation
-  "clientTurnId": "…",                              // REQUIRED; the idempotency key for this exchange
-  "mediaTypes": ["movie"]                           // optional; "movie" | "movies" | "film" | "tv" | "show" | "series"
+  "query": "something tense with a clever ending",    // 1..1000 chars, trimmed
+  "conversationId": "1f2e3d4c-…",                     // optional UUID string; null mints a new conversation
+  "clientTurnId": "9a8b7c6d-…",                       // REQUIRED UUID string; the idempotency key for this exchange
+  "mediaTypes": ["movie"]                             // optional; "movie" | "movies" | "film" | "tv" | "show" | "series"
 }
 ```
 
 `history`, `shownTmdbIds` and `continuation` **do not exist**. They were removed, not renamed.
+
+**Both ids are UUIDs, not opaque strings.** `SearchTurns.ClientTurnId` and
+`SearchConversations.Id` are `uuid` columns, so a nanoid or a `${tabId}-${n}` key is unrepresentable
+and is refused — `client_turn_id_invalid` / `conversation_id_invalid`, in the same `{ error, code }`
+shape as every other refusal. They arrive as strings and are parsed by the handler precisely so that
+refusal is a coded one: bound as `Guid` they failed in the JSON binder, before any of the codes
+below could be reached, and the caller got a `text/plain` .NET exception with no `code` at all.
+`"00000000-0000-0000-0000-000000000000"` is well-formed and still invalid — it is the "no id"
+sentinel, and every turn would collide on it.
+
+**Every `mediaTypes` token must be one of the six.** An unknown token is `media_type_invalid`, not a
+silently dropped filter: a stale or typo'd token would otherwise be indistinguishable from no filter
+at all, and the turn would be billed regardless.
 
 The client mints one `clientTurnId` per user message and resends it verbatim on a retry — a dropped
 connection, a StrictMode double-invoke, an impatient second tap. All three are answered from the
@@ -37,9 +50,9 @@ stored turn.
 | Status | Shape | When |
 | --- | --- | --- |
 | `200` `text/event-stream` | the SSE stream below | a live turn, or the replay of a finished one |
-| `400` | `{ error, code }` | `empty_query`, `query_too_long`, `client_turn_id_required` |
+| `400` | `{ error, code }` | `empty_query`, `query_too_long`, `client_turn_id_required`, `client_turn_id_invalid`, `conversation_id_invalid`, `media_type_invalid` |
 | `404` | `{ error, code }` | `conversation_not_found` — an id that is not the caller's, or is gone. **Never a fork.** |
-| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation |
+| `409` | `{ error, code }` | `turn_in_progress` — this turn, or another one, is still running on this conversation · `client_turn_id_reused` — this key already answered a **different** question |
 
 `code` is stable and is what a client switches on. The prose in `error` is the user's and may
 change; matching on it is how a UI ends up rendering a crash message for an honest refusal.
@@ -74,9 +87,20 @@ client can explain the order — but it must never re-sort by it: `blend` is rou
 the server's ordering carries a tiebreak the rounded number cannot reproduce.
 
 A **replay** (the same `clientTurnId` again) emits the same grammar — `conversation`, then `done` —
-with three extra fields: `replayed: true`, `removed` (how many stored cards the eligibility
-re-filter dropped since), and `failed` / `failureCode` when the stored turn was a failure. A replay
-makes zero model calls, writes zero rows and writes **no exposures**.
+carrying **every key a live `done` carries**, plus three a live turn cannot state: `replayed: true`,
+`removed` (how many stored cards the eligibility re-filter dropped since), and `failed` /
+`failureCode` when the stored turn was a failure. `timingsMs` and `debug` are present and `null`,
+under the same founder gating as a live turn: one event name, one shape, always. A replay makes zero
+model calls, writes zero rows and writes **no exposures**.
+
+**A replay answers the same question or it answers nothing.** The key identifies one exchange, so
+re-sending it with a different `query` (compared trimmed and ordinal against the question the stored
+turn answers) is `409 client_turn_id_reused` rather than the previous question's answer. Whitespace
+differs freely — that is a retry; anything else is a new question and needs a new key.
+
+**Whether a submission is an `ask` or a `page` is compared trimmed and ORDINAL**, case included. A
+question retyped in different capitals is a new ask and gets its own user row; only a byte-identical
+repeat is another page of the last question.
 
 ## The read routes
 
@@ -84,7 +108,7 @@ makes zero model calls, writes zero rows and writes **no exposures**.
 | --- | --- |
 | `GET /api/search/conversations?limit=20` | `[{ id, title, turnCount, lastTurnAt, lastCardsAt }]` |
 | `GET /api/search/conversations/{id}` | the resume payload below; `404` if it is not the caller's |
-| `GET /api/search/turns/{id}` | `{ status, reason, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`** |
+| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`** |
 | `DELETE /api/search/conversations/{id}` | `204`. Cards, turns, conversation. **Never exposures.** |
 | `GET /api/search/conversations/latest` | **deprecated** — the same payload for the newest conversation |
 
@@ -99,6 +123,12 @@ The resume payload:
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
   "reason":  "…",        // the newest replayed turn's reason, verbatim
+  "conflict": {          // the collision notice that turn emitted, or null — see below
+    "excludedGenres":   ["comedy"],
+    "excludedKeywords": ["anime"],
+    "minYear": 2000, "maxYear": null,
+    "message": "Your conditions permanently exclude comedy and anime, …"
+  },
   "removed": 0,          // stored cards the eligibility re-filter dropped, across BOTH lists
   "lastQuery": "…",      // the last user turn
   "mediaTypes": ["tv"],  // the filter that turn ran under, in request tokens
@@ -114,6 +144,25 @@ rather than off the column, so a cause can never outlive the failure it describe
 separates a turn the user stopped themselves (`client_aborted`) from one that hit a snag; without
 it, both render the same and the page either apologises for a deliberate stop or stays quiet about a
 real failure.
+
+`conflict` is the `conflict` frame that turn emitted, **stored on the turn** and handed back with
+it — `null` on a thread that had no collision, which is most of them. It restores the notice and the
+"under your conditions" pill, which were stream-only: reload a thread that asked for a 90s romantic
+comedy against standing exclusions on both genres and it came back as four post-2000 dramas under
+that question with nothing left on the page saying why. The cards are restored from rows and the
+reason line from a column; the explanation was the one part of the turn the server forgot.
+
+It is **stored, not recomputed**, for the same reason `reason` is: the account's conditions can
+change between the turn and the resume — that is the entire point of the Conditions screen the
+notice points at — and a notice re-derived from today's rules would describe an answer produced
+under yesterday's.
+
+`poolSize` and `catalogueSize` are on the live frame and deliberately **not** in the stored object:
+both count the catalogue at one instant and stop being true the moment the next title is ingested,
+so replaying them on a resume would state a stale number as a current one. `minYear` / `maxYear` are
+present only when the **year** is what collided — an account with a standing window has one on every
+turn, so storing them unconditionally would put a year chip on a screen whose collision was purely a
+genre.
 
 `lastCardsAt: null` means **transcript only** — a conversation that predates stored results. Render
 that as its own state; it is a different fact from a turn that honestly returned nothing.

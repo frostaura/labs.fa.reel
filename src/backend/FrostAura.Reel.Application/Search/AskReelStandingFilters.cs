@@ -89,7 +89,7 @@ public static class AskReelStandingFilters
     /// </summary>
     public static IReadOnlyList<string> CollidingGenres(
         FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
-        Colliding(rules.ExcludeGenres, intent.Genres, requested?.Genres);
+        Colliding(rules.ExcludeGenres, AskedFor(rawQuery: null, intent, requested));
 
     /// <summary>
     /// The words this turn asked for that the account permanently AVOIDS — the same collision as
@@ -107,7 +107,7 @@ public static class AskReelStandingFilters
     /// </summary>
     public static IReadOnlyList<string> CollidingKeywords(
         FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
-        Colliding(rules.ExcludeKeywords, intent.Keywords, requested?.Keywords);
+        Colliding(rules.ExcludeKeywords, AskedFor(rawQuery: null, intent, requested));
 
     /// <summary>
     /// True when the turn's release-year window cannot survive the account's standing one — "the
@@ -128,20 +128,81 @@ public static class AskReelStandingFilters
         || (rules.MaxYear is { } standingMax && intent.MinYear is { } askedMin && askedMin > standingMax);
 
     /// <summary>
-    /// The intersection of one standing exclusion list with what the turn asked for, from both
-    /// readings. The INTENT's casing wins where both carry the term, because that is the spelling
-    /// the rest of the turn is working in; order follows the intent and then the user's words, so
-    /// the same turn always names its collisions in the same order.
+    /// Everything this turn asked for, as one vocabulary: the model's genres and keywords, the
+    /// heuristic's genres and keywords, and the raw sentence's own word tokens — in that order, so
+    /// the intent's casing wins where two readings carry the same term and the same turn always
+    /// names its collisions in the same order.
+    ///
+    /// <para><b>One vocabulary, deliberately, not one per list.</b> The collision used to intersect
+    /// the account's excluded GENRES with the turn's genres and the account's excluded KEYWORDS with
+    /// the turn's keywords. That assumes the conditions editor and the interpreter agree about which
+    /// vocabulary a word belongs to, and they do not: the founder holds "anime" as an excluded
+    /// genre, "an anime series" is read by the heuristic as a keyword, and a turn asking for exactly
+    /// the thing the account permanently excludes therefore emitted no conflict frame at all —
+    /// while the model's own prose in the same stream said the filters excluded anime. Which list
+    /// the editor happened to write a rule to is an implementation detail of the editor; the user
+    /// asked for a word, and the pipeline is about to enforce a rule against it.</para>
+    ///
+    /// <para><paramref name="rawQuery"/> is the last resort and it is worth its cost: the heuristic
+    /// drops stop words and the model drops whatever the prompt told it to, so a word both of them
+    /// discarded can still be the one the rule names. Tokens are whole words — never substrings,
+    /// which would collide "war" with "warm" — and sub-3-character tokens are dropped as punctuation
+    /// debris, exactly as the heuristic's own tokenizer does.</para>
     /// </summary>
-    private static IReadOnlyList<string> Colliding(
-        IReadOnlyList<string> excluded, IReadOnlyList<string> fromIntent, IReadOnlyList<string>? fromWords) =>
-        excluded.Count == 0
-            ? []
-            : fromIntent
-                .Concat(fromWords ?? [])
-                .Where(v => excluded.Contains(v, StringComparer.OrdinalIgnoreCase))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+    public static IReadOnlyList<string> AskedFor(string? rawQuery, SearchIntent intent, SearchIntent? requested) =>
+        intent.Genres
+            .Concat(intent.Keywords)
+            .Concat(requested?.Genres ?? [])
+            .Concat(requested?.Keywords ?? [])
+            .Concat(Tokens(rawQuery))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>
+    /// The intersection of one standing exclusion list with <see cref="AskedFor"/>. Whole-token,
+    /// case-insensitive; a multi-word rule ("true crime") is matched as a phrase against the joined
+    /// vocabulary instead, because no single token can carry it.
+    /// </summary>
+    public static IReadOnlyList<string> Colliding(IReadOnlyList<string> excluded, IReadOnlyList<string> askedFor)
+    {
+        if (excluded.Count == 0 || askedFor.Count == 0)
+        {
+            return [];
+        }
+
+        var single = askedFor.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var phrase = string.Join(' ', askedFor);
+        return excluded
+            .Where(rule => !string.IsNullOrWhiteSpace(rule))
+            .Select(rule => rule.Trim())
+            .Where(rule => single.Contains(rule)
+                || (rule.Contains(' ') && phrase.Contains(rule, StringComparison.OrdinalIgnoreCase)))
+            // The spelling the user or the intent used, where there is one — the rule row's casing
+            // is the editor's, and the sentence around it is the turn's.
+            .Select(rule => askedFor.FirstOrDefault(
+                v => string.Equals(v, rule, StringComparison.OrdinalIgnoreCase)) ?? rule)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>Whole word tokens of a raw query, lowercased, punctuation-split, debris dropped.</summary>
+    private static IEnumerable<string> Tokens(string? rawQuery)
+    {
+        if (string.IsNullOrWhiteSpace(rawQuery))
+        {
+            yield break;
+        }
+
+        foreach (var token in rawQuery.ToLowerInvariant().Split(
+                     rawQuery.Where(c => !char.IsLetterOrDigit(c)).Distinct().ToArray(),
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (token.Length > 2)
+            {
+                yield return token;
+            }
+        }
+    }
 
     /// <summary>
     /// What the user is told, in prose. Numbers about the POOL travel as raw JSON beside this so the
