@@ -40,6 +40,7 @@ import {
   skeletonCount,
   SKELETON_CAP,
   wasPaged,
+  resumedConflict,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -1770,6 +1771,110 @@ describe("wasPaged", () => {
     expect(wasPaged(untyped)).toBe(false);
     expect(wasPaged([...untyped, page(2)])).toBe(true);
     expect(wasPaged([page(0), ...untyped])).toBe(false);
+  });
+});
+
+/**
+ * F4-06 — the explanation was the one part of a turn that did not survive a reload.
+ *
+ * Ask "a 90s romantic comedy" against standing exclusions on both genres and the reply is honest,
+ * the notice names the collision and the bubble carries a pill. Reload, and the same question comes
+ * back over four post-2000 dramas with `askreel-conflict` and `askreel-reply-conflict` both absent
+ * — a screen with nothing left on it saying why the answer looks nothing like the question. The
+ * cards were restored from rows and the reason line from a column; the account of WHY was stream-
+ * only.
+ *
+ * The server now stores it on the turn and hands it back on the resume payload. These tests pin
+ * the client half — including the shapes an older or half-deployed server sends, because the field
+ * is optional and a client that trusts it will render `undefined` into a warning card.
+ */
+describe("resumedConflict", () => {
+  it("reads_the_stored_notice_and_names_both_kinds_of_excluded_term", () => {
+    const found = resumedConflict({
+      conflict: {
+        message: "Your conditions permanently exclude comedy and anime.",
+        excludedGenres: ["comedy"],
+        excludedKeywords: ["anime"],
+        minYear: 2000,
+        maxYear: null,
+      },
+    });
+    expect(found).toEqual({
+      message: "Your conditions permanently exclude comedy and anime.",
+      terms: ["comedy", "anime"],
+    });
+  });
+
+  it("is_null_when_the_thread_had_no_collision", () => {
+    // Which is most threads, and is also every payload from a server that predates the column.
+    expect(resumedConflict({})).toBeNull();
+    expect(resumedConflict({ conflict: null })).toBeNull();
+  });
+
+  it("refuses_a_malformed_or_empty_notice_rather_than_rendering_it", () => {
+    // Fixture variation on the one field the card actually prints. A warning-styled box reading
+    // "undefined" is worse than no box: it looks like the product failing at the exact moment it
+    // is explaining itself.
+    expect(resumedConflict({ conflict: {} as never })).toBeNull();
+    expect(resumedConflict({ conflict: { message: "   " } })).toBeNull();
+    expect(resumedConflict({ conflict: { message: 7 } as never })).toBeNull();
+    expect(resumedConflict({ conflict: "no" as never })).toBeNull();
+  });
+
+  it("drops_junk_out_of_the_term_list_without_dropping_the_message", () => {
+    // The terms are a sentence the page builds; the message is the server's own. One being
+    // unusable must not take the other down with it.
+    const found = resumedConflict({
+      conflict: { message: "Your conditions rule that out.", excludedGenres: ["comedy", "", 4] as never, excludedKeywords: "anime" as never },
+    });
+    expect(found).toEqual({ message: "Your conditions rule that out.", terms: ["comedy"] });
+  });
+});
+
+describe("chatReducer — a resumed thread restores its collision notice", () => {
+  const payload = {
+    id: "conv-9",
+    lastCardsAt: "2026-09-11T09:00:00Z",
+    cards: [card(1)],
+    reason: "1 pick ranked for you, from 40 pulled",
+    lastQuery: "a 90s romantic comedy",
+    turns: [
+      { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+      { sequence: 1, role: "assistant", text: "I can't recommend that.", kind: "ask", status: "Completed" },
+    ],
+    conflict: { message: "Your conditions exclude comedy and romance.", excludedGenres: ["comedy", "romance"] },
+  };
+
+  it("puts_the_message_the_terms_and_the_bubble_pill_back", () => {
+    const state = chatReducer(initialChatState, { type: "resume", payload });
+    expect(state.conflict).toBe("Your conditions exclude comedy and romance.");
+    expect(state.conflictTerms).toEqual(["comedy", "romance"]);
+    // The pill belongs on the bubble the notice qualifies, which is the newest assistant row —
+    // the same row `reason` and the notice itself are about.
+    expect(state.turns.at(-1)).toEqual({
+      role: "assistant",
+      text: "I can't recommend that.",
+      conflict: true,
+    });
+  });
+
+  it("leaves_a_collision_free_thread_unmarked", () => {
+    // Fixture variation, one field: the notice removed. A pill on every resumed answer would be
+    // worse than none, because it is a warning.
+    const clean = { ...payload, conflict: null };
+    const state = chatReducer(initialChatState, { type: "resume", payload: clean });
+    expect(state.conflict).toBeNull();
+    expect(state.conflictTerms).toEqual([]);
+    expect(state.turns.at(-1)?.conflict).toBeUndefined();
+  });
+
+  it("does_not_survive_the_next_question", () => {
+    // A conflict describes the question that produced it. Asking again in the same thread must
+    // clear both the notice and the pill, exactly as the live path already does.
+    const resumed = chatReducer(initialChatState, { type: "resume", payload });
+    const asking = chatReducer(resumed, { type: "userTurn", message: "something else entirely", fresh: false });
+    expect(asking.conflict).toBeNull();
+    expect(asking.conflictTerms).toEqual([]);
   });
 });
 

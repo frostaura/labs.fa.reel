@@ -489,6 +489,87 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await askEnd(page);
   });
 
+  test("the collision notice and the pill come back with the answer after a reload", async ({ page }) => {
+    // F4-06. The cards were restored from rows and the reason line from a column; the
+    // EXPLANATION was stream-only. A reloaded thread that asked for a 90s romantic comedy against
+    // standing exclusions on both genres came back as post-2000 dramas under that question with
+    // `askreel-conflict` and `askreel-reply-conflict` both absent — nothing left on the page
+    // saying why the answer looks nothing like the question. This is the continuity failure class
+    // the founder complained about, applied to the explanation rather than to the cards.
+    await stubEventSource(page);
+    await stubAskReel(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/search/conversations/latest", {
+      id: "9e1a0000-0000-4000-8000-000000000009",
+      title: "a 90s romantic comedy",
+      lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+      turns: [
+        { sequence: 0, role: "user", text: "a 90s romantic comedy", kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "I can’t recommend a 90s romantic comedy.", kind: "ask", status: "Completed" },
+      ],
+      cards: [ALPHA],
+      reason: "1 pick ranked for you, from 40 pulled.",
+      removed: 0,
+      lastQuery: "a 90s romantic comedy",
+      mediaTypes: [],
+      shown: [],
+      // The stored object, exactly as the turn record hands it back: no `poolSize` /
+      // `catalogueSize`, because both stop being true the moment the next title is ingested.
+      conflict: {
+        excludedGenres: ["comedy", "romance"],
+        excludedKeywords: [],
+        minYear: 2000,
+        maxYear: null,
+        message: "Your conditions permanently exclude comedy and romance, so this is the closest fit.",
+      },
+    });
+    await page.goto("/search");
+
+    await expect(gridNames(page)).toHaveText(["Alpha Creek"]);
+    const notice = page.getByTestId("askreel-conflict");
+    await expect(notice).toContainText("Your conditions permanently exclude comedy and romance");
+    await expect(notice.getByTestId("askreel-conflict-terms")).toHaveText("Rules out comedy and romance.");
+    // …and on the bubble it qualifies, which is the newest assistant row — the same row the
+    // notice anchors under.
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveText("under your conditions");
+  });
+
+  test("a resumed thread that had no collision shows no notice and no pill", async ({ page }) => {
+    // Fixture variation, one field: `conflict` removed from the same payload. A warning pill on
+    // every resumed answer would be worse than none at all, because it IS a warning.
+    await stubEventSource(page);
+    await stubAskReel(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/search/conversations/latest", {
+      id: "9e1a0000-0000-4000-8000-00000000000a",
+      title: "a tense heist",
+      lastCardsAt: new Date(Date.now() - 60_000).toISOString(),
+      turns: [
+        { sequence: 0, role: "user", text: "a tense heist", kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "One that fits.", kind: "ask", status: "Completed" },
+      ],
+      cards: [ALPHA],
+      reason: "1 pick ranked for you, from 40 pulled.",
+      removed: 0,
+      lastQuery: "a tense heist",
+      mediaTypes: [],
+      shown: [],
+    });
+    await page.goto("/search");
+
+    await expect(gridNames(page)).toHaveText(["Alpha Creek"]);
+    await expect(page.getByTestId("askreel-conflict")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-reply-conflict")).toHaveCount(0);
+  });
+
   test("the floor tray names the account's own bar, to one decimal, and counts its own contents", async ({ page }) => {
     // Same tray, one field different from the test above: the account has a saved
     // `minPredictedRating`. That single field is what turns "Reel held some back" into a sentence

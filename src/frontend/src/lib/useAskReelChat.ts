@@ -305,6 +305,20 @@ export interface ConversationPayload {
    */
   belowFloor?: AskCard[];
   reason?: string | null;
+  /**
+   * The collision notice the newest replayed turn emitted, stored on the turn and handed back
+   * with it — `null` on a thread that had no collision, which is most of them.
+   *
+   * F4-06: the cards were restored from rows and the reason line from a column, and the
+   * EXPLANATION was the one part of the turn the server forgot. Reload a thread that asked for a
+   * 90s romantic comedy against standing exclusions on both genres and it came back as four
+   * post-2000 dramas under that question with nothing on the page saying why.
+   *
+   * Optional, and treated as untrusted: see {@link resumedConflict}. `poolSize` / `catalogueSize`
+   * are deliberately absent — both count the catalogue at one instant and stop being true
+   * immediately, so a resume replaying them would state a stale number as a current one.
+   */
+  conflict?: PersistedConflict | null;
   /** Stored cards the eligibility re-filter dropped since the turn ran, across BOTH lists. */
   removed?: number;
   lastQuery?: string | null;
@@ -312,6 +326,54 @@ export interface ConversationPayload {
   mediaTypes?: string[];
   /** The whole conversation's no-repeat set — informational; the server applies its own. */
   shown?: number[];
+}
+
+/**
+ * A collision notice as it is STORED — the `conflict` frame minus the two counts that go stale.
+ *
+ * `minYear` / `maxYear` are present only when the YEAR is what collided; an account with a standing
+ * window would otherwise carry them on every turn and put a year on a screen whose collision was
+ * purely a genre. They are accepted and deliberately not rendered as terms: the server's own
+ * `message` already states the window, and the live `conflict` frame carries no such fields, so
+ * naming them here would make a resumed notice say more than the live one it is restoring.
+ */
+export interface PersistedConflict {
+  message: string;
+  excludedGenres?: string[];
+  excludedKeywords?: string[];
+  minYear?: number | null;
+  maxYear?: number | null;
+}
+
+/** Everything in `value` that is a non-blank string, and nothing else. */
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+/**
+ * The collision notice a resumed thread is entitled to render, or null.
+ *
+ * Top-level on the resume payload, which is where the turn record puts it: it is the NEWEST
+ * replayed turn's notice, exactly as `reason` is that turn's sentence, and the two are restored
+ * together or the page explains an answer with half of its own account of it.
+ *
+ * Validated rather than trusted, and the two halves fail independently. `message` is what the card
+ * PRINTS: a warning-styled box reading "undefined" is worse than no box, because it looks like the
+ * product breaking at the precise moment it is explaining itself. The term list is a sentence the
+ * page builds, so junk is dropped out of it without taking the message down.
+ */
+export function resumedConflict(payload: { conflict?: PersistedConflict | null }): { message: string; terms: string[] } | null {
+  const raw: unknown = payload.conflict;
+  if (!raw || typeof raw !== "object") return null;
+  const message = (raw as PersistedConflict).message;
+  if (typeof message !== "string" || !message.trim()) return null;
+  return {
+    message,
+    terms: excludedTerms(
+      stringList((raw as PersistedConflict).excludedGenres),
+      stringList((raw as PersistedConflict).excludedKeywords),
+    ),
+  };
 }
 
 /**
@@ -1161,7 +1223,26 @@ export function chatReducer(state: State, action: ChatAction): State {
       // media toggle and the retry have something to replay — without it, a resumed thread's chips
       // were inert until the user typed again.
       const p = action.payload;
+      // F4-06. The notice is the account of WHY the answer looks nothing like the question, and it
+      // was stream-only: `askreel-conflict` and `askreel-reply-conflict` were both absent after a
+      // reload, leaving a screen full of post-2000 dramas under "a 90s romantic comedy" with
+      // nothing on it explaining either. Restored here, from the stored object, never recomputed —
+      // the account's conditions can change between the turn and the resume (that is the whole
+      // point of the Conditions screen the notice points at), and a re-derived notice would
+      // describe an answer produced under yesterday's rules.
+      const restoredConflict = resumedConflict(p);
       const turns = transcriptOf(p.turns);
+      // …and the pill goes back on the bubble the notice qualifies, which is the newest assistant
+      // row — the same row `reason` and the notice itself are about. A warning on every resumed
+      // answer would be worse than none, so this is the one row and only when there is a notice.
+      if (restoredConflict) {
+        for (let i = turns.length - 1; i >= 0; i--) {
+          if (turns[i].role === "assistant") {
+            turns[i] = { ...turns[i], conflict: true };
+            break;
+          }
+        }
+      }
       const cards = p.cards ?? [];
       const byId: Record<string, AskCard> = {};
       for (const c of cards) byId[c.titleId] = c;
@@ -1203,6 +1284,8 @@ export function chatReducer(state: State, action: ChatAction): State {
         // two apart — a zero there would suppress a fence that an older server still owes us.
         droppedByFloor: p.belowFloor ? tray.length : null,
         reason: p.reason ?? null,
+        conflict: restoredConflict?.message ?? null,
+        conflictTerms: restoredConflict?.terms ?? [],
         // The payload's `reason` is the NEWEST turn's, verbatim — so on a thread whose answer was
         // paged it describes one page and the restored grid is several, which is R1-03 arriving by
         // the resume path. The transcript says which; see {@link wasPaged} for why "ever paged" is
