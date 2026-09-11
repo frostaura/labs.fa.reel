@@ -25,6 +25,7 @@ import {
   plural,
   showMoodPresets,
   showsFootnote,
+  turnSettled,
   recentListing,
   lastTurnOutcome,
   answeredQuestion,
@@ -1997,6 +1998,31 @@ describe("chatReducer — a resumed thread restores its collision notice", () =>
  * The route takes `limit` (clamped 1..100) and NO offset, so 100 is the ceiling reachable from
  * here and the menu says so rather than offering a control that cannot go further.
  */
+/**
+ * R3-03. What counts as "the thread just changed" — the question the RTK cache needed answering and
+ * nobody was asking, so a completed `/ask` (which streams outside RTK Query entirely) invalidated
+ * nothing and every client-side remount of /search re-rendered the payload from the last fetch.
+ */
+describe("turnSettled", () => {
+  it("fires_on_every_way_out_of_a_turn_not_just_the_happy_one", () => {
+    // Fixture variation across the four exits: an answer, a Stop, a failure and a 409. Each leaves
+    // a row on the server the cached payload does not describe — the Stop and the failure write a
+    // `Failed` row with a code, and the 409 means another turn is writing the thread right now.
+    for (const next of ["done", "stopped", "error", "blocked", "idle"] as const) {
+      expect(turnSettled("streaming", next)).toBe(true);
+    }
+  });
+
+  it("is_silent_when_no_turn_was_running_and_while_one_still_is", () => {
+    // A resume, a mount and a thread switch all change `status` without a turn having finished —
+    // invalidating there would refetch the payload the page has only just applied.
+    for (const previous of ["idle", "resumed", "done", "stopped", "error", "blocked"] as const) {
+      expect(turnSettled(previous, "done")).toBe(false);
+    }
+    expect(turnSettled("streaming", "streaming")).toBe(false);
+  });
+});
+
 describe("recentListing", () => {
   it("asks_for_the_cheap_page_first", () => {
     expect(recentListing(false, 0).limit).toBe(RECENT_LIMIT);

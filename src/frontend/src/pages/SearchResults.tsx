@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, Mic, Plus, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
@@ -9,7 +9,7 @@ import CardQuickActions from "../components/rec/CardQuickActions";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import {
-  useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
+  api, useGetConversationQuery, useGetFiltersQuery, useGetTurnQuery, useUnsaveForLaterMutation,
 } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
@@ -22,7 +22,7 @@ import {
   plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
   useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  scrollTargetFor, skeletonCount,
+  scrollTargetFor, skeletonCount, turnSettled,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -105,8 +105,9 @@ function AskReel() {
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, belowFloor, droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
-    pageQuery,
+    pageQuery, hasLocalTurn,
   } = useAskReelChat();
+  const storeDispatch = useDispatch();
   // The bar itself is not on the wire and should not be: it is the account's own standing
   // condition, the same `minPredictedRating` PickConditionsSummary reads two elements up the page.
   // Reading it from the one source keeps the tray's number and the conditions summary from ever
@@ -156,12 +157,50 @@ function AskReel() {
   const resumeFrom = resumeTarget(threadId);
   const { data: resumed, error: resumeError, refetch: refetchConversation } = useGetConversationQuery(resumeFrom, {
     skip: !shouldResume || resumeFrom === NO_RESUME,
+    // R3-03's backstop. The invalidation below keeps the cache warm while the tab is here, but a
+    // turn answered in ANOTHER tab, or a fetch that never landed because the user navigated away
+    // mid-flight, leaves this entry describing a thread that has moved on — and the entry outlives
+    // the route by `keepUnusedDataFor`. A mount is the one moment the page has nothing of its own
+    // to lose by asking again.
+    refetchOnMountOrArgChange: true,
   });
+
+  /**
+   * R3-03. A completed `/ask` streams outside RTK Query, so nothing invalidated the conversation it
+   * had just changed: leave `/search` by the header mark or the tab bar and come back with Back,
+   * and the route re-mounted onto the payload from the LAST fetch — 21 + 21 cards on screen came
+   * back as 14 + 10, under the footnote of a turn two pages earlier, and it did not self-correct.
+   *
+   * Invalidated on every exit from a turn rather than on `done` alone — see {@link turnSettled} —
+   * and by the bare tag, which reaches the thread list and every `getConversation` entry whatever
+   * argument keyed it (a thread resumed through the deprecated `latest` alias is cached under that
+   * word, not under its id).
+   */
+  const settledFrom = useRef(status);
+  useEffect(() => {
+    const previous = settledFrom.current;
+    settledFrom.current = status;
+    if (turnSettled(previous, status)) storeDispatch(api.util.invalidateTags(["Conversation"]));
+  }, [status, storeDispatch]);
+
+  /**
+   * Which conversation this page last put on screen from a payload. Read by the guard below: an
+   * explicit thread switch changes the query ARGUMENT, and that is what separates "the user asked
+   * for a different thread" from "the fetch we just invalidated came back".
+   */
+  const resumedArg = useRef<string | null>(null);
 
   useEffect(() => {
     // Guarded on `seedStarted`, not cancelled on cleanup: once a search has begun, a late-arriving
     // stored conversation must never replace it.
     if (!resumed || seedStarted.current) return;
+    // …and once a turn of THIS visit has produced what is on screen, the reducer is ahead of the
+    // payload. The invalidation above makes a refetch land while that answer is up, and applying it
+    // would replace a live twenty-one-card answer with the server's account of it — correct data,
+    // arriving as a state change nobody asked for, mid-read. A thread the user explicitly switched
+    // to is a different argument and is never blocked by this.
+    if (hasLocalTurn && resumedArg.current === resumeFrom) return;
+    resumedArg.current = resumeFrom;
     resume(resumed);
     // The toggle and the grid have to agree about what produced what is under it — a restored
     // answer that ran under "Movies" beside a control reading "All" is a control that lies.
@@ -170,7 +209,7 @@ function AskReel() {
     // `filter` is deliberately NOT a dependency: this reconciles the toggle TO the payload once,
     // and re-running it on every toggle change would fight the user for control of it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumed, resume, setFilter]);
+  }, [resumed, resume, setFilter, hasLocalTurn, resumeFrom]);
 
   // A stored id the server does not have any more — deleted from another device, or past
   // retention. Forget it rather than asking for it on every visit from here.

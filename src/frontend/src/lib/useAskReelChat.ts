@@ -871,6 +871,27 @@ export function canPage(
   return status === "stopped" && settled === cardCount;
 }
 
+/**
+ * Did a turn just finish — in any of the ways a turn can finish?
+ *
+ * R3-03. A completed `/ask` streams outside RTK Query and so invalidated nothing: `getConversation`
+ * provides `{type:"Conversation", id}` and only `deleteConversation` ever invalidated it, so every
+ * client-side remount of `/search` re-rendered the payload from the last fetch. Page an answer to
+ * 21 + 21, press Home, press Back, and 14 + 10 came back — the thread as it was when the page last
+ * asked the server, under the footnote of a turn two pages ago. A hard reload restored all 42,
+ * which is what pinned it to the client rather than to the record.
+ *
+ * Every exit counts, not just `done`: a Stop and a failure both write a row (`Failed`, with its
+ * code), and a `page` that completes changes what the thread's newest answer is. Each of the three
+ * leaves the cached payload describing a conversation that has moved on.
+ *
+ * `blocked` is in as well — a 409 means another turn is writing this conversation right now, so the
+ * cached copy is if anything staler than after a turn of this tab's own.
+ */
+export function turnSettled(previous: ChatStatus, next: ChatStatus): boolean {
+  return previous === "streaming" && next !== "streaming";
+}
+
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
 export function lastUserQuery(turns: ChatTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -1947,5 +1968,18 @@ export function useAskReelChat() {
      * by the seam alongside {@link ResumedTail}; empty on an ordinary resume.
      */
     answeredQuery: state.answeredQuery,
+    /**
+     * Has a turn of THIS visit produced what is on screen?
+     *
+     * The page reads it before applying a conversation payload: a reducer that has run a turn is
+     * ahead of anything the server has been asked for since, and R3-03's fix (invalidating the
+     * `Conversation` tag when a turn settles) means a refetch can now land WHILE that answer is on
+     * screen. Without the check the refetch would replace a live, paged, twenty-one-card answer
+     * with the server's account of it — correct data, arriving as a state change nobody asked for.
+     *
+     * `stream` is the run id the reducer is listening to, and it is non-zero from the moment a turn
+     * starts until a resume or a `+ New` clears it — which is exactly "this visit owns the screen".
+     */
+    hasLocalTurn: state.stream !== 0,
   };
 }

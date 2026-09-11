@@ -285,6 +285,137 @@ test.describe("Ask Reel — the thread survives leaving the page", () => {
   });
 });
 
+/**
+ * R3-03. Leaving `/search` and coming back with Back re-rendered the answer as it was at the last
+ * GET, not as it is.
+ *
+ * `getConversation` provides `{type:"Conversation", id}` and only `deleteConversation` invalidated
+ * it, so a completed `/ask` — which streams outside RTK Query entirely — changed the thread and
+ * told the cache nothing. A 21 + 21 paged answer came back as 14 + 10 under the footnote of the
+ * turn before the page, on the very gesture F6-03 had just been fixed to make reachable, and it
+ * did not self-correct on a wait. A hard reload restored all 42, which is what pinned it to the
+ * client rather than to the record.
+ */
+test.describe("Ask Reel — leaving the page and coming back shows the thread as it is", () => {
+  const DELTA = card("d4", "Delta Ridge", { blend: 0.4 });
+  const ECHO = card("e5", "Echo Valley", { blend: 0.3 });
+
+  /** The server's record AFTER the page — five cards across two turns, as a resume replays it. */
+  const PAGED_PAYLOAD = {
+    ...RESUME_PAYLOAD,
+    turns: [
+      ...RESUME_PAYLOAD.turns,
+      { sequence: 2, role: "assistant", text: "", kind: "page", status: "Completed" },
+    ],
+    cards: [ALPHA, BORDER, CEDAR, DELTA, ECHO],
+    // Deliberately NOT the sentence the live page frame carries, so the two are distinguishable on
+    // screen: this is the stored turn's reason, and it may only appear once the page has actually
+    // re-read the thread.
+    reason: "2 picks ranked for you, from 65 pulled.",
+    shown: [ALPHA, BORDER, CEDAR, DELTA, ECHO].map((c) => c.tmdbId),
+  };
+
+  /** Runs "Show me more" against the stub and settles a five-card, two-turn answer. */
+  async function pageTheAnswer(page: Page) {
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page);
+    await askPush(page, "conversation", { id: CONVERSATION, turnId: "turn-2", sequence: 2 });
+    await askPush(page, "done", { results: [DELTA, ECHO], reason: "2 more from the same angle.", kept: 2 });
+    await askEnd(page);
+    await expect(gridNames(page)).toHaveCount(5);
+  }
+
+  test("a paged answer survives Home and Back at its paged size", async ({ page }) => {
+    // The exact repro: resume a thread (which warms the cache with the thread as it was), page it,
+    // leave by the header mark, come back with Back.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+
+    // The server's record from the moment the page lands. Registered before the turn so the
+    // re-read the completed page triggers gets the thread as it now is.
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, PAGED_PAYLOAD);
+    await pageTheAnswer(page);
+    await expect(page.getByTestId("askreel-footnote")).toContainText("2 more from the same angle.");
+
+    await page.getByLabel("Reel home").click();
+    await expect(page).toHaveURL(/\/home$/);
+    // Wait for /search to genuinely UNMOUNT — a goBack inside the same React batch never re-mounts
+    // the route, and the test would pass against a page that never had to restore anything.
+    await expect(page.getByTestId("askreel-composer")).toHaveCount(0);
+    await page.goBack();
+
+    // Five, not three. Before the fix this was the thread as of the last fetch — the answer before
+    // the page — with the earlier turn's footnote under it.
+    await expect(gridNames(page)).toHaveCount(5);
+    await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Delta Ridge", "Echo Valley"]);
+    await expect(page.getByTestId("askreel-footnote")).toContainText("2 picks ranked for you, from 65 pulled.");
+  });
+
+  test("the completed page re-reads the thread it changed, without disturbing the answer on screen", async ({ page }) => {
+    // The mechanism, pinned on its own: the invalidation fires, AND the payload it fetches does not
+    // replace the answer the reader is looking at. Both halves matter — a refetch that clobbered
+    // would swap a live paged answer for the server's account of it mid-read, which is a state
+    // change nobody asked for even when the data is right.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    // Registered AFTER boot so it wins the match, then reloaded so the count starts at this
+    // page's own first read of the thread.
+    const reads: string[] = [];
+    // Flipped by the test rather than counted off, so a second read from a StrictMode remount
+    // cannot decide what the FIRST render sees.
+    let hasPaged = false;
+    await page.route(
+      (u) => u.pathname === `/api/search/conversations/${CONVERSATION}`,
+      (route) => {
+        reads.push(route.request().url());
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(hasPaged ? PAGED_PAYLOAD : RESUME_PAYLOAD),
+        });
+      },
+    );
+    await page.reload();
+    await expect(gridNames(page)).toHaveText(STORED_ORDER);
+    const before = reads.length;
+    hasPaged = true;
+
+    await pageTheAnswer(page);
+    // The thread was re-read because a turn finished, not because anything re-mounted.
+    await expect.poll(() => reads.length).toBeGreaterThan(before);
+    // …and the screen is still the live answer: the stored sentence has NOT taken over the
+    // footnote, and the five cards are the five the page produced.
+    await expect(page.getByTestId("askreel-footnote")).toContainText("2 more from the same angle.");
+    await expect(gridNames(page)).toHaveCount(5);
+  });
+
+  test("switching to another thread is never mistaken for a re-read of this one", async ({ page }) => {
+    // Fixture variation on the guard: the same "a payload arrived while this visit owns the screen"
+    // shape, with the one difference that matters — the user asked for a DIFFERENT thread. Blocking
+    // that would make `Recent ▾` inert after the first question of a visit.
+    await boot(page, { resume: "stored", storedId: CONVERSATION });
+    await mockJson(page, `**/api/search/conversations/${CONVERSATION}`, PAGED_PAYLOAD);
+    await pageTheAnswer(page);
+
+    await mockJson(page, `**/api/search/conversations/${OTHER_CONVERSATION}`, {
+      ...RESUME_PAYLOAD,
+      id: OTHER_CONVERSATION,
+      title: "something funny",
+      turns: [
+        { sequence: 0, role: "user", text: "something funny", kind: "ask", status: "Completed" },
+        { sequence: 1, role: "assistant", text: "One that fits.", kind: "ask", status: "Completed" },
+      ],
+      cards: [CEDAR],
+      reason: "1 pick ranked for you, from 12 pulled.",
+      lastQuery: "something funny",
+    });
+    await page.getByTestId("askreel-recent").click();
+    await page.getByTestId("askreel-recent-open").nth(1).click();
+
+    await expect(page.getByTestId("askreel-transcript")).toContainText("something funny");
+    await expect(gridNames(page)).toHaveText(["Cedar Falls"]);
+  });
+});
+
 test.describe("Ask Reel — the server's order is the contract", () => {
   test("a page never re-orders the answer it extends, and the reload reproduces the screen", async ({ page }) => {
     // SB-01, both halves in one run. Wave-B pressed `Show me more` and watched page-two's picks
