@@ -10,6 +10,7 @@ import {
   lastUserQuery,
   mediaFilterFor,
   CONVERSATION_ID_KEY,
+  canPage,
   floorHeldBack,
   floorPartition,
   formatFloor,
@@ -1004,5 +1005,80 @@ describe("floorPartition", () => {
     // re-sorting here would invent a ranking the server never produced.
     const cards = [card(3, { predictedRating: 9 }), card(1, { predictedRating: 7 }), card(2, { predictedRating: 8 })];
     expect(floorPartition(cards, bar).kept.map((c) => c.titleId)).toEqual(["t3", "t1", "t2"]);
+  });
+});
+
+/**
+ * R1-04 — "Show me more" over an answer that is not this question's.
+ *
+ * The reported sequence: get a 37-card answer, ask something new, press Stop before the first
+ * card arrives. The previous answer is correctly held and dimmed — and the page control rendered
+ * underneath it, outside the stopped branch, with no idea the cards above belonged to an earlier
+ * question. Pressing it replayed the STOPPED question, dropped the dim, and the 37 held cards
+ * silently stopped being "the previous answer" and became page one of a different question.
+ *
+ * The rule this pins: a page extends a COMPLETED turn. Nothing else is pageable — not a turn in
+ * flight, not one the user abandoned, not a held previous answer, not a failure, not a 409.
+ */
+describe("canPage", () => {
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "a tense heist movie", fresh: true }),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
+  );
+
+  it("pages_a_completed_turn_and_a_resumed_one", () => {
+    // The two states where what is on screen is a finished answer to the last question asked: a
+    // turn that completed this visit, and one the server handed back whole.
+    expect(canPage("done", false, false, 2)).toBe(true);
+    expect(canPage("resumed", false, false, 2)).toBe(true);
+  });
+
+  it("never_pages_a_held_previous_answer", () => {
+    // The R1-04 repro, as state: stopped, holding, cards on screen, a `lastQuery` pointing at the
+    // question that was never answered. Every one of those three states used to render the button.
+    const asking = chatReducer(answered, { type: "userTurn", message: "slow burn detective series", fresh: false });
+    const stopped = chatReducer(asking, { type: "stop" });
+    expect(stopped.holdingPrevious).toBe(true);
+    expect(stopped.order).toHaveLength(2);
+    expect(canPage(stopped.status, stopped.holdingPrevious, stopped.exhausted, stopped.order.length)).toBe(false);
+    // …and the hold alone is disqualifying, whatever the status beside it says.
+    expect(canPage("streaming", true, false, 2)).toBe(false);
+    expect(canPage("blocked", true, false, 2)).toBe(false);
+  });
+
+  it("never_pages_a_turn_that_did_not_finish", () => {
+    // Fixture variation on the status alone, cards and hold held constant: a stopped page's cards
+    // are real but unranked and unfloored, a failure has an "Ask again" of its own, and a 409
+    // means the answer is already on its way. None of the three is a completed turn.
+    expect(canPage("stopped", false, false, 2)).toBe(false);
+    expect(canPage("error", false, false, 2)).toBe(false);
+    expect(canPage("blocked", false, false, 2)).toBe(false);
+    expect(canPage("streaming", false, false, 2)).toBe(false);
+    expect(canPage("idle", false, false, 2)).toBe(false);
+  });
+
+  it("stops_asking_once_the_server_says_there_is_no_more", () => {
+    expect(canPage("done", false, true, 2)).toBe(false);
+    // Nothing on screen is nothing to extend.
+    expect(canPage("done", false, false, 0)).toBe(false);
+  });
+});
+
+/**
+ * The other half of R1-04, in the reducer: `moreTurn` used to clear `holdingPrevious`
+ * unconditionally, which is the mechanism by which the held cards changed ownership. The guard
+ * above means a page can no longer start from a hold — and if one ever did, the previous answer
+ * must stay labelled as previous rather than being silently adopted by the new question.
+ */
+describe("chatReducer — moreTurn never adopts a held answer", () => {
+  it("leaves_the_hold_exactly_as_it_found_it", () => {
+    const answered = chatReducer(
+      chatReducer(initialChatState, { type: "userTurn", message: "a tense heist movie", fresh: true }),
+      { type: "done", data: { results: [card(1), card(2)], reason: "2 picks" } },
+    );
+    // Fixture variation: the same action from the two states that differ only in the hold.
+    const held = chatReducer(answered, { type: "userTurn", message: "slow burn detective", fresh: false });
+    expect(chatReducer(held, { type: "moreTurn" }).holdingPrevious).toBe(true);
+    expect(chatReducer(answered, { type: "moreTurn" }).holdingPrevious).toBe(false);
   });
 });

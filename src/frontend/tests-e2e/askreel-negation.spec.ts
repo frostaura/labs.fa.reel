@@ -257,6 +257,56 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(page.getByTestId("askreel-composer")).toBeEditable();
   });
 
+  test("Show me more is withdrawn over a held answer, and comes back when one completes", async ({ page }) => {
+    // R1-04, from the browser. Same fixture as the test above and one control different: the
+    // reported sequence pressed "Show me more" while the held answer was on screen, and the page
+    // sent the STOPPED question as a page — the 37 held cards dropped their dim and became page
+    // one of a question that had never been answered, with nothing on screen saying so.
+    await bootSearch(page);
+
+    await page.getByTestId("askreel-composer").fill("a tense heist movie");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page);
+    await askPush(page, "done", { results: [ALPHA, BORDER, CEDAR], reason: "3 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+    // A completed turn IS pageable — the control has to exist before its absence means anything.
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+
+    await page.getByTestId("askreel-composer").fill("slow burn detective series");
+    await page.getByTestId("askreel-composer").press("Enter");
+    await waitForAsk(page, 2);
+    await askPush(page, "phase", { stage: "searching", found: 0, scored: 0 });
+    await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
+    await page.getByTestId("askreel-stop").click();
+
+    // The held answer is still there, still seamed and still dimmed — and there is no longer a
+    // control offering to extend it. The stopped card's "Ask again" is the only offer on screen.
+    await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
+    await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
+    await expect(page.getByTestId("askreel-more")).toHaveCount(0);
+    // …and nothing went out. The bug was a billed turn, not just a wrong screen.
+    await page.waitForTimeout(400);
+    expect(await askRequests(page)).toHaveLength(2);
+
+    // "Ask again" replays the stopped question and completes it; paging is offered again the
+    // moment there is a finished answer to page — the capability is withdrawn, not lost.
+    await page.getByTestId("askreel-stopped").getByTestId("askreel-retry").click();
+    await waitForAsk(page, 3);
+    await askPush(page, "done", { results: [ALPHA, BORDER], reason: "2 picks ranked for you, from 40 pulled." });
+    await askEnd(page);
+    await expect(page.getByTestId("askreel-previous-answer")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-more")).toBeVisible();
+
+    await page.getByTestId("askreel-more").click();
+    await waitForAsk(page, 4);
+    const requests = (await askRequests(page)) as { query: string }[];
+    // The page carries the question that was actually ANSWERED — not the one that was stopped and
+    // then re-asked under a different id, and never the earlier heist turn whose cards it extends.
+    expect(requests[3].query).toBe("slow burn detective series");
+    await askPush(page, "done", { results: [], reason: null });
+    await askEnd(page);
+  });
+
   test("a filter collision is named above the grid, and the floor's cut gets its own tray", async ({ page }) => {
     await bootSearch(page);
 

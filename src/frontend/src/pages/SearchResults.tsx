@@ -96,7 +96,7 @@ function AskReel() {
   const [draft, setDraft] = useState("");
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
-    retryTurn, stop, setMediaTypes, exhausted, appending, canRetry, conflict, belowFloor,
+    retryTurn, stop, setMediaTypes, exhausted, appending, pageable, canRetry, conflict, belowFloor,
     droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt, conversationId, errorReason,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
@@ -629,10 +629,17 @@ function AskReel() {
           inside the viewport on first paint — so every single message fired a SECOND full-price
           /ask turn, whose interpret reply was generated, billed and then discarded. An explicit
           button costs one request per message and reads honestly ("there is more if you want
-          it") instead of silently spending. */}
-      {visible.length > 0 && (
+          it") instead of silently spending.
+
+          …and it is offered only over an answer a page can legitimately extend. `pageable` is the
+          hook's own rule (see `canPage`), so the control and `loadMore` cannot disagree: a held
+          previous answer, a stopped turn, a failure and a 409 all render nothing here. R1-04 was
+          this button sitting under a HELD answer after a Stop — pressing it replayed the question
+          that was never answered and silently adopted the earlier question's cards as page one.
+          `appending` keeps it on screen, disabled, for the length of its own page. */}
+      {visible.length > 0 && (pageable || appending || exhausted) && (
         <div className="flex flex-col items-center gap-2">
-          {!exhausted && (
+          {(pageable || appending) && (
             <button
               type="button"
               data-testid="askreel-more"
@@ -643,7 +650,7 @@ function AskReel() {
               {appending ? "Finding more like these…" : "Show me more"}
             </button>
           )}
-          {exhausted && (
+          {exhausted && !appending && (
             <p className="fa-caption text-fa-frost-dim text-center">
               That&apos;s everything on this thread — refine it above for a different angle.
             </p>

@@ -304,6 +304,33 @@ export function transcriptOf(rows: { role: string; text: string }[]): ChatTurn[]
     .map((t) => ({ role: t.role as "user" | "assistant", text: t.text }));
 }
 
+/**
+ * Whether "Show me more" may be offered at all — the question being, whose answer is on screen?
+ *
+ * A page EXTENDS an answer, so it only makes sense over one: a completed turn of this visit, or a
+ * thread the server handed back whole. Every other state fails for a reason of its own, and R1-04
+ * is what happens when none of them are checked. Get a 37-card answer, ask something new, press
+ * Stop before the first card lands: the previous answer is correctly held and dimmed, and the page
+ * control rendered underneath it with no idea the cards above it belonged to an earlier question.
+ * Pressing it replayed the STOPPED question, the dim came off, and 37 held cards silently stopped
+ * being "the previous answer" and became page one of a different one.
+ *
+ * So: `holdingPrevious` is disqualifying whatever the status — those cards are not this question's
+ * answer. `stopped` is disqualifying because an abandoned turn never reached `done`, which is where
+ * ranking and the quality floor run: extending an unranked, unfloored partial compounds it. `error`
+ * and `blocked` have their own controls ("Ask again", "Check again") saying what to do instead, and
+ * a page from either would be a second, contradictory offer beside them.
+ */
+export function canPage(
+  status: ChatStatus,
+  holdingPrevious: boolean,
+  exhausted: boolean,
+  cardCount: number,
+): boolean {
+  if (cardCount === 0 || exhausted || holdingPrevious) return false;
+  return status === "done" || status === "resumed";
+}
+
 /** The text of the last thing the USER said — what a page or a re-ask has to replay. */
 export function lastUserQuery(turns: ChatTurn[]): string {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -486,7 +513,13 @@ export function chatReducer(state: State, action: ChatAction): State {
       // A page, not a turn: no transcript entry, and the existing cards stay put. It is explicitly
       // NOT a hold — a page ADDS to what is on screen, so the first candidate must append rather
       // than replace the answer it is extending.
-      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, holdingPrevious: false, arrived: 0 };
+      //
+      // `holdingPrevious` is carried, never cleared. Clearing it unconditionally was R1-04's
+      // mechanism: a page started over a HELD answer dropped the dim and the seam, and the cards
+      // of an earlier question became page one of the stopped one without a word on screen.
+      // `canPage` now stops such a page being started at all; this is the backstop, and it fails
+      // the honest way — the previous answer stays labelled as previous.
+      return { ...state, status: "streaming", phase: null, appending: true, errorReason: null, arrived: 0 };
     case "reaskTurn": {
       // The same question asked again — a media-filter change, or a retry after a failure. Like a
       // page it adds no transcript entry (the user said it once; echoing their bubble on every
@@ -811,7 +844,10 @@ export function useAskReelChat() {
    */
   const loadMore = useCallback(() => {
     const s = stateRef.current;
-    if (s.status === "streaming" || s.exhausted || !s.lastQuery || s.order.length === 0) return;
+    // The authoritative guard, here rather than only in the render: this is what issues the
+    // request, and a page over a held or abandoned answer is a billed turn for a question the
+    // user never got an answer to (R1-04). See {@link canPage} for what each state means.
+    if (!canPage(s.status, s.holdingPrevious, s.exhausted, s.order.length) || !s.lastQuery) return;
     run(s.lastQuery, false, "more");
   }, [run]);
 
@@ -930,6 +966,12 @@ export function useAskReelChat() {
   return {
     turns: state.turns, status: state.status, phase: state.phase, cards, outsideCards, reason: state.reason,
     send, resume, startNew, loadMore, reask, retryTurn, stop, setMediaTypes, exhausted: state.exhausted, appending: state.appending,
+    /**
+     * Whether "Show me more" may be offered — the same rule {@link loadMore} enforces, so the
+     * control and the callback can never disagree about whose answer is on screen. False over a
+     * held previous answer, a stopped turn, a failure and a 409; see {@link canPage}.
+     */
+    pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length),
     /** The server's note that this question collides with a standing exclusion; not an error. */
     conflict: state.conflict,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
