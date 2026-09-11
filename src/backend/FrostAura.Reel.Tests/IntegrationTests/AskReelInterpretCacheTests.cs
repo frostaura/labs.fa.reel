@@ -89,6 +89,87 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
     }
 
     /// <summary>
+    /// F5-05. The TMDB half of discovery has hit since F2-02 — the test above proves it — and yet a
+    /// byte-identical repeat still spent 1.5 seconds in the <c>discover</c> stage and came back with
+    /// a different pool size (87, then 86). The rest of that stage is the SEMANTIC arm: a paid
+    /// concept embedding plus a pgvector kNN over the account's own catalogue, re-bought in full
+    /// every time and drifting because the catalogue moves underneath it.
+    ///
+    /// <para>The concept is the identity of that call — it is literally the string the provider is
+    /// paid to embed — so it is what the arm is keyed on. Asserted here as "the provider was asked
+    /// for that exact text once across two turns", which is the same fact as the ledger delta and is
+    /// visible per-turn, where <c>ExternalApiUsages</c> (a per-day aggregate) is not.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_identical_question_reuses_the_semantic_pull_as_well_as_the_tmdb_one()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var agent = new DriftingAgent();
+        var tmdb = new CountingTmdbClient(Discoverable(72301, 4));
+        var embeddings = new CountingEmbeddingProvider();
+        var log = new CapturingLogger();
+        const string Question = "a tense sci-fi thriller with a great twist";
+
+        await RunAsync(accountId, cache, agent, tmdb, log, Question, embeddings);
+        var pullsForTheFirstTurn = tmdb.DiscoverCalls;
+        await RunAsync(accountId, cache, agent, tmdb, log, Question, embeddings);
+
+        // The concept the agent's answer renders to — computed through the production helper, so a
+        // change to how a concept is assembled cannot leave this test asserting a dead string.
+        var concept = LiveSearchExpansionService.ConceptText(
+            new AgentReply("Coming up.", agent.LastIntent, agent.LastIntent));
+
+        Assert.Equal(1, embeddings.TimesAskedFor(concept));
+        // And the half that was already fixed stays fixed: no second TMDB pull either.
+        Assert.True(pullsForTheFirstTurn > 0, "the first turn should have pulled from TMDB at all.");
+        Assert.Equal(pullsForTheFirstTurn, tmdb.DiscoverCalls);
+    }
+
+    /// <summary>
+    /// The probe: one field of the semantic key moved. A different account asking the identical
+    /// question must re-pull, because the neighbours come from that account's OWN eligible
+    /// catalogue — a shared list would be one tenant reading another's pool.
+    /// </summary>
+    [Fact]
+    public async Task Another_account_does_not_share_the_semantic_pull()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var mine = await SeedAccountAsync();
+        var theirs = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(mine);
+        await MarkAllExistingTitlesSeenAsync(theirs);
+
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        // A model that does NOT drift, so both tenants render the identical concept and the only
+        // thing that can separate their two embed calls is the account on the key.
+        var agent = new SteadyAgent();
+        var tmdb = new CountingTmdbClient(Discoverable(72401, 4));
+        var embeddings = new CountingEmbeddingProvider();
+        var log = new CapturingLogger();
+        const string Question = "a tense sci-fi thriller with a great twist";
+
+        await RunAsync(mine, cache, agent, tmdb, log, Question, embeddings);
+        await RunAsync(theirs, cache, agent, tmdb, log, Question, embeddings);
+
+        var concept = LiveSearchExpansionService.ConceptText(
+            new AgentReply("Coming up.", agent.LastIntent, agent.LastIntent));
+
+        Assert.Equal(2, embeddings.TimesAskedFor(concept));
+    }
+
+    /// <summary>
     /// The probe: one field of the key moved. Adding a standing exclusion changes the summary the
     /// prompt is handed, so the cached intent is the answer to a different question and must not be
     /// served — this is the same reasoning that puts the prompt version and the model id on every
@@ -153,9 +234,10 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
         events.Single(e => e.Event == "done").Data.GetProperty("debug").GetProperty("intent").GetRawText();
 
     private async Task<List<(string Event, JsonElement Data)>> RunAsync(
-        Guid accountId, IMemoryCache cache, ISearchAgent agent, ITmdbClient tmdb, CapturingLogger log, string message)
+        Guid accountId, IMemoryCache cache, ISearchAgent agent, ITmdbClient tmdb, CapturingLogger log, string message,
+        IEmbeddingProvider? embeddings = null)
     {
-        var (service, events) = BuildService(accountId, tmdb, agent, cache, log, out var emit);
+        var (service, events) = BuildService(accountId, tmdb, agent, cache, log, out var emit, embeddings);
         await service.StreamAsync(
             message, [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None, debug: true);
         return events;
@@ -185,7 +267,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
 
     private (LiveSearchExpansionService Service, List<(string Event, JsonElement Data)> Events) BuildService(
         Guid accountId, ITmdbClient tmdb, ISearchAgent agent, IMemoryCache cache, CapturingLogger log,
-        out LiveSearchExpansionService.Emit emit)
+        out LiveSearchExpansionService.Emit emit, IEmbeddingProvider? embeddings = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -201,7 +283,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
             scoped,
             agent,
             tmdb,
-            new UnitEmbeddingProvider(),
+            embeddings ?? new UnitEmbeddingProvider(),
             eligibility,
             new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
@@ -310,6 +392,53 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>(
                 titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+    }
+
+    /// <summary>
+    /// A model that answers the same sentence the same way every time — the control against
+    /// <see cref="DriftingAgent"/>, for tests that need two turns to render one identical concept.
+    /// </summary>
+    private sealed class SteadyAgent : ISearchAgent
+    {
+        public SearchIntent LastIntent { get; } =
+            new(["thriller"], ["twist ending", "suspense"], [], "a tense sci-fi thriller with a great twist", null, null);
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "steady-agent";
+
+        public Task<AgentReply> InterpretAsync(
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
+            CancellationToken ct = default, string? standingFilters = null) =>
+            Task.FromResult(new AgentReply("Coming up.", LastIntent, LastIntent));
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
+            string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<RerankResult>>(
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+    }
+
+    /// <summary>
+    /// Records every text it is asked to embed, so "was this concept bought twice" is a question the
+    /// test can answer. <c>ExternalApiUsages</c> cannot: it is a per-day aggregate of
+    /// (provider, purpose, day, count), so a single turn's delta is not isolable from it — which is
+    /// exactly why the finder had to infer the cache miss from a drifting pool size instead.
+    /// </summary>
+    private sealed class CountingEmbeddingProvider : IEmbeddingProvider
+    {
+        private readonly UnitEmbeddingProvider _inner = new();
+        private readonly List<string> _asked = [];
+
+        public bool IsAvailable => true;
+
+        public int TimesAskedFor(string text) => _asked.Count(t => t == text);
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
+        {
+            _asked.AddRange(texts);
+            return _inner.EmbedAsync(texts, ct);
+        }
     }
 
     private sealed class UnitEmbeddingProvider : IEmbeddingProvider

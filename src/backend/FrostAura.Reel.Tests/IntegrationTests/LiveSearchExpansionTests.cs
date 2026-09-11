@@ -264,11 +264,22 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public string ModelId => "fake-exclusion-agent";
 
+        /// <summary>
+        /// <c>Requested</c> is populated, and that is not incidental. The turn under test is "a
+        /// tense thriller, NO HORROR PLEASE" — the user typed the negation — and only a negation
+        /// the user typed (or a standing rule) may route a title into the flagged outside channel.
+        /// An agent that left <c>Requested</c> null would be modelling a model INFERRING the
+        /// exclusion, which is a different turn and is deliberately no longer a negation at all:
+        /// "which you asked to skip" printed for something the user never said is the caption
+        /// defect F4-02 measured. The production agent fills this from the free deterministic
+        /// reading of the same sentence.
+        /// </summary>
         public Task<AgentReply> InterpretAsync(
             IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
             Task.FromResult(new AgentReply(
                 "Tense thrillers, steering clear of horror.",
-                new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"])));
+                new SearchIntent(["thriller"], ["tense"], [], "tense thriller", null, null, null, ExcludeGenres: ["horror"]),
+                new SearchIntent(["thriller"], ["tense"], [], message, null, null, null, ExcludeGenres: ["horror"])));
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>

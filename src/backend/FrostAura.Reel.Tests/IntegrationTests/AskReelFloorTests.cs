@@ -211,7 +211,7 @@ public class AskReelFloorTests(PostgresFixture fixture) : EmbeddedCatalogTestBas
 
         Assert.Equal(
             "8 picks ranked for you, from 40 pulled · only 2 picks cleared your 6.0 bar, so it was relaxed "
-            + "· 6 picks shown below your 6.0 bar",
+            + "· 6 picks on screen under your 6.0 bar",
             ReasonFor(verdict, discovered: 40, floor: 6m));
     }
 
@@ -232,9 +232,9 @@ public class AskReelFloorTests(PostgresFixture fixture) : EmbeddedCatalogTestBas
             discovered: 40, floor: 6m);
 
         Assert.Contains("only 2 picks cleared your 6.0 bar", before, StringComparison.Ordinal);
-        Assert.Contains("5 picks shown below your 6.0 bar", before, StringComparison.Ordinal);
+        Assert.Contains("5 picks on screen under your 6.0 bar", before, StringComparison.Ordinal);
         Assert.Contains("only 3 picks cleared your 6.0 bar", after, StringComparison.Ordinal);
-        Assert.Contains("4 picks shown below your 6.0 bar", after, StringComparison.Ordinal);
+        Assert.Contains("4 picks on screen under your 6.0 bar", after, StringComparison.Ordinal);
     }
 
     /// <summary>

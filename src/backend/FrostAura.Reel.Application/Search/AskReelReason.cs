@@ -16,6 +16,35 @@ namespace FrostAura.Reel.Application.Search;
 /// verbatim by tests, read by a human, and — like everything else this backend formats — must not
 /// acquire a comma decimal separator on a differently-configured host.</para>
 /// </summary>
+/// <summary>
+/// One turn's counts, as one value.
+///
+/// <para>Every clause of the reason line is derived from these and from nothing else, which is the
+/// point: the clauses used to take seven loose arguments and compose independently, so a starved
+/// turn could say "0 picks matched" and "only 1 pick cleared" and "1 pick shown below" about the
+/// same two cards. Four numbers that describe one screen have to travel together or they drift.</para>
+/// </summary>
+/// <param name="Picks">Cards on screen that matched everything asked for — the grid.</param>
+/// <param name="Outside">
+/// Cards on screen that trip one of the user's own negations, flagged and shown separately. These
+/// are explicitly NOT picks, and no clause may count them as such.
+/// </param>
+/// <param name="Tray">
+/// Cards the account's rating floor put under the "show the N under your bar" fence. Zero on a
+/// relaxed turn by construction — relaxation drops nothing.
+/// </param>
+/// <param name="Pulled">How many candidates discovery returned before any ranking.</param>
+/// <param name="AboveFloor">
+/// How many of the <see cref="Shown"/> cards cleared the floor. <see cref="AskReelReason.AboveFloorUnknown"/>
+/// from a caller that cannot count it. Load-bearing only on a relaxed turn, where nothing is
+/// dropped and <see cref="Tray"/> is therefore 0 whether every card cleared the bar or none did.
+/// </param>
+public readonly record struct TurnCounts(int Picks, int Outside, int Tray, int Pulled, int AboveFloor)
+{
+    /// <summary>Everything the turn put on the screen — both channels, never the tray.</summary>
+    public int Shown => Picks + Outside;
+}
+
 public static class AskReelReason
 {
     /// <summary>What separates the clauses. A middot reads as a list; a semicolon read as a sentence.</summary>
@@ -49,23 +78,40 @@ public static class AskReelReason
     /// </param>
     public static string Build(
         int picks, int outsideShown, int droppedByFloor, int discovered, bool widened, bool floorRelaxed, decimal floor,
-        int aboveFloor = AboveFloorUnknown)
-    {
+        int aboveFloor = AboveFloorUnknown) =>
+        Build(new TurnCounts(picks, outsideShown, droppedByFloor, discovered, aboveFloor), widened, floorRelaxed, floor);
 
-        if (picks + outsideShown == 0)
+    /// <summary>
+    /// Builds the turn's reason line from ONE set of counts.
+    ///
+    /// <para><b>Why the counts travel together.</b> Each clause used to be appended independently
+    /// and none of them knew what the others had said, so a starved turn produced "0 picks matched
+    /// everything you asked · 2 closest-but-outside shown separately · widened to find enough · only
+    /// 1 pick cleared your 6.0 bar, so it was relaxed · 1 pick shown below your 6.0 bar" — against
+    /// two results, an empty tray and nothing stored below the floor. Two clauses called an
+    /// outside-request card a "pick" while the first clause had just said no picks matched, and the
+    /// last one borrowed the tray clause's own words ("shown below") for cards that were in the grid.
+    /// <see cref="AskReelReasonSelfConsistencyTests"/> parses this method's output back against
+    /// these counts across the whole branch space, which is the only way a clause list stays
+    /// honest.</para>
+    /// </summary>
+    public static string Build(TurnCounts counts, bool widened, bool floorRelaxed, decimal floor)
+    {
+        if (counts.Shown == 0)
         {
             return Empty;
         }
 
         var clauses = new List<string>(4);
-        if (outsideShown > 0)
+        if (counts.Outside > 0)
         {
-            clauses.Add(FormattableString.Invariant($"{picks} {Pick(picks)} matched everything you asked"));
-            clauses.Add(FormattableString.Invariant($"{outsideShown} closest-but-outside shown separately"));
+            clauses.Add(FormattableString.Invariant($"{counts.Picks} {Pick(counts.Picks)} matched everything you asked"));
+            clauses.Add(FormattableString.Invariant($"{counts.Outside} closest-but-outside shown separately"));
         }
         else
         {
-            clauses.Add(FormattableString.Invariant($"{picks} {Pick(picks)} ranked for you, from {discovered} pulled"));
+            clauses.Add(FormattableString.Invariant(
+                $"{counts.Picks} {Pick(counts.Picks)} ranked for you, from {counts.Pulled} pulled"));
         }
 
         if (widened)
@@ -77,11 +123,11 @@ public static class AskReelReason
         // reach: a turn that dropped cards for failing the user's own bar said nothing about them.
         if (floorRelaxed)
         {
-            clauses.AddRange(RelaxedClauses(picks + outsideShown, aboveFloor, floor));
+            clauses.AddRange(RelaxedClauses(counts, floor));
         }
-        else if (droppedByFloor > 0)
+        else if (counts.Tray > 0)
         {
-            clauses.Add(FormattableString.Invariant($"{droppedByFloor} under your {FormatFloor(floor)} bar — shown below"));
+            clauses.Add(FormattableString.Invariant($"{counts.Tray} under your {FormatFloor(floor)} bar — shown below"));
         }
 
         return string.Join(Separator, clauses);
@@ -102,28 +148,50 @@ public static class AskReelReason
     /// relaxed" would send the reader hunting for below-bar cards that do not exist. The honest
     /// fact there is that the bar held.</para>
     /// </summary>
-    private static IEnumerable<string> RelaxedClauses(int shown, int aboveFloor, decimal floor)
+    private static IEnumerable<string> RelaxedClauses(TurnCounts counts, decimal floor)
     {
         var bar = FormatFloor(floor);
-        if (aboveFloor < 0)
+        if (counts.AboveFloor < 0)
         {
             // The caller cannot count. Claim nothing about counts — true in every branch.
             yield return FormattableString.Invariant($"your {bar} bar was relaxed to fill the screen");
             yield break;
         }
 
-        var below = Math.Max(0, shown - aboveFloor);
+        // The noun changes with the channel mix, and that is the whole of F4-05's server half. On a
+        // turn with an outside channel these counts span BOTH lists — a card under the bar is under
+        // it wherever it sits — so calling them "picks" folds cards the same sentence has just
+        // called not-matching into the pick count. "21 picks" against "0 picks matched everything
+        // you asked" was one screen's footnote.
+        var above = counts.AboveFloor;
+        var below = Math.Max(0, counts.Shown - above);
         if (below == 0)
         {
-            yield return FormattableString.Invariant($"every pick cleared your {bar} bar");
+            // "Every" takes the singular noun whatever the count is — "every picks cleared" is the
+            // same trust leak as the "1 picks" that shipped once already.
+            yield return FormattableString.Invariant($"every {Unit(counts, 1)} cleared your {bar} bar");
             yield break;
         }
 
-        yield return aboveFloor == 0
+        yield return above == 0
             ? FormattableString.Invariant($"nothing cleared your {bar} bar, so it was relaxed")
-            : FormattableString.Invariant($"only {aboveFloor} {Pick(aboveFloor)} cleared your {bar} bar, so it was relaxed");
-        yield return FormattableString.Invariant($"{below} {Pick(below)} shown below your {bar} bar");
+            : FormattableString.Invariant(
+                $"only {above} {Unit(counts, above)} cleared your {bar} bar, so it was relaxed");
+
+        // "ON SCREEN under your bar", never "shown below". A relaxed turn stores no tray at all, so
+        // the tray clause's own wording put a count against an empty belowFloor array — the reader
+        // was told to look below a fence that was not there.
+        yield return FormattableString.Invariant($"{below} {Unit(counts, below)} on screen under your {bar} bar");
     }
+
+    /// <summary>
+    /// "pick" / "picks" on a turn whose whole screen is picks; "card" / "cards" once an outside
+    /// channel is on it, because those are explicitly not picks.
+    /// </summary>
+    private static string Unit(TurnCounts counts, int of) =>
+        counts.Outside > 0
+            ? of == 1 ? "card" : "cards"
+            : Pick(of);
 
     /// <summary>
     /// "1 pick", "2 picks". Trivially small and here on purpose: "1 picks" shipped, and a reader who

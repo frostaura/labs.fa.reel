@@ -19,7 +19,12 @@ public class TurnRecordTests
     // The same question again is another page of it, whatever the client thinks it is doing.
     [InlineData("something tense", "something tense", SearchTurnKind.Page)]
     [InlineData("something tense", "  something tense  ", SearchTurnKind.Page)]
-    [InlineData("something tense", "Something Tense", SearchTurnKind.Page)]
+    // F5-10: a re-typed question is a NEW ASK, not a page. Whitespace is a transport artefact and
+    // folding it is safe; capitals are something a person typed on purpose. A user who retyped in
+    // caps used to get a page — new results, no user bubble recorded, and a resumed transcript
+    // showing one question where five submissions had been made.
+    [InlineData("something tense", "Something Tense", SearchTurnKind.Ask)]
+    [InlineData("something tense", "SOMETHING TENSE", SearchTurnKind.Ask)]
     // A different question is a new ask, including one that merely contains the last.
     [InlineData("something tense", "something tense but funnier", SearchTurnKind.Ask)]
     [InlineData("something tense", "", SearchTurnKind.Ask)]

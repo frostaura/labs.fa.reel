@@ -93,6 +93,109 @@ public class AskReelConflictDetectionTests
             AskReelStandingFilters.CollidingKeywords(rules, Laundered(), requested));
     }
 
+    /// <summary>
+    /// F5-03, the half that survived. The founder holds "anime" as an excluded GENRE; the heuristic
+    /// reads "an anime series" as a KEYWORD. Each list was intersected with its own vocabulary, so
+    /// neither side matched and the turn emitted no conflict frame at all — while the model's prose
+    /// in the same stream said the standing filters excluded anime. Which list the conditions editor
+    /// happened to write a rule to is not a fact about what the user asked for.
+    /// </summary>
+    [Fact]
+    public void A_standing_genre_the_user_typed_as_a_keyword_still_collides()
+    {
+        var rules = FilterRuleSet.Create(["anime", "animation"], null, null, null, null, null, null);
+        var requested = Stub().Heuristic("an anime series");
+
+        Assert.Equal(
+            ["anime"],
+            AskReelStandingFilters.CollidingGenres(rules, Laundered(), requested));
+    }
+
+    /// <summary>
+    /// The mirror: a standing avoid-KEYWORD the user typed as a genre word. <c>excludedKeywords</c>
+    /// was empty on every conflict frame ever captured, and this is one of the two reasons why.
+    /// </summary>
+    [Fact]
+    public void A_standing_keyword_the_user_typed_as_a_genre_still_collides()
+    {
+        var rules = FilterRuleSet.Create(null, null, ["comedy"], null, null, null, null);
+        var requested = Stub().Heuristic("something genuinely funny");
+
+        Assert.Equal(
+            ["comedy"],
+            AskReelStandingFilters.CollidingKeywords(rules, Laundered(), requested));
+    }
+
+    /// <summary>
+    /// The raw sentence is the last reading, and it is not decoration: the heuristic drops stop
+    /// words and the model drops whatever the prompt told it to, so a word BOTH discarded can still
+    /// be the one the standing rule names.
+    /// </summary>
+    [Fact]
+    public void A_word_only_the_raw_sentence_still_carries_collides()
+    {
+        var askedFor = AskReelStandingFilters.AskedFor(
+            "find me something about the history of jazz",
+            new SearchIntent([], ["jazz"], [], "jazz", null, null),
+            requested: null);
+
+        Assert.Equal(["history"], AskReelStandingFilters.Colliding(["history"], askedFor));
+    }
+
+    /// <summary>
+    /// The probe: one field moved. A standing exclusion the turn did NOT ask for — in any of the
+    /// three readings — is not a collision, so the raw-token pass cannot turn the notice into
+    /// noise that fires on every turn an account with twelve rules ever makes.
+    /// </summary>
+    [Fact]
+    public void A_standing_exclusion_the_turn_never_named_is_not_a_collision()
+    {
+        var askedFor = AskReelStandingFilters.AskedFor(
+            "a tense heist movie",
+            new SearchIntent(["thriller"], ["heist"], [], "heist", null, null),
+            requested: null);
+
+        Assert.Empty(AskReelStandingFilters.Colliding(FounderRules.ExcludeGenres, askedFor));
+    }
+
+    /// <summary>
+    /// The founder's own filter set against the sentence the finders used. Both halves fire: comedy
+    /// is permanently excluded and the 90s are outside the standing year window.
+    /// </summary>
+    [Fact]
+    public void The_founder_filter_set_collides_on_both_the_genre_and_the_decade()
+    {
+        var requested = Stub().Heuristic("a 90s romantic comedy");
+        var laundered = new SearchIntent([], [], [], "a 90s romantic comedy", 2000, null);
+
+        Assert.Contains(
+            "comedy",
+            AskReelStandingFilters.CollidingGenres(FounderRules, laundered, requested));
+        Assert.True(AskReelStandingFilters.YearWindowCollides(FounderRules, laundered, requested));
+    }
+
+    /// <summary>
+    /// Matching is whole-token, never substring: "war" must not collide with "warm", and a
+    /// twelve-rule account would otherwise see the notice on nearly every turn.
+    /// </summary>
+    [Fact]
+    public void A_standing_exclusion_does_not_match_a_word_that_merely_contains_it()
+    {
+        var askedFor = AskReelStandingFilters.AskedFor(
+            "something warm and hopeful", new SearchIntent([], ["warm"], [], "warm", null, null), null);
+
+        Assert.Empty(AskReelStandingFilters.Colliding(["war"], askedFor));
+    }
+
+    /// <summary>
+    /// The account the whole round was measured against: eight excluded genres and a 2000 floor.
+    /// Kept as a fixture so a change to the collision rule is judged against a real filter set
+    /// rather than against a single convenient exclusion.
+    /// </summary>
+    private static readonly FilterRuleSet FounderRules = FilterRuleSet.Create(
+        ["anime", "animation", "comedy", "documentary", "history", "music", "musical", "romance"],
+        null, null, ["en"], 6.0m, 2000, null);
+
     [Fact]
     public void A_keyword_the_account_does_not_avoid_is_not_a_collision()
     {
