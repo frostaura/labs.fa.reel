@@ -659,8 +659,10 @@ function AskReel() {
       )}
 
       {/* A failure that arrives while cards are already on screen (a page that blew up) must not
-          wipe the reel — it gets a quiet inline retry instead of the full-bleed error card. */}
-      {status === "error" && cards.length > 0 && (
+          wipe the reel — it gets a quiet inline retry instead of the full-bleed error card. NOT for
+          a 404: that has its own card above, and both firing put two "Ask again" buttons under two
+          different explanations of the same thing. */}
+      {status === "error" && errorReason !== "conversation" && cards.length > 0 && (
         <div className="flex flex-col items-center gap-2" data-testid="askreel-page-error">
           <p className="fa-caption text-fa-warning">That last request hit a snag.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
