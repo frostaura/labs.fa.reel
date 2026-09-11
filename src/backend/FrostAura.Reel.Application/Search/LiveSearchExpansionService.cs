@@ -452,7 +452,8 @@ public sealed class LiveSearchExpansionService(
                     var candidateIds = await DiscoverCandidateIdsAsync(pass, region, ct);
                     var semanticIds = isPersonQuery
                         ? new List<Guid>()
-                        : await SemanticNeighbourIdsAsync(accountId, agentReply with { Intent = pass }, referenceVectors, ct);
+                        : await SemanticNeighbourIdsAsync(
+                            accountId, agentReply with { Intent = pass }, referenceVectors, ct);
                     discovered = discovered.Concat(candidateIds).Concat(semanticIds).Distinct().ToList();
                 }
 
@@ -1143,13 +1144,40 @@ public sealed class LiveSearchExpansionService(
         {
             if (concept.Length > 0)
             {
-                var embedded = await embeddings.EmbedAsync([concept], ct);
-                if (embedded.Length == 0 || embedded[0].Length == 0)
+                // The OTHER half of "discovery", and the one that was still being bought on every
+                // repeat. The TMDB arm has been cached per intent since F2-02 and it hits — a
+                // byte-identical question re-pulls nothing from TMDB — yet the `discover` stage
+                // still cost 1.5 seconds on a measured repeat. This embedding is why: a paid
+                // provider call, on the critical path, for a string the process resolved moments
+                // ago.
+                //
+                // The CONCEPT is cached, not the neighbour list, and the difference matters. The
+                // kNN underneath is local, cheap, and reads the account's own catalogue — which the
+                // enrichment sweep grows continuously — so running it fresh is what makes the pool
+                // current rather than stale. (The 87-then-86 pool sizes the finder measured across
+                // two identical turns are that catalogue moving, which is correct.) Caching the
+                // resolved ids instead would have frozen a recall decision for the sake of a
+                // millisecond query and skipped titles embedded since.
+                //
+                // The window is InterpretTtl rather than DiscoveryTtl because past ten minutes the
+                // interpret cache has expired anyway, the model re-reads the question and the
+                // concept can legitimately change — a longer TTL here would rarely be reachable.
+                var conceptKey = ConceptVectorKey(accountId, concept, agent.ModelId);
+                if (cache.TryGetValue<float[]>(conceptKey, out var remembered) && remembered is { Length: > 0 })
                 {
-                    return [];
+                    queryVec = remembered;
                 }
+                else
+                {
+                    var embedded = await embeddings.EmbedAsync([concept], ct);
+                    if (embedded.Length == 0 || embedded[0].Length == 0)
+                    {
+                        return [];
+                    }
 
-                queryVec = embedded[0];
+                    queryVec = embedded[0];
+                    cache.Set(conceptKey, queryVec, InterpretTtl);
+                }
             }
             else
             {
@@ -1659,7 +1687,7 @@ public sealed class LiveSearchExpansionService(
         return !string.IsNullOrWhiteSpace(intent.FreeText) ? intent.FreeText.Trim() : rawQuery;
     }
 
-    private static string ConceptText(AgentReply agentReply)
+    internal static string ConceptText(AgentReply agentReply)
     {
         var intent = agentReply.Intent;
         var parts = new List<string>();
@@ -2188,4 +2216,23 @@ public sealed class LiveSearchExpansionService(
     /// </summary>
     internal static string FitKey(Guid accountId, Guid titleId, string qnorm, string modelId) => string.Create(
         CultureInfo.InvariantCulture, $"rerank:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{titleId}:{qnorm}");
+
+    /// <summary>
+    /// The semantic arm's concept-embedding key: the account and the exact text the provider would
+    /// be paid to embed.
+    ///
+    /// <para>The CONCEPT TEXT rather than the intent, because it is literally the provider's
+    /// argument: two intents that render the same concept are the same call, and one that renders a
+    /// different concept is a different vector however similar the intents look.</para>
+    ///
+    /// <para>The ACCOUNT is on it for the same reason it is on <see cref="InterpretKey"/>, even
+    /// though an embedding is a pure function of its text and could in principle be shared: this is
+    /// a process-wide <see cref="IMemoryCache"/> in a multi-tenant app, the concept is assembled
+    /// from a reply written against one person's taste, and the cost of keeping the boundary is one
+    /// duplicate embedding in the rare case two tenants type a byte-identical concept. Cheap
+    /// insurance beats a tenancy argument that has to be re-made every time someone reads this.</para>
+    /// </summary>
+    internal static string ConceptVectorKey(Guid accountId, string concept, string modelId) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"askreel:concept:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{NormalizeQuery(concept)}");
 }
