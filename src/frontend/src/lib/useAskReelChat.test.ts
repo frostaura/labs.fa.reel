@@ -12,6 +12,7 @@ import {
   CONVERSATION_ID_KEY,
   canPage,
   floorHeldBack,
+  footnote,
   floorPartition,
   formatFloor,
   readStoredConversationId,
@@ -1080,5 +1081,122 @@ describe("chatReducer — moreTurn never adopts a held answer", () => {
     const held = chatReducer(answered, { type: "userTurn", message: "slow burn detective", fresh: false });
     expect(chatReducer(held, { type: "moreTurn" }).holdingPrevious).toBe(true);
     expect(chatReducer(answered, { type: "moreTurn" }).holdingPrevious).toBe(false);
+  });
+});
+
+/**
+ * R1-03 — the `gained === 0` rule, and the three faces one gesture wore.
+ *
+ * Paging used to decide two things from one number: `gained`, the count of ids the page added to
+ * `order` that were not already in it. A page's `done.results` is always a subset of what already
+ * streamed as `candidate` frames, so `gained` was usually 0 — the page's `reason` was discarded
+ * and `exhausted` latched, hiding "Show me more" after a page that had just added thirteen cards.
+ * It was not ALWAYS 0, which is why it survived: `candidate` early-returns on a title already in
+ * `byId`, and `byId` still holds every card of every earlier turn INCLUDING its below-floor tray,
+ * so a page overlapping the previous tray reached `done` with ten genuinely new ids and behaved
+ * correctly. The same gesture, opposite behaviour, decided by tray overlap the user cannot see.
+ *
+ * The rule now: a page's own `done` is authoritative for that page. Exhaustion is what the SERVER
+ * says — a page that returned no cards at all — and the accounting line is always the latest page
+ * that actually added something, over a count of what is on screen.
+ */
+describe("chatReducer — paging is the server's account, not an id diff", () => {
+  /** A settled two-card answer with its own footnote — where every page below starts. */
+  const answered = chatReducer(
+    chatReducer(initialChatState, { type: "userTurn", message: "a tense heist movie", fresh: true }),
+    { type: "done", data: { results: [card(1), card(2)], reason: "2 picks ranked for you, from 40 pulled" } },
+  );
+
+  it("a_page_that_adds_new_cards_takes_over_the_accounting", () => {
+    // Face one: the ordinary page. Thirteen new ids, none of them on screen before.
+    const paging = chatReducer(answered, { type: "moreTurn" });
+    const more = [card(3), card(4), card(5)];
+    const done = chatReducer(paging, {
+      type: "done",
+      data: { results: more, reason: "3 picks ranked for you, from 65 pulled", kept: 3 },
+    });
+    expect(done.order).toHaveLength(5);
+    expect(done.exhausted).toBe(false);
+    expect(done.reason).toBe("3 picks ranked for you, from 65 pulled");
+    expect(done.paged).toBe(true);
+  });
+
+  it("a_page_whose_results_all_arrived_as_candidates_is_still_a_page", () => {
+    // Face two, and the one that broke: every id in `done.results` already reached `order` as a
+    // `candidate`, so `gained` was 0 — the page's sentence was thrown away and paging latched shut
+    // over a grid that had just grown. `gained` is no longer consulted: the page returned cards,
+    // so it is a page.
+    let state = chatReducer(answered, { type: "moreTurn" });
+    for (const n of [3, 4, 5]) state = chatReducer(state, { type: "candidate", data: card(n) });
+    expect(state.order).toHaveLength(5);
+    const done = chatReducer(state, {
+      type: "done",
+      data: { results: [card(3), card(4), card(5)], reason: "3 picks ranked for you, from 65 pulled", kept: 3 },
+    });
+    expect(done.order).toHaveLength(5);
+    expect(done.exhausted).toBe(false);
+    expect(done.reason).toBe("3 picks ranked for you, from 65 pulled");
+    expect(done.paged).toBe(true);
+  });
+
+  it("a_page_the_server_returned_nothing_for_is_the_end_and_says_nothing_new", () => {
+    // Face three: the honest exhaustion. `kept === 0` and no results — the server's own statement
+    // that there is nothing left under this question. It latches, and it must NOT re-describe the
+    // answer: `AskReelReason.Empty` ("no fresh matches — try another angle") is true of the PAGE
+    // and false of the five cards on screen, so the previous accounting stands.
+    const paging = chatReducer(answered, { type: "moreTurn" });
+    const done = chatReducer(paging, {
+      type: "done",
+      data: { results: [], reason: "no fresh matches — try another angle", kept: 0 },
+    });
+    expect(done.exhausted).toBe(true);
+    expect(done.reason).toBe("2 picks ranked for you, from 40 pulled");
+    expect(done.paged).toBe(false);
+    expect(done.order).toHaveLength(2);
+  });
+
+  it("a_fresh_answer_replaces_the_accounting_and_reopens_paging", () => {
+    // The latch is per-answer, not per-thread: the next question starts over.
+    const paging = chatReducer(answered, { type: "moreTurn" });
+    const exhaustedState = chatReducer(paging, { type: "done", data: { results: [], reason: null, kept: 0 } });
+    expect(exhaustedState.exhausted).toBe(true);
+    const asking = chatReducer(exhaustedState, { type: "userTurn", message: "something quieter", fresh: false });
+    expect(asking.exhausted).toBe(false);
+    expect(asking.paged).toBe(false);
+    const next = chatReducer(asking, { type: "done", data: { results: [card(9)], reason: "1 pick ranked for you, from 12 pulled" } });
+    expect(next.exhausted).toBe(false);
+    expect(next.paged).toBe(false);
+    expect(next.reason).toBe("1 pick ranked for you, from 12 pulled");
+  });
+});
+
+/**
+ * The footnote. On a paged answer the server's sentence describes the PAGE — "13 picks ranked for
+ * you, from 65 pulled" — and R1-03 watched it sit under a grid of 37, accounting for whichever
+ * turn happened to win the id diff. Neither the first page's sentence nor the last one's is true
+ * of the accumulated set, so the line says both: what is on screen, and where the last of it came
+ * from.
+ */
+describe("footnote", () => {
+  it("is_the_servers_sentence_verbatim_on_an_unpaged_answer", () => {
+    expect(footnote("24 picks ranked for you, from 60 pulled", 24, false))
+      .toBe("24 picks ranked for you, from 60 pulled");
+  });
+
+  it("says_what_is_on_screen_and_what_the_last_page_added", () => {
+    // Fixture variation on the one field that changes the sentence: `paged`. Same reason, same
+    // count, and the paged form is the only one that can be true of a 37-card grid.
+    expect(footnote("13 picks ranked for you, from 65 pulled", 37, true))
+      .toBe("37 picks so far · last page: 13 picks ranked for you, from 65 pulled");
+    expect(footnote("1 pick ranked for you, from 9 pulled", 1, true))
+      .toBe("1 pick so far · last page: 1 pick ranked for you, from 9 pulled");
+  });
+
+  it("says_nothing_when_the_server_said_nothing", () => {
+    expect(footnote(null, 12, true)).toBeNull();
+    expect(footnote(null, 0, false)).toBeNull();
+    // Nothing on screen to count: fall back to the sentence rather than claiming "0 picks so far".
+    expect(footnote("no fresh matches — try another angle", 0, true))
+      .toBe("no fresh matches — try another angle");
   });
 });

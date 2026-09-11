@@ -242,6 +242,53 @@ export function floorHeldBack(belowFloorCount: number, droppedByFloor: number | 
 }
 
 /**
+ * What separates clauses in an accounting line. The server's own `AskReelReason.Separator`, so a
+ * client-composed clause sits in the same list as the server's without changing punctuation
+ * halfway through the sentence.
+ */
+const REASON_SEPARATOR = " · ";
+
+/**
+ * Has this page run out? The server's answer, not an id diff.
+ *
+ * The old rule counted how many of a page's ids were not already in `order` and latched
+ * `exhausted` on zero — but a page's `done.results` is always a subset of what already streamed as
+ * `candidate` frames, so that count was usually zero on a page that had just added thirteen cards
+ * (R1-03). It was not ALWAYS zero, and the difference was invisible: `candidate` early-returns on
+ * a title already in `byId`, which still holds every card of every earlier turn including its
+ * below-floor tray, so a page overlapping the previous tray reached `done` with genuinely new ids
+ * and behaved correctly. One gesture, opposite behaviour, decided by tray overlap.
+ *
+ * The server is the only party that can answer this: it derives the no-repeat set from its own
+ * rows, so a page it returns nothing for is a page with nothing left to return. `kept` is the
+ * server's own count of what it kept and equals `results.length` on every path that sends it;
+ * both are required to be empty, so a malformed frame fails towards "ask again" rather than
+ * towards a latch the user cannot undo.
+ */
+export function pageIsExhausted(data: Pick<DoneData, "results" | "kept">): boolean {
+  return data.results.length === 0 && (data.kept == null || data.kept <= 0);
+}
+
+/**
+ * The provenance line under the grid.
+ *
+ * The server's sentence describes ONE turn — "13 picks ranked for you, from 65 pulled". On an
+ * un-paged answer that is the whole truth and it is rendered verbatim. On a paged one it is true
+ * of the last page and false of the grid: R1-03 watched "24 picks ranked for you, from 60 pulled"
+ * sit under 37 cards, and the alternative (the newest page's sentence) would have claimed 13 of
+ * the same 37. Neither is the accumulated set, so the line says both — what is on screen, and
+ * where the last of it came from.
+ *
+ * A count of zero falls back to the sentence alone: "0 picks so far" is a claim about a screen
+ * with no grid on it, and the branch that renders this only fires when there are cards anyway.
+ */
+export function footnote(reason: string | null, shownCount: number, paged: boolean): string | null {
+  if (!reason) return null;
+  if (!paged || shownCount <= 0) return reason;
+  return `${shownCount} ${plural(shownCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+}
+
+/**
  * The floor, formatted for the tray label — always one decimal, always the same string.
  *
  * `toLocaleString(undefined, { maximumFractionDigits: 1 })` printed "6" in the tray while the
@@ -352,8 +399,16 @@ interface State {
   appending: boolean;
   /** The message to replay when paging. Keeps "more" on the same intent as the last real turn. */
   lastQuery: string;
-  /** Latches when a page adds nothing new, so the scroll sentinel stops asking. */
+  /**
+   * Latches when the SERVER returns a page with no cards at all, so the page control stops
+   * offering. Never inferred from an id diff — see {@link pageIsExhausted}.
+   */
   exhausted: boolean;
+  /**
+   * True once this answer has had at least one page appended to it. The footnote needs it: the
+   * server's sentence describes one turn, and on a paged answer that is not the grid.
+   */
+  paged: boolean;
   /**
    * The server's account of a collision between this question and the account's own exclusions —
    * "you asked for horror, and horror is excluded". Shown as a note beside the answer, never as an
@@ -447,7 +502,7 @@ export function failureFor(err: unknown): ChatAction {
 
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
-  conversationId: null, appending: false, lastQuery: "", exhausted: false,
+  conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null,
 };
@@ -500,7 +555,7 @@ export function chatReducer(state: State, action: ChatAction): State {
         ? { ...initialChatState, turns: [turn], status: "streaming", lastQuery: action.message }
         : {
             ...state, turns: [...state.turns, turn], status: "streaming", phase: null,
-            reason: null, appending: false, lastQuery: action.message, exhausted: false,
+            reason: null, appending: false, lastQuery: action.message, exhausted: false, paged: false,
             // A conflict describes the question that produced it. A new question gets a clean
             // slate, or last turn's "horror is excluded" note hangs over an unrelated answer.
             conflict: null, belowFloor: [], droppedByFloor: null, errorReason: null,
@@ -529,7 +584,7 @@ export function chatReducer(state: State, action: ChatAction): State {
       const turns = state.turns.at(-1)?.role === "assistant" ? state.turns.slice(0, -1) : state.turns;
       return {
         ...state, turns, status: "streaming", phase: null,
-        reason: null, appending: false, exhausted: false,
+        reason: null, appending: false, exhausted: false, paged: false,
         belowFloor: [], droppedByFloor: null, errorReason: null,
         holdingPrevious: state.order.length > 0, arrived: 0,
       };
@@ -621,18 +676,26 @@ export function chatReducer(state: State, action: ChatAction): State {
       // derived from its own cards, so an uncapped list here can no longer grow a request.
       const shown = Array.from(new Set([...state.shown, ...newTmdb]));
       const incoming = action.data.results.map((c) => c.titleId);
-      // Appending keeps what is on screen and adds only genuinely new ids; a page that adds
-      // nothing latches `exhausted` so the scroll sentinel stops asking for more.
+      // Appending keeps what is on screen and adds only genuinely new ids. The de-duplication is
+      // bookkeeping and nothing else reads it: what it used to decide — whether the page's own
+      // sentence counted, and whether paging was over — is the SERVER's to say, because only the
+      // server knows what is left (see `pageIsExhausted` for the diff that used to decide both).
       const order = state.appending
         ? [...state.order, ...incoming.filter((id) => !state.order.includes(id))]
         : incoming;
-      const gained = order.length - state.order.length;
+      // A page the server returned nothing for: it is the end of this answer, and it has nothing
+      // to say ABOUT the answer. `AskReelReason.Empty` is true of the page and false of the grid
+      // above it, so the accounting that was already there stands.
+      const emptyPage = state.appending && pageIsExhausted(action.data);
       return {
         ...state, byId, order: partitionedOrder(order, byId), status: "done", shown, appending: false,
         // The answer landed, so there is nothing left being held: `order` above is this turn's.
         holdingPrevious: false,
-        reason: state.appending && gained === 0 ? state.reason : action.data.reason,
-        exhausted: state.appending ? gained === 0 : false,
+        reason: emptyPage ? state.reason : action.data.reason,
+        exhausted: state.appending ? pageIsExhausted(action.data) : false,
+        // A page that added cards makes the answer a paged one, and it stays paged until the next
+        // question replaces it — the footnote needs to know the grid is more than one turn's work.
+        paged: state.appending ? state.paged || !emptyPage : false,
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
@@ -972,6 +1035,11 @@ export function useAskReelChat() {
      * held previous answer, a stopped turn, a failure and a 409; see {@link canPage}.
      */
     pageable: canPage(state.status, state.holdingPrevious, state.exhausted, state.order.length),
+    /**
+     * Whether this answer is more than one turn's work. Read only by the footnote, which has to
+     * say so: the server's sentence describes the turn that produced it, never the accumulation.
+     */
+    paged: state.paged,
     /** The server's note that this question collides with a standing exclusion; not an error. */
     conflict: state.conflict,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */

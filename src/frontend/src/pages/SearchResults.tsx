@@ -15,7 +15,7 @@ import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
 import {
-  floorHeldBack, floorPartition, formatFloor, mediaFilterFor, nextBootstrap, plural,
+  floorHeldBack, floorPartition, footnote, formatFloor, mediaFilterFor, nextBootstrap, plural,
   readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId, useAskReelChat,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
@@ -96,7 +96,7 @@ function AskReel() {
   const [draft, setDraft] = useState("");
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
-    retryTurn, stop, setMediaTypes, exhausted, appending, pageable, canRetry, conflict, belowFloor,
+    retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict, belowFloor,
     droppedByFloor, holdingPrevious, arrived, removed, lastCardsAt, conversationId, errorReason,
   } = useAskReelChat();
   // The bar itself is not on the wire and should not be: it is the account's own standing
@@ -228,6 +228,9 @@ function AskReel() {
   // The settled outcome, announced once the stream stops. Kept separate from the streaming
   // narration below so the two live regions never talk over each other.
   const settledCount = visible.length + outsideVisible.length;
+  // Counted off the SCREEN, not off the wire: the line claims what a reader can count, and the
+  // eligibility filter and the stopped-turn floor both remove cards the server did send.
+  const footnoteText = footnote(reason, settledCount, paged);
   // What a stopped turn says, in one place: the sr-only live region and the on-screen card must
   // not be able to disagree, and the count is the turn's OWN — cards held over from the previous
   // answer are still on screen and are explicitly not what arrived before the user stopped.
@@ -660,9 +663,13 @@ function AskReel() {
 
       {/* The provenance footnote ("12 picks ranked for you, from 50 pulled"). Only ever shown
           alongside actual results — on an empty answer it was a second, contradictory message
-          under the empty state. */}
-      {reason && status === "done" && !appending && (visible.length > 0 || outsideVisible.length > 0) && (
-        <p className="fa-caption text-fa-frost-dim text-center">{reason}</p>
+          under the empty state.
+
+          On a PAGED answer the server's sentence is about one turn and the grid is several, which
+          is R1-03: "24 picks ranked for you, from 60 pulled" sat under 37 cards. `footnote` is
+          what reconciles the two — see it for why neither sentence alone can be true here. */}
+      {footnoteText && status === "done" && !appending && (visible.length > 0 || outsideVisible.length > 0) && (
+        <p className="fa-caption text-fa-frost-dim text-center" data-testid="askreel-footnote">{footnoteText}</p>
       )}
 
       {/* A failure that arrives while cards are already on screen (a page that blew up) must not
