@@ -12,7 +12,7 @@ import {
 } from "../store/api";
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
-import { PickConditionsSummary } from "../components/rec/PickConditionsButton";
+import SearchConditions from "../components/search/SearchConditions";
 import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
@@ -531,11 +531,16 @@ function AskReel() {
             />
           </div>
         </div>
-        {/* The same summary the feed carries, for the same reason: every standing condition
+        {/* The same conditions the feed carries, for the same reason: every standing condition
             applies to search too, and a thread that quietly obeys a "no documentary" saved on
             another screen is a thread the user cannot reason about. The browse toggle rides along
-            and stays dismissible from here. */}
-        <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={changeFilter} />
+            and stays dismissible from here.
+
+            `SearchConditions` and not the feed's summary — F6-17: the capped version named six
+            conditions and counted the rest as an inert "+6 more" span, so half the account's
+            exclusions were named as existing and unreachable from the page they shape. Here they
+            are all chips, and the editor is one tap away. */}
+        <SearchConditions className="mt-2" browse={filter} onBrowseChange={changeFilter} />
       </div>
 
       {/* Always mounted so it is a live region by the time it has something to say. Announces the
