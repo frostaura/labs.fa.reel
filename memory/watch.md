@@ -63,3 +63,4 @@ last_verified: 2026-09-11
 - **Success metrics for the commercial half are instrumented nowhere.** The "≥5 external users" gate has no counter —
   the criterion that decides this program's fate is measured by hand. `docs/product-spec.md` also cites a brand-assets
   path that does not exist in this repo.
+- **`AskReelEndpointTests.An_aborted_stream_leaves_a_failed_turn_and_the_prior_block_still_replays` is timing-sensitive in CI.** On 2026-09-16 it failed once in the Postgres integration job on a context-only push (485 of 486 passing) and passed on an immediate rerun of the same commit. One red run of that test is not evidence of a regression; two in a row is. Candidate for the local-flaky quarantine if it recurs — owner: unassigned.
