@@ -19,6 +19,13 @@ to act before an answer existed, it took the conservative side and recorded the 
   Docker Hub; the redeploy step is skipped only because the repo carries no `DEPLOY_ENABLED` variable and no
   `PORTAINER_STACK_ID` secret (`state.md`). Setting those two is the deploy.
 
+## The M2 bar is written in a metric the harness no longer reads
+- **The research question, milestone 2 and the modelling kill criterion all say "≥20% relative precision@10";
+  the implemented gate reads NDCG@10 lift.** precision@10 was retired in the instrument repair — quantised to
+  0.1 on a top-10 cut, so its achievable lift lattice moves with the baseline and the bar as written is
+  near-unusable at the measured one. `CLAUDE.md`'s *description of the harness* is corrected; the founder-set
+  wording is not. Restate the three in NDCG lift, or record why precision@10 stays the stated bar.
+
 ## Existential, and not ours to decide
 - **Trakt commercial terms.** An open milestone-5 gate that could end the product outright — Reel's identity, history
   and write-back all run through Trakt.

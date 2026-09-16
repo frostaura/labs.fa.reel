@@ -17,8 +17,9 @@ last_verified: 2026-09-11
   [`../CLAUDE.md`](../CLAUDE.md). **One deliberate exception:** the `Convert.ToDecimal`/`ToInt32` calls in
   `EligibilityQueryBuilder` stay provider-less, because EF translates only the single-argument overloads and a
   provider makes the predicate untranslatable — dozens of integration tests go red.
-- **`hnsw.iterative_scan = 'strict_order'` is set on every connection from `ReelDbContext.OnConfiguring`, not from
-  DI.** *Why:* the flaw belongs to every filtered vector query in the codebase, not to one arm, so a per-call-site
+- **`hnsw.iterative_scan = 'strict_order'` is issued on every connection by `HnswFilteredSearchInterceptor`,
+  which `ReelDbContext.OnConfiguring` registers — not from DI.** (`OnConfiguring` holds only the one-line
+  registration; the statement, the `strict_order` choice and the swallow-on-failure all live in the interceptor.) *Why:* the flaw belongs to every filtered vector query in the codebase, not to one arm, so a per-call-site
   `SET LOCAL` would need its own transaction and would be forgotten by the next arm added. Wiring it in
   `OnConfiguring` means a context built by hand — which is exactly what the integration fixture does — cannot have a
   different retrieval contract from production, so the suite guards the thing that actually ships. `strict_order` over

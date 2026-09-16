@@ -10,8 +10,10 @@ last_verified: 2026-09-11
 ## Programme and repo
 - **The repo is PRIVATE (founder, 2026-08-07).** *Why:* `frostaura/fa.reel` had been public while Labs is
   stealth-by-default, and the exception was never recorded. Asked and answered at the first push in a month: flip
-  private, then push. **Consequence:** the `LICENSE` file still says MIT while nothing is published, and going public
-  again is a fresh founder call needing a recorded stealth exception.
+  private, then push. **Consequence — two residues still assert the opposite, and neither is an agent's to change:** the
+  `LICENSE` file still says MIT, and `README.md`'s licence line reads "Open by default, per FrostAura
+  engineering doctrine" — a claim about *doctrine*, not merely a licence, on a repo that is private. Going
+  public again is a fresh founder call needing a recorded stealth exception; so is correcting that line.
 - **Deploy was decided 2026-07-24 and has never been executed.** *Why it matters:* the external-user kill criterion is
   evaluated against a *deployed* product, so a kill tripped by a timer on an undeployed product is void. What is left is
   a founder action, not an engineering one, and **what specifically is left moves — `state.md` holds it, this file does

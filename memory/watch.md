@@ -37,7 +37,7 @@ last_verified: 2026-09-11
   happened, and the latest prompt version restarted the count. No prompt reaches anyone but the founder until it is.
 - **Of the follow-ups the QA walks raised, three are still unstarted:** the "done" reason still has two shapes on the
   lexical and filmography paths; the ranking-seed embedding is bought per turn; the conditions summary's "+N more" is
-  inert on the feed. The fourth — the banner's residual layout shift — was fixed and pushed on 2026-09-11.
+  inert on the feed.
 - **Two layout shifts are left on `/search`, both outside the turn, both wanting a design call first.** Page load still
   shifts as the conditions strip arrives and pushes the page down; a late `reranked` frame can grow a card by its
   why-line and move every row under it. Reserving a strip whose height only the response knows, and fixing a uniform
@@ -58,6 +58,8 @@ last_verified: 2026-09-11
 - **Interleaving is off and stays off until it is worth three months** of comparison at this traffic.
 
 ## Standing
+- **The declared quality bar is "Silver", whose definition includes *deployed*.** Reel is not, so the tier
+  reads as a target rather than a met bar — and nothing in the scope says which it is.
 - **Success metrics for the commercial half are instrumented nowhere.** The "≥5 external users" gate has no counter —
   the criterion that decides this program's fate is measured by hand. `docs/product-spec.md` also cites a brand-assets
   path that does not exist in this repo.
