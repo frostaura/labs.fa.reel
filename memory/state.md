@@ -2,7 +2,7 @@
 name: fa-reel-state
 description: "Works end to end for one account. CI green end to end and images published, but NOT deployed and zero external users — the 5-user kill clock was never evaluable. The model still loses to the popularity baseline."
 type: state
-last_verified: 2026-09-11
+last_verified: 2026-09-16
 ---
 
 # Current state
@@ -13,18 +13,19 @@ exactly one account — the founder's. **It is not deployed and has zero externa
 users" gate and the kill criterion built on it have never been evaluable. Deploy is a founder action, not a build
 task: `questions.md`.
 
-**Repo topology — reconciled 2026-09-11, both clones inspected against GitHub.** One private repo. `~/src/fa.reel` is
-the dev clone where code, builds and the dev loop live, and it is **in sync with `origin/main`**. The copy under
-`FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**; it was briefly a diverged fork after the
-founder pushed from the dev clone, and has since been merged back onto published `main` — it is now **ahead-only by
-context commits, nothing behind, and no product file deleted in the range**, so a push from here fast-forwards. The
-push stays the founder's call. **The reconcile is not free and will recur:** the context commits deleted the old single-file
-`memory/gotchas.md` and `memory/decisions.md` — those two and no others, verified against the range on 2026-09-11 — while the
-dev clone still edits them, so every merge raises a modify/delete conflict on exactly those paths. Keep the deletion and fold
-the dev clone's edits into the split topics first. **`memory/watch.md` is NOT one of them**: it is live in both clones and was
-merged as a modification, so deleting it destroys a live topic.
-**Never `--force` from this clone** — it would destroy pushed product work. **The iCloud clone's `origin/main` ref
-goes stale between fetches**, so an ahead-count taken here is phantom until you `git fetch`.
+**Repo topology — re-inspected 2026-09-16, after the push.** One private repo, two clones. The copy
+under `FrostAura Global/Labs/projects/fa.reel` is the **context-file home only**, and on 2026-09-16 the
+founder authorised a tree-wide commit and push: **this clone is what went up**, and it re-read locally
+afterwards as `main`, upstream `origin/main`, **zero ahead and zero behind**, clean tree. `~/src/fa.reel`
+is the dev clone where code, builds and the dev loop live, and it is now **behind published `main` and
+does not know it** — its `origin/main` ref predates the push, so `rev-list --left-right --count` there
+reports 0/0 while the published tip is not even an object it holds (confirmed read-only 2026-09-16).
+**Fetch there before believing any count, and never `--force` from either clone.** **The reconcile is
+not free and will recur:** the context commits deleted the old single-file `memory/gotchas.md` and
+`memory/decisions.md` — those two and no others — while the dev clone still edits them, so every merge
+raises a modify/delete conflict on exactly those paths. Keep the deletion and fold the dev clone's
+edits into the split topics first. **`memory/watch.md` is NOT one of them**: it is live in both clones
+and was merged as a modification, so deleting it destroys a live topic.
 
 **The test gate is real, and on 2026-09-11 it went green end to end on published `main`** — Backend, Frontend,
 Security, Backend Integration and Frontend E2E all passed on the same run, the first all-green `main` since at least
@@ -63,5 +64,4 @@ cross-reference verdicts serving keep-only).** Each closed with a headed QA walk
 those walks raised was fixed before they ended — but the follow-ups the QA walks raised are mostly still unstarted, so
 the walks are closed and the surface is not (`decisions-*` for what was decided, `watch.md` for what is owed).
 
-**The dev loop** runs from `~/src/fa.reel`: Vite on 5173, the API on 5054 under plain `dotnet run`, Postgres in
-Docker on 5433, gateway container deliberately stopped. Traps: `gotchas-build.md`.
+**The dev loop** runs from `~/src/fa.reel`: Vite on 5173, the API on 5054 under plain `dotnet run`, Postgres in Docker on 5433, gateway container deliberately stopped. Traps: `gotchas-build.md`.
