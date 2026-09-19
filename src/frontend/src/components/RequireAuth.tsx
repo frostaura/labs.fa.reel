@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate } from "react-router";
 import { useGetSessionQuery } from "../store/api";
 
 /** Frost splash while the session resolves; bounce to the landing page when signed out. */

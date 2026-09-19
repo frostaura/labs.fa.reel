@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router";
 import { Star } from "lucide-react";
 import { useGetPersonQuery, useRatePersonMutation, useUnratePersonMutation } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";

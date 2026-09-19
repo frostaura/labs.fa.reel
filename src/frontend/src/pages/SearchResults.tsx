@@ -2,7 +2,7 @@ import { MD_BREAKPOINT_PX, useMinWidth } from "../lib/useMinWidth";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
 import { useDispatch, useSelector } from "react-redux";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
 import { AlertTriangle, Mic, Plus, RotateCcw, Send, Sparkles, Square } from "lucide-react";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";

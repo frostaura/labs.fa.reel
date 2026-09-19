@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { RefreshCw } from "lucide-react";
 import PreferencesSection from "../components/settings/PreferencesSection";
 import PreferenceTags from "../components/settings/PreferenceTags";

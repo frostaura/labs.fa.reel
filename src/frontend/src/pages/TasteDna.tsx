@@ -11,7 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import { useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { Share2 } from "lucide-react";
 import { toPng } from "html-to-image";
 import { useGetSessionQuery, useGetTasteDnaQuery } from "../store/api";

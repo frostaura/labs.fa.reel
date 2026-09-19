@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router";
 import { useExchangeTraktCodeMutation } from "../store/api";
-import { consumeOauthState, parseCallbackParams } from "../lib/traktOauth";
+import {
+  consumeOauthState,
+  describeCallbackRejection,
+  parseCallbackParams,
+  peekOauthState,
+} from "../lib/traktOauth";
 
 type Status = "exchanging" | "error";
 
@@ -14,51 +19,39 @@ export default function TraktCallback() {
   const location = useLocation();
   const navigate = useNavigate();
   const [exchange] = useExchangeTraktCodeMutation();
-  const [status, setStatus] = useState<Status>("exchanging");
-  const [message, setMessage] = useState<string | null>(null);
+  const [exchangeError, setExchangeError] = useState<string | null>(null);
   const started = useRef(false);
 
-  // Kept as an effect deliberately. This is a one-shot side effect, not derived state: the
-  // authorization code is single-use and `consumeOauthState()` destroys the stored nonce, so the
-  // validation cannot be re-run during render — the second render would see no nonce and fail a
-  // sign-in that had already succeeded. The `started` ref makes it fire exactly once under
-  // StrictMode, and each setState below is terminal (the component renders the error and stops),
-  // so nothing cascades.
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot OAuth exchange; see above */
+  const params = useMemo(() => parseCallbackParams(location.search), [location.search]);
+
+  // Every rejection reason is a pure function of the URL and the stored nonce, so it is derived
+  // rather than pushed into state from the effect — that avoids the cascading render of
+  // painting "Linking…" first and correcting it a frame later.
+  const validationError = useMemo(
+    () => describeCallbackRejection(params, peekOauthState()),
+    [params]
+  );
+
+  const message = validationError ?? exchangeError;
+  const status: Status = message ? "error" : "exchanging";
+
   useEffect(() => {
     if (started.current) return; // StrictMode double-invoke guard — the code is single-use
     started.current = true;
 
-    const { code, state, error } = parseCallbackParams(location.search);
-    const expectedState = consumeOauthState();
+    // Clear the nonce on every arrival, valid or not, matching the original single-use contract.
+    consumeOauthState();
+    if (validationError || !params.code || !params.state) return;
 
-    if (error) {
-      setStatus("error");
-      setMessage(error === "access_denied" ? "Trakt access was declined." : `Trakt returned: ${error}`);
-      return;
-    }
-    if (!code || !state) {
-      setStatus("error");
-      setMessage("Missing authorization code — start again from the sign-in page.");
-      return;
-    }
-    if (expectedState && state !== expectedState) {
-      setStatus("error");
-      setMessage("Sign-in state mismatch. Start again from the sign-in page.");
-      return;
-    }
-
-    exchange({ code, state })
+    exchange({ code: params.code, state: params.state })
       .unwrap()
       .then((session) => {
         navigate(session.onboarded ? "/home" : "/onboarding", { replace: true });
       })
       .catch(() => {
-        setStatus("error");
-        setMessage("Could not complete sign-in with Trakt. Please try again.");
+        setExchangeError("Could not complete sign-in with Trakt. Please try again.");
       });
-  }, [location.search, exchange, navigate]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  }, [params, validationError, exchange, navigate]);
 
   return (
     <div className="min-h-screen flex items-center justify-center px-6">

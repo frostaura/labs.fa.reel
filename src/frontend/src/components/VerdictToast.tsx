@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDispatch, useSelector } from "react-redux";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { X } from "lucide-react";
 import type { AppDispatch, RootState } from "../store";
 import { verdictDismissed } from "../store/verdictSlice";

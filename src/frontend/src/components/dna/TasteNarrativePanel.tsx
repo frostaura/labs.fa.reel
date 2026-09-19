@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Pencil, RefreshCw, Undo2 } from "lucide-react";
 import {
   useGetNarrativeQuery,
@@ -31,12 +31,14 @@ export default function TasteNarrativePanel() {
   const [draft, setDraft] = useState("");
 
   // Adopt the server's text whenever we are not mid-edit. Guarded on `editing` so a poll landing
-  // while the user is typing cannot overwrite what they are writing.
-  useEffect(() => {
-    if (!editing) {
-      setDraft(data?.text ?? "");
-    }
-  }, [data?.text, editing]);
+  // while the user is typing cannot overwrite what they are writing. Derived during render rather
+  // than in an effect — an effect would paint the stale draft for a frame after each poll lands.
+  const serverText = data?.text ?? "";
+  const [syncedText, setSyncedText] = useState(serverText);
+  if (!editing && serverText !== syncedText) {
+    setSyncedText(serverText);
+    setDraft(serverText);
+  }
 
   if (isLoading) {
     return <div className="fa-card h-40 reel-shimmer" data-testid="narrative-loading" />;

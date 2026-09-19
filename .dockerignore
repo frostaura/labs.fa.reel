@@ -1,0 +1,43 @@
+# Docker build context exclusions.
+# Both Dockerfiles build from the repo root as context, so without this file every local
+# bin/obj/node_modules tree gets shipped to the daemon — and, worse, COPY'd into the build
+# stage on top of a clean restore. CI checks out fresh so it never bites there; a dev running
+# `docker compose build` after a local `dotnet build` hits stale-artifact failures.
+.git
+.github
+.vscode
+.idea
+
+# .NET intermediates — must not leak into the SDK stage's restore/publish
+**/bin
+**/obj
+**/artifacts
+**/TestResults
+**/*.user
+
+# Node / frontend intermediates
+**/node_modules
+**/dist
+**/dist-ssr
+**/.vite
+**/*.tsbuildinfo
+
+# Test + coverage output
+**/coverage
+**/coverage-frontend
+**/playwright-report
+**/test-results
+**/*.cobertura.xml
+**/.playwright-mcp
+
+# Secrets — never bake into an image layer
+.env
+.env.local
+.env.*.local
+
+# Docs and local scratch that no image needs
+docs
+research/data
+**/*.log
+**/logs
+**/.DS_Store

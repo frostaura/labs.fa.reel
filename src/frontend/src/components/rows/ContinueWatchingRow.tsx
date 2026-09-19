@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { X } from "lucide-react";
 import type { ContinueEntry } from "../../store/feedTypes";
 import PosterImage from "../rec/PosterImage";

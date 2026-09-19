@@ -1,4 +1,4 @@
-import { Navigate } from "react-router-dom";
+import { Navigate } from "react-router";
 import { Clapperboard } from "lucide-react";
 import { useGetSessionQuery, useStartTraktAuthMutation } from "../store/api";
 import { hasSessionFlag } from "../lib/sessionFlag";

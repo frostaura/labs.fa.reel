@@ -54,4 +54,6 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 );
 Button.displayName = "Button";
 
-export { Button, buttonVariants };
+// buttonVariants stays module-local: exporting a non-component alongside a component breaks
+// Fast Refresh (react-refresh/only-export-components), and nothing outside this file uses it.
+export { Button };

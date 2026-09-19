@@ -26,12 +26,12 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('src/backend/**/*.csproj', '*.slnx') }}
@@ -88,7 +88,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -140,7 +140,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -157,7 +157,7 @@ jobs:
         run: CI=1 npm run test:e2e
 
       - name: Upload Playwright report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: playwright-report
@@ -165,6 +165,9 @@ jobs:
             ./src/frontend/test-results/
             ./src/frontend/playwright-report/
           retention-days: 7
+          # Playwright only writes these on failure (trace/screenshot retain-on-failure), so a
+          # green run has nothing to upload. The default `warn` annotated every passing build.
+          if-no-files-found: ignore
 
   # ============================================================================
   # Security — npm audit + dotnet vulnerable package scan
@@ -179,7 +182,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -197,7 +200,7 @@ jobs:
         run: npm run audit:gate
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
 
@@ -267,7 +270,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
 
@@ -285,13 +288,50 @@ jobs:
         run: dotnet test FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
 
   # ============================================================================
+  # Docker — build both images and smoke the composed stack (lifeos qa-compose parity)
+  # ============================================================================
+  # Runs on pull requests too, deliberately: until this job existed the Dockerfiles and the
+  # compose wiring were only exercised by the publish jobs, which are push-to-main only. A
+  # broken image or gateway route therefore passed CI on the PR and only surfaced after the
+  # merge — after a bad :latest had already been pushed. This gate moves that failure left.
+  docker:
+    name: Docker Build & Stack Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [backend, frontend]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Validate the production stack file
+        # docker-compose.prod.yml is the literal file content behind the Portainer stack, and
+        # nothing else in CI parses it. Placeholder values only satisfy its `:?` required vars.
+        env:
+          POSTGRES_PASSWORD: ci_placeholder
+          JWT_SECRET: ci_placeholder_jwt_secret_at_least_32_chars
+          TRAKT_CLIENT_ID: ci_placeholder
+          TRAKT_CLIENT_SECRET: ci_placeholder
+          TMDB_READ_ACCESS_TOKEN: ci_placeholder
+        run: docker compose -f docker-compose.prod.yml config -q
+
+      - name: Build images and smoke the composed stack
+        # Same target a developer runs locally, so a green CI means `make docker-ready` works
+        # on a laptop too. Probes /health, /health/ready (real pgvector migrations applied)
+        # and / (SPA bundle) through the gateway.
+        run: make docker-ready
+
+      - name: Tear down compose stack
+        if: always()
+        run: make docker-down
+
+  # ============================================================================
   # Docker Build & Push — only on push to main, after all CI gates pass
   # ============================================================================
   build-backend-amd64:
     name: Build Backend (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security]
+    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
@@ -319,7 +359,7 @@ jobs:
     name: Build Backend (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security]
+    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
@@ -368,7 +408,7 @@ jobs:
     name: Build Frontend (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security]
+    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
@@ -396,7 +436,7 @@ jobs:
     name: Build Frontend (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security]
+    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code

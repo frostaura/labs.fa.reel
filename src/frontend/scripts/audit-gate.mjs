@@ -17,21 +17,15 @@
 
 import { execFileSync } from "node:child_process";
 
-const ALLOWLIST = [
-  {
-    id: "GHSA-qwww-vcr4-c8h2",
-    package: "react-router",
-    reviewBy: "2026-11-07",
-    reason:
-      "RSC Mode CSRF bypass. Applies only to React Server Components with server actions; Reel " +
-      "is a client-only SPA (Vite build, BrowserRouter, static nginx) and imports no RSC entry " +
-      "point, so the vulnerable code path is not reachable. Every published version >=7.12.0 is " +
-      "affected and no fixed release exists, while downgrading below 7.12.0 REINTRODUCES " +
-      "GHSA-wrjc-x8rr-h8h6 (open redirect via backslash in Link/useNavigate), which IS reachable " +
-      "from a SPA. Staying on 7.18.2 is therefore the better posture, not the more convenient one. " +
-      "Remove this entry the moment react-router ships a release outside the 7.12.0-8.2.0 range.",
-  },
-];
+// Empty, and that is the goal state. The one entry that lived here waived
+// GHSA-qwww-vcr4-c8h2 (react-router RSC Mode CSRF bypass) on the grounds that every published
+// version >=7.12.0 was affected with no fixed release, and that dropping below 7.12.0 would
+// reintroduce GHSA-wrjc-x8rr-h8h6 — a SPA-reachable open redirect. It carried its own exit
+// condition: "remove this entry the moment react-router ships a release outside the
+// 7.12.0-8.2.0 range." react-router 8.3.0 is that release, and the dependency now sits on it,
+// so the waiver is gone rather than left to sit until its review date. `npm audit` reports no
+// advisories at any severity. Keep this list empty unless there is genuinely nothing to move to.
+const ALLOWLIST = [];
 
 let report;
 try {

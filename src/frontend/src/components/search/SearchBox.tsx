@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
 import { AlertTriangle, Eye, Search, Sparkles } from "lucide-react";
 import { useSearchTypeaheadGlobalQuery, useSearchTypeaheadQuery } from "../../store/api";
 import { shouldQueryGlobal } from "../../lib/globalTypeahead";

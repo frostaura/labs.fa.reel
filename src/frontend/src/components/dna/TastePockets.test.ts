@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_POCKET_SHARE, pocketSummary, visiblePockets } from "./TastePockets";
+import { MIN_POCKET_SHARE, pocketSummary, visiblePockets } from "../../lib/tastePockets";
 import type { TasteCluster } from "../../store/api";
 
 const pocket = (ordinal: number, share: number, names: string[] = ["A", "B", "C"]): TasteCluster => ({

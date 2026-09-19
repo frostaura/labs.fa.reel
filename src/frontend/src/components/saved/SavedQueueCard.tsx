@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { BookmarkX } from "lucide-react";
 import type { SavedQueueItem } from "../../store/savedTypes";
 import PosterImage from "../rec/PosterImage";

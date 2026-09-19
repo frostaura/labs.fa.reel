@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import type { FeedCard } from "../../store/feedTypes";
 import { backdropUrl, posterUrl } from "../../lib/tmdbImages";
 import PredictedRatingBadge from "./PredictedRatingBadge";
@@ -63,9 +63,15 @@ export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: Hero
   // the new number-one pick ends up half off-screen to the left — so when the lead changes, start
   // from the start. Paging appends, so it never trips this.
   const leadId = cards[0]?.titleId;
+  // Derived during render rather than in an effect: setState inside an effect costs a second
+  // render pass, and the dots would paint one frame against the old index before correcting.
+  const [syncedLeadId, setSyncedLeadId] = useState(leadId);
+  if (leadId !== syncedLeadId) {
+    setSyncedLeadId(leadId);
+    setActive(0);
+  }
   useEffect(() => {
     scroller.current?.scrollTo({ left: 0, behavior: "instant" as ScrollBehavior });
-    setActive(0);
   }, [leadId]);
 
   if (cards.length === 0) {

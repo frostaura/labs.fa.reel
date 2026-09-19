@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { Layers } from "lucide-react";
 import { useGetCrossReferenceQuery } from "../../store/api";
 import { xrefBandCopy, xrefCoverageNote } from "../../lib/xrefCopy";

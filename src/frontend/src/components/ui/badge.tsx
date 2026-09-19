@@ -31,4 +31,6 @@ function Badge({ className, variant, ...props }: BadgeProps) {
   );
 }
 
-export { Badge, badgeVariants };
+// badgeVariants stays module-local: exporting a non-component alongside a component breaks
+// Fast Refresh (react-refresh/only-export-components), and nothing outside this file uses it.
+export { Badge };

@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import { Fingerprint, Home, Search, Bookmark } from "lucide-react";
 
 /**
