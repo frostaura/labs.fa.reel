@@ -10,6 +10,7 @@ import {
 } from "react-router";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
+import RequireFounder from "./components/RequireFounder";
 import Landing from "./pages/Landing";
 
 // Landing stays eager — it is the signed-out entry point and must paint without a second
@@ -25,8 +26,10 @@ const TitleDetail = lazy(() => import("./pages/TitleDetail"));
 const Person = lazy(() => import("./pages/Person"));
 const Saved = lazy(() => import("./pages/Saved"));
 const TasteDna = lazy(() => import("./pages/TasteDna"));
+const TrackRecord = lazy(() => import("./pages/TrackRecord"));
 const SearchResults = lazy(() => import("./pages/SearchResults"));
 const RatePicker = lazy(() => import("./pages/RatePicker"));
+const Blend = lazy(() => import("./pages/Blend"));
 
 function RouteFallback() {
   return (
@@ -79,10 +82,19 @@ function AppRoutes() {
             <Route path="/person/:personId" element={<Person />} />
             <Route path="/saved" element={<Saved />} />
             <Route path="/dna" element={<TasteDna />} />
+            <Route path="/track-record" element={<TrackRecord />} />
             <Route path="/search" element={<SearchResults />} />
             <Route path="/rate" element={<RatePicker />} />
+            <Route path="/blend" element={<Blend />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/lab" element={<Lab />} />
+            <Route
+              path="/lab"
+              element={
+                <RequireFounder>
+                  <Lab />
+                </RequireFounder>
+              }
+            />
           </Route>
           <Route path="*" element={<Navigate to="/home" replace />} />
         </Routes>

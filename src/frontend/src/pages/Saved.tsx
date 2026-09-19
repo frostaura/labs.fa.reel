@@ -1,20 +1,70 @@
-import { Link, useLocation } from "react-router";
+import { useEffect, useRef, useState } from "react";
 import { ExternalLink, ListChecks } from "lucide-react";
-import { useGetSavedQuery } from "../store/api";
-import PosterImage from "../components/rec/PosterImage";
-import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
+import { useGetSavedQuery, useUnsaveForLaterMutation } from "../store/api";
+import SavedSortControl from "../components/saved/SavedSortControl";
+import SavedQueueCard from "../components/saved/SavedQueueCard";
+import WatchTonightCard from "../components/saved/WatchTonightCard";
+import PostWatchStrip from "../components/saved/PostWatchStrip";
+import { formatRuntime } from "../lib/format";
+import { pinnedPick, queueBelowPin, type SavedSort } from "../lib/savedQueue";
 
-/** Save-for-later shelf + the managed "Reel — Up Next" Trakt list panel. */
+/**
+ * The queue. Not a bookmark folder: an ordered answer to "what do I put on tonight", with the
+ * pinned pick at the top and every card carrying the three facts the decision needs — how good it
+ * is for you (with its error band), how long it is, and whether you can watch it right now.
+ */
 export default function Saved() {
-  const { data, isLoading } = useGetSavedQuery();
-  const location = useLocation();
+  const [sort, setSort] = useState<SavedSort>("tonight");
+  const { data, isLoading, refetch } = useGetSavedQuery({ sort });
+  const [unsave] = useUnsaveForLaterMutation();
+  // "Not tonight" is session-scoped and client-side: it advances to the next candidate and records
+  // nothing against the title. Reset whenever the shelf itself changes underneath it.
+  const [skipCount, setSkipCount] = useState(0);
+
+  // The scoring backfill is budgeted per request, so a queue longer than the budget arrives with
+  // some cards unscored. Top up while the number is FALLING and stop the moment it stalls — a title
+  // with no feature vector never gets a score, and polling it forever would be a spinner that
+  // never resolves. Bounded twice over: by progress and by a hard round cap.
+  const remaining = data?.unscoredRemaining ?? 0;
+  const lastRemaining = useRef<number | null>(null);
+  const topUps = useRef(0);
+  useEffect(() => {
+    if (remaining <= 0) {
+      lastRemaining.current = null;
+      topUps.current = 0;
+      return;
+    }
+
+    const progressed = lastRemaining.current == null || remaining < lastRemaining.current;
+    if (!progressed || topUps.current >= 6) return;
+
+    lastRemaining.current = remaining;
+    topUps.current += 1;
+    const timer = setTimeout(() => void refetch(), 400);
+    return () => clearTimeout(timer);
+  }, [remaining, refetch]);
+
+  const items = data?.items ?? [];
+  const budget = data?.eveningBudgetMinutes ?? 150;
+  const band = data?.expectedAbsoluteError ?? null;
+  const pinned = pinnedPick(items, budget, skipCount);
+  const rest = queueBelowPin(items, pinned);
+  const candidateCount = items.filter(
+    (i) => i.availableNow && i.predictedRating != null && i.runtimeMinutes != null && i.runtimeMinutes <= budget
+  ).length;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <h1 className="text-2xl font-light text-fa-frost-bright">Saved</h1>
         {data?.managedListUrl && (
-          <a href={data.managedListUrl} target="_blank" rel="noreferrer" className="fa-button">
+          <a
+            href={data.managedListUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="fa-button"
+            title="Reel keeps a Trakt list called “Reel — Up Next” in sync with this shelf. Anything saved here lands on it — and shows up in Plex, Kodi, Infuse and every Trakt-connected app."
+          >
             <ListChecks className="h-4 w-4" />
             Reel — Up Next on Trakt
             <ExternalLink className="h-3.5 w-3.5" />
@@ -22,11 +72,23 @@ export default function Saved() {
         )}
       </div>
 
-      <p className="fa-caption text-fa-frost-dim max-w-2xl">
-        Everything you saved, synced to your Trakt watchlist and the managed{" "}
-        <span className="text-fa-frost">Reel — Up Next</span> list — visible in Plex, Kodi, Infuse and
-        every Trakt-connected app. Watch something and it leaves the queue by itself.
-      </p>
+      {/* Loop-closing prompts sit above the queue on both surfaces that can carry them. */}
+      <PostWatchStrip />
+
+      <div className="flex items-end justify-between gap-4 flex-wrap">
+        <p className="fa-caption text-fa-frost-dim max-w-xl">
+          Your queue, in the order worth watching it. Everything here syncs to the managed{" "}
+          <span className="text-fa-frost">Reel — Up Next</span> list — visible in Plex, Kodi, Infuse
+          and every Trakt-connected app. Watch something and it leaves by itself.
+        </p>
+        <SavedSortControl
+          value={sort}
+          onChange={(next) => {
+            setSort(next);
+            setSkipCount(0);
+          }}
+        />
+      </div>
 
       {isLoading ? (
         <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
@@ -34,39 +96,62 @@ export default function Saved() {
             <div key={i} className="reel-poster reel-shimmer" />
           ))}
         </div>
-      ) : (data?.items.length ?? 0) === 0 ? (
-        <div className="fa-card p-8 text-center">
+      ) : items.length === 0 ? (
+        <div className="fa-card p-8 text-center" data-testid="saved-empty">
           <p className="fa-body text-fa-frost-dim">
-            Nothing saved yet — hit “Save for later” on any pick and it lands here and on your Trakt queue.
+            Nothing in the queue yet — hit “Save for later” on any pick and it lands here and on your
+            Trakt list.
+          </p>
+          <p className="fa-caption text-fa-frost-dim/70 mt-2">
+            Once there are a few, Reel pins the one worth putting on tonight.
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
-          {data!.items.map((item) => (
-            <Link
-              key={item.titleId}
-              to={`/title/${item.mediaType.toLowerCase()}/${item.tmdbId}`}
-              state={{ backgroundLocation: location }}
-              className="group block focus:outline-none"
-            >
-              <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
-                <PosterImage path={item.posterPath} alt={item.name} size="w185" />
-                {item.predictedRating != null && (
-                  <div className="absolute top-2 right-2">
-                    <PredictedRatingBadge rating={item.predictedRating} />
-                  </div>
-                )}
-              </div>
-              <p className="mt-2 fa-body text-fa-frost-bright truncate" title={item.name}>
-                {item.name}
+        <>
+          {pinned ? (
+            <WatchTonightCard
+              item={pinned}
+              expectedAbsoluteError={band}
+              hasNext={skipCount + 1 < candidateCount}
+              onNotTonight={() => setSkipCount((n) => n + 1)}
+            />
+          ) : (
+            // No pin is a real answer, and the shelf says which rule could not be met rather than
+            // relaxing one and pinning something the user cannot actually watch tonight.
+            <div className="fa-card p-4" data-testid="watch-tonight-empty">
+              <p className="fa-overline text-fa-frost-dim mb-1">watch tonight</p>
+              <p className="fa-body text-fa-frost-dim">
+                {skipCount > 0
+                  ? "That's everything in the queue that's streaming now and fits tonight."
+                  : `Nothing in your queue is streaming right now and under ${formatRuntime(budget)}.`}
               </p>
-              <p className="fa-caption text-fa-frost-dim">
-                {item.year ?? ""}
-                {item.onManagedList ? " · on Up Next" : ""}
-              </p>
-            </Link>
-          ))}
-        </div>
+            </div>
+          )}
+
+          {remaining > 0 && (
+            <p className="fa-caption text-fa-frost-dim/70" data-testid="saved-unscored">
+              Scoring {remaining} more {remaining === 1 ? "save" : "saves"} — they’ll get their number
+              shortly.
+            </p>
+          )}
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+            {rest.map((item) => (
+              <SavedQueueCard
+                key={item.titleId}
+                item={item}
+                expectedAbsoluteError={band}
+                onUnsave={(target) =>
+                  unsave({
+                    titleId: target.titleId,
+                    mediaType: target.mediaType.toLowerCase(),
+                    tmdbId: target.tmdbId!,
+                  })
+                }
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

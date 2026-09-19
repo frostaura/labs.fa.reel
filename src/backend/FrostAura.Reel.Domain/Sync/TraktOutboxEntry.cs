@@ -11,6 +11,7 @@ public enum OutboxKind
     RemoveFromWatchlist,
     ListAdd,
     ListRemove,
+    RemoveFromHistory,
 }
 
 public enum OutboxStatus

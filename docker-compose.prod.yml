@@ -46,7 +46,7 @@ services:
       EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
       EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-1536}
       EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://openrouter.ai/api/v1}
-      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-$OPENROUTER_API_KEY}
       REEL_SEARCH_MODEL: ${REEL_SEARCH_MODEL:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
@@ -55,14 +55,32 @@ services:
       SYNC_HOT_MINUTES: ${SYNC_HOT_MINUTES:-5}
       RETRAIN_MIN_NEW_RATINGS: ${RETRAIN_MIN_NEW_RATINGS:-10}
       GEOIP_DEFAULT_REGION: ${GEOIP_DEFAULT_REGION:-US}
+      # Catalogue bulk seed (POST /api/dev/seed-catalog) and the daily ceilings that complete it.
+      # The two vote floors decide how big the seeded corpus is: measured 2026-09-10 the defaults
+      # yield ~9,300 titles, and 50/50 yields ~34,800. EXTRACT_DAILY_TOKENS is the only one that
+      # costs real money — 1.5M tokens is ~$0.23/day at gpt-5.4-mini input pricing, ~1,360 titles.
+      SEED_MOVIE_MIN_VOTES: ${SEED_MOVIE_MIN_VOTES:-500}
+      SEED_SHOW_MIN_VOTES: ${SEED_SHOW_MIN_VOTES:-200}
+      SEED_PAGES_PER_RUN: ${SEED_PAGES_PER_RUN:-400}
+      SEED_MAX_TITLES: ${SEED_MAX_TITLES:-60000}
+      HYDRATE_MAX_TITLES_PER_DAY: ${HYDRATE_MAX_TITLES_PER_DAY:-1500}
+      EXTRACT_DAILY_TOKENS: ${EXTRACT_DAILY_TOKENS:-1500000}
+      EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://reel.frostaura.net}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://reel.frostaura.net}
+    # /health/ready, not /health: /health answers "the process is up", which was already true while
+    # the database was unreachable or the schema was a migration behind — so the gateway's
+    # `condition: service_healthy` was gating on nothing. /health/ready checks both.
+    # start_period is 120s because migrations run BEFORE the listener opens (DatabaseInitializer is
+    # awaited ahead of app.Run()), so a cold host answers nothing at all — connection refused, not
+    # 503 — for as long as the full chain takes against an empty pgvector database. 20s covered a
+    # warm restart and nothing else. Retries stay deliberately generous on top of that.
     healthcheck:
-      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health >/dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health/ready >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 20s
+      retries: 30
+      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,13 +126,25 @@ configs:
           listen 80;
           server_name _;
           location /api/ {
-            proxy_pass http://backend_upstream/api/;
+            # No URI on the proxy_pass: nginx then forwards the original request URI untouched.
+            # `http://backend_upstream/api/;` was identity-equivalent here, but it is one keystroke
+            # from the shape that deleted `/api` in the Portainer descriptor — so the whole class
+            # is removed rather than reasoned about. Guarded by NginxDescriptorParityTests.
+            proxy_pass http://backend_upstream;
             proxy_set_header Host $$http_host;
             proxy_set_header X-Real-IP $$remote_addr;
             proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $$scheme;
             proxy_set_header CF-IPCountry $$http_cf_ipcountry;
             client_max_body_size 10m;
+            # Ask Reel streams on this prefix (`/api/search/ask`), not on /sse/, so /api/ needs the
+            # same six directives — buffered here, a whole turn arrives at once.
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 3600s;
           }
           location /sse/ {
             proxy_pass http://backend_upstream/sse/;
@@ -129,7 +159,10 @@ configs:
             proxy_cache off;
             proxy_read_timeout 86400s;
           }
-          location /health { proxy_pass http://backend_upstream/health; }
+          location /health { proxy_pass http://backend_upstream; }
+          # Readiness, which is what the backend healthcheck gates on: it checks the database and
+          # pending migrations, where /health answers before the app can serve anything.
+          location /health/ready { proxy_pass http://backend_upstream; }
           location / {
             proxy_pass http://frontend_upstream;
             proxy_set_header Host $$host;

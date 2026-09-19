@@ -5,6 +5,7 @@ import ConditionsEditor from "../settings/ConditionsEditor";
 import ConditionSummary from "../settings/ConditionSummary";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
+import type { BrowseFilter } from "../../lib/browseFilter";
 
 /**
  * The conditions editor, reachable from the feed itself.
@@ -33,10 +34,16 @@ export default function PickConditionsButton({ onSaved }: { onSaved?: () => void
         >
           <SlidersHorizontal className="h-3.5 w-3.5" />
           Conditions
+          {/* Counts SAVED conditions only — the browse toggles are a per-device view filter this
+              dialog cannot edit, so counting them here would send the user in to look for a control
+              that is not there. The chip row therefore legitimately carries more chips than this
+              badge counts; the label spells out which ones it means. */}
           {activeCount > 0 && (
             <span
               className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fa-frost/20 px-1 text-fa-frost-bright tabular-nums"
               data-testid="conditions-count"
+              aria-label={`${activeCount} saved condition${activeCount === 1 ? "" : "s"}`}
+              title={`${activeCount} saved condition${activeCount === 1 ? "" : "s"} — browse toggles are counted separately`}
             >
               {activeCount}
             </span>
@@ -73,9 +80,32 @@ export default function PickConditionsButton({ onSaved }: { onSaved?: () => void
  * The one-line "this is why your feed looks like this", for the feed header. Separate from the
  * button so the summary can sit under the page title at full width instead of being squeezed into
  * a control strip.
+ *
+ * Takes the browse filter as well as the saved conditions, because the header claims to summarise
+ * everything shaping the feed and a "Movies only" toggle shapes it every bit as visibly as a genre
+ * exclusion. Passing the setter through makes those chips dismissible from here.
  */
-export function PickConditionsSummary({ className }: { className?: string }) {
+export function PickConditionsSummary({
+  className,
+  browse,
+  onBrowseChange,
+}: {
+  className?: string;
+  browse?: BrowseFilter | null;
+  onBrowseChange?: (next: BrowseFilter) => void;
+}) {
   const { data: filters } = useGetFiltersQuery();
-  if (!filters || summaryChips(filters).length === 0) return null;
-  return <ConditionSummary filters={filters} limit={6} className={className} />;
+  // Waits for the real payload rather than rendering against the defaults: `normalizeFilters`
+  // fills an absent payload out to `languages: ["en"]`, so an in-flight query would briefly assert
+  // an "English only" condition the account may not actually have.
+  if (!filters || summaryChips(filters, browse).length === 0) return null;
+  return (
+    <ConditionSummary
+      filters={filters}
+      browse={browse}
+      onBrowseChange={onBrowseChange}
+      limit={6}
+      className={className}
+    />
+  );
 }

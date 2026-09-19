@@ -140,6 +140,14 @@ body {
   .reel-scrim {
     background-image: linear-gradient(180deg, transparent 30%, rgba(6, 18, 31, 0.55) 62%, rgba(6, 18, 31, 0.92) 100%);
   }
+  /* On phones the hero title sits higher up the artwork and the poster fills more of the
+     viewport, so the same gradient left light art washing out the text — start the ink sooner
+     and land denser. */
+  @media (max-width: 640px) {
+    .reel-scrim {
+      background-image: linear-gradient(180deg, transparent 18%, rgba(6, 18, 31, 0.65) 55%, rgba(6, 18, 31, 0.95) 100%);
+    }
+  }
   /* 2:3 poster base with skeleton background while the image loads. */
   .reel-poster {
     @apply aspect-[2/3] rounded-lg overflow-hidden bg-fa-ink-3;
@@ -184,14 +192,22 @@ body {
 }
 
 /* Indeterminate progress sweep — a frost segment slides the track when work is in flight but no
- * percentage is known. Used by the onboarding build-up so a busy op never reads as frozen. */
+ * percentage is known. Used by the onboarding build-up so a busy op never reads as frozen.
+ *
+ * `transform`, not `left`: an animation on `left` relayouts the segment on every frame, and every
+ * one of those frames is a `layout-shift` entry against the page's CLS. Each is individually tiny
+ * (a 4 px-tall bar), but a slow machine drops frames, so the segment jumps further per entry and
+ * the entries grow with the machine — the one CLS source on this page that got WORSE the slower
+ * the runner was. A transform animation is composited, scores nothing, and looks identical.
+ * The segment is 40% of its track, so `translateX(250%)` puts its left edge at the track's end. */
 .fa-progress-slide {
   width: 40%;
+  left: 0;
   animation: fa-progress-slide 1.1s ease-in-out infinite;
 }
 @keyframes fa-progress-slide {
-  0%   { left: -40%; }
-  100% { left: 100%; }
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
 }
 
 /* Job/sync status orbs (pipeline metrics, sync pill). */
@@ -265,4 +281,23 @@ body {
   width: 16px; height: 16px; border-radius: 999px;
   background: var(--fa-frost-bright); border: 2px solid var(--fa-ink);
   box-shadow: 0 0 0 1px var(--fa-frost-bright), 0 0 12px rgba(212, 236, 255, 0.55);
+}
+
+/* Motion, once, for the whole stylesheet.
+ *
+ * Every animation above is decorative — the progress sweep, the card rise, the skeleton shimmer,
+ * the status orbs, the frost melt — and each one is an independent thing to forget. A user who has
+ * asked their OS for less motion is asking about all of them, so the preference is honoured in one
+ * place rather than per component. Animations are collapsed to an instant rather than removed:
+ * `animation: none` cancels `both`/`forwards` fill modes, which would leave anything animating IN
+ * (reel-rise, reel-melt) stuck at its starting opacity — invisible. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

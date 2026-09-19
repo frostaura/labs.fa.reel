@@ -23,8 +23,22 @@ export const EMPTY_SYNC = {
   outboxDeadLetters: 0,
 };
 
+/**
+ * Mocks a GET-ish endpoint with a JSON body.
+ *
+ * String patterns of the form "**" + "/api/..." are matched against the URL *pathname*, so
+ * requests carrying a query string ("/api/search/typeahead?q=x") still intercept. Playwright's
+ * glob matching runs against the full URL including the query, so a bare glob ending at
+ * ".../typeahead" silently misses "?q=" requests — the exact trap that broke the mobile
+ * typeahead mock. Path matching is exact (no prefix creep): a "/api/feed" pattern never
+ * swallows "/api/feed/continue-watching". Pass a RegExp for anything fancier.
+ */
 export async function mockJson(page: Page, url: string | RegExp, body: unknown, status = 200): Promise<void> {
-  await page.route(url, (route) =>
+  const matcher =
+    typeof url === "string" && url.startsWith("**/")
+      ? (u: URL) => u.pathname === url.slice(2)
+      : url;
+  await page.route(matcher, (route) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) })
   );
 }
@@ -72,6 +86,202 @@ export async function stubEventSource(page: Page): Promise<void> {
     };
     (window as unknown as Record<string, unknown>).EventSource = FakeEventSource;
   });
+}
+
+/**
+ * Scripted stand-in for the Ask Reel POST-SSE stream (/api/search/ask). route.fulfill can only
+ * hand back a complete body, but the specs need frame-by-frame control — "no reorder on a
+ * candidate-scored frame" is only observable BETWEEN frames — so this patches window.fetch and
+ * serves a ReadableStream the test drives via askPush/askEnd. Request bodies are recorded on
+ * window.__ask.requests so specs can assert what each turn actually sent.
+ */
+export async function stubAskReel(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const streams: { controller: ReadableStreamDefaultController<Uint8Array>; open: boolean }[] = [];
+    const requests: unknown[] = [];
+    const encoder = new TextEncoder();
+    const realFetch = window.fetch.bind(window);
+    // Every AbortController the app makes, so a spec can cut the page's OWN request from outside —
+    // a dropped connection, a proxy, a stray cleanup — with no Stop pressed and nothing mocked
+    // into failing. A transparent subclass: it adds a push and changes no behaviour.
+    const controllers: AbortController[] = [];
+    const RealAbortController = window.AbortController;
+    class RecordingAbortController extends RealAbortController {
+      constructor() {
+        super();
+        controllers.push(this);
+      }
+    }
+    window.AbortController = RecordingAbortController as unknown as typeof AbortController;
+    // The signals of the /ask requests, newest last — how `abortLive` finds the right controller
+    // among the several dozen RTK Query makes for an ordinary page load.
+    const askSignals: AbortSignal[] = [];
+    // The next N /ask calls answer with this status and code instead of a stream. Queued rather
+    // than latched, because the states worth testing are transitions: a 409 followed by the real
+    // answer is the whole of "wait, then check again".
+    const failures: { status: number; code: string }[] = [];
+
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+      if (!url.includes("/api/search/ask")) return realFetch(input, init);
+      // The signal is honoured, not merely accepted. A stub that ignores it cannot fail when the
+      // page aborts its own request — which is precisely the defect the Home → /search hand-off
+      // shipped with: one `POST /api/search/ask` killed by a StrictMode cleanup, and every e2e
+      // spec passing over it because the stub kept streaming into a request the browser had cut.
+      const signal = init?.signal ?? null;
+      if (signal) askSignals.push(signal);
+      if (signal?.aborted) throw new DOMException("The user aborted a request.", "AbortError");
+      try {
+        requests.push(JSON.parse((init?.body as string) ?? "{}"));
+      } catch {
+        requests.push(null);
+      }
+      const failure = failures.shift();
+      if (failure) {
+        // The house error shape — `{ error, code }` — because the client switches on `code` and a
+        // bare status would let a test pass against a client that only reads the number.
+        return new Response(JSON.stringify({ error: "…", code: failure.code }), {
+          status: failure.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const entry = { controller: null as unknown as ReadableStreamDefaultController<Uint8Array>, open: true };
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          entry.controller = controller;
+          streams.push(entry);
+          // An abort errors the body exactly as the browser does, so the pending `reader.read()`
+          // rejects with an AbortError and the client's own catch runs.
+          signal?.addEventListener("abort", () => {
+            entry.open = false;
+            try {
+              controller.error(new DOMException("The user aborted a request.", "AbortError"));
+            } catch {
+              // Already closed or errored — nothing left to cut.
+            }
+          }, { once: true });
+        },
+        cancel() {
+          entry.open = false;
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    };
+
+    (window as unknown as Record<string, unknown>).__ask = {
+      requests,
+      count() {
+        return streams.filter((s) => s.open).length;
+      },
+      failNext(status: number, code: string) {
+        failures.push({ status, code });
+      },
+      abortLive() {
+        const signal = askSignals.at(-1);
+        const owner = controllers.find((c) => c.signal === signal);
+        if (!owner || owner.signal.aborted) return false;
+        owner.abort();
+        return true;
+      },
+      push(event: string, data: unknown) {
+        const live = streams.filter((s) => s.open).at(-1);
+        // `id:` first on every frame, exactly as the server writes it. A parser that treats an
+        // unrecognised field line as data drops the whole frame, and a stub that omits the line
+        // would never catch that — which is how a client can pass every test and then see nothing
+        // at all against the real endpoint.
+        live?.controller.enqueue(
+          encoder.encode(`id: ${streams.length}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+        );
+      },
+      keepalive() {
+        const live = streams.filter((s) => s.open).at(-1);
+        live?.controller.enqueue(encoder.encode(":keepalive\n\n"));
+      },
+      end() {
+        const live = streams.filter((s) => s.open).at(-1);
+        if (live) {
+          live.open = false;
+          try {
+            live.controller.close();
+          } catch {
+            // Reader already cancelled the stream — nothing left to close.
+          }
+        }
+      },
+    };
+  });
+}
+
+interface AskStub {
+  count: () => number;
+  abortLive: () => boolean;
+  push: (event: string, data: unknown) => void;
+  keepalive: () => void;
+  failNext: (status: number, code: string) => void;
+  end: () => void;
+  requests: unknown[];
+}
+
+/**
+ * Makes the next Ask Reel request answer with a status instead of a stream — a 409
+ * `turn_in_progress`, a 404 `conversation_not_found`, a 400. Queued, so a test can script "refused,
+ * then answered" and watch the page move between the two.
+ */
+export async function askFailNext(page: Page, status: number, code: string): Promise<void> {
+  await page.evaluate(
+    ([s, c]) => (window as unknown as { __ask: AskStub }).__ask.failNext(s as number, c as string),
+    [status, code] as const,
+  );
+}
+
+/**
+ * Cuts the newest live Ask Reel request at its own AbortController — the page's request dying for
+ * a reason the page did not choose. Returns false when there was nothing live to cut, so a spec
+ * cannot pass by aborting nothing.
+ */
+export async function askAbortLive(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.abortLive());
+}
+
+/** Emits a `:keepalive` comment frame — the thing a parser must skip without losing its place. */
+export async function askKeepalive(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.keepalive());
+}
+
+/** Emits one SSE frame on the most recent live Ask Reel stream opened by {@link stubAskReel}. */
+export async function askPush(page: Page, event: string, data: Record<string, unknown>): Promise<void> {
+  await page.evaluate(
+    ([e, d]) => (window as unknown as { __ask: AskStub }).__ask.push(e as string, d),
+    [event, data] as const
+  );
+}
+
+/**
+ * Pushes a `conflict` frame — the server naming a collision between the question and the
+ * account's own exclusions. Its own helper because the payload has four fields of which only
+ * `message` is required, and a spec that spells the object out inline tends to send all four and
+ * so never exercises the shape an older server actually sends.
+ */
+export async function askPushConflict(page: Page, message: string, extra: Record<string, unknown> = {}): Promise<void> {
+  await askPush(page, "conflict", { message, ...extra });
+}
+
+/** Closes the most recent live Ask Reel stream (the server ending the response). */
+export async function askEnd(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.end());
+}
+
+/** Waits until the app has opened an Ask Reel stream, then returns the recorded request bodies. */
+export async function askRequests(page: Page): Promise<unknown[]> {
+  return page.evaluate(() => (window as unknown as { __ask: AskStub }).__ask.requests);
+}
+
+/** Waits for at least `n` Ask Reel requests to have been issued. */
+export async function waitForAsk(page: Page, n = 1): Promise<void> {
+  await page.waitForFunction(
+    (min) => ((window as unknown as { __ask?: AskStub }).__ask?.requests.length ?? 0) >= (min as number),
+    n
+  );
 }
 
 export async function emit(page: Page, type: string, data: Record<string, unknown>): Promise<void> {

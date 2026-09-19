@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using FrostAura.Reel.Application.Ingestion;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -7,8 +8,10 @@ using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Tests.Fakes;
 using FrostAura.Reel.Tests.IntegrationTests;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.Ingestion;
@@ -54,11 +57,17 @@ public class ShowProgressReconcileTests(PostgresFixture fixture)
         }
 
         // Trakt now reports ONLY the kept show — the user cleared the removed show's history.
-        var trakt = new StubTraktClient([WatchedShow(kept.TraktId!.Value, "Kept Show", airedEpisodes: 10, watchedEpisodes: 3)]);
+        var trakt = new StubTraktClient
+        {
+            WatchedShows = [WatchedShow(kept.TraktId!.Value, "Kept Show", airedEpisodes: 10, watchedEpisodes: 3)],
+        };
 
         await using (var db = fixture.CreateContext(ctx))
         {
-            var ingestor = new TraktLibraryIngestor(db, trakt, new NoopEventHub(), NullLogger<TraktLibraryIngestor>.Instance);
+            var ingestor = new TraktLibraryIngestor(
+                db, trakt, new NoopEventHub(),
+                new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())),
+                NullLogger<TraktLibraryIngestor>.Instance);
             await ingestor.IngestShowsAsync(account.Id, "token", RatePriority.DeltaPoll, CancellationToken.None);
             await db.SaveChangesAsync();
         }
@@ -111,22 +120,4 @@ public class ShowProgressReconcileTests(PostgresFixture fixture)
         }
     }
 
-    /// <summary>Only <see cref="GetWatchedShowsAsync"/> is exercised by IngestShowsAsync; the rest throw.</summary>
-    private sealed class StubTraktClient(IReadOnlyList<TraktWatchedShow> watchedShows) : ITraktClient
-    {
-        public Task<IReadOnlyList<TraktWatchedShow>> GetWatchedShowsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
-            Task.FromResult(watchedShows);
-
-        public Task<TraktTokenResponse> ExchangeCodeAsync(string code, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<TraktTokenResponse> RefreshTokenAsync(string refreshToken, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<TraktUserSettings> GetUserSettingsAsync(string accessToken, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<IReadOnlyList<TraktWatchedMovie>> GetWatchedMoviesAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<IReadOnlyList<TraktRatingItem>> GetRatingsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<TraktShowProgress?> GetShowProgressAsync(string accessToken, long showTraktId, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<string> GetLastActivitiesRawAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<long?> ResolveTraktIdByTmdbAsync(string accessToken, long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task PostSyncBatchAsync(string accessToken, string endpoint, object payload, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<long> EnsureListAsync(string accessToken, string name, string description, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task PostListItemsAsync(string accessToken, long listId, object payload, bool remove, RatePriority priority, CancellationToken ct = default) => throw new NotSupportedException();
-    }
 }

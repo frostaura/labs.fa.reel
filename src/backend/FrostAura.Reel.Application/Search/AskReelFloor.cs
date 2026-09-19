@@ -1,0 +1,106 @@
+namespace FrostAura.Reel.Application.Search;
+
+/// <summary>
+/// What the account's minimum-predicted-rating filter does to a turn's picks.
+///
+/// <para>The rule it replaces did three dishonest things at once. It compared against the floor
+/// with <c>Count > 0</c>, so a turn where ONE card cleared a 6.0 bar returned that single card and
+/// silently binned the rest. When nothing cleared, it kept the best six and said the floor had been
+/// relaxed — but the six were a truncation nobody asked for, so "relaxed" also meant "and most of
+/// your results were thrown away". And the outside-request channel skipped the floor entirely, so a
+/// contradicting title the user had already excluded could appear beneath a bar it did not clear.</para>
+///
+/// <para>The rule now: a turn where fewer than <c>minKept</c> cards clear the floor RELAXES — the
+/// floor is dropped for that turn and nothing is truncated. Otherwise the cards that clear are the
+/// picks and the cards that do not are handed back as <see cref="Decision{T}.BelowFloor"/>, to be
+/// shown in a tray and counted out loud. Either way the user is told what happened to every card,
+/// which is the whole point: a drop the user cannot see is indistinguishable from a bug.</para>
+///
+/// <para>Generic over the card shape and pure, so the decision can be pinned exhaustively without a
+/// database, a model or a turn.</para>
+/// </summary>
+public static class AskReelFloor
+{
+    /// <summary>
+    /// The floor's verdict on one turn. <see cref="Kept"/> and <see cref="KeptOutside"/> keep their
+    /// channels separate because outside cards always trail every clean pick on screen.
+    /// </summary>
+    public sealed record Decision<T>(
+        IReadOnlyList<T> Kept,
+        IReadOnlyList<T> KeptOutside,
+        IReadOnlyList<T> BelowFloor,
+        bool Relaxed,
+        int AboveFloorCount)
+    {
+        /// <summary>How many cards the floor took off the screen. Zero on a relaxed turn, by construction.</summary>
+        public int DroppedByFloor => BelowFloor.Count;
+
+        /// <summary>
+        /// How many cards are ON SCREEN but under the bar. Zero unless the floor was relaxed, and the
+        /// number the relaxed turn's copy has to say out loud: three finders independently reported
+        /// cards badged 5.2 sitting in the recommended grid under a sentence that mentioned no such
+        /// thing. It is derived rather than stored because <see cref="AboveFloorCount"/> and the two
+        /// kept channels are the only facts here — a fourth stored count could disagree with them.
+        /// </summary>
+        public int ShownBelowFloor =>
+            Relaxed ? Math.Max(0, Kept.Count + KeptOutside.Count - AboveFloorCount) : 0;
+    }
+
+    /// <summary>
+    /// Applies <paramref name="floor"/> to both channels.
+    ///
+    /// <para>A card with NO prediction clears the floor. That is deliberate and it is the opposite
+    /// call to the crowd-rating filter: a crowd rating is missing metadata about the title, whereas
+    /// a missing prediction means this account has no model yet — refusing every card because we
+    /// cannot score them is refusing to answer at all. The caller's job is to make sure the number
+    /// is really absent before relying on this, which is why the null cards get a scoring pass
+    /// immediately before the floor rather than after it.</para>
+    ///
+    /// <para><paramref name="minKept"/> is a THRESHOLD, not a take: it decides whether the floor
+    /// binds this turn, and nothing is truncated to it in either branch.</para>
+    /// </summary>
+    public static Decision<T> Apply<T>(
+        IReadOnlyList<T> clean,
+        IReadOnlyList<T> outside,
+        Func<T, decimal?> predictedOf,
+        decimal floor,
+        int minKept)
+    {
+        if (floor <= 0m)
+        {
+            // No floor configured is the filter not existing, so every card trivially clears it.
+            return new Decision<T>(clean, outside, [], Relaxed: false, AboveFloorCount: clean.Count + outside.Count);
+        }
+
+        // Compared at the precision the BADGE renders, not the precision the wire carries. A card
+        // predicted 5.95 is stored and sent as 5.95 and drawn by the badge as "6.0" (the client's
+        // toFixed(1)), so a 2-dp comparison put a card badged 6.0 inside a tray labelled "under
+        // your 6.0 bar" and made "only 2 picks cleared your 6.0 bar" disprovable by counting
+        // badges — 2 claimed against 4 badged on one measured turn, 5 against 7 on another. The
+        // user cannot see the second decimal; the sentence has to be true about what they can see.
+        // AwayFromZero, not banker's rounding, because that is what toFixed does at the .x5 edge.
+        // The wire keeps both decimals: the digit is real, and the ordering and the exposure log
+        // both want it. Only the comparison rounds.
+        bool Clears(T card) =>
+            predictedOf(card) is not { } predicted
+            || decimal.Round(predicted, 1, MidpointRounding.AwayFromZero) >= floor;
+
+        var keptClean = clean.Where(Clears).ToList();
+        var keptOutside = outside.Where(Clears).ToList();
+
+        // Honouring the floor strictly would leave the screen too thin to be useful. Drop it for
+        // this turn and SAY SO, rather than silently ignoring the setting or silently returning
+        // almost nothing. Everything comes back — the old rule's Take(minKept) was a second,
+        // unannounced cull layered on top of the first.
+        var aboveFloor = keptClean.Count + keptOutside.Count;
+        if (aboveFloor < minKept)
+        {
+            return new Decision<T>(clean, outside, [], Relaxed: true, AboveFloorCount: aboveFloor);
+        }
+
+        var below = clean.Where(card => !Clears(card))
+            .Concat(outside.Where(card => !Clears(card)))
+            .ToList();
+        return new Decision<T>(keptClean, keptOutside, below, Relaxed: false, AboveFloorCount: aboveFloor);
+    }
+}

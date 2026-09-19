@@ -18,6 +18,31 @@ public interface ITmdbClient
     Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
         bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default);
 
+    /// <summary>
+    /// One page of the catalogue bulk seed's walk: discover ordered by <c>vote_count.desc</c>,
+    /// constrained to a SINGLE release year and a vote-count floor, on the
+    /// <see cref="RatePriority.Backfill"/> lane and billed to purpose <c>seed</c>.
+    ///
+    /// <para>
+    /// It is a separate method rather than another parameter on <see cref="DiscoverAsync"/> for
+    /// three reasons, each of which is a defect if it is fudged. The sort order is
+    /// <c>vote_count.desc</c>, not <c>popularity.desc</c>: popularity is a present-day trailing
+    /// metric that reshuffles daily, so a multi-day resumable walk over it revisits and misses rows
+    /// unpredictably, while vote count is monotone enough to walk once. The year window is CLOSED
+    /// at both ends, because TMDB caps discover at page 500 (10,000 results) for any one query and
+    /// the unpartitioned corpus is an order of magnitude past that — the partition is what keeps
+    /// every query under the wall. And the caller needs <c>total_pages</c> back, which the list
+    /// helpers discard.
+    /// </para>
+    ///
+    /// <para>
+    /// Deliberately UNFILTERED by language. The rows are global; an account's language rule is
+    /// applied at eligibility, where it can be relaxed per account without re-acquiring supply.
+    /// </para>
+    /// </summary>
+    Task<TmdbDiscoverPage> DiscoverSeedPageAsync(
+        bool movies, int year, int minVoteCount, int page, CancellationToken ct = default);
+
     /// <summary>This week's trending titles (movie or tv).</summary>
     Task<IReadOnlyList<TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default);
 
@@ -26,6 +51,15 @@ public interface ITmdbClient
     /// real collaborative signal available from day one, without needing our own cross-tenant data.
     /// </summary>
     Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default);
+
+    /// <summary>
+    /// TMDB's <c>similar</c> list for a title — a DIFFERENT signal to
+    /// <see cref="GetRecommendationsAsync"/>, not a synonym: recommendations are behavioural
+    /// ("people who liked this also liked…"), similar is content-derived from genres and keywords.
+    /// Running both over the same seed set widens the pool along two independent axes for one extra
+    /// call per seed, which is why the seed arms alternate between them rather than picking one.
+    /// </summary>
+    Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default);
 
     /// <summary>Resolve free-text keyword names to TMDB keyword ids (/search/keyword). Interactive priority — drives live Ask Reel.</summary>
     Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default);
@@ -56,12 +90,22 @@ public interface ITmdbClient
     /// </para>
     /// <paramref name="releasedBefore"/> closes the upper end of a decade query — without it
     /// "80s sci-fi" pulls 1980-to-today ordered by popularity.
+    /// <paramref name="maxRuntimeMinutes"/> maps to <c>with_runtime.lte</c> ("under 90 minutes") —
+    /// discovery-side only; the caller still post-filters the final pool, because the semantic arm
+    /// bypasses TMDB entirely.
+    /// <para>
+    /// <paramref name="options"/> carries the account's standing content rules (language, crowd-rating
+    /// floor, vote-count floor), the optional person constraint, and the rate-gate lane. It is how the
+    /// feed build reuses this method instead of growing a second query builder next to it — the whole
+    /// point of routing supply through here. Omitting it reproduces the original Ask Reel behaviour.
+    /// </para>
     /// </summary>
     Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page,
         IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-        DateTime? releasedBefore = null, CancellationToken ct = default);
+        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
+        TmdbDiscoverOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Watch providers for one title in one region (JustWatch-powered; attribution required).</summary>
     Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default);

@@ -11,7 +11,10 @@ import {
   summaryChips,
   yearCeiling,
 } from "./pickConditions";
+import { DEFAULT_BROWSE_FILTER, type BrowseFilter } from "./browseFilter";
 import type { FiltersPayload } from "../store/api";
+
+const browse = (over: Partial<BrowseFilter> = {}): BrowseFilter => ({ ...DEFAULT_BROWSE_FILTER, ...over });
 
 const base = (over: Partial<FiltersPayload> = {}): FiltersPayload => ({ ...DEFAULT_FILTERS, ...over });
 
@@ -245,5 +248,107 @@ describe("summaryChips", () => {
       "no documentary",
       "English only",
     ]);
+  });
+
+  it("marks every content chip as a saved condition", () => {
+    const chips = summaryChips(base({ includeGenres: ["horror"], excludeKeywords: ["gore"], minCrowdRating: 7 }));
+    expect(chips.length).toBeGreaterThan(0);
+    expect(chips.every((c) => c.kind === "condition")).toBe(true);
+    expect(chips.every((c) => c.clear === undefined)).toBe(true);
+  });
+});
+
+/**
+ * The browse toggles in the same summary.
+ *
+ * The bug this closes: the header claimed to summarise "what is shaping this feed" while showing
+ * only the SAVED conditions, so a "Movies only" toggle could halve the feed with nothing in the
+ * header admitting it. The two kinds must therefore appear in ONE list — and be distinguishable
+ * inside it, because one follows the account and the other stays in this browser.
+ */
+describe("summaryChips — browse toggles", () => {
+  it("says nothing about a toggle set to 'all' — that is off, not a filter", () => {
+    expect(summaryChips(base({ languages: ["*"] }), browse())).toEqual([]);
+    expect(summaryChips(base({ languages: ["*"] }), null)).toEqual([]);
+    expect(summaryChips(base({ languages: ["*"] }))).toEqual([]);
+  });
+
+  it("names each media selection in words", () => {
+    expect(summaryChips(base({ languages: ["*"] }), browse({ media: "movie" })).map((c) => c.label)).toEqual([
+      "Movies only",
+    ]);
+    expect(summaryChips(base({ languages: ["*"] }), browse({ media: "show" })).map((c) => c.label)).toEqual([
+      "TV only",
+    ]);
+  });
+
+  it("names each availability bucket in words", () => {
+    expect(
+      summaryChips(base({ languages: ["*"] }), browse({ availability: "available" })).map((c) => c.label),
+    ).toEqual(["Available now"]);
+    expect(summaryChips(base({ languages: ["*"] }), browse({ availability: "coming" })).map((c) => c.label)).toEqual([
+      "Coming soon",
+    ]);
+  });
+
+  it("combines both kinds into one list rather than a second parallel row", () => {
+    const chips = summaryChips(
+      base({ excludeGenres: ["documentary"], languages: ["en"] }),
+      browse({ media: "movie", availability: "available" }),
+    );
+    expect(chips.map((c) => [c.label, c.kind])).toEqual([
+      ["no documentary", "condition"],
+      ["English only", "condition"],
+      ["Movies only", "browse"],
+      ["Available now", "browse"],
+    ]);
+  });
+
+  it("marks the kind as data, so the renderer never parses a label to group the row", () => {
+    const chips = summaryChips(base({ excludeGenres: ["documentary"], languages: ["*"] }), browse({ media: "show" }));
+    expect(chips.filter((c) => c.kind === "condition").map((c) => c.label)).toEqual(["no documentary"]);
+    expect(chips.filter((c) => c.kind === "browse").map((c) => c.label)).toEqual(["TV only"]);
+  });
+
+  it("gives every browse chip the patch that clears it — the control that set it may be off-screen", () => {
+    const chips = summaryChips(base({ languages: ["*"] }), browse({ media: "movie", availability: "coming" }));
+    expect(chips.map((c) => c.clear)).toEqual([{ media: "all" }, { availability: "all" }]);
+    // Applying a chip's patch clears that one filter and leaves the other alone.
+    const current = browse({ media: "movie", availability: "coming" });
+    expect({ ...current, ...chips[0].clear }).toEqual({ media: "all", availability: "coming" });
+  });
+
+  it("keeps the include/exclude wording of the content chips intact alongside them", () => {
+    const chips = summaryChips(
+      base({ includeGenres: ["crime"], excludeGenres: ["documentary"], languages: ["*"] }),
+      browse({ media: "movie" }),
+    );
+    expect(chips.map((c) => [c.label, c.tone])).toEqual([
+      ["has crime", "include"],
+      ["no documentary", "exclude"],
+      ["Movies only", "include"],
+    ]);
+  });
+
+  it("keys every chip uniquely across both kinds, so React can render the combined row", () => {
+    const chips = summaryChips(
+      base({
+        includeGenres: ["horror", "crime"],
+        excludeGenres: ["documentary"],
+        excludeKeywords: ["gore"],
+        minCrowdRating: 7,
+        minPredictedRating: 8,
+        minYear: 1990,
+        maturityCeiling: "R",
+      }),
+      browse({ media: "movie", availability: "available" }),
+    );
+    expect(new Set(chips.map((c) => c.key)).size).toBe(chips.length);
+  });
+
+  it("counts only the saved conditions when no browse filter is passed — what the Conditions badge counts", () => {
+    const filters = base({ excludeGenres: ["documentary"], languages: ["en"] });
+    expect(summaryChips(filters)).toHaveLength(2);
+    expect(summaryChips(filters, browse({ media: "movie", availability: "coming" }))).toHaveLength(4);
   });
 });

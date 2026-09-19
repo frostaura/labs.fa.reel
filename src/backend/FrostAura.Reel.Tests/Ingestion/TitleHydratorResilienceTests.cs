@@ -119,7 +119,7 @@ public class TitleHydratorResilienceTests
         Assert.Null(titles[0].LastMetadataRefreshAt);
     }
 
-    private static TitleHydrator Hydrator(ITmdbClient tmdb) =>
+    internal static TitleHydrator Hydrator(ITmdbClient tmdb) =>
         new(new UnusedDbContext(), tmdb, NullLogger<TitleHydrator>.Instance);
 
     private static List<Title> Batch(int count) =>
@@ -137,7 +137,9 @@ public class TitleHydratorResilienceTests
     /// Returns credit-free details (so hydration never needs the database), 404s or throws for the
     /// nominated TMDB id.
     /// </summary>
-    private sealed class StubTmdb(long? failFor, Exception failure, bool failEverything = false, long? notFoundFor = null) : ITmdbClient
+    internal sealed class StubTmdb(
+        long? failFor, Exception failure, bool failEverything = false, long? notFoundFor = null,
+        Func<long, TmdbTitleDetails>? details = null) : ITmdbClient
     {
         public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default)
         {
@@ -151,12 +153,18 @@ public class TitleHydratorResilienceTests
                 return Task.FromResult<TmdbTitleDetails?>(null); // TMDB 404 — confirmed missing.
             }
 
-            return Task.FromResult<TmdbTitleDetails?>(new TmdbTitleDetails(
+            return Task.FromResult<TmdbTitleDetails?>(details?.Invoke(tmdbId) ?? new TmdbTitleDetails(
                 tmdbId, "/poster.jpg", "/backdrop.jpg", 12.5m, 7.1m, 900, 101,
                 "An overview.", "A tagline.", null, [], [], "yt-key", ["heist"], "en"));
         }
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => GetMovieAsync(tmdbId, ct);
+
+        // The bulk-seed walk is not exercised by this fixture; SeedCatalogJobHandlerTests owns its own
+        // scripted TMDB client. An empty page reads as "this partition is exhausted", which is the
+        // only honest answer a fake that was never given a corpus can give.
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
             throw new NotSupportedException();
@@ -165,6 +173,9 @@ public class TitleHydratorResilienceTests
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
@@ -181,8 +192,8 @@ public class TitleHydratorResilienceTests
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page,
-            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null,
-            CancellationToken ct = default) =>
+            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
+            TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
@@ -193,7 +204,7 @@ public class TitleHydratorResilienceTests
     /// Deliberately inert persistence port: these titles carry no credits, so a correct hydrator
     /// never touches the database at all. Any member access here is a test failure with a name.
     /// </summary>
-    private sealed class UnusedDbContext : IReelDbContext
+    internal sealed class UnusedDbContext : IReelDbContext
     {
         public DbSet<Account> Accounts => throw Unexpected();
         public DbSet<TraktConnection> TraktConnections => throw Unexpected();
@@ -203,28 +214,44 @@ public class TitleHydratorResilienceTests
         public DbSet<TitleAttributes> TitleAttributes => throw Unexpected();
         public DbSet<Person> Persons => throw Unexpected();
         public DbSet<TitleCredit> TitleCredits => throw Unexpected();
-        public DbSet<Episode> Episodes => throw Unexpected();
         public DbSet<StreamingProvider> StreamingProviders => throw Unexpected();
-        public DbSet<ProviderLinkPattern> ProviderLinkPatterns => throw Unexpected();
         public DbSet<TitleAvailability> TitleAvailabilities => throw Unexpected();
         public DbSet<WatchedTitle> WatchedTitles => throw Unexpected();
         public DbSet<ShowWatchProgress> ShowWatchProgresses => throw Unexpected();
         public DbSet<UserRating> UserRatings => throw Unexpected();
+        public DbSet<UserRatingEvent> UserRatingEvents => throw Unexpected();
         public DbSet<UserPersonRating> UserPersonRatings => throw Unexpected();
         public DbSet<UserTitleReaction> UserTitleReactions => throw Unexpected();
         public DbSet<ContentFilter> ContentFilters => throw Unexpected();
         public DbSet<UserPreferenceTag> UserPreferenceTags => throw Unexpected();
         public DbSet<Domain.Search.SearchConversation> SearchConversations => throw Unexpected();
         public DbSet<Domain.Search.SearchTurn> SearchTurns => throw Unexpected();
+
+        public DbSet<Domain.Search.SearchTurnCard> SearchTurnCards => throw Unexpected();
         public DbSet<PersonAffinity> PersonAffinities => throw Unexpected();
-        public DbSet<AccountTasteProfile> AccountTasteProfiles => throw Unexpected();
         public DbSet<TrainingRun> TrainingRuns => throw Unexpected();
         public DbSet<ModelArtifact> ModelArtifacts => throw Unexpected();
         public DbSet<EvaluationResult> EvaluationResults => throw Unexpected();
         public DbSet<TitleScore> TitleScores => throw Unexpected();
         public DbSet<OnlineModelState> OnlineModelStates => throw Unexpected();
+        public DbSet<TasteCluster> TasteClusters => throw Unexpected();
         public DbSet<FeedSnapshot> FeedSnapshots => throw Unexpected();
         public DbSet<FeedItem> FeedItems => throw Unexpected();
+
+        public DbSet<FeedBuildStat> FeedBuildStats => throw Unexpected();
+        public DbSet<AccountDigest> AccountDigests => throw Unexpected();
+        public DbSet<Domain.Lens.AccountTasteNarrative> AccountTasteNarratives => throw Unexpected();
+        public DbSet<Domain.Lens.TitleLensCopy> TitleLensCopies => throw Unexpected();
+        public DbSet<Domain.CrossReference.TitleCrossReferenceVerdict> TitleCrossReferenceVerdicts => throw Unexpected();
+        public DbSet<Domain.CrossReference.CrossReferenceEvaluation> CrossReferenceEvaluations => throw Unexpected();
+
+        public DbSet<Domain.CrossReference.CrossReferenceEvaluationItem> CrossReferenceEvaluationItems => throw Unexpected();
+        public Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade Database => throw Unexpected();
+        public DbSet<ExposureEvent> ExposureEvents => throw Unexpected();
+        public DbSet<ExposureOutcome> ExposureOutcomes => throw Unexpected();
+        public DbSet<TitleExposureRollup> TitleExposureRollups => throw Unexpected();
+        public DbSet<Domain.Notifications.PushSubscription> PushSubscriptions => throw Unexpected();
+        public DbSet<Domain.Notifications.AppSecret> AppSecrets => throw Unexpected();
         public DbSet<SyncJob> SyncJobs => throw Unexpected();
         public DbSet<TraktOutboxEntry> TraktOutbox => throw Unexpected();
         public DbSet<ManagedListItem> ManagedListItems => throw Unexpected();

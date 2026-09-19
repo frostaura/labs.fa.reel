@@ -4,10 +4,13 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Ml;
+using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -73,11 +76,16 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         var cache = new MemoryCache(new MemoryCacheOptions());
         var residual = new OnlineResidualModel(db, featureBuilder, engine, cache, NullLogger<OnlineResidualModel>.Instance);
         var tmdb = new EmptyTmdbClient();
-        var candidateGenerator = new CandidateGenerator(db, tmdb, NullLogger<CandidateGenerator>.Instance);
+        var candidateGenerator = new CandidateGenerator(db, tmdb, new EligibilityQueryBuilder(db), NullLogger<CandidateGenerator>.Instance);
         var agent = new UnavailableSearchAgent();
         var paginator = new FeedPaginator(
-            db, featureBuilder, retriever, engine, residual, candidateGenerator, tmdb, agent, cache,
-            NullLogger<FeedPaginator>.Instance);
+            db, featureBuilder, retriever, engine, residual,
+            new RatingCalibrationService(db, cache), new DislikeSignal(db, cache),
+            candidateGenerator, tmdb, agent,
+            new PersonalisationContext(db, new DislikeSignal(db, cache)),
+            new FrostAura.Reel.Application.CrossReference.RerankBudget(
+                db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
+            cache, NullLogger<FeedPaginator>.Instance);
 
         var req = new MoreFeedRequest(FeedRowContext.Hero, AnchorTitleId: null, Genre: null, ExcludeTitleIds: [], Limit: 12, MediaType: media);
         return await paginator.MoreAsync(account, req, CancellationToken.None);
@@ -177,6 +185,12 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => Task.FromResult<TmdbTitleDetails?>(null);
 
+        // The bulk-seed walk is not exercised by this fixture; SeedCatalogJobHandlerTests owns its own
+        // scripted TMDB client. An empty page reads as "this partition is exhausted", which is the
+        // only honest answer a fake that was never given a corpus can give.
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
+
         public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
@@ -184,6 +198,9 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
@@ -197,25 +214,10 @@ public class FeedPaginatorMediaFilterTests(PostgresFixture fixture)
         public Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
-        public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page, IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, CancellationToken ct = default) =>
+        public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page, IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
-    }
-
-    /// <summary>An agent that is never available, so the paginator keeps the pure model order (no LLM
-    /// curation) — the media assertion is about which titles surface, not their curated order.</summary>
-    private sealed class UnavailableSearchAgent : ISearchAgent
-    {
-        public bool IsAvailable => false;
-
-        public string ModelId => "stub";
-
-        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(IReadOnlyList<RerankInput> titles, string query, string tasteSummary, CancellationToken ct = default) =>
-            throw new NotSupportedException();
     }
 }

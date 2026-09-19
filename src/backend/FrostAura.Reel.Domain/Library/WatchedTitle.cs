@@ -20,6 +20,13 @@ public class WatchedTitle : IAccountScoped
 
     public DateTime? LastWatchedAt { get; set; }
 
+    /// <summary>
+    /// The watched_at Reel itself logged to Trakt via AddToHistory; null when the watch came from
+    /// Trakt ingest. Reversibility anchor for RemoveFromHistory: un-rating removes exactly the
+    /// play Reel logged (matched by this timestamp) and never touches ingested history.
+    /// </summary>
+    public DateTime? ReelLoggedWatchedAt { get; set; }
+
     public bool IsFullyWatched { get; set; }
 
     public DateTime FirstSyncedAt { get; set; }

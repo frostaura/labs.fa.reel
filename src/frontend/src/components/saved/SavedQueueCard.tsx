@@ -1,0 +1,118 @@
+import { Link, useLocation } from "react-router";
+import { BookmarkX } from "lucide-react";
+import type { SavedQueueItem } from "../../store/savedTypes";
+import PosterImage from "../rec/PosterImage";
+import ScoreBadges from "../rec/ScoreBadges";
+import { logoUrl } from "../../lib/tmdbImages";
+import { formatRuntime } from "../../lib/format";
+import { predictionWithBand, savedAgo } from "../../lib/savedQueue";
+
+interface Props {
+  item: SavedQueueItem;
+  expectedAbsoluteError: number | null;
+  onUnsave: (item: SavedQueueItem) => void;
+}
+
+/**
+ * One card in the queue below the pin. It answers the three questions the old poster grid did not:
+ * is it any good for me (with its error band), how long is it, and can I actually watch it now.
+ */
+export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }: Props) {
+  const location = useLocation();
+  const band = predictionWithBand(item.predictedRating, expectedAbsoluteError);
+  const runtime = formatRuntime(item.runtimeMinutes);
+
+  return (
+    <Link
+      to={`/title/${item.mediaType.toLowerCase()}/${item.tmdbId}`}
+      state={{ backgroundLocation: location }}
+      className="group block focus:outline-none"
+      data-testid="saved-card"
+    >
+      <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03]">
+        <PosterImage path={item.posterPath} alt={item.name} size="w185" />
+        <ScoreBadges
+          predictedRating={item.predictedRating}
+          crowdRating={item.crowdRating}
+          crowdVotes={item.crowdVotes}
+        />
+        {item.providers.length > 0 && (
+          <div className="absolute bottom-2 left-2 flex gap-1" data-testid="saved-card-providers">
+            {item.providers.slice(0, 3).map((p) =>
+              logoUrl(p.logoPath) ? (
+                <img
+                  key={p.name}
+                  src={logoUrl(p.logoPath)!}
+                  alt={p.name}
+                  title={`${p.name} — streaming now`}
+                  className="h-5 w-5 rounded-[4px] ring-1 ring-black/30"
+                  loading="lazy"
+                />
+              ) : (
+                <span
+                  key={p.name}
+                  title={`${p.name} — streaming now`}
+                  className="fa-overline rounded-[4px] bg-fa-ink/80 px-1 py-0.5 text-fa-frost-dim ring-1 ring-black/30"
+                >
+                  {p.name.slice(0, 2)}
+                </span>
+              )
+            )}
+          </div>
+        )}
+        {/* One-tap unsave, same overlay pattern as the feed cards' quick actions. */}
+        {item.tmdbId != null && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              onUnsave(item);
+            }}
+            aria-label={`Remove ${item.name} from Saved`}
+            title="Remove from Saved"
+            className="absolute left-1.5 top-1.5 rounded-full bg-fa-ink/70 p-1.5 text-fa-frost-dim backdrop-blur-sm transition hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60"
+            data-testid="saved-unsave"
+          >
+            <BookmarkX className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      <div className="mt-2 space-y-0.5">
+        <p className="fa-body text-fa-frost-bright truncate" title={item.name}>
+          {item.name}
+        </p>
+        <p className="fa-caption text-fa-frost-dim">
+          {[item.year, runtime].filter(Boolean).join(" · ") || " "}
+        </p>
+        <p className="fa-caption text-fa-frost-dim">
+          {band != null ? (
+            <span title="Predicted rating, and what predictions for you are typically off by">{band}</span>
+          ) : (
+            // Never a blank corner: an absent number is a state of the backfill, not a verdict.
+            <span title="Reel has not scored this one yet — it is being backfilled.">scoring…</span>
+          )}
+          {" · "}
+          {item.availableNow ? (
+            <span className="text-fa-frost/80">streaming now</span>
+          ) : (
+            <span title="Not on one of your flatrate services in your region right now.">not streaming</span>
+          )}
+        </p>
+        {/* Every card states its list status — "on Up Next" once the outbox has written the
+            ManagedListItem to Trakt, "syncing…" while that write is still queued. */}
+        <p className="fa-caption text-fa-frost-dim/70">
+          {savedAgo(item.daysSaved)}
+          {" · "}
+          {item.onManagedList ? (
+            "on Up Next"
+          ) : (
+            <span title="Queued for the managed Trakt list — Reel writes it back in the background.">
+              syncing…
+            </span>
+          )}
+        </p>
+      </div>
+    </Link>
+  );
+}

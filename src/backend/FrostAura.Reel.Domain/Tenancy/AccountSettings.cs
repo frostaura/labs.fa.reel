@@ -14,4 +14,13 @@ public class AccountSettings
 
     /// <summary>Captured in-app ahead of M5 billing; not collected at signup.</summary>
     public string? EmailForBilling { get; set; }
+
+    /// <summary>
+    /// How long an evening is, in minutes — the ceiling the Saved shelf's pinned "watch tonight"
+    /// pick must fit inside. Null means the user has never said, and the queue applies its own
+    /// default rather than storing one here: a value written on their behalf reads back as a
+    /// preference they expressed. Lives in the owned jsonb document, so adding it is NOT a schema
+    /// change and must not produce a migration.
+    /// </summary>
+    public int? EveningBudgetMinutes { get; set; }
 }

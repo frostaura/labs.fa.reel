@@ -10,6 +10,7 @@ using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -125,10 +126,13 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
         await using var db = fixture.CreateContext(scoped);
+        var configuration = new ConfigurationBuilder().Build();
         var handler = new HydrateCatalogJobHandler(
             db,
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
             new NoopHub(),
+            new CatalogHydrationBudget(db, configuration),
+            configuration,
             NullLogger<HydrateCatalogJobHandler>.Instance);
 
         var job = new SyncJob
@@ -240,6 +244,12 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => GetMovieAsync(tmdbId, ct);
 
+        // The bulk-seed walk is not exercised by this fixture; SeedCatalogJobHandlerTests owns its own
+        // scripted TMDB client. An empty page reads as "this partition is exhausted", which is the
+        // only honest answer a fake that was never given a corpus can give.
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
+
         public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -247,6 +257,9 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
@@ -263,8 +276,8 @@ public class HydrateCatalogResilienceTests(PostgresFixture fixture)
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds, string? region, DateTime? releasedAfter, int page,
-            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null,
-            CancellationToken ct = default) =>
+            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null, DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
+            TmdbDiscoverOptions? options = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>

@@ -51,22 +51,22 @@ test.describe("mobile navigation", () => {
     await expect(page.locator("header nav.hidden")).toBeHidden();
   });
 
-  // KNOWN FAILING — a MOCK problem, not a product bug. Diagnosed 2026-08-07 by logging the network
-  // inside the mobile viewport: the panel opens, the component issues
-  // `GET /api/search/typeahead?q=medieval` exactly as it should, and that request reaches the real
-  // dev proxy and comes back 401. Playwright never intercepts it, so the component correctly
-  // renders no results for an unauthorized response. Every other mock in this file works; this is
-  // the only one whose request carries a query string, and switching it from a glob to a RegExp did
-  // not help either.
-  //
-  // So: mobile typeahead itself is fine — do not go looking for a rendering bug in SearchBox. What
-  // needs fixing is the interception. Marked fixme rather than deleted so the gap stays visible;
-  // the rest of this file gates CI.
-  test.fixme("the search tab opens a working search panel (Ask Reel reachable)", async ({ page }) => {
+  // Previously known-failing, fixed 2026-08-10 — it was a MOCK problem, not a product bug, and it
+  // had TWO stacked causes:
+  //  1. Playwright glob patterns match the full URL including the query string, so the original
+  //     `**/api/search/typeahead` glob never matched `?q=medieval`. mockJson now matches string
+  //     patterns against the pathname, which closes this for every parameterised endpoint.
+  //  2. The RegExp retry failed anyway because the local run was reusing whatever listened on
+  //     :5173 — the *production* container, whose service worker seizes control shortly after
+  //     first paint (skipWaiting + clientsClaim). Late fetches like typeahead were then issued by
+  //     the worker, which page.route cannot see; the first-load mocks (auth/feed) fired before the
+  //     worker took control, which is why only this one "randomly" missed. The config now blocks
+  //     service workers and makes the port overridable (PW_PORT) so a busy :5173 is never reused.
+  test("the search tab opens a working search panel (Ask Reel reachable)", async ({ page }) => {
     await bootHome(page);
-    // A RegExp rather than a glob, because a glob's trailing ** is ambiguous about crossing "?"
-    // into a query string and this is the only mock in the suite whose request carries one.
-    await mockJson(page, /\/api\/search\/typeahead/, {
+    // Also answers the sparse-shortlist `?global=1` follow-up (same pathname); the payload has no
+    // `global` array so the Beyond-your-catalogue group simply stays hidden here.
+    await mockJson(page, "**/api/search/typeahead", {
       titles: [{
         titleId: "00000000-0000-0000-0000-0000000000aa",
         mediaType: "Movie", tmdbId: 2002, name: "Medieval Quest", year: 2019,
@@ -84,8 +84,20 @@ test.describe("mobile navigation", () => {
     await panel.getByTestId("search-input").fill("medieval");
     await expect(panel.getByTestId("typeahead-result")).toBeVisible();
 
+    // Ask Reel now CONSUMES the ?q= seed — /search starts the turn and immediately strips the
+    // param (a reload three refinements in used to re-fire it), so the URL to assert is /search
+    // and the proof of arrival is the seeded question sitting in the transcript. The stream is
+    // answered minimally so the turn settles instead of 401ing against the real proxy.
+    await page.route("**/api/search/ask", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: 'event: done\ndata: {"results":[],"reason":null}\n\n',
+      })
+    );
     await panel.getByTestId("ask-reel-row").click();
-    await expect(page).toHaveURL(/\/search\?q=medieval/);
+    await expect(page).toHaveURL(/\/search(?:$|\?)/);
+    await expect(page.getByText("medieval").first()).toBeVisible();
     // Navigating closes the panel.
     await expect(panel).toBeHidden();
   });

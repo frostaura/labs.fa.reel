@@ -4,13 +4,18 @@ import { useDispatch } from "react-redux";
 import { Lock, Sparkles } from "lucide-react";
 import {
   useGetContinueWatchingQuery,
+  useGetDigestQuery,
   useGetFeedGenresQuery,
   useGetFeedQuery,
   useGetSessionQuery,
 } from "../store/api";
 import { removalsCleared } from "../store/removedTitlesSlice";
+import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
+import ModelLearnedBand from "../components/rec/ModelLearnedBand";
+import CrossReferenceBand from "../components/rec/CrossReferenceBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
+import RecRow from "../components/rows/RecRow";
 import GenreRow from "../components/rows/GenreRow";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
@@ -18,6 +23,13 @@ import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import PickConditionsButton, { PickConditionsSummary } from "../components/rec/PickConditionsButton";
 import { matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
+import { formatRankedAt } from "../lib/format";
+import PostWatchStrip from "../components/saved/PostWatchStrip";
+import TrackRecordStrip from "../components/rec/TrackRecordStrip";
+import TonightMoodChips from "../components/rec/TonightMoodChips";
+import type { TonightMood } from "../lib/tonightMood";
+import { pipelineStageCopy } from "../lib/syncCopy";
+import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -28,6 +40,11 @@ export default function Home() {
   const dispatch = useDispatch();
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;
+
+  // Two rows of tonight's picks for anyone who can page for more of them. Free is capped at three
+  // hero cards server-side and its /more returns exhausted, so a second row there would be a half-
+  // empty grid advertising the cap. Below `md` the grid collapses back to one row on its own.
+  const heroRows: HeroRows = session?.tier === "Free" ? 1 : 2;
 
   // Every row is keyed on `resetKey`, so changing it remounts them and discards the pages the user
   // has scrolled. The snapshot's own generatedAt is therefore NOT the key: acting on a card queues
@@ -56,17 +73,30 @@ export default function Home() {
   // change. Bumped only on a successful save, so nothing resets while the dialog is merely open.
   const [conditionsVersion, setConditionsVersion] = useState(0);
 
+  // The tonight mood, held in component state and nowhere else. Deliberately NOT persisted and
+  // deliberately NOT part of `resetKey`: it re-sorts the snapshot the browser already has, so it
+  // must not remount the rows and lose the user's scroll, and it must not survive into tomorrow as
+  // a standing preference nobody remembers setting.
+  const [mood, setMood] = useState<TonightMood | null>(null);
+
   const resetKey = `${adoptedKey}#${conditionsVersion}`;
   const hasFresherPicks = latestKey !== "" && adoptedKey !== "" && latestKey !== adoptedKey;
 
-  // Adopting re-seeds every row from the server (which already excludes removed titles), so the
-  // session's removal set is now redundant — clear it to avoid masking re-eligible titles.
+  // Adopting re-seeds every row from the server (which already excludes removed titles, and whose
+  // numbers are current by construction), so the session's removal set AND its recalibration
+  // overrides are now redundant — clear both, or an override could mask a fresher server value.
   useEffect(() => {
-    if (adoptedKey) dispatch(removalsCleared());
+    if (adoptedKey) {
+      dispatch(removalsCleared());
+      dispatch(scoreOverridesCleared());
+    }
   }, [adoptedKey, dispatch]);
 
   const { data: genres } = useGetFeedGenresQuery(undefined, { skip: building });
+  const { data: digest } = useGetDigestQuery(undefined, { skip: building });
   const continueFiltered = (continueWatching ?? []).filter((e) => matchesMedia(e.mediaType, filter));
+  // The weekly digest rail hides itself entirely until Friday's build lands something.
+  const digestFiltered = (digest?.items ?? []).filter((c) => matchesMedia(c.mediaType, filter));
 
   return (
     <div className="space-y-8">
@@ -75,16 +105,20 @@ export default function Home() {
           <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
           {feed?.generatedAt && (
             <p className="fa-caption text-fa-frost-dim mt-1">
-              ranked for you · {new Date(feed.generatedAt).toLocaleString()}
+              ranked for you · {formatRankedAt(feed.generatedAt)}
             </p>
           )}
-          {/* The conditions actually in force, under the title. Without this the feed silently
-              obeys settings made on another screen — a standing "no documentary" is invisible
-              exactly where its effect is. */}
-          <PickConditionsSummary className="mt-2" />
+          {/* Everything actually in force, under the title: the saved conditions AND the browse
+              toggles. Without this the feed silently obeys settings made on another screen — a
+              standing "no documentary" is invisible exactly where its effect is — and the browse
+              toggles were doubly invisible, since the summary used to omit them entirely while they
+              were halving the feed. */}
+          <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={setFilter} />
         </div>
         {!building && (
-          <div className="flex items-center gap-2">
+          // Wraps: at phone width the two browse segments plus the refresh button overran the
+          // viewport, and the overflow made the whole page scroll sideways.
+          <div className="flex flex-wrap items-center gap-2">
             <PickConditionsButton
               onSaved={() => {
                 setAdoptOnNext(true);
@@ -103,15 +137,35 @@ export default function Home() {
                 New picks ready
               </button>
             )}
-            {(feed?.hero.length ?? 0) > 0 && <BrowseFilters value={filter} onChange={setFilter} />}
-            <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+            {/* On a phone the refresh control closes the first line beside the conditions button
+                and the browse segments take their own line; from md the three sit in one row. */}
+            {(feed?.hero.length ?? 0) > 0 && (
+              <div className="order-3 w-full md:order-none md:w-auto">
+                <BrowseFilters value={filter} onChange={setFilter} />
+              </div>
+            )}
+            <div className="order-2 ml-auto md:order-none md:ml-0">
+              <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+            </div>
           </div>
         )}
       </div>
 
+      <PostWatchStrip />
+
+      {/* The product's own error rate, on its front page. Hides itself when there is no number
+          yet — an absence of evidence is not a bad score. */}
+      <TrackRecordStrip />
+
       {isLoading || building ? (
         <div className="space-y-8">
-          <div className="aspect-[16/8.5] rounded-2xl reel-shimmer" />
+          {/* Literally the hero's own container and card metrics, so the picks land in the space
+              already held for them. The full-bleed block this replaced was a head taller than the
+              card it stood in for, and a second row would have doubled that shove. */}
+          <div className={heroContainerClass(heroRows)} aria-hidden>
+            <div className={heroShimmerClass(heroRows)} />
+            {heroRows === 2 && <div className={heroShimmerClass(heroRows)} />}
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
             {Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="reel-poster reel-shimmer" />
@@ -119,13 +173,25 @@ export default function Home() {
           </div>
           {building && (
             <p className="fa-body text-fa-frost-dim text-center">
-              Your picks are being assembled ({session?.pipelineStage}) — they&apos;ll appear here the moment they&apos;re ready.
+              Your picks are being assembled — {pipelineStageCopy(session?.pipelineStage)} — they&apos;ll appear here the moment they&apos;re ready.
             </p>
           )}
         </div>
       ) : (
         <>
-          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} />
+          {/* Above the hero, and outside its re-key: the band is news about the MODEL, not about
+              this snapshot, so a row remount must not take it with it. */}
+          <ModelLearnedBand />
+
+          {/* Beside the retrain band and outside the hero's re-key for the same reason: this is
+              news about the deep pass, not about tonight's snapshot, so a row remount must not
+              take it with it. Below the model band because a retrain is the larger event. */}
+          <CrossReferenceBand />
+
+          {/* Above the hero, because it is a question about tonight rather than about the model. */}
+          <TonightMoodChips value={mood} onChange={setMood} />
+
+          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
 
           <ContinueWatchingRow entries={continueFiltered} />
 
@@ -144,8 +210,16 @@ export default function Home() {
               context={{ row: row.kind, anchorTitleId: row.anchorTitleId, genre: null }}
               seed={row.items}
               filter={filter}
+              mood={mood}
             />
           ))}
+
+          {digestFiltered.length > 0 && (
+            <RecRow
+              title={<span className="text-fa-frost-bright">New &amp; high for you this week</span>}
+              items={digestFiltered}
+            />
+          )}
 
           {(genres ?? []).map((g) => (
             <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />

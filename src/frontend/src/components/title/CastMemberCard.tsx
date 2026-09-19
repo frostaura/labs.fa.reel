@@ -33,7 +33,9 @@ export default function CastMemberCard({ member }: { member: CreditPerson }) {
           </span>
         )}
       </div>
-      <p className="fa-caption text-fa-frost group-hover:text-fa-frost-bright truncate" title={member.name}>{member.name}</p>
+      {/* Two-line clamp, not a single-line truncate: most credit names are two words, and the
+          old truncate cut "Benedict Cumberbatch" to "Benedict Cumberb…" on every chip. */}
+      <p className="fa-caption text-fa-frost group-hover:text-fa-frost-bright line-clamp-2" title={member.name}>{member.name}</p>
       {member.character && <p className="fa-caption text-fa-frost-dim/70 truncate">{member.character}</p>}
     </Link>
   );

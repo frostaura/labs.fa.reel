@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { RefreshCw } from "lucide-react";
 import PreferencesSection from "../components/settings/PreferencesSection";
 import PreferenceTags from "../components/settings/PreferenceTags";
 import BillingCard from "../components/settings/BillingCard";
+import PushOptIn from "../components/settings/PushOptIn";
 import {
   useGetSessionQuery,
   useGetSyncStatusQuery,
@@ -59,8 +61,11 @@ export default function Settings() {
   };
 
   return (
-    <div className="max-w-2xl space-y-6">
-      <h1 className="text-2xl font-light text-fa-frost-bright">Settings</h1>
+    // One column on mobile (source order preserved); a two-column card grid from lg up, where a
+    // stack of narrow cards in a max-w-2xl gutter wasted the whole right half of the screen.
+    // `lg:space-y-0` matters: space-y margins survive inside grid cells and would double the gap.
+    <div className="max-w-2xl space-y-6 lg:max-w-5xl lg:grid lg:grid-cols-2 lg:gap-6 lg:space-y-0 lg:items-start">
+      <h1 className="text-2xl font-light text-fa-frost-bright lg:col-span-2">Settings</h1>
 
       <section className="fa-card p-5 space-y-4">
         <h2 className="fa-section-title">Trakt account</h2>
@@ -119,31 +124,30 @@ export default function Settings() {
         </div>
       </section>
 
-      <a href="/rate" className="fa-card p-5 flex items-center justify-between gap-3 hover:border-fa-frost/40 transition-colors" data-testid="sharpen-link">
+      {/* Router Link, not <a href> — a full document reload just to reach /rate threw away the
+          store (and the settings the user may not have noticed were still saving). */}
+      <Link to="/rate" className="fa-card p-5 flex items-center justify-between gap-3 hover:border-fa-frost/40 transition-colors" data-testid="sharpen-link">
         <div>
           <h2 className="fa-section-title">Sharpen your recommendations</h2>
           <p className="fa-caption text-fa-frost-dim">Rate a few popular titles you’ve seen — the model gets sharper.</p>
         </div>
         <span className="fa-body text-fa-frost shrink-0">Rate →</span>
-      </a>
+      </Link>
 
       <BillingCard />
 
+      <PushOptIn />
+
       <EmailCapture onSave={(email) => updateSettings({ email })} />
 
-      <PreferenceTags />
+      <div className="lg:col-span-2">
+        <PreferenceTags />
+      </div>
 
-      <PreferencesSection />
-
-      <section className="fa-card p-5 space-y-2">
-        <h2 className="fa-section-title">Plan</h2>
-        <p className="fa-body text-fa-frost-bright">{session?.tier ?? "Free"}</p>
-        <p className="fa-caption text-fa-frost-dim">
-          {session?.tier === "Founder"
-            ? "Founder access — everything unlocked during the beta."
-            : "Free: taste DNA + daily shortlist. The full feed, natural-language search, filters and the managed Trakt list arrive with the paid tier."}
-        </p>
-      </section>
+      {/* Conditions editor + PIN — wide, dense content that needs the full row. */}
+      <div className="lg:col-span-2">
+        <PreferencesSection />
+      </div>
     </div>
   );
 }

@@ -53,6 +53,9 @@ public static class DependencyInjection
         // ── Fair-Use usage ledger ──────────────────────────────────────────────────────────
         services.AddSingleton<ApiUsageRecorder>();
         services.AddHostedService(sp => sp.GetRequiredService<ApiUsageRecorder>());
+        // The same instance, seen as the port the lens budget gate reads its in-flight counters
+        // through — the ledger flushes every 15s and a burst can outrun it.
+        services.AddSingleton<Domain.Sync.IPendingApiUsage>(sp => sp.GetRequiredService<ApiUsageRecorder>());
 
         // ── External adapters ──────────────────────────────────────────────────────────────
         // Trakt/TMDB both front with Cloudflare, which rejects UA-less requests — HttpClient
@@ -117,6 +120,43 @@ public static class DependencyInjection
             client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
             client.Timeout = TimeSpan.FromSeconds(60);
             client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        }).AddStandardResilienceHandler(o =>
+        {
+            // The ONE client a user sits and waits on, so the budget is stated rather than
+            // defaulted. The default is 3 attempts at 10s inside 30s total; here a slow-but-alive
+            // completion was being killed at 10s and then bought twice more, tripling the spend on
+            // a turn that was going to succeed. ONE retry, because a chat completion that failed
+            // has already been paid for and an identical re-ask is a second bill, not a cheaper
+            // one. 25s per attempt is above the observed p99 for these two calls; 55s total leaves
+            // room for exactly one retry and still lands inside the client's own 60s cap.
+            // CircuitBreaker sampling must stay >= 2x the attempt timeout or the validator throws
+            // at startup.
+            o.Retry.MaxRetryAttempts = 1;
+            o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(25);
+            o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(55);
+            o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(50);
+        });
+
+        // The cross-reference judge runs a 60-title batch against a strict schema — the longest
+        // single chat call in the product at 20-35s observed, so it gets the lens writer's ceiling
+        // rather than the 60s the smaller calls use.
+        services.AddHttpClient<Domain.Ports.ICrossReferenceJudge, OpenRouterCrossReferenceJudge>(client =>
+        {
+            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(90);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        }).AddStandardResilienceHandler();
+
+        // The lens writer runs longer than the other chat calls: a narrative is ~10 sentences and a
+        // lens is five to ten times a why-line's output tokens, so the transport cap has to sit
+        // above the callers' own budgets rather than pre-empting them.
+        services.AddHttpClient<Domain.Lens.ILensWriter, OpenRouterLensWriter>(client =>
+        {
+            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(90);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
         }).AddStandardResilienceHandler();
 
         // ── Shared-work coordination + request caching ───────────────────────────────────
@@ -127,15 +167,67 @@ public static class DependencyInjection
         services.AddSingleton<IModelEngine, Ml.FastTreeModelEngine>();
         services.AddScoped<Application.Ml.FeatureVectorBuilder>();
         services.AddScoped<Application.Ml.OnlineResidualModel>();
+        services.AddScoped<Application.Ml.RatingCalibrationService>();
+        services.AddScoped<Application.Ml.RetrainGate>();
+        services.AddScoped<Application.Ml.ModelLearnedQuery>();
+        services.AddScoped<Application.Ml.ResidualReplay>();
+        services.AddScoped<Application.Ranking.DislikeSignal>();
         services.AddScoped<Application.Ml.OnDemandScorer>();
         services.AddScoped<Application.Ml.EvalHarness>();
+        services.AddScoped<Application.Ml.PersonAffinityWriter>();
+        services.AddScoped<Application.Ml.ClosedLoop.RetroLoopQuery>();
+        services.AddScoped<Application.Ml.ClosedLoop.ExposureLog>();
+        services.AddScoped<Application.Experiments.InterleaveSummaryQuery>();
+        services.AddScoped<Application.Ml.ClosedLoop.AccuracyQuery>();
+        services.AddScoped<Application.Ml.ClosedLoop.RatingVerdictQuery>();
+        services.AddScoped<Application.Ml.TasteFactsBuilder>();
+        services.AddScoped<Application.Ml.PersonalisationContext>();
+
+        // ── "Through your lens" ────────────────────────────────────────────────────────────
+        services.AddScoped<Application.Lens.LensBudget>();
+        services.AddScoped<Application.Lens.LensInputBuilder>();
+        services.AddScoped<Application.Lens.LensVerifier>();
+        services.AddScoped<Application.Lens.LensService>();
+        services.AddScoped<Application.Lens.TasteNarrativeService>();
+        services.AddScoped<Application.Lens.LensAudit>();
+
+        // ── Cross-reference rounds ─────────────────────────────────────────────────────────
+        // Scoped like the lens set, and for the same reason: every one of these reads the ledger or
+        // the catalogue through the request/job DbContext. RerankBudget lives here rather than under
+        // the serving pipeline because it is the same kind of object as the other two — a ceiling
+        // read off the token ledger — and keeping the three together is what stops a fourth being
+        // written somewhere else.
+        services.AddScoped<Application.CrossReference.CrossReferenceBudget>();
+        services.AddScoped<Application.CrossReference.RerankBudget>();
+        services.AddScoped<Application.CrossReference.NeighbourFinder>();
+        services.AddScoped<Application.CrossReference.CrossReferenceCandidateBuilder>();
+        services.AddScoped<Application.CrossReference.CrossReferenceService>();
+        // The enqueue gate the feed build asks before queuing a pass. Scoped so the job it adds
+        // lands on the BUILD's tracked context and commits with the build's own writes.
+        services.AddScoped<Application.CrossReference.CrossReferenceScheduler>();
+        // The read side of the same table, shared by the feed build and both read-path serves so
+        // the three cannot disagree about which prompt generation or which fingerprint is current.
+        services.AddScoped<Application.CrossReference.CrossReferenceFactors>();
+        // What the home band is allowed to say, in counted numbers only.
+        services.AddScoped<Application.CrossReference.CrossReferenceStatusQuery>();
+        // Offline only, reached through the founder-only /api/dev surface.
+        services.AddScoped<Application.CrossReference.CrossReferenceBacktest>();
 
         // ── Serving pipeline ─────────────────────────────────────────────────────────────
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();
+        services.AddScoped<Application.Search.FilterCostMeter>();
         services.AddScoped<Application.Search.LexicalSearchService>();
         services.AddScoped<Application.Search.LiveSearchExpansionService>();
         services.AddScoped<Application.Ranking.CandidateGenerator>();
+        // The day's taste partition. Scoped so it shares the request/job DbContext; the partition
+        // itself is cached day-granular in IMemoryCache, which is a singleton, so a build and the
+        // rails it triggers all split their ANN budget across the same pockets.
+        services.AddScoped<Application.Ranking.TasteClusterProvider>();
         services.AddScoped<Application.Ranking.CandidateRetriever>();
+        // Offline diagnostic, reached only through the founder-only /api/dev surface. Scoped like
+        // everything else it composes; it writes nothing.
+        services.AddScoped<Application.Ranking.RetrievalRecallProbe>();
+        services.AddScoped<Application.Ranking.FeedStarvationDiagnostic>();
         services.AddScoped<Application.Ranking.FeedPaginator>();
         services.AddScoped<Application.Ranking.FeedRefreshCoordinator>();
         services.AddScoped<Application.Ingestion.TitleHydrator>();
@@ -152,15 +244,40 @@ public static class DependencyInjection
         services.AddScoped<IJobHandler, EnrichCatalogJobHandler>();
         services.AddScoped<IJobHandler, TrainJobHandler>();
         services.AddScoped<IJobHandler, EvaluateJobHandler>();
+        // The interleaving posture, resolved from the environment once per process. Singleton so
+        // every build in a process agrees on what the experiment is; off unless INTERLEAVE_ENABLED
+        // says otherwise, in which case nothing downstream behaves differently at all.
+        services.AddSingleton(Application.Ranking.Interleaving.InterleaveOptions.From(configuration));
         services.AddScoped<IJobHandler, BuildFeedJobHandler>();
         services.AddScoped<IJobHandler, RefreshAvailabilityJobHandler>();
+        services.AddScoped<IJobHandler, BuildDigestJobHandler>();
+        services.AddScoped<IJobHandler, BuildTasteNarrativeJobHandler>();
+        services.AddScoped<IJobHandler, PersonaliseTitlesJobHandler>();
+        services.AddScoped<IJobHandler, CrossReferenceJobHandler>();
+        services.AddScoped<IJobHandler, SeedCatalogJobHandler>();
+
+        // The catalogue's two daily ceilings. Scoped because both read the ledger through the
+        // request/job DbContext; the enrichment one also reads the recorder's un-flushed counters,
+        // which is why IPendingApiUsage is a singleton resolved into it rather than the reverse.
+        services.AddScoped<Application.Jobs.CatalogHydrationBudget>();
+        services.AddScoped<Application.Jobs.CatalogEnrichmentBudget>();
+        services.AddScoped<Application.Jobs.CatalogSeedProgressQuery>();
         services.AddHostedService<JobRunnerService>();
         services.AddHostedService<TraktDeltaPollService>();
         services.AddHostedService<NightlyReconcileService>();
         services.AddHostedService<CatalogGrowthService>();
+        services.AddHostedService<CatalogFollowThroughService>();
         services.AddHostedService<TitleLanguageBackfillService>();
         services.AddHostedService<TokenRefreshService>();
         services.AddHostedService<TraktOutboxDispatcherService>();
+        services.AddHostedService<WeeklyDigestService>();
+
+        // ── Web push + blend ─────────────────────────────────────────────────────────────
+        // Singleton: the VAPID pair must be provisioned once and shared; it scopes its own
+        // DbContext for the one-time load.
+        services.AddSingleton<Notifications.VapidKeyProvider>();
+        services.AddSingleton<Domain.Ports.IWebPushSender, Notifications.WebPushSender>();
+        services.AddScoped<Application.Blend.BlendService>();
 
         return services;
     }

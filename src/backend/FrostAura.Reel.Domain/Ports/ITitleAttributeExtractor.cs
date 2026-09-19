@@ -15,6 +15,17 @@ public interface ITitleAttributeExtractor
     string ModelId { get; }
 
     /// <summary>
+    /// The PROMPT generation this extractor speaks, stamped onto every row it writes and the
+    /// invalidation axis for stored attributes — the exact analogue of <c>FeatureSchema.Version</c>
+    /// for artifacts. A stored row whose version is below the running one is not wrong in shape,
+    /// it is wrong in MEANING (a value produced before a vocabulary closed, a scale re-anchored,
+    /// a field re-defined), and nothing about the row itself reveals that. Bumping this is what
+    /// forces re-extraction; the nightly sweep drains the backlog at the per-run cap so a bump
+    /// costs days of spend rather than one night of it.
+    /// </summary>
+    int Version { get; }
+
+    /// <summary>
     /// Extracts attributes for a batch. Result is row-aligned with <paramref name="inputs"/>;
     /// a null entry means that one title could not be extracted (the caller marks it Failed and
     /// retries later). Implementations must not throw for a single bad title — only for a

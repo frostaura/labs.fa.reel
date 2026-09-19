@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Persistence;
@@ -45,22 +46,22 @@ public class FullIngestJobHandler(
 
         if (phase == "movies")
         {
-            var count = await ingestor.IngestMoviesAsync(accountId, token, RatePriority.Interactive, ct);
-            await SaveWithCursorAsync(job, new Cursor("shows"), 25, $"{count} movies", ct);
+            var movies = await ingestor.IngestMoviesAsync(accountId, token, RatePriority.Interactive, ct);
+            await SaveWithCursorAsync(job, new Cursor("shows"), 25, $"{movies.Count} movies", ct);
             phase = "shows";
         }
 
         if (phase == "shows")
         {
-            var (shows, episodes) = await ingestor.IngestShowsAsync(accountId, token, RatePriority.Interactive, ct);
-            await SaveWithCursorAsync(job, new Cursor("ratings"), 55, $"{shows} shows · {episodes} episodes", ct);
+            var shows = await ingestor.IngestShowsAsync(accountId, token, RatePriority.Interactive, ct);
+            await SaveWithCursorAsync(job, new Cursor("ratings"), 55, $"{shows.Shows} shows · {shows.Episodes} episodes", ct);
             phase = "ratings";
         }
 
         if (phase == "ratings")
         {
-            var count = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.Interactive, ct);
-            await SaveWithCursorAsync(job, new Cursor("progress"), 80, $"{count} ratings", ct);
+            var ratings = await ingestor.IngestRatingsAsync(accountId, token, RatePriority.Interactive, ct);
+            await SaveWithCursorAsync(job, new Cursor("progress"), 80, $"{ratings.Count} ratings", ct);
             phase = "progress";
         }
 
@@ -111,7 +112,10 @@ public class FullIngestJobHandler(
             .CountAsync(m => m == MediaType.Show, ct);
         var ratingCount = await db.UserRatings.CountAsync(r => r.AccountId == accountId, ct);
 
-        PublishInsight(accountId, "library", $"Found {movieCount:N0} movies and {showCount:N0} shows in your history");
+        PublishInsight(
+            accountId,
+            "library",
+            string.Create(CultureInfo.InvariantCulture, $"Found {movieCount:N0} movies and {showCount:N0} shows in your history"));
 
         var lovedGenres = await db.UserRatings
             .Where(r => r.AccountId == accountId && r.Rating >= 8)
@@ -121,7 +125,12 @@ public class FullIngestJobHandler(
             .OrderByDescending(g => g.Count()).Take(2).Select(g => g.Key).ToList();
         if (topGenres.Count > 0)
         {
-            PublishInsight(accountId, "genre", $"You rate {string.Join(" and ", topGenres)} highest — {ratingCount:N0} ratings tell on you");
+            PublishInsight(
+                accountId,
+                "genre",
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"You rate {string.Join(" and ", topGenres)} highest — {ratingCount:N0} ratings tell on you"));
         }
 
         var decades = await db.UserRatings

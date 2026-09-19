@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
@@ -7,6 +8,7 @@ using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -62,9 +64,13 @@ public sealed class FeedPaginator(
     CandidateRetriever candidateRetriever,
     IModelEngine engine,
     OnlineResidualModel residualModel,
+    RatingCalibrationService calibration,
+    DislikeSignal dislikes,
     CandidateGenerator candidateGenerator,
     ITmdbClient tmdb,
     ISearchAgent agent,
+    PersonalisationContext personalisation,
+    CrossReference.RerankBudget rerankBudget,
     IMemoryCache cache,
     ILogger<FeedPaginator> logger)
 {
@@ -72,7 +78,35 @@ public sealed class FeedPaginator(
     // personalized pgvector ANN slice, so paging no longer re-ranks only the popular head.
     private const int WindowPopCount = 100;
     private const int WindowAnnCount = 90;
+
+    /// <summary>
+    /// Taste clusters a PAGINATED window may pull from. See the call site for why this is not the
+    /// full k: the paginator's p95 is a number a user is watching.
+    /// </summary>
+    private const int WindowMaxClusters = 3;
     private const int DeepenThreshold = 40; // usable window thinner than this → pull more from TMDB
+
+    /// <summary>
+    /// How long a page request may spend deepening from TMDB before it gives up and serves what it
+    /// already has. Deepening is an optimisation; the user waiting for the row is not.
+    /// </summary>
+    private static readonly TimeSpan DeepenBudget = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Soft budget, checked BETWEEN curation batches. The first batch is always allowed to finish:
+    /// a budget that can cancel mid-batch caches nothing, so every later request pays the same
+    /// timeout again and the row never warms — measured, a 4s cap against a ~7s batch pinned every
+    /// request at 4s for ever, which is worse in steady state than one slow request followed by
+    /// 46ms. Letting a batch complete guarantees forward progress: each page view caches what it
+    /// curated, so a row converges to warm.
+    /// </summary>
+    private static readonly TimeSpan CurationBudget = TimeSpan.FromSeconds(4);
+
+    /// <summary>
+    /// Hard ceiling on the whole curation pass, so a hung provider cannot hold the connection
+    /// indefinitely. Deliberately well above one batch — this is the backstop, not the budget.
+    /// </summary>
+    private static readonly TimeSpan CurationCeiling = TimeSpan.FromSeconds(20);
     private const int MaxDeepenPage = 25;
     private const int CurationBuffer = 8; // model-rank this many extra so the LLM has room to re-order
     private const int RerankBatch = 9;
@@ -116,10 +150,14 @@ public sealed class FeedPaginator(
         var minPredicted = await MinPredictedAsync(account.Id, ct);
         var exclude = req.ExcludeTitleIds.ToList();
         // Online residual head for this artifact, loaded once and added to every window score below.
-        var residual = await residualModel.LoadAsync(account.Id, artifact.Id, ct);
+        var residual = await residualModel.LoadAsync(account.Id, artifact, ct);
+        // The account's monotone predicted→actual map, applied after the residual so a paged-in card
+        // carries the same number the snapshot build would have given it.
+        var calibrator = await calibration.GetAsync(account.Id, ct);
 
         var pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-        var scored = await ScoreWindowAsync(artifact, taste, pool, minPredicted, residual, now, ct);
+        var all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
+        var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
 
         // Deepen on the USABLE (post-scoring, post-MinPredictedRating) count — not the raw retrieved
         // count. A high predicted-rating floor can gut a window that looked full: the old gate saw a
@@ -129,12 +167,49 @@ public sealed class FeedPaginator(
         // lazily when opened) and re-fetch + re-score.
         if (scored.Count < DeepenThreshold)
         {
-            var grew = await DeepenAsync(req, taste, account.Region, exclude.Count, ct);
+            // Time-boxed, because deepening is an OPTIONAL improvement to this page and the caller
+            // is a user waiting on a row. It reaches out to TMDB through a shared rate gate, so when
+            // that gate is busy — a catalogue-wide re-hydration, a burst of searches — a single lane
+            // can hold its connection for ten to twenty seconds. Measured at 6.8-12.1s per lane
+            // during exactly that. The browser then runs out of connections to the origin and
+            // UNRELATED requests queue behind it: opening a title took 4.9s while three of these
+            // were in flight, which reads as "the app is slow" rather than "this row is still
+            // filling".
+            //
+            // On timeout we keep whatever the window already held. A slightly shorter row is a much
+            // smaller harm than a page that appears frozen, and the next page request retries.
+            using var deepenCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deepenCts.CancelAfter(DeepenBudget);
+            var grew = 0;
+            try
+            {
+                grew = await DeepenAsync(req, taste, account.Region, exclude.Count, deepenCts.Token);
+            }
+            catch (OperationCanceledException) when (deepenCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                logger.LogInformation(
+                    "Feed page deepening for {Row} exceeded {Budget}s; serving the {Count} candidates already scored.",
+                    RowKey(req), DeepenBudget.TotalSeconds, scored.Count);
+            }
+
             if (grew > 0)
             {
                 pool = await FetchWindowAsync(account, req, exclude, taste, ct);
-                scored = await ScoreWindowAsync(artifact, taste, pool, minPredicted, residual, now, ct);
+                all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
+                scored = all.Where(s => s.Predicted >= minPredicted).ToList();
             }
+        }
+
+        // The floor is soft, exactly as in the feed build and in Ask Reel: when the window holds
+        // real candidates but none clear the account's MinPredictedRating, serving nothing tells the
+        // user the reel ended when it has not. Fall back to the best of what this lane actually has
+        // rather than reporting a false exhaustion.
+        if (scored.Count == 0 && all.Count > 0)
+        {
+            logger.LogInformation(
+                "Feed page relaxed the {Floor} predicted-rating floor for {Row}: none of {Count} candidates cleared it.",
+                minPredicted, RowKey(req), all.Count);
+            scored = all;
         }
 
         if (scored.Count == 0)
@@ -143,22 +218,74 @@ public sealed class FeedPaginator(
         }
 
         var boosts = await LoadPreferenceBoostsAsync(account.Id, scored, ct);
-        var ranked = await RankAsync(req, taste, scored, boosts, now, ct);
+        // The same account-level taste prior the snapshot build ranks by. Page 2 of a row is the
+        // same feed as page 1: a rule that keeps a no-history genre out of the hero and then lets it
+        // straight back in on scroll is not a rule, it is a delay. Ranking only — the card's
+        // PredictedRating below is untouched by it.
+        var prior = TastePrior.From(taste);
+        var ranked = await RankAsync(req, taste, scored, boosts, prior, now, ct);
+
+        // The rail's anchor (name + genres), loaded once: the curation prompt names it so the LLM
+        // can state the concrete link, and the templater fallback cites a genuinely shared genre.
+        AnchorInfo? anchor = null;
+        if (req.Context is FeedRowContext.BecauseYouLoved or FeedRowContext.Similar && req.AnchorTitleId is { } anchorTitleId)
+        {
+            anchor = await db.Titles
+                .Where(t => t.Id == anchorTitleId)
+                .Select(t => new AnchorInfo(t.Name, t.Genres))
+                .FirstOrDefaultAsync(ct);
+        }
 
         // LLM curation pass over the top slice: the model gives the personalised rating, the agent
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
-        var curated = await CurateAsync(account, req, taste, curationPool, ct);
+        var curated = await CurateAsync(account, req, taste, curationPool, prior, anchor?.Name, ct);
         var taken = curated.Take(req.Limit).ToList();
 
-        var modelWhy = await BuildWhyAsync(req, taste, taken.Select(c => c.Scored).ToList(), ct);
+        var whyContexts = await BuildWhyContextsAsync(taste, taken.Select(c => c.Scored).ToList(), anchor, ct);
         await PersistScoresAsync(account.Id, artifact.Id, taken.Select(c => c.Scored).ToList(), now, ct);
 
-        return taken.Select(c => new ScoredFeedItem(
-            c.Scored.Title, Math.Round(c.Scored.Predicted, 1),
-            // The agent's line is the curated voice; fall back to the model's contribution sentence.
-            !string.IsNullOrWhiteSpace(c.Why) ? c.Why! : modelWhy.GetValueOrDefault(c.Scored.Title.Id, "Strong fit with your taste profile."),
-            IsReleased(c.Scored.Title, now))).ToList();
+        // Output guard + no-repeat: a cached/LLM line that leaks third person, opens with the
+        // banned "Because you loved", argues against its own pick, or exactly repeats an earlier
+        // card on this page is discarded for the deterministic templater sentence — which itself
+        // re-seeds until distinct.
+        var takenWhys = new HashSet<string>(StringComparer.Ordinal);
+        var genericUsed = false;
+        var items = new List<ScoredFeedItem>(taken.Count);
+        foreach (var c in taken)
+        {
+            string why;
+            if (!string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.Rejects(c.Why)
+                && !SecondPersonVoice.SoundsAntiRecommendation(c.Why) && takenWhys.Add(c.Why!))
+            {
+                why = c.Why!;
+            }
+            else if (whyContexts.TryGetValue(c.Scored.Title.Id, out var whyContext))
+            {
+                why = ExplanationTemplater.BuildDistinctSentence(whyContext, takenWhys);
+            }
+            else
+            {
+                why = ExplanationTemplater.GenericFallback;
+            }
+
+            // The generic fallback may appear at most once per page: a later card with nothing
+            // verifiable to say ships an empty why rather than repeating boilerplate.
+            if (string.Equals(why, ExplanationTemplater.GenericFallback, StringComparison.Ordinal))
+            {
+                why = genericUsed ? string.Empty : why;
+                genericUsed = true;
+            }
+
+            // 2 dp, matching BuildFeedJobHandler.DisplayRating and the exposure log. Page 2+ is the
+            // same feed as page 1, so it must not be the one surface that quantises coarser: a
+            // calibration join across FeedItem, TitleScore and ExposureLog would inherit the floor
+            // from whichever side is coarsest. Invisible to users — the badge is toFixed(1).
+            items.Add(new ScoredFeedItem(
+                c.Scored.Title, Math.Round(c.Scored.Predicted, 2), why, IsReleased(c.Scored.Title, now)));
+        }
+
+        return items;
     }
 
     /// <summary>
@@ -168,7 +295,9 @@ public sealed class FeedPaginator(
     /// is batched and concurrency-bounded. Degrades to the pure model order if the agent is
     /// unavailable or errors — the cards are already personalised, curation only sharpens them.
     /// </summary>
-    private async Task<List<Curated>> CurateAsync(Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool, CancellationToken ct)
+    private async Task<List<Curated>> CurateAsync(
+        Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool,
+        TastePrior prior, string? anchorName, CancellationToken ct)
     {
         if (!agent.IsAvailable || pool.Count == 0)
         {
@@ -191,36 +320,72 @@ public sealed class FeedPaginator(
             }
         }
 
+        // The family ceiling. Curation SHARPENS an order the model has already personalised, so a
+        // page that ships without it is a slightly worse order and not a wrong one — the same way
+        // the agent-unavailable and rerank-failed paths already behave. This is a request path, so
+        // it gets the full ceiling rather than the background fraction.
         if (uncached.Count > 0)
         {
-            var tasteSummary = await BuildTasteSummaryAsync(taste, ct);
-            await CurationGate.WaitAsync(ct);
-            try
+            var allowance = await rerankBudget.AllowanceAsync(account.Id, ct);
+            if (!allowance.HasHeadroom)
             {
-                for (var i = 0; i < uncached.Count; i += RerankBatch)
-                {
-                    var batch = uncached.Skip(i).Take(RerankBatch).ToList();
-                    IReadOnlyList<RerankResult> results;
-                    try
-                    {
-                        results = await agent.RerankBatchAsync(batch, query, tasteSummary, ct);
-                    }
-                    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-                    {
-                        logger.LogWarning(ex, "Feed curation rerank failed for {Row}; falling back to model order.", rowKey);
-                        break;
-                    }
+                logger.LogInformation(
+                    "Feed curation for {Row} skipped: the re-rank family ceiling is spent ({Allowance}). "
+                    + "The page serves model order and is curated on a later day.",
+                    rowKey, allowance.Describe());
+                uncached.Clear();
+            }
+        }
 
+        if (uncached.Count > 0)
+        {
+            // Time-boxed for the same reason deepening is: this is an LLM round-trip on the critical
+            // path of a row the user is waiting for, and the fit cache is an in-process IMemoryCache
+            // that every deploy empties. Measured after a restart, a cold lane took 13.4s; the same
+            // lane once warm takes 46ms. Three cold lanes in flight exhaust the browser's
+            // connections to the origin and stall unrelated requests — a title detail that answers
+            // in 20ms took 4.9s behind them.
+            //
+            // Curation only SHARPENS an order the model has already personalised, so a page that
+            // ships without it is a slightly worse order, not a wrong one — which is exactly how
+            // the existing agent-unavailable and rerank-failed paths already behave. Whatever
+            // batches completed inside the budget are still applied and cached, so the next page
+            // over the same titles is warm.
+            //
+            // The budget/ceiling/first-batch mechanics themselves live in LlmBudgetLoop — one copy
+            // shared with the feed why pass, Ask Reel's rerank stream and lens generation.
+            using var loop = new LlmBudgetLoop(
+                new LlmBudgetOptions(CurationBudget, CurationCeiling, RerankBatch, CurationGate), ct);
+            var narrative = await personalisation.ContextForAsync(account.Id, taste, ct);
+
+            if (!await loop.TryAcquireGateAsync())
+            {
+                // Every slot is busy and the budget expired before one freed. Fall through rather
+                // than returning early: whatever fits were already cached still apply, and the
+                // blend/ordering below is the single place that decides final order.
+                logger.LogInformation(
+                    "Feed curation for {Row} gave up waiting for a slot within {Budget}s; serving model order.",
+                    rowKey, CurationBudget.TotalSeconds);
+            }
+            else
+            {
+                var stop = await loop.RunAsync(uncached, async (batch, batchCt) =>
+                {
+                    var results = await agent.RerankBatchAsync(
+                        batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
                     foreach (var r in results)
                     {
                         fitById[r.TitleId] = r;
                         cache.Set(FitKey(account.Id, r.TitleId, rowKey), r, FitTtl);
                     }
+                });
+
+                if (stop != LlmBudgetStop.Completed)
+                {
+                    logger.LogInformation(
+                        "Feed curation for {Row} stopped ({Stop}) after {Elapsed:0.0}s with {Done} of {Total} titles curated; the rest keep model order and are curated on a later page.",
+                        rowKey, stop, loop.Elapsed.TotalSeconds, fitById.Count, pool.Count);
                 }
-            }
-            finally
-            {
-                CurationGate.Release();
             }
         }
 
@@ -232,7 +397,13 @@ public sealed class FeedPaginator(
             .Select(s =>
             {
                 var fit = fitById.GetValueOrDefault(s.Title.Id);
-                var modelNorm = (double)s.Predicted / 10d;
+                // The prior rides the MODEL side of the blend, not the fit side: it is a statement
+                // about this account's evidence, which is exactly what the FastTree half is supposed
+                // to represent and the agent's genre-level judgment cannot see. Folding it in here
+                // rather than only in RankAsync is load-bearing — this blend RE-ORDERS the pool, so
+                // a prior applied only upstream would decide which titles are curated and then be
+                // thrown away deciding which are shown.
+                var modelNorm = (double)s.Predicted * prior.MultiplierFor(s.Title) / 10d;
                 var blend = fit is null ? modelNorm : (0.6 * modelNorm) + (0.4 * fit.Fit);
                 return (Scored: s, Fit: fit, Blend: blend);
             })
@@ -241,36 +412,15 @@ public sealed class FeedPaginator(
             .ToList();
     }
 
-    private async Task<string> BuildTasteSummaryAsync(FeatureVectorBuilder.TasteState taste, CancellationToken ct)
-    {
-        var topGenres = taste.GenreRatings
-            .OrderByDescending(kv => kv.Value.Count).Take(4).Select(kv => kv.Key).ToList();
-        var loved = await db.Titles
-            .Where(t => taste.TopLovedTitleIds.Contains(t.Id)).Select(t => t.Name).Take(4).ToListAsync(ct);
-
-        var parts = new List<string>();
-        if (topGenres.Count > 0)
-        {
-            parts.Add("favours " + string.Join(", ", topGenres));
-        }
-
-        if (loved.Count > 0)
-        {
-            parts.Add("loves " + string.Join(", ", loved));
-        }
-
-        return parts.Count > 0 ? string.Join("; ", parts) : "no strong signal yet";
-    }
-
     private static string QueryFor(MoreFeedRequest req) => req.Context switch
     {
-        FeedRowContext.Hero => "the best titles to watch tonight",
-        FeedRowContext.Genre => $"great {req.Genre?.Replace('-', ' ')} titles",
-        FeedRowContext.BecauseYouLoved => "titles in the same vein as ones they loved",
-        FeedRowContext.Similar => "titles a lot like the one they're looking at",
-        FeedRowContext.DeepCuts => "under-the-radar hidden gems they'd rate highly",
-        FeedRowContext.NewForYou => "recent releases worth their time",
-        _ => "titles personalised to their taste",
+        FeedRowContext.Hero => "the best titles for you to watch tonight",
+        FeedRowContext.Genre => $"great {req.Genre?.Replace('-', ' ')} titles for you",
+        FeedRowContext.BecauseYouLoved => "titles in the same vein as ones you loved",
+        FeedRowContext.Similar => "titles a lot like the one you're looking at",
+        FeedRowContext.DeepCuts => "under-the-radar hidden gems you'd rate highly",
+        FeedRowContext.NewForYou => "recent releases worth your time",
+        _ => "titles personalised to your taste",
     };
 
     private static string RowKey(MoreFeedRequest req) => req.Context switch
@@ -281,7 +431,36 @@ public sealed class FeedPaginator(
         _ => req.Context.ToString().ToLowerInvariant(),
     };
 
-    private static string FitKey(Guid accountId, Guid titleId, string rowKey) => $"feedfit:{accountId}:{titleId}:{rowKey}";
+    /// <summary>
+    /// Row keys for the SNAPSHOT rows, kept format-identical to <see cref="RowKey"/> (and therefore
+    /// to <see cref="FitKey"/>) on purpose: the feed build's why pass and this paginator's curation
+    /// pass share one 6h fit cache, so a rail warmed at build time serves its later pages without
+    /// re-spending, and vice versa. Stable per (rowKind, anchor) across rebuilds.
+    /// <para>Public rather than internal because the exposure log records this exact string as a
+    /// card's <c>RowKey</c> from the API layer too. A second copy of the format in another assembly
+    /// is how a rail's cache key and its exposure key start disagreeing about which rail it was.</para>
+    /// </summary>
+    public static string RowKeyFor(Domain.Feed.FeedRowKind row, Guid? anchorTitleId) => row switch
+    {
+        Domain.Feed.FeedRowKind.BecauseYouLoved => $"loved:{anchorTitleId}",
+        Domain.Feed.FeedRowKind.Hero => "hero",
+        Domain.Feed.FeedRowKind.DeepCuts => "deepcuts",
+        Domain.Feed.FeedRowKind.NewForYou => "newforyou",
+        _ => row.ToString().ToLowerInvariant(),
+    };
+
+    /// <summary>The row-intent phrasing for a snapshot row — mirrors <see cref="QueryFor"/> so the
+    /// build-time why pass asks the agent the same stable question the paginated path asks.</summary>
+    internal static string QueryForRow(Domain.Feed.FeedRowKind row) => row switch
+    {
+        Domain.Feed.FeedRowKind.Hero => "the best titles for you to watch tonight",
+        Domain.Feed.FeedRowKind.BecauseYouLoved => "titles in the same vein as ones you loved",
+        Domain.Feed.FeedRowKind.DeepCuts => "under-the-radar hidden gems you'd rate highly",
+        Domain.Feed.FeedRowKind.NewForYou => "recent releases worth your time",
+        _ => "titles personalised to your taste",
+    };
+
+    internal static string FitKey(Guid accountId, Guid titleId, string rowKey) => $"feedfit:{accountId}:{titleId}:{rowKey}";
 
     /// <summary>The active browse-filter medium as an enum, or null for "all". Anything unrecognised
     /// (including "all") maps to null so the window and deepen stay both-media.</summary>
@@ -343,7 +522,14 @@ public sealed class FeedPaginator(
             annCount: WindowAnnCount,
             maturityCeiling: account.Settings.MaturityCeiling,
             ct,
-            ignoreGenreFilters: IgnoresGenreFilters(req));
+            ignoreGenreFilters: IgnoresGenreFilters(req),
+            // Three clusters, not the full k. This is a REQUEST path and a home load fires every
+            // rail at once: at k = 9 that is six rails × nine exact pgvector scans over a
+            // lane-restricted id set, which HNSW cannot serve. Three keeps the account's heaviest
+            // pockets represented on page 2 — a rail that ranked by one taste on page 1 and another
+            // on page 2 is not a rail — at a cost the browser is willing to wait for. The feed BUILD,
+            // which is a background job with a minute's box, passes the full k.
+            maxClusters: WindowMaxClusters);
     }
 
     /// <summary>
@@ -427,13 +613,16 @@ public sealed class FeedPaginator(
     }
 
     /// <summary>
-    /// Builds vectors for the window, scores them through the request-path model cache, and keeps
-    /// only titles clearing the account's MinPredictedRating floor. Extracted so the deepen decision
-    /// can gate on the USABLE post-floor count and re-run identically after growing the catalog.
+    /// Builds vectors for the window and scores them through the request-path model cache. Returns
+    /// EVERY scored title — the caller applies the MinPredictedRating floor, so it can tell "this
+    /// lane is empty" apart from "this lane is full but nothing cleared the floor" and relax rather
+    /// than report a false exhaustion. Extracted so the deepen decision can gate on the usable
+    /// post-floor count and re-run identically after growing the catalog.
     /// </summary>
     private async Task<List<Scored>> ScoreWindowAsync(
         ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
-        IReadOnlyList<Title> pool, decimal minPredicted, OnlineResidualModel.ResidualState residual, DateTime now, CancellationToken ct)
+        IReadOnlyList<Title> pool, OnlineResidualModel.ResidualState residual, RatingCalibrator calibrator,
+        DateTime now, CancellationToken ct)
     {
         if (pool.Count == 0)
         {
@@ -451,20 +640,34 @@ public sealed class FeedPaginator(
             artifact.Id, artifact.ArtifactBytes,
             scorable.Select(t => vectors[t.Id]).ToArray(), FeatureSchema.AllNames());
 
+        // Same dislike demotion as the snapshot build and OnDemandScorer — a paged-in card must
+        // not ignore a dislike the rest of the feed honours. Profile is ~10-min cached, so the
+        // per-window cost is three id-batched lookups.
+        var profile = await dislikes.GetProfileAsync(artifact.AccountId, ct);
+        var demotions = await dislikes.DemotionsForAsync(
+            profile, scorable.Select(t => t.Id).ToList(), ct);
+
         return scorable.Zip(rows, (title, row) =>
             {
-                var adjusted = row.Score + OnlineResidualModel.Residual(residual.Weights, residual.Bias, vectors[title.Id]);
-                return new Scored(title, row, Math.Clamp((decimal)adjusted, 0m, 10m));
+                // base + residual → calibrator → demotion: the same fixed order as the snapshot
+                // build and OnDemandScorer. The pre-calibration value and the map's delta ride along
+                // for the exposure log, and are never written to a column.
+                var adjusted = row.Score + OnlineResidualModel.Residual(residual, vectors[title.Id]);
+                var calibrated = calibrator.Calibrate(adjusted);
+                var predicted = DislikeSignal.ApplyDemotion(
+                    (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
+                return new Scored(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
             })
-            .Where(s => s.Predicted >= minPredicted)
             .ToList();
     }
 
     /// <summary>Pull another TMDB page into the catalog for this lane. Returns rows newly created.</summary>
     private async Task<int> DeepenAsync(MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, string region, int seenCount, CancellationToken ct)
     {
-        // Walk deeper into TMDB as the user scrolls: each ~20 cards seen advances a page.
-        var page = Math.Clamp(2 + seenCount / 20, 2, MaxDeepenPage);
+        // Walk deeper into TMDB as the user scrolls: each ~20 cards seen advances a page. The
+        // arithmetic lives in DiscoveryPaging, which the feed BUILD now reads from too — it used to
+        // exist only here, which is why the build read page 1 for ever.
+        var page = DiscoveryPaging.DeepenPage(seenCount, MaxDeepenPage);
         // Media-aware deepen: a "Movies" lane pulls ONLY movies from TMDB (and vice versa), so a thin
         // movies lane grows with movies instead of half its deepen budget landing shows the media
         // window would then drop. Null medium keeps the original both-media behaviour.
@@ -562,9 +765,10 @@ public sealed class FeedPaginator(
 
     private async Task<List<Scored>> RankAsync(
         MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> scored,
-        IReadOnlyDictionary<Guid, double> boosts, DateTime now, CancellationToken ct)
+        IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, DateTime now, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
+        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t);
 
         switch (req.Context)
         {
@@ -572,10 +776,10 @@ public sealed class FeedPaginator(
             // anchor-embedding cosine × predicted — the same blend, differing only in which title is
             // the anchor (a loved title vs the one being viewed).
             case FeedRowContext.BecauseYouLoved when req.AnchorTitleId is { } lovedAnchorId:
-                return await RankByAnchorSimilarityAsync(lovedAnchorId, scored, boosts, ct);
+                return await RankByAnchorSimilarityAsync(lovedAnchorId, scored, boosts, prior, ct);
 
             case FeedRowContext.Similar when req.AnchorTitleId is { } viewedAnchorId:
-                return await RankByAnchorSimilarityAsync(viewedAnchorId, scored, boosts, ct);
+                return await RankByAnchorSimilarityAsync(viewedAnchorId, scored, boosts, prior, ct);
 
             case FeedRowContext.DeepCuts:
                 {
@@ -584,16 +788,16 @@ public sealed class FeedPaginator(
                         ? ordered[ordered.Count * 7 / 10].Title.TmdbPopularity ?? 0m : 0m;
                     return scored
                         .Where(s => s.Predicted >= 6m && (s.Title.TmdbPopularity ?? 0m) <= threshold)
-                        .OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id))
+                        .OrderByDescending(s => (double)s.Predicted * Weight(s.Title))
                         .ToList();
                 }
 
             case FeedRowContext.Hero:
             case FeedRowContext.NewForYou:
-                return scored.OrderByDescending(s => (double)s.Predicted * (double)Freshness(s.Title, now) * Boost(s.Title.Id)).ToList();
+                return scored.OrderByDescending(s => (double)s.Predicted * (double)Freshness(s.Title, now) * Weight(s.Title)).ToList();
 
             default:
-                return scored.OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id)).ToList();
+                return scored.OrderByDescending(s => (double)s.Predicted * Weight(s.Title)).ToList();
         }
     }
 
@@ -606,14 +810,15 @@ public sealed class FeedPaginator(
     /// Shared by the home "because you loved" rail and the detail "more like this" rail.
     /// </summary>
     private async Task<List<Scored>> RankByAnchorSimilarityAsync(
-        Guid anchorId, List<Scored> scored, IReadOnlyDictionary<Guid, double> boosts, CancellationToken ct)
+        Guid anchorId, List<Scored> scored, IReadOnlyDictionary<Guid, double> boosts, TastePrior prior, CancellationToken ct)
     {
         double Boost(Guid id) => boosts.TryGetValue(id, out var b) ? b : 1d;
+        double Weight(Title t) => Boost(t.Id) * prior.MultiplierFor(t);
 
         var anchor = await db.Titles.FirstOrDefaultAsync(t => t.Id == anchorId, ct);
         if (anchor is null)
         {
-            return scored.OrderByDescending(s => (double)s.Predicted * Boost(s.Title.Id)).ToList();
+            return scored.OrderByDescending(s => (double)s.Predicted * Weight(s.Title)).ToList();
         }
 
         var embIds = scored.Select(s => s.Title.Id).Append(anchorId).ToList();
@@ -626,7 +831,7 @@ public sealed class FeedPaginator(
         return scored
             .Select(s => (s, sim: Sim(s.Title)))
             .Where(x => x.sim > 0.15d)
-            .OrderByDescending(x => (double)x.s.Predicted * (0.5 + x.sim) * Boost(x.s.Title.Id))
+            .OrderByDescending(x => (double)x.s.Predicted * (0.5 + x.sim) * Weight(x.s.Title))
             .Select(x => x.s)
             .ToList();
     }
@@ -683,43 +888,36 @@ public sealed class FeedPaginator(
         return best;
     }
 
-    private async Task<Dictionary<Guid, string>> BuildWhyAsync(MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> taken, CancellationToken ct)
+    /// <summary>
+    /// Builds each taken title's fully-verified templater context: role-matched user-rated people,
+    /// rated genres, the rail's anchor with a genuinely shared genre, and the title's LLM-derived
+    /// tone (used by the templater only when it passes the closed vocabulary — rows extracted
+    /// before vocabulary enforcement carry polluted labels). Returned as contexts, not sentences,
+    /// so the caller's no-repeat guard can re-seed a collision.
+    /// </summary>
+    private async Task<Dictionary<Guid, ExplanationTemplater.Context>> BuildWhyContextsAsync(
+        FeatureVectorBuilder.TasteState taste, List<Scored> taken, AnchorInfo? anchor, CancellationToken ct)
     {
         var titleIds = taken.Select(s => s.Title.Id).ToList();
-        var credits = await db.TitleCredits
-            .Where(c => titleIds.Contains(c.TitleId))
-            .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.PersonId, c.Role, p.Name })
-            .ToListAsync(ct);
         // Per-title, per-role best-affinity person among people the user has actually rated (count ≥ 2),
         // so the templater names the person matching each contribution's role and never invents a name.
-        var personsByTitle = credits
-            .Where(c => taste.PersonRatings.TryGetValue(c.PersonId, out var r) && r.Count >= 2)
-            .GroupBy(c => c.TitleId)
-            .ToDictionary(
-                g => g.Key,
-                g => (IReadOnlyDictionary<CreditRole, ExplanationTemplater.PersonAffinity>)g
-                    .GroupBy(c => c.Role)
-                    .ToDictionary(
-                        rg => rg.Key,
-                        rg => rg
-                            .Select(c => new ExplanationTemplater.PersonAffinity(
-                                c.Name, TasteMath.ShrunkenMean(taste.PersonRatings[c.PersonId], taste.UserMean)))
-                            .OrderByDescending(p => p.Affinity)
-                            .First()));
+        // Single-sourced in VerifiedPeople, shared with the feed builder and the title endpoint.
+        var personsByTitle = VerifiedPeople.BestByRole(await VerifiedPeople.ForTitlesAsync(db, taste, titleIds, ct));
 
-        string? anchorName = null;
-        if (req.Context is FeedRowContext.BecauseYouLoved or FeedRowContext.Similar && req.AnchorTitleId is { } anchorId)
-        {
-            anchorName = await db.Titles.Where(t => t.Id == anchorId).Select(t => t.Name).FirstOrDefaultAsync(ct);
-        }
+        var toneByTitle = await db.TitleAttributes
+            .Where(a => titleIds.Contains(a.TitleId) && a.Tone != null)
+            .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct);
 
-        var result = new Dictionary<Guid, string>(taken.Count);
+        var anchorGenres = anchor?.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<Guid, ExplanationTemplater.Context>(taken.Count);
         foreach (var s in taken)
         {
             var persons = personsByTitle.GetValueOrDefault(s.Title.Id) ?? ExplanationTemplater.NoPersons;
             var ratedGenres = s.Title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet();
-            result[s.Title.Id] = ExplanationTemplater.BuildSentence(new ExplanationTemplater.Context(
-                s.Title, s.Row.TopContributions, persons, ratedGenres, anchorName));
+            var sharedGenre = anchorGenres is null ? null : s.Title.Genres.FirstOrDefault(anchorGenres.Contains);
+            result[s.Title.Id] = new ExplanationTemplater.Context(
+                s.Title, s.Row.TopContributions, persons, ratedGenres, anchor?.Name,
+                sharedGenre, toneByTitle.GetValueOrDefault(s.Title.Id));
         }
 
         return result;
@@ -822,7 +1020,17 @@ public sealed class FeedPaginator(
         return union == 0 ? 0d : (double)intersection / union;
     }
 
-    private sealed record Scored(Title Title, ScoredRow Row, decimal Predicted);
+    /// <summary>The rail's anchor as the why-lines need it: its name and its genres.</summary>
+    private sealed record AnchorInfo(string Name, string[] Genres);
+
+    /// <summary>
+    /// One scored title in a page window. <paramref name="Predicted"/> is what the user sees;
+    /// <paramref name="BaseScore"/> is the pre-calibration value (base model + online residual) and
+    /// <paramref name="CalibrationDelta"/> how far the calibrator moved it — carried for the exposure
+    /// log the closed-loop work lands next, never persisted as a column.
+    /// </summary>
+    private sealed record Scored(
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
 
     /// <summary>A model-scored title after the LLM curation pass — Why is the agent's line, or null.</summary>
     private sealed record Curated(Scored Scored, string? Why);

@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -35,7 +36,10 @@ public class OpenRouterAttributeExtractor(
     HttpClient httpClient,
     ApiUsageRecorder usageRecorder,
     IConfiguration configuration,
-    ILogger<OpenRouterAttributeExtractor> logger)
+    ILogger<OpenRouterAttributeExtractor> logger,
+    // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
+    // every real code path, but the adapter must still be `new`-able in tests without a scope.
+    IAccountContext? accountContext = null)
     : ITitleAttributeExtractor
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -50,26 +54,13 @@ public class OpenRouterAttributeExtractor(
     ];
 
     /// <summary>
-    /// Closed tone vocabulary. Free-text here would let the model mint a new label per title,
-    /// so the column stops being a taxonomy and becomes noise. The deterministic stub's three
-    /// values ("brooding", "playful", "balanced") are members, so both modes share one vocabulary.
+    /// The closed tone/era vocabularies now live in <see cref="Domain.Catalog.AttributeVocabulary"/>
+    /// so the why-line templater can verify a stored Tone against the same list this extractor
+    /// enforces on the provider. These aliases keep the extractor reading as before.
     /// </summary>
-    private static readonly string[] ToneVocabulary =
-    [
-        "bleak", "brooding", "melancholic", "tense", "gritty", "earnest", "contemplative",
-        "dreamlike", "balanced", "wry", "satirical", "playful", "whimsical", "warm",
-        "uplifting", "exhilarating",
-    ];
+    private static readonly string[] ToneVocabulary = Domain.Catalog.AttributeVocabulary.Tones;
 
-    /// <summary>
-    /// Closed era vocabulary, likewise a superset of the stub's ("period", "modern",
-    /// "contemporary", "unknown").
-    /// </summary>
-    private static readonly string[] EraVocabulary =
-    [
-        "prehistoric", "ancient", "medieval", "period", "19th-century", "early-20th-century",
-        "mid-20th-century", "modern", "contemporary", "near-future", "far-future", "timeless", "unknown",
-    ];
+    private static readonly string[] EraVocabulary = Domain.Catalog.AttributeVocabulary.Eras;
 
     /// <summary>A scalar may overshoot the bounds by this much (float formatting) before it reads as a scale error.</summary>
     private const decimal RangeTolerance = 0.005m;
@@ -109,6 +100,25 @@ public class OpenRouterAttributeExtractor(
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
         : configuration["OPENROUTER_MODEL"] ?? "openai/gpt-5.4-mini";
+
+    /// <summary>
+    /// The prompt generation stamped on every row this adapter writes. Bump it whenever a change
+    /// here alters what a stored value MEANS, never for a change that only alters how the answer
+    /// is obtained (a retry strategy, a token budget, a transport fix).
+    /// <para>
+    /// <b>v1 → v2 (2026-09-09).</b> The 2026-08-07 prompt closed the Tone and Era vocabularies and
+    /// began enforcing them through <c>json_schema</c>. Rows written before that carry free-text
+    /// labels: 2,312 pre-vocabulary rows hold <b>215 distinct Tone</b> and <b>97 distinct Era</b>
+    /// values against vocabularies of 16 and 13. Those are not merely untidy — the why-line
+    /// templater verifies a stored Tone against the closed list and silently drops anything else,
+    /// so a pre-vocabulary row reads as "no tone" everywhere downstream while looking Done in the
+    /// table. Only re-extraction fixes them, and until this constant existed nothing could ask
+    /// for it: the handler hard-coded <c>ExtractorVersion = 1</c> and no sweep ever read it back.
+    /// </para>
+    /// </summary>
+    public const int CurrentExtractorVersion = 2;
+
+    public int Version => CurrentExtractorVersion;
 
     public async Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
         IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
@@ -214,10 +224,14 @@ public class OpenRouterAttributeExtractor(
         TitleAttributeInput input, string? repairHint, bool compact, CancellationToken ct)
     {
         var strict = _strictSchemaSupported;
+
+        // Recorded in a finally, AFTER the response: the counts live in the response body, so the
+        // old record-then-send ordering could never see them. The finally keeps every HTTP attempt
+        // counted — including the ones that fail before a body exists, which then read as
+        // "unknown tokens" rather than "free".
+        OpenRouterUsage? usage = null;
         try
         {
-            usageRecorder.Record(ApiProvider.OpenRouter);
-
             using var request = BuildRequest(input, repairHint, compact, strict);
             using var response = await httpClient.SendAsync(request, ct);
 
@@ -244,6 +258,7 @@ public class OpenRouterAttributeExtractor(
             }
 
             var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
+            usage = dto?.Usage;
             var choice = dto?.Choices?.FirstOrDefault();
             var content = choice?.Message?.Content;
             if (string.IsNullOrWhiteSpace(content))
@@ -267,6 +282,16 @@ public class OpenRouterAttributeExtractor(
         {
             logger.LogWarning(ex, "Attribute extraction failed for {Title} ({TitleId}).", input.Name, input.TitleId);
             return AttemptOutcome.Failed(ExtractionFailure.Transport, [ex.GetType().Name]);
+        }
+        finally
+        {
+            usageRecorder.Record(
+                ApiProvider.OpenRouter,
+                ApiUsagePurpose.ExtractAttributes,
+                ModelId,
+                accountContext?.AccountId,
+                usage?.PromptTokens,
+                usage?.CompletionTokens);
         }
     }
 
@@ -606,7 +631,7 @@ public class OpenRouterAttributeExtractor(
             new(null, failure, problems);
     }
 
-    private sealed record ChatResponse(ChatChoice[]? Choices);
+    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 
     private sealed record ChatChoice(ChatMessage? Message, [property: JsonPropertyName("finish_reason")] string? FinishReason);
 

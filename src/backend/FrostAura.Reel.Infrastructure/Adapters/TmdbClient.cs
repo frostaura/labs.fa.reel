@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -34,13 +35,24 @@ public class TmdbClient(
     /// <summary>Ceiling on a single backoff — a hostile Retry-After must not park a background job for an hour.</summary>
     private static readonly TimeSpan MaxThrottleDelay = TimeSpan.FromSeconds(30);
 
+    /// <summary>The concept firehose's own vote-count floor, overridable per call — see the note in
+    /// <see cref="DiscoverByConceptAsync"/>.</summary>
+    private const int DefaultConceptVoteCount = 10;
+
+    /// <summary>TMDB <c>release_dates</c> type 3 = Theatrical — the preferred certification source.</summary>
+    private const int TheatricalReleaseType = 3;
+
     public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
-        GetDetailsAsync($"movie/{tmdbId}?append_to_response=credits,videos,keywords", ct);
+        // release_dates carries the per-region age certification. Appended rather than fetched
+        // separately: TMDB allows up to 20 sub-requests on append_to_response, so certification for
+        // the whole catalogue costs exactly zero additional HTTP calls.
+        GetDetailsAsync($"movie/{tmdbId}?append_to_response=credits,videos,keywords,release_dates", ct);
 
     public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) =>
         // aggregate_credits = the full series regulars (across seasons), not one episode's cast —
         // far better signal for cast/crew affinity than plain credits.
-        GetDetailsAsync($"tv/{tmdbId}?append_to_response=aggregate_credits,videos,keywords", ct);
+        // content_ratings is the TV analogue of release_dates: a flat region → rating list.
+        GetDetailsAsync($"tv/{tmdbId}?append_to_response=aggregate_credits,videos,keywords,content_ratings", ct);
 
     public async Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
         bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default)
@@ -55,7 +67,7 @@ public class TmdbClient(
         if (releasedAfter is { } after)
         {
             var dateField = movies ? "primary_release_date" : "first_air_date";
-            query += $"&{dateField}.gte={after:yyyy-MM-dd}";
+            query += string.Create(CultureInfo.InvariantCulture, $"&{dateField}.gte={after:yyyy-MM-dd}");
         }
 
         if (movies && region is { Length: 2 })
@@ -66,11 +78,43 @@ public class TmdbClient(
         return await GetListAsync(path + query, movies, RatePriority.Reconcile, ct);
     }
 
+    public async Task<TmdbDiscoverPage> DiscoverSeedPageAsync(
+        bool movies, int year, int minVoteCount, int page, CancellationToken ct = default)
+    {
+        var path = movies ? "discover/movie" : "discover/tv";
+        var dateField = movies ? "primary_release_date" : "first_air_date";
+
+        // Every number and date here is written invariant, and this is one of the sites where a
+        // comma decimal separator or a Hijri year would not fail — TMDB IGNORES a parameter it
+        // cannot parse and returns a valid, unfiltered, unpartitioned page. That page would sail
+        // past the 500-page wall silently and the walk would seed a different corpus than the plan
+        // describes. Composed from ints via an invariant interpolated string for exactly that reason.
+        var query = string.Create(CultureInfo.InvariantCulture, $"?sort_by=vote_count.desc&include_adult=false&page={page}")
+            + string.Create(CultureInfo.InvariantCulture, $"&vote_count.gte={minVoteCount}")
+            + string.Create(CultureInfo.InvariantCulture, $"&{dateField}.gte={year:0000}-01-01")
+            + string.Create(CultureInfo.InvariantCulture, $"&{dateField}.lte={year:0000}-12-31");
+
+        // Backfill: the lowest lane there is, so a catalogue-wide walk can never make a live search
+        // or a feed build wait on the shared 40/sec gate.
+        using var response = await SendAsync(path + query, RatePriority.Backfill, ct, ApiUsagePurpose.Seed);
+        response.EnsureSuccessStatusCode();
+        var dto = await response.Content.ReadFromJsonAsync<ListDto>(JsonOptions, ct);
+
+        return new TmdbDiscoverPage(
+            Project(dto?.Results, movies),
+            dto?.Page > 0 ? dto.Page : page,
+            dto?.TotalPages ?? 0,
+            dto?.TotalResults ?? 0);
+    }
+
     public Task<IReadOnlyList<TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default) =>
         GetListAsync(movies ? "trending/movie/week" : "trending/tv/week", movies, RatePriority.Reconcile, ct);
 
     public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
         GetListAsync($"{(movies ? "movie" : "tv")}/{tmdbId}/recommendations", movies, RatePriority.Reconcile, ct);
+
+    public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+        GetListAsync($"{(movies ? "movie" : "tv")}/{tmdbId}/similar", movies, RatePriority.Reconcile, ct);
 
     public async Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default)
     {
@@ -176,12 +220,16 @@ public class TmdbClient(
         bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
         string? region, DateTime? releasedAfter, int page,
         IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-        DateTime? releasedBefore = null, CancellationToken ct = default)
+        DateTime? releasedBefore = null, int? maxRuntimeMinutes = null,
+        TmdbDiscoverOptions? options = null, CancellationToken ct = default)
     {
         var path = movies ? "discover/movie" : "discover/tv";
-        // vote_count.gte is lower than the feed's discover (50) — concept queries want recall over
-        // the most niche unseen titles, not just the popular ones. Genres + keywords OR-joined.
-        var query = $"?sort_by=popularity.desc&include_adult=false&page={page}&vote_count.gte=10";
+        // vote_count.gte defaults lower than the feed's discover (50) — concept queries want recall
+        // over the most niche unseen titles, not just the popular ones. The feed build overrides it
+        // back to 50 through options, so routing supply through here does not quietly widen its
+        // quality floor. Genres + keywords OR-joined.
+        var query = $"?sort_by=popularity.desc&include_adult=false&page={page}"
+            + $"&vote_count.gte={options?.MinVoteCount ?? DefaultConceptVoteCount}";
         var dateField = movies ? "primary_release_date" : "first_air_date";
         if (genreIds.Count > 0)
         {
@@ -191,6 +239,15 @@ public class TmdbClient(
         if (keywordIds.Count > 0)
         {
             query += $"&with_keywords={string.Join('|', keywordIds)}";
+        }
+
+        // with_people is a MOVIE-discover parameter; /discover/tv has no person filter at all, so
+        // sending it there would return an unconstrained page that looks like a person arm and is
+        // not one. Silently dropping it for TV is the honest reading — the caller's own media plan
+        // decides whether a person arm happens at all.
+        if (movies && options?.PeopleIds is { Count: > 0 } peopleIds)
+        {
+            query += $"&with_people={string.Join('|', peopleIds)}";
         }
 
         // TMDB AND-s the without_* filters, which is what we want: a title is dropped if it carries
@@ -207,12 +264,33 @@ public class TmdbClient(
 
         if (releasedAfter is { } after)
         {
-            query += $"&{dateField}.gte={after:yyyy-MM-dd}";
+            query += string.Create(CultureInfo.InvariantCulture, $"&{dateField}.gte={after:yyyy-MM-dd}");
         }
 
         if (releasedBefore is { } before)
         {
-            query += $"&{dateField}.lte={before:yyyy-MM-dd}";
+            query += string.Create(CultureInfo.InvariantCulture, $"&{dateField}.lte={before:yyyy-MM-dd}");
+        }
+
+        // "Under 90 minutes" — TMDB supports with_runtime.lte on both movie and tv discover
+        // (tv reads it against episode run time).
+        if (maxRuntimeMinutes is { } maxRuntime)
+        {
+            query += $"&with_runtime.lte={maxRuntime}";
+        }
+
+        // The account's standing content rules. Both are allow/floor semantics rather than
+        // exclusions, so an absent rule means "unconstrained", never "exclude everything".
+        if (options?.OriginalLanguage is { Length: 2 } language)
+        {
+            query += $"&with_original_language={language.ToLowerInvariant()}";
+        }
+
+        if (options?.MinVoteAverage is { } minVoteAverage)
+        {
+            // Invariant culture: a decimal formatted under a comma-decimal locale would produce
+            // vote_average.gte=6,0, which TMDB reads as a malformed number and ignores.
+            query += $"&vote_average.gte={minVoteAverage.ToString(CultureInfo.InvariantCulture)}";
         }
 
         if (movies && region is { Length: 2 })
@@ -220,7 +298,7 @@ public class TmdbClient(
             query += $"&region={region}";
         }
 
-        return GetListAsync(path + query, movies, RatePriority.Interactive, ct);
+        return GetListAsync(path + query, movies, options?.Priority ?? RatePriority.Interactive, ct);
     }
 
     public async Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default)
@@ -274,8 +352,11 @@ public class TmdbClient(
         using var response = await SendAsync(path, priority, ct);
         response.EnsureSuccessStatusCode();
         var dto = await response.Content.ReadFromJsonAsync<ListDto>(JsonOptions, ct);
+        return Project(dto?.Results, movies);
+    }
 
-        return (dto?.Results ?? [])
+    private static IReadOnlyList<TmdbListItem> Project(ListResultDto[]? results, bool movies) =>
+        (results ?? [])
             .Where(r => r.Id > 0 && (r.Title ?? r.Name) is not null)
             .Select(r => new TmdbListItem(
                 r.Id,
@@ -291,7 +372,6 @@ public class TmdbClient(
                 r.GenreIds ?? [],
                 r.OriginalLanguage))
             .ToList();
-    }
 
     /// <summary>
     /// Sends an authenticated GET, retrying HTTP 429 with bounded exponential backoff and honouring
@@ -301,14 +381,18 @@ public class TmdbClient(
     /// to EnsureSuccessStatusCode and surface as a hard job failure. The caller owns the response.
     /// GETs only — no non-idempotent request is ever replayed.
     /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(string path, RatePriority priority, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendAsync(
+        string path, RatePriority priority, CancellationToken ct, string? purpose = null)
     {
         for (var attempt = 0; ; attempt++)
         {
             // Re-acquired per attempt: a retry is a fresh call against both the rate gate and the
             // daily Fair-Use ledger.
             await rateGate.AcquireAsync(priority, ct);
-            usageRecorder.Record(ApiProvider.Tmdb);
+            // purpose is null for every TMDB call but the catalogue bulk seed, which needs its own
+            // ledger line so its spend is separable from the feed's. A null purpose keeps the
+            // pre-existing (Tmdb, day, null, null, null) bucket exactly as it was.
+            usageRecorder.Record(ApiProvider.Tmdb, purpose);
 
             using var request = AuthGet(path);
             var response = await httpClient.SendAsync(request, ct);
@@ -384,7 +468,10 @@ public class TmdbClient(
         [property: JsonPropertyName("genre_ids")] int[]? GenreIds,
         string? Job);
 
-    private sealed record ListDto(ListResultDto[]? Results);
+    // Page/TotalPages/TotalResults default to 0 so every existing single-page caller is unchanged;
+    // the snake_case naming policy maps them to TMDB's own total_pages / total_results.
+    private sealed record ListDto(
+        ListResultDto[]? Results, int Page = 0, int TotalPages = 0, int TotalResults = 0);
 
     private sealed record ListResultDto(
         long Id,
@@ -482,12 +569,71 @@ public class TmdbClient(
             crew,
             trailer?.Key,
             keywords,
-            dto.OriginalLanguage);
+            dto.OriginalLanguage,
+            (dto.SpokenLanguages ?? []).Select(l => l.Iso6391).Where(c => c is not null).Select(c => c!).ToArray(),
+            dto.Languages ?? [],
+            dto.Title ?? dto.Name,
+            ParseDate(dto.ReleaseDate ?? dto.FirstAirDate),
+            (dto.Genres ?? []).Select(g => g.Id).ToArray(),
+            Certifications(dto));
+    }
+
+    /// <summary>
+    /// Region → age certification, from whichever of the two appended blocks the medium carries.
+    ///
+    /// <para>Movies: <c>release_dates.results[]</c> holds one entry per region, each with several
+    /// dated releases that may disagree. <b>Type 3 (Theatrical)</b> is preferred — it is the rating
+    /// the film is actually known by; a later "Digital"/"TV" entry can carry an edited-for-broadcast
+    /// certification, and TMDB returns them in no meaningful order. Any other non-blank
+    /// certification is taken only when the region has no theatrical entry.</para>
+    ///
+    /// <para>TV: <c>content_ratings.results[]</c> is already one rating per region.</para>
+    ///
+    /// <para>Regions are upper-cased and blank certifications are dropped, so a present key always
+    /// means a real value — <c>TasteMath.CertificationOrdinal("")</c> is 0, indistinguishable from
+    /// "we never asked", which is the exact ambiguity schema v4 exists to remove.</para>
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? Certifications(DetailsDto dto)
+    {
+        var byRegion = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var region in dto.ReleaseDates?.Results ?? [])
+        {
+            var code = region.Iso31661?.Trim().ToUpperInvariant();
+            if (string.IsNullOrEmpty(code) || region.ReleaseDates is null)
+            {
+                continue;
+            }
+
+            var entries = region.ReleaseDates
+                .Where(e => !string.IsNullOrWhiteSpace(e.Certification))
+                .ToList();
+            var chosen = entries.FirstOrDefault(e => e.Type == TheatricalReleaseType) ?? entries.FirstOrDefault();
+            if (chosen?.Certification is { } certification)
+            {
+                byRegion[code] = certification.Trim();
+            }
+        }
+
+        foreach (var rating in dto.ContentRatings?.Results ?? [])
+        {
+            var code = rating.Iso31661?.Trim().ToUpperInvariant();
+            if (!string.IsNullOrEmpty(code) && !string.IsNullOrWhiteSpace(rating.Rating))
+            {
+                byRegion[code] = rating.Rating.Trim();
+            }
+        }
+
+        return byRegion.Count == 0 ? null : byRegion;
     }
 
     private sealed record DetailsDto(
         long Id,
         [property: JsonPropertyName("original_language")] string? OriginalLanguage,
+        // Corroborators for the unreliable original_language — see TmdbLanguage.Resolve. Movies expose
+        // spoken_languages only; TV exposes both (verified live against /3/movie and /3/tv).
+        [property: JsonPropertyName("spoken_languages")] SpokenLanguageDto[]? SpokenLanguages,
+        [property: JsonPropertyName("languages")] string[]? Languages,
         [property: JsonPropertyName("poster_path")] string? PosterPath,
         [property: JsonPropertyName("backdrop_path")] string? BackdropPath,
         decimal Popularity,
@@ -501,7 +647,38 @@ public class TmdbClient(
         CreditsDto? Credits,
         [property: JsonPropertyName("aggregate_credits")] AggregateCreditsDto? AggregateCredits,
         VideosDto? Videos,
-        KeywordsDto? Keywords);
+        KeywordsDto? Keywords,
+        // On-demand detail hydration needs the fields a list row would have carried: display title
+        // (movies: title, TV: name), release date, and full genre objects (details payloads have no
+        // genre_ids array — they inline genres[].id in the same id space).
+        string? Title = null,
+        string? Name = null,
+        [property: JsonPropertyName("release_date")] string? ReleaseDate = null,
+        [property: JsonPropertyName("first_air_date")] string? FirstAirDate = null,
+        GenreDto[]? Genres = null,
+        // Certification, appended to the same hydration call. Movies nest it two deep
+        // (release_dates.results[].release_dates[].certification, with a release TYPE per entry);
+        // TV is flat (content_ratings.results[].rating).
+        [property: JsonPropertyName("release_dates")] ReleaseDatesDto? ReleaseDates = null,
+        [property: JsonPropertyName("content_ratings")] ContentRatingsDto? ContentRatings = null);
+
+    private sealed record GenreDto(int Id, string? Name);
+
+    private sealed record ReleaseDatesDto(ReleaseDateRegionDto[]? Results);
+
+    private sealed record ReleaseDateRegionDto(
+        [property: JsonPropertyName("iso_3166_1")] string? Iso31661,
+        [property: JsonPropertyName("release_dates")] ReleaseDateEntryDto[]? ReleaseDates);
+
+    private sealed record ReleaseDateEntryDto(string? Certification, int Type);
+
+    private sealed record ContentRatingsDto(ContentRatingDto[]? Results);
+
+    private sealed record ContentRatingDto(
+        [property: JsonPropertyName("iso_3166_1")] string? Iso31661,
+        string? Rating);
+
+    private sealed record SpokenLanguageDto([property: JsonPropertyName("iso_639_1")] string? Iso6391);
 
     private sealed record CreditsDto(CastDto[]? Cast, CrewDto[]? Crew);
 

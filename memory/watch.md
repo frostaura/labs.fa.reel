@@ -1,17 +1,66 @@
 ---
 name: fa-reel-watch
-description: "Model does not beat the popularity baseline after 4 iterations (founder call); Tone/Era taxonomy polluted pre-2026-08-07; no counter behind the ≥5-external-users gate"
+description: "The chat surface still has NO ceilings — no rate limiter, no tier check, no budget — and the provider-side spend cap is one unclicked founder action. Every in-app reaction re-judges the whole cross-reference pool at LLM cost."
 type: watch
-last_verified: 2026-08-07
+last_verified: 2026-09-11
 ---
 
 # Watch list
 
-- **RESOLVED 2026-08-07:** the `dotnet format` failure on `FeedPaginator.cs` was fixed and pushed; the gate now exits 0 across all 204 files.
-- **THE open question: the model does not beat the popularity baseline.** Re-measured clean on 2026-08-07 at 0.30 vs 0.30 (0% relative lift) after four modelling iterations. The kill criterion names three. See `memory/state.md` for the full table and why the leak fix did not move precision@10. Founder call.
-- **`Tone` and `Era` on the 2,312 pre-2026-08-07 `TitleAttributes` rows are polluted** — 215 distinct `Tone` values and 97 distinct `Era` values against closed vocabularies of 16 and 13, including incoherent entries like `period-victorian`, `1980s` and `fantasy` (not an era). Harmless today because `FeatureVectorBuilder` reads only the seven scalars plus `Themes`. **Re-extract those rows before surfacing either field in the UI or adding it to the feature schema** — the new strict JSON schema only constrains extractions from here on.
-- **`PipelineStage` has no "not enough ratings" value.** An account below the 10-rating training floor is parked as `Degraded`, which is the only terminal stage the UI renders as stopped. The correct fix is a new enum member plus a frontend case.
-- **A full software-defect audit on 2026-08-07 catalogued ~50 confirmed defects** across search, the recommender, the data pipeline, LLM handling and the UI. Remediation is in progress; the plan lives at `~/.claude/plans/fix-all-defects-immidiately-toasty-parrot.md`. The three that reframe the program: search exclusions are applied *after* the candidate pool is cut so negation cannot remove anything; the recommender has two training-time label leaks; and 50% of the catalogue is fed to the trainer with `TraktRating = 0` because one failing title permanently aborts its whole 25-title hydration batch.
-- **RESOLVED 2026-08-07:** `sync/ratings` and `users/me/lists` now walk pages through `GetAllPagesAsync` like the watched endpoints. `search/tmdb/{id}` is a single-match lookup and is safe by construction.
-- `docs/product-spec.md` §"FrostAura family look" cites `/docs/brand/assets/` as the canonical asset location; no such directory exists in this repo.
-- Success metrics for the commercial half are instrumented nowhere — the "≥5 external users" gate has no counter behind it.
+## Unbounded cost — the sharpest item here
+- **The chat surface has no ceilings.** Ask Reel's phase 0 and 1 shipped; **phase 2 did not**: no rate limiter, no
+  tier rungs (Free gets the whole pipeline), no chat budget, no kill switch, no narrative fencing, no export or
+  erasure, secrets not rotated. At the measured per-turn cost one account can run up tens of dollars an hour. **The
+  provider-side spend cap at OpenRouter is a single unclicked founder action** and is the cheapest mitigation
+  available. Phases 3 and 4 have not started.
+- **Every in-app reaction re-judges the whole cross-reference pool.** The taste profile hash carries the
+  dislike-centroid version and the loved anchors by design — a lens note must not survive a dismissal — so a dismissal
+  or a high rating changes the key, the cross-reference treats the entire scored pool as unjudged at the new key, and
+  the top lens notes are rewritten. Budget-bounded and honest, but the dominant LLM cost today. **The next call is a
+  coarser key for verdicts** (the neighbours a verdict rests on do not change on a dismissal) or a daily cap on
+  re-judging.
+
+## Owed work
+- **The cross-reference pool is shortlist-only.** Verdicts need a persisted score, so a pass covers the current
+  shortlist rather than the whole eligible catalogue and coverage grows one build at a time. **Widening it means
+  persisting first-pass scores for the whole retrieved set, and that is the next change.** The second verdict round
+  (survivors re-judged, any demotion, a hero bar — the code calls it PR4) stays gated on the OUT arm clearing its
+  Wilson-upper threshold (`decisions-retrieval.md`).
+- **Do not run another schema bump against the current eval ledger** — at this holdout size it cannot separate a small
+  win from noise. The next modelling move is a bigger or pooled holdout, or a within-account paired design.
+- **`HeroEligibleCount` at the 7.5 floor is still zero on every build**, even after the catalogue seed. Watch for the
+  first non-zero; until then the hero floor is being relaxed on every build.
+- **The retrieval-recall and build-latency gates are unpaid.** The recall probe needs a before/after over a week on a
+  budget covering part of it; the first cluster-aware build was slower while the eligible pool jumped in the same
+  hour, so build p95 is unattributed; `hnsw.ef_search` is still at its default while cluster pulls ask for hundreds.
+- **The 50-read human review bar for lens copy has not been met.** The audit endpoint exists, the reads have not
+  happened, and the latest prompt version restarted the count. No prompt reaches anyone but the founder until it is.
+- **Of the follow-ups the QA walks raised, three are still unstarted:** the "done" reason still has two shapes on the
+  lexical and filmography paths; the ranking-seed embedding is bought per turn; the conditions summary's "+N more" is
+  inert on the feed.
+- **Two layout shifts are left on `/search`, both outside the turn, both wanting a design call first.** Page load still
+  shifts as the conditions strip arrives and pushes the page down; a late `reranked` frame can grow a card by its
+  why-line and move every row under it. Reserving a strip whose height only the response knows, and fixing a uniform
+  two-line why-box on every card, are product calls — which is why neither was taken.
+- **Extraction-era pollution is still draining.** Tone and era on the oldest attribute rows are untrustworthy and
+  gated off by a minimum trusted extractor version; watch the stale-extractor count reach zero before surfacing either
+  field.
+- **`PipelineStage` has no "not enough ratings" value**, so an account below the ratings floor is parked as
+  `Degraded` — a new enum member plus a frontend case.
+
+## Debris and hygiene
+- **The QA walks' probe conversations are still in the live database.** `GET /api/search/conversations` lists them all and
+  is the only source that needs nothing outside the running system; a partial id list also sits in
+  `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`. Delete each through the UI or
+  `DELETE /api/search/conversations/{id}` — never SQL, which leaves the turn record and the usage ledger disagreeing.
+- **`reel_test_w9` is still sitting on port 5433** — the QA-walk copies have been dropped. Drop it too; a throwaway
+  copy with background jobs on spends real provider calls.
+- **Interleaving is off and stays off until it is worth three months** of comparison at this traffic.
+
+## Standing
+- **The declared quality bar is "Silver", whose definition includes *deployed*.** Reel is not, so the tier
+  reads as a target rather than a met bar — and nothing in the scope says which it is.
+- **Success metrics for the commercial half are instrumented nowhere.** The "≥5 external users" gate has no counter —
+  the criterion that decides this program's fate is measured by hand. `docs/product-spec.md` also cites a brand-assets
+  path that does not exist in this repo.
+- **`AskReelEndpointTests.An_aborted_stream_leaves_a_failed_turn_and_the_prior_block_still_replays` is timing-sensitive in CI.** On 2026-09-16 it failed once in the Postgres integration job on a context-only push (485 of 486 passing) and passed on an immediate rerun of the same commit. One red run of that test is not evidence of a regression; two in a row is. Candidate for the local-flaky quarantine if it recurs — owner: unassigned.

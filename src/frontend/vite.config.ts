@@ -38,6 +38,14 @@ export default defineConfig({
     react(),
     devSwKillSwitch(),
     VitePWA({
+      // injectManifest (not generateSW): Web Push needs first-class `push` / `notificationclick`
+      // listeners, so the worker is now hand-written in src/sw.ts. ALL caching semantics —
+      // NetworkFirst /api with its two load-bearing exclusions, the poster CacheFirst, the
+      // navigation-fallback denylist — moved there verbatim; sw.ts is the single place those
+      // rules live now. The dev kill-switch above still owns /sw.js during `vite dev`.
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
       registerType: "autoUpdate",
       injectRegister: "auto",
       devOptions: { enabled: false, type: "module", navigateFallback: "index.html" },
@@ -48,53 +56,8 @@ export default defineConfig({
         background_color: "#06121F",
         display: "standalone"
       },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,svg,png,ico,webp,woff2}"],
-        navigateFallback: "/index.html",
-        // SSE must never be answered by the service worker.
-        navigateFallbackDenylist: [/^\/sse\//, /^\/api\//],
-        runtimeCaching: [
-          // All GET /api/* is mutable, per-user data (feed, sync status). NetworkFirst keeps RTK
-          // Query's post-mutation refetches honest; the cache is only an offline fallback. SSE
-          // (/sse/*) is excluded entirely.
-          //
-          // TWO exclusions are load-bearing, both learned the hard way:
-          //
-          // /api/auth/* is NEVER cached. A cached session response makes a signed-out user look
-          // signed in until the entry expires, and the app cannot tell the difference — which is
-          // the same class of bug as the cached app shell rendering perfectly over a completely
-          // dead backend and reporting it as "couldn't reach the sign-in service".
-          //
-          // maxAgeSeconds is ONE HOUR, not the seven days this used to hold. Seven days of
-          // fallback for "mutable, per-user data" means a network blip can serve a week-old feed,
-          // watch state or entitlement with no visual difference from live data. An offline
-          // fallback should be recent enough to be recognisably yours and short enough that
-          // anything genuinely stale simply fails and surfaces as an error the UI can report.
-          {
-            urlPattern: ({ url, request }) =>
-              request.method === "GET" &&
-              url.pathname.startsWith("/api/") &&
-              !url.pathname.startsWith("/api/auth/") &&
-              !url.pathname.includes("/stream"),
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "reel-api",
-              networkTimeoutSeconds: 8,
-              expiration: { maxEntries: 300, maxAgeSeconds: 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          },
-          // TMDB artwork is immutable per path — cache hard. Repeat visits paint posters instantly.
-          {
-            urlPattern: ({ url }) => url.hostname === "image.tmdb.org",
-            handler: "CacheFirst",
-            options: {
-              cacheName: "reel-posters",
-              expiration: { maxEntries: 500, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          }
-        ]
+      injectManifest: {
+        globPatterns: ["**/*.{js,css,html,svg,png,ico,webp,woff2}"]
       }
     })
   ],

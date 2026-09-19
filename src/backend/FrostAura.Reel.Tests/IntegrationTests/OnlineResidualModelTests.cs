@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ml;
@@ -56,7 +57,10 @@ public class OnlineResidualModelTests(PostgresFixture fixture)
         var engine = new FastTreeModelEngine();
         var residualModel = new OnlineResidualModel(
             db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance);
-        var scorer = new OnDemandScorer(db, featureBuilder, engine, residualModel);
+        var scorer = new OnDemandScorer(
+            db, featureBuilder, engine, residualModel,
+            new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
+            new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())));
         var now = DateTime.UtcNow;
 
         // Baseline: no events yet ⇒ residual 0 ⇒ pure base score.

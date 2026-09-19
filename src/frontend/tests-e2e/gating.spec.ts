@@ -12,6 +12,8 @@ const card = (n: number) => ({
   backdropPath: null,
   genres: ["drama"],
   predictedRating: 8.1,
+  crowdRating: 7.9,
+  crowdVotes: 40000,
   whyThis: "Strong fit with your taste profile.",
 });
 
@@ -37,6 +39,27 @@ test.describe("entitlement gating", () => {
     await expect(page.getByTestId("hero-card")).toHaveCount(3);
     await expect(page.getByText(/more personalised rows on the full feed/i)).toBeVisible();
     await expect(page.getByText(/paid feed unlocks every row/i)).toBeVisible();
+  });
+
+  test("free tier typing /lab lands on home — the model lab is a founder instrument", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", { ...SESSION_FOUNDER, tier: "Free" });
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/feed/continue-watching", []);
+    await mockJson(page, "**/api/feed", {
+      generatedAt: new Date().toISOString(),
+      hero: [card(1), card(2), card(3)],
+      rows: [],
+      lockedRowCount: 3,
+    });
+
+    await page.goto("/lab");
+
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("hero-card")).toHaveCount(3);
   });
 
   test("founder tier renders rows without the upsell", async ({ page }) => {
@@ -66,5 +89,16 @@ test.describe("entitlement gating", () => {
     await expect(page.getByTestId("hero-card")).toHaveCount(5);
     await expect(page.getByText("Anchor Film")).toBeVisible();
     await expect(page.getByText(/more personalised rows/i)).toHaveCount(0);
+
+    // Remediation card anatomy, locked in on the row cards: every card carries the shared
+    // ScoreBadges stack (prediction over crowd — "8.1 for you" + "7.9") and the one-tap quick
+    // actions overlay (Not for me / Save), so acting on a pick costs no navigation.
+    await expect(page.getByTestId("rec-card")).toHaveCount(4);
+    const firstCard = page.getByTestId("rec-card").first();
+    await expect(firstCard.getByTestId("score-badges")).toContainText("8.1");
+    await expect(firstCard.getByTestId("score-badges")).toContainText("for you");
+    await expect(firstCard.getByTestId("score-badges")).toContainText("7.9");
+    await expect(firstCard.getByTestId("quick-not-interested")).toBeAttached();
+    await expect(firstCard.getByTestId("quick-save")).toBeAttached();
   });
 });

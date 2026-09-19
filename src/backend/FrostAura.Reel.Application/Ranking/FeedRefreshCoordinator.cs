@@ -63,6 +63,10 @@ public sealed class FeedRefreshCoordinator(
             Kind = JobKind.BuildFeed,
             Priority = 1,
             EnqueuedAt = DateTime.UtcNow,
+            // Persisted, not just logged: BuildFeedJobHandler reads it to decide Preserve vs Fresh
+            // (FeedBuildPolicy) — "delta-sync" must keep tonight's picks, "content filters changed"
+            // must re-deal them.
+            TriggerReason = reason,
         });
         logger.LogInformation("Reactive feed rebuild enqueued for {AccountId} ({Reason}).", accountId, reason);
         return true;

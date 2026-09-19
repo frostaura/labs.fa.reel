@@ -14,9 +14,13 @@ import { useRef, useState } from "react";
 import { Link } from "react-router";
 import { Share2 } from "lucide-react";
 import { toPng } from "html-to-image";
-import { useGetTasteDnaQuery } from "../store/api";
+import { useGetSessionQuery, useGetTasteDnaQuery } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";
 import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
+import ShareCard from "../components/dna/ShareCard";
+import DislikePanel from "../components/dna/DislikePanel";
+import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
+import TastePockets from "../components/dna/TastePockets";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -40,8 +44,10 @@ function ChartTip({ active, payload, label }: { active?: boolean; payload?: { na
 /** The free hook: who you are, in data. Built screenshot-clean — this page is the viral loop. */
 export default function TasteDna() {
   const { data } = useGetTasteDnaQuery();
-  const cardRef = useRef<HTMLDivElement>(null);
+  const { data: session } = useGetSessionQuery();
+  const templateRef = useRef<HTMLDivElement>(null);
   const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
 
   if (!data) {
     return <div className="h-72 rounded-2xl reel-shimmer" />;
@@ -50,50 +56,66 @@ export default function TasteDna() {
   const driftData = data.drift.map((d) => ({ year: d.year, ...d.shares }));
   const driftGenres = data.topGenres.slice(0, 5).map((g) => g.genre);
 
-  // Export a shareable PNG. Excludes the avatar grid (cross-origin TMDB images would taint the
-  // canvas) and any stray <img>; the radar + stats + branding are the shareable core.
+  // Export the dedicated offscreen template (components/dna/ShareCard), never this page.
+  // Screenshotting the live dashboard is what produced the half-blank card: its Recharts
+  // sections measure themselves from the live DOM and rasterise as empty boxes in the clone.
+  // The template is plain divs + inline SVG, fixed-size, with no <img> to filter or taint.
   const share = async () => {
-    if (!cardRef.current) return;
+    if (!templateRef.current) return;
     setSharing(true);
+    setShareError(null);
     try {
-      const dataUrl = await toPng(cardRef.current, {
+      const dataUrl = await toPng(templateRef.current, {
         backgroundColor: "#06121F",
         pixelRatio: 2,
-        filter: (node) => {
-          const el = node as HTMLElement;
-          return el.tagName !== "IMG" && el.dataset?.shareExclude === undefined;
-        },
+        skipFonts: false, // Figtree is self-hosted (@fontsource) — same-origin, embeddable.
       });
       const link = document.createElement("a");
       link.download = "my-reel-taste-dna.png";
       link.href = dataUrl;
       link.click();
     } catch {
-      // Capture can fail on some browsers — degrade silently.
+      setShareError("Couldn’t render your card — try again.");
     } finally {
       setSharing(false);
     }
   };
 
   return (
-    <div ref={cardRef} className="space-y-8">
+    <div className="space-y-8">
+      <ShareCard ref={templateRef} data={data} displayName={session?.displayName ?? null} />
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-light text-fa-frost-bright">Your taste DNA</h1>
           <p className="fa-caption text-fa-frost-dim mt-1">
-            computed from {data.ratingsCount.toLocaleString()} ratings · always yours, always free
+            {/* "rated", not "watched" — deliberately. Every title you have ever RATED feeds this,
+                with no cutoff; titles you watched without rating do not feed a feature yet, and the
+                copy must not claim them until they do. */}
+            every title you&apos;ve ever rated counts — all {data.ratingsCount.toLocaleString()} of them, with recent
+            ones counting a little more · always yours, always free
           </p>
         </div>
-        <button
-          onClick={share}
-          disabled={sharing}
-          data-share-exclude
-          data-testid="dna-share"
-          className="fa-button-ghost flex items-center gap-2 shrink-0 disabled:opacity-50"
-        >
-          <Share2 className="h-4 w-4" /> {sharing ? "Rendering…" : "Share card"}
-        </button>
+        <div className="shrink-0 text-right space-y-1">
+          <button
+            onClick={share}
+            disabled={sharing}
+            data-testid="dna-share"
+            className="fa-button-ghost flex items-center gap-2 disabled:opacity-50"
+          >
+            <Share2 className="h-4 w-4" /> {sharing ? "Rendering…" : "Share card"}
+          </button>
+          {shareError && (
+            <p role="alert" className="fa-caption text-fa-danger" data-testid="dna-share-error">
+              {shareError}
+            </p>
+          )}
+        </div>
       </div>
+
+      {/* What Reel believes about you, in words — and your correction to it. Above the charts on
+          purpose: the charts describe the data, this describes the person the data was read as,
+          and this is the text every downstream model call is actually told. */}
+      <TasteNarrativePanel />
 
       {/* Headline stats */}
       <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -175,6 +197,12 @@ export default function TasteDna() {
         </section>
       </div>
 
+      {/* The pockets retrieval actually pulls from — the answer to "does it know I also like X". */}
+      <TastePockets clusters={data.clusters} />
+
+      {/* What you've said no to — the strongest negative signal, made legible and revocable. */}
+      <DislikePanel />
+
       {/* Taste drift */}
       {driftData.length > 1 && (
         <section className="fa-card p-5">
@@ -202,7 +230,7 @@ export default function TasteDna() {
         </section>
       )}
 
-      <div className="grid lg:grid-cols-2 gap-6" data-share-exclude>
+      <div className="grid lg:grid-cols-2 gap-6">
         {/* Creators */}
         <section className="fa-card p-5">
           <h2 className="fa-section-title mb-3">Creator affinities</h2>

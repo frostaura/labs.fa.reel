@@ -41,7 +41,17 @@ public sealed record SearchIntent(
     // exclusion plus a ranking penalty — never as a hard cull, so a negation can narrow the
     // ordering but can never empty the result set.
     IReadOnlyList<string>? ExcludeGenres = null,
-    IReadOnlyList<string>? ExcludeKeywords = null);
+    IReadOnlyList<string>? ExcludeKeywords = null,
+    // Titles the user names as COMPARISONS ("like Blade Runner but more emotional", "similar to
+    // Severance") — not things to return, but anchors to search NEAR. Resolved to catalogue titles
+    // with embeddings so their semantic neighbours dominate discovery; the named title itself is
+    // excluded from the results (the user has plainly seen or at least knows it). Nullable with a
+    // null default so every existing construction site stays valid; treat null as empty.
+    IReadOnlyList<string>? ReferenceTitles = null,
+    // An upper runtime bound in minutes ("under 90 minutes" → 90). Applied to TMDB discovery
+    // (with_runtime.lte) AND as a post-filter on the final pool, because the semantic arm knows
+    // nothing about runtimes.
+    int? MaxRuntimeMinutes = null);
 
 public interface ISearchQueryInterpreter
 {
@@ -50,6 +60,24 @@ public interface ISearchQueryInterpreter
 
     string ModelId { get; }
 
-    /// <summary>Parse a free-text query into a discovery spec. Never throws — degrades to a keyword-only intent.</summary>
-    Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default);
+    /// <summary>
+    /// Parse a free-text query into a discovery spec. Never throws — degrades to a keyword-only
+    /// intent.
+    ///
+    /// <para><paramref name="standingFilters"/> is the account's own content rules, already
+    /// summarised. It sits AFTER <c>ct</c> for the same reason it does on
+    /// <see cref="ISearchAgent.InterpretAsync"/>: a caller passes the token positionally. This
+    /// interpreter is the FALLBACK half of Ask Reel's two prompt/parser pairs, and the pair has
+    /// drifted before — a spec field added to one prompt and not the other is simply always absent
+    /// from that path's answers, silently. Passing null means "no standing rules".</para>
+    /// </summary>
+    Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default, string? standingFilters = null);
+
+    /// <summary>
+    /// The deterministic, offline, FREE reading of the query — the same fallback
+    /// <see cref="InterpretAsync"/> degrades to, exposed on its own so a caller that needs a
+    /// fallback intent does not have to buy a chat completion to obtain one. Same input, same
+    /// output, no network, no spend. Never throws.
+    /// </summary>
+    SearchIntent Heuristic(string query);
 }

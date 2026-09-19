@@ -68,44 +68,63 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
           )}
         </p>
       ) : (
-        <div className="flex flex-wrap gap-2" data-testid="provider-list">
-          {data.providers.map((p) => {
-            const kinds = p.kinds.map((k) => KIND_LABEL[k] ?? k).join(" · ") || "watch";
-            const direct = p.linkKind === "direct";
-            return (
-              <a
-                key={p.provider}
-                href={p.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={`${p.provider} · ${kinds} · ${direct ? "opens provider" : "via TMDB"}`}
-                aria-label={`${p.provider} — ${kinds} — ${
-                  direct ? "direct link, opens the provider" : "opens the TMDB watch page"
-                }`}
-                className="group flex items-center gap-2 rounded-lg border border-fa-edge bg-fa-glass px-2 py-1.5 transition hover:border-fa-frost/40"
-                data-testid="provider-chip"
-                data-link-kind={p.linkKind}
-              >
-                <div className="h-8 w-8 rounded-md overflow-hidden bg-fa-ink-3 shrink-0">
-                  {logoUrl(p.logoPath) ? (
-                    <img src={logoUrl(p.logoPath)!} alt="" loading="lazy" className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="h-full w-full flex items-center justify-center fa-caption text-fa-frost-dim" aria-hidden>
-                      {p.provider.slice(0, 2)}
+        (() => {
+          // Every "via TMDB" chip bounces to the SAME TMDB watch page — a wall of near-identical
+          // chips promising different providers but delivering one URL. Collapse them into a
+          // single trailing row-link; only "direct" providers earn an individual chip.
+          const direct = data.providers.filter((p) => p.linkKind === "direct");
+          const viaTmdb = data.providers.filter((p) => p.linkKind !== "direct");
+          const tmdbUrl = viaTmdb[0]?.url ?? data.tmdbWatchPage;
+          return (
+            <div className="flex flex-wrap items-center gap-2" data-testid="provider-list">
+              {direct.map((p) => {
+                const kinds = p.kinds.map((k) => KIND_LABEL[k] ?? k).join(" · ") || "watch";
+                return (
+                  <a
+                    key={p.provider}
+                    href={p.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`${p.provider} · ${kinds} · opens provider`}
+                    aria-label={`${p.provider} — ${kinds} — direct link, opens the provider`}
+                    className="group flex items-center gap-2 rounded-lg border border-fa-edge bg-fa-glass px-2 py-1.5 transition hover:border-fa-frost/40"
+                    data-testid="provider-chip"
+                    data-link-kind={p.linkKind}
+                  >
+                    <div className="h-8 w-8 rounded-md overflow-hidden bg-fa-ink-3 shrink-0">
+                      {logoUrl(p.logoPath) ? (
+                        <img src={logoUrl(p.logoPath)!} alt="" loading="lazy" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="h-full w-full flex items-center justify-center fa-caption text-fa-frost-dim" aria-hidden>
+                          {p.provider.slice(0, 2)}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                <div className="pr-1 min-w-0" aria-hidden>
-                  <p className="fa-caption text-fa-frost-bright leading-tight">{p.provider}</p>
-                  <p className="fa-caption leading-tight flex flex-wrap items-center gap-x-1 gap-y-0.5">
-                    <span className="text-fa-frost-dim/70">{kinds}</span>
-                    <LinkKindPill linkKind={p.linkKind} />
-                  </p>
-                </div>
-              </a>
-            );
-          })}
-        </div>
+                    <div className="pr-1 min-w-0" aria-hidden>
+                      <p className="fa-caption text-fa-frost-bright leading-tight">{p.provider}</p>
+                      <p className="fa-caption leading-tight flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                        <span className="text-fa-frost-dim/70">{kinds}</span>
+                        <LinkKindPill linkKind={p.linkKind} />
+                      </p>
+                    </div>
+                  </a>
+                );
+              })}
+              {viaTmdb.length > 0 && (
+                <a
+                  href={tmdbUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`More watch options for ${viaTmdb.length} more provider${viaTmdb.length === 1 ? "" : "s"} on the TMDB watch page`}
+                  className="fa-caption inline-flex items-center gap-1 rounded-lg border border-fa-edge bg-fa-glass px-3 py-2 text-fa-frost transition hover:border-fa-frost/40 hover:text-fa-frost-bright"
+                  data-testid="tmdb-more-link"
+                >
+                  More options via TMDB →
+                </a>
+              )}
+            </div>
+          );
+        })()
       )}
 
       {data && <p className="fa-caption text-fa-frost-dim/60">{data.attribution}</p>}

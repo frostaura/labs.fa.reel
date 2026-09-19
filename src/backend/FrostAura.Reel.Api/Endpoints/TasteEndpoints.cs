@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -10,10 +11,40 @@ namespace FrostAura.Reel.Api.Endpoints;
 /// <summary>Taste DNA — the free hook: who you are, in data. Computed live from raw events.</summary>
 public static class TasteEndpoints
 {
+    /// <summary>Default and maximum page sizes for the dislike history.</summary>
+    private const int DislikePageSize = 20;
+
+    private const int MaxDislikePageSize = 50;
+
+    /// <summary>How many demoted genres / tones the one-line dislike summary names.</summary>
+    private const int DislikeProfileTop = 3;
+
     public static void MapTasteEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGroup("/api/taste").RequireAccount().MapGet("/", async (
-            IReelDbContext db, IAccountContext accountContext, FeatureVectorBuilder featureBuilder, CancellationToken ct) =>
+        var group = app.MapGroup("/api/taste").RequireAccount();
+
+        // The strongest negative signal the product collects, made scrutable. 175 live
+        // NotInterested / Dropped rows drive a recency-decayed, reason-weighted demotion on every
+        // scoring surface, and until now the user could neither see the list nor audit what it had
+        // taught the model — only revoke a title one at a time, if they could find it again.
+        //
+        // Two halves: the history (newest first, paginated, each row carrying the reason it was
+        // given and the date) and the PROFILE — the genres and tones actually being demoted right
+        // now. The profile is windowed to DislikeSignal.WindowDays and recency-decayed, so it
+        // legitimately says less than the total; the payload reports both numbers rather than
+        // letting one stand in for the other.
+        group.MapGet("/dislikes", async (
+                IReelDbContext db, IAccountContext accountContext, DislikeSignal dislikes,
+                int? offset, int? limit, CancellationToken ct) =>
+            Results.Ok(await BuildDislikesAsync(
+                db, dislikes, accountContext.AccountId!.Value, offset, limit, ct)));
+
+        group.MapGet("/", async (
+            IReelDbContext db,
+            IAccountContext accountContext,
+            FeatureVectorBuilder featureBuilder,
+            TasteClusterProvider tasteClusters,
+            CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var now = DateTime.UtcNow;
@@ -133,6 +164,40 @@ public static class TasteEndpoints
                 })
                 .ToList();
 
+            // The pockets of taste retrieval actually splits its budget across, made visible. This is
+            // the only surface on which the multi-centroid work is legible to the person it is about:
+            // genres and eras describe a library by its labels, and these describe it by what the
+            // titles are LIKE — the corner no genre names. Share, not weight, because the absolute
+            // number is an internal scale and a percentage is the only honest reading of it.
+            var partition = await tasteClusters.GetAsync(accountId, now, ct);
+            var clusterWeight = partition.Sum(c => c.Weight);
+            var clusterExemplarIds = partition.SelectMany(c => c.ExemplarTitleIds).Distinct().ToList();
+            var clusterTitles = clusterExemplarIds.Count == 0
+                ? []
+                : await db.Titles
+                    .Where(t => clusterExemplarIds.Contains(t.Id))
+                    .Select(t => new { t.Id, t.Name, t.Year, t.PosterPath })
+                    .ToDictionaryAsync(t => t.Id, ct);
+            var clusters = clusterWeight <= 0d
+                ? []
+                : partition.Select(c => new
+                {
+                    ordinal = c.Ordinal,
+                    share = Math.Round(c.Weight / clusterWeight, 3),
+                    titleCount = c.MemberCount,
+                    exemplars = c.ExemplarTitleIds
+                        .Where(clusterTitles.ContainsKey)
+                        .Select(id => new
+                        {
+                            name = clusterTitles[id].Name,
+                            year = clusterTitles[id].Year,
+                            posterPath = clusterTitles[id].PosterPath,
+                        })
+                        .ToList(),
+                })
+                .Where(c => c.exemplars.Count > 0)
+                .ToList();
+
             return Results.Ok(new
             {
                 userMean = Math.Round(taste.UserMean, 2),
@@ -147,7 +212,95 @@ public static class TasteEndpoints
                 topActors,
                 histogram,
                 drift,
+                clusters,
             });
         });
     }
+
+    /// <summary>
+    /// The dislike history plus the profile it currently drives. Extracted from the route so it can
+    /// be exercised against real Postgres — the ordering, the live-reaction predicate and the
+    /// pagination are all SQL.
+    /// </summary>
+    internal static async Task<DislikesResponse> BuildDislikesAsync(
+        IReelDbContext db, DislikeSignal dislikes, Guid accountId, int? offset, int? limit, CancellationToken ct)
+    {
+        var skip = Math.Max(0, offset ?? 0);
+        var take = Math.Clamp(limit ?? DislikePageSize, 1, MaxDislikePageSize);
+
+        var live = db.UserTitleReactions
+            .Where(r => r.AccountId == accountId && r.RevokedAt == null
+                && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.Dropped));
+
+        var total = await live.CountAsync(ct);
+        var items = await live
+            .OrderByDescending(r => r.CreatedAt)
+            .Skip(skip)
+            .Take(take)
+            .Join(db.Titles, r => r.TitleId, t => t.Id, (r, t) => new DislikeEntry(
+                t.Id,
+                t.MediaType.ToString(),
+                t.TmdbId,
+                t.Name,
+                t.Year,
+                t.PosterPath,
+                r.Kind.ToString(),
+                r.Reason == null ? null : r.Reason.ToString(),
+                r.CreatedAt))
+            .ToListAsync(ct);
+
+        var profile = await dislikes.GetProfileAsync(accountId, ct);
+        return new DislikesResponse(
+            total,
+            skip,
+            take,
+            skip + items.Count < total,
+            items,
+            new DislikeProfileSummary(
+                // What the demotion is actually built from right now — a subset of `total`,
+                // because the profile only looks back DislikeSignal.WindowDays.
+                DislikeSignal.WindowDays,
+                profile.Recent.Count,
+                [.. profile.GenreWeights
+                    .OrderByDescending(kv => kv.Value)
+                    .Take(DislikeProfileTop)
+                    .Select(kv => new DemotedGenre(kv.Key, Math.Round(kv.Value, 2)))],
+                [.. profile.ToneWeights
+                    .OrderByDescending(kv => kv.Value)
+                    .Take(DislikeProfileTop)
+                    .Select(kv => new DemotedTone(kv.Key, Math.Round(kv.Value, 2)))]));
+    }
+
+    /// <summary>One live dislike. <c>Reason</c> is null for a Dropped row (dropping has no reason)
+    /// and for dismissals recorded before the card overlay offered a picker.</summary>
+    internal sealed record DislikeEntry(
+        Guid TitleId,
+        string MediaType,
+        long? TmdbId,
+        string Name,
+        int? Year,
+        string? PosterPath,
+        string Kind,
+        string? Reason,
+        DateTime CreatedAt);
+
+    internal sealed record DemotedGenre(string Genre, double Weight);
+
+    internal sealed record DemotedTone(string Tone, double Weight);
+
+    /// <summary>What the demotion is built from right now — deliberately reported apart from the
+    /// total, because the profile is windowed and recency-decayed and legitimately says less.</summary>
+    internal sealed record DislikeProfileSummary(
+        int WindowDays,
+        int ActiveCount,
+        IReadOnlyList<DemotedGenre> Genres,
+        IReadOnlyList<DemotedTone> Tones);
+
+    internal sealed record DislikesResponse(
+        int Total,
+        int Offset,
+        int Limit,
+        bool HasMore,
+        IReadOnlyList<DislikeEntry> Items,
+        DislikeProfileSummary Profile);
 }

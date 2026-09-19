@@ -37,6 +37,15 @@ public static class PipelineEventTypes
     public const string Insight = "insight";
     public const string ModelProgress = "model-progress";
     public const string FeedReady = "feed-ready";
+
+    /// <summary>
+    /// The Active snapshot's numbers moved while its items did not — a Preserve build that
+    /// recalibrated tonight's picks without re-dealing them. Carries the snapshot's UNCHANGED
+    /// <c>generatedAt</c> plus the moved cards, so the client patches its caches in place. It must
+    /// never be treated as <see cref="FeedReady"/>: invalidating the feed on this frame would
+    /// remount every row and throw away the scroll it exists to protect.
+    /// </summary>
+    public const string FeedScoresUpdated = "feed-scores-updated";
     public const string Failed = "failed";
     public const string Heartbeat = "heartbeat";
     public const string JobProgress = "job-progress";

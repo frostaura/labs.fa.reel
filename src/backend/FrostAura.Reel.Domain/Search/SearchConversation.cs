@@ -18,4 +18,20 @@ public class SearchConversation : IAccountScoped
     public DateTime CreatedAt { get; set; }
 
     public DateTime LastTurnAt { get; set; }
+
+    /// <summary>
+    /// How many <see cref="SearchTurn"/> rows this conversation holds — both roles, every status.
+    /// Denormalised so the conversation LIST is one query rather than one plus a group-by; kept in
+    /// step by the endpoint that writes the turns, and backfilled by count.
+    /// </summary>
+    public int TurnCount { get; set; }
+
+    /// <summary>
+    /// When this conversation last stored cards. <b>NULL means transcript only</b> — every
+    /// conversation that predates the turn record has messages and no results, and the resume
+    /// surface must say so rather than rendering an empty grid that reads as "no matches". It is a
+    /// different fact from "the last turn returned nothing", which is a completed turn with zero
+    /// cards and a reason that explains itself.
+    /// </summary>
+    public DateTime? LastCardsAt { get; set; }
 }

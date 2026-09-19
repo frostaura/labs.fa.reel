@@ -1,3 +1,4 @@
+using System.Globalization;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
@@ -16,7 +17,12 @@ namespace FrostAura.Reel.Application.Search;
 /// continue-watching surface only — no rating (rated implies seen, including titles rated
 /// without a logged play), not actively NotInterested, not already saved for later (founder
 /// addition 2026-06-19: a title you've put on your watchlist is a decision already made — it
-/// lives on Saved, not back in the picks), and inside the account's content-preference rules.
+/// lives on Saved, not back in the picks), not Dropped (founder report 2026-08-07: "I tried to
+/// drop the show, and it says dropped, but it's still on my tonight's pick list" — Dropped was
+/// scoped to Continue Watching, so a dropped title with no watch footprint stayed eligible and was
+/// re-selected on every build, for ever; "I stopped watching this" now excludes it from every
+/// suggestion surface, and it is reversible via the undrop DELETE), and inside the account's
+/// content-preference rules.
 /// Maturity ceilings compare certification ordinals in memory (certification systems don't order
 /// in SQL) via <see cref="PassesMaturity"/>.
 ///
@@ -34,15 +40,120 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// onto the genre specific suggestions too — of course in those cases the genre filters would be
     /// ignored"). Never set it on a general discovery surface.
     /// </param>
-    public IQueryable<Title> EligibleTitles(Guid accountId, bool ignoreGenreFilters = false)
+    /// <param name="suppressed">
+    /// Content rules to leave OUT of the query, on top of <paramref name="ignoreGenreFilters"/>. This
+    /// exists for the empty-feed diagnostic (<see cref="Ranking.FeedStarvationDiagnostic"/>), which
+    /// answers "which single condition emptied the pool?" by re-counting with one rule dropped at a
+    /// time. It must never be used to SERVE titles — a surface that suppresses a rule is showing the
+    /// user content they told it not to. Discovery surfaces pass nothing here.
+    /// </param>
+    public IQueryable<Title> EligibleTitles(
+        Guid accountId, bool ignoreGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
     {
-        return ContentFilteredTitles(accountId, ignoreGenreFilters).Where(t =>
+        return ContentFilteredTitles(accountId, ignoreGenreFilters, suppressed).Where(t =>
             !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
             && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
             && !db.UserTitleReactions.Any(r =>
                 r.AccountId == accountId && r.TitleId == t.Id
-                && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.SaveForLater)
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
                 && r.RevokedAt == null));
+    }
+
+    /// <summary>
+    /// <see cref="EligibleTitles(Guid, bool, IReadOnlySet{FilterKind})"/> rewound to a past instant:
+    /// the interaction footprint is evaluated as it stood at <paramref name="asOf"/>, so a title the
+    /// user watched, rated, saved or declined AFTER that moment counts as eligible then, exactly as
+    /// it did on the day.
+    ///
+    /// <para><b>OFFLINE MEASUREMENT ONLY.</b> Nothing that serves titles may call this — it is
+    /// deliberately a separate method rather than an optional parameter on the serving overload,
+    /// because a nullable date threaded through the live predicate would change the SQL every
+    /// surface in the product emits in order to serve a diagnostic that runs by hand. The serving
+    /// path is byte-for-byte what it was.</para>
+    ///
+    /// <para>The CONTENT rules are read as they stand today, not as-of, and that is the honest call
+    /// rather than a shortcut: <c>ContentFilter</c> rows carry a <c>CreatedAt</c> but are mutated
+    /// and deleted in place, so there is no history to rewind to. A recall figure computed here
+    /// therefore answers "under today's rules, would the arms have reached this title" — which is
+    /// the question worth asking, since today's rules are the ones the next build will use.</para>
+    ///
+    /// <para>Two dating calls, both stated because they bound the answer. A watch counts as-of only
+    /// when <c>LastWatchedAt</c> is known and falls on or before <paramref name="asOf"/>: an
+    /// undated watch row reads as NOT-yet-watched, matching the year filter's "absence of a date is
+    /// not evidence of the wrong date". And a rating counts by <see cref="UserRating.FirstRatedAt"/>
+    /// rather than <c>RatedAt</c>, for the same reason <c>EvalHarness</c> splits on it — <c>RatedAt</c>
+    /// is overwritten by every Trakt ratings walk, so a re-rate would drag a title backwards across
+    /// the as-of line.</para>
+    /// </summary>
+    public IQueryable<Title> EligibleTitlesAsOf(Guid accountId, DateTime asOf, bool ignoreGenreFilters = false)
+    {
+        return ContentFilteredTitles(accountId, ignoreGenreFilters).Where(t =>
+            !db.WatchedTitles.Any(w =>
+                w.AccountId == accountId && w.TitleId == t.Id
+                && w.LastWatchedAt != null && w.LastWatchedAt <= asOf)
+            && !db.UserRatings.Any(r =>
+                r.AccountId == accountId && r.TitleId == t.Id && r.FirstRatedAt <= asOf)
+            && !db.UserTitleReactions.Any(r =>
+                r.AccountId == accountId && r.TitleId == t.Id
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
+                && r.CreatedAt <= asOf
+                && (r.RevokedAt == null || r.RevokedAt > asOf)));
+    }
+
+    /// <summary>
+    /// The eligible title-id set for <paramref name="accountId"/> computed WITHOUT the row-level
+    /// tenancy filters, so a session pinned to one account can evaluate another account's
+    /// eligibility (Blend needs both participants' sets). This is an EXCLUSION primitive only:
+    /// it returns opaque title ids used to narrow a joint pool, and callers must never surface
+    /// another tenant's interaction rows, ratings, or filters through it. Same rule as
+    /// <see cref="EligibleTitles"/> — one builder, one predicate, two tenancy modes.
+    /// </summary>
+    public async Task<HashSet<Guid>> EligibleTitleIdsUnscopedAsync(Guid accountId, CancellationToken ct = default)
+    {
+        var ids = await EligibleTitles(accountId)
+            .IgnoreQueryFilters()
+            .Select(t => t.Id)
+            .ToListAsync(ct);
+        return [.. ids];
+    }
+
+    /// <summary>
+    /// The subset of <paramref name="candidateTitleIds"/> that now carries an interaction footprint —
+    /// the SAME rule <see cref="EligibleTitles"/> applies, expressed as a set lookup for surfaces
+    /// holding titles that were already materialised (the feed snapshot) instead of a query to filter.
+    ///
+    /// It exists because the two used to be independent copies, and they drifted: the snapshot pruner
+    /// unioned SaveForLater + NotInterested + watched + rated while <see cref="EligibleTitles"/> had
+    /// its own list, so when Dropped joined the exclusions on 2026-08-07 only one of them learned
+    /// about it. Anything that prunes a materialised feed calls this — do not write a second copy.
+    /// </summary>
+    public async Task<HashSet<Guid>> InteractedTitleIdsAsync(
+        Guid accountId, IReadOnlyCollection<Guid> candidateTitleIds, CancellationToken ct = default)
+    {
+        if (candidateTitleIds.Count == 0)
+        {
+            return [];
+        }
+
+        var interacted = new HashSet<Guid>();
+        interacted.UnionWith(await db.UserTitleReactions
+            .Where(r => r.AccountId == accountId && r.RevokedAt == null
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
+                && candidateTitleIds.Contains(r.TitleId))
+            .Select(r => r.TitleId).ToListAsync(ct));
+        interacted.UnionWith(await db.WatchedTitles
+            .Where(w => w.AccountId == accountId && candidateTitleIds.Contains(w.TitleId))
+            .Select(w => w.TitleId).ToListAsync(ct));
+        interacted.UnionWith(await db.UserRatings
+            .Where(r => r.AccountId == accountId && candidateTitleIds.Contains(r.TitleId))
+            .Select(r => r.TitleId).ToListAsync(ct));
+        return interacted;
     }
 
     /// <summary>
@@ -51,15 +162,27 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// exclusion. Discovery surfaces use <see cref="EligibleTitles"/>, which composes this.
     /// </summary>
     /// <param name="ignoreGenreFilters">See <see cref="EligibleTitles"/> — genre rails only.</param>
-    public IQueryable<Title> ContentFilteredTitles(Guid accountId, bool ignoreGenreFilters = false)
+    /// <param name="suppressed">See <see cref="EligibleTitles"/> — the empty-feed diagnostic only.</param>
+    public IQueryable<Title> ContentFilteredTitles(
+        Guid accountId, bool ignoreGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
     {
+        // Captured as locals so each arm's predicate is a constant EF can fold away, rather than a
+        // set lookup it would have to translate.
+        var skipExcludeGenre = ignoreGenreFilters || suppressed?.Contains(FilterKind.ExcludeGenre) == true;
+        var skipIncludeGenre = ignoreGenreFilters || suppressed?.Contains(FilterKind.IncludeGenre) == true;
+        var skipKeyword = suppressed?.Contains(FilterKind.ExcludeKeyword) == true;
+        var skipLanguage = suppressed?.Contains(FilterKind.Language) == true;
+        var skipCrowd = suppressed?.Contains(FilterKind.MinCrowdRating) == true;
+        var skipYears = suppressed?.Contains(FilterKind.MinYear) == true || suppressed?.Contains(FilterKind.MaxYear) == true;
+
         var query = db.Titles.Where(t =>
-            ignoreGenreFilters
+            skipExcludeGenre
             || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && t.Genres.Contains(f.Value)));
 
         query = query.Where(t =>
-            !db.ContentFilters.Any(f =>
+            skipKeyword
+            || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeKeyword
                 && (t.Name.ToLower().Contains(f.Value.ToLower())
                     || (t.Overview != null && t.Overview.ToLower().Contains(f.Value.ToLower()))
@@ -76,7 +199,7 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // translated fine. It is now written as ContentFilters.Any over t.Genres.Contains purely so it
         // is the mirror image of the ExcludeGenre arm above and reads as one rule with two signs.
         query = query.Where(t =>
-            ignoreGenreFilters
+            skipIncludeGenre
             || !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre)
             || db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre && t.Genres.Contains(f.Value)));
@@ -86,7 +209,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // an unknown (null) language reads as not-English and is excluded unless "*" is set — the
         // founder asked for English, not "English plus anything we failed to tag".
         query = query.Where(t =>
-            db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value == "*")
+            skipLanguage
+            || db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value == "*")
             || (t.Language != null
                 && db.ContentFilters.Any(f =>
                     f.AccountId == accountId && f.Kind == FilterKind.Language && f.Value != "*" && f.Value == t.Language.ToLower()))
@@ -106,8 +230,18 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // The floor is read through a scalar subquery whose CAST sits in the SELECT list, so Postgres
         // only ever casts rows that already matched Kind = MinCrowdRating. Language rows ("en") and
         // keyword rows are never fed to the numeric cast.
+        //
+        // Convert.ToDecimal / Convert.ToInt32 are called here WITHOUT an IFormatProvider, and that is
+        // deliberate rather than an oversight the culture sweep missed: EF Core translates only the
+        // single-argument overloads, so passing CultureInfo.InvariantCulture makes the whole predicate
+        // untranslatable and the query falls apart (verified 2026-09-10 — ~40 integration tests go red).
+        // No host culture is involved either way: the conversion happens inside Postgres as a CAST,
+        // never in .NET. The stored string shape is what makes that safe, and it is guaranteed by
+        // ContentFilterRules.FormatRating / FormatYear, which are already invariant and are the only
+        // sanctioned writers of these rows.
         query = query.Where(t =>
-            !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.MinCrowdRating)
+            skipCrowd
+            || !db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.MinCrowdRating)
             || (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
                     ? t.TmdbVoteAverage
                     : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
@@ -122,7 +256,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // above: a missing year is a metadata gap on an otherwise well-rated title, whereas a missing
         // rating is the very thing the floor is asserting about.
         query = query.Where(t =>
-            !db.ContentFilters.Any(f =>
+            skipYears
+            || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && (f.Kind == FilterKind.MinYear || f.Kind == FilterKind.MaxYear))
             || (t.Year == null && t.ReleasedAt == null && t.FirstAiredAt == null)
             || ((t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year))
@@ -135,6 +270,98 @@ public class EligibilityQueryBuilder(IReelDbContext db)
                         .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MaxYear)
                         .Select(f => (int?)Convert.ToInt32(f.Value))
                         .FirstOrDefault() ?? int.MaxValue)));
+
+        return query;
+    }
+
+    /// <summary>
+    /// The eligibility rule evaluated against an EXPLICIT rule set instead of the account's saved
+    /// <c>ContentFilters</c> rows — the draft the conditions editor is currently showing.
+    ///
+    /// The interaction footprint half is unchanged and still reads the account's real rows: a draft
+    /// changes what you are willing to be shown, never what you have already seen.
+    /// </summary>
+    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules)
+    {
+        return ContentFilteredTitles(rules).Where(t =>
+            !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
+            && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
+            && !db.UserTitleReactions.Any(r =>
+                r.AccountId == accountId && r.TitleId == t.Id
+                && (r.Kind == ReactionKind.NotInterested
+                    || r.Kind == ReactionKind.SaveForLater
+                    || r.Kind == ReactionKind.Dropped)
+                && r.RevokedAt == null));
+    }
+
+    /// <summary>
+    /// The content-preference rules from an explicit <see cref="FilterRuleSet"/> rather than from the
+    /// database. Same rules, same order, same edge calls as the persisted overload above — an unrated
+    /// title fails a crowd floor, an undated title passes a year window, no language rows means
+    /// English-only — expressed over in-memory values because the caller is costing conditions that
+    /// have not been saved and therefore cannot be read back out of <c>ContentFilters</c>.
+    ///
+    /// This is the ONE sanctioned second phrasing of the content predicate, and it is pinned to the
+    /// first by <c>FilterCostMeterTests.Draft_rules_match_the_persisted_rules_title_for_title</c>,
+    /// which seeds a catalogue, saves the rules, and asserts both paths return the identical id set.
+    /// If you change one arm here, change it there and let that test prove it. Anything that SERVES
+    /// titles keeps using the persisted overload — a draft is a question, not a permission.
+    /// </summary>
+    public IQueryable<Title> ContentFilteredTitles(FilterRuleSet rules)
+    {
+        var includeGenres = rules.IncludeGenres;
+        var languages = rules.EffectiveLanguages;
+        var allLanguages = rules.AllLanguagesAllowed;
+        var crowdFloor = rules.MinCrowdRating;
+        var minYear = rules.MinYear;
+        var maxYear = rules.MaxYear;
+
+        var query = db.Titles.AsQueryable();
+
+        // Excluded genres and keywords are an AND of NOTs, so each one is its own Where — which is
+        // exactly what "a title carrying ANY excluded value is out" means, and it keeps every arm a
+        // plain translatable predicate over one captured constant.
+        foreach (var genre in rules.ExcludeGenres)
+        {
+            var value = genre;
+            query = query.Where(t => !t.Genres.Contains(value));
+        }
+
+        foreach (var keyword in rules.ExcludeKeywords)
+        {
+            var value = keyword;
+            query = query.Where(t =>
+                !(t.Name.ToLower().Contains(value)
+                    || (t.Overview != null && t.Overview.ToLower().Contains(value))
+                    || t.Keywords.Any(k => k.Contains(value))));
+        }
+
+        // Include-genres are an allow-list when present: at least one must match.
+        query = query.Where(t => includeGenres.Count == 0 || t.Genres.Any(g => includeGenres.Contains(g)));
+
+        // Language allow-list, with the same two documented calls as the persisted arm: "*" opts every
+        // language back in, and an unknown (null) language reads as not-English.
+        query = query.Where(t =>
+            allLanguages
+            || (t.Language != null && languages.Contains(t.Language.ToLower())));
+
+        // Crowd floor, resolved TMDB-then-Trakt inline exactly as above — a title with no crowd
+        // rating from either source FAILS the floor.
+        query = query.Where(t =>
+            crowdFloor == null
+            || (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
+                    ? t.TmdbVoteAverage
+                    : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
+                >= crowdFloor);
+
+        // Inclusive year window; a title with no year, release date or first-aired date PASSES.
+        query = query.Where(t =>
+            (minYear == null && maxYear == null)
+            || (t.Year == null && t.ReleasedAt == null && t.FirstAiredAt == null)
+            || ((t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year))
+                    >= (minYear ?? int.MinValue)
+                && (t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year))
+                    <= (maxYear ?? int.MaxValue)));
 
         return query;
     }

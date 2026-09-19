@@ -4,7 +4,7 @@ import { Star } from "lucide-react";
 import { useGetPersonQuery, useRatePersonMutation, useUnratePersonMutation } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";
 import PosterImage from "../components/rec/PosterImage";
-import PredictedRatingBadge from "../components/rec/PredictedRatingBadge";
+import ScoreBadges from "../components/rec/ScoreBadges";
 
 /** Initials for the avatar fallback — first letters of the first two words of a name. */
 function initials(name: string): string {
@@ -113,15 +113,8 @@ export default function Person() {
                       the gradient-initials fallback for a null path, and the onError that keeps a
                       stale TMDB URL from rendering the browser's broken-image glyph. */}
                   <PosterImage path={t.posterPath} alt={t.name} size="w185" />
-                  {t.userRating != null ? (
-                    <span className="absolute top-2 right-2 rounded-full bg-fa-ink/80 text-fa-frost-bright fa-caption px-1.5 py-0.5 flex items-center gap-0.5">
-                      <Star className="h-2.5 w-2.5 fill-current" /> {t.userRating}
-                    </span>
-                  ) : t.predictedRating != null ? (
-                    <div className="absolute top-2 right-2">
-                      <PredictedRatingBadge rating={t.predictedRating} />
-                    </div>
-                  ) : null}
+                  {/* The shared stack; an explicit rating replaces the prediction (its rule). */}
+                  <ScoreBadges userRating={t.userRating} predictedRating={t.predictedRating} />
                 </div>
                 <p className="mt-2 fa-caption text-fa-frost-bright truncate" title={t.name}>{t.name}</p>
                 <p className="fa-caption text-fa-frost-dim">{t.year ?? ""}</p>

@@ -1,7 +1,43 @@
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
-import type { ContinueEntry, FeedCard, FeedPayload, GenreRail, MoreFeedRequest, MoreFeedResponse } from "./feedTypes";
+import { ensureFreshSession } from "../lib/session";
+import { clearHasSession, markHasSession } from "../lib/sessionFlag";
+import type {
+  BlendPicksPayload,
+  BlendPreview,
+  ContinueEntry,
+  DigestPayload,
+  LensPayload,
+  NarrativePayload,
+  FeedCard,
+  FeedPayload,
+  GenreRail,
+  MoreFeedRequest,
+  MoreFeedResponse,
+} from "./feedTypes";
 import { titleRemoved, titleRestored } from "./removedTitlesSlice";
-import type { PersonPayload, ProvidersPayload, SavedEntry, TitleDetailPayload } from "./titleTypes";
+import { verdictShown } from "./verdictSlice";
+import type { RatingVerdict } from "../lib/verdictCopy";
+import type { PersonPayload, ProvidersPayload, TitleDetailPayload } from "./titleTypes";
+import type { RecentlyWatchedResponse, SavedQueueResponse } from "./savedTypes";
+// Type-only, so nothing at runtime depends on the hook module: the resume payload is defined
+// beside the reducer that consumes it, and duplicating its shape here is how the two drift.
+import type { ConversationPayload } from "../lib/useAskReelChat";
+import type { AskCard } from "../lib/askReelStream";
+
+/**
+ * The "your model just learned" band's payload. Every field is either already in the evaluation
+ * ledger or is a diff of two rows that already exist — nothing here was added to the schema.
+ */
+export interface ModelLearned {
+  trainedAt: string;
+  newRatingsSinceLast: number;
+  calibrationBias: number | null;
+  calibrationMae: number | null;
+  /** Previous MAE minus current: positive means the model runs closer to the user's own scores. */
+  maeImprovement: number | null;
+  spearman: number | null;
+  picksChanged: number;
+}
 
 export interface TypeaheadTitle {
   titleId: string;
@@ -14,9 +50,23 @@ export interface TypeaheadTitle {
   predictedRating: number | null;
 }
 
+/** One "beyond your catalogue" row — a raw TMDB lookup hit, never ingested and never scored. */
+export interface GlobalTypeaheadRow {
+  source: "tmdb";
+  mediaType: "movie" | "show";
+  tmdbId: number;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  crowdRating: number | null;
+  predictedRating: number | null;
+}
+
 export interface TypeaheadPayload {
   titles: TypeaheadTitle[];
   people: { personId: string; name: string; knownFor: string | null; profilePath: string | null }[];
+  /** Only present when the request asked for the global leg (`&global=1`). */
+  global?: GlobalTypeaheadRow[];
 }
 
 export interface FiltersPayload {
@@ -35,6 +85,49 @@ export interface FiltersPayload {
   maxYear: number | null;
 }
 
+/**
+ * What one content rule costs. `marginal` is the eligible count with that ONE rule relaxed minus the
+ * eligible count as drafted — "dropping comedy adds ~180". Marginals deliberately do NOT sum: two
+ * rules can be holding the same title out, so relaxing both returns less than the two numbers
+ * together, which is exactly why the meter reports per rule instead of one grand total.
+ */
+export interface FilterCostRule {
+  /** The server's FilterKind name — "ExcludeGenre", "Language", "MinCrowdRating", "MinYear"… */
+  kind: string;
+  /** The value the user would tap off: a genre slug, a threshold, or the joined language list. */
+  value: string;
+  marginal: number;
+}
+
+/** A rule worth offering as a one-tap relaxation, because relaxing it actually returns titles. */
+export interface FilterCostSuggestion {
+  kind: string;
+  value: string;
+  gain: number;
+}
+
+/**
+ * The cost of a draft rule set. `total` is the whole catalogue (the denominator in "421 of 5,319");
+ * `eligible` is what survives BOTH the rules and the locked zero-footprint rule — the real supply
+ * behind tonight's picks, not a filter-only count.
+ */
+export interface FilterCostReport {
+  total: number;
+  eligible: number;
+  byRule: FilterCostRule[];
+  suggestions: FilterCostSuggestion[];
+}
+
+/** One pocket of taste — a cluster over the account's loved and rewatched titles (Ml/TasteClusterer). */
+export interface TasteCluster {
+  ordinal: number;
+  /** Share of the account's loved-title weight this pocket holds, 0–1. */
+  share: number;
+  titleCount: number;
+  /** The account's own titles nearest the pocket's centre — never recommendations. */
+  exemplars: { name: string; year: number | null; posterPath: string | null }[];
+}
+
 export interface TasteDnaPayload {
   userMean: number;
   contrarianScore: number;
@@ -48,6 +141,8 @@ export interface TasteDnaPayload {
   topActors: { personId: string; name: string; profilePath: string | null; rating: number }[];
   histogram: { rating: number; count: number }[];
   drift: { year: number; shares: Record<string, number> }[];
+  /** Empty below the clusterer's input floor (30 loved titles) and for accounts with no embeddings. */
+  clusters: TasteCluster[];
 }
 
 /** Pipeline stages as reported by the backend (Account.PipelineStage). */
@@ -101,12 +196,81 @@ export interface SyncStatus {
   lastListSyncAt: string | null;
   /** Most recent write-back error text, for the indicator's hover detail. */
   outboxLastError: string | null;
+  /**
+   * Progress toward the next drift retrain, so a screen that asks for ratings can say what they
+   * buy. `newRatingsSinceTrain` counts UserRatings whose immutable `FirstRatedAt` is newer than the
+   * Active artifact's `TrainedAt` — the same two inputs the nightly reconcile's gate reads. Absent
+   * on a response from a backend that predates the field.
+   */
+  retrain?: {
+    minNewRatings: number;
+    newRatingsSinceTrain: number;
+    /** False before the first model exists: the next train is the FIRST, not a drift retrain. */
+    hasActiveModel: boolean;
+    lastTrainedAt: string | null;
+  };
+}
+
+/**
+ * One card on the rate grid. `source` says which half it came from: "watched" is a title the user
+ * has seen and never scored — a memory, the highest-information label the product can ask for —
+ * and "popular" is the cold-start fallback pool behind it.
+ */
+export interface RateSuggestion {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  crowdRating: number | null;
+  crowdVotes: number | null;
+  source: "watched" | "popular";
+}
+
+/**
+ * One live dislike — a NotInterested or Dropped reaction that has not been revoked. `reason` is
+ * null on rows recorded before the card overlay offered a picker (and on Dropped, which has no
+ * reason), which is itself worth showing: it is why the profile below says less than the total.
+ */
+export interface DislikeEntry {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number | null;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  kind: "NotInterested" | "Dropped";
+  reason: "Genre" | "SeenEnough" | "Tone" | "NotForMe" | null;
+  createdAt: string;
+}
+
+/**
+ * The dislike history plus what it currently teaches the model. `total` counts every live dislike;
+ * `profile.activeCount` counts only those inside `profile.windowDays`, which is the set the
+ * recency-decayed demotion is actually built from — the two are reported separately rather than
+ * letting one stand in for the other.
+ */
+export interface DislikesPayload {
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  items: DislikeEntry[];
+  profile: {
+    windowDays: number;
+    activeCount: number;
+    genres: { genre: string; weight: number }[];
+    tones: { tone: string; weight: number }[];
+  };
 }
 
 export interface AccountSettings {
   region: string;
   onboarded: boolean;
   email?: string | null;
+  /** Served RESOLVED (never null): how long an evening is, for the Saved shelf's pinned pick. */
+  eveningBudgetMinutes?: number;
 }
 
 export interface ModelEvalDetail {
@@ -115,16 +279,50 @@ export interface ModelEvalDetail {
   caveats?: string[];
 }
 
+/** One rolling split origin — the harness reports five (60/65/70/75/80% of the rating history). */
+export interface ModelEvalOrigin {
+  fraction: number;
+  splitAt: string;
+  trainRows: number;
+  unfilteredHoldout: number;
+  eligibleHoldout: number;
+  threshold: number;
+  lowSample: boolean;
+  ndcgModel: number;
+  ndcgBaseline: number;
+  ndcgRelativeLift: number;
+  precisionModel: number;
+  precisionBaseline: number;
+}
+
+/**
+ * Nullable everywhere the 2026-09 instrument repair added a column: ledger rows written before it
+ * genuinely have no NDCG, no CI and no calibration, and rendering a zero would claim a measurement
+ * that was never taken.
+ */
 export interface ModelEval {
+  /** Quantised to 0.1 by a ten-slot cut — display only; the gate reads NDCG. */
   modelPrecisionAt10: number;
   baselinePrecisionAt10: number;
+  /** The legacy precision lift, kept so the twelve historical rows stay comparable. */
   relativeImprovement: number;
   rmse: number;
   mae: number;
   spearmanRho: number;
+  spearmanSe: number | null;
+  ndcgAt10Model: number | null;
+  ndcgAt10Baseline: number | null;
+  ndcgLiftCiLow: number | null;
+  ndcgLiftCiHigh: number | null;
+  calibrationBias: number | null;
+  ece: number | null;
+  eligibleHoldoutCount: number | null;
+  unfilteredHoldoutCount: number | null;
   holdoutPositiveCount: number;
   lowSample: boolean;
   passedGate: boolean;
+  passedLegacyGate: boolean;
+  origins: ModelEvalOrigin[] | null;
   detail: ModelEvalDetail;
 }
 
@@ -141,28 +339,287 @@ export interface ModelRun {
   eval: ModelEval | null;
 }
 
+/** Predicted-vs-actual summary. `pearsonCorrelation` is null when it is genuinely undefined. */
+export interface PredictionAccuracy {
+  count: number;
+  meanPredicted: number;
+  meanActual: number;
+  meanAbsoluteError: number;
+  bias: number;
+  withinOnePointRate: number;
+  pearsonCorrelation: number | null;
+}
+
+export interface RetroMiss {
+  titleId: string;
+  name: string;
+  year: number | null;
+  predicted: number;
+  actual: number;
+  gap: number;
+}
+
+/** "Titles you watched because of Reel average X; titles you found yourself average Y." */
+export interface CounterfactualWindow {
+  window: string;
+  days: number | null;
+  viaReelCount: number;
+  viaReelMeanRating: number | null;
+  otherCount: number;
+  otherMeanRating: number | null;
+  delta: number | null;
+}
+
+/**
+ * The retro closed loop: what Reel predicted against what actually happened. Computed live from
+ * the managed list, ratings and stored scores — no new schema, and no smoothing.
+ */
+export interface ModelEfficiency {
+  computedAt: string;
+  conversions: {
+    count: number;
+    ratedCount: number;
+    scoredCount: number;
+    accuracy: PredictionAccuracy;
+    ratingDistribution: { rating: number; count: number }[];
+    worstMisses: RetroMiss[];
+  };
+  predictedVsActual: {
+    pairs: number;
+    accuracy: PredictionAccuracy;
+    worstMisses: RetroMiss[];
+  };
+  counterfactual: CounterfactualWindow[];
+}
+
+/** One ranker's record across the interleaving experiment. */
+export interface PolicyStanding {
+  policyId: string;
+  description: string | null;
+  /** "A", "B", or null for a ranker that is no longer one of the configured arms. */
+  team: string | null;
+  slates: number;
+  cards: number;
+  credits: number;
+  slateWins: number;
+}
+
+/**
+ * The interleaving readout. Every number is computed on read from the exposure log, and the
+ * always-valid p-value may be looked at as often as you like without inflating the error rate —
+ * which is the entire reason the harness uses an mSPRT rather than a test with a sample-size plan.
+ */
+export interface InterleaveSummary {
+  computedAt: string;
+  enabled: boolean;
+  policyA: string;
+  policyB: string;
+  tau: number;
+  alpha: number;
+  slates: number;
+  decidedSlates: number;
+  ties: number;
+  winsA: number;
+  winsB: number;
+  alwaysValidP: number;
+  significant: boolean;
+  preferenceRateA: number | null;
+  ciLow: number;
+  ciHigh: number;
+  signTestP: number;
+  firstSlateAt: string | null;
+  lastSlateAt: string | null;
+  decidedSlatesPerDay: number | null;
+  slatesToDecisionAt65: number;
+  estimatedDaysToDecision: number | null;
+  standings: PolicyStanding[];
+}
+
 export interface ModelMetrics {
   gate: {
+    /** The mean-relative-NDCG-lift clause of the gate (0.20). */
     threshold: number;
     passed: boolean;
     latestLift: number | null;
+    ndcgModel: number | null;
+    ndcgBaseline: number | null;
+    ndcgLiftCiLow: number | null;
+    ndcgLiftCiHigh: number | null;
+    ciExcludesZero: boolean;
+    legacyThreshold: number;
+    legacyPassed: boolean;
     iterationsUsed: number;
     killCriterionAt: number;
+    criterionExceeded: boolean;
   };
+  efficiency: ModelEfficiency;
   activeArtifact: { version: number; algo: string; trainedAt: string } | null;
   runs: ModelRun[];
+}
+
+/** One predicted band on the calibration chart. Null means the band is empty, not that it is zero. */
+export interface CalibrationBucket {
+  bucket: number;
+  low: number;
+  high: number;
+  n: number;
+  meanPredicted: number | null;
+  meanActual: number | null;
+}
+
+/** One specific thing Reel got right or wrong, with enough identity to render its poster. */
+export interface AccuracyMoment {
+  titleId: string;
+  name: string;
+  year: number | null;
+  posterPath: string | null;
+  mediaType: string;
+  tmdbId: number | null;
+  predicted: number;
+  actual: number;
+  /** Null on the retro fallback — a stored score is not proof the card was ever on screen. */
+  surface: string | null;
+  shownAt: string | null;
+  ratedAt: string;
+  daysToOutcome: number | null;
+}
+
+/**
+ * The track record. `source` is part of the payload rather than an implementation detail: the page
+ * says out loud whether a number came from the exposure log ("we know this was on your screen") or
+ * from the retro join ("a score existed before you rated it"), because the two are different
+ * strengths of evidence and smoothing over the difference is the one thing this surface must not do.
+ */
+export interface AccuracyPayload {
+  window: string;
+  from: string | null;
+  to: string;
+  source: "exposures" | "retro" | "none";
+  headline: {
+    withinOnePoint: number;
+    n: number;
+    meanAbsoluteError: number;
+    bias: number;
+    correlation: number | null;
+    meanPredicted: number;
+    meanActual: number;
+  };
+  calibration: CalibrationBucket[];
+  moments: AccuracyMoment[];
+  conversion: {
+    shown: number;
+    saved: number;
+    watched: number;
+    rated: number;
+    shownToSaved: number | null;
+    savedToWatched: number | null;
+    shownToRated: number | null;
+    medianDaysToWatch: number | null;
+  };
+  counterfactual: CounterfactualWindow[];
+  learnedThisWeek: {
+    trainedAt: string;
+    newRatings: number;
+    calibrationBias: number | null;
+    calibrationMae: number | null;
+    maeImprovement: number | null;
+    spearman: number | null;
+    picksChanged: number;
+  } | null;
+  crossReference: CrossReferenceAccuracy;
+}
+
+/**
+ * How the titles served under one cross-reference standing actually turned out. `answerable` is the
+ * server's own judgement about whether `n` is large enough to read anything into — the panel shows
+ * the count and refuses to draw a conclusion below it, because this measurement can never reach
+ * significance (about 2% of ratings are made in the app) and the offline backtest is the gate.
+ */
+export interface CrossReferenceVerdictOutcome {
+  verdict: string;
+  n: number;
+  meanLaterRating: number | null;
+  lovedRate: number | null;
+  dislikedRate: number | null;
+  answerable: boolean;
+}
+
+/** The newest pooled backtest at one prompt generation — the evidence that decided what a verdict may do. */
+export interface CrossReferenceBacktest {
+  promptVersion: number;
+  evaluatedAt: string;
+  judged: number;
+  auc: number | null;
+  meanLaterRatingKeep: number | null;
+  meanLaterRatingOut: number | null;
+  keepLovedRate: number | null;
+  keepDislikedRate: number | null;
+  falseRuleOutRate: number;
+  falseRuleOutLow: number;
+  falseRuleOutHigh: number;
+  trueRuleOutRate: number;
+  unsureRate: number;
+  gating: string;
+  caveat: string;
+  /** Whether this is the generation the job is writing today. */
+  current: boolean;
+}
+
+export interface CrossReferenceAccuracy {
+  online: CrossReferenceVerdictOutcome[];
+  backtests: CrossReferenceBacktest[];
+  minimumOutcomes: number;
+}
+
+/**
+ * The home band's payload. The server answers 204 whenever there is nothing honest to say — no
+ * active model, or a pool nothing has judged and nothing is judging — which arrives here as null.
+ */
+export interface CrossReferenceStatus {
+  running: boolean;
+  judged: number;
+  total: number;
+  kept: number;
+  ruledOut: number;
+  unsure: number;
+  noSignal: number;
+  gating: string;
+}
+
+/**
+ * One row of Ask Reel's thread list. `lastCardsAt: null` means the thread predates stored results
+ * — it is a transcript, and saying so is a different fact from a turn that returned nothing.
+ */
+export interface ConversationSummary {
+  id: string;
+  title: string | null;
+  turnCount: number;
+  lastTurnAt: string;
+  lastCardsAt: string | null;
+}
+
+/**
+ * What a turn says about itself when a client comes back to ask. `status` is the server's own
+ * enum name (`Pending` / `Completed` / `Failed`); a Pending turn answers 202, so a poller can tell
+ * "not yet" apart from "nothing".
+ */
+export interface TurnStatusPayload {
+  status: string;
+  reason: string | null;
+  failureCode: string | null;
+  cards: AskCard[];
+  removed?: number;
 }
 
 /**
  * Auth rides in HttpOnly cookies (reel_at / reel_rt) — no headers to prepare; every request
  * just needs credentials included. The access cookie lives 15 minutes: on a 401 the base
- * query silently rotates the session via /auth/refresh (single-flight) and retries once.
- * A refreshed access cookie also heals the SSE EventSource on its next auto-reconnect.
+ * query silently rotates the session via `ensureFreshSession` (single-flight, shared with the
+ * raw-fetch callers in `lib/session.ts`) and retries once. A refreshed access cookie also heals
+ * the SSE EventSource on its next auto-reconnect.
  * Terminal 401s surface through query `error` states; RequireAuth redirects to landing.
  */
 const rawBaseQuery = fetchBaseQuery({ baseUrl: "/api", credentials: "include" });
-
-let refreshInFlight: Promise<Response> | null = null;
 
 const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryError> = async (
   args,
@@ -173,11 +630,7 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
 
   const url = typeof args === "string" ? args : args.url;
   if (result.error?.status === 401 && !url.startsWith("auth/")) {
-    refreshInFlight ??= fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
-    const refresh = await refreshInFlight.finally(() => {
-      refreshInFlight = null;
-    });
-    if (refresh.ok) {
+    if (await ensureFreshSession()) {
       result = await rawBaseQuery(args, queryApi, extraOptions);
     }
   }
@@ -191,11 +644,25 @@ export const api = createApi({
   // "Feed" is the picks snapshot and is deliberately NOT invalidated by per-title reactions — see
   // the note on `markNotInterested`. "ContinueWatching" is split out so dropping a show can refresh
   // that rail without re-seeding (and so resetting) every infinite row the user is scrolling.
-  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "Prefs", "Person", "PrefTags"],
+  // "Conversation" covers Ask Reel's thread list and each resumed thread. The /ask STREAM is not in
+  // here and cannot be — RTK Query cannot hold a text/event-stream body — but everything around it
+  // is ordinary cached data, which is what makes a delete refresh the Recent menu on its own.
+  tagTypes: ["Session", "Sync", "Feed", "ContinueWatching", "TasteDna", "Lab", "Title", "Saved", "RecentlyWatched", "Prefs", "Person", "PrefTags", "Dislikes", "Accuracy", "Narrative", "Lens", "CrossReference", "Conversation"],
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",
       providesTags: ["Session"],
+      // A successful probe proves this browser holds a session — remember it so the landing
+      // page's probe-skip (see Landing.tsx) never applies to a signed-in browser. A failure
+      // deliberately does NOT clear the flag: a network blip must not degrade the next visit.
+      async onQueryStarted(_arg, { queryFulfilled }) {
+        try {
+          await queryFulfilled;
+          markHasSession();
+        } catch {
+          // Signed out or offline — leave the flag as-is; only logout clears it.
+        }
+      },
     }),
     startTraktAuth: b.mutation<TraktAuthStart, void>({
       // POST: generates a fresh signed state server-side on each call.
@@ -204,9 +671,25 @@ export const api = createApi({
     exchangeTraktCode: b.mutation<Session, { code: string; state: string }>({
       query: (body) => ({ url: "auth/trakt/callback", method: "POST", body }),
       invalidatesTags: ["Session", "Sync"],
+      // The OAuth callback IS account creation — set the flag here so the very first
+      // post-sign-in landing visit probes instead of assuming signed-out.
+      async onQueryStarted(_arg, { queryFulfilled }) {
+        try {
+          await queryFulfilled;
+          markHasSession();
+        } catch {
+          // Exchange failed — no session was established, nothing to remember.
+        }
+      },
     }),
     logout: b.mutation<void, void>({
       query: () => ({ url: "auth/logout", method: "POST" }),
+      async onQueryStarted(_arg, { queryFulfilled }) {
+        // Clear regardless of outcome: the user asked to sign out, so the landing page should
+        // treat this browser as signed-out even if the server call failed.
+        clearHasSession();
+        await queryFulfilled.catch(() => undefined);
+      },
     }),
     getSyncStatus: b.query<SyncStatus, void>({
       query: () => "sync/status",
@@ -231,6 +714,34 @@ export const api = createApi({
     rebuildFeed: b.mutation<void, void>({
       query: () => ({ url: "feed/rebuild", method: "POST" }),
       invalidatesTags: ["Sync"],
+    }),
+    /**
+     * What the latest retrain bought the user. Its own endpoint rather than a field on `getFeed`:
+     * the feed payload is fetched constantly and this is a retrain-cadence number. The server
+     * answers 204 whenever the band would be a claim the data cannot support, which arrives here as
+     * an empty body — hence the null.
+     *
+     * Tagged "Lab" alongside the ledger: both go stale on exactly the same event (a train/evaluate
+     * run completing), and RealtimeSync already invalidates that tag when one does.
+     */
+    getModelLearned: b.query<ModelLearned | null, void>({
+      query: () => ({
+        url: "feed/learned",
+        responseHandler: async (response) => (response.status === 204 ? null : await response.json()),
+      }),
+      providesTags: ["Lab"],
+    }),
+    /**
+     * The cross-reference band's numbers. Its own endpoint for the same reason `feed/learned` is:
+     * the feed payload is refetched constantly and this moves on the cadence of a background pass.
+     * A 204 — nothing judged and nothing judging — arrives as null and the band renders nothing.
+     */
+    getCrossReference: b.query<CrossReferenceStatus | null, void>({
+      query: () => ({
+        url: "feed/cross-reference",
+        responseHandler: async (response) => (response.status === 204 ? null : await response.json()),
+      }),
+      providesTags: ["CrossReference"],
     }),
     getFeedGenres: b.query<GenreRail[], void>({
       query: () => "feed/genres",
@@ -290,7 +801,10 @@ export const api = createApi({
         }
       },
     }),
-    rateTitle: b.mutation<{ userRating: number }, { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }>({
+    rateTitle: b.mutation<
+      { userRating: number; watchedLogged?: boolean; verdict?: RatingVerdict | null },
+      { titleId: string; mediaType: string; tmdbId: number; rating: number; markWatched?: boolean }
+    >({
       // titleId rides along only to key the local removal set; it must not leak into the POST body.
       query: ({ mediaType, tmdbId, titleId: _titleId, ...body }) => ({ url: `titles/${mediaType}/${tmdbId}/rating`, method: "POST", body }),
       async onQueryStarted({ titleId, mediaType, tmdbId, rating }, { dispatch, queryFulfilled }) {
@@ -301,11 +815,39 @@ export const api = createApi({
           })
         );
         try {
-          await queryFulfilled;
+          const { data } = await queryFulfilled;
           // Seen+rated → the title has an interaction footprint now; prune it from the live rows.
           // Deliberately does NOT invalidate Feed — see `markNotInterested`.
           dispatch(titleRemoved({ titleId }));
-          dispatch(api.util.invalidateTags(["TasteDna", "Saved"]));
+          // A rating is exactly the answer the loop-closing prompt was asking for, so the strip
+          // retires that title on the next read rather than continuing to ask a settled question.
+          // Accuracy moves with every rating, so the track record is stale the moment one lands.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "RecentlyWatched", "Accuracy"]));
+          // The after-rating moment, raised here rather than at the three call sites that can rate:
+          // one dispatch means the title modal, the rate picker, the post-watch strip and whatever
+          // rating surface ships next all get it, and none of them can forget to.
+          if (data?.verdict) {
+            dispatch(verdictShown({ verdict: data.verdict, actual: rating }));
+          }
+        } catch {
+          patch.undo();
+        }
+      },
+    }),
+    unrateTitle: b.mutation<{ userRating: null }, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/rating`, method: "DELETE" }),
+      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+        const patch = dispatch(
+          api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
+            draft.userState.userRating = null;
+          })
+        );
+        try {
+          await queryFulfilled;
+          // Un-rating changes taste and (for a Reel-logged movie) reverses the play — same
+          // downstream surfaces as rateTitle, the track record included: a retracted rating is one
+          // fewer verdict against the model.
+          dispatch(api.util.invalidateTags(["TasteDna", "Saved", "Accuracy"]));
         } catch {
           patch.undo();
         }
@@ -317,6 +859,9 @@ export const api = createApi({
         method: "POST",
         body: { reason },
       }),
+      // The dislike history on Taste DNA is a plain list of these rows — safe to invalidate,
+      // unlike Feed (see below), because nothing is scrolled through it.
+      invalidatesTags: ["Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -339,6 +884,7 @@ export const api = createApi({
     }),
     undoNotInterested: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/not_interested`, method: "DELETE" }),
+      invalidatesTags: ["Dislikes"],
       async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
@@ -355,10 +901,12 @@ export const api = createApi({
         }
       },
     }),
-    markDropped: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    // `titleId` rides along only to key the local removal set — the URL is built from
+    // mediaType/tmdbId and there is no body, so it never reaches the wire.
+    markDropped: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "POST" }),
       invalidatesTags: ["ContinueWatching"], // that rail only — not the picks snapshot
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         // Two patches, because the drop button exists on two surfaces. The detail page reads
         // getTitle; the Continue Watching shelf reads getContinueWatching, and it used to have no
         // optimistic patch at all — the card sat there through a POST *and* the invalidation
@@ -380,15 +928,21 @@ export const api = createApi({
         ];
         try {
           await queryFulfilled;
+          // Dropping is an interaction footprint like any other, so the title must leave the picks
+          // rows too — not just the Continue Watching rail. It previously did not, and a dropped
+          // show sat in Tonight's picks reading as if the drop had not registered. Via the local
+          // removal set and ONLY that: invalidating Feed here would remount every infinite row and
+          // discard the pages the user has scrolled — see `markNotInterested`.
+          dispatch(titleRemoved({ titleId }));
         } catch {
           patches.forEach((p) => p.undo());
         }
       },
     }),
-    undrop: b.mutation<void, { mediaType: string; tmdbId: number }>({
+    undrop: b.mutation<void, { titleId: string; mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => ({ url: `titles/${mediaType}/${tmdbId}/reactions/dropped`, method: "DELETE" }),
-      invalidatesTags: ["ContinueWatching"],
-      async onQueryStarted({ mediaType, tmdbId }, { dispatch, queryFulfilled }) {
+      invalidatesTags: ["ContinueWatching", "Dislikes"],
+      async onQueryStarted({ titleId, mediaType, tmdbId }, { dispatch, queryFulfilled }) {
         const patch = dispatch(
           api.util.updateQueryData("getTitle", { mediaType, tmdbId }, (draft) => {
             draft.userState.dropped = false;
@@ -396,6 +950,10 @@ export const api = createApi({
         );
         try {
           await queryFulfilled;
+          // Symmetric with the drop: restore the key so the card comes back to the live rows
+          // without a refetch, exactly as `undoNotInterested` does. Without this an undrop leaves
+          // the card hidden until a reload.
+          dispatch(titleRestored({ titleId }));
         } catch {
           patch.undo();
         }
@@ -438,44 +996,165 @@ export const api = createApi({
         }
       },
     }),
-    getSaved: b.query<{ managedListUrl: string | null; items: SavedEntry[] }, void>({
-      query: () => "saved",
+    // The queue, in the order the user asked for. `sort` is part of the cache key, so switching
+    // orders is a fresh request rather than a client-side re-sort — the server owns the comparator
+    // (and the pinned pick), and two implementations of it would drift within a release.
+    getSaved: b.query<SavedQueueResponse, { sort?: string } | void>({
+      query: (args) => (args && args.sort ? `saved?sort=${encodeURIComponent(args.sort)}` : "saved"),
       providesTags: ["Saved"],
+    }),
+    // Watched-via-Reel titles that are still unrated. Kept under its own tag: rating one of these
+    // must retire that prompt without refetching the whole shelf, and saving a title must not
+    // disturb the strip the user is halfway through answering.
+    getRecentlyWatched: b.query<RecentlyWatchedResponse, void>({
+      query: () => "saved/recently-watched",
+      providesTags: ["RecentlyWatched"],
     }),
     getTasteDna: b.query<TasteDnaPayload, void>({
       query: () => "taste",
       providesTags: ["TasteDna"],
     }),
+    // The taste narrative — what Reel believes about you, in words you can correct.
+    getNarrative: b.query<NarrativePayload, void>({
+      query: () => "taste/narrative",
+      providesTags: ["Narrative"],
+    }),
+    // Your own rewrite. It wins everywhere and survives regeneration; only the regenerate action
+    // clears it. Invalidates Feed too, because the narrative IS the personalisation context every
+    // downstream call rides on — an edit changes what the next build is told about you.
+    saveNarrative: b.mutation<NarrativePayload, { text: string | null }>({
+      query: (body) => ({ url: "taste/narrative", method: "PUT", body }),
+      invalidatesTags: ["Narrative"],
+    }),
+    regenerateNarrative: b.mutation<{ queued: boolean }, void>({
+      query: () => ({ url: "taste/narrative/regenerate", method: "POST" }),
+      invalidatesTags: ["Narrative"],
+    }),
+    // On-demand lens for one title. Generates when nothing usable is cached, behind a 5s server
+    // ceiling, and ALWAYS answers with a `source` — so the modal renders the ladder (fresh, stale,
+    // or the templater fallback it already had) rather than a spinner that resolves to nothing.
+    getLens: b.query<LensPayload, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => `titles/${mediaType}/${tmdbId}/lens`,
+      providesTags: (_r, _e, arg) => [{ type: "Lens" as const, id: `${arg.mediaType}:${arg.tmdbId}` }],
+    }),
+    // "This spoiled it." Withdraws every note for the title so the surface falls back at once.
+    reportLensSpoiler: b.mutation<{ withdrawn: number }, { mediaType: string; tmdbId: number }>({
+      query: ({ mediaType, tmdbId }) => ({
+        url: `titles/${mediaType}/${tmdbId}/lens/spoiled`,
+        method: "POST",
+      }),
+      invalidatesTags: (_r, _e, arg) => [
+        { type: "Lens" as const, id: `${arg.mediaType}:${arg.tmdbId}` },
+        "Title",
+        "Feed",
+      ],
+    }),
     getFilters: b.query<FiltersPayload, void>({
       query: () => "settings/filters",
       providesTags: ["Prefs"],
     }),
-    updateFilters: b.mutation<FiltersPayload, { filters: FiltersPayload; pin?: string }>({
-      query: ({ filters, pin }) => ({
+    // Saves ride the short-lived unlock token from /pin/verify (X-Settings-Unlock) — the raw PIN
+    // is never cached client-side, so it is never replayed per call.
+    updateFilters: b.mutation<FiltersPayload, { filters: FiltersPayload; unlockToken?: string }>({
+      query: ({ filters, unlockToken }) => ({
         url: "settings/filters",
         method: "PUT",
         body: filters,
-        headers: pin ? { "X-Settings-Pin": pin } : undefined,
+        headers: unlockToken ? { "X-Settings-Unlock": unlockToken } : undefined,
       }),
       invalidatesTags: ["Prefs", "Feed"],
+    }),
+    // What the DRAFT in the editor costs — a POST because it carries the unsaved rule set, but a
+    // query and not a mutation because it changes nothing: it needs the arg-keyed cache, since the
+    // editor re-costs on every debounced chip tap and slider drag. `keepUnusedDataFor` matches the
+    // server's own 60s window, so a user toggling a chip back and forth pays for it once.
+    filterCost: b.query<FilterCostReport, FiltersPayload>({
+      query: (filters) => ({ url: "settings/filters/cost", method: "POST", body: filters }),
+      keepUnusedDataFor: 60,
     }),
     setPin: b.mutation<{ pinConfigured: boolean }, { pin: string; currentPin?: string }>({
       query: (body) => ({ url: "settings/pin", method: "POST", body }),
       invalidatesTags: ["Session"],
     }),
-    verifyPin: b.mutation<{ valid: boolean }, { pin: string }>({
+    verifyPin: b.mutation<{ valid: boolean; unlockToken: string; expiresAt: string }, { pin: string }>({
       query: (body) => ({ url: "settings/pin/verify", method: "POST", body }),
     }),
+    // PIN removal is destructive, so it deliberately takes the freshly re-entered raw PIN — the
+    // backend refuses unlock tokens on this endpoint and callers must prompt, not read a cache.
     removePin: b.mutation<{ pinConfigured: boolean }, { pin: string }>({
       query: ({ pin }) => ({ url: "settings/pin", method: "DELETE", headers: { "X-Settings-Pin": pin } }),
       invalidatesTags: ["Session"],
+    }),
+    /**
+     * Ask Reel's thread list — enough to render the `Recent` menu and nothing more.
+     *
+     * Bounded on purpose: the menu shows a handful, and an unbounded list would grow with the
+     * account for a control nobody scrolls.
+     */
+    listConversations: b.query<ConversationSummary[], number | void>({
+      query: (limit) => `search/conversations?limit=${typeof limit === "number" ? limit : 20}`,
+      providesTags: ["Conversation"],
+    }),
+    /**
+     * One conversation, resumed — the transcript AND the answer as it should look now.
+     *
+     * The id is `"latest"` only for a browser that has never asked anything: `/conversations/latest`
+     * is the ACCOUNT's newest thread, not this tab's, and preferring it is how two tabs (or a phone
+     * and a laptop) silently converged on one conversation. One endpoint serves both because the
+     * route's `{id:guid}` constraint cannot match the word, so the page expresses the whole rule as
+     * a single query argument.
+     */
+    getConversation: b.query<ConversationPayload, string>({
+      query: (id) => `search/conversations/${encodeURIComponent(id)}`,
+      providesTags: (_r, _e, id) => [{ type: "Conversation" as const, id }],
+    }),
+    /**
+     * What became of a turn whose stream this client lost. The events are gone, but the turn is a
+     * row, and a row answers the only question a disconnected client has: is it done, and what did
+     * it say. `202` while it is still running, which RTK surfaces as data with `status: "Pending"`.
+     */
+    getTurn: b.query<TurnStatusPayload, string>({
+      query: (id) => `search/turns/${encodeURIComponent(id)}`,
+    }),
+    /**
+     * Erasure, for one conversation. Invalidates the list AND that thread's own entry: without the
+     * second, the page can keep rendering a conversation the server no longer has, and without the
+     * first the deleted thread stays in the menu until a reload and 404s when clicked.
+     *
+     * It never touches exposures — that is the server's promise, stated in its own doc-comment.
+     */
+    deleteConversation: b.mutation<void, string>({
+      query: (id) => ({ url: `search/conversations/${encodeURIComponent(id)}`, method: "DELETE" }),
+      invalidatesTags: (_r, _e, id) => ["Conversation", { type: "Conversation" as const, id }],
     }),
     searchTypeahead: b.query<TypeaheadPayload, string>({
       query: (q) => `search/typeahead?q=${encodeURIComponent(q)}`,
       keepUnusedDataFor: 30,
     }),
+    // Fired only when the local shortlist comes back sparse — the backend re-runs the local
+    // lookup and adds a `global` array of TMDB-wide matches (see shouldQueryGlobal).
+    searchTypeaheadGlobal: b.query<TypeaheadPayload, string>({
+      query: (q) => `search/typeahead?q=${encodeURIComponent(q)}&global=1`,
+      keepUnusedDataFor: 30,
+    }),
+    /**
+     * The track record. Free for every tier — a paid accuracy report reads as hiding the scorecard.
+     * Polled by nothing: it changes when a rating lands, and the rating mutation invalidates it.
+     */
+    getAccuracy: b.query<AccuracyPayload, { window?: string } | void>({
+      query: (args) => `accuracy?window=${args && args.window ? args.window : "90d"}`,
+      providesTags: ["Accuracy"],
+    }),
     getModelMetrics: b.query<ModelMetrics, void>({
       query: () => "metrics/model",
+      providesTags: ["Lab"],
+    }),
+    /**
+     * The interleaving instrument. Founder-only server-side; polled slowly because the underlying
+     * number moves on the scale of days, and a fast poll would suggest otherwise.
+     */
+    getInterleave: b.query<InterleaveSummary, void>({
+      query: () => "metrics/interleave",
       providesTags: ["Lab"],
     }),
     trainModel: b.mutation<void, void>({
@@ -498,14 +1177,42 @@ export const api = createApi({
       query: () => "billing/status",
       providesTags: ["Session"],
     }),
-    getRateSuggestions: b.query<
-      { titleId: string; mediaType: "Movie" | "Show"; tmdbId: number; name: string; year: number | null; posterPath: string | null }[],
-      void
-    >({
+    getDislikes: b.query<DislikesPayload, { offset?: number; limit?: number } | void>({
+      query: (args) => ({
+        url: "taste/dislikes",
+        params: { offset: args?.offset ?? 0, limit: args?.limit ?? 20 },
+      }),
+      providesTags: ["Dislikes"],
+    }),
+    getRateSuggestions: b.query<RateSuggestion[], void>({
       query: () => "titles/rate-suggestions",
     }),
     createCheckout: b.mutation<{ url?: string; error?: string }, void>({
       query: () => ({ url: "billing/checkout", method: "POST" }),
+    }),
+    // Weekly digest — read-only snapshot of this week's "new & high for you" picks.
+    getDigest: b.query<DigestPayload, void>({
+      query: () => "digest/current",
+    }),
+    // Web push. The VAPID key is fetched lazily at opt-in time, not on page load.
+    getVapidPublicKey: b.query<{ key: string }, void>({
+      query: () => "push/vapid-public-key",
+    }),
+    subscribePush: b.mutation<{ ok: boolean }, { endpoint: string; keys: { p256dh: string; auth: string } }>({
+      query: (body) => ({ url: "push/subscribe", method: "POST", body }),
+    }),
+    unsubscribePush: b.mutation<{ ok: boolean }, { endpoint: string }>({
+      query: (body) => ({ url: "push/subscribe", method: "DELETE", body }),
+    }),
+    // Blend — two-person joint picks via a shareable code.
+    createBlendCode: b.mutation<{ code: string }, void>({
+      query: () => ({ url: "blend/code", method: "POST" }),
+    }),
+    getBlendPreview: b.query<BlendPreview, string>({
+      query: (code) => `blend/${encodeURIComponent(code)}/preview`,
+    }),
+    getBlendPicks: b.mutation<BlendPicksPayload, string>({
+      query: (code) => ({ url: `blend/${encodeURIComponent(code)}/picks`, method: "POST" }),
     }),
   }),
 });
@@ -519,11 +1226,15 @@ export const {
   useTriggerSyncMutation,
   useUpdateSettingsMutation,
   useGetModelMetricsQuery,
+  useGetInterleaveQuery,
   useTrainModelMutation,
   useGetFeedQuery,
   useGetContinueWatchingQuery,
   useRebuildFeedMutation,
   useGetFeedGenresQuery,
+  useGetModelLearnedQuery,
+  useGetCrossReferenceQuery,
+  useGetAccuracyQuery,
   useLoadMoreFeedMutation,
   useGetTitleQuery,
   useGetProvidersQuery,
@@ -531,6 +1242,7 @@ export const {
   useRatePersonMutation,
   useUnratePersonMutation,
   useRateTitleMutation,
+  useUnrateTitleMutation,
   useMarkNotInterestedMutation,
   useUndoNotInterestedMutation,
   useMarkDroppedMutation,
@@ -538,8 +1250,19 @@ export const {
   useSaveForLaterMutation,
   useUnsaveForLaterMutation,
   useGetSavedQuery,
+  useGetRecentlyWatchedQuery,
   useGetTasteDnaQuery,
+  useGetNarrativeQuery,
+  useSaveNarrativeMutation,
+  useRegenerateNarrativeMutation,
+  useGetLensQuery,
+  useReportLensSpoilerMutation,
   useSearchTypeaheadQuery,
+  useSearchTypeaheadGlobalQuery,
+  useListConversationsQuery,
+  useGetConversationQuery,
+  useGetTurnQuery,
+  useDeleteConversationMutation,
   useGetFiltersQuery,
   useUpdateFiltersMutation,
   useGetPreferenceTagsQuery,
@@ -547,8 +1270,17 @@ export const {
   useRemovePreferenceTagMutation,
   useGetBillingStatusQuery,
   useCreateCheckoutMutation,
+  useGetDislikesQuery,
   useGetRateSuggestionsQuery,
   useSetPinMutation,
+  useFilterCostQuery,
   useVerifyPinMutation,
   useRemovePinMutation,
+  useGetDigestQuery,
+  useLazyGetVapidPublicKeyQuery,
+  useSubscribePushMutation,
+  useUnsubscribePushMutation,
+  useCreateBlendCodeMutation,
+  useLazyGetBlendPreviewQuery,
+  useGetBlendPicksMutation,
 } = api;

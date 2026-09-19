@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Catalog;
 
 namespace FrostAura.Reel.Tests.Ml;
@@ -81,20 +82,137 @@ public class FeatureLeakageMathTests
     }
 
     [Fact]
-    public void Schema_version_two_adds_the_crowd_presence_flags()
+    public void Schema_version_five_appends_the_presence_flags_and_keeps_the_head_of_the_vector_put()
     {
-        // Imputing missing crowd data as a real 0 changed the vector, so it is a version bump — and
-        // the v1 scalars keep their v1 positions (the flags are appended, never interleaved).
-        Assert.Equal(2, FeatureSchema.Version);
+        // v2 added the crowd-presence flags; v3 made dislike reasons learnable; v4 closed the
+        // train/serve skew on certification, subgenres, tone and era; v5 closes the last one — the
+        // gap between "credit rows exist" and "we know these people". Each bump APPENDS to the
+        // scalars, so a stored artifact can only ever be wrong loudly (width mismatch), never
+        // silently — see the ONE exception any bump has taken, pinned separately below.
+        Assert.Equal(5, FeatureSchema.Version);
 
         var names = FeatureSchema.Scalars;
-        Assert.Equal("hasRuntime", names[^3]);
-        Assert.Equal("hasTraktRating", names[^2]);
-        Assert.Equal("hasPopularity", names[^1]);
+        Assert.Equal("knownPeopleFraction", names[^3]);
+        Assert.Equal("knownDirectorOrWriter", names[^2]);
+        Assert.Equal("isUnscripted", names[^1]);
+
+        // v4's tail is now the four slots immediately BEFORE v5's — appended, not interleaved.
+        Assert.Equal("hasCertification", names[^7]);
+        Assert.Equal("hasSubgenres", names[^6]);
+        Assert.Equal("hasAttributesTone", names[^5]);
+        Assert.Equal("hasAttributesEra", names[^4]);
+
+        // …and v3's before that, still where v4 left them.
+        Assert.Equal("hasRuntime", names[^12]);
+        Assert.Equal("hasTraktRating", names[^11]);
+        Assert.Equal("hasPopularity", names[^10]);
+        Assert.Equal("simNotInterestedCentroid", names[^9]);
+        Assert.Equal("dislikedGenreOverlap", names[^8]);
+
+        // Every scalar ahead of the deleted slot keeps its v3 index.
         Assert.Equal(0, Array.IndexOf(names, "releaseAgeLog"));
         Assert.Equal(1, Array.IndexOf(names, "runtimeMinutes"));
         Assert.Equal(3, Array.IndexOf(names, "traktRating"));
         Assert.Equal(5, Array.IndexOf(names, "tmdbPopularityLog"));
+        Assert.Equal(6, Array.IndexOf(names, "certificationOrdinal"));
+        Assert.Equal(15, Array.IndexOf(names, "contrarianAdjustedRating"));
+    }
+
+    [Fact]
+    public void Schema_version_four_deleted_the_dead_show_engagement_slot_and_it_stays_deleted()
+    {
+        // The one reorder in this file's history, and the reason it is allowed HERE and only here:
+        // a version bump renumbers the vector anyway, so the dead slot goes now or it never goes.
+        // showEngagement was pinned to 0 on both paths — train-only by construction, because a
+        // scored candidate can never have episode ratings under the zero-footprint rule.
+        Assert.DoesNotContain("showEngagement", FeatureSchema.Scalars);
+        Assert.DoesNotContain("showEngagement", FeatureSchema.AllNames());
+
+        // Everything that FOLLOWED it moved down exactly one place — that is the renumber, stated.
+        Assert.Equal(16, Array.IndexOf(FeatureSchema.Scalars, "attrDarkness"));
+    }
+
+    [Fact]
+    public void Schema_version_five_keeps_every_block_in_order_and_appends_within_them()
+    {
+        // Block-level form of the append rule: the scalar, genre and subgenre blocks keep their
+        // internal order and their relative order, and the two new blocks land after all of them.
+        var all = FeatureSchema.AllNames();
+        var expectedWidth = FeatureSchema.Scalars.Length + FeatureSchema.Genres.Length
+            + FeatureSchema.SubgenreBuckets + FeatureSchema.Tones.Length + FeatureSchema.Eras.Length;
+
+        Assert.Equal(expectedWidth, FeatureSchema.VectorLength);
+        Assert.Equal(expectedWidth, all.Length);
+        Assert.Equal(41, FeatureSchema.Scalars.Length);
+        Assert.Equal(30, FeatureSchema.Genres.Length);
+        Assert.Equal(132, FeatureSchema.VectorLength);
+
+        // v5 is a pure APPEND at both levels: three scalars on the end of the scalar block, five
+        // slugs on the end of the genre block. Every index that existed in v4 is unmoved — the
+        // width alone changed, which is the loud failure mode a stored artifact needs.
+        Assert.Equal("western", FeatureSchema.Genres[24]);
+        Assert.Equal(["reality", "soap", "talk-show", "news", "game-show"], FeatureSchema.Genres[25..]);
+        Assert.Equal("genre:action", all[FeatureSchema.Scalars.Length]);
+        Assert.Equal("genre:game-show", all[FeatureSchema.Scalars.Length + FeatureSchema.Genres.Length - 1]);
+
+        var toneOffset = FeatureSchema.Scalars.Length + FeatureSchema.Genres.Length + FeatureSchema.SubgenreBuckets;
+        Assert.Equal("subgenreBucket:31", all[toneOffset - 1]);
+        Assert.Equal("tone:" + FeatureSchema.Tones[0], all[toneOffset]);
+        Assert.Equal("era:" + FeatureSchema.Eras[0], all[toneOffset + FeatureSchema.Tones.Length]);
+        Assert.Equal("era:" + FeatureSchema.Eras[^1], all[^1]);
+
+        // The blocks are the extractor's closed vocabularies, not a second copy of them — a copy
+        // would drift the moment either moved, and the block width would stop matching what the
+        // provider is actually allowed to return.
+        Assert.Same(AttributeVocabulary.Tones, FeatureSchema.Tones);
+        Assert.Same(AttributeVocabulary.Eras, FeatureSchema.Eras);
+        Assert.Equal(16, FeatureSchema.Tones.Length);
+        Assert.Equal(13, FeatureSchema.Eras.Length);
+
+        // Names are unique, or an explanation lookup would silently pick the wrong slot.
+        Assert.Equal(all.Length, all.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void A_polluted_tone_or_era_reads_as_absent_rather_than_landing_in_a_slot()
+    {
+        // The 2,312 pre-2026-08-07 rows carry free text ("period-victorian", "1980s", "fantasy").
+        // Two independent guards keep them out of the vector: the extractor-version gate in
+        // FeatureVectorBuilder, and this vocabulary lookup, which is what makes the one-hot write
+        // itself impossible rather than merely unlikely.
+        Assert.True(FeatureSchema.MinTrustedExtractorVersion >= 2);
+        Assert.Equal(-1, AttributeVocabulary.ToneIndex("period-victorian"));
+        Assert.Equal(-1, AttributeVocabulary.EraIndex("1980s"));
+        Assert.Equal(-1, AttributeVocabulary.EraIndex("fantasy"));
+        Assert.Equal(-1, AttributeVocabulary.ToneIndex(null));
+        Assert.Equal(-1, AttributeVocabulary.EraIndex(null));
+
+        // …while every legitimate member resolves to its own slot, in vocabulary order.
+        Assert.Equal(0, AttributeVocabulary.ToneIndex(AttributeVocabulary.Tones[0]));
+        Assert.Equal(AttributeVocabulary.Tones.Length - 1, AttributeVocabulary.ToneIndex(AttributeVocabulary.Tones[^1]));
+        Assert.Equal(AttributeVocabulary.Eras.Length - 1, AttributeVocabulary.EraIndex(AttributeVocabulary.Eras[^1]));
+        Assert.All(AttributeVocabulary.Tones, t => Assert.True(AttributeVocabulary.IsClosedVocabTone(t)));
+        Assert.All(AttributeVocabulary.Eras, e => Assert.True(AttributeVocabulary.IsClosedVocabEra(e)));
+    }
+
+    [Fact]
+    public void The_residual_head_stats_are_recomputed_at_the_new_width()
+    {
+        // A bump changes the vector width, so the persisted mu/sigma block must be rebuilt with it.
+        // FromRows sizes itself from the rows it is given rather than from a constant, which is what
+        // makes the retrain sufficient — but "it works out" is the kind of thing that stops being
+        // true silently, so it is pinned.
+        var rows = new[]
+        {
+            Enumerable.Range(0, FeatureSchema.VectorLength).Select(i => (float)i).ToArray(),
+            Enumerable.Range(0, FeatureSchema.VectorLength).Select(i => (float)(i * 2)).ToArray(),
+        };
+
+        var standardizer = FeatureStandardizer.FromRows(rows);
+
+        Assert.False(standardizer.IsIdentity);
+        Assert.Equal(FeatureSchema.VectorLength, standardizer.Length);
+        Assert.Equal(FeatureSchema.VectorLength, standardizer.Standardize(rows[0]).Length);
     }
 
     [Fact]
@@ -109,13 +227,73 @@ public class FeatureLeakageMathTests
     }
 
     [Fact]
+    public void An_unknown_person_affinity_is_imputed_below_the_mean_not_at_it()
+    {
+        // The v5 imputation, as a constant with a direction. Imputing at the user's MEAN spelled
+        // "we have never heard of these people" identically to "we know them and they're average
+        // for you" — and the mean is a positive-sounding number, which is how directorAffinity and
+        // writerAffinity became top positive contributors on titles with nobody known in them.
+        Assert.True(
+            FeatureSchema.NeutralLowPersonAffinityOffset > 0m,
+            "the imputation must sit strictly below the user's mean, or it says nothing at all");
+
+        // …but it is a nudge, not a verdict. Half a point is smaller than the spread between a
+        // typical user's best and worst genres, so a well-matched unknown title can still outrank a
+        // poorly-matched known one — the presence scalars are what let the model learn the rest.
+        Assert.True(
+            FeatureSchema.NeutralLowPersonAffinityOffset <= 1m,
+            "a larger offset would be a verdict on unknown people rather than an admission of ignorance");
+
+        // Same rule as every other neutral fill-in in this schema: never the extreme end of the
+        // range. A user whose own mean is already 1.2 must not have unknown crews imputed at 0.7.
+        Assert.True(Math.Max(1m, 1.2m - FeatureSchema.NeutralLowPersonAffinityOffset) >= 1m);
+    }
+
+    [Fact]
+    public void The_unscripted_scalar_reads_the_same_vocabulary_the_fit_demotion_does()
+    {
+        // isUnscripted is the aggregate of the v5 genre slots, and it MUST be computed from
+        // UnscriptedFormats — the same predicate that scales the LLM's fit verdict. Two lists with
+        // one name is the drift this schema's comments have been warning about since v2, and here it
+        // would show up as a model feature and a product rule quietly disagreeing about what reality
+        // television is.
+        Assert.True(UnscriptedFormats.IsUnscripted(["reality"]));
+        Assert.True(UnscriptedFormats.IsUnscripted(["talk-show"]));
+        Assert.True(UnscriptedFormats.IsUnscripted(["game-show"]));
+        Assert.True(UnscriptedFormats.IsUnscripted(["news"]));
+
+        // Soap gets a genre slot and is deliberately NOT unscripted: it is scripted television that
+        // merely shares the scheduling economics. Documentary likewise — the founder's library rates
+        // them, and UnscriptedFormats has excluded it from the start for exactly that reason.
+        Assert.False(UnscriptedFormats.IsUnscripted(["soap"]));
+        Assert.False(UnscriptedFormats.IsUnscripted(["documentary"]));
+        Assert.Contains("soap", FeatureSchema.Genres);
+
+        // Every slug the predicate recognises that is ALSO a Trakt genre now has a slot, so the
+        // aggregate can never fire without at least one one-hot beside it to explain why.
+        foreach (var slug in new[] { "reality", "talk-show", "game-show", "news" })
+        {
+            Assert.Contains(slug, FeatureSchema.Genres);
+        }
+    }
+
+    [Fact]
     public void The_persisted_eval_caveat_no_longer_claims_symmetry()
     {
         // The harness is deliberately hostile to itself; it must not be hostile in a way that is
-        // untrue. Present-day popularity IS the baseline's whole ranking signal and one of ~86
-        // features for the model — that asymmetry runs in the baseline's favour.
+        // untrue. Present-day popularity IS the baseline's whole ranking signal and one of
+        // VectorLength features for the model — that asymmetry runs in the baseline's favour.
         Assert.DoesNotContain("symmetrically", EvalHarness.PopularityCaveat, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("NOT symmetric", EvalHarness.PopularityCaveat, StringComparison.Ordinal);
         Assert.Contains("understates the model", EvalHarness.PopularityCaveat, StringComparison.Ordinal);
+
+        // The width is INTERPOLATED, never typed — it has already been wrong twice in prose. The
+        // caveat is user-visible and persisted with every evaluation, so a stale number there is a
+        // false statement in the ledger, not a typo.
+        Assert.Contains(
+            $"one of {FeatureSchema.VectorLength} features",
+            EvalHarness.PopularityCaveat,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("86 features", EvalHarness.PopularityCaveat, StringComparison.Ordinal);
     }
 }

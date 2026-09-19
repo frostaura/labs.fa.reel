@@ -1,17 +1,26 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
 public static class SyncEndpoints
 {
+    public record HistoryCleanupRequest(string MediaType, long TmdbId, DateTime StartAt, DateTime EndAt, bool DryRun = true);
+
     public static void MapSyncEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/sync").RequireAccount();
 
-        group.MapGet("/status", async (IReelDbContext db, IAccountContext accountContext, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/status", async (
+            IReelDbContext db, IAccountContext accountContext, IConfiguration configuration,
+            HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -54,6 +63,13 @@ public static class SyncEndpoints
             // (onboarding/enrichment/training) outranks a background Trakt poll (delta/reconcile)
             // that fires every few minutes — otherwise a transient DeltaSync, enqueued after a
             // long EnrichCatalog, would hijack the pill and read as a generic "Syncing".
+            //
+            // JobKind.CrossReference is deliberately NOT here, and its "xref" kind is deliberately
+            // not in the frontend's BACKGROUND_KINDS either. A pass that can legitimately run for
+            // ten minutes is the most interesting thing happening to the account while it runs, and
+            // the founder asked to watch it count; letting a delta poll steal the pill from it would
+            // report a five-second sync over a ten-minute one. The two sets must stay mirrored:
+            // src/frontend/src/lib/syncCopy.ts.
             static bool IsBackground(JobKind k) =>
                 k is JobKind.DeltaSync or JobKind.FullReconcile or JobKind.RefreshAvailability;
 
@@ -66,9 +82,32 @@ public static class SyncEndpoints
                     .ThenByDescending(j => j.EnqueuedAt)
                     .FirstOrDefault();
 
+            // Progress toward the next retrain, so a screen that asks for ratings can say what they
+            // BUY: "7 more ratings and Reel retrains tonight". Same two inputs the nightly
+            // reconcile's gate uses, read the same way — FirstRatedAt, never Trakt's mutable
+            // RatedAt, because the question is what Reel has learned since the artifact trained.
+            var retrainThreshold = configuration.GetValue("RETRAIN_MIN_NEW_RATINGS", 10);
+            var trainedAt = await db.ModelArtifacts
+                .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
+                .Select(a => (DateTime?)a.TrainedAt)
+                .FirstOrDefaultAsync(ct);
+            var newRatingsSinceTrain = trainedAt is { } since
+                ? await db.UserRatings.CountAsync(r => r.AccountId == account.Id && r.FirstRatedAt > since, ct)
+                : 0;
+
             return Results.Ok(new
             {
                 pipelineStage = account.PipelineStage.ToString(),
+                retrain = new
+                {
+                    minNewRatings = retrainThreshold,
+                    newRatingsSinceTrain,
+                    // No Active artifact yet ⇒ the next train is the FIRST one, not a drift
+                    // retrain, and no count is meaningful. The UI says so rather than implying a
+                    // threshold that is not what will actually fire.
+                    hasActiveModel = trainedAt is not null,
+                    lastTrainedAt = trainedAt,
+                },
                 connectionStatus = connection?.Status.ToString() ?? "Revoked",
                 lastDeltaSyncAt = connection?.LastDeltaSyncAt,
                 lastFullReconcileAt = connection?.LastFullReconcileAt,
@@ -108,6 +147,107 @@ public static class SyncEndpoints
             }
 
             return Results.Accepted();
+        });
+
+        // ── Founder-only surgical history repair ────────────────────────────────────────
+        // Removes the Trakt history events for ONE title inside an explicit watched_at window —
+        // the recovery tool for corruption like the show-object sync/history incident, where one
+        // rating fabricated a play for every aired episode. DryRun (the default) only reports
+        // what would be removed.
+        group.MapPost("/history-cleanup", async (
+            HistoryCleanupRequest request,
+            IReelDbContext db, IAccountContext accountContext, HttpContext http,
+            TraktTokenStore tokenStore, ITraktClient trakt, CancellationToken ct) =>
+        {
+            var account = await http.GetCurrentAccountAsync(db, ct);
+            if (account is null || account.Tier != AccountTier.Founder)
+            {
+                return EndpointHelpers.Forbidden("founder only");
+            }
+
+            var title = await TitleEndpoints.ResolveTitleAsync(db, request.MediaType, request.TmdbId, ct);
+            if (title is null)
+            {
+                return Results.NotFound();
+            }
+
+            var connection = await db.TraktConnections.FirstOrDefaultAsync(c => c.AccountId == account.Id, ct);
+            if (connection is null || connection.Status == ConnectionStatus.Revoked)
+            {
+                return Results.BadRequest(new { error = "trakt connection unavailable" });
+            }
+
+            var token = await tokenStore.GetValidAccessTokenAsync(connection, ct);
+            var traktId = title.TraktId;
+            if (traktId is null)
+            {
+                traktId = await trakt.ResolveTraktIdByTmdbAsync(
+                    token, request.TmdbId, title.MediaType == MediaType.Movie, RatePriority.Interactive, ct);
+                if (traktId is null)
+                {
+                    return Results.BadRequest(new { error = "trakt id unresolved" });
+                }
+
+                title.TraktId = traktId; // resolved once, cached forever on the catalog row
+            }
+
+            var type = title.MediaType == MediaType.Movie ? "movies" : "shows";
+            var history = await trakt.GetHistoryAsync(
+                token, type, traktId.Value, request.StartAt, request.EndAt, RatePriority.Interactive, ct);
+
+            if (request.DryRun)
+            {
+                await db.SaveChangesAsync(ct); // keep a freshly resolved Trakt id even on dry runs
+                return Results.Ok(new
+                {
+                    dryRun = true,
+                    found = history.Count,
+                    // Capped for response size — `found` carries the full count.
+                    events = history.Take(50).Select(h => new { id = h.Id, watchedAt = h.WatchedAt, type = h.Type }),
+                });
+            }
+
+            // /sync/history/remove caps at 100 ids per call — chunk to stay under it.
+            foreach (var chunk in history.Select(h => h.Id).Chunk(100))
+            {
+                await trakt.PostSyncBatchAsync(token, "sync/history/remove", new { ids = chunk }, RatePriority.Interactive, ct);
+            }
+
+            // Local watched state for the title is now stale — drop it and let a forced delta
+            // resync rebuild the truth from Trakt (mirrors /api/sync/now).
+            var watched = await db.WatchedTitles
+                .Where(w => w.AccountId == account.Id && w.TitleId == title.Id)
+                .ToListAsync(ct);
+            db.WatchedTitles.RemoveRange(watched);
+            if (title.MediaType == MediaType.Show)
+            {
+                var progress = await db.ShowWatchProgresses
+                    .Where(p => p.AccountId == account.Id && p.TitleId == title.Id)
+                    .ToListAsync(ct);
+                db.ShowWatchProgresses.RemoveRange(progress);
+            }
+
+            var resyncInFlight = await db.SyncJobs.AnyAsync(
+                j => j.AccountId == account.Id
+                    && (j.Kind == JobKind.DeltaSync || j.Kind == JobKind.FullIngest)
+                    && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running), ct);
+            if (!resyncInFlight)
+            {
+                db.SyncJobs.Add(new SyncJob
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = account.Id,
+                    Kind = JobKind.DeltaSync,
+                    Priority = 0, // founder asked — interactive priority
+                    EnqueuedAt = DateTime.UtcNow,
+                    // Force a full refetch: Trakt does not bump last_activities on history
+                    // *removal*, so a diffed delta would skip the very change just made.
+                    CursorJson = """{"Force":true}""",
+                });
+            }
+
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(new { dryRun = false, removed = history.Count, resyncQueued = true });
         });
     }
 }

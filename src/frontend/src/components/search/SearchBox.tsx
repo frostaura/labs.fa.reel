@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { AlertTriangle, Eye, Search, Sparkles } from "lucide-react";
-import { useSearchTypeaheadQuery } from "../../store/api";
+import { useSearchTypeaheadGlobalQuery, useSearchTypeaheadQuery } from "../../store/api";
+import { shouldQueryGlobal } from "../../lib/globalTypeahead";
+import { mintHandoff } from "../../lib/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
 import PredictedRatingBadge from "../rec/PredictedRatingBadge";
 
@@ -49,9 +51,21 @@ export default function SearchBox() {
 
   const titles = data?.titles ?? [];
   const people = data?.people ?? [];
+
+  // The global TMDB leg fires only after the LOCAL query has resolved sparse — a lookup beyond
+  // the ~4k ingested pool ("jeanne dielman" → something, not nothing). Gating on `data` being
+  // present keeps it strictly after local resolution for the CURRENT term.
+  const globalEligible = !isError && data !== undefined && shouldQueryGlobal(debounced, titles.length);
+  const { data: globalData, isFetching: isGlobalFetching } = useSearchTypeaheadGlobalQuery(debounced, {
+    skip: !globalEligible,
+  });
+  const globalRows = globalEligible ? (globalData?.global ?? []) : [];
+
   const options: Option[] = [
     ...titles.map((t) => ({ path: `/title/${t.mediaType.toLowerCase()}/${t.tmdbId}`, overlay: true })),
     ...people.map((p) => ({ path: `/person/${p.personId}`, overlay: false })),
+    // Global rows navigate exactly like local title rows — the detail endpoint hydrates on demand.
+    ...globalRows.map((g) => ({ path: `/title/${g.mediaType}/${g.tmdbId}`, overlay: true })),
   ];
   // Clamped rather than reset in an effect: a shorter result set must never leave the active
   // descendant pointing at an option that no longer exists.
@@ -73,11 +87,26 @@ export default function SearchBox() {
     activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
+  /**
+   * Hand the question to /search in the navigation itself, not in the URL.
+   *
+   * `?q=` was a round trip through the address bar: the page read the param, fired the turn, then
+   * deleted the param — and a reload landing before that delete re-fired the question as a fresh
+   * conversation, throwing away every refinement made since. Router state is carried by the
+   * history entry instead, so there is nothing to clean up and nothing to re-fire.
+   *
+   * The turn id is minted HERE, with the navigation, and recorded as THIS document's hand-off —
+   * see {@link mintHandoff}. It does two jobs. It is the turn's idempotency key, so a /search that
+   * genuinely re-sends it is replayed from the stored turn rather than billed a second time; and
+   * it is what lets /search tell a live hand-off from one that merely came back with the history
+   * entry on a reload or a Back, which it used to re-ask as a phantom turn.
+   */
   const askReel = () => {
-    if (query.trim().length === 0) return;
+    const ask = query.trim();
+    if (ask.length === 0) return;
     setOpen(false);
     setActiveIndex(-1);
-    navigate(`/search?q=${encodeURIComponent(query.trim())}`);
+    navigate("/search", { state: { ask, askTurnId: mintHandoff() } });
   };
 
   const go = (option: Option) => {
@@ -155,7 +184,7 @@ export default function SearchBox() {
             </div>
           ) : isFetching && options.length === 0 ? (
             <div className="px-4 py-3 fa-caption text-fa-frost-dim">searching…</div>
-          ) : options.length === 0 ? (
+          ) : options.length === 0 && !(globalEligible && isGlobalFetching) ? (
             <div className="px-4 py-3 fa-caption text-fa-frost-dim" data-testid="typeahead-empty">
               Nothing by that name.
             </div>
@@ -231,6 +260,52 @@ export default function SearchBox() {
                       </Link>
                     );
                   })}
+                </div>
+              )}
+
+              {/* Beyond your catalogue — raw TMDB lookup rows for a sparse local shortlist.
+                  Lookup, not suggestion: never scored, never eligibility-filtered, no for-you
+                  badge. Selecting one navigates like a local row; the detail endpoint hydrates
+                  the title on demand. */}
+              {globalEligible && (globalRows.length > 0 || isGlobalFetching) && (
+                <div role="group" aria-label="Beyond your catalogue">
+                  <p className="fa-overline px-3 pt-2 pb-1 text-fa-frost-dim flex items-baseline gap-2" aria-hidden="true">
+                    Beyond your catalogue
+                    <span className="fa-caption normal-case tracking-normal">via TMDB</span>
+                  </p>
+                  {globalRows.length === 0 ? (
+                    <div className="px-4 pb-3 fa-caption text-fa-frost-dim" data-testid="typeahead-global-loading">
+                      Searching everywhere…
+                    </div>
+                  ) : (
+                    globalRows.map((row, i) => {
+                      const index = titles.length + people.length + i;
+                      return (
+                        <Link
+                          key={`${row.mediaType}-${row.tmdbId}`}
+                          ref={index === active ? activeRef : undefined}
+                          id={optionId(index)}
+                          role="option"
+                          aria-selected={index === active}
+                          to={`/title/${row.mediaType}/${row.tmdbId}`}
+                          state={{ backgroundLocation: location }}
+                          onClick={() => setOpen(false)}
+                          className={`flex items-center gap-3 px-3 py-2 transition ${index === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
+                          data-testid="typeahead-global-result"
+                        >
+                          <div className="w-8 shrink-0">
+                            <PosterImage path={row.posterPath} alt={row.name} size="w185" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="fa-body text-fa-frost-bright truncate">{row.name}</p>
+                            <p className="fa-caption text-fa-frost-dim">
+                              {row.year ?? ""} · {row.mediaType === "movie" ? "film" : "series"}
+                            </p>
+                          </div>
+                        </Link>
+                      );
+                    })
+                  )}
                 </div>
               )}
             </div>

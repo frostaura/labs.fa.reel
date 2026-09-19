@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
-import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint } from "lucide-react";
+import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users, Target } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
 import { useDispatch } from "react-redux";
 import type { AppDispatch } from "../store";
@@ -9,6 +9,7 @@ import SearchBox from "./search/SearchBox";
 import MobileTabBar from "./MobileTabBar";
 import Footer from "./Footer";
 import RealtimeSync from "./RealtimeSync";
+import VerdictToast from "./VerdictToast";
 import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
@@ -39,20 +40,18 @@ export default function Layout() {
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
-  // Adjusted during render rather than in an effect: an effect would paint the panel open on
-  // the new route first and then close it, a visible flash plus a cascading render.
   //
-  // This replaces an effect that carried a `react-hooks/set-state-in-effect` suppression. That
-  // suppression's stated objection was that deriving the panel's state from the route would make
-  // it un-reopenable — true of a pure derivation, but this is not one. The `lastNavKey` sentinel
-  // closes the panel on a route *change* only; opening it again on the same route leaves
-  // `navKey === lastNavKey`, so nothing reopens or re-closes it. Same behaviour, no suppression.
-  const navKey = `${location.pathname}${location.search}`;
-  const [lastNavKey, setLastNavKey] = useState(navKey);
-  if (navKey !== lastNavKey) {
-    setLastNavKey(navKey);
+  // Kept as an effect deliberately. The router location is an external system this panel follows,
+  // which is exactly what an effect is for; the panel's open state is not derivable from the route
+  // (the user opens it on any route, and reopening it on the same route must work). The linter's
+  // preferred shapes both cost more than the warning: deriving from the route makes the panel
+  // un-reopenable, and threading a close callback down through SearchBox and every result link
+  // spreads one concern across files that cannot see this panel. The cascading render it warns
+  // about is one extra pass during a route change that is already re-rendering the whole tree.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional sync to the router; see above
     setMobileSearchOpen(false);
-  }
+  }, [location.pathname, location.search]);
 
   const handleSignOut = async () => {
     await logout().unwrap().catch(() => undefined);
@@ -95,6 +94,15 @@ export default function Layout() {
                 <span className="fa-caption text-fa-frost hidden sm:inline">{session?.displayName}</span>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => navigate("/blend")}>
+                  <Users className="h-4 w-4 mr-2" /> Blend
+                </DropdownMenuItem>
+                {/* Free for every tier, deliberately: a paid accuracy report reads as hiding the
+                    scorecard. Sits above Settings because it is a thing to read, not a thing to
+                    configure. */}
+                <DropdownMenuItem onClick={() => navigate("/track-record")}>
+                  <Target className="h-4 w-4 mr-2" /> Track record
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => navigate("/settings")}>
                   <SettingsIcon className="h-4 w-4 mr-2" /> Settings
                 </DropdownMenuItem>
@@ -122,6 +130,9 @@ export default function Layout() {
         <Outlet />
       </main>
       <Footer />
+      {/* Mounted once, driven by the store: every rating path raises the after-rating moment and
+          none of them has to know this component exists. */}
+      <VerdictToast />
       <MobileTabBar searchOpen={mobileSearchOpen} onToggleSearch={() => setMobileSearchOpen((v) => !v)} />
     </div>
   );

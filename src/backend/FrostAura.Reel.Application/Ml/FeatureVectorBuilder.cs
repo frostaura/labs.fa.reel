@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using Microsoft.EntityFrameworkCore;
@@ -28,8 +29,27 @@ public class FeatureVectorBuilder(IReelDbContext db)
     private const decimal LovedThreshold = 8m;
     private const int TopLovedCount = 10;
 
+    /// <summary>
+    /// How many loved titles the "because you loved" ANCHOR rotation may draw from.
+    ///
+    /// Deliberately a SEPARATE, wider pool from <see cref="TopLovedCount"/>. That constant sizes
+    /// <see cref="TasteState.TopLovedTitleIds"/> / <see cref="TasteState.LovedEmbeddings"/>, which
+    /// feed the <c>simTopLovedMax</c> / <c>simTopLovedMean</c> FEATURES — widening it would silently
+    /// change every vector the model has ever been trained on. Anchor choice is presentation, not
+    /// features, so it gets its own pool and leaves the schema alone.
+    /// </summary>
+    private const int LovedAnchorPoolCount = 40;
+
     /// <summary>Prior used when leave-one-out leaves no observations at all (matches the cold-start mean).</summary>
     private const decimal NeutralUserMean = 7m;
+
+    /// <summary>
+    /// How far back <see cref="TasteState.RecentCentroid"/> reaches — <b>a drift arm layered on the
+    /// all-time signal, not a filter on it.</b> See the comment at the cutoff for the full statement;
+    /// in short, no rating is ever excluded from the taste state by age, and this window only decides
+    /// which loved titles ALSO get a second, drift-shaped centroid of their own.
+    /// </summary>
+    public const int RecentCentroidWindowDays = 365;
 
     /// <summary>The user's own label on a title, plus the crowd rating it was paired against.</summary>
     public readonly record struct SelfRating(short Rating, DateTime RatedAt, decimal? GlobalRating);
@@ -90,17 +110,27 @@ public class FeatureVectorBuilder(IReelDbContext db)
         IReadOnlyDictionary<string, decimal> GenreContrarianOffset,
         IReadOnlyDictionary<int, List<short>> DecadeRatings,
         IReadOnlyDictionary<Guid, List<short>> PersonRatings,
-        IReadOnlyDictionary<Guid, decimal> ShowEngagement,
         IReadOnlyList<Guid> TopLovedTitleIds,
         float[]? LovedCentroid,
         float[]? RecentCentroid,
         IReadOnlyDictionary<Guid, float[]> LovedEmbeddings,
-        SelfExclusion Self);
+        SelfExclusion Self,
+        IReadOnlyList<Guid> LovedAnchorPool,
+        IReadOnlyDictionary<string, double> DislikedGenreWeights,
+        float[]? NotInterestedCentroid,
+        /// <summary>
+        /// The share of the user's movie/show-level ratings that are MOVIES, 0..1 — 0.5 when they
+        /// have rated nothing yet. It is a supply signal, not a feature: discovery uses it to ask
+        /// TMDB for the two media in the proportion the user actually rates, instead of a fixed 1:1
+        /// intake that produced an all-TV live feed on the founder's account.
+        /// </summary>
+        decimal MovieRatedShare);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
-        // Movie/show-level ratings are the label-bearing events; everything user-side derives
-        // from them (episode/season ratings feed only the showEngagement auxiliary signal).
+        // Movie/show-level ratings are the label-bearing events; everything user-side derives from
+        // them. Episode and season ratings are still INGESTED, but since schema v4 deleted
+        // `showEngagement` they feed no feature at all — see the note where it was computed.
         var titleRatings = await db.UserRatings
             .Where(r => r.AccountId == accountId && r.RatedAt <= asOf
                 && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
@@ -110,8 +140,16 @@ public class FeatureVectorBuilder(IReelDbContext db)
         var ratedTitleIds = titleRatings.Select(r => r.TitleId).Distinct().ToList();
         var ratedTitles = await db.Titles
             .Where(t => ratedTitleIds.Contains(t.Id))
-            .Select(t => new { t.Id, t.Genres, t.Year, t.TraktRating })
+            .Select(t => new { t.Id, t.Genres, t.Year, t.TraktRating, t.MediaType })
             .ToDictionaryAsync(t => t.Id, ct);
+
+        // Media mix over DISTINCT rated titles, not rating rows — a show rated once and a movie
+        // rated once are one vote each. Neutral with nothing rated: an even split asserts nothing.
+        var ratedMedia = ratedTitleIds.Where(ratedTitles.ContainsKey).ToList();
+        var ratedMovies = ratedMedia.Count(id => ratedTitles[id].MediaType == MediaType.Movie);
+        var movieRatedShare = ratedMedia.Count == 0
+            ? 0.5m
+            : (decimal)ratedMovies / ratedMedia.Count;
 
         var userMean = titleRatings.Count > 0 ? (decimal)titleRatings.Average(r => (double)r.Rating) : NeutralUserMean;
 
@@ -196,14 +234,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // per-title contribution to subtract and leave-one-out must skip them.
         var explicitPersonIds = explicitPersonRatings.Select(pr => pr.PersonId).ToHashSet();
 
-        // Show engagement: episode/season ratings averaged per parent show.
-        var showEngagement = (await db.UserRatings
-                .Where(r => r.AccountId == accountId && r.RatedAt <= asOf
-                    && (r.SubjectType == RatingSubjectType.Episode || r.SubjectType == RatingSubjectType.Season))
-                .GroupBy(r => r.TitleId)
-                .Select(g => new { g.Key, Mean = g.Average(r => (double)r.Rating) })
-                .ToListAsync(ct))
-            .ToDictionary(x => x.Key, x => (decimal)x.Mean);
+        // NOTE: a per-show mean of episode/season ratings used to be computed here for the
+        // `showEngagement` feature. That feature was pinned to 0 from Phase 8b and deleted outright
+        // in schema v4, so this was a database round-trip per taste-state build feeding a field
+        // nothing read. Removed with the slot.
 
         // Loved set for embedding similarity features (centroids tolerate missing embeddings).
         var topLoved = titleRatings
@@ -215,8 +249,33 @@ public class FeatureVectorBuilder(IReelDbContext db)
             .Take(TopLovedCount)
             .ToList();
 
+        // The anchor pool: the same loved set, but ordered by rating WEIGHTED BY RECENCY rather than
+        // rating alone. A user with thousands of ratings has a strict top-10 that is frozen for ever
+        // — which is exactly why "Because you loved X" showed the same three titles every build. This
+        // ordering lets a recently-loved 8 outrank a decade-old 10, and it is deterministic (a pure
+        // function of the ratings and asOf), so a build is reproducible from its own timestamp.
+        var lovedAnchorPool = titleRatings
+            .Where(r => r.Rating >= LovedThreshold)
+            .GroupBy(r => r.TitleId)
+            .Select(g => g.OrderByDescending(r => r.Rating).ThenByDescending(r => r.RatedAt).First())
+            .OrderByDescending(r => r.Rating * TasteMath.RecencyWeight(r.RatedAt, asOf))
+            .ThenByDescending(r => r.RatedAt)
+            .Select(r => r.TitleId)
+            .Take(LovedAnchorPoolCount)
+            .ToList();
+
         var lovedIds = titleRatings.Where(r => r.Rating >= LovedThreshold).Select(r => r.TitleId).Distinct().ToList();
-        var recentCutoff = asOf.AddDays(-365);
+
+        // The ONLY window in this method, and it is a DRIFT arm layered on the all-time signal, not
+        // a filter on it. `lovedIds` above is every loved title ever rated and feeds LovedCentroid
+        // and the similarity features; this narrower set feeds RecentCentroid, which exists so a
+        // taste that has moved in the last year can pull ~35% of the ANN budget its way. Nothing is
+        // dropped by it: a title outside the window still counts in full through LovedCentroid, and
+        // separately carries its own TasteMath.RecencyWeight wherever weighting applies. The founder
+        // asked for "every single one, not just 180 days" and this is the window people find when
+        // they look — so it is named rather than left as a literal, and 2,966 of his 3,354 watched
+        // titles are older than a year, which is how much a real cutoff here would have cost.
+        var recentCutoff = asOf.AddDays(-RecentCentroidWindowDays);
         var recentLovedIds = titleRatings
             .Where(r => r.Rating >= LovedThreshold && r.RatedAt >= recentCutoff)
             .Select(r => r.TitleId).Distinct().ToList();
@@ -227,6 +286,89 @@ public class FeatureVectorBuilder(IReelDbContext db)
         var topLovedEmbeddings = topLoved
             .Where(lovedEmbeddings.ContainsKey)
             .ToDictionary(id => id, id => lovedEmbeddings[id]);
+
+        // ── Dislike signals (schema v3) — as-of aware like every other label source ─────────
+        // A reaction created after asOf does not exist yet; one revoked after asOf was still live
+        // at asOf. Reactions are not labels, so no leave-one-out is needed: a scored candidate is
+        // by definition unreacted-to, and a training row's own reaction cannot exist (a rating
+        // implies "seen", a dislike implies "won't watch" — the interaction-footprint rule keeps
+        // them disjoint). Math shared with DislikeSignal so the served demotion and the trained
+        // feature agree by construction.
+        var dislikeReactions = await db.UserTitleReactions
+            .Where(r => r.AccountId == accountId
+                && (r.Kind == ReactionKind.NotInterested || r.Kind == ReactionKind.Dropped)
+                && r.CreatedAt <= asOf && r.CreatedAt >= asOf.AddDays(-DislikeSignal.WindowDays)
+                && (r.RevokedAt == null || r.RevokedAt > asOf))
+            .Select(r => new { r.TitleId, r.Kind, r.Reason, r.CreatedAt })
+            .ToListAsync(ct);
+
+        var dislikedGenreWeights = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        float[]? notInterestedCentroid = null;
+        if (dislikeReactions.Count > 0)
+        {
+            var newestPerDislikedTitle = dislikeReactions
+                .GroupBy(r => r.TitleId)
+                .Select(g => g.OrderByDescending(r => r.CreatedAt).First())
+                .ToList();
+
+            var dislikedIds = newestPerDislikedTitle.Select(r => r.TitleId).ToList();
+            var dislikedGenres = await db.Titles
+                .Where(t => dislikedIds.Contains(t.Id))
+                .Select(t => new { t.Id, t.Genres })
+                .ToDictionaryAsync(t => t.Id, t => t.Genres, ct);
+
+            foreach (var reaction in newestPerDislikedTitle.Where(r => r.Reason == ReactionReason.Genre))
+            {
+                if (!dislikedGenres.TryGetValue(reaction.TitleId, out var genres))
+                {
+                    continue;
+                }
+
+                var weight = DislikeSignal.RecencyWeight(reaction.CreatedAt, asOf);
+                foreach (var genre in genres)
+                {
+                    dislikedGenreWeights[genre] = dislikedGenreWeights.GetValueOrDefault(genre) + weight;
+                }
+            }
+
+            // Recency-weighted centroid over the NOT-INTERESTED titles' embeddings (Dropped is a
+            // scheduling signal, not a similarity one — it feeds the genre map above when reasoned,
+            // never the centroid).
+            var notInterested = newestPerDislikedTitle
+                .Where(r => r.Kind == ReactionKind.NotInterested)
+                .ToList();
+            var niEmbeddings = await LoadEmbeddingsAsync(notInterested.Select(r => r.TitleId).ToList(), ct);
+            double[]? centroidSum = null;
+            var centroidWeight = 0d;
+            foreach (var reaction in notInterested)
+            {
+                if (!niEmbeddings.TryGetValue(reaction.TitleId, out var embedding))
+                {
+                    continue;
+                }
+
+                var weight = DislikeSignal.RecencyWeight(reaction.CreatedAt, asOf);
+                centroidSum ??= new double[embedding.Length];
+                if (centroidSum.Length == embedding.Length)
+                {
+                    for (var i = 0; i < embedding.Length; i++)
+                    {
+                        centroidSum[i] += weight * embedding[i];
+                    }
+
+                    centroidWeight += weight;
+                }
+            }
+
+            if (centroidSum is not null && centroidWeight > 0d)
+            {
+                notInterestedCentroid = new float[centroidSum.Length];
+                for (var i = 0; i < centroidSum.Length; i++)
+                {
+                    notInterestedCentroid[i] = (float)(centroidSum[i] / centroidWeight);
+                }
+            }
+        }
 
         var self = new SelfExclusion(
             selfRatings,
@@ -250,12 +392,15 @@ public class FeatureVectorBuilder(IReelDbContext db)
             genreContrarian,
             decadeRatings,
             personRatings,
-            showEngagement,
             topLoved,
             lovedCentroid,
             recentCentroid,
             topLovedEmbeddings,
-            self);
+            self,
+            lovedAnchorPool,
+            dislikedGenreWeights,
+            notInterestedCentroid,
+            movieRatedShare);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
@@ -337,29 +482,24 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
             // ── Cast & crew affinities ─────────────────────────────────────────────────
             var credits = creditsByTitle.GetValueOrDefault(id);
-            var (director, cast, writer, lovedCast, hasCredits) = CreditAffinities(taste, personStats, credits, prior, self);
-            vector[s++] = (float)director;
-            vector[s++] = (float)cast;
-            vector[s++] = (float)writer;
-            vector[s++] = lovedCast;
-            vector[s++] = hasCredits;
+            var creditFeatures = CreditAffinities(taste, personStats, credits, prior, self);
+            vector[s++] = (float)creditFeatures.Director;
+            vector[s++] = (float)creditFeatures.Cast;
+            vector[s++] = (float)creditFeatures.Writer;
+            vector[s++] = creditFeatures.LovedCast;
+            // Literally "credit rows exist" — the KNOWLEDGE half moved to the two v5 scalars below.
+            vector[s++] = creditFeatures.HasCredits;
 
             // ── Contrarian calibration ─────────────────────────────────────────────────
             vector[s++] = (float)((title.TraktRating ?? prior) + ContrarianOffset(taste, title.Genres, self));
 
-            // ── Show engagement ────────────────────────────────────────────────────────
-            // showEngagement is the mean of the user's own episode/season ratings for THIS show, so
-            // it is non-zero only for a show they have already watched — and the founder-locked
-            // zero-interaction-footprint rule guarantees a scored candidate never has. It is
-            // therefore always 0 at serving time and only ever non-zero during training: the same
-            // train/serve skew as the embedding and affinity leaks, just quieter, because a
-            // train-only signal teaches the model to lean on something that can never fire in
-            // production.
-            //
-            // Held at 0 on both paths rather than deleted, so v2 feature indices stay put — the
-            // slot is dead weight FastTree will simply never split on, and removing it is a
-            // schema-version decision to take deliberately, not a side effect of this fix.
-            vector[s++] = 0f;
+            // NOTE: v1-v3 wrote a `showEngagement` slot here, pinned to 0 on both paths. It was the
+            // mean of the user's own episode/season ratings for THIS show, so it could only ever be
+            // non-zero for a show they had already watched — which the founder-locked
+            // zero-interaction-footprint rule guarantees a scored candidate never is. Train-only by
+            // construction, therefore pure train/serve skew, therefore pinned; and pinned rather than
+            // deleted only because deleting it renumbers the vector. Schema v4 takes that renumber
+            // deliberately and the slot is gone. Do not reinstate it without a version bump.
 
             // ── LLM attributes ─────────────────────────────────────────────────────────
             if (attributes.TryGetValue(id, out var attrs))
@@ -424,6 +564,58 @@ public class FeatureVectorBuilder(IReelDbContext db)
             vector[s++] = title.TraktRating is null ? 0f : 1f;
             vector[s++] = title.TmdbPopularity is null ? 0f : 1f;
 
+            // ── Dislike signals (schema v3) ────────────────────────────────────────────
+            // Neutral 0 when the account has no dislikes or the title no embedding. No leave-one-out
+            // (see BuildTasteStateAsync): a reacted-to title can never be a training row or a
+            // candidate, so there is no self-contribution to subtract.
+            vector[s++] = embeddings.TryGetValue(id, out var candidateEmbedding)
+                ? Cosine(candidateEmbedding, taste.NotInterestedCentroid)
+                : 0f;
+            vector[s++] = (float)DislikeSignal.GenreOverlap(title.Genres, taste.DislikedGenreWeights);
+
+            // ── Attribute/metadata presence (schema v4) ────────────────────────────────
+            // The v2 lesson applied to the four signals that carried the SAME defect one layer up:
+            // certification and subgenres are written only by Trakt ingest (IngestMapper), never by
+            // TitleHydrator, so before v4 a TMDB-discovered candidate scored certificationOrdinal 0
+            // and 32 zero subgenre buckets while every training row — the user's own Trakt library —
+            // had them populated. The model could learn "certification 0 ⇒ library title ⇒ rated",
+            // which is a label proxy that serving can never reproduce. v4 both SOURCES certification
+            // from TMDB during hydration and says out loud when it is missing.
+            //
+            // Tone/Era are gated on the extractor version as well as on presence: see
+            // FeatureSchema.MinTrustedExtractorVersion. A stale row reads exactly like no row.
+            var toneIndex = -1;
+            var eraIndex = -1;
+            if (attributes.TryGetValue(id, out var vocab)
+                && vocab.ExtractorVersion >= FeatureSchema.MinTrustedExtractorVersion)
+            {
+                toneIndex = AttributeVocabulary.ToneIndex(vocab.Tone);
+                eraIndex = AttributeVocabulary.EraIndex(vocab.Era);
+            }
+
+            vector[s++] = string.IsNullOrWhiteSpace(title.Certification) ? 0f : 1f;
+            // Both sources feed the shared hash buckets below, so the flag has to cover both — a
+            // title with themes but no Trakt subgenres genuinely does light buckets.
+            vector[s++] = title.Subgenres.Length > 0
+                || (attributes.TryGetValue(id, out var subgenreSource) && subgenreSource.Themes.Length > 0)
+                    ? 1f
+                    : 0f;
+            vector[s++] = toneIndex >= 0 ? 1f : 0f;
+            vector[s++] = eraIndex >= 0 ? 1f : 0f;
+
+            // ── Credit knowledge + unscripted aggregate (schema v5) ────────────────────
+            // The v2/v4 lesson one more time, on the last signal still telling it: hasCredits above
+            // says only that credit ROWS exist. These two say how much of the people behind them the
+            // user has any record with, which is the question directorAffinity / castAffinity /
+            // writerAffinity are conditioned on and which nothing was answering.
+            vector[s++] = creditFeatures.KnownPeopleFraction;
+            vector[s++] = creditFeatures.KnownDirectorOrWriter;
+            // The aggregate of the five v5 genre slots, via the SAME predicate the fit-verdict
+            // demotion uses — one vocabulary, not two. Note `soap` deliberately does NOT light it:
+            // a soap is scripted, it just shares the scheduling-filler economics, so it gets its own
+            // genre slot and no claim about being unscripted.
+            vector[s++] = UnscriptedFormats.IsUnscripted(title.Genres) ? 1f : 0f;
+
             // ── Genre multi-hot ────────────────────────────────────────────────────────
             var genreSet = title.Genres.ToHashSet(StringComparer.OrdinalIgnoreCase);
             for (var g = 0; g < FeatureSchema.Genres.Length; g++)
@@ -445,6 +637,25 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 {
                     vector[s + TasteMath.StableBucket(theme, FeatureSchema.SubgenreBuckets)] = 1f;
                 }
+            }
+
+            s += FeatureSchema.SubgenreBuckets;
+
+            // ── Tone one-hot (schema v4) ───────────────────────────────────────────────
+            // At most one slot lights; an untrusted, out-of-vocabulary or missing tone lights none,
+            // which is why hasAttributesTone sits beside it — an all-zero block would otherwise be
+            // indistinguishable from a tone the model has simply never seen.
+            if (toneIndex >= 0)
+            {
+                vector[s + toneIndex] = 1f;
+            }
+
+            s += FeatureSchema.Tones.Length;
+
+            // ── Era one-hot (schema v4) ────────────────────────────────────────────────
+            if (eraIndex >= 0)
+            {
+                vector[s + eraIndex] = 1f;
             }
 
             result[id] = vector;
@@ -535,7 +746,41 @@ public class FeatureVectorBuilder(IReelDbContext db)
 
     private sealed record CreditRow(Guid TitleId, Guid PersonId, CreditRole Role, int? CastOrder);
 
-    private static (decimal Director, decimal Cast, decimal Writer, float LovedCast, float HasCredits) CreditAffinities(
+    /// <summary>
+    /// The neutral-LOW imputation for a person-affinity nothing is known about (schema v5):
+    /// <c>prior − 0.5</c>, floored at 1 so it stays inside the rating scale for a user whose mean is
+    /// already at the bottom of it. See <see cref="FeatureSchema.NeutralLowPersonAffinityOffset"/>
+    /// for why it is not the prior itself.
+    /// </summary>
+    private static decimal NeutralLowAffinity(decimal prior) =>
+        Math.Max(1m, prior - FeatureSchema.NeutralLowPersonAffinityOffset);
+
+    /// <summary>
+    /// Person-affinity features, and the two v5 scalars that say how much of them is actually known.
+    ///
+    /// <para><b>Known-and-average and know-nothing used to be the same number.</b> A title whose
+    /// credited people the user has never rated fell through every branch below and returned the
+    /// prior — the user's own mean — for director, cast and writer alike, behind a
+    /// <c>hasCredits = 1</c> that only ever meant "credit rows exist". On the founder's live account
+    /// this made <c>directorAffinity</c> and <c>writerAffinity</c> the top POSITIVE contributors on
+    /// precisely the titles with nobody known in them: a reality show with twelve unknown presenters
+    /// and no director or writer row read as three solidly-average signals plus a presence flag.</para>
+    ///
+    /// <para>v5 separates the three questions that were collapsed into one. <c>hasCredits</c> keeps
+    /// its literal meaning (any credit row exists) and is now honest because it is no longer the
+    /// only thing asked. <c>knownPeopleFraction</c> carries how much of the cast and crew the user
+    /// has any record with. <c>knownDirectorOrWriter</c> singles out the above-the-line roles, whose
+    /// affinities are the ones that were being fabricated. And an unknown affinity is imputed
+    /// neutral-LOW rather than at the mean, so the fabricated value at least errs toward "we do not
+    /// know" instead of toward "this is for you".</para>
+    ///
+    /// <para><b>Leave-one-out holds for the two new scalars by construction:</b> both are computed
+    /// from the SAME post-subtraction counts the affinities are. A training row whose only shared
+    /// person is that title itself has <c>count &lt;= 0</c> after subtraction, so the person is not
+    /// known — exactly as they would not be at serving time, where the candidate is unrated and
+    /// contributed nothing to any pool. One path, no divergence.</para>
+    /// </summary>
+    private static CreditFeatures CreditAffinities(
         TasteState taste,
         IReadOnlyDictionary<Guid, Stat> personStats,
         IReadOnlyList<CreditRow>? credits,
@@ -544,7 +789,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
     {
         if (credits is null || credits.Count == 0)
         {
-            return (prior, prior, prior, 0f, 0f);
+            var unknown = NeutralLowAffinity(prior);
+            return new CreditFeatures(unknown, unknown, unknown, 0f, 0f, 0f, 0f);
         }
 
         // A person credited on this title in two roles was handed this title's rating twice, so the
@@ -561,9 +807,14 @@ public class FeatureVectorBuilder(IReelDbContext db)
         decimal directorSum = 0m, writerSum = 0m;
         int directorCount = 0, writerCount = 0, lovedCast = 0;
         var cast = new List<decimal>();
+        // DISTINCT people, so a person credited twice on one title is one person in the fraction.
+        var creditedPeople = new HashSet<Guid>();
+        var knownPeople = new HashSet<Guid>();
+        var knownAboveTheLine = false;
 
         foreach (var credit in credits)
         {
+            creditedPeople.Add(credit.PersonId);
             if (!personStats.TryGetValue(credit.PersonId, out var stat))
             {
                 continue;
@@ -585,15 +836,22 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 continue;
             }
 
+            // Known = the user has at least one rating that reaches this person, AFTER this title's
+            // own rating is taken back out. That subtraction is what keeps the fraction honest on a
+            // training row (see the leave-one-out note above).
+            knownPeople.Add(credit.PersonId);
+
             switch (credit.Role)
             {
                 case CreditRole.Director:
                     directorCount += count;
                     directorSum += sum;
+                    knownAboveTheLine = true;
                     break;
                 case CreditRole.Writer:
                     writerCount += count;
                     writerSum += sum;
+                    knownAboveTheLine = true;
                     break;
                 default:
                     if (credit.CastOrder is null or < 5)
@@ -610,13 +868,35 @@ public class FeatureVectorBuilder(IReelDbContext db)
             }
         }
 
-        return (
-            TasteMath.ShrunkenMean(directorSum, directorCount, prior),
-            cast.Count > 0 ? cast.Average() : prior,
-            TasteMath.ShrunkenMean(writerSum, writerCount, prior),
+        // A role with nothing known behind it is imputed neutral-LOW, not at the prior. ShrunkenMean
+        // still handles the KNOWN-but-thin case exactly as before — that is what shrinkage is for —
+        // so this only ever fires where the alternative was inventing a number outright.
+        var unknownAffinity = NeutralLowAffinity(prior);
+        return new CreditFeatures(
+            directorCount > 0 ? TasteMath.ShrunkenMean(directorSum, directorCount, prior) : unknownAffinity,
+            cast.Count > 0 ? cast.Average() : unknownAffinity,
+            writerCount > 0 ? TasteMath.ShrunkenMean(writerSum, writerCount, prior) : unknownAffinity,
             lovedCast,
-            1f);
+            HasCredits: 1f,
+            KnownPeopleFraction: creditedPeople.Count == 0
+                ? 0f
+                : (float)knownPeople.Count / creditedPeople.Count,
+            KnownDirectorOrWriter: knownAboveTheLine ? 1f : 0f);
     }
+
+    /// <summary>
+    /// The credit block's outputs. A named record rather than a seven-place tuple: the two v5
+    /// additions made the positional form a trap, and <c>HasCredits</c> vs <c>KnownPeopleFraction</c>
+    /// are precisely the pair nobody should be able to transpose by accident.
+    /// </summary>
+    private readonly record struct CreditFeatures(
+        decimal Director,
+        decimal Cast,
+        decimal Writer,
+        float LovedCast,
+        float HasCredits,
+        float KnownPeopleFraction,
+        float KnownDirectorOrWriter);
 
     /// <summary>
     /// The user's genre-level contrarian offset for this title, with the title's own (user, crowd)

@@ -58,12 +58,13 @@ services:
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_MAX_CONCURRENCY: ${OPENROUTER_MAX_CONCURRENCY:-4}
       # Embeddings — base URL is load-bearing: OpenRouter serves text-embedding-3-small, so the
-      # provider must point there (with OPENROUTER_API_KEY), not the api.openai.com default.
+      # provider must point there, not the api.openai.com default. The key falls back to
+      # OPENROUTER_API_KEY, since both go to the same gateway; set EMBEDDINGS_API_KEY only to split them.
       EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-openai}
       EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
       EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-1536}
       EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://openrouter.ai/api/v1}
-      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-$OPENROUTER_API_KEY}
       # Conversational search model (defaults to OPENROUTER_MODEL)
       REEL_SEARCH_MODEL: ${REEL_SEARCH_MODEL:-}
       # Sync cadence
@@ -76,6 +77,17 @@ services:
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # Region default when CF-IPCountry is absent
       GEOIP_DEFAULT_REGION: ${GEOIP_DEFAULT_REGION:-US}
+      # Catalogue bulk seed (POST /api/dev/seed-catalog) and the daily ceilings that complete it.
+      # The two vote floors decide how big the seeded corpus is: measured 2026-09-10 the defaults
+      # yield ~9,300 titles, and 50/50 yields ~34,800. EXTRACT_DAILY_TOKENS is the only one that
+      # costs real money — 1.5M tokens is ~$0.23/day at gpt-5.4-mini input pricing, ~1,360 titles.
+      SEED_MOVIE_MIN_VOTES: ${SEED_MOVIE_MIN_VOTES:-500}
+      SEED_SHOW_MIN_VOTES: ${SEED_SHOW_MIN_VOTES:-200}
+      SEED_PAGES_PER_RUN: ${SEED_PAGES_PER_RUN:-400}
+      SEED_MAX_TITLES: ${SEED_MAX_TITLES:-60000}
+      HYDRATE_MAX_TITLES_PER_DAY: ${HYDRATE_MAX_TITLES_PER_DAY:-1500}
+      EXTRACT_DAILY_TOKENS: ${EXTRACT_DAILY_TOKENS:-1500000}
+      EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8090}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8090,http://localhost:5173}
       TestHelpers__ModelStubMode: ${TestHelpers__ModelStubMode:-false}
@@ -83,12 +95,16 @@ services:
       TRAKT_ACCESS_TOKEN: ${TRAKT_ACCESS_TOKEN:-}
       TRAKT_REFRESH_TOKEN: ${TRAKT_REFRESH_TOKEN:-}
       TRAKT_DEV_PROFILE: ${TRAKT_DEV_PROFILE:-}
+    # /health/ready, not /health — see the note in docker-compose.prod.yml. Locally the gateway also
+    # gates on this, and a locally built image usually faces an already-migrated database, so the
+    # long start_period costs nothing on the happy path and covers the first run against an empty
+    # volume, which is exactly when it used to flap.
     healthcheck:
-      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health >/dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health/ready >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 20s
+      retries: 30
+      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy

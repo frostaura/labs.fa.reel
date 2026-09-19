@@ -9,12 +9,12 @@ using Pgvector.EntityFrameworkCore;
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
 [Collection("postgres")]
-public class TenancyIsolationTests(PostgresFixture fixture)
+public class TenancyIsolationTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
     [Fact]
     public async Task Account_scoped_rows_are_invisible_across_accounts()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return; // no Postgres available — covered in CI's backend-integration job
         }
@@ -22,7 +22,7 @@ public class TenancyIsolationTests(PostgresFixture fixture)
         var unscoped = new AccountContext();
         Guid accountA, accountB, titleId;
 
-        await using (var db = fixture.CreateContext(unscoped))
+        await using (var db = Fixture.CreateContext(unscoped))
         {
             var a = new Account { Id = Guid.NewGuid(), TraktUserSlug = $"user-a-{Guid.NewGuid():N}", CreatedAt = DateTime.UtcNow, LastSeenAt = DateTime.UtcNow, PipelineStageChangedAt = DateTime.UtcNow };
             var b = new Account { Id = Guid.NewGuid(), TraktUserSlug = $"user-b-{Guid.NewGuid():N}", CreatedAt = DateTime.UtcNow, LastSeenAt = DateTime.UtcNow, PipelineStageChangedAt = DateTime.UtcNow };
@@ -37,7 +37,7 @@ public class TenancyIsolationTests(PostgresFixture fixture)
         // Scoped to A: must see exactly A's row — and the global catalog title.
         var contextA = new AccountContext();
         contextA.SetAccount(accountA);
-        await using (var db = fixture.CreateContext(contextA))
+        await using (var db = Fixture.CreateContext(contextA))
         {
             var watched = await db.WatchedTitles.Where(w => w.TitleId == titleId).ToListAsync();
             var row = Assert.Single(watched);
@@ -48,7 +48,7 @@ public class TenancyIsolationTests(PostgresFixture fixture)
         // Scoped to B: sees only B's row.
         var contextB = new AccountContext();
         contextB.SetAccount(accountB);
-        await using (var db = fixture.CreateContext(contextB))
+        await using (var db = Fixture.CreateContext(contextB))
         {
             var watched = await db.WatchedTitles.Where(w => w.TitleId == titleId).ToListAsync();
             var row = Assert.Single(watched);
@@ -57,7 +57,7 @@ public class TenancyIsolationTests(PostgresFixture fixture)
         }
 
         // Unscoped (background/global): sees both.
-        await using (var db2 = fixture.CreateContext(new AccountContext()))
+        await using (var db2 = Fixture.CreateContext(new AccountContext()))
         {
             Assert.Equal(2, await db2.WatchedTitles.CountAsync(w => w.TitleId == titleId));
         }
@@ -66,12 +66,12 @@ public class TenancyIsolationTests(PostgresFixture fixture)
     [Fact]
     public async Task Vector_roundtrip_and_cosine_distance_work()
     {
-        if (!fixture.Available)
+        if (!Fixture.Available)
         {
             return;
         }
 
-        await using var db = fixture.CreateContext(new AccountContext());
+        await using var db = Fixture.CreateContext(new AccountContext());
 
         var near = new Title { Id = Guid.NewGuid(), MediaType = MediaType.Movie, TraktId = Random.Shared.NextInt64(1, long.MaxValue), TraktSlug = "near", Name = "Near", CreatedAt = DateTime.UtcNow };
         var far = new Title { Id = Guid.NewGuid(), MediaType = MediaType.Movie, TraktId = Random.Shared.NextInt64(1, long.MaxValue), TraktSlug = "far", Name = "Far", CreatedAt = DateTime.UtcNow };

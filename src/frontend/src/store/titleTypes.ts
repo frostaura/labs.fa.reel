@@ -34,6 +34,21 @@ export interface PersonPayload {
   }[];
 }
 
+/** One verified person behind a person-affinity contribution bar (mirrors ContributionDetails). */
+export interface ContributionPerson {
+  personId: string;
+  name: string;
+  yourAverage: number;
+  titleCount: number;
+}
+
+/** The tap-through behind one contribution bar: person features carry people, era features a note. */
+export interface ContributionDetail {
+  feature: string;
+  people?: ContributionPerson[] | null;
+  note?: string | null;
+}
+
 export interface TitleDetailPayload {
   titleId: string;
   mediaType: "Movie" | "Show";
@@ -41,6 +56,12 @@ export interface TitleDetailPayload {
   name: string;
   year: number | null;
   overview: string | null;
+  /**
+   * The personalised why-line for this title — the persisted sentence from the account's Active
+   * feed snapshot, or the same deterministic templater's rebuild when the title is outside the
+   * current build. Null when nothing verifiable can be cited; never the generic boilerplate.
+   */
+  whyThis: string | null;
   tagline: string | null;
   runtimeMinutes: number | null;
   certification: string | null;
@@ -60,6 +81,7 @@ export interface TitleDetailPayload {
     contributions: { feature: string; value: number }[];
     scoredAt: string;
   } | null;
+  contributionDetails: ContributionDetail[];
   userState: {
     isFullyWatched: boolean;
     plays: number;
@@ -87,14 +109,3 @@ export interface ProvidersPayload {
   providers: ProviderEntry[];
 }
 
-export interface SavedEntry {
-  titleId: string;
-  mediaType: "Movie" | "Show";
-  tmdbId: number | null;
-  name: string;
-  year: number | null;
-  posterPath: string | null;
-  predictedRating: number | null;
-  savedAt: string;
-  onManagedList: boolean;
-}

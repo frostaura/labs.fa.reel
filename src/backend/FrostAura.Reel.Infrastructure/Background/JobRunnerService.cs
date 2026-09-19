@@ -110,24 +110,39 @@ public sealed class JobRunnerService(
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         var now = DateTime.UtcNow;
 
-        var claimed = await db.Database.SqlQuery<Guid>(
-            $"""
-             UPDATE "SyncJobs" SET
-                 "Status" = 'Running',
-                 "StartedAt" = COALESCE("StartedAt", {now}),
-                 "HeartbeatAt" = {now},
-                 "AttemptCount" = "AttemptCount" + 1
-             WHERE "Id" = (
-                 SELECT "Id" FROM "SyncJobs"
-                 WHERE "Status" = 'Pending'
-                 ORDER BY "Priority", "EnqueuedAt"
-                 LIMIT 1
-                 FOR UPDATE SKIP LOCKED)
-             RETURNING "Id" AS "Value"
-             """).ToListAsync(ct);
+        var claimed = await db.Database.SqlQuery<Guid>(ClaimNextSql(now)).ToListAsync(ct);
 
         return claimed.Count == 0 ? null : claimed[0];
     }
+
+    /// <summary>
+    /// The claim, as one statement. Priority then age — with one ordering rule on top: a
+    /// <c>BuildFeed</c> is not claimable while the same account has a <c>DeltaSync</c> pending or
+    /// running. The refresh control enqueues both at once so the build scores the freshly synced
+    /// library; with two runner slots the build used to start beside the sync, finish first on
+    /// stale data, and the sync's own reconcile build then did the work again. The stale-job
+    /// reclaim bounds how long a wedged sync can hold a build back.
+    /// </summary>
+    internal static FormattableString ClaimNextSql(DateTime now) =>
+        $"""
+         UPDATE "SyncJobs" SET
+             "Status" = 'Running',
+             "StartedAt" = COALESCE("StartedAt", {now}),
+             "HeartbeatAt" = {now},
+             "AttemptCount" = "AttemptCount" + 1
+         WHERE "Id" = (
+             SELECT j."Id" FROM "SyncJobs" j
+             WHERE j."Status" = 'Pending'
+               AND NOT (j."Kind" = 'BuildFeed' AND EXISTS (
+                   SELECT 1 FROM "SyncJobs" d
+                   WHERE d."AccountId" = j."AccountId"
+                     AND d."Kind" = 'DeltaSync'
+                     AND d."Status" IN ('Pending', 'Running')))
+             ORDER BY j."Priority", j."EnqueuedAt"
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED)
+         RETURNING "Id" AS "Value"
+         """;
 
     private async Task RunJobAsync(Guid jobId, CancellationToken ct)
     {

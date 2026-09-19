@@ -1,4 +1,5 @@
 import type { FiltersPayload } from "../store/api";
+import type { BrowseFilter } from "./browseFilter";
 
 /**
  * The conditions behind tonight's picks — vocabulary, the three-state genre rule, year-range
@@ -185,12 +186,33 @@ export type FiltersLike = Partial<FiltersPayload> | null | undefined;
 
 export type ChipTone = "include" | "exclude" | "neutral";
 
+/**
+ * Which kind of filter a chip describes. The two behave differently and a user must not have to
+ * guess which is which:
+ *
+ * - `condition` — a saved content condition. Lives on the account, follows the user to every
+ *   device and every surface, and is edited in the Conditions dialog.
+ * - `browse` — a per-device view toggle (Movies/TV, Available/Coming soon). Remembered in this
+ *   browser's localStorage only, applies to the cards already fetched, and is cleared from the chip
+ *   itself or from the segmented control it came from.
+ *
+ * Carried as data rather than inferred from the key prefix so the renderer never has to parse a
+ * string to decide how to label a group.
+ */
+export type ChipKind = "condition" | "browse";
+
 export interface ConditionChip {
   /** Stable React key. */
   key: string;
   /** Self-describing on its own — these chips also render on the feed with no legend beside them. */
   label: string;
   tone: ChipTone;
+  kind: ChipKind;
+  /**
+   * Browse chips only: the patch that turns this one filter back off, so a chip can clear itself.
+   * The control that set it is often scrolled out of view by the time the chip is read.
+   */
+  clear?: Partial<BrowseFilter>;
 }
 
 const LANGUAGE_LABEL = new Map(LANGUAGES.map((l) => [l.code, l.label]));
@@ -200,36 +222,85 @@ function titleCase(slug: string): string {
 }
 
 /**
+ * The browse toggles, as chips. Private on purpose: {@link summaryChips} is the single entry point,
+ * so there is exactly one place that decides what the header claims about the feed. A second
+ * exported derivation is how a header ends up disagreeing with itself.
+ *
+ * "All" produces no chip, for the same reason "all languages" produces none — a chip that names a
+ * non-condition teaches the eye to skip the row.
+ */
+function browseChips(browse: BrowseFilter | null | undefined): ConditionChip[] {
+  if (!browse) return [];
+  const chips: ConditionChip[] = [];
+
+  if (browse.media !== "all") {
+    chips.push({
+      key: "browse:media",
+      label: browse.media === "movie" ? "Movies only" : "TV only",
+      tone: "include",
+      kind: "browse",
+      clear: { media: "all" },
+    });
+  }
+  // "Available now" is *released*, not "streaming somewhere" — the honest reading of the underlying
+  // predicate (see browseFilter.ts). The chip must not promise more than the filter does.
+  if (browse.availability !== "all") {
+    chips.push({
+      key: "browse:availability",
+      label: browse.availability === "available" ? "Available now" : "Coming soon",
+      tone: "include",
+      kind: "browse",
+      clear: { availability: "all" },
+    });
+  }
+
+  return chips;
+}
+
+/**
  * Everything currently narrowing the feed, as chips. This is the answer to "why does my feed look
  * like this" — the question a filter set buried two screens away can never answer. An empty array
  * means genuinely nothing is on; the caller says so in words.
  *
- * Deliberately silent about conditions that restrict nothing: "all languages", a rating floor of
- * zero, a year range spanning the whole catalogue. A chip for a non-condition trains the eye to
- * ignore the row.
+ * Both kinds of filter come out of here, in one list: the saved content conditions first, then the
+ * per-device browse toggles. Omitting the browse toggles was the bug — the row claimed to summarise
+ * what was shaping the feed while a "Movies only" toggle silently halved it. Each chip carries its
+ * `kind`, so the renderer can group and label them without a second derivation.
+ *
+ * `browse` is optional because two callers legitimately want the content conditions alone: the
+ * Settings page, which has no browse toggles at all, and the Conditions button's count badge, which
+ * counts only what the dialog can edit.
+ *
+ * Deliberately silent about filters that restrict nothing: "all languages", a rating floor of zero,
+ * a year range spanning the whole catalogue, a browse toggle set to "all".
  */
-export function summaryChips(raw: FiltersLike): ConditionChip[] {
+export function summaryChips(raw: FiltersLike, browse?: BrowseFilter | null): ConditionChip[] {
   const f = normalizeFilters(raw);
   const chips: ConditionChip[] = [];
 
   for (const genre of f.includeGenres) {
-    chips.push({ key: `inc:${genre}`, label: `has ${titleCase(genre)}`, tone: "include" });
+    chips.push({ key: `inc:${genre}`, label: `has ${titleCase(genre)}`, tone: "include", kind: "condition" });
   }
   for (const genre of f.excludeGenres) {
-    chips.push({ key: `exc:${genre}`, label: `no ${titleCase(genre)}`, tone: "exclude" });
+    chips.push({ key: `exc:${genre}`, label: `no ${titleCase(genre)}`, tone: "exclude", kind: "condition" });
   }
   if (f.minCrowdRating != null && f.minCrowdRating > 0) {
-    chips.push({ key: "crowd", label: `crowd ≥ ${f.minCrowdRating.toFixed(1)}`, tone: "include" });
+    chips.push({ key: "crowd", label: `crowd ≥ ${f.minCrowdRating.toFixed(1)}`, tone: "include", kind: "condition" });
   }
   if (f.minPredictedRating != null && f.minPredictedRating > 0) {
-    chips.push({ key: "predicted", label: `for you ≥ ${f.minPredictedRating.toFixed(1)}`, tone: "include" });
+    chips.push({
+      key: "predicted",
+      label: `for you ≥ ${f.minPredictedRating.toFixed(1)}`,
+      tone: "include",
+      kind: "condition",
+    });
   }
   if (f.minYear != null && f.maxYear != null) {
-    chips.push({ key: "years", label: `${f.minYear}–${f.maxYear}`, tone: "include" });
+    chips.push({ key: "years", label: `${f.minYear}–${f.maxYear}`, tone: "include", kind: "condition" });
   } else if (f.minYear != null) {
-    chips.push({ key: "years", label: `${f.minYear} onwards`, tone: "include" });
+    chips.push({ key: "years", label: `${f.minYear} onwards`, tone: "include", kind: "condition" });
   } else if (f.maxYear != null) {
-    chips.push({ key: "years", label: `up to ${f.maxYear}`, tone: "include" });
+    chips.push({ key: "years", label: `up to ${f.maxYear}`, tone: "include", kind: "condition" });
   }
   if (!f.languages.includes(ALL_LANGUAGES)) {
     const named = f.languages.map((code) => LANGUAGE_LABEL.get(code) ?? code.toUpperCase());
@@ -237,14 +308,19 @@ export function summaryChips(raw: FiltersLike): ConditionChip[] {
       key: "languages",
       label: named.length === 1 ? `${named[0]} only` : named.join(", "),
       tone: "neutral",
+      kind: "condition",
     });
   }
   if (f.maturityCeiling) {
-    chips.push({ key: "maturity", label: `up to ${f.maturityCeiling}`, tone: "exclude" });
+    chips.push({ key: "maturity", label: `up to ${f.maturityCeiling}`, tone: "exclude", kind: "condition" });
   }
   for (const keyword of f.excludeKeywords) {
-    chips.push({ key: `kw:${keyword}`, label: `no “${keyword}”`, tone: "exclude" });
+    chips.push({ key: `kw:${keyword}`, label: `no “${keyword}”`, tone: "exclude", kind: "condition" });
   }
+
+  // Browse chips are keyed `browse:*`, so they cannot collide with a content key however the genre
+  // and keyword vocabularies grow.
+  chips.push(...browseChips(browse));
 
   return chips;
 }

@@ -17,6 +17,55 @@ export interface FeedCard {
   whyThis: string;
   isReleased: boolean;
   providers?: { name: string; logoPath: string | null }[];
+  /**
+   * Hero cards only: "confident" when the pick cleared the hero's confidence bar on its own merits,
+   * "reaching" when the never-blank backfill put it there because nothing did. Absent on every other
+   * surface, and absent on hero cards paged in after the snapshot — those are selected against the
+   * account's own floor, not the hero bar, so they have no bar to be measured against.
+   */
+  confidence?: "confident" | "reaching";
+  /** The bar `confidence` was measured against (7.5, or the account's higher "for you" minimum). */
+  floorUsed?: number;
+  /**
+   * "Through your lens" copy, where any has been written for this account and title. Every field
+   * is optional and every surface must render correctly without them: the daily budget, the
+   * provider and the output guards can each withhold copy, and a card that only looks right when
+   * the LLM answered is a card that looks broken on a bad day.
+   */
+  hook?: string | null;
+  /** The first clause of the lens — the card's two-line why when it is present. */
+  lensClause?: string | null;
+  /** The lens's closed-vocabulary mood; the strongest signal the tonight-mood chips sort on. */
+  mood?: string | null;
+  /** The extracted scalars the chips fall back to. Absent on an unenriched title. */
+  texture?: { darkness: number; pacing: number; complexity: number; humor: number } | null;
+}
+
+/** The lens as the API returns it, with the honesty about where it came from. */
+export interface LensPayload {
+  /** "fresh" (written against your current taste), "stale" (older, still shown), or "none". */
+  source: "fresh" | "stale" | "none";
+  lens: string | null;
+  hook: string | null;
+  caution: string | null;
+  anchors: { title: string; relation: string }[];
+  mood: string | null;
+  whenToWatch: string | null;
+  generatedAt: string | null;
+}
+
+/** The account's taste narrative — what Reel believes about you, and your correction to it. */
+export interface NarrativePayload {
+  /** Already the effective text: your edit if you made one, otherwise the generated version. */
+  text: string | null;
+  isEdited: boolean;
+  version: number | null;
+  ratingsCount: number;
+  generatedAt: string | null;
+  /** True when your taste has moved since this was written. It is still shown; it is just owed a rewrite. */
+  isStale: boolean;
+  regenerating: boolean;
+  writerAvailable: boolean;
 }
 
 export interface FeedRow {
@@ -74,4 +123,42 @@ export interface ContinueEntry {
   watchedEpisodes: number;
   totalAired: number;
   completionPct: number;
+}
+
+/** The current ISO week's digest — feed-shaped cards; empty items until the Friday build runs. */
+export interface DigestPayload {
+  weekStart: string | null;
+  generatedAt: string | null;
+  items: FeedCard[];
+}
+
+/** A Blend joint pick: the shared card fields plus both personal predictions (1dp). */
+export interface BlendCard {
+  titleId: string;
+  mediaType: "Movie" | "Show";
+  tmdbId: number | null;
+  name: string;
+  year: number | null;
+  runtimeMinutes: number | null;
+  posterPath: string | null;
+  backdropPath: string | null;
+  genres: string[];
+  crowdRating: number | null;
+  crowdVotes: number | null;
+  isReleased: boolean;
+  providers?: { name: string; logoPath: string | null }[];
+  forYou: number;
+  forThem: number;
+  /** min(forYou, forThem) — the ordering key. */
+  joint: number;
+}
+
+export interface BlendPreview {
+  ownerName: string;
+  eligibleBothCount: number;
+}
+
+export interface BlendPicksPayload {
+  ownerName: string;
+  items: BlendCard[];
 }

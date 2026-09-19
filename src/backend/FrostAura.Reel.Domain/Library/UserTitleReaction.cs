@@ -8,9 +8,14 @@ public enum ReactionKind
     SaveForLater,
 
     /// <summary>
-    /// User manually dropped an in-progress show — hides it from Continue Watching only.
-    /// Revocable via <see cref="UserTitleReaction.RevokedAt"/>. Exclude-only: no rating, no
-    /// model penalty, no Trakt write-back (Trakt has no dropped concept).
+    /// User manually dropped a show. Hides it from Continue Watching AND from every discovery
+    /// surface that composes <c>EligibilityQueryBuilder.EligibleTitles</c> — feed, search
+    /// suggestions, Ask Reel. It was Continue-Watching-only until 2026-08-07, which meant a dropped
+    /// title with no watch footprint stayed eligible and was re-picked on every feed build.
+    /// Revocable via <see cref="UserTitleReaction.RevokedAt"/>, which restores eligibility.
+    /// No rating, no Trakt write-back (Trakt has no dropped concept). Since Phase 8b (2026-08-07)
+    /// it is no longer model-silent: a drop feeds the online residual head as a mild soft-negative
+    /// and joins the dislike profile that demotes similar titles at serving time.
     /// </summary>
     Dropped,
 }
@@ -20,6 +25,11 @@ public enum ReactionReason
     Genre,
     SeenEnough,
     Tone,
+
+    /// <summary>"Just not for me" — the catch-all the not-interested sheet offers alongside the
+    /// specific reasons. Persisted by name (string column), so ordering is not load-bearing;
+    /// appended last anyway for tidy history.</summary>
+    NotForMe,
 }
 
 /// <summary>

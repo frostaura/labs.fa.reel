@@ -1,9 +1,11 @@
 using System.Security.Cryptography;
+using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Filters;
+using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Api.Endpoints;
@@ -49,7 +51,7 @@ public static class FilterEndpoints
 
         group.MapPut("/filters", async (
             FiltersPayload payload, IReelDbContext db, IAccountContext accountContext,
-            FeedRefreshCoordinator feedRefresh, HttpContext http, CancellationToken ct) =>
+            FeedRefreshCoordinator feedRefresh, SettingsUnlockTokenService tokens, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -57,7 +59,7 @@ public static class FilterEndpoints
                 return Results.Unauthorized();
             }
 
-            if (!await VerifyPinHeaderAsync(account.Settings.SettingsPinHash, http))
+            if (!await VerifyUnlockAsync(account, http, tokens))
             {
                 return Results.StatusCode(StatusCodes.Status423Locked);
             }
@@ -137,7 +139,7 @@ public static class FilterEndpoints
             // window would linger until the next build. Enqueue a reactive rebuild (reuses the Active
             // model) so the feed re-filters immediately; it commits in the same SaveChanges as the
             // filter change. Kind-agnostic by construction — every filter, old and new, invalidates.
-            await feedRefresh.RequestRebuildAsync(accountId, "content filters changed", ct);
+            await feedRefresh.RequestRebuildAsync(accountId, FeedBuildPolicy.FiltersChangedReason, ct);
 
             await db.SaveChangesAsync(ct);
             // Echo what was actually STORED, not what was sent: a swapped year window and a clamped
@@ -149,6 +151,35 @@ public static class FilterEndpoints
                 MinYear = years.MinYear,
                 MaxYear = years.MaxYear,
             });
+        });
+
+        // Read-only, and deliberately NOT behind the settings PIN. The PIN protects CHANGING what a
+        // shared device is allowed to show; this changes nothing, and gating it would leave the one
+        // person who can see the conditions unable to see what they cost. It is a POST because it
+        // carries the DRAFT the editor is currently showing — costing only the saved rules would
+        // answer a question nobody is asking while their finger is on a chip.
+        group.MapPost("/filters/cost", async (
+            FiltersPayload payload, FilterCostMeter meter, CancellationToken ct) =>
+        {
+            // The year window is validated, not clamped, on the way in — the same call the save makes,
+            // so a typo is refused here too rather than costing a window the user cannot store.
+            if (!ContentFilterRules.TryNormalizeYears(payload.MinYear, payload.MaxYear, out var years, out var yearError))
+            {
+                return Results.BadRequest(new { error = yearError });
+            }
+
+            var rules = FilterRuleSet.Create(
+                payload.ExcludeGenres,
+                payload.IncludeGenres,
+                // Umbrella keyword terms expand on save, so they expand here too — otherwise the meter
+                // costs "lgbtq" as one rule while the save would store the whole family.
+                KeywordFilterExpansion.Expand(payload.ExcludeKeywords),
+                payload.Languages,
+                payload.MinCrowdRating,
+                years.MinYear,
+                years.MaxYear);
+
+            return Results.Ok(await meter.MeasureAsync(rules, ct));
         });
 
         group.MapPost("/pin", async (PinRequest request, IReelDbContext db, HttpContext http, CancellationToken ct) =>
@@ -175,11 +206,19 @@ public static class FilterEndpoints
             return Results.Ok(new { pinConfigured = true });
         });
 
-        group.MapPost("/pin/verify", async (PinVerifyRequest request, IReelDbContext db, HttpContext http, CancellationToken ct) =>
+        group.MapPost("/pin/verify", async (
+            PinVerifyRequest request, IReelDbContext db, SettingsUnlockTokenService tokens, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
-            var valid = account?.Settings.SettingsPinHash is { } hash && VerifyPin(hash, request.Pin);
-            return valid ? Results.Ok(new { valid = true }) : Results.StatusCode(StatusCodes.Status423Locked);
+            if (account?.Settings.SettingsPinHash is not { } hash || !VerifyPin(hash, request.Pin))
+            {
+                return Results.StatusCode(StatusCodes.Status423Locked);
+            }
+
+            // Success hands back a short-lived unlock token INSTEAD of the client re-sending the
+            // raw PIN per call — the PIN itself must never be cached on the client.
+            var (token, expiresAt) = tokens.Issue(account.Id);
+            return Results.Ok(new { valid = true, unlockToken = token, expiresAt });
         });
 
         group.MapDelete("/pin", async (IReelDbContext db, HttpContext http, CancellationToken ct) =>
@@ -190,6 +229,9 @@ public static class FilterEndpoints
                 return Results.Unauthorized();
             }
 
+            // Deliberately raw-PIN-only — an unlock token is NOT accepted here. Removing the PIN
+            // is destructive (it opens content conditions to everyone on the device), so it always
+            // re-prompts; a token minted 14 minutes ago on a shared screen must not be enough.
             if (!await VerifyPinHeaderAsync(account.Settings.SettingsPinHash, http))
             {
                 return Results.StatusCode(StatusCodes.Status423Locked);
@@ -201,7 +243,31 @@ public static class FilterEndpoints
         });
     }
 
-    private static Task<bool> VerifyPinHeaderAsync(string? pinHash, HttpContext http)
+    /// <summary>
+    /// The gate for non-destructive PIN-locked writes. No PIN configured — open. Otherwise a
+    /// valid <c>X-Settings-Unlock</c> token (minted by <c>/pin/verify</c>) unlocks, with the raw
+    /// <c>X-Settings-Pin</c> header kept as a legacy fallback for clients that predate the token.
+    /// Destructive actions (PIN removal) must NOT route through here — they re-verify the raw PIN
+    /// every time via <see cref="VerifyPinHeaderAsync"/>.
+    /// </summary>
+    internal static Task<bool> VerifyUnlockAsync(Account account, HttpContext http, SettingsUnlockTokenService tokens)
+    {
+        if (account.Settings.SettingsPinHash is not { } pinHash)
+        {
+            return Task.FromResult(true); // no PIN configured — open
+        }
+
+        var unlockToken = http.Request.Headers["X-Settings-Unlock"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(unlockToken) && tokens.Validate(unlockToken, account.Id))
+        {
+            return Task.FromResult(true);
+        }
+
+        var supplied = http.Request.Headers["X-Settings-Pin"].FirstOrDefault() ?? string.Empty;
+        return Task.FromResult(VerifyPin(pinHash, supplied));
+    }
+
+    internal static Task<bool> VerifyPinHeaderAsync(string? pinHash, HttpContext http)
     {
         if (pinHash is null)
         {

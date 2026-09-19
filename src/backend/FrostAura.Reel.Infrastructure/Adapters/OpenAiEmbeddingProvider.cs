@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -13,7 +14,13 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 /// OpenAI-compatible /embeddings adapter (api.openai.com by default; EMBEDDINGS_BASE_URL
 /// overridable). Returns L2-normalized vectors so pgvector cosine and dot products agree.
 /// </summary>
-public class OpenAiEmbeddingProvider(HttpClient httpClient, ApiUsageRecorder usageRecorder, IConfiguration configuration)
+public class OpenAiEmbeddingProvider(
+    HttpClient httpClient,
+    ApiUsageRecorder usageRecorder,
+    IConfiguration configuration,
+    // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
+    // every real code path, but the adapter must still be `new`-able in tests without a scope.
+    IAccountContext? accountContext = null)
     : IEmbeddingProvider
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
@@ -41,13 +48,13 @@ public class OpenAiEmbeddingProvider(HttpClient httpClient, ApiUsageRecorder usa
             return [];
         }
 
-        usageRecorder.Record(ApiProvider.OpenRouter); // unified LLM-spend ledger bucket
+        var model = configuration["EMBEDDINGS_MODEL"] ?? "text-embedding-3-small";
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "embeddings")
         {
             Content = JsonContent.Create(new
             {
-                model = configuration["EMBEDDINGS_MODEL"] ?? "text-embedding-3-small",
+                model,
                 input = texts,
             }, options: JsonOptions),
         };
@@ -57,6 +64,16 @@ public class OpenAiEmbeddingProvider(HttpClient httpClient, ApiUsageRecorder usa
         response.EnsureSuccessStatusCode();
         var dto = await response.Content.ReadFromJsonAsync<EmbeddingsResponse>(JsonOptions, ct)
             ?? throw new InvalidOperationException("Empty embeddings response.");
+
+        // Recorded after the response, still on the unified LLM-spend bucket but now carrying its own
+        // model and purpose so embeddings stop being indistinguishable from chat. The embeddings API
+        // bills prompt tokens only — there is no completion side, and reporting one would be a lie.
+        usageRecorder.Record(
+            ApiProvider.OpenRouter,
+            ApiUsagePurpose.Embed,
+            model,
+            accountContext?.AccountId,
+            dto.Usage?.PromptTokens);
 
         return dto.Data
             .OrderBy(d => d.Index)
@@ -81,7 +98,7 @@ public class OpenAiEmbeddingProvider(HttpClient httpClient, ApiUsageRecorder usa
         return result;
     }
 
-    private sealed record EmbeddingsResponse(EmbeddingDatum[] Data);
+    private sealed record EmbeddingsResponse(EmbeddingDatum[] Data, OpenRouterUsage? Usage);
 
     private sealed record EmbeddingDatum(int Index, [property: JsonPropertyName("embedding")] float[] Embedding);
 }

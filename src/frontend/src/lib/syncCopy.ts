@@ -69,6 +69,28 @@ const EXPLAINERS: Record<string, SyncExplainer> = {
       "Ranking by predicted rating, freshness and variety",
     ],
   },
+  narrative: {
+    title: "Writing your taste profile",
+    lines: [
+      "Turning your ratings into a description of what you actually like",
+      "Rewritten only when your taste has genuinely moved",
+    ],
+  },
+  lens: {
+    title: "Writing tonight's notes",
+    lines: [
+      "A short note on why each headline pick fits you",
+      "Written for the hero and the leaders of each row",
+    ],
+  },
+  xref: {
+    title: "Cross-referencing against your history",
+    lines: [
+      "Checking every eligible title against the ones you've actually rated",
+      "Each candidate is judged beside your nearest rated titles and your own scores",
+      "Nothing gets hidden — at most a title is pushed down the page",
+    ],
+  },
 };
 
 const FALLBACK: SyncExplainer = {
@@ -93,6 +115,11 @@ const JOB_KIND_TO_SSE: Record<string, string> = {
   Train: "train",
   Evaluate: "evaluate",
   BuildFeed: "feed",
+  // These two shipped without a mapping and fell back to "Background sync" — a job the user is
+  // watching, described as nothing in particular.
+  BuildTasteNarrative: "narrative",
+  PersonaliseTitles: "lens",
+  CrossReference: "xref",
 };
 
 export function jobKindToSseKind(jobKind: string | null | undefined): string | null {
@@ -102,9 +129,127 @@ export function jobKindToSseKind(jobKind: string | null | undefined): string | n
 /**
  * Background Trakt polls (delta/reconcile) fire every few minutes and must not hijack the pill
  * from a primary pipeline job (onboarding, enrichment, training) that the user is waiting on.
+ *
+ * `xref` is deliberately NOT in here. A cross-reference pass can legitimately own the pill for ten
+ * minutes, counting titles as it goes, and that is the founder's stated preference: a five-second
+ * delta poll stealing the pill from it would report the least interesting thing on screen. Mirrors
+ * `IsBackground` in `src/backend/FrostAura.Reel.Api/Endpoints/SyncEndpoints.cs`; change one, change
+ * the other.
  */
 const BACKGROUND_KINDS = new Set(["delta", "reconcile"]);
 
 export function isBackgroundKind(sseKind: string | null | undefined): boolean {
   return sseKind != null && BACKGROUND_KINDS.has(sseKind);
+}
+
+/** The `job-completed` payload for a delta/reconcile. Mirrors the backend's `SyncSummary`. */
+export interface SyncSummaryPayload {
+  ratingsAdded: number;
+  ratingsChanged: number;
+  watchedAdded: number;
+  retrainQueued: boolean;
+  retrainAt: string | null;
+  picksChanged: number | null;
+}
+
+/** The idle sentence when a sync found nothing at all. */
+export const UP_TO_DATE = "Already up to date";
+
+const plural = (count: number, singular: string, many = `${singular}s`) => (count === 1 ? singular : many);
+
+/** Grouped the same way the server groups it — invariant, not locale-dependent. */
+const count = (value: number) => value.toLocaleString("en-US");
+
+/**
+ * The post-sync sentence: what arrived from Trakt, then the one consequence worth naming.
+ *
+ * Mirrors `SyncSummaryCopy.Describe` in
+ * `src/backend/FrostAura.Reel.Application/Sync/SyncSummary.cs`, which renders the same shape into
+ * the job's persisted `ProgressMessage`. Both exist because the pill has two sources — this live
+ * SSE payload and the 5-second poll of that message — and a single renderer on either side would
+ * leave the other one guessing. Change one, change the other; both are covered by tests asserting
+ * the same example sentences.
+ *
+ * The numbers themselves are the fix. The count the sync used to have in hand was every rating row
+ * walked from Trakt on a full paginated refetch — ~3,400 for the founder's account, seasons and
+ * episodes included — so this sentence would have read "Pulled 3,412 new ratings" after every
+ * single sync, forever.
+ */
+export function syncSummaryCopy(summary: SyncSummaryPayload | null | undefined): string | null {
+  if (!summary) return null;
+
+  const lead =
+    summary.ratingsAdded > 0
+      ? `Pulled ${count(summary.ratingsAdded)} new ${plural(summary.ratingsAdded, "rating")} from Trakt`
+      : summary.ratingsChanged > 0
+        ? `Updated ${count(summary.ratingsChanged)} ${plural(summary.ratingsChanged, "rating")} from Trakt`
+        : summary.watchedAdded > 0
+          ? `Pulled ${count(summary.watchedAdded)} new ${plural(summary.watchedAdded, "watch", "watches")} from Trakt`
+          : UP_TO_DATE;
+
+  // A concrete change to the page outranks a promise about tonight: "3 picks changed" is something
+  // the user can go and look at. picksChanged === 0 is knowledge, not a clause.
+  const tail =
+    summary.picksChanged != null && summary.picksChanged > 0
+      ? `${count(summary.picksChanged)} ${plural(summary.picksChanged, "pick")} changed`
+      : summary.retrainQueued
+        ? summary.retrainAt
+          ? `retraining tonight at ${utcHourMinute(summary.retrainAt)} UTC`
+          : "retraining now"
+        : null;
+
+  return tail ? `${lead} — ${tail}` : lead;
+}
+
+/**
+ * HH:mm of an ISO instant, in UTC. Read off the string rather than through `Date`, so the hour the
+ * user is promised is the hour the server scheduled — a browser in Johannesburg rendering "05:00
+ * UTC" for an 03:00 job is a lie the local timezone would tell for free.
+ */
+function utcHourMinute(iso: string): string {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return "03:00";
+  return `${String(parsed.getUTCHours()).padStart(2, "0")}:${String(parsed.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * What the pipeline is doing for you, in words, per `Account.PipelineStage`.
+ *
+ * The stage used to be interpolated RAW into the waiting copy on Home — "Your picks are being
+ * assembled (Extracting)" — which is an internal state-machine token leaking onto the founder's
+ * home screen. Each phrase is a verb clause in the second person, so it reads as the tail of a
+ * sentence rather than a label.
+ *
+ * `Degraded` is the hard-failure parking state (revoked token, dead-lettered writes) and is the
+ * one stage with a REASON worth quoting: pass the persisted one (`outboxLastError` on
+ * `/api/sync/status`) and it is shown verbatim instead of the generic line. Callers that do not
+ * hold it get honest generic copy — never a blank, and never the enum.
+ *
+ * An unknown stage falls back to the generic clause, so a new backend stage ships safely ahead of
+ * the frontend that names it.
+ */
+const PIPELINE_STAGE_COPY: Record<string, string> = {
+  Linked: "linking your Trakt",
+  Ingesting: "pulling your history",
+  Extracting: "reading every title",
+  Training: "teaching your model",
+  Evaluated: "checking itself",
+  FeedReady: "putting tonight's picks together",
+};
+
+/** The generic clause for an unknown stage, and for Degraded with no persisted reason. */
+export const PIPELINE_STAGE_FALLBACK = "getting your library ready";
+
+/** What Degraded says when nothing was persisted to explain it. */
+export const PIPELINE_DEGRADED_FALLBACK = "your Trakt link needs attention";
+
+export function pipelineStageCopy(
+  stage: string | null | undefined,
+  degradedReason?: string | null
+): string {
+  if (stage === "Degraded") {
+    return degradedReason?.trim() || PIPELINE_DEGRADED_FALLBACK;
+  }
+
+  return (stage && PIPELINE_STAGE_COPY[stage]) || PIPELINE_STAGE_FALLBACK;
 }

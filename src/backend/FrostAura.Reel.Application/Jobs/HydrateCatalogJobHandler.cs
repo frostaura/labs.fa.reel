@@ -5,6 +5,7 @@ using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Application.Jobs;
@@ -28,6 +29,8 @@ public class HydrateCatalogJobHandler(
     IReelDbContext db,
     TitleHydrator hydrator,
     IPipelineEventHub events,
+    CatalogHydrationBudget budget,
+    IConfiguration configuration,
     ILogger<HydrateCatalogJobHandler> logger) : IJobHandler
 {
     public JobKind Kind => JobKind.HydrateCatalog;
@@ -52,6 +55,17 @@ public class HydrateCatalogJobHandler(
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
+        // A null account is the GLOBAL catalogue sweep the seed's follow-through queues. It is a
+        // genuinely different walk — a different pending set (the whole catalogue, not one library),
+        // a different order (supply priority, not id) and a daily ceiling — so it gets its own
+        // method rather than a handful of `accountId is null` branches threaded through logic whose
+        // every line is load-bearing for the account path.
+        if (job.AccountId is null)
+        {
+            await ExecuteGlobalAsync(job, ct);
+            return;
+        }
+
         var accountId = job.AccountId ?? throw new InvalidOperationException("HydrateCatalog requires an account.");
         var cursor = job.CursorJson is null
             ? new Cursor(null, 1, null)
@@ -63,6 +77,11 @@ public class HydrateCatalogJobHandler(
         IOrderedQueryable<Title> Pending() => db.Titles
             .Where(t => referenced.Contains(t.Id) && t.TmdbId != null && t.LastMetadataRefreshAt == null)
             .OrderBy(t => t.Id);
+
+        // The account's own region steers which age certification TMDB's per-region block resolves
+        // to; TitleHydrator falls back to US when it is absent or TMDB has no entry for it. The row
+        // itself stays global — this only picks which of several labels the catalogue stores.
+        var region = await db.Accounts.Where(a => a.Id == accountId).Select(a => a.Region).FirstOrDefaultAsync(ct);
 
         var failures = cursor.Failures ?? [];
         var lastTitleId = cursor.LastTitleId;
@@ -86,7 +105,7 @@ public class HydrateCatalogJobHandler(
                     break;
                 }
 
-                var result = await hydrator.HydrateBatchResilientAsync(batch, ct);
+                var result = await hydrator.HydrateBatchResilientAsync(batch, ct, region);
                 processed += result.Hydrated;
 
                 foreach (var title in result.Failed)
@@ -188,5 +207,131 @@ public class HydrateCatalogJobHandler(
             pass,
             retired,
             stranded);
+    }
+
+    /// <summary>The global sweep's checkpoint — the poison-pill counter, and what this chain has hydrated.</summary>
+    private sealed record GlobalCursor(Dictionary<string, int>? Failures, int Hydrated);
+
+    /// <summary>
+    /// The GLOBAL catalogue sweep: hydrates rows that belong to no account, in the order an
+    /// account's discovery would surface them, bounded by <c>HYDRATE_MAX_TITLES_PER_DAY</c>.
+    ///
+    /// <para>
+    /// <b>Priority order is the entire point of a capped run.</b> The seed lands tens of thousands
+    /// of rows and a day's ceiling covers a small fraction of them, so WHICH fraction decides
+    /// whether the recall gap closes this week or in two months. Highest <c>TmdbVoteCount</c> first,
+    /// then most recent: that is the same axis the seed walks and very close to the order in which
+    /// eligibility and the popularity arm would actually surface a title. Id order — what the
+    /// account path uses, correctly, because a library is small and must be covered entirely —
+    /// would hydrate a uniformly random sample and leave the titles most likely to be rated waiting
+    /// behind the obscure ones.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>No page cursor, by construction.</b> The pending query excludes what is already hydrated,
+    /// so an interrupted run simply re-selects what is left — the same reasoning that removed the
+    /// cursor from <c>EnrichCatalog</c>. What the cursor still carries is the failure counter, which
+    /// must survive a crash or a permanently-broken title would be retried for ever.
+    /// </para>
+    /// </summary>
+    private async Task ExecuteGlobalAsync(SyncJob job, CancellationToken ct)
+    {
+        var cursor = job.CursorJson is null
+            ? new GlobalCursor(null, 0)
+            : JsonSerializer.Deserialize<GlobalCursor>(job.CursorJson) ?? new GlobalCursor(null, 0);
+        var failures = cursor.Failures ?? [];
+
+        // Retire anything that spent its budget on an earlier run BEFORE selecting work, so a
+        // permanently-broken title stops occupying a slot in today's ceiling. Stamping is what the
+        // 404 path already does: no metadata is worse than none only if it also blocks everything
+        // behind it.
+        var spent = failures.Where(f => f.Value >= MaxTitleAttempts).Select(f => f.Key).ToList();
+        if (spent.Count > 0)
+        {
+            var spentIds = spent.Select(Guid.Parse).ToList();
+            foreach (var title in await db.Titles.Where(t => spentIds.Contains(t.Id)).ToListAsync(ct))
+            {
+                title.LastMetadataRefreshAt = DateTime.UtcNow;
+            }
+
+            foreach (var key in spent)
+            {
+                failures.Remove(key);
+            }
+
+            logger.LogWarning("Global hydration retired {Count} title(s) past the attempt budget.", spent.Count);
+            await db.SaveChangesAsync(ct);
+        }
+
+        var allowance = await budget.AllowanceAsync(DateTime.UtcNow, ct);
+        // Titles hydrated by an account-scoped run earlier today count against the same ceiling —
+        // it bounds TMDB calls against the shared catalogue, not calls made by this one job.
+        var remaining = (int)Math.Min(int.MaxValue, allowance.Remaining);
+
+        // Titles are GLOBAL rows, so there is no account whose region could steer the certification
+        // block. The deployment's default region is the honest stand-in, and TitleHydrator falls
+        // back to US when it is absent.
+        var region = configuration["GEOIP_DEFAULT_REGION"] ?? TitleHydrator.FallbackCertificationRegion;
+
+        // Failed titles are excluded rather than re-selected: without this the same batch comes back
+        // on the next iteration and burns its whole attempt budget inside one run, which turns a
+        // transient TMDB blip into a wholesale retirement.
+        var skip = failures.Keys.Select(Guid.Parse).ToList();
+
+        IQueryable<Title> Pending() => CatalogFollowThroughScheduler.PendingHydration(db)
+            .Where(t => !skip.Contains(t.Id))
+            .OrderByDescending(t => t.TmdbVoteCount)
+            .ThenByDescending(t => t.Year ?? 0)
+            .ThenBy(t => t.Id);
+
+        var backlog = await Pending().CountAsync(ct);
+        var processed = 0;
+        var deadBatches = 0;
+
+        while (!ct.IsCancellationRequested && processed < remaining)
+        {
+            var batch = await Pending().Take(Math.Min(SaveBatchSize, remaining - processed)).ToListAsync(ct);
+            if (batch.Count == 0)
+            {
+                break;
+            }
+
+            var result = await hydrator.HydrateBatchResilientAsync(batch, ct, region);
+            processed += result.Hydrated;
+
+            foreach (var title in result.Failed)
+            {
+                var key = title.Id.ToString();
+                failures[key] = failures.GetValueOrDefault(key) + 1;
+                skip.Add(title.Id);
+            }
+
+            // Saved unconditionally and before anything below can throw — the batch's hydrations and
+            // its failure counts are durable even if the outage guard fires on this very iteration.
+            job.CursorJson = JsonSerializer.Serialize(
+                new GlobalCursor(failures.Count == 0 ? null : failures, cursor.Hydrated + processed));
+            job.ProgressPct = backlog == 0 ? 100m : Math.Min(100m, Math.Round(100m * processed / backlog, 1));
+            job.ProgressMessage = $"hydrated {processed}/{Math.Min(remaining, backlog)} catalogue titles today";
+            await db.SaveChangesAsync(ct);
+
+            deadBatches = result.Hydrated == 0 && batch.Count > 1 ? deadBatches + 1 : 0;
+            if (deadBatches >= OutageBatchThreshold)
+            {
+                throw new InvalidOperationException(
+                    $"TMDB hydration failed for {deadBatches} consecutive full batches with no successes — treating as an upstream outage rather than retiring the titles.");
+            }
+        }
+
+        // Newly hydrated rows have an overview and keywords and nothing derived from them. Enrich is
+        // a clean no-op without LLM keys, so queueing it is safe regardless of configuration.
+        if (processed > 0 && await EnrichmentScheduler.EnqueueAsync(db, null, DateTime.UtcNow, ct))
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        logger.LogInformation(
+            "Global HydrateCatalog: {Processed} title(s) hydrated of a {Backlog} backlog; "
+            + "daily allowance {Used}/{Limit}, {Failing} title(s) carrying failures.",
+            processed, backlog, allowance.Used, allowance.Limit, failures.Count);
     }
 }
