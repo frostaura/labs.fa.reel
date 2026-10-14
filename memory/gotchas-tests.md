@@ -38,9 +38,6 @@ last_verified: 2026-09-11
 - **`TenancyModelTests` hard-codes the model's table count.** Any new entity bumps it in the same commit as its
   migration, and two branches that each add a table will both bump it — the integrator sums them rather than taking
   either side.
-- **The local-flaky quarantine is currently empty**, and pinned by name so that adding a row is a deliberate decision
-  rather than a way to make a red test go away. The skip flag belongs in the local command only; CI's pgvector service
-  is authoritative and runs all of them.
 - **Verify a failure by observable behaviour — logs, HTTP codes — never by config inspection.** An "embeddings are
   broken" diagnosis read one environment variable, missed the key fallback chain, and steered a whole QA pass at a
   non-bug.

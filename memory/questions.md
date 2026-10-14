@@ -1,8 +1,8 @@
 ---
 name: fa-reel-questions
-description: "Every one of these is Dean's, and the deploy decision blocks the rest — until Reel is deployed the external-user kill criterion cannot be evaluated at all. Trakt commercial terms remain the one question that can end the product."
+description: "All Dean's. Deploy blocks the rest — undeployed, the external-user kill criterion cannot be evaluated. New: is the uncommitted gpt-6-luna model swap a founder decision? Trakt commercial terms can still end the product."
 type: question
-last_verified: 2026-09-11
+last_verified: 2026-10-14
 ---
 
 # Open questions
@@ -12,12 +12,11 @@ either changes the spec, spends money, or touches a founder-locked rule. Where t
 to act before an answer existed, it took the conservative side and recorded the alternative — `decisions-chat.md`.
 
 ## Blocking everything else
-- **Deploy date.** The deploy was decided 2026-07-24 and has never been executed, and it is what makes the "≥5
-  external users" criterion evaluable at all. The external-user count is zero and the 60-day clock has passed on
-  either anchor. Deploy and re-anchor at the first external serve, or apply the criterion as written and kill.
-  **Nothing technical is left in the way:** CI is green on `main` on all five gates and publishes multi-arch images to
-  Docker Hub; the redeploy step is skipped only because the repo carries no `DEPLOY_ENABLED` variable and no
-  `PORTAINER_STACK_ID` secret (`state.md`). Setting those two is the deploy.
+- **Deploy date.** Decided 2026-07-24, never executed, and it is what makes the "≥5 external users" criterion
+  evaluable at all. External users are zero and the 60-day clock has passed on either anchor: deploy and re-anchor at
+  the first external serve, or apply the criterion as written and kill. **Nothing technical is in the way** — CI is
+  green and publishing; the redeploy job skips because `DEPLOY_ENABLED` and `PORTAINER_STACK_ID` are still unset
+  (re-checked 2026-10-14). Steps: the repo's `docs/deployment.md`.
 
 ## The M2 bar is written in a metric the harness no longer reads
 - **The research question, milestone 2 and the modelling kill criterion all say "≥20% relative precision@10";
@@ -40,26 +39,22 @@ to act before an answer existed, it took the conservative side and recorded the 
   not. The designed approach is pseudonymisation, which still rewrites an append-only row. **Decide before the first
   external user**, not after.
 - **An API or MCP surface for Gaia** collides with "Sign in with Trakt only". Decide before any demand test.
-- **Ad-hoc lists from chat.** The spec defines one managed list per profile with an auto-removal contract; extra lists
-  need that contract written, or a refusal.
+- **Ad-hoc lists from chat** need the spec's one-list auto-removal contract extended, or a refusal.
 
-## Ask Reel — cost and models
+## Models and cost
+- **Is the extraction model now `openai/gpt-6-luna`?** Uncommitted dev-clone edits swap every default away from the
+  locked `gpt-5.4-mini` and call it "founder-locked 2026-10-14"; published `main` and this scope's `CLAUDE.md` do
+  not. Those edits say the id keys re-extraction and the chat caches (unverified), so the swap may re-price the
+  whole catalogue. Commit it with the rule change, or discard it — topology in `state.md`.
+- **Does the extraction-model lock extend to the search model?** Unstated — the uncommitted swap changes both.
+  Rerank is most of a chat turn's tokens and the only end of the pipe where a different model would matter.
 - **The pricing position of Ask Reel, and the real LLM ceiling.** The spec puts natural-language search behind the
-  paywall; the endpoint has no tier check at all, so Free gets the whole pipeline. Proposed rungs exist as config
-  only. The number needed is the per-account monthly budget — at the measured per-turn cost, a quarter-dollar buys
-  roughly eighty turns.
-- **Does the extraction-model lock extend to the search model?** Unstated. Rerank is most of a chat turn's tokens and
-  is the only end of the pipe where a different model would matter.
-
-## Product calls surfaced by the QA walks
-- **Should a typed negation be airtight like a standing one?** By contract it is soft, so "thrillers, no horror" can
-  still show horror under the honest "outside your request" caption when the clean set is thin.
-- **The All/Movies/TV control keeps reading All after "only shows"**, because the words shape the intent rather than
-  the hard filter. Correct by contract, surprising in use.
+  paywall; the endpoint has no tier check, so Free gets the whole pipeline. The number needed is the per-account
+  monthly budget — at the measured per-turn cost, a quarter-dollar buys roughly eighty turns.
 
 ## Standing product and research calls
-- **Spoiler tolerance for lens copy.** Assumed first-act only with a lexicon post-filter; the bar has never been set.
-- **MovieLens licence request, or drop item-item collaborative filtering.** Retrieval supply is the binding
-  constraint, which makes a public-corpus arm more interesting than it was — but it is a licensing decision.
-- **Does `/rate` stay live ahead of an edge proof?** It was rebuilt around watched-but-unrated titles; whether it
-  belongs in front of a user before the model beats a baseline is a product call.
+- **Should a typed negation be airtight like a standing one?** By contract it is soft. **And should "only shows"
+  move the All/Movies/TV control?** It shapes the intent, not the hard filter — correct by contract, surprising.
+- **Spoiler tolerance for lens copy** — assumed first-act only; the bar has never been set.
+- **MovieLens licence request, or drop item-item CF** — supply is the binding constraint; a licensing call.
+- **Does `/rate` stay live ahead of an edge proof?** Rebuilt around watched-but-unrated titles; a product call.

@@ -1,8 +1,8 @@
 ---
 name: fa-reel-watch
-description: "The chat surface still has NO ceilings — no rate limiter, no tier check, no budget — and the provider-side spend cap is one unclicked founder action. Every in-app reaction re-judges the whole cross-reference pool at LLM cost."
+description: "The chat surface still has NO ceilings — no rate limiter, tier check or budget — and the OpenRouter spend cap is unconfirmed. Every in-app reaction re-judges the whole cross-reference pool at LLM cost. QA-copy databases pile up."
 type: watch
-last_verified: 2026-09-11
+last_verified: 2026-10-14
 ---
 
 # Watch list
@@ -10,24 +10,18 @@ last_verified: 2026-09-11
 ## Unbounded cost — the sharpest item here
 - **The chat surface has no ceilings.** Ask Reel's phase 0 and 1 shipped; **phase 2 did not**: no rate limiter, no
   tier rungs (Free gets the whole pipeline), no chat budget, no kill switch, no narrative fencing, no export or
-  erasure, secrets not rotated. At the measured per-turn cost one account can run up tens of dollars an hour. **The
-  provider-side spend cap at OpenRouter is a single unclicked founder action** and is the cheapest mitigation
-  available. Phases 3 and 4 have not started.
-- **Every in-app reaction re-judges the whole cross-reference pool.** The taste profile hash carries the
-  dislike-centroid version and the loved anchors by design — a lens note must not survive a dismissal — so a dismissal
-  or a high rating changes the key, the cross-reference treats the entire scored pool as unjudged at the new key, and
-  the top lens notes are rewritten. Budget-bounded and honest, but the dominant LLM cost today. **The next call is a
-  coarser key for verdicts** (the neighbours a verdict rests on do not change on a dismissal) or a daily cap on
-  re-judging.
+  erasure, secrets not rotated. At the measured per-turn cost one account can run up tens of dollars an hour (still no
+  rate limiter anywhere in the backend, 2026-10-14). **A provider-side spend cap at OpenRouter is the cheapest
+  mitigation** — recorded unclicked 2026-09-11; whether it is set now cannot be seen from the repo, so ask Dean.
+- **Every in-app reaction re-judges the whole cross-reference pool.** The taste-profile hash carries the dislike
+  centroid and loved anchors by design (a lens note must not survive a dismissal), so each reaction turns the scored
+  pool unjudged and rewrites the top lens notes — budget-bounded, but the dominant LLM cost. **Next call:** a coarser
+  verdict key (a verdict's neighbours do not move on a dismissal) or a daily re-judge cap.
 
 ## Owed work
-- **The cross-reference pool is shortlist-only.** Verdicts need a persisted score, so a pass covers the current
-  shortlist rather than the whole eligible catalogue and coverage grows one build at a time. **Widening it means
-  persisting first-pass scores for the whole retrieved set, and that is the next change.** The second verdict round
-  (survivors re-judged, any demotion, a hero bar — the code calls it PR4) stays gated on the OUT arm clearing its
-  Wilson-upper threshold (`decisions-retrieval.md`).
-- **Do not run another schema bump against the current eval ledger** — at this holdout size it cannot separate a small
-  win from noise. The next modelling move is a bigger or pooled holdout, or a within-account paired design.
+- **The cross-reference pool is shortlist-only** — verdicts need a persisted score, so coverage grows one build at a
+  time. **Next change: persist first-pass scores for the whole retrieved set.** Round 2 (the code's PR4) stays gated
+  on the OUT arm's Wilson-upper threshold (`decisions-retrieval.md`).
 - **`HeroEligibleCount` at the 7.5 floor is still zero on every build**, even after the catalogue seed. Watch for the
   first non-zero; until then the hero floor is being relaxed on every build.
 - **The retrieval-recall and build-latency gates are unpaid.** The recall probe needs a before/after over a week on a
@@ -38,29 +32,29 @@ last_verified: 2026-09-11
 - **Of the follow-ups the QA walks raised, three are still unstarted:** the "done" reason still has two shapes on the
   lexical and filmography paths; the ranking-seed embedding is bought per turn; the conditions summary's "+N more" is
   inert on the feed.
-- **Two layout shifts are left on `/search`, both outside the turn, both wanting a design call first.** Page load still
-  shifts as the conditions strip arrives and pushes the page down; a late `reranked` frame can grow a card by its
-  why-line and move every row under it. Reserving a strip whose height only the response knows, and fixing a uniform
-  two-line why-box on every card, are product calls — which is why neither was taken.
-- **Extraction-era pollution is still draining.** Tone and era on the oldest attribute rows are untrustworthy and
-  gated off by a minimum trusted extractor version; watch the stale-extractor count reach zero before surfacing either
-  field.
-- **`PipelineStage` has no "not enough ratings" value**, so an account below the ratings floor is parked as
-  `Degraded` — a new enum member plus a frontend case.
+- **Two layout shifts are left on `/search`, both outside the turn, both wanting a design call first.** Page load
+  still shifts as the conditions strip arrives and pushes the page down; a late `reranked` frame can grow a card by
+  its why-line and move every row under it. Both fixes are product calls, so neither was taken.
+- **Extraction-era pollution is still draining** — tone and era on the oldest rows stay gated off by a minimum
+  trusted extractor version until the stale-extractor count reaches zero.
+- **`PipelineStage` has no "not enough ratings" value**, so an account below the ratings floor is parked as `Degraded`
+  — a new enum member plus a frontend case.
 
 ## Debris and hygiene
-- **The QA walks' probe conversations are still in the live database.** `GET /api/search/conversations` lists them all and
-  is the only source that needs nothing outside the running system; a partial id list also sits in
-  `~/.claude/plans/ask-reel-panel-2026-09-10/probe/test-conversation-ids.txt`. Delete each through the UI or
-  `DELETE /api/search/conversations/{id}` — never SQL, which leaves the turn record and the usage ledger disagreeing.
-- **`reel_test_w9` is still sitting on port 5433** — the QA-walk copies have been dropped. Drop it too; a throwaway
-  copy with background jobs on spends real provider calls.
-- **Interleaving is off and stays off until it is worth three months** of comparison at this traffic.
+- **The QA walks' probe conversations are still in the live database** (`GET /api/search/conversations` lists them).
+  Delete each through the UI or `DELETE /api/search/conversations/{id}` — never SQL, which leaves the turn record and
+  the usage ledger disagreeing.
+- **Throwaway `reel_test_*` databases have piled up on port 5433** — fixture copies plus the `w*`/`p2*` QA-walk
+  copies, `reel_test_w9` among them (listed 2026-10-14). Drop the QA copies; one with background jobs on spends real
+  provider calls.
 
 ## Standing
-- **The declared quality bar is "Silver", whose definition includes *deployed*.** Reel is not, so the tier
-  reads as a target rather than a met bar — and nothing in the scope says which it is.
-- **Success metrics for the commercial half are instrumented nowhere.** The "≥5 external users" gate has no counter —
-  the criterion that decides this program's fate is measured by hand. `docs/product-spec.md` also cites a brand-assets
-  path that does not exist in this repo.
-- **`AskReelEndpointTests.An_aborted_stream_leaves_a_failed_turn_and_the_prior_block_still_replays` is timing-sensitive in CI.** On 2026-09-16 it failed once in the Postgres integration job on a context-only push (485 of 486 passing) and passed on an immediate rerun of the same commit. One red run of that test is not evidence of a regression; two in a row is. Candidate for the local-flaky quarantine if it recurs — owner: unassigned.
+- **The declared quality bar is "Silver", whose definition includes *deployed*.** Reel is not, so the tier reads as a
+  target rather than a met bar — and nothing in the scope says which it is.
+- **The "≥5 external users" kill gate has no counter** — the criterion that decides this program is measured by hand.
+  `docs/product-spec.md` also cites a brand-assets path that does not exist in this repo.
+- **`AskReelEndpointTests.An_aborted_stream_leaves_a_failed_turn_and_the_prior_block_still_replays` is
+  timing-sensitive in CI** — red once on 2026-09-16, green on rerun and on every `main` run since. Two reds in a row
+  is a regression; candidate for the local-flaky quarantine if it recurs. Owner: unassigned.
+- **The repo's `docs/deployment.md` still describes a weekly "rot check" run** that `ci.yml` no longer has (dropped
+  before the PR #1 merge) — the doc is wrong, not the workflow.

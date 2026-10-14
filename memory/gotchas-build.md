@@ -11,8 +11,8 @@ last_verified: 2026-09-11
   `~/src/fa.reel`; the copy under `FrostAura Global/` is the context-file home. On 2026-09-09 fileproviderd took `git
   status` on the iCloud tree past two minutes, a 40 MB Docker context to 16 minutes, and Vite to 137 s before it hung
   on a file close — the clone starts Vite in under a second. The two clones exchange commits by pulling from each
-  other's local path, so **after committing in one, pull in the other or they drift**, and the non-fetching clone's
-  `origin/main` ref goes stale (see `state.md` — a phantom "ahead" count).
+  other's local path, so **after committing in one, pull in the other or they drift**, and a clone that has not fetched
+  reads 0/0 against a stale `origin/main` — fetch before believing any count.
 - **iCloud can delay another session's file writes by MINUTES.** A subagent looked stalled with its files "missing",
   then the whole batch landed mid-way through the salvage agent's run. On this volume, absence on disk is not evidence
   of absence — wait and re-list before declaring another session's work lost.
