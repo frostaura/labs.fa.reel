@@ -17,8 +17,23 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.ApiDescription.Server" Version="10.0.13">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="Stripe.net" Version="52.0.0" />
   </ItemGroup>
+
+  <!--
+    Build-time OpenAPI document generation (Microsoft.Extensions.ApiDescription.Server). Off for an
+    ordinary build, because generating launches the app's entry point; `npm run gen:api` in
+    src/frontend switches it on with -p:OpenApiGenerateDocuments=true and then derives the TS types.
+  -->
+  <PropertyGroup>
+    <OpenApiGenerateDocuments>false</OpenApiGenerateDocuments>
+    <OpenApiDocumentsDirectory>$(MSBuildProjectDirectory)/../../frontend/openapi</OpenApiDocumentsDirectory>
+    <OpenApiGenerateDocumentsOptions>--file-name reel-api</OpenApiGenerateDocumentsOptions>
+  </PropertyGroup>
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>

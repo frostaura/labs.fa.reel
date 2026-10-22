@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using FrostAura.Reel.Api;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Middleware;
@@ -7,6 +8,7 @@ using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Infrastructure;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 // ── Invariant culture, process-wide, before anything else runs ────────────────────────────────
 // Nothing this service formats is localised: prompts sent to OpenRouter, TMDB and Trakt query
@@ -22,13 +24,32 @@ using Microsoft.EntityFrameworkCore;
 CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
 CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
 
-DotEnv.Load();
+// Build-time OpenAPI generation (Microsoft.Extensions.ApiDescription.Server) runs this entry point
+// under a mock server to read the endpoint table. That run must never load .env, open a database
+// or start a background service: .env on a dev machine points at the live database.
+var generatingOpenApiDocument = Assembly.GetEntryAssembly()?.GetName().Name == "GetDocument.Insider";
+
+if (!generatingOpenApiDocument)
+{
+    DotEnv.Load();
+}
 
 var builder = WebApplication.CreateBuilder(args);
+
+if (generatingOpenApiDocument)
+{
+    // Registration needs a connection string; nothing in a generation run ever opens it.
+    builder.Configuration["ConnectionStrings:Postgres"] = "Host=localhost;Database=openapi_generation";
+}
 
 builder.Services.AddReelInfrastructure(builder.Configuration);
 builder.Services.AddSingleton<SettingsUnlockTokenService>();
 builder.Services.AddOpenApi();
+
+if (generatingOpenApiDocument)
+{
+    builder.Services.RemoveAll<IHostedService>();
+}
 
 var corsOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? "http://localhost:5173")
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -41,7 +62,11 @@ app.UseCors();
 
 app.UseMiddleware<AccountResolutionMiddleware>();
 
-app.MapOpenApi();
+// The document is generated at build time; at runtime it is served only to a developer.
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
 
 app.MapAuthEndpoints();
 app.MapAccountEndpoints();
@@ -85,6 +110,12 @@ app.MapGet("/health/ready", async (ReelDbContext db, CancellationToken ct) =>
         ? Results.Ok(new { status = "ready" })
         : Results.Problem($"{pending} pending migration(s)", statusCode: StatusCodes.Status503ServiceUnavailable);
 });
+
+if (generatingOpenApiDocument)
+{
+    app.Run();
+    return;
+}
 
 // A fatal error before app.Run() must END the process. On 2026-10-14 an unhandled startup
 // exception left the process alive at 100% CPU and never listening, so `restart: always` had
