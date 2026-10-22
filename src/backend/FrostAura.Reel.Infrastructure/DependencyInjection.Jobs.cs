@@ -1,0 +1,29 @@
+using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Infrastructure.Background;
+using FrostAura.Reel.Infrastructure.Persistence;
+using FrostAura.Reel.Infrastructure.Sse;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace FrostAura.Reel.Infrastructure;
+
+public static partial class DependencyInjection
+{
+    /// <summary>Persistence, the tenancy scope, the pipeline event hub and the job runner.</summary>
+    private static IServiceCollection AddReelJobs(this IServiceCollection services, string connectionString)
+    {
+        services.AddScoped<IAccountContext, AccountContext>();
+
+        services.AddDbContext<ReelDbContext>(options =>
+            options.UseNpgsql(connectionString, npgsql => npgsql.UseVector()));
+        services.AddScoped<IReelDbContext>(sp => sp.GetRequiredService<ReelDbContext>());
+
+        // ── Pipeline: event hub and the job runner ─────────────────────────────────────────
+        services.AddSingleton<IPipelineEventHub, PipelineEventHub>();
+        services.AddHostedService<JobRunnerService>();
+
+        return services;
+    }
+}
