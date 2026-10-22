@@ -24,11 +24,11 @@ public class TypeaheadRelevanceTests
         // when predicted rating alone decided the order.
         string[] distractors = ["Superman", "Deception", "Breakdown", "Wallace & Gromit"];
 
-        var intendedScore = SearchEndpoints.TitleSimilarity(intended, typed);
+        var intendedScore = TypeaheadEndpoints.TitleSimilarity(intended, typed);
         foreach (var distractor in distractors)
         {
             Assert.True(
-                intendedScore > SearchEndpoints.TitleSimilarity(distractor, typed),
+                intendedScore > TypeaheadEndpoints.TitleSimilarity(distractor, typed),
                 $"'{typed}' should score '{intended}' above '{distractor}'.");
         }
     }
@@ -37,8 +37,8 @@ public class TypeaheadRelevanceTests
     public void An_exact_term_scores_higher_than_a_transposition()
     {
         Assert.True(
-            SearchEndpoints.TitleSimilarity("Inception", "inception")
-            > SearchEndpoints.TitleSimilarity("Inception", "inceptoin"));
+            TypeaheadEndpoints.TitleSimilarity("Inception", "inception")
+            > TypeaheadEndpoints.TitleSimilarity("Inception", "inceptoin"));
     }
 
     [Fact]
@@ -48,8 +48,8 @@ public class TypeaheadRelevanceTests
         // "spider man" must be indistinguishable — that equivalence is what makes a hyphen-less
         // query find a hyphenated title at all.
         Assert.Equal(
-            SearchEndpoints.TitleSimilarity("Spider-Man", "spiderman"),
-            SearchEndpoints.TitleSimilarity("spider man", "spiderman"),
+            TypeaheadEndpoints.TitleSimilarity("Spider-Man", "spiderman"),
+            TypeaheadEndpoints.TitleSimilarity("spider man", "spiderman"),
             precision: 10);
     }
 
@@ -60,6 +60,6 @@ public class TypeaheadRelevanceTests
     [InlineData("!!!")]
     public void A_degenerate_name_scores_zero_rather_than_throwing(string? name)
     {
-        Assert.Equal(0d, SearchEndpoints.TitleSimilarity(name, "inception"));
+        Assert.Equal(0d, TypeaheadEndpoints.TitleSimilarity(name, "inception"));
     }
 }

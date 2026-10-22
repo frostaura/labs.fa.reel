@@ -26,7 +26,7 @@ public class GlobalTypeaheadLookupTests
             ShowResults = [Item(4, false, "Dielman: The Series", popularity: 30m, voteAverage: 0m)],
         };
 
-        var rows = await SearchEndpoints.GlobalLookupAsync(
+        var rows = await TypeaheadEndpoints.GlobalLookupAsync(
             tmdb, "dielman", new HashSet<(bool, long)> { (true, 2) }, CancellationToken.None);
 
         // Local row 2 deduped away; the rest ordered by popularity desc across both media types.
@@ -53,7 +53,7 @@ public class GlobalTypeaheadLookupTests
                 .ToArray(),
         };
 
-        var rows = await SearchEndpoints.GlobalLookupAsync(
+        var rows = await TypeaheadEndpoints.GlobalLookupAsync(
             tmdb, "movie", new HashSet<(bool, long)>(), CancellationToken.None);
 
         Assert.Equal(6, rows.Count);
@@ -66,7 +66,7 @@ public class GlobalTypeaheadLookupTests
     {
         var tmdb = new FakeSearchTmdbClient { Throw = true };
 
-        var rows = await SearchEndpoints.GlobalLookupAsync(
+        var rows = await TypeaheadEndpoints.GlobalLookupAsync(
             tmdb, "dielman", new HashSet<(bool, long)>(), CancellationToken.None);
 
         Assert.Empty(rows); // the local typeahead survives a TMDB outage

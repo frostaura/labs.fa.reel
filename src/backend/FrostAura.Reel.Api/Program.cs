@@ -44,6 +44,7 @@ app.UseMiddleware<AccountResolutionMiddleware>();
 app.MapOpenApi();
 
 app.MapAuthEndpoints();
+app.MapAccountEndpoints();
 app.MapSettingsEndpoints();
 app.MapSyncEndpoints();
 app.MapFeedEndpoints();
@@ -53,6 +54,7 @@ app.MapReactionEndpoints();
 app.MapPersonEndpoints();
 app.MapSavedEndpoints();
 app.MapSearchEndpoints();
+app.MapTypeaheadEndpoints();
 app.MapTasteEndpoints();
 app.MapNarrativeEndpoints();
 app.MapProviderEndpoints();
@@ -65,6 +67,7 @@ app.MapBlendEndpoints();
 app.MapMetricsEndpoints();
 app.MapAccuracyEndpoints();
 app.MapSseEndpoints();
+app.MapObservabilityEndpoints();
 app.MapDevEndpoints();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
