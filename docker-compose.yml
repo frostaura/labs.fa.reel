@@ -54,7 +54,7 @@ services:
       TMDB_RATE_PER_SEC: ${TMDB_RATE_PER_SEC:-40}
       # OpenRouter (fa.startup naming) — all LLM calls route through this gateway
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-5.4-mini}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-6-luna}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_MAX_CONCURRENCY: ${OPENROUTER_MAX_CONCURRENCY:-4}
       # Embeddings — base URL is load-bearing: OpenRouter serves text-embedding-3-small, so the
@@ -80,7 +80,7 @@ services:
       # Catalogue bulk seed (POST /api/dev/seed-catalog) and the daily ceilings that complete it.
       # The two vote floors decide how big the seeded corpus is: measured 2026-09-10 the defaults
       # yield ~9,300 titles, and 50/50 yields ~34,800. EXTRACT_DAILY_TOKENS is the only one that
-      # costs real money — 1.5M tokens is ~$0.23/day at gpt-5.4-mini input pricing, ~1,360 titles.
+      # costs real money — 1.5M tokens is ~$0.15/day at gpt-6-luna input pricing, ~1,360 titles.
       SEED_MOVIE_MIN_VOTES: ${SEED_MOVIE_MIN_VOTES:-500}
       SEED_SHOW_MIN_VOTES: ${SEED_SHOW_MIN_VOTES:-200}
       SEED_PAGES_PER_RUN: ${SEED_PAGES_PER_RUN:-400}

@@ -16,7 +16,7 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 
 /// <summary>
 /// Extracts taste attributes via OpenRouter chat completions (model from OPENROUTER_MODEL,
-/// founder-locked <c>openai/gpt-5.4-mini</c>). Mirrors fa.startup's OpenRouter conventions.
+/// founder-locked <c>openai/gpt-6-luna</c>). Mirrors fa.startup's OpenRouter conventions.
 ///
 /// Two modes, picked at availability time:
 ///  • <b>live</b> — OPENROUTER_API_KEY present: one structured-JSON request per title.
@@ -99,7 +99,7 @@ public class OpenRouterAttributeExtractor(
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
-        : configuration["OPENROUTER_MODEL"] ?? "openai/gpt-5.4-mini";
+        : configuration["OPENROUTER_MODEL"] ?? "openai/gpt-6-luna";
 
     /// <summary>
     /// The prompt generation stamped on every row this adapter writes. Bump it whenever a change

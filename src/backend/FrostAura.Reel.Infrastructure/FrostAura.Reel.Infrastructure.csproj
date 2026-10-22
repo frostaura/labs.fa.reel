@@ -11,15 +11,16 @@
 
   <ItemGroup>
     <!--
-      The Microsoft 10.0.x set is held at 10.0.10 across every project. 10.0.9 pulled a
-      vulnerable System.Security.Cryptography.Xml transitively (GHSA-8q5v-6pqq-x66h, high),
-      which needed a direct pin to override; 10.0.10 carries the patched transitive itself,
-      so the pin is gone rather than left behind as dead weight.
+      The Microsoft 10.0.x set is held at one patch level across every project, currently 10.0.13.
+      Each bump has been forced by a high-severity advisory on a transitive the set itself pulls
+      (System.Security.Cryptography.Xml at 10.0.9; .Pkcs and .Xml again at 10.0.10), which
+      NU1903 + TreatWarningsAsErrors turns into a failed restore. Moving the whole set to the
+      patched release fixes it without a direct pin, so none is kept as dead weight.
     -->
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.10" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.10" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.13" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.13" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.7.0" />
     <PackageReference Include="Microsoft.ML" Version="5.0.0" />
     <PackageReference Include="Microsoft.ML.FastTree" Version="5.0.0" />

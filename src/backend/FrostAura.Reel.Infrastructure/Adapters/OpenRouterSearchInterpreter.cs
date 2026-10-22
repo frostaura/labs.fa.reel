@@ -17,7 +17,7 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 
 /// <summary>
 /// Turns a natural-language Ask Reel query into a TMDB discovery spec via OpenRouter chat
-/// completions (REEL_SEARCH_MODEL, default <c>openai/gpt-5.4-mini</c>). Mirrors the attribute
+/// completions (REEL_SEARCH_MODEL, default <c>openai/gpt-6-luna</c>). Mirrors the attribute
 /// extractor's transport + stub contract:
 ///  • <b>live</b> — OPENROUTER_API_KEY present: one structured-JSON request.
 ///  • <b>stub</b> — no key / TestHelpers:ModelStubMode: a deterministic heuristic that splits the
@@ -52,7 +52,7 @@ public class OpenRouterSearchInterpreter(
         // Empty env vars are "present but blank" to .NET config, which defeats ?? — treat blank as absent.
         : configuration["REEL_SEARCH_MODEL"] is { Length: > 0 } m ? m
         : configuration["OPENROUTER_MODEL"] is { Length: > 0 } o ? o
-        : "openai/gpt-5.4-mini";
+        : "openai/gpt-6-luna";
 
     public async Task<SearchIntent> InterpretAsync(
         string query, CancellationToken ct = default, string? standingFilters = null)

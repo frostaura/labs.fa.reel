@@ -1,4 +1,4 @@
-using FrostAura.Reel.Application.Configuration;
+﻿using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
@@ -75,9 +75,9 @@ public sealed class CatalogHydrationBudget(IReelDbContext db, IConfiguration? co
 /// </para>
 ///
 /// <para><b>The arithmetic, spelled out, because a ceiling nobody can re-derive gets raised by
-/// accident.</b> Extraction runs on the founder-locked <c>openai/gpt-5.4-mini</c> at mini-tier
-/// input pricing of ~$0.15 per million tokens. <c>EXTRACT_DAILY_TOKENS</c> = 1,500,000 is therefore
-/// ~$0.23/day, ~$7/month — call it $0.25/day. One extraction is ~1,100 tokens (a ~900-token prompt
+/// accident.</b> Extraction runs on the founder-locked <c>openai/gpt-6-luna</c> at input pricing
+/// of ~$0.10 per million tokens. <c>EXTRACT_DAILY_TOKENS</c> = 1,500,000 is therefore
+/// ~$0.15/day, ~$4.50/month. One extraction is ~1,100 tokens (a ~900-token prompt
 /// carrying the overview, genres and keywords, plus a ~200-token structured answer), so the ceiling
 /// buys ~1,360 titles a day and a ~35,000-title seed is fully attributed in ~26 days. Embeddings are
 /// an order of magnitude cheaper: <c>text-embedding-3-small</c> at ~$0.02 per million tokens makes

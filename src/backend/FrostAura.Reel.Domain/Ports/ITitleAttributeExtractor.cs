@@ -2,7 +2,7 @@ namespace FrostAura.Reel.Domain.Ports;
 
 /// <summary>
 /// LLM-derived taste-attribute extraction for one title (OpenRouter, model
-/// <c>openai/gpt-5.4-mini</c> — founder-locked 2026-06-12). Extracted once, cached forever,
+/// <c>openai/gpt-6-luna</c> — founder-locked 2026-10-14, replacing gpt-5.4-mini). Extracted once, cached forever,
 /// shared across every tenant. Availability gates on the API key being configured OR a
 /// deterministic stub being active (tests + keyless dev). One vector space with NL search by
 /// construction is the embedder's job; this port supplies the structured human-legible scalars.

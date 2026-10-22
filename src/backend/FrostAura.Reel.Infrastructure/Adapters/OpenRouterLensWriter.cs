@@ -17,7 +17,7 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 
 /// <summary>
 /// Writes the product's two pieces of second-person prose through OpenRouter (founder-locked
-/// <c>openai/gpt-5.4-mini</c>): the account's taste narrative, and one title seen through it.
+/// <c>openai/gpt-6-luna</c>): the account's taste narrative, and one title seen through it.
 ///
 /// <para>Structurally a sibling of <see cref="OpenRouterAttributeExtractor"/> and follows the same
 /// three rules, for the same reasons. <b>Strict <c>json_schema</c> where the provider supports
@@ -132,7 +132,7 @@ public class OpenRouterLensWriter(
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
-        : configuration["OPENROUTER_MODEL"] is { Length: > 0 } m ? m : "openai/gpt-5.4-mini";
+        : configuration["OPENROUTER_MODEL"] is { Length: > 0 } m ? m : "openai/gpt-6-luna";
 
     public int LensPromptVersion => CurrentLensPromptVersion;
 

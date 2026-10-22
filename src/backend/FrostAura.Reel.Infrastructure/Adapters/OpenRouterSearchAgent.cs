@@ -17,7 +17,7 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 
 /// <summary>
 /// The conversational Ask Reel agent over OpenRouter (REEL_SEARCH_MODEL, default
-/// <c>openai/gpt-5.4-mini</c> — the "small model crunching more data" lever). Two jobs: turn a
+/// <c>openai/gpt-6-luna</c> — the "small model crunching more data" lever). Two jobs: turn a
 /// chat turn into a reply + discovery intent, and judge each candidate's hyper-personal fit for a
 /// live re-rank. Stub mode (no key / TestHelpers:ModelStubMode) is deterministic: it reuses the
 /// query interpreter for intent, returns a canned reply, and derives fit from the predicted rating
@@ -83,7 +83,7 @@ public class OpenRouterSearchAgent(
         // Empty env vars are "present but blank" to .NET config, which defeats ?? — treat blank as absent.
         : configuration["REEL_SEARCH_MODEL"] is { Length: > 0 } m ? m
         : configuration["OPENROUTER_MODEL"] is { Length: > 0 } o ? o
-        : "openai/gpt-5.4-mini";
+        : "openai/gpt-6-luna";
 
     public async Task<AgentReply> InterpretAsync(
         IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,

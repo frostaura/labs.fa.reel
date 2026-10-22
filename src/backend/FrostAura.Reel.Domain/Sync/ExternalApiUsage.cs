@@ -129,7 +129,7 @@ public class ExternalApiUsage
     /// <summary>The account the call was made on behalf of; null for catalogue-wide or unattributed work.</summary>
     public Guid? AccountId { get; set; }
 
-    /// <summary>The model id billed, e.g. <c>openai/gpt-5.4-mini</c>; null for non-LLM providers.</summary>
+    /// <summary>The model id billed, e.g. <c>openai/gpt-6-luna</c>; null for non-LLM providers.</summary>
     public string? Model { get; set; }
 
     /// <summary>One of <see cref="ApiUsagePurpose"/>; null where the call has no LLM purpose.</summary>
