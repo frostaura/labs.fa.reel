@@ -77,16 +77,19 @@ public static class PreMigrationBackup
             return;
         }
 
-        if (options.RequestDirectory is null)
-        {
-            logger.LogWarning("No pre-migration backup is configured ({Key} unset); pending migrations will apply without a dump.", PreMigrationBackupOptions.RequestDirectoryKey);
-            return;
-        }
-
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         var pending = await PendingMigrationsAsync(db, logger, ct);
         if (pending.Count == 0)
         {
+            return;
+        }
+
+        if (options.RequestDirectory is null)
+        {
+            logger.LogWarning(
+                "{Count} pending migration(s) will apply WITHOUT a pre-migration dump: {Key} is unset (no backup service on this host).",
+                pending.Count,
+                PreMigrationBackupOptions.RequestDirectoryKey);
             return;
         }
 

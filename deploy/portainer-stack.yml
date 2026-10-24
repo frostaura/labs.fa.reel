@@ -285,7 +285,8 @@ configs:
         week_ago=$$(date -u -d "@$$(( $$(date -u +%s) - 6 * 86400 ))" +%Y%m%d)
         if [ "$$(date -u +%u)" = "$$WEEKLY_DAY" ] || [ -z "$$newest_weekly" ] \
           || [ "$$(basename "$$newest_weekly" .dump | cut -c6- | tr -d '-')" -lt "$$week_ago" ]; then
-          cp "$$dest" "$$BACKUP_DIR/weekly/reel-$$today.dump"
+          # A hard link costs no space and outlives the daily copy's pruning; cp where links are refused.
+          ln -f "$$dest" "$$BACKUP_DIR/weekly/reel-$$today.dump" 2> /dev/null || cp "$$dest" "$$BACKUP_DIR/weekly/reel-$$today.dump"
           log "kept weekly copy reel-$$today.dump"
         fi
         prune "$$BACKUP_DIR/daily" "$$KEEP_DAILY"
