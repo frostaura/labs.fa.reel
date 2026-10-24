@@ -1507,6 +1507,19 @@ public class BuildFeedJobHandler(
         // long history most of a loved title's 50 nearest neighbours are already seen, and an anchor
         // whose remaining neighbourhood cannot fill a rail honestly is passed over for the next one
         // rather than padded with strangers.
+        // What a kept member was admitted on when its rail was dealt, as stored on the row. A kept
+        // card keeps showing that reason: the facts the gate reads move (a theme re-extraction, a
+        // keyword refresh), and a chip that silently changed or vanished under a card the user is
+        // already looking at would be the gate contradicting itself.
+        var keptEvidence = new Dictionary<(Guid Anchor, Guid Title), IReadOnlyList<SharedEvidence>>();
+        foreach (var item in previousItems.Where(i => i.Row == FeedRowKind.BecauseYouLoved && i.AnchorTitleId != null))
+        {
+            if (AnchorRowGate.Deserialize(item.EvidenceJson) is { Count: > 0 } stored)
+            {
+                keptEvidence[(item.AnchorTitleId!.Value, item.TitleId)] = stored;
+            }
+        }
+
         var anchorExtras = new List<Candidate>();
         var anchorTrace = new List<string>();
         foreach (var anchor in anchorCandidates)
@@ -1520,6 +1533,7 @@ public class BuildFeedJobHandler(
                 .Where(e => e.TitleId == anchor.Id)
                 .Select(e => e.Embedding)
                 .FirstOrDefaultAsync(ct);
+            var pulledNeighbours = 0;
             if (anchorVector is not null)
             {
                 var neighbours = await candidateRetriever.RetrieveSimilarAsync(
@@ -1529,6 +1543,7 @@ public class BuildFeedJobHandler(
                     AnchorNeighbourPull,
                     account.Settings.MaturityCeiling,
                     ct);
+                pulledNeighbours = neighbours.Count;
                 var unscored = neighbours.Where(t => !candidatesById.ContainsKey(t.Id)).ToList();
                 if (unscored.Count > 0)
                 {
@@ -1564,7 +1579,12 @@ public class BuildFeedJobHandler(
                 db, cache, anchor.Id, candidatesById.Keys.Where(id => id != anchor.Id).ToList(), ct);
             foreach (var (titleId, admission) in admissions)
             {
-                if (admission.Admitted || keptMemberIds.Contains(titleId))
+                if (keptMemberIds.Contains(titleId)
+                    && keptEvidence.TryGetValue((anchor.Id, titleId), out var stored))
+                {
+                    railEvidence[(anchor.Id, titleId)] = stored;
+                }
+                else if (admission.Admitted || keptMemberIds.Contains(titleId))
                 {
                     railEvidence[(anchor.Id, titleId)] = admission.Evidence;
                 }
@@ -1624,9 +1644,15 @@ public class BuildFeedJobHandler(
                         [.. railOrder.Skip(taking)]));
             }
 
+            // Stage by stage, so a thin rail says WHICH rule thinned it: the eligible neighbours the
+            // retriever pulled (standing filters and seen titles already applied), how many of those
+            // sit inside the anchor's 50th-neighbour radius, how many of those also share evidence,
+            // how many clear the predicted-rating floor, and how many were dealt.
+            var radiusFloor = await AnchorRowGate.NeighbourFloorAsync(db, cache, anchor.Id, ct);
+            var inRadius = admissions.Count(a => radiusFloor is { } rf && a.Value.Similarity is { } sim && sim >= rf);
             anchorTrace.Add(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{anchor.Name}: {admittedPool.Count} admitted, {admittedPool.Count(x => x.Candidate.Predicted >= effectiveFloor)} at the floor, {members.Count} dealt"));
+                $"{anchor.Name}: radius {radiusFloor:0.000}, {pulledNeighbours} eligible neighbours pulled, {inRadius} inside the radius, {admittedPool.Count} with shared evidence, {admittedPool.Count(x => x.Candidate.Predicted >= effectiveFloor)} at the {effectiveFloor:0.0} floor, {members.Count} dealt"));
             if (members.Count < RowMinMembers)
             {
                 capture.AnchorsPassedOver++;
@@ -1789,6 +1815,8 @@ public class BuildFeedJobHandler(
                 FinalScore = FinalScoreOf(item.Candidate, Freshness, Prior),
                 WhyThisSentence = item.WhyThis,
                 ExplanationJson = ExplanationOf(item.Candidate, PriorOf(item.Candidate.Title)),
+                WhySource = item.WhySource.Name,
+                EvidenceJson = item.AnchorTitleId is null ? null : AnchorRowGate.Serialize(item.WhyContext.AnchorEvidence ?? []),
             });
         }
 
@@ -2229,6 +2257,17 @@ public class BuildFeedJobHandler(
                 }
             }
         }
+
+        // A card whose model pass was attempted and failed shows the templated ANCHORED line —
+        // built from the gate's evidence, so it is checkable — or nothing. Off an anchored row the
+        // templater only has soft contribution copy ("Close in feel to the titles you love"), and
+        // serving it where the model's line should be reads as a reason nobody checked: 28 of 37
+        // rail cards in one live build carried exactly that. The source stays Fallback; the
+        // attempt and its failure are what the log keeps.
+        foreach (var item in planned.Where(i => i.WhySource == ExposureWhySource.Fallback && i.AnchorTitleId is null))
+        {
+            item.WhyThis = string.Empty;
+        }
     }
 
     /// <summary>
@@ -2450,7 +2489,13 @@ public class BuildFeedJobHandler(
                     attempted.WhySource = ExposureWhySource.Fallback;
                 }
 
-                var inputs = batch.Select(p => RerankInputFor(p.Candidate, contexts)).ToList();
+                // On an anchored rail the gate's evidence leads each card's "picked for" list, so
+                // the model's line names the link that was checked rather than inventing one.
+                var inputs = batch.Select(p => RerankInputFor(p.Candidate, contexts) with
+                {
+                    Context = AnchorEvidencePrompt.With(
+                        contexts.GetValueOrDefault(p.Candidate.Title.Id), p.WhyContext.AnchorEvidence, anchorName),
+                }).ToList();
                 var results = await agent.RerankBatchAsync(
                     inputs, FeedPaginator.QueryForRow(rail.Key.Row), persona, anchorName,
                     ApiUsagePurpose.RerankFeed, batchCt);

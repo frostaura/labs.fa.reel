@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using Microsoft.EntityFrameworkCore;
@@ -76,7 +77,77 @@ public static class AnchorRowGate
         "miniseries",
         "tv movie",
         "independent film",
+        "biography",
+        "3d animation",
+        "2d animation",
+        "stop motion",
+        "adult animation",
+        "live action and animation",
     };
+
+    /// <summary>
+    /// Story words so common they link a title to a tenth of the catalogue: carried by more than
+    /// 2.5% of the titles that have any (measured 2026-10-24 on a copy of the founder's catalogue —
+    /// 33,260 keyworded titles, 14,161 completed extractions). "Friendship" sat on 13.8% of
+    /// extracted titles and "identity" on 9.7%, and the latter admitted Doctor Who to a Sherlock
+    /// rail. Shared, they are not a reason anyone would recognise. A fixed list rather than a live
+    /// document-frequency read so the gate stays a pure, testable rule; the counts are stable
+    /// because the theme vocabulary is closed and the keyword head moves slowly.
+    /// </summary>
+    private static readonly HashSet<string> CommonKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "murder", "romance", "friendship", "revenge", "lgbt", "christmas", "new york city",
+    };
+
+    /// <inheritdoc cref="CommonKeywords"/>
+    private static readonly HashSet<string> CommonThemes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "friendship", "survival", "identity", "family", "revenge", "grief", "coming of age", "romance",
+        "redemption", "loyalty", "justice", "teamwork", "ambition", "betrayal", "family bonds", "isolation",
+        "belonging", "deception", "trauma",
+    };
+
+    /// <summary>
+    /// True when a keyword says something about the story that few titles share — not a production
+    /// fact ("woman director", "sequel", any "based on …" source) and not a near-universal one.
+    /// </summary>
+    public static bool IsDistinctiveKeyword(string keyword) =>
+        !MetaKeywords.Contains(keyword)
+        && !CommonKeywords.Contains(keyword)
+        && !keyword.StartsWith("based on ", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when an extracted theme is specific enough to be a reason (see <see cref="CommonThemes"/>).</summary>
+    public static bool IsDistinctiveTheme(string theme) => !CommonThemes.Contains(theme);
+
+    private static readonly JsonSerializerOptions EvidenceJsonOptions = new(JsonSerializerDefaults.Web);
+
+    /// <summary>The evidence as the jsonb array <c>FeedItem.EvidenceJson</c> stores — <c>[{kind, label, role}]</c>.</summary>
+    public static string Serialize(IReadOnlyList<SharedEvidence> evidence) =>
+        JsonSerializer.Serialize(evidence, EvidenceJsonOptions);
+
+    /// <summary>
+    /// Reads <c>FeedItem.EvidenceJson</c> back. Null for a null column (a row written before the
+    /// evidence was stored); an unreadable document reads as no evidence rather than throwing,
+    /// because a serving path must never fail on a stored row.
+    /// </summary>
+    public static IReadOnlyList<SharedEvidence>? Deserialize(string? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<SharedEvidence>>(json, EvidenceJsonOptions)?
+                .Where(e => !string.IsNullOrWhiteSpace(e.Kind) && !string.IsNullOrWhiteSpace(e.Label))
+                .ToList() ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
 
     /// <summary>A candidate's standing against one anchor.</summary>
     /// <param name="Similarity">Plot-embedding cosine to the anchor; null when either side has no embedding.</param>
@@ -219,7 +290,7 @@ public static class AnchorRowGate
                 return chips;
             }
 
-            if (!MetaKeywords.Contains(keyword) && anchor.Keywords.Contains(keyword, StringComparer.OrdinalIgnoreCase)
+            if (IsDistinctiveKeyword(keyword) && anchor.Keywords.Contains(keyword, StringComparer.OrdinalIgnoreCase)
                 && chips.All(c => !string.Equals(c.Label, keyword, StringComparison.OrdinalIgnoreCase)))
             {
                 chips.Add(new SharedEvidence("keyword", keyword));
@@ -233,7 +304,7 @@ public static class AnchorRowGate
                 return chips;
             }
 
-            if (anchor.Themes.Contains(theme, StringComparer.OrdinalIgnoreCase)
+            if (IsDistinctiveTheme(theme) && anchor.Themes.Contains(theme, StringComparer.OrdinalIgnoreCase)
                 && chips.All(c => !string.Equals(c.Label, theme, StringComparison.OrdinalIgnoreCase)))
             {
                 chips.Add(new SharedEvidence("theme", theme));

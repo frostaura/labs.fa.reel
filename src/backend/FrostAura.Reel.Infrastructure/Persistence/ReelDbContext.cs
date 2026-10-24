@@ -393,6 +393,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         {
             e.HasIndex(i => new { i.FeedSnapshotId, i.Row, i.Rank });
             e.Property(i => i.ExplanationJson).HasColumnType("jsonb");
+            e.Property(i => i.WhySource).HasMaxLength(32);
+            e.Property(i => i.EvidenceJson).HasColumnType("jsonb");
         });
 
         modelBuilder.Entity<AccountDigest>(e =>

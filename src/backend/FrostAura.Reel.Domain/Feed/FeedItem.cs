@@ -37,4 +37,22 @@ public class FeedItem : IAccountScoped
 
     /// <summary>Top contributions backing the why-this sentence (jsonb).</summary>
     public string ExplanationJson { get; set; } = "[]";
+
+    /// <summary>
+    /// How <see cref="WhyThisSentence"/> was produced — the exposure log's why-source name
+    /// (<c>Llm</c>, <c>Cache</c>, <c>Templater</c>, <c>Preserved</c>, <c>Fallback</c>, <c>None</c>,
+    /// …), read back through <c>ExposureWhySource.Parse</c>, which maps anything unrecognised to
+    /// Unknown. Null on a row written before provenance was stored: the deploy purge reads that as
+    /// "built under rules this image no longer trusts" and rebuilds the snapshot once.
+    /// </summary>
+    public string? WhySource { get; set; }
+
+    /// <summary>
+    /// On an anchored row: the shared evidence the anchored-row gate admitted this card on, as a
+    /// jsonb array of <c>{kind, label, role}</c> — exactly what the card's chips render. Stored at
+    /// deal time because the facts it was read from move (a theme re-extraction, a keyword refresh)
+    /// and a kept card must keep showing the reason it was admitted for. Null off anchored rows and
+    /// on rows written before it was stored.
+    /// </summary>
+    public string? EvidenceJson { get; set; }
 }

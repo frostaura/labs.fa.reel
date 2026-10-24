@@ -40,9 +40,19 @@ public sealed class NightlyReconcileService(
         // during host start-up — closes the window in which a request could load one.
         await SweepStaleSchemaArtifactsAsync(stoppingToken);
 
-        // Also before the gate, for the same reason: what makes a snapshot untrusted only changes
-        // across a DEPLOY (a guard or a gate that got stricter), so start-up is when to look.
-        await SweepUntrustedSnapshotsAsync(stoppingToken);
+        // Also before the reconcile loop's gate, for the same reason: what makes a snapshot
+        // untrusted only changes across a DEPLOY (a guard or a gate that got stricter), so start-up
+        // is when to look. It has its own switch (UntrustedSnapshotSweep.Enabled), which follows
+        // Background:NightlyReconcile unless set: the purge enqueues PAID builds, and a slot or eval
+        // host started on a copy of an account's data must not spend on it by default.
+        if (UntrustedSnapshotSweep.Enabled(configuration))
+        {
+            await SweepUntrustedSnapshotsAsync(stoppingToken);
+        }
+        else
+        {
+            logger.LogInformation("Untrusted-snapshot purge disabled (Background:TrustPurge / Background:NightlyReconcile).");
+        }
 
         if (!configuration.GetValue("Background:NightlyReconcile", true))
         {
@@ -269,8 +279,10 @@ public sealed class NightlyReconcileService(
             {
                 logger.LogWarning(
                     "Untrusted snapshot for {AccountId}: {Whys} refused why-line(s), {Cards} anchored card(s) with no "
-                    + "shared evidence — forcing one Fresh build.",
-                    finding.AccountId, finding.RefusedWhys, finding.UnexplainedAnchoredCards);
+                    + "stored evidence, {Unattributed} row(s) with no stored why-source, {Fallbacks} fallback caption(s) "
+                    + "— forcing one Fresh build.",
+                    finding.AccountId, finding.RefusedWhys, finding.UnexplainedAnchoredCards,
+                    finding.UnattributedCards, finding.FallbackCaptions);
             }
 
             logger.LogWarning("Untrusted-snapshot purge staged {Staged} Fresh build(s).", staged);

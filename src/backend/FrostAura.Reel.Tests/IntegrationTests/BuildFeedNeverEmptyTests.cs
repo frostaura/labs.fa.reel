@@ -483,10 +483,15 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
         Assert.NotEmpty(items);
         Assert.True(agent.RerankCalls > 0, "the build should have consulted the agent");
-        Assert.All(items, i =>
+        Assert.All(items, i => Assert.DoesNotContain("bounce off", i.WhyThisSentence, StringComparison.OrdinalIgnoreCase));
+
+        // The refused line is a failed model pass: an anchored card falls back to its templated
+        // evidence line, every other card shows no line rather than soft templater copy.
+        Assert.All(items.Where(i => i.AnchorTitleId != null), i => Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence)));
+        Assert.All(items.Where(i => i.AnchorTitleId == null), i =>
         {
-            Assert.DoesNotContain("bounce off", i.WhyThisSentence, StringComparison.OrdinalIgnoreCase);
-            Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence), "every card still carries a why");
+            Assert.Equal("Fallback", i.WhySource);
+            Assert.Equal(string.Empty, i.WhyThisSentence);
         });
     }
 
@@ -667,6 +672,18 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.Contains(exposures, e => e.WhySource == "Fallback");
         Assert.All(exposures, e => Assert.Null(e.LlmFit));
         Assert.All(exposures, e => Assert.NotNull(e.BaseScore)); // the build knows its breakdown
+
+        // A failed pass shows the templated ANCHORED line or nothing — and the snapshot stores which.
+        Assert.All(items, i => Assert.False(string.IsNullOrWhiteSpace(i.WhySource)));
+        Assert.All(items.Where(i => i.AnchorTitleId == null && i.WhySource == "Fallback"), i => Assert.Equal(string.Empty, i.WhyThisSentence));
+        Assert.All(items.Where(i => i.AnchorTitleId != null), i => Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence)));
+
+        // The model was handed each anchored card's checked link, naming the anchor by title.
+        var anchoredInputs = agent.Inputs.Where(x => x.Anchor is not null).ToList();
+        Assert.NotEmpty(anchoredInputs);
+        Assert.All(anchoredInputs, x => Assert.Contains(
+            x.Input.Context!.TopContributions,
+            c => c.Contains(x.Anchor!, StringComparison.Ordinal) && !c.Contains("anchor", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -719,6 +736,14 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         var evidence = await AnchorRowGate.EvidenceAsync(
             db, anchored.Select(i => (i.AnchorTitleId!.Value, i.TitleId)).ToList(), CancellationToken.None);
         Assert.All(anchored, i => Assert.NotEmpty(evidence[(i.AnchorTitleId!.Value, i.TitleId)]));
+
+        // The admitting evidence is STORED on the row — it is what the chips render and what the
+        // deploy purge reads — and equals what the gate found; every row stores its why-source.
+        Assert.All(anchored, i => Assert.Equal(
+            evidence[(i.AnchorTitleId!.Value, i.TitleId)], AnchorRowGate.Deserialize(i.EvidenceJson)));
+        Assert.All(
+            await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync(),
+            i => Assert.NotEqual(WhySourceKind.Unknown, ExposureWhySource.Parse(i.WhySource).Kind));
 
         foreach (var rail in anchored.GroupBy(i => i.AnchorTitleId!.Value))
         {
@@ -832,6 +857,9 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public int RerankCalls;
 
+        /// <summary>Every (anchor name, candidate) pair the build handed the model.</summary>
+        public System.Collections.Concurrent.ConcurrentBag<(string? Anchor, RerankInput Input)> Inputs { get; } = [];
+
         public bool IsAvailable => true;
 
         public string ModelId => "sourced-agent";
@@ -843,6 +871,11 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             Interlocked.Increment(ref RerankCalls);
+            foreach (var title in titles)
+            {
+                Inputs.Add((anchorName, title));
+            }
+
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
                 .Select(t => fitSource == ResultSource.Fallback
                     ? new RerankResult(

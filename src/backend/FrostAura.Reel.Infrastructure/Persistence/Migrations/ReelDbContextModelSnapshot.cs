@@ -906,6 +906,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("AnchorTitleId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("EvidenceJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("ExplanationJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -929,6 +932,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("TitleId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("WhySource")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
                     b.Property<string>("WhyThisSentence")
                         .IsRequired()

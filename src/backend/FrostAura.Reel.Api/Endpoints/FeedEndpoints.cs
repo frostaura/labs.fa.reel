@@ -256,6 +256,9 @@ public static class FeedEndpoints
                                     TitleId = c.Title.Id,
                                     PredictedRating = c.PredictedRating,
                                     WhyThisSentence = backfillWhy,
+                                    EvidenceJson = gate is not null && gate.TryGetValue(c.Title.Id, out var refillAdmission)
+                                        ? AnchorRowGate.Serialize(refillAdmission.Evidence)
+                                        : null,
                                 },
                                 Title = c.Title,
                             });
@@ -283,15 +286,29 @@ public static class FeedEndpoints
             // card shown keeps the sentence. Read-only request — the mutation is never saved.
             ExplanationTemplater.EnforceGenericOnce(items.Select(x => x.Item));
 
-            // The chips on anchored cards: what each one verifiably shares with its anchor. One pass
-            // over the whole page; the build already decided admission, this only reads the facts.
-            var evidence = await AnchorRowGate.EvidenceAsync(
-                db,
-                items
-                    .Where(x => x.Item.Row == FeedRowKind.BecauseYouLoved && x.Item.AnchorTitleId != null)
-                    .Select(x => (x.Item.AnchorTitleId!.Value, x.Title.Id))
-                    .ToList(),
-                ct);
+            // The chips on anchored cards: the evidence each card was admitted on, as the build
+            // stored it on the row — no catalogue reads on the Home path, and a chip cannot drift
+            // away from the reason the card was dealt for. Only a row written before the evidence
+            // was stored (a snapshot the deploy purge has not rebuilt yet) is read live.
+            var storedEvidence = new Dictionary<(Guid, Guid), IReadOnlyList<SharedEvidence>>();
+            var legacyAnchored = new List<(Guid AnchorId, Guid TitleId)>();
+            foreach (var x in items.Where(x => x.Item.Row == FeedRowKind.BecauseYouLoved && x.Item.AnchorTitleId != null))
+            {
+                if (AnchorRowGate.Deserialize(x.Item.EvidenceJson) is { } stored)
+                {
+                    storedEvidence[(x.Item.AnchorTitleId!.Value, x.Title.Id)] = stored;
+                }
+                else
+                {
+                    legacyAnchored.Add((x.Item.AnchorTitleId!.Value, x.Title.Id));
+                }
+            }
+
+            var evidence = legacyAnchored.Count == 0
+                ? storedEvidence
+                : (await AnchorRowGate.EvidenceAsync(db, legacyAnchored, ct))
+                    .Concat(storedEvidence)
+                    .ToDictionary(kv => kv.Key, kv => kv.Value);
 
             var nowUtc = DateTime.UtcNow;
 

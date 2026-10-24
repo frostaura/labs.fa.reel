@@ -5,13 +5,16 @@ using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
 /// <summary>
 /// WS-5 task 3, the deploy-time purge: an Active snapshot carrying a why-line this build refuses,
-/// or an anchored card with nothing shared with its anchor, gets exactly one forced Fresh build; a
-/// clean snapshot gets none; and a build already waiting is re-aimed rather than joined.
+/// an anchored card with no stored evidence, a row with no stored why-source, or a caption on a
+/// failed non-anchored pass gets exactly one forced Fresh build; a clean snapshot gets none, even
+/// when the catalogue moves under it; a build already waiting is re-aimed rather than joined; and
+/// the purge is off on a host whose background services are off.
 /// </summary>
 [Collection("postgres")]
 public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
@@ -27,9 +30,10 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
         var stub = await SeedAsync(heroWhy: "A action pick aligned with your taste.");
         var era = await SeedAsync(heroWhy: "From the 2010s, a decade you rate highly.");
         var article = await SeedAsync(heroWhy: "A adventure for a quiet night.");
-        var unexplained = await SeedAsync(heroWhy: "You rate Tony Gilroy 7.8 on average.", memberShares: false);
-        var clean = await SeedAsync(heroWhy: "You rate Tony Gilroy 7.8 on average.", memberShares: true);
-        var blank = await SeedAsync(heroWhy: string.Empty, memberShares: true); // the generic-once blank
+        var hedged = await SeedAsync(heroWhy: "Sharp legal drama, though the series format is a weaker fit for you.");
+        var unexplained = await SeedAsync(heroWhy: "You rate Tony Gilroy 7.8 on average.", storedEvidence: false);
+        var clean = await SeedAsync(heroWhy: "You rate Tony Gilroy 7.8 on average.");
+        var blank = await SeedAsync(heroWhy: string.Empty); // the generic-once blank
 
         await using var db = fixture.CreateContext(new AccountContext());
         var findings = (await UntrustedSnapshotSweep.FindAsync(db, CancellationToken.None))
@@ -38,6 +42,7 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
         Assert.Equal(1, findings[stub].RefusedWhys);
         Assert.Equal(1, findings[era].RefusedWhys);
         Assert.Equal(1, findings[article].RefusedWhys);
+        Assert.Equal(1, findings[hedged].RefusedWhys);
         Assert.Equal(0, findings[unexplained].RefusedWhys);
         Assert.Equal(1, findings[unexplained].UnexplainedAnchoredCards);
         Assert.False(findings.ContainsKey(clean));
@@ -55,6 +60,91 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
         }
 
         Assert.False(await verify.SyncJobs.AnyAsync(j => j.AccountId == clean));
+    }
+
+    [Fact]
+    public async Task A_snapshot_written_before_provenance_was_stored_is_rebuilt_once()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Every row a pre-deploy image wrote: no why-source, no stored evidence. Its fallback and
+        // stub captions cannot be told from real ones, so the account gets its one Fresh build.
+        var legacy = await SeedAsync(heroWhy: "Close in feel to the titles you love.", whySource: null, storedEvidence: null);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var finding = (await UntrustedSnapshotSweep.FindAsync(db, CancellationToken.None)).Single(f => f.AccountId == legacy);
+        Assert.Equal(2, finding.UnattributedCards);
+        Assert.Equal(1, finding.UnexplainedAnchoredCards);
+    }
+
+    [Fact]
+    public async Task A_non_anchored_caption_on_a_failed_model_pass_is_rebuilt_and_its_honest_blank_is_not()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var captioned = await SeedAsync(heroWhy: "Close in feel to the titles you love.", heroWhySource: "Fallback");
+        var blanked = await SeedAsync(heroWhy: string.Empty, heroWhySource: "Fallback");
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        var findings = (await UntrustedSnapshotSweep.FindAsync(db, CancellationToken.None)).ToDictionary(f => f.AccountId);
+        Assert.Equal(1, findings[captioned].FallbackCaptions);
+        Assert.False(findings.ContainsKey(blanked));
+    }
+
+    [Fact]
+    public async Task Catalogue_drift_under_a_kept_card_never_triggers_another_paid_build()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The card was admitted on a shared director and that evidence is stored on the row. The
+        // catalogue then changes underneath it (a credit re-sync drops the shared director): the
+        // earlier sweep re-read the facts, found nothing shared, and forced a Fresh build on every
+        // restart. Stored evidence does not drift.
+        var accountId = await SeedAsync(heroWhy: "You rate Tony Gilroy 7.8 on average.");
+        await using (var drift = fixture.CreateContext(new AccountContext()))
+        {
+            var memberId = await drift.FeedItems
+                .Where(i => i.AccountId == accountId && i.Row == FeedRowKind.BecauseYouLoved)
+                .Select(i => i.TitleId)
+                .SingleAsync();
+            drift.TitleCredits.RemoveRange(await drift.TitleCredits.Where(c => c.TitleId == memberId).ToListAsync());
+            await drift.SaveChangesAsync();
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.DoesNotContain(await UntrustedSnapshotSweep.FindAsync(db, CancellationToken.None), f => f.AccountId == accountId);
+    }
+
+    [Theory]
+    [InlineData(null, null, true)] // production default: on
+    [InlineData(null, "false", false)] // a slot with background services off: off
+    [InlineData(null, "true", true)]
+    [InlineData("true", "false", true)] // an eval stack that wants the purge measured: explicit on
+    [InlineData("false", "true", false)] // explicit off wins
+    public void The_purge_follows_the_hosts_background_switch_unless_set(string? trustPurge, string? reconcile, bool expected)
+    {
+        var settings = new Dictionary<string, string?>();
+        if (trustPurge is not null)
+        {
+            settings["Background:TrustPurge"] = trustPurge;
+        }
+
+        if (reconcile is not null)
+        {
+            settings["Background:NightlyReconcile"] = reconcile;
+        }
+
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        Assert.Equal(expected, UntrustedSnapshotSweep.Enabled(configuration));
     }
 
     [Fact]
@@ -94,9 +184,15 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
 
     /// <summary>
     /// One account, an Active snapshot with a hero card carrying <paramref name="heroWhy"/> and one
-    /// because-you-loved card whose credits do — or do not — share the anchor's director.
+    /// because-you-loved card admitted on the anchor's director, with what each row stores.
     /// </summary>
-    private async Task<Guid> SeedAsync(string heroWhy, bool memberShares = true)
+    /// <param name="heroWhy">The hero card's persisted line.</param>
+    /// <param name="storedEvidence">True: the anchored card stores the shared director it was admitted on;
+    /// false: it stores none; null: no column value (a pre-deploy row).</param>
+    /// <param name="whySource">The why-source stored on every row; null for a pre-deploy row.</param>
+    /// <param name="heroWhySource">Overrides the hero's stored why-source.</param>
+    private async Task<Guid> SeedAsync(
+        string heroWhy, bool? storedEvidence = true, string? whySource = "Llm", string? heroWhySource = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var account = new Account
@@ -110,8 +206,7 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
         db.Accounts.Add(account);
 
         var director = new Person { Id = Guid.NewGuid(), TmdbId = Random.Shared.NextInt64(1, long.MaxValue), Name = "Shared Director" };
-        var stranger = new Person { Id = Guid.NewGuid(), TmdbId = Random.Shared.NextInt64(1, long.MaxValue), Name = "Somebody Else" };
-        db.Persons.AddRange(director, stranger);
+        db.Persons.Add(director);
 
         Title NewTitle(string name) => new()
         {
@@ -132,7 +227,7 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
         {
             Id = Guid.NewGuid(),
             TitleId = member.Id,
-            PersonId = memberShares ? director.Id : stranger.Id,
+            PersonId = director.Id,
             Role = CreditRole.Director,
         });
 
@@ -155,6 +250,7 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
             TitleId = hero.Id,
             PredictedRating = 7.4m,
             WhyThisSentence = heroWhy,
+            WhySource = heroWhySource ?? whySource,
         });
         db.FeedItems.Add(new FeedItem
         {
@@ -167,6 +263,13 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
             TitleId = member.Id,
             PredictedRating = 7.1m,
             WhyThisSentence = "Same director as anchor: Shared Director.",
+            WhySource = whySource,
+            EvidenceJson = storedEvidence switch
+            {
+                true => AnchorRowGate.Serialize([new SharedEvidence("person", director.Name, "director")]),
+                false => "[]",
+                null => null,
+            },
         });
 
         await db.SaveChangesAsync();

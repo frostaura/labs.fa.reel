@@ -62,6 +62,20 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // Rollback only. NOT NULL cannot be restored over the NULLs this migration's code writes
+            // ("breakdown unknown"), so they go back to the 0 the older image used for the same
+            // meaning — the one place the append-only log is rewritten, and only on the way down.
+            migrationBuilder.Sql(
+                """
+                UPDATE "ExposureEvents"
+                SET "BaseScore" = COALESCE("BaseScore", 0),
+                    "CalibrationDelta" = COALESCE("CalibrationDelta", 0),
+                    "ResidualApplied" = COALESCE("ResidualApplied", 0),
+                    "DemotionApplied" = COALESCE("DemotionApplied", 0)
+                WHERE "BaseScore" IS NULL OR "CalibrationDelta" IS NULL
+                   OR "ResidualApplied" IS NULL OR "DemotionApplied" IS NULL;
+                """);
+
             migrationBuilder.AlterColumn<decimal>(
                 name: "ResidualApplied",
                 table: "ExposureEvents",
