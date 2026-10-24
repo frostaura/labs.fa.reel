@@ -147,13 +147,25 @@ public class UntrustedSnapshotSweepTests(PostgresFixture fixture)
         db.FeedSnapshots.Add(snapshot);
         db.FeedItems.Add(new FeedItem
         {
-            Id = Guid.NewGuid(), AccountId = account.Id, FeedSnapshotId = snapshot.Id, Row = FeedRowKind.Hero,
-            Rank = 0, TitleId = hero.Id, PredictedRating = 7.4m, WhyThisSentence = heroWhy,
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            FeedSnapshotId = snapshot.Id,
+            Row = FeedRowKind.Hero,
+            Rank = 0,
+            TitleId = hero.Id,
+            PredictedRating = 7.4m,
+            WhyThisSentence = heroWhy,
         });
         db.FeedItems.Add(new FeedItem
         {
-            Id = Guid.NewGuid(), AccountId = account.Id, FeedSnapshotId = snapshot.Id, Row = FeedRowKind.BecauseYouLoved,
-            AnchorTitleId = anchor.Id, Rank = 0, TitleId = member.Id, PredictedRating = 7.1m,
+            Id = Guid.NewGuid(),
+            AccountId = account.Id,
+            FeedSnapshotId = snapshot.Id,
+            Row = FeedRowKind.BecauseYouLoved,
+            AnchorTitleId = anchor.Id,
+            Rank = 0,
+            TitleId = member.Id,
+            PredictedRating = 7.1m,
             WhyThisSentence = "Same director as anchor: Shared Director.",
         });
 
