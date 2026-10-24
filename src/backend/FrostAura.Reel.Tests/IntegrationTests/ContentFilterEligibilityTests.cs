@@ -266,10 +266,11 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         var bromanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["bromance"]; });
         var datingHistoryShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["dating history"]; });
         var plainShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["detective"]; });
-        // Labels that read as on-genre but fail the film calibration (GenreStandIns.Patterns): only
-        // 36% of "period drama" films are History and 28% of "19th century" ones, and a "shark" show
-        // is a nature show as often as a horror one. TV must be as strict as films, not stricter.
-        var periodDramaShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["period drama", "19th century"]; });
+        // Labels that read as on-genre but fail the film calibration (GenreStandIns.Patterns): 19% of
+        // "victorian england" films and 18% of "alternate history" ones are History, and a "shark"
+        // show is a nature show as often as a horror one.
+        var periodDramaShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["victorian england", "alternate history"]; });
+        var nineteenthCenturyShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["19th century"]; });
         var sharkShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["shark", "scuba diving"]; });
         var thrillerFilm = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Keywords = ["romance", "slasher"]; });
         var romanceFilm = await SeedTitleAsync(t => t.Genres = ["romance"]);
@@ -278,7 +279,7 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         {
             romanceShow, romanticShow, horrorShow, slasherShow, periodShow, historicalShow, taggedShow,
             bromanceShow, datingHistoryShow, plainShow, thrillerFilm, romanceFilm, loveTriangleShow,
-            periodDramaShow, sharkShow,
+            periodDramaShow, sharkShow, nineteenthCenturyShow,
         };
 
         // No rule configured: every one is eligible, so the arms are inert without a row.

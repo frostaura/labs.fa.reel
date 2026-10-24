@@ -9,7 +9,7 @@ public static partial class GenreStandIns
     /// alone name about 80 TV stand-in phrases. Resolving them per turn through /search/keyword at
     /// TMDB's 40 requests a second costs two seconds on a cold cache — longer than the discovery
     /// arm's whole 1.5 s budget, so a cold turn would fetch nothing. Resolved once (2026-10-24, live
-    /// TMDB, exact case-insensitive name match: 154 of 154 phrases found). A pattern added without an
+    /// TMDB, exact case-insensitive name match: 198 of 198 phrases found). A pattern added without an
     /// id here fails <c>GenreStandInsTests.Every_pattern_has_a_tmdb_keyword_id</c>; the arm still
     /// resolves anything missing at run time.</para>
     /// </summary>
@@ -170,5 +170,49 @@ public static partial class GenreStandIns
             ["romance musical"] = 331653,
             ["cabaret musical"] = 345807,
             ["anime"] = 210024,
+            ["unrequited love"] = 10048,
+            ["heartbreak"] = 34265,
+            ["crush"] = 9986,
+            ["ex-lover"] = 2695,
+            ["online dating"] = 182195,
+            ["older woman younger man relationship"] = 157799,
+            ["older man younger woman relationship"] = 14669,
+            ["boyfriend girlfriend relationship"] = 164698,
+            ["monster"] = 1299,
+            ["sea monster"] = 33696,
+            ["satan"] = 10138,
+            ["period drama"] = 15060,
+            ["period piece"] = 286194,
+            ["19th century"] = 207928,
+            ["18th century"] = 160279,
+            ["17th century"] = 207941,
+            ["16th century"] = 208244,
+            ["15th century"] = 213097,
+            ["14th century"] = 237612,
+            ["20th century"] = 285398,
+            ["medieval"] = 161257,
+            ["middle ages (476-1453)"] = 41406,
+            ["world war i"] = 2504,
+            ["world war ii"] = 1956,
+            ["post world war ii"] = 160224,
+            ["holocaust (shoah)"] = 1739,
+            ["ancient rome"] = 5049,
+            ["roman empire"] = 1405,
+            ["edo period"] = 190446,
+            ["feudal japan"] = 198754,
+            ["american civil war"] = 179585,
+            ["usa history"] = 192279,
+            ["royal family"] = 4833,
+            ["japanese occupation of korea"] = 250212,
+            ["historical event"] = 159289,
+            ["musician"] = 4048,
+            ["singer"] = 10229,
+            ["aspiring singer"] = 10228,
+            ["rapper"] = 4562,
+            ["hip-hop"] = 898,
+            ["composer"] = 1233,
+            ["rock star"] = 2570,
+            ["punk rock"] = 4470,
+            ["idol"] = 287664,
         };
 }

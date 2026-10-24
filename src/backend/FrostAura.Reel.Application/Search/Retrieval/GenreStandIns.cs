@@ -51,24 +51,29 @@ public static partial class GenreStandIns
     /// <para><b>How the TV-gap lists were chosen (2026-10-24, slot copy, 31,546 films / 6,716
     /// shows).</b> Films are the medium where the answer is known — TMDB tags them with the genre — so
     /// each candidate label was scored on films: of the films carrying it, the share TMDB tags with
-    /// the genre. A label stands in when that share is at least 0.6 on at least 15 films AND the
-    /// label names the genre's own subject (a love story; a monster, a haunting, gore; a historical
-    /// era or nation's history; music-making), never an incidental setting, object or production
-    /// trait — "woods", "shark", "basement", "scuba diving" and "low budget" all clear 0.6 on films
-    /// and would wrongly empty TV of nature and diving shows. The genre's own name and adjective are
-    /// whole-word stems ("romance", "romantic", "horror", "thriller", "historical", "music"). A
-    /// "nation history" label qualifies on fewer films (at least 4) because the subject is the genre.
-    /// Labels that fail the bar were dropped even when they read as on-genre — "period drama" (0.36
-    /// of films are History), "19th century" (0.28), "victorian england" (0.19), "musician" (0.54) —
-    /// because applying them to TV would make TV STRICTER than films, not as strict.</para>
+    /// the genre. A label stands in when that share clears the genre's bar on at least 10 films AND
+    /// the label names the genre's own subject (a love story; a monster, a haunting, gore; a historical
+    /// period, era or nation's history; music-making). The bar is three times the genre's share of all
+    /// films, floored at 0.25 and capped at 0.6: romance 0.46, horror 0.46, history 0.25, thriller
+    /// 0.6, music 0.25. A rare genre needs the relative bar — 4.7% of films are History, so even
+    /// "period drama" (0.36) or "19th century" (0.28) multiplies the odds six- to eightfold yet could
+    /// never clear a majority. An exclusion errs toward removing: a missed one shows the user what
+    /// they ruled out, an extra one costs a title they had plenty of alternatives to. Settings,
+    /// objects and production traits never qualify however they score — "woods", "shark", "basement",
+    /// "scuba diving", "low budget" — nor do labels that only sound on-genre ("alternate history",
+    /// 0.18; "victorian england", 0.19). The genre's own name and adjective are whole-word stems
+    /// ("romance", "romantic", "horror", "thriller", "historical", "music"); a "nation history" label
+    /// qualifies on fewer films (at least 4) because its subject is the genre.</para>
     ///
     /// <para><b>What that buys, measured on films (the stand-ins scored against TMDB's own genre
     /// tags).</b> Share of genre-tagged films the stand-ins catch, before → after: romance 0.12 →
-    /// 0.34, horror 0.22 → 0.49, history 0.12 → 0.14, thriller 0.07 → 0.16, music 0.16 → 0.44; with
-    /// precision 0.68, 0.81, 0.57, 0.72, 0.61. Keywords alone cannot make a TV exclusion airtight:
-    /// the measured catch rate is the honest ceiling of this proxy, and 476 shows carry no keyword
-    /// at all although hydrated. TV is tagged with genre-name labels far more often than films
-    /// (742 shows carry "romance" against 295 films), so these film rates understate TV's.</para>
+    /// 0.36, horror 0.22 → 0.51, history 0.12 → 0.37, thriller 0.07 → 0.16, music 0.16 → 0.51; with
+    /// precision 0.65, 0.79, 0.40, 0.72, 0.54 (each several times its genre's base rate). Keywords
+    /// alone cannot make a TV exclusion airtight: the measured catch rate is the honest ceiling of
+    /// this proxy, and 476 shows carry no keyword at all although hydrated. TV is tagged with
+    /// genre-name labels far more often than films (742 shows carry "romance" against 295 films), so
+    /// these film rates understate TV's. Re-derive the lists when the vocabulary moves (P1's
+    /// KeywordVocabulary is the place to automate it).</para>
     ///
     /// <para><b>anime and musical</b> have no genre id on either medium, so nothing can score them:
     /// their lists are the exact labels read off the vocabulary by hand. "based on play or musical"
@@ -89,6 +94,9 @@ public static partial class GenreStandIns
                 new Exact("opposites attract"), new Exact("love affair"), new Exact("romcom"), new Exact("hallmark"),
                 new Exact("valentine's day"), new Exact("marriage proposal"), new Exact("friends in love"),
                 new Exact("pretend relationship"), new Exact("blind date"), new Exact("dating"),
+                new Exact("unrequited love"), new Exact("heartbreak"), new Exact("crush"), new Exact("ex-lover"),
+                new Exact("online dating"), new Exact("older woman younger man relationship"),
+                new Exact("older man younger woman relationship"), new Exact("boyfriend girlfriend relationship"),
             ],
             ["horror"] =
             [
@@ -109,6 +117,7 @@ public static partial class GenreStandIns
                 new Exact("urban legend"), new Exact("lovecraftian"), new Exact("cabin in the woods"),
                 new Exact("axe murder"), new Exact("decapitation"), new Exact("chainsaw"), new Exact("evil child"),
                 new Exact("ancient evil"), new Exact("reanimation"), new Exact("human sacrifice"),
+                new Exact("monster"), new Exact("sea monster"), new Exact("satan"),
             ],
             ["history"] =
             [
@@ -117,7 +126,15 @@ public static partial class GenreStandIns
                 new Exact("british history"), new Exact("american history"), new Exact("russian history"),
                 new Exact("french history"), new Exact("italian history"), new Exact("spanish history"),
                 new Exact("european history"), new Exact("soviet union history"), new Exact("world history"),
-                new Exact("ancient history"),
+                new Exact("ancient history"), new Exact("period drama"), new Exact("period piece"),
+                new Exact("19th century"), new Exact("18th century"), new Exact("17th century"),
+                new Exact("16th century"), new Exact("15th century"), new Exact("14th century"),
+                new Exact("20th century"), new Exact("medieval"), new Exact("middle ages (476-1453)"),
+                new Exact("world war i"), new Exact("world war ii"), new Exact("post world war ii"),
+                new Exact("holocaust (shoah)"), new Exact("ancient rome"), new Exact("roman empire"),
+                new Exact("edo period"), new Exact("feudal japan"), new Exact("american civil war"),
+                new Exact("usa history"), new Exact("royal family"), new Exact("japanese occupation of korea"),
+                new Exact("historical event"),
             ],
             ["thriller"] =
             [
@@ -133,7 +150,9 @@ public static partial class GenreStandIns
                 new Exact("live performance"), new Exact("rock band"), new Exact("boy band"),
                 new Exact("rock 'n' roll"), new Exact("singer-songwriter"), new Exact("recording studio"),
                 new Exact("pop star"), new Exact("pop singer"), new Exact("jazz"), new Exact("heavy metal"),
-                new Exact("opera"), new Exact("record producer"), new Exact("singing"),
+                new Exact("opera"), new Exact("record producer"), new Exact("singing"), new Exact("musician"),
+                new Exact("singer"), new Exact("aspiring singer"), new Exact("rapper"), new Exact("hip-hop"),
+                new Exact("composer"), new Exact("rock star"), new Exact("punk rock"), new Exact("idol"),
             ],
             ["musical"] =
             [

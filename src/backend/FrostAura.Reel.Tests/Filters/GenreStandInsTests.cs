@@ -51,8 +51,9 @@ public class GenreStandInsTests
     [InlineData("horror", "horrors of war", false)]
     [InlineData("history", "history", true)]
     [InlineData("history", "historical drama", true)]
-    [InlineData("history", "period drama", false)]          // 36% of such films are History: calibration drops it
-    [InlineData("history", "19th century", false)]          // 28%
+    [InlineData("history", "period drama", true)]           // 0.36 of such films are History: 8x the base rate
+    [InlineData("history", "19th century", true)]           // 0.28: 6x
+    [InlineData("history", "victorian england", false)]     // 0.19: under the 0.25 floor
     [InlineData("history", "british history", true)]
     [InlineData("romance", "love triangle", true)]
     [InlineData("romance", "forbidden love", true)]
@@ -60,7 +61,7 @@ public class GenreStandInsTests
     [InlineData("romance", "unrequited", false)]
     [InlineData("music", "rock music", true)]
     [InlineData("music", "music competition", true)]
-    [InlineData("music", "musician", false)]                // 54%: below the bar
+    [InlineData("music", "musician", true)]                 // 0.54 against a 0.03 base rate
     [InlineData("music", "musical", false)]                 // a different genre, not a word match
     [InlineData("music", "soap opera", false)]              // "opera" is an exact label only
     [InlineData("horror", "shark", false)]                  // a setting, not the genre's subject
