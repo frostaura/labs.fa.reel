@@ -139,11 +139,11 @@ public sealed record TmdbDiscoveryResult(
 /// is <see cref="TmdbDiscoveryVerdict.Eligible"/>.</para>
 ///
 /// <para>Measured by <c>TmdbDiscoveryShareProbe</c> (the 30 lane-C probes, the founder's slot data,
-/// live TMDB, 2026-10-24): the v1 replica pulled 1,090 titles of which 234 (21.5%) were eligible;
-/// this arm pulls 1,233, of which 527 (42.7%) are eligible catalogue titles and 115 more are
-/// provisional new ones — short of the 50% gate. 537 of the pulled titles are ones he has already
+/// live TMDB, 2026-10-24): the v1 replica pulled 1,090 titles of which 222 (20.4%) were eligible;
+/// this arm pulls 1,216, of which 514 (42.3%) are eligible catalogue titles and 113 more are
+/// provisional new ones — short of the 50% gate. 535 of the pulled titles are ones he has already
 /// seen or rated, which no TMDB parameter can express, so the share cannot pass 56% for him
-/// whatever is sent. Cold-cache p95 under the 1.5 s deadline: 1.1 s, no probe timed out.</para>
+/// whatever is sent. Cold-cache p95 under the 1.5 s deadline: 1.0 s, no probe timed out.</para>
 /// </summary>
 public sealed class TmdbDiscoveryArm(
     ITmdbClient tmdb, IReelDbContext db, EligibilityQueryBuilder eligibility, IMemoryCache cache)
@@ -153,10 +153,11 @@ public sealed class TmdbDiscoveryArm(
     /// watcher has left), because a hard high cutoff would silently hide new releases (NEW-2). The
     /// low-vote titles it admits are kept honest elsewhere — the crowd floor still applies, the badge
     /// and ranking read the vote-shrunk <see cref="CrowdRating"/>, and supply counts use
-    /// <see cref="CrowdVotes.MinRelaxVotes"/>. Measured on the 30 probes (<c>TmdbDiscoveryShareProbe</c>,
-    /// 2026-10-24): a floor of 50 raises the eligible SHARE from 42.7% to 46.8% only by fetching fewer
-    /// new titles — eligible titles fall from 527 to 519 and new usable ones from 115 to 1 — and 200
-    /// cuts eligible titles to 369. The share is the gate; the titles are the supply.
+    /// <see cref="CrowdVotes.MinRelaxVotes"/>. Measured on the 30 probes (<c>TmdbDiscoveryShareProbe</c>
+    /// sweep, 2026-10-24, before the last stand-in revision): a floor of 50 raises the eligible SHARE
+    /// from 42.7% to 46.8% only by fetching fewer new titles — eligible titles fall from 527 to 519
+    /// and new usable ones from 115 to 1 — and 200 cuts eligible titles to 369. The share is the gate;
+    /// the titles are the supply.
     /// </summary>
     public const int DefaultMinVoteCount = 10;
 
