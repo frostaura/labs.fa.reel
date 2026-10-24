@@ -24,7 +24,9 @@ public sealed class BuildTasteNarrativeJobHandler(
     IReelDbContext db,
     FeatureVectorBuilder featureBuilder,
     TasteNarrativeService narratives,
-    ILogger<BuildTasteNarrativeJobHandler> logger) : IJobHandler
+    ILogger<BuildTasteNarrativeJobHandler> logger,
+    // Optional so a hand-built handler (a test) needs no breaker; DI always supplies it.
+    Llm.IProviderHealth? health = null) : IJobHandler
 {
     /// <summary>Set on the job's cursor by the regenerate action, which spends even when up to date.</summary>
     public const string ForceCursor = """{"Force":true}""";
@@ -34,6 +36,14 @@ public sealed class BuildTasteNarrativeJobHandler(
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildTasteNarrative requires an account.");
+        if (health?.OpenBreakerFor(Domain.Sync.ApiProvider.OpenRouter, Domain.Sync.ApiUsagePurpose.TasteNarrative) is { } open)
+        {
+            // Paused, not failed — see PersonaliseTitlesJobHandler.
+            job.ProgressMessage = $"taste profile paused ({open.ReasonCode})";
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
         var force = job.CursorJson is { Length: > 0 } cursor
             && cursor.Contains("\"Force\":true", StringComparison.OrdinalIgnoreCase);
 

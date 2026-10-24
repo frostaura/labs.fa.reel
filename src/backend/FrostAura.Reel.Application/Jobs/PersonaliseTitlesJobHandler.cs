@@ -30,7 +30,9 @@ public sealed class PersonaliseTitlesJobHandler(
     FeatureVectorBuilder featureBuilder,
     TasteFactsBuilder facts,
     LensService lens,
-    ILogger<PersonaliseTitlesJobHandler> logger) : IJobHandler
+    ILogger<PersonaliseTitlesJobHandler> logger,
+    // Optional so a hand-built handler (a test) needs no breaker; DI always supplies it.
+    Llm.IProviderHealth? health = null) : IJobHandler
 {
     /// <summary>
     /// The hard cap per run: hero (5) + rank 0–2 of each rail (up to 9) + the digest's top pick.
@@ -53,6 +55,15 @@ public sealed class PersonaliseTitlesJobHandler(
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
         var accountId = job.AccountId ?? throw new InvalidOperationException("PersonaliseTitles requires an account.");
+        if (health?.OpenBreakerFor(Domain.Sync.ApiProvider.OpenRouter, Domain.Sync.ApiUsagePurpose.Lens) is { } open)
+        {
+            // Paused, not failed: the provider breaker is open, every call would be refused before
+            // it was sent, and a run that "wrote" nothing must not read as one that tried.
+            job.ProgressMessage = $"lens paused ({open.ReasonCode})";
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
         var includeSaved = job.CursorJson is { Length: > 0 } cursor
             && cursor.Contains("\"Saved\":true", StringComparison.OrdinalIgnoreCase);
 

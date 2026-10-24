@@ -488,7 +488,7 @@ public class OpenRouterSearchInterpreter(
         return sb.Append("Request: ").Append(query).ToString();
     }
 
-    private const string SystemPrompt =
+    internal const string SystemPrompt =
         "You convert a movie/TV search request into a JSON discovery spec. Return ONLY a JSON object with keys: " +
         "genres (array of slugs from EXACTLY this set: action, adventure, animation, comedy, crime, documentary, " +
         "drama, family, fantasy, history, horror, music, mystery, romance, science-fiction, thriller, war, western), " +

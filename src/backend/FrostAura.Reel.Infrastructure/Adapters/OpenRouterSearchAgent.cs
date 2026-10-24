@@ -506,7 +506,7 @@ public class OpenRouterSearchAgent(
         "Standing filters (the account's own rules; the answer space is limited to titles that pass them): "
         + filters + '\n';
 
-    private static string BuildInterpretPrompt(
+    internal static string BuildInterpretPrompt(
         IReadOnlyList<ChatTurn> history, string message, string taste, IReadOnlyList<string> shown,
         string? standingFilters = null)
     {
@@ -678,7 +678,7 @@ public class OpenRouterSearchAgent(
     /// is simply always absent: "80s sci-fi movies" returned 2026/1996/2012/1993 titles for
     /// exactly that reason, since only minYear was requested and the upper bound never existed.
     /// </summary>
-    private const string InterpretSystemPrompt =
+    internal const string InterpretSystemPrompt =
         "You are Reel, a sharp, warm film & TV recommendation companion. Reply conversationally in ONE short sentence, " +
         "then resolve the request into a discovery spec. Return ONLY a JSON object: reply (string), genres (array of " +
         "slugs from EXACTLY: action, adventure, animation, comedy, crime, documentary, drama, family, fantasy, history, " +
@@ -708,7 +708,7 @@ public class OpenRouterSearchAgent(
         "instead of promising the excluded thing. Never put an excluded genre or term in genres/keywords. " +
         "Use the conversation + shown list to resolve references. Output strictly valid JSON.";
 
-    private const string RerankSystemPrompt =
+    internal const string RerankSystemPrompt =
         "You are Reel's taste engine, speaking directly to the viewer whose taste and request are given. For each " +
         "title, judge how well it fits YOU — that viewer — factoring your taste, the request's mood/soft-constraints " +
         "(e.g. \"nothing too gory\", \"feel-good\"), and the title itself. Return ONLY a JSON object " +
@@ -733,7 +733,7 @@ public class OpenRouterSearchAgent(
     /// The request-judging purposes' system prompt: the feed's prompt, UNTOUCHED, followed by the
     /// request check. Appended rather than edited in, so the feed's prompt stays byte-identical.
     /// </summary>
-    private const string AskRerankSystemPrompt = RerankSystemPrompt + " " +
+    internal const string AskRerankSystemPrompt = RerankSystemPrompt + " " +
         "ALSO, for every title, include \"satisfies\": \"yes\", \"partial\" or \"no\" — whether the title IS " +
         "what the request asks for, judged only from what is given about the title (its genres, overview, themes, " +
         "tone and people), and SEPARATELY from whether you would like it. \"yes\": it plainly is the thing asked " +

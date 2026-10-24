@@ -609,7 +609,7 @@ public class OpenRouterLensWriter(
 
     // ── Prompts ────────────────────────────────────────────────────────────────────────────
 
-    private static readonly string NarrativeSystemPrompt =
+    internal static readonly string NarrativeSystemPrompt =
         "You write a short, precise description of ONE person's film and television taste, addressed "
         + "directly to them as \"you\".\n"
         + "Return ONLY {\"sentences\": [...]} with between " + MinSentences + " and " + MaxSentences

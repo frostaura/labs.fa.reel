@@ -34,6 +34,32 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class LensPipelineTests(PostgresFixture fixture)
 {
+    [Fact]
+    public async Task Behind_an_open_provider_breaker_the_lens_and_narrative_jobs_pause_without_spending()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // WS-1 task 2/6: "LLM job kinds paused". The breaker is the provider's (a 402); both jobs
+        // stop before reading anything, say why, and finish rather than fail — the status API
+        // already carries the breaker, and a red job per build would be the same news twice.
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService();
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        await using var db = fixture.CreateContext(new AccountContext());
+        var lens = new PersonaliseTitlesJobHandler(db, null!, null!, null!, NullLogger<PersonaliseTitlesJobHandler>.Instance, health);
+        var narrative = new BuildTasteNarrativeJobHandler(db, null!, null!, NullLogger<BuildTasteNarrativeJobHandler>.Instance, health);
+        var lensJob = new SyncJob { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Kind = JobKind.PersonaliseTitles };
+        var narrativeJob = new SyncJob { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Kind = JobKind.BuildTasteNarrative };
+
+        await lens.ExecuteAsync(lensJob, CancellationToken.None);
+        await narrative.ExecuteAsync(narrativeJob, CancellationToken.None);
+
+        Assert.Equal("lens paused (payment_required)", lensJob.ProgressMessage);
+        Assert.Equal("taste profile paused (payment_required)", narrativeJob.ProgressMessage);
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>Stub mode on, and no key — the same configuration a keyless install runs.</summary>
