@@ -70,12 +70,18 @@ public sealed record CrossReferenceEntry(
 /// limit. Distinct from an empty <paramref name="Entries"/> on a successful call, which is a real
 /// (and loud) answer: the judge said nothing about anything.
 /// </param>
+/// <param name="Failure">
+/// Why an unsuccessful batch produced nothing — <see cref="AgentFailureKind.Truncated"/> above all,
+/// which is deterministic for a model and prompt and is what the cross-run breaker counts. Null on
+/// success, and null where an older double does not say.
+/// </param>
 public sealed record CrossReferenceBatchResult(
     IReadOnlyList<CrossReferenceEntry> Entries,
     bool Succeeded,
     long? PromptTokens,
     long? CompletionTokens,
-    int RejectedEntries);
+    int RejectedEntries,
+    AgentFailureKind? Failure = null);
 
 /// <summary>
 /// Everything about a batch that is a property of the PROMPT GENERATION rather than of the
@@ -127,6 +133,14 @@ public interface ICrossReferenceJudge
     bool IsAvailable { get; }
 
     string ModelId { get; }
+
+    /// <summary>
+    /// What a run is judged ON for the cross-run breaker — the model and the reasoning effort it is
+    /// sent at. Two runs that failed on the same key failed for the same reason; a changed model or
+    /// effort is a new instrument and starts the count again. Defaults to the model id so every
+    /// test double keeps compiling.
+    /// </summary>
+    string RunKey => ModelId;
 
     /// <summary>
     /// The prompt generation, and part of the verdict key. Bump when a change alters what a stored

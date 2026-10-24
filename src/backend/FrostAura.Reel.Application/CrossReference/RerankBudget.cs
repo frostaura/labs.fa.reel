@@ -9,27 +9,85 @@ namespace FrostAura.Reel.Application.CrossReference;
 /// <summary>
 /// What the re-rank family had left, and whether a given member may spend.
 ///
-/// <para><see cref="HasHeadroom"/> is the interactive answer — Ask Reel and the paginator get the
-/// whole ceiling. <see cref="HasBackgroundHeadroom"/> is the background answer and stops earlier,
-/// so a feed build cannot spend the day's allowance before the founder has typed anything.</para>
+/// <para><see cref="HasHeadroom"/> is the interactive answer — the paginator gets the whole ceiling.
+/// <see cref="HasBackgroundHeadroom"/> is the background answer and stops earlier, so a feed build
+/// cannot spend the day's allowance before the founder has typed anything.
+/// <see cref="HasAskHeadroom"/> is Ask Reel v1's answer and stops at
+/// <see cref="RerankBudget.AskShare"/>, so a conversation cannot spend the curation reserve.</para>
+///
+/// <para><paramref name="AskCallsUsed"/> / <paramref name="AskTokensUsed"/> are the Ask members'
+/// part (<c>rerank-ask</c>, <c>rerank-expand</c>) of <paramref name="CallsUsed"/> /
+/// <paramref name="TokensUsed"/>, which stay the WHOLE family's totals.</para>
 /// </summary>
-public sealed record RerankAllowance(long CallsUsed, long CallsLimit, long TokensUsed, long TokensLimit)
+public sealed record RerankAllowance(
+    long CallsUsed, long CallsLimit, long TokensUsed, long TokensLimit, long AskCallsUsed = 0, long AskTokensUsed = 0)
 {
     public bool HasHeadroom => CallsUsed < CallsLimit && TokensUsed < TokensLimit;
 
     /// <summary>
-    /// Whether a BACKGROUND member of the family (<c>rerank-feed</c>) may spend. It stops at
-    /// <see cref="BackgroundFraction"/> of both ceilings — the reserve is not for the feed, it is
-    /// for whoever is still awake at eleven.
+    /// Whether a BACKGROUND member of the family (<c>rerank-feed</c>) may spend: the curation
+    /// members' own spend stays under <see cref="RerankBudget.BackgroundFraction"/> of what Ask has
+    /// left of the ceiling. With no Ask spend that is exactly the old 70% stop; with Ask at its full
+    /// share the feed still has 70% of the 40% reserve, and the paginator keeps the rest.
     /// </summary>
     public bool HasBackgroundHeadroom =>
-        CallsUsed < (long)(CallsLimit * RerankBudget.BackgroundFraction)
-        && TokensUsed < (long)(TokensLimit * RerankBudget.BackgroundFraction);
+        HasHeadroom
+        && CallsUsed - AskCallsUsed < (long)((CallsLimit - AskCallsUsed) * RerankBudget.BackgroundFraction)
+        && TokensUsed - AskTokensUsed < (long)((TokensLimit - AskTokensUsed) * RerankBudget.BackgroundFraction);
+
+    /// <summary>
+    /// Whether an ASK member (<c>rerank-ask</c>, <c>rerank-expand</c>) may spend: the Ask members'
+    /// own spend stays under <see cref="RerankBudget.AskShare"/> of both ceilings, which is what keeps
+    /// at least 40% of the family for page and feed curation however long the conversation runs.
+    /// </summary>
+    public bool HasAskHeadroom =>
+        HasHeadroom
+        && AskCallsUsed < (long)(CallsLimit * RerankBudget.AskShare)
+        && AskTokensUsed < (long)(TokensLimit * RerankBudget.AskShare);
 
     public long CallsRemaining => Math.Max(0, CallsLimit - CallsUsed);
 
+    /// <summary>
+    /// Whether one more call for <paramref name="purpose"/>, spending up to
+    /// <paramref name="tokens"/>, fits — the reservation form of the three predicates above, used
+    /// BEFORE a call is sent so nothing overshoots. A call admitted here can never take any of the
+    /// three totals past its ceiling.
+    /// </summary>
+    public bool Admits(string purpose, long tokens)
+    {
+        var after = this with
+        {
+            CallsUsed = CallsUsed + 1,
+            TokensUsed = TokensUsed + tokens,
+            AskCallsUsed = RerankBudget.IsAskMember(purpose) ? AskCallsUsed + 1 : AskCallsUsed,
+            AskTokensUsed = RerankBudget.IsAskMember(purpose) ? AskTokensUsed + tokens : AskTokensUsed,
+        };
+
+        // "After the call, still within" — the <= forms of the predicates.
+        if (after.CallsUsed > CallsLimit || after.TokensUsed > TokensLimit)
+        {
+            return false;
+        }
+
+        if (RerankBudget.IsAskMember(purpose))
+        {
+            return after.AskCallsUsed <= (long)(CallsLimit * RerankBudget.AskShare)
+                && after.AskTokensUsed <= (long)(TokensLimit * RerankBudget.AskShare);
+        }
+
+        if (purpose == ApiUsagePurpose.RerankFeed)
+        {
+            return after.CallsUsed - after.AskCallsUsed <= (long)((CallsLimit - AskCallsUsed) * RerankBudget.BackgroundFraction)
+                && after.TokensUsed - after.AskTokensUsed <= (long)((TokensLimit - AskTokensUsed) * RerankBudget.BackgroundFraction);
+        }
+
+        return true;
+    }
+
     public string Describe() =>
-        $"{CallsUsed}/{CallsLimit} calls, {TokensUsed}/{TokensLimit} tokens";
+        AskCallsUsed > 0
+            ? $"{CallsUsed}/{CallsLimit} calls ({AskCallsUsed} Ask), {TokensUsed}/{TokensLimit} tokens"
+            : $"{CallsUsed}/{CallsLimit} calls, {TokensUsed}/{TokensLimit} tokens";
 }
 
 /// <summary>
@@ -74,6 +132,17 @@ public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration
     /// </summary>
     public const double BackgroundFraction = 0.70d;
 
+    /// <summary>
+    /// The most of both ceilings Ask Reel v1's members (<c>rerank-ask</c>, <c>rerank-expand</c>)
+    /// may spend: 60%, so page and feed curation always keep at least 40% of the family. Ask v2
+    /// bills its own purposes (<c>AskBudget</c>) and never reaches this share at all.
+    /// </summary>
+    public const double AskShare = 0.60d;
+
+    /// <summary>True for the family members that are a person mid-conversation.</summary>
+    public static bool IsAskMember(string purpose) =>
+        purpose is ApiUsagePurpose.RerankAsk or ApiUsagePurpose.RerankExpand;
+
     public const string CallsSetting = "LLM_RERANK_DAILY_CALLS";
 
     public const string TokensSetting = "LLM_RERANK_DAILY_TOKENS";
@@ -88,6 +157,21 @@ public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration
         var today = DateTime.UtcNow.Date;
         var family = ApiUsagePurpose.RerankFamily;
 
+        long calls = 0, tokens = 0, askCalls = 0, askTokens = 0;
+
+        // Summed across every member, legacy included: the recorder's un-flushed counters are keyed
+        // per purpose, so a family gate has to ask for each of them. Read BEFORE the ledger: a
+        // flush landing between the two reads then counts its rows twice (conservative) rather
+        // than not at all.
+        if (pending is not null)
+        {
+            foreach (var purpose in family)
+            {
+                var (c, t) = pending.PendingToday(ApiProvider.OpenRouter, accountId, purpose);
+                Add(purpose, c, t);
+            }
+        }
+
         // AccountId is a dimension on the ledger rather than ownership of it, so the predicate is
         // written out here — the same reason LensBudget writes its own.
         var rows = await db.ExternalApiUsages
@@ -96,27 +180,25 @@ public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration
                 && u.Purpose != null
                 && family.Contains(u.Purpose)
                 && u.Day == today)
-            .Select(u => new { u.CallCount, u.TokensUsed })
+            .Select(u => new { u.Purpose, u.CallCount, u.TokensUsed })
             .ToListAsync(ct);
 
-        var calls = rows.Sum(r => r.CallCount);
-        var tokens = rows.Sum(r => r.TokensUsed ?? 0);
-
-        // Summed across every member, legacy included: the recorder's un-flushed counters are keyed
-        // per purpose, so a family gate has to ask for each of them.
-        long pendingCalls = 0;
-        long pendingTokens = 0;
-        if (pending is not null)
+        foreach (var r in rows)
         {
-            foreach (var purpose in family)
-            {
-                var (c, t) = pending.PendingToday(ApiProvider.OpenRouter, accountId, purpose);
-                pendingCalls += c;
-                pendingTokens += t;
-            }
+            Add(r.Purpose!, r.CallCount, r.TokensUsed ?? 0);
         }
 
-        return new RerankAllowance(
-            calls + pendingCalls, DailyCalls, tokens + pendingTokens, DailyTokens);
+        return new RerankAllowance(calls, DailyCalls, tokens, DailyTokens, askCalls, askTokens);
+
+        void Add(string purpose, long c, long t)
+        {
+            calls += c;
+            tokens += t;
+            if (IsAskMember(purpose))
+            {
+                askCalls += c;
+                askTokens += t;
+            }
+        }
     }
 }

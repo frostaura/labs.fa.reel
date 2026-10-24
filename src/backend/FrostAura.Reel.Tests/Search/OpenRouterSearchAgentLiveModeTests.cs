@@ -73,7 +73,7 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
-    public async Task A_third_person_why_is_replaced_with_the_stub_sentence_keeping_the_fit()
+    public async Task A_third_person_why_is_dropped_keeping_the_model_fit()
     {
         // Two leaking sentences ("their", "the user's") and one clean second-person line.
         var payload = $$"""
@@ -87,12 +87,19 @@ public class OpenRouterSearchAgentLiveModeTests
 
         var results = await agent.RerankBatchAsync(Titles(), "something tense", "likes thrillers");
 
-        // The model's fit survives; only the leaking sentence is swapped for the stub's line.
+        // The model's fit survives; the leaking sentence is DROPPED, and nothing is invented in its
+        // place — the consumer shows its own deterministic line, labelled as what it is.
         Assert.Equal(0.91d, results[0].Fit, 3);
-        Assert.Equal("A thriller pick aligned with your taste.", results[0].Why);
+        Assert.Equal(ResultSource.Llm, results[0].FitSource);
+        Assert.Equal(string.Empty, results[0].Why);
+        Assert.Equal(ResultSource.Fallback, results[0].WhySource);
+        Assert.Null(results[0].ModelWhy);
+        Assert.Equal(0.91d, results[0].ModelFit);
         Assert.Equal(0.42d, results[1].Fit, 3);
-        Assert.Equal("A drama pick aligned with your taste.", results[1].Why);
+        Assert.Equal(string.Empty, results[1].Why);
         Assert.Equal("A tense pick that fits your taste", results[2].Why);
+        Assert.Equal(ResultSource.Llm, results[2].WhySource);
+        Assert.DoesNotContain(results, r => r.Why.Contains("aligned with your taste", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -134,7 +141,7 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
-    public async Task A_because_you_loved_opener_is_replaced_with_the_stub_sentence_keeping_the_fit()
+    public async Task A_because_you_loved_opener_is_dropped_keeping_the_model_fit()
     {
         // The exact vague template the founder rejected — the model must not smuggle it back in.
         var payload = $$"""
@@ -148,7 +155,8 @@ public class OpenRouterSearchAgentLiveModeTests
         var results = await agent.RerankBatchAsync(Titles(), "q", "taste", anchorName: "Hokum");
 
         Assert.Equal(0.91d, results[0].Fit, 3); // fit survives; only the sentence is discarded
-        Assert.Equal("A thriller pick aligned with your taste.", results[0].Why);
+        Assert.Equal(string.Empty, results[0].Why);
+        Assert.Equal(ResultSource.Fallback, results[0].WhySource);
         Assert.Equal("Shares Hokum's slow-burn small-town dread", results[2].Why);
     }
 
@@ -405,13 +413,14 @@ public class OpenRouterSearchAgentLiveModeTests
         // answers 400 naming response_format; the adapter retires strict mode for the PROCESS and
         // re-sends as json_object. Per-INSTANCE would be useless — the adapter rides a transient
         // typed HttpClient and is rebuilt every scope, so it would re-pay the rejected request on
-        // literally every call.
+        // literally every call. The memory is the DI-singleton capability table, keyed by MODEL.
         var handler = new CannedHandler(
             new CannedResponse(HttpStatusCode.BadRequest, """{"error":{"message":"response_format json_schema is not supported"}}"""),
             Ok($$"""{"results":[{"titleId":"{{TitleA}}","fit":0.42,"why":"still answered"}]}"""));
         var recorder = Recorder();
+        var capabilities = new FrostAura.Reel.Infrastructure.Llm.ModelCapabilities();
 
-        var results = await Agent(handler, recorder).RerankBatchAsync(
+        var results = await Agent(handler, recorder, capabilities).RerankBatchAsync(
             Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
 
         Assert.Equal(2, handler.Bodies.Count);
@@ -424,15 +433,22 @@ public class OpenRouterSearchAgentLiveModeTests
         // while the ledger is written by the caller: a record moved inside ChatAsync would bill the
         // downgrade twice, and a record keyed off the wrong variable would bill it to the wrong
         // surface. Both buckets are asserted, because one absorbing the other is the failure that
-        // leaves every per-surface cost figure wrong without looking wrong.
+        // leaves every per-surface cost figure wrong without looking wrong. The rejected request
+        // IS on the ledger: it was an HTTP attempt, and every attempt is a call.
         var feedHandler = new CannedHandler(Ok("""{"results":[]}"""));
-        await Agent(feedHandler, recorder).RerankBatchAsync(
+        await Agent(feedHandler, recorder, capabilities).RerankBatchAsync(
             Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
 
         Assert.Single(feedHandler.Bodies);
         Assert.Equal("json_object", ResponseFormatTypeOf(feedHandler.Bodies[0]));
         Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankFeed).Calls);
-        Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankAsk).Calls);
+        Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankAsk).Calls);
+
+        // And a hand-built adapter with NO shared table (a test, a fresh process) probes again —
+        // one rejection never leaks into an unrelated instance's state.
+        var isolated = new CannedHandler(Ok("""{"results":[]}"""));
+        await Agent(isolated, Recorder()).RerankBatchAsync(Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
+        Assert.Equal("json_schema", ResponseFormatTypeOf(isolated.Bodies[0]));
     }
 
     [Theory]
@@ -775,6 +791,10 @@ public class OpenRouterSearchAgentLiveModeTests
     private static OpenRouterSearchAgent Agent(CannedHandler handler, ApiUsageRecorder recorder) =>
         Agent(handler, new HeuristicInterpreter(), recorder);
 
+    private static OpenRouterSearchAgent Agent(
+        CannedHandler handler, ApiUsageRecorder recorder, FrostAura.Reel.Infrastructure.Llm.ModelCapabilities capabilities) =>
+        Agent(handler, new HeuristicInterpreter(), recorder, capabilities);
+
     private static OpenRouterSearchAgent Agent(CannedHandler handler, HeuristicInterpreter interpreter) =>
         Agent(handler, interpreter, Recorder());
 
@@ -785,7 +805,8 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     private static OpenRouterSearchAgent Agent(
-        CannedHandler handler, HeuristicInterpreter interpreter, ApiUsageRecorder recorder)
+        CannedHandler handler, HeuristicInterpreter interpreter, ApiUsageRecorder recorder,
+        FrostAura.Reel.Infrastructure.Llm.ModelCapabilities? capabilities = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -796,7 +817,7 @@ public class OpenRouterSearchAgentLiveModeTests
             .Build();
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterSearchAgent(
-            client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
+            client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance, capabilities: capabilities);
     }
 
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);

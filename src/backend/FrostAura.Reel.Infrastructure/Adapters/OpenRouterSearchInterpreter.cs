@@ -1,14 +1,14 @@
 using System.Globalization;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Infrastructure.Llm;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -31,10 +31,16 @@ public class OpenRouterSearchInterpreter(
     ILogger<OpenRouterSearchInterpreter> logger,
     // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
     // every real code path, but the adapter must still be `new`-able in tests without a scope.
-    IAccountContext? accountContext = null)
+    IAccountContext? accountContext = null,
+    ILlmPurposeCatalog? purposes = null,
+    ModelCapabilities? capabilities = null,
+    IProviderHealth? health = null,
+    ILlmCallGate? gate = null)
     : ISearchQueryInterpreter
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    /// <summary>The shared transport (purpose <c>search-interpret</c>, which now carries a completion ceiling).</summary>
+    private readonly OpenRouterChatClient _chat = new(
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
 
     private string? ApiKey => configuration["OPENROUTER_API_KEY"] is { Length: > 0 } key ? key : null;
 
@@ -49,10 +55,7 @@ public class OpenRouterSearchInterpreter(
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
-        // Empty env vars are "present but blank" to .NET config, which defeats ?? — treat blank as absent.
-        : configuration["REEL_SEARCH_MODEL"] is { Length: > 0 } m ? m
-        : configuration["OPENROUTER_MODEL"] is { Length: > 0 } o ? o
-        : "openai/gpt-6-luna";
+        : _chat.Options(ApiUsagePurpose.SearchInterpret).Model;
 
     public Task<SearchIntent> InterpretAsync(
         string query, CancellationToken ct = default, string? standingFilters = null) =>
@@ -67,49 +70,22 @@ public class OpenRouterSearchInterpreter(
             return Heuristic(trimmed);
         }
 
-        // Recorded in a finally, AFTER the response: the token counts are in the body, so the old
-        // record-then-send ordering could never see them. Every HTTP attempt still counts as a call.
-        OpenRouterUsage? usage = null;
-        try
+        // The shared client records every attempt on the ledger (a failed one included), bounds the
+        // completion — this call used to have no max_tokens at all — and never throws for a provider
+        // failure, so every failure lands on the free heuristic below.
+        var completion = await _chat.CompleteAsync(
+            new LlmChatRequest(
+                ApiUsagePurpose.SearchInterpret,
+                [LlmMessage.System(SystemPrompt), LlmMessage.User(BuildUserMessage(trimmed, standingFilters, history))]),
+            ct);
+        if (!completion.Succeeded)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
-            {
-                Content = JsonContent.Create(new
-                {
-                    model = ModelId,
-                    temperature = 0,
-                    response_format = new { type = "json_object" },
-                    messages = new object[]
-                    {
-                        new { role = "system", content = SystemPrompt },
-                        new { role = "user", content = BuildUserMessage(trimmed, standingFilters, history) },
-                    },
-                }, options: JsonOptions),
-            };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
-
-            using var response = await httpClient.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
-            var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
-            usage = dto?.Usage;
-            var content = dto?.Choices?.FirstOrDefault()?.Message?.Content;
-            return string.IsNullOrWhiteSpace(content) ? HeuristicIntent(trimmed) : Parse(content, trimmed);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Query interpretation failed for {Query}; falling back to heuristic.", trimmed);
+            logger.LogWarning(
+                "Query interpretation failed ({Failure}) for {Query}; falling back to heuristic.", completion.Failure, trimmed);
             return HeuristicIntent(trimmed);
         }
-        finally
-        {
-            usageRecorder.Record(
-                ApiProvider.OpenRouter,
-                ApiUsagePurpose.SearchInterpret,
-                ModelId,
-                accountContext?.AccountId,
-                usage?.PromptTokens,
-                usage?.CompletionTokens);
-        }
+
+        return Parse(completion.Content!, trimmed);
     }
 
     private static SearchIntent Parse(string json, string fallbackText)
@@ -538,10 +514,4 @@ public class OpenRouterSearchInterpreter(
         "STANDING FILTERS: where a standing-filters line is given, those are the account's own content rules and " +
         "they bound the answer space — never put an excluded genre or term in genres or keywords, even when the " +
         "request asks for it. Output strictly valid JSON.";
-
-    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
-
-    private sealed record ChatChoice(ChatMessage? Message);
-
-    private sealed record ChatMessage(string? Content);
 }

@@ -1,15 +1,13 @@
 using System.Globalization;
-using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.CrossReference;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Infrastructure.Llm;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -34,10 +32,14 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 /// looked at again — the opposite of what a missing answer should cause.</para>
 ///
 /// <para><b><c>max_tokens</c> is computed, and <c>finish_reason=length</c> discards the batch.</b>
-/// A closed-enum entry is ~45 completion tokens; 64 per candidate plus 256 of JSON overhead is
-/// generous. A completion cut at a token boundary has missing entries rather than wrong ones, and
-/// those missing entries are indistinguishable from a deliberate omission — so the whole batch is
-/// discarded and retried by the next run rather than half-recorded.</para>
+/// The ceiling is the purpose's fixed allowance plus a per-candidate share (both in
+/// <see cref="LlmPurposeCatalog"/>, measured at reasoning effort none). The old 64 × n + 256 was
+/// sized for a model that does not reason: on gpt-6-luna every batch since 2026-10-14 finished at
+/// exactly 4,096 with zero verdicts, because hidden reasoning spent the ceiling — and splitting the
+/// batch cannot help when the ceiling scales with it. A completion cut at a token boundary has
+/// missing entries rather than wrong ones, and those missing entries are indistinguishable from a
+/// deliberate omission — so the whole batch is discarded rather than half-recorded, after the
+/// shared client's one retry at twice the ceiling.</para>
 ///
 /// <para><b>Every number that reaches the prompt is
 /// <see cref="CultureInfo.InvariantCulture"/>-formatted.</b> This machine renders 8.4 as "8,4" — a
@@ -56,9 +58,17 @@ public class OpenRouterCrossReferenceJudge(
     // Optional by design, mirroring the other OpenRouter adapters: the typed HttpClient is
     // transient and is always constructed inside a scope in production, but the adapter must stay
     // `new`-able in a test with no scope.
-    IAccountContext? accountContext = null)
+    IAccountContext? accountContext = null,
+    ILlmPurposeCatalog? purposes = null,
+    ModelCapabilities? capabilities = null,
+    IProviderHealth? health = null,
+    ILlmCallGate? gate = null)
     : ICrossReferenceJudge
 {
+    /// <summary>The shared transport: strict schema, effort, ceilings, retries, breaker, budget and ledger.</summary>
+    private readonly OpenRouterChatClient _chat = new(
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+
     /// <summary>
     /// The prompt generation, and part of the verdict key.
     ///
@@ -115,12 +125,6 @@ public class OpenRouterCrossReferenceJudge(
     /// </summary>
     internal const int GoldenPinnedVersion = CrossReferencePromptVersions.First;
 
-    /// <summary>Completion tokens allowed per candidate. A closed-enum entry is ~45.</summary>
-    private const int TokensPerCandidate = 64;
-
-    /// <summary>JSON envelope overhead on top of the per-candidate budget.</summary>
-    private const int TokenOverhead = 256;
-
     /// <summary>
     /// Overview characters in the prompt. 200, not the lens writer's 1,200 and not the 300 an
     /// earlier draft assumed: no prose is written back from this call, so the overview is here to
@@ -134,11 +138,6 @@ public class OpenRouterCrossReferenceJudge(
     /// <summary>Themes shown per candidate.</summary>
     private const int MaxThemes = 4;
 
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
-    /// <summary>See <see cref="OpenRouterLensWriter"/>: written once, read from many.</summary>
-    private volatile bool _strictSchemaSupported = true;
-
     private string? ApiKey => configuration["OPENROUTER_API_KEY"] is { Length: > 0 } key ? key : null;
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
@@ -147,7 +146,10 @@ public class OpenRouterCrossReferenceJudge(
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
-        : configuration["OPENROUTER_MODEL"] is { Length: > 0 } m ? m : "openai/gpt-6-luna";
+        : _chat.Options(ApiUsagePurpose.CrossReference).Model;
+
+    /// <summary>The model-and-effort a verdict is written under — what the cross-run breaker compares runs on.</summary>
+    public string RunKey => StubMode ? ModelId : _chat.CacheSalt(ApiUsagePurpose.CrossReference);
 
     public int PromptVersion => CurrentPromptVersion;
 
@@ -649,20 +651,27 @@ public class OpenRouterCrossReferenceJudge(
 
         var system = BuildSystemPrompt(round, options);
         var user = BuildUserPrompt(candidates, persona, round, options);
-        var maxTokens = (TokensPerCandidate * candidates.Count) + TokenOverhead;
 
-        var outcome = await ChatAsync(
-            system, user, maxTokens, ResultsSchema(candidates.Count, options.PromptVersion), usagePurpose, ct);
-        if (outcome.Content is null)
+        var outcome = await _chat.CompleteAsync(
+            new LlmChatRequest(
+                usagePurpose,
+                [LlmMessage.System(system), LlmMessage.User(user)],
+                ResultsSchema(candidates.Count, options.PromptVersion),
+                Items: candidates.Count),
+            ct);
+        if (!outcome.Succeeded)
         {
             // No rows, not Failed rows. Absence is the retry signal; a Failed row would look like a
             // judgement to the resume anti-join and suppress its own retry.
+            logger.LogWarning(
+                "Cross-reference judge produced no verdicts for purpose {Purpose} ({Failure}, {Count} candidates, ceiling {MaxTokens}).",
+                usagePurpose, outcome.Failure, candidates.Count, outcome.MaxTokens);
             return new CrossReferenceBatchResult(
-                [], Succeeded: false, outcome.Usage?.PromptTokens, outcome.Usage?.CompletionTokens, 0);
+                [], Succeeded: false, outcome.PromptTokens, outcome.CompletionTokens, 0, outcome.AgentFailure);
         }
 
         var (entries, rejected) = ParseResults(
-            outcome.Content, candidates.Select(c => c.TitleId).ToHashSet(), options.PromptVersion);
+            outcome.Content!, candidates.Select(c => c.TitleId).ToHashSet(), options.PromptVersion);
         if (rejected > 0)
         {
             logger.LogWarning(
@@ -672,7 +681,7 @@ public class OpenRouterCrossReferenceJudge(
         }
 
         return new CrossReferenceBatchResult(
-            entries, Succeeded: true, outcome.Usage?.PromptTokens, outcome.Usage?.CompletionTokens, rejected);
+            entries, Succeeded: true, outcome.PromptTokens, outcome.CompletionTokens, rejected);
     }
 
     /// <summary>
@@ -846,110 +855,4 @@ public class OpenRouterCrossReferenceJudge(
                 candidate.TitleId, CrossReferenceVerdict.Unsure, CrossReferenceReasons.InsufficientSignal, 0.50d),
         };
     }
-
-    // ── Transport ──────────────────────────────────────────────────────────────────────────
-
-    private sealed record ChatOutcome(string? Content, OpenRouterUsage? Usage);
-
-    private async Task<ChatOutcome> ChatAsync(
-        string system, string user, int maxTokens, object schema, string purpose, CancellationToken ct)
-    {
-        var strict = _strictSchemaSupported;
-        OpenRouterUsage? usage = null;
-        try
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
-            {
-                Content = JsonContent.Create(new
-                {
-                    model = ModelId,
-                    temperature = 0,
-                    max_tokens = maxTokens,
-                    response_format = strict ? schema : new { type = "json_object" },
-                    messages = new object[]
-                    {
-                        new { role = "system", content = system },
-                        new { role = "user", content = user },
-                    },
-                }, options: JsonOptions),
-            };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
-
-            using var response = await httpClient.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                if (strict && IsStrictSchemaRejection(response.StatusCode, body))
-                {
-                    // ONE-TIME downgrade, per process, exactly as the lens writer and the extractor
-                    // do it: retrying the schema on every batch would pay a rejection per call.
-                    _strictSchemaSupported = false;
-                    logger.LogWarning(
-                        "OpenRouter rejected strict json_schema for {Model} (HTTP {Status}); falling back to "
-                        + "json_object for the remainder of this process. Field validation now rests on the parser.",
-                        ModelId, (int)response.StatusCode);
-                    return await ChatAsync(system, user, maxTokens, schema, purpose, ct);
-                }
-
-                logger.LogWarning(
-                    "Cross-reference judge HTTP {Status} for purpose {Purpose}.", (int)response.StatusCode, purpose);
-                return new ChatOutcome(null, null);
-            }
-
-            var dto = await response.Content.ReadFromJsonAsync<CrossReferenceChatResponse>(JsonOptions, ct);
-            usage = dto?.Usage;
-            var choice = dto?.Choices?.FirstOrDefault();
-
-            // A "length" finish means the array was cut at a token boundary. The entries that DID
-            // arrive are indistinguishable from a complete answer with omissions, and an omission is
-            // the resume signal — so the whole batch is discarded rather than half-recorded.
-            if (string.Equals(choice?.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
-            {
-                logger.LogWarning(
-                    "Cross-reference completion hit the {MaxTokens}-token limit for purpose {Purpose}; "
-                    + "the whole batch is discarded rather than partially recorded.",
-                    maxTokens, purpose);
-                return new ChatOutcome(null, usage);
-            }
-
-            return new ChatOutcome(choice?.Message?.Content, usage);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Cross-reference judge call failed for purpose {Purpose}.", purpose);
-            return new ChatOutcome(null, usage);
-        }
-        finally
-        {
-            // In a finally, AFTER the response: the counts live in the response body. Every HTTP
-            // attempt is counted, including one that fails before a body exists — which then reads
-            // as "unknown tokens" rather than "free".
-            usageRecorder.Record(
-                ApiProvider.OpenRouter, purpose, ModelId, accountContext?.AccountId,
-                usage?.PromptTokens, usage?.CompletionTokens);
-        }
-    }
-
-    private static bool IsStrictSchemaRejection(HttpStatusCode status, string body)
-    {
-        if (status is not (HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity
-            or HttpStatusCode.NotImplemented or HttpStatusCode.NotFound))
-        {
-            return false;
-        }
-
-        return body.Contains("json_schema", StringComparison.OrdinalIgnoreCase)
-            || body.Contains("response_format", StringComparison.OrdinalIgnoreCase)
-            || body.Contains("structured output", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private sealed record CrossReferenceChatResponse(
-        [property: JsonPropertyName("choices")] List<CrossReferenceChoice>? Choices,
-        [property: JsonPropertyName("usage")] OpenRouterUsage? Usage);
-
-    private sealed record CrossReferenceChoice(
-        [property: JsonPropertyName("message")] CrossReferenceMessage? Message,
-        [property: JsonPropertyName("finish_reason")] string? FinishReason);
-
-    private sealed record CrossReferenceMessage([property: JsonPropertyName("content")] string? Content);
 }
