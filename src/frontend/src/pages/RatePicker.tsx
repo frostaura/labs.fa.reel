@@ -8,6 +8,7 @@ import {
 } from "../store/api";
 import PosterImage from "../components/rec/PosterImage";
 import LoadFailed from "../components/settings/LoadFailed";
+import { refusedOutright } from "../components/settings/saveOutcome";
 import { Button } from "../components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 
@@ -49,8 +50,14 @@ export default function RatePicker() {
     try {
       await rateTitle({ titleId: t.titleId, mediaType: t.mediaType, tmdbId: t.tmdbId, rating: value, markWatched: true }).unwrap();
       setConfirmed((c) => ({ ...c, [t.titleId]: value }));
-    } catch {
-      setFailure(`Couldn't save your ${value} for ${t.name} — it's back in the grid. Nothing was rated.`);
+    } catch (error: unknown) {
+      // Only a refusal (4xx) is known not to have landed. A 5xx or a dropped connection may have
+      // come after the rating was written, so that copy says what is known: it was not confirmed.
+      setFailure(
+        refusedOutright(error)
+          ? `Couldn't save your ${value} for ${t.name} — it's back in the grid. Nothing was rated.`
+          : `Couldn't confirm your ${value} for ${t.name} — it may not have saved, so it's back in the grid. Rate it again.`
+      );
     } finally {
       setPending((p) => {
         const next = { ...p };
@@ -153,7 +160,7 @@ export default function RatePicker() {
             believing the rating had landed. */}
         {failure && (
           <div role="alert" className="mt-3 flex flex-wrap items-center gap-3 fa-card border-fa-danger/40 px-4 py-2" data-testid="rate-failure">
-            <p className="fa-caption text-fa-danger flex-1 min-w-0">{failure}</p>
+            <p className="fa-caption text-fa-danger flex-1 min-w-0" data-testid="rate-failure-text">{failure}</p>
             <Button variant="ghost" size="sm" onClick={() => setFailure(null)}>
               Dismiss
             </Button>

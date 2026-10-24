@@ -196,6 +196,7 @@ test.describe("track record", () => {
     await expect(page.getByTestId("learned")).toHaveCount(0);
     // And it says where the ratings that fill it come from.
     await expect(page.getByTestId("track-record-empty-rate")).toHaveAttribute("href", "/rate");
+    await expect(page.getByTestId("track-record-empty-rate")).toHaveText("Rate what you've watched");
   });
 
   test("a failed read is an error with a Retry, not a shimmer that never ends", async ({ page }) => {

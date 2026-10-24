@@ -178,11 +178,12 @@ export default function TrackRecord() {
         <p className="fa-caption text-fa-frost-dim mt-2" data-testid="source-note">
           {sourceNote(data)}
         </p>
-        {/* The empty state's way forward: the page fills from ratings of titles Reel already scored,
-            and /rate is where those are collected. */}
+        {/* The empty state's way forward. The page fills as you rate titles Reel had already scored
+            for you; /rate offers what you've watched and never rated (plus popular titles), so the
+            button says that rather than promising a list of scored titles it does not show. */}
         {empty && (
           <Link to="/rate" className="fa-button-primary inline-flex mt-3" data-testid="track-record-empty-rate">
-            Rate titles Reel has scored
+            Rate what you&apos;ve watched
           </Link>
         )}
 

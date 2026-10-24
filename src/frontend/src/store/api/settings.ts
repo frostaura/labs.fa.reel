@@ -69,9 +69,24 @@ export const settingsApi = api.injectEndpoints({
     }),
     // Returns the stored settings AFTER the write. Callers compare it with what they sent: the
     // endpoint answers 200 and keeps the old value for an email it does not accept.
+    // The stored settings it returns are written straight into `getSettings`: waiting for the
+    // invalidation's refetch left the email box showing the OLD address in between — and for good
+    // if that refetch failed.
     updateSettings: b.mutation<AccountSettings, Partial<AccountSettings>>({
       query: (body) => ({ url: "settings", method: "PUT", body }),
       invalidatesTags: ["Session"],
+      async onQueryStarted(_body, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(
+            settingsApi.util.updateQueryData("getSettings", undefined, (draft) => {
+              Object.assign(draft, data);
+            })
+          );
+        } catch {
+          // A failed save changes nothing stored; the caller reports it.
+        }
+      },
     }),
     getFilters: b.query<FiltersPayload, void>({
       query: () => "settings/filters",

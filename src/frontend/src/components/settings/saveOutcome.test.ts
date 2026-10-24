@@ -4,6 +4,9 @@ import {
   SAVE_LOCKED_TEXT,
   SAVE_REJECTED_FALLBACK,
   emailSaveMessage,
+  humaniseReason,
+  pinFailureText,
+  refusedOutright,
   saveFailureMessage,
   savedMessage,
 } from "./saveOutcome";
@@ -16,7 +19,7 @@ describe("saveFailureMessage", () => {
 
   it("a 400 shows the server's own reason as a sentence", () => {
     const m = saveFailureMessage({ status: 400, data: { error: "minYear must be between 1900 and 2027" } });
-    expect(m.text).toBe("MinYear must be between 1900 and 2027.");
+    expect(m.text).toBe("The earliest year must be between 1900 and 2027.");
     expect(m).toMatchObject({ tone: "danger", persistent: true, retryable: false, kind: "rejected" });
   });
 
@@ -73,5 +76,48 @@ describe("emailSaveMessage", () => {
 
   it("is a refusal when the server kept nothing for a new address", () => {
     expect(emailSaveMessage("a@b", null).tone).toBe("danger");
+  });
+});
+
+describe("humaniseReason — the server's 400 text as the screen says it", () => {
+  it.each([
+    ["minYear must be between 1870 and 2100", "The earliest year must be between 1870 and 2100."],
+    ["maxYear must be between 1870 and 2100", "The latest year must be between 1870 and 2100."],
+    ["pin must be 4-8 digits", "The PIN must be 4-8 digits."],
+    ["eveningBudgetMinutes must be positive", "Evening budget minutes must be positive."],
+    ["Tag must be 2–120 characters.", "Tag must be 2–120 characters."],
+    ["billing isn't switched on", "Billing isn't switched on."],
+  ])("%s", (reason, text) => {
+    expect(humaniseReason(reason)).toBe(text);
+  });
+
+  it("never shows a raw camelCase identifier", () => {
+    expect(humaniseReason("minCrowdRating must be between 0 and 10")).not.toMatch(/[a-z][A-Z]/);
+  });
+});
+
+describe("pinFailureText — only a 423 means the PIN was wrong", () => {
+  it.each([
+    ["a 423", { status: 423 }, "Wrong current PIN — nothing changed."],
+    ["a 400", { status: 400, data: { error: "pin must be 4-8 digits" } }, "The PIN must be 4-8 digits."],
+    ["a 500", { status: 500 }, SAVE_FAILED_TEXT],
+    ["a dropped connection", { status: "FETCH_ERROR" }, SAVE_FAILED_TEXT],
+  ])("%s", (_label, error, text) => {
+    expect(pinFailureText(error, "Wrong current PIN — nothing changed.")).toBe(text);
+  });
+});
+
+describe("refusedOutright — the copy may say 'nothing changed' only for a 4xx", () => {
+  it.each([
+    [{ status: 400 }, true],
+    [{ status: 409 }, true],
+    [{ status: 500 }, false],
+    [{ status: 503 }, false],
+    [{ status: "FETCH_ERROR" }, false],
+    [{ status: "TIMEOUT_ERROR" }, false],
+    [new Error("boom"), false],
+    [null, false],
+  ])("%o → %s", (error, expected) => {
+    expect(refusedOutright(error)).toBe(expected);
   });
 });

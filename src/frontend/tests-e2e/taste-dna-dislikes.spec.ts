@@ -135,6 +135,41 @@ test.describe("taste DNA dislikes", () => {
     await expect(page.getByTestId("dislike-next")).toBeDisabled();
   });
 
+  test("a failed Older page says so — page 1's rows never stand in for it — and Newer recovers", async ({ page }) => {
+    await bootDna(page);
+    await expect(page.getByText("Declined 1")).toBeVisible();
+
+    await page.route(/\/api\/taste\/dislikes/, (route) =>
+      new URL(route.request().url()).searchParams.get("offset") === "20"
+        ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+        : route.fallback()
+    );
+    await page.getByTestId("dislike-next").click();
+
+    await expect(page.getByTestId("dislikes-page-error")).toBeVisible();
+    await expect(page.getByText("Declined 1")).toHaveCount(0);
+    await expect(page.getByTestId("dislike-range")).toHaveText("from 21 of 175");
+    await expect(page.getByTestId("dislike-next")).toBeDisabled();
+
+    await page.getByTestId("dislike-prev").click();
+    await expect(page.getByText("Declined 1")).toBeVisible();
+    await expect(page.getByTestId("dislikes-page-error")).toHaveCount(0);
+    await expect(page.getByTestId("dislike-range")).toHaveText("1–3 of 175");
+  });
+
+  test("a failed undo says so and the row stays", async ({ page }) => {
+    await bootDna(page);
+    await page.route(/\/api\/titles\/.*\/reactions\/not_interested$/, (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+    );
+    await page.getByTestId("dislike-row").nth(0).getByTestId("dislike-revoke").click();
+
+    const status = page.getByTestId("dislike-revoke-status");
+    await expect(status).toContainText("Couldn't undo Declined 1 — it's still on the list.");
+    await expect(status).toHaveAttribute("data-tone", "danger");
+    await expect(page.getByTestId("dislike-row")).toHaveCount(3);
+  });
+
   test("an account that has said no to nothing gets no panel at all", async ({ page }) => {
     await bootDna(page, {
       total: 0,

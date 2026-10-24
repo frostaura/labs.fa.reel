@@ -39,4 +39,13 @@ test.describe("landing on phones", () => {
     }));
     expect(scrollWidth).toBe(innerWidth);
   });
+
+  test("the mock pick is captioned as an illustration, not passed off as a real title", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.goto("/");
+    await expect(page.getByTestId("landing-illustration-caption")).toHaveText(
+      "An illustration of how a pick reads — the title and its numbers are made up."
+    );
+    await expect(page.getByTestId("landing-illustration")).toContainText("Neon Static");
+  });
 });

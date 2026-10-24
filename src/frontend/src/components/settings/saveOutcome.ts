@@ -50,15 +50,65 @@ export function saveFailureMessage(error: unknown): SaveMessage {
   return { tone: "danger", text: SAVE_FAILED_TEXT, persistent: true, retryable: true, kind: "failed" };
 }
 
-/** The server's own `{ error: "…" }` text, when it sent one worth showing. */
+/**
+ * The settings PIN's own failures. A 423 on these endpoints means the PIN typed was wrong, so the
+ * caller supplies that sentence; a 400 is the server's rule; anything else — a 500, a dropped
+ * connection — is a request that failed, never "wrong PIN".
+ */
+export function pinFailureText(error: unknown, wrongPin: string): string {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (status === 423) return wrongPin;
+  if (status === 400) return serverReason(error) ?? SAVE_REJECTED_FALLBACK;
+  return SAVE_FAILED_TEXT;
+}
+
+/**
+ * Whether a failed write is KNOWN not to have landed: the server answered and refused it (4xx).
+ * A 5xx, a dropped connection or a timeout may have come after the write committed, so copy for
+ * those must not promise that nothing changed.
+ */
+export function refusedOutright(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
+/**
+ * Field names the server's 400 reasons start with, said the way the screen says them. The server
+ * writes "minYear must be between 1870 and 2100"; capitalising that gave "MinYear must be…".
+ */
+const FIELD_LABELS: Record<string, string> = {
+  minYear: "The earliest year",
+  maxYear: "The latest year",
+  minCrowdRating: "The minimum crowd score",
+  minPredictedRating: "The minimum predicted rating",
+  maturityCeiling: "The maturity limit",
+  pin: "The PIN",
+};
+
+/** The server's own `{ error: "…" }` text, when it sent one worth showing, as a sentence. */
 function serverReason(error: unknown): string | null {
   const data = (error as { data?: unknown } | null)?.data;
   const text = typeof data === "string" ? null : (data as { error?: unknown } | null)?.error;
   if (typeof text !== "string") return null;
   const trimmed = text.trim();
   if (trimmed.length === 0) return null;
-  // Server reasons are lower-case fragments ("pin must be 4-8 digits"); a sentence reads better.
-  return trimmed[0].toUpperCase() + trimmed.slice(1) + (/[.!?]$/.test(trimmed) ? "" : ".");
+  return humaniseReason(trimmed);
+}
+
+/**
+ * A server reason as a sentence: a leading field identifier becomes its label (an unknown camelCase
+ * one is split into words), the first letter is capitalised and a full stop is added.
+ */
+export function humaniseReason(reason: string): string {
+  const match = /^([a-z]+(?:[A-Z][a-z0-9]*)*)\b(.*)$/s.exec(reason);
+  let text = reason;
+  if (match) {
+    const [, field, rest] = match;
+    const label = FIELD_LABELS[field] ?? (/[A-Z]/.test(field) ? field.replace(/([A-Z])/g, " $1").toLowerCase() : null);
+    if (label !== null) text = label + rest;
+  }
+  text = text[0].toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(text) ? text : `${text}.`;
 }
 
 /**

@@ -71,7 +71,7 @@ async function routeFilters(page: Page, handler: (route: Route) => Promise<void>
 test.describe("conditions save outcomes", () => {
   const cases: { label: string; status: number; body: unknown; text: RegExp; retry: boolean }[] = [
     { label: "500", status: 500, body: {}, text: /^Couldn't save — nothing changed\./, retry: true },
-    { label: "400", status: 400, body: { error: "minYear must be between 1900 and 2027" }, text: /^MinYear must be between 1900 and 2027\./, retry: false },
+    { label: "400", status: 400, body: { error: "minYear must be between 1900 and 2027" }, text: /^The earliest year must be between 1900 and 2027\./, retry: false },
     { label: "423", status: 423, body: {}, text: /^Locked — enter your settings PIN, then save again\./, retry: false },
   ];
 
@@ -206,6 +206,26 @@ test.describe("leave guard", () => {
     await expect(page).toHaveURL(/\/rate$/);
   });
 
+  test("two dirty drafts ask once, naming both, and OK leaves", async ({ page }) => {
+    await boot(page, { billing: { tier: "Free", configured: true } });
+    await routeFilters(page, (route) => route.fulfill({ status: 500, body: "{}" }));
+    await mockJson(page, "**/api/titles/rate-suggestions", []);
+    await page.goto("/settings");
+
+    await page.getByTestId("genre-war").click();
+    await page.getByTestId("email-input").fill("me@example.com");
+
+    const prompts: string[] = [];
+    page.on("dialog", (dialog) => {
+      prompts.push(dialog.message());
+      void dialog.accept();
+    });
+    await page.getByTestId("sharpen-link").click();
+    await expect(page).toHaveURL(/\/rate$/);
+    // One click, one question — the old per-card listeners asked twice.
+    expect(prompts).toEqual(["You have unsaved changes to your conditions and your email address. Leave without saving them?"]);
+  });
+
   test("a clean page navigates without asking", async ({ page }) => {
     await boot(page);
     await routeFilters(page, (route) => route.fulfill({ status: 500, body: "{}" }));
@@ -281,6 +301,50 @@ test.describe("region and email", () => {
     await expect(page.getByText("Saved ✓")).toHaveCount(0);
   });
 
+  test("a saved email stays in the box even when the follow-up read fails — never the old address", async ({ page }) => {
+    await boot(page, { billing: { tier: "Free", configured: true }, settings: { email: "old@example.com" } });
+    let saved = false;
+    await page.route(
+      (u) => u.pathname === "/api/settings",
+      async (route) => {
+        if (route.request().method() === "PUT") {
+          saved = true;
+          // Hold the answer so the box is observed between the save and the refetch.
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ region: "US", onboarded: true, email: "new@example.com" }) });
+          return;
+        }
+        // Every read after the save fails.
+        return saved ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" }) : route.fallback();
+      }
+    );
+    await page.goto("/settings");
+    await expect(page.getByTestId("email-input")).toHaveValue("old@example.com");
+
+    const values: string[] = [];
+    await page.exposeFunction("recordEmail", (v: string) => values.push(v));
+    await page.evaluate(() => {
+      const input = document.querySelector<HTMLInputElement>("[data-testid=email-input]")!;
+      const record = (window as unknown as { recordEmail: (v: string) => void }).recordEmail;
+      new MutationObserver(() => record(input.value)).observe(input, { attributes: true });
+      const poll = () => {
+        record(input.value);
+        requestAnimationFrame(poll);
+      };
+      poll();
+    });
+
+    await page.getByTestId("email-input").fill("new@example.com");
+    await page.getByTestId("email-save").click();
+    await expect(page.getByTestId("email-save-status")).toHaveText("Saved.");
+    await expect(page.getByTestId("email-input")).toHaveValue("new@example.com");
+    await expect(page.getByTestId("email-save")).toBeDisabled();
+    // Give the failing refetch time to land, then check nothing ever painted the old address back.
+    await page.waitForTimeout(500);
+    await expect(page.getByTestId("email-input")).toHaveValue("new@example.com");
+    const afterFill = values.slice(values.indexOf("new@example.com"));
+    expect(afterFill).not.toContain("old@example.com");
+  });
+
   test("a failed email save is a danger message, not 'Saved ✓'", async ({ page }) => {
     await boot(page, { billing: { tier: "Free", configured: true } });
     await page.route(
@@ -293,6 +357,110 @@ test.describe("region and email", () => {
     await page.getByTestId("email-save").click();
     await expect(page.getByTestId("email-save-status")).toHaveAttribute("data-tone", "danger");
     await expect(page.getByTestId("email-save-status-retry")).toBeVisible();
+  });
+});
+
+test.describe("the other settings saves report failures too", () => {
+  for (const c of [
+    { label: "500", status: 500, body: {}, text: "Couldn't save — nothing changed." },
+    { label: "400", status: 400, body: { error: "pin must be 4-8 digits" }, text: "The PIN must be 4-8 digits." },
+  ]) {
+    test(`a PIN set that fails with ${c.label} says what happened — never "Wrong current PIN"`, async ({ page }) => {
+      await boot(page);
+      await routeFilters(page, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FILTERS) }));
+      await page.route(
+        (u) => u.pathname === "/api/settings/pin",
+        (route) => route.fulfill({ status: c.status, contentType: "application/json", body: JSON.stringify(c.body) })
+      );
+      await page.goto("/settings");
+      await page.getByTestId("new-pin-input").fill("1234");
+      await page.getByTestId("pin-submit").click();
+      await expect(page.getByTestId("pin-error")).toHaveText(c.text);
+      await expect(page.getByText(/Wrong current PIN|Could not set the PIN|PIN updated/)).toHaveCount(0);
+    });
+  }
+
+  test("a tag that fails to save stays in the box and says so; Retry adds it", async ({ page }) => {
+    await boot(page);
+    let fail = true;
+    let tags: { id: string; text: string }[] = [];
+    await page.route(
+      (u) => u.pathname === "/api/preferences/tags",
+      (route) => {
+        if (route.request().method() === "POST") {
+          if (fail) return route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+          tags = [{ id: "t1", text: "slow-burn heists" }];
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(tags[0]) });
+        }
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(tags) });
+      }
+    );
+    await page.goto("/settings");
+
+    await page.getByTestId("add-tag-input").fill("slow-burn heists");
+    await page.getByTestId("add-tag-input").press("Enter");
+    const status = page.getByTestId("tag-save-status");
+    await expect(status).toHaveText(/^Couldn't add "slow-burn heists" — nothing changed\./);
+    await expect(status).toHaveAttribute("data-tone", "danger");
+    // The words the user typed are still there.
+    await expect(page.getByTestId("add-tag-input")).toHaveValue("slow-burn heists");
+
+    fail = false;
+    await page.getByTestId("tag-save-status-retry").click();
+    await expect(page.getByTestId("preference-tags")).toContainText("slow-burn heists");
+    await expect(page.getByTestId("add-tag-input")).toHaveValue("");
+    await expect(page.getByTestId("tag-save-status")).toHaveCount(0);
+  });
+
+  test("a tag that fails to remove says it is still on", async ({ page }) => {
+    await boot(page);
+    await page.route(
+      (u) => u.pathname === "/api/preferences/tags",
+      (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: "t1", text: "slow-burn heists" }]) })
+    );
+    await page.route(
+      (u) => u.pathname === "/api/preferences/tags/t1",
+      (route) => route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+    );
+    await page.goto("/settings");
+    await page.getByTestId("remove-tag").click();
+    await expect(page.getByTestId("tag-save-status")).toHaveText(/^Couldn't remove "slow-burn heists" — it's still on\./);
+    await expect(page.getByTestId("preference-tags")).toContainText("slow-burn heists");
+  });
+
+  test("a failed notifications enable says so instead of silently showing 'Turn on' again", async ({ page }) => {
+    // A browser with push: a registration whose subscribe works, so the server's refusal is the failure.
+    await page.addInitScript(() => {
+      const subscription = {
+        endpoint: "https://push.example/abc",
+        toJSON: () => ({ keys: { p256dh: "p", auth: "a" } }),
+        unsubscribe: async () => true,
+      };
+      const registration = {
+        pushManager: { getSubscription: async () => null, subscribe: async () => subscription },
+      };
+      Object.defineProperty(window, "PushManager", { value: function PushManager() {}, configurable: true });
+      Object.defineProperty(window, "Notification", {
+        value: { permission: "default", requestPermission: async () => "granted" },
+        configurable: true,
+      });
+      Object.defineProperty(navigator, "serviceWorker", {
+        value: { getRegistration: async () => registration, getRegistrations: async () => [], ready: Promise.resolve(registration) },
+        configurable: true,
+      });
+    });
+    await boot(page);
+    await mockJson(page, "**/api/push/vapid-public-key", { key: "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U" });
+    await page.route(
+      (u) => u.pathname === "/api/push/subscribe",
+      (route) => route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+    );
+    await page.goto("/settings");
+
+    await expect(page.getByTestId("push-toggle")).toContainText("Turn on");
+    await page.getByTestId("push-toggle").click();
+    await expect(page.getByTestId("push-failure")).toHaveText("Couldn't turn notifications on — they're still off. Try again in a moment.");
+    await expect(page.getByTestId("push-toggle")).toContainText("Turn on");
   });
 });
 

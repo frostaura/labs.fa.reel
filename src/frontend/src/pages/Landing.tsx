@@ -16,41 +16,49 @@ const MOCK_POSTERS: { genre: string; gradient: string; tilt: string }[] = [
 
 /**
  * The visual sell: what a Reel pick actually looks like, before asking anyone to sign in — a fan
- * of poster-style mock cards with one fully-rendered card (real ScoreBadges, real why-line) in
- * front. Entirely local CSS/DOM; deliberately no TMDB art on a page that exists to earn trust.
+ * of poster-style mock cards with one fully-rendered card (real ScoreBadges, an example why-line)
+ * in front, captioned as an illustration. Entirely local CSS/DOM; deliberately no TMDB art on a page that exists to earn trust.
  */
 function PosterMockRow() {
   return (
-    // `overflow-hidden` is the backstop, not the fix. Below `sm` the two outer posters drop out
+    // A <figure> with a visible caption, because every title and number in it is made up: until the
+    // brand art and real app screenshots replace it (P2, a parent-level deliverable — KILL-10's
+    // landing half), the row must never read as a real pick with real scores.
+    // The row: `overflow-hidden` is the backstop, not the fix. Below `sm` the two outer posters drop out
     // (MockPoster's `outer`) and the inner pair narrows to w-16, which takes the row from ~440 px
     // (all five) to ~248 px, inside a 320 px phone's column. Before, the row pushed the column
     // 32 px off the left edge at 375 px and clipped the pitch ("nk your Trakt profile").
-    <div className="w-full max-w-3xl mx-auto flex items-end justify-center overflow-hidden pt-2 pb-4" aria-hidden>
-      {MOCK_POSTERS.slice(0, 2).map((p, i) => (
-        <MockPoster key={p.genre} poster={p} outer={i === 0} />
-      ))}
+    <figure className="space-y-1" data-testid="landing-illustration">
+      <div className="w-full max-w-3xl mx-auto flex items-end justify-center overflow-hidden pt-2 pb-4" aria-hidden>
+        {MOCK_POSTERS.slice(0, 2).map((p, i) => (
+          <MockPoster key={p.genre} poster={p} outer={i === 0} />
+        ))}
 
-      {/* The featured card — a real pick's anatomy: badges up top, why-line below. */}
-      <div className="relative z-10 w-36 sm:w-40 shrink-0 -mx-3 rounded-lg bg-fa-ink-2 p-1.5 pb-2 shadow-fa-glass ring-1 ring-fa-edge text-left">
-        <div
-          className="relative aspect-[2/3] rounded-md overflow-hidden"
-          style={{ backgroundImage: "linear-gradient(155deg, #14385a 0%, #0e2038 45%, #38214a 100%)" }}
-        >
-          <ScoreBadges predictedRating={8.4} crowdRating={7.9} />
-          <div className="absolute inset-x-0 bottom-0 h-1/2 reel-scrim" />
-          <p className="absolute bottom-2 left-2 right-2 fa-caption text-fa-frost-bright font-medium">
-            Neon Static
+        {/* The featured card — a real pick's anatomy: badges up top, why-line below. */}
+        <div className="relative z-10 w-36 sm:w-40 shrink-0 -mx-3 rounded-lg bg-fa-ink-2 p-1.5 pb-2 shadow-fa-glass ring-1 ring-fa-edge text-left">
+          <div
+            className="relative aspect-[2/3] rounded-md overflow-hidden"
+            style={{ backgroundImage: "linear-gradient(155deg, #14385a 0%, #0e2038 45%, #38214a 100%)" }}
+          >
+            <ScoreBadges predictedRating={8.4} crowdRating={7.9} />
+            <div className="absolute inset-x-0 bottom-0 h-1/2 reel-scrim" />
+            <p className="absolute bottom-2 left-2 right-2 fa-caption text-fa-frost-bright font-medium">
+              Neon Static
+            </p>
+          </div>
+          <p className="mt-1.5 px-0.5 fa-caption text-fa-frost/80 leading-snug">
+            Shares Blade Runner&apos;s neon melancholy — and it&apos;s streaming now.
           </p>
         </div>
-        <p className="mt-1.5 px-0.5 fa-caption text-fa-frost/80 leading-snug">
-          Shares Blade Runner&apos;s neon melancholy — and it&apos;s streaming now.
-        </p>
-      </div>
 
-      {MOCK_POSTERS.slice(2).map((p, i, rest) => (
-        <MockPoster key={p.genre} poster={p} outer={i === rest.length - 1} />
-      ))}
-    </div>
+        {MOCK_POSTERS.slice(2).map((p, i, rest) => (
+          <MockPoster key={p.genre} poster={p} outer={i === rest.length - 1} />
+        ))}
+      </div>
+      <figcaption className="fa-caption text-fa-frost-dim" data-testid="landing-illustration-caption">
+        An illustration of how a pick reads — the title and its numbers are made up.
+      </figcaption>
+    </figure>
   );
 }
 

@@ -7,7 +7,6 @@
  * (payloads stripped server-side); Paid gets every row, the endless row pages, the genre rails and
  * an on-demand rebuild. Change this copy only together with those checks.
  */
-export type PlanTier = "Free" | "Paid" | "Founder";
 
 /** What Free includes, then what Paid adds — each a list of things the server enforces. */
 export const FREE_INCLUDES = ["taste DNA", "the track record", "a daily three-pick shortlist", "Ask Reel", "your Saved queue"] as const;

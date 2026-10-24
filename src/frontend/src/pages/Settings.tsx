@@ -35,7 +35,13 @@ const REGIONS = ["US", "GB", "DE", "FR", "NL", "ZA", "AU", "CA", "ES", "IT", "PT
 function EmailCapture({ billingConfigured }: { billingConfigured: boolean }) {
   const { data: settings, isError, isFetching, refetch } = useGetSettingsQuery();
   const [updateSettings, { isLoading: saving }] = useUpdateSettingsMutation();
-  const stored = settings?.email ?? "";
+  // What the last confirmed save stored, until the read catches up. The query hook keeps showing its
+  // PREVIOUS result while the save's refetch is in flight — and for good if that refetch fails — so
+  // without this the box flashed the old address back after "Saved." (and could stay on it).
+  const [confirmed, setConfirmed] = useState<string | null>(null);
+  const serverStored = settings?.email ?? "";
+  if (confirmed !== null && serverStored === confirmed) setConfirmed(null);
+  const stored = confirmed ?? serverStored;
   // The box holds the user's edit, or — until they type — whatever is on file. Deriving it this way
   // (rather than seeding state in an effect) means the stored address is in the box on first paint.
   const [edit, setEdit] = useState<string | null>(null);
@@ -51,7 +57,7 @@ function EmailCapture({ billingConfigured }: { billingConfigured: boolean }) {
   const trimmed = email.trim();
   const changed = settings !== undefined && trimmed !== stored;
   const valid = trimmed.length === 0 || trimmed.includes("@");
-  useLeaveGuard(changed, "You have an unsaved email address. Leave without saving it?");
+  useLeaveGuard(changed, "your email address");
 
   if (isError && !settings) {
     return <LoadFailed what="your email settings" onRetry={() => void refetch()} retrying={isFetching} variant="inline" testId="email-load-error" />;
@@ -67,7 +73,10 @@ function EmailCapture({ billingConfigured }: { billingConfigured: boolean }) {
       const result = await updateSettings({ email: trimmed }).unwrap();
       const message = emailSaveMessage(trimmed, result.email);
       setStatus(message);
-      if (message.tone === "success") setEdit(null);
+      if (message.tone === "success") {
+        setConfirmed(result.email ?? "");
+        setEdit(null);
+      }
     } catch (error: unknown) {
       setStatus(saveFailureMessage(error));
     }

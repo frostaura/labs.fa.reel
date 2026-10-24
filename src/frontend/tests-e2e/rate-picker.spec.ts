@@ -203,7 +203,15 @@ test.describe("rate picker", () => {
       await page.getByTestId("rate-card").filter({ hasText: "Seen 1" }).click();
       await page.getByTestId("rate-value").nth(7).click();
 
-      await expect(page.getByTestId("rate-failure")).toContainText("Couldn't save your 8 for Seen 1");
+      // Only a refusal (4xx) is known not to have landed; a 500 or a drop may have saved it.
+      if (status === 400) {
+        await expect(page.getByTestId("rate-failure-text")).toHaveText("Couldn't save your 8 for Seen 1 — it's back in the grid. Nothing was rated.");
+      } else {
+        await expect(page.getByTestId("rate-failure-text")).toHaveText(
+          "Couldn't confirm your 8 for Seen 1 — it may not have saved, so it's back in the grid. Rate it again."
+        );
+        await expect(page.getByTestId("rate-failure")).not.toContainText("Nothing was rated");
+      }
       // The card is back, the counter never moved, and nothing claims a rating was made.
       await expect(page.getByTestId("rate-card")).toHaveCount(2);
       await expect(page.getByTestId("retrain-progress")).toHaveText("7 more ratings and Reel retrains tonight.");
@@ -234,4 +242,3 @@ test.describe("rate picker", () => {
     await expect(page.getByTestId("rate-session-count")).toHaveText("1 rated in this session");
   });
 });
-
