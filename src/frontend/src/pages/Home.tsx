@@ -100,15 +100,21 @@ export default function Home() {
   const digestFiltered = (digest?.items ?? []).filter((c) => matchesMedia(c.mediaType, filter));
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+    // Tighter rhythm on a phone, where every 12px of chrome above the first pick is 12px of pick
+    // below the fold.
+    <div className="space-y-5 md:space-y-8">
+      <div className="flex flex-wrap items-end justify-between gap-2 md:gap-3">
         <div>
-          <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
-          {feed?.generatedAt && (
-            <p className="fa-caption text-fa-frost-dim mt-1">
-              ranked for you · {formatRankedAt(feed.generatedAt)}
-            </p>
-          )}
+          {/* The stamp sits beside the heading where it fits (a phone included) and wraps under it
+              where it does not: a line of chrome saved is a line of the first pick above the fold. */}
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
+            {feed?.generatedAt && (
+              <p className="fa-caption text-fa-frost-dim">
+                ranked for you · {formatRankedAt(feed.generatedAt)}
+              </p>
+            )}
+          </div>
           {/* Everything actually in force, under the title: the saved conditions AND the browse
               toggles. Without this the feed silently obeys settings made on another screen — a
               standing "no documentary" is invisible exactly where its effect is — and the browse

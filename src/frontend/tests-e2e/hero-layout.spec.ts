@@ -58,7 +58,7 @@ async function serveBrightArt(page: Page): Promise<void> {
   await page.route(/image\.tmdb\.org/, (route) => route.fulfill({ status: 200, contentType: "image/png", body }));
 }
 
-async function bootHome(page: Page, count: number): Promise<void> {
+async function bootHome(page: Page, count: number, overrides: Record<string, unknown> = {}): Promise<void> {
   await stubEventSource(page);
   await page.goto("about:blank");
   await serveBrightArt(page);
@@ -73,7 +73,7 @@ async function bootHome(page: Page, count: number): Promise<void> {
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
   await mockJson(page, "**/api/feed", {
     generatedAt: new Date().toISOString(),
-    hero: Array.from({ length: count }, (_, i) => heroCard(i + 1)),
+    hero: Array.from({ length: count }, (_, i) => ({ ...heroCard(i + 1), ...overrides })),
     rows: [],
     lockedRowCount: 0,
   });
@@ -230,5 +230,24 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         expect(ratio, `hero ${i} title contrast`).toBeGreaterThanOrEqual(4.5);
       }
     });
+  });
+}
+
+/**
+ * The first pick is above the fold on a cold Home (I-10). This fixture carries the chrome every
+ * account has — title, conditions, browse toggles, mood chips — and none of the status bands, which
+ * the Home status line (FD-15) collapses; it guards the hero's own share of the budget.
+ */
+for (const [viewport, budget] of [
+  [{ width: 1440, height: 900 }, 220],
+  [{ width: 390, height: 844 }, 300],
+] as const) {
+  test(`the first hero card starts within ${budget}px of the top at ${viewport.width}×${viewport.height}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    // Confident picks: the row-level "nothing cleared your bar" admission is one of the status
+    // lines FD-15 folds into a single line, and is measured with them, not here.
+    await bootHome(page, 5, { confidence: "confident", predictedRating: 8.1 });
+    const top = await page.getByTestId("hero-card").first().evaluate((el) => el.getBoundingClientRect().top);
+    expect(top).toBeLessThanOrEqual(budget);
   });
 }
