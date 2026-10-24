@@ -16,10 +16,35 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// case-insensitive at letter/digit boundaries, so "ghost" still matches the label "ghost story" and
 /// "horror" still matches "supernatural horror" — the TV-horror coverage the containment rule
 /// existed for — while "music" no longer matches "musical".</para>
+///
+/// <para><b>Generated forms match catalogue LABELS only, never prose.</b> Stripping a final "s" is
+/// right for "ghosts" and wrong for "news": the generated "new" tripped every title whose overview
+/// says "a new teacher arrives", and a standing exclusion is airtight, so it culled them silently
+/// (D6). A label is a curated tag, where the singular of a plural is the same tag; a title's name or
+/// overview is free prose, where it is a different word. So <see cref="MatchesPhrase"/> takes a
+/// <c>literalOnly</c> switch for prose, and a short list of words that only look plural ("news",
+/// "series", "riches") never generates a form at all.</para>
 /// </summary>
 public static class NegationTerms
 {
     private static readonly TimeSpan RegexBudget = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Words ending in "s" whose stripped form is a different word, or no plural at all. They match
+    /// as typed and generate nothing.
+    /// </summary>
+    private static readonly IReadOnlySet<string> NotPlurals = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "news", "series", "species", "riches", "means", "odds", "thanks", "politics", "physics",
+        "mathematics", "economics", "ethics", "athletics", "gymnastics", "aerobics", "acrobatics",
+        "electronics", "robotics", "genetics", "linguistics", "logistics", "statistics", "christmas",
+        "texas", "paris", "atlas", "lens", "bus", "gas", "chaos",
+        "cosmos", "pathos", "ethos", "diabetes", "measles", "mumps", "rabies", "herpes", "billiards",
+        "headquarters", "crossroads", "barracks", "gallows", "whereabouts", "glasses", "always",
+        "perhaps", "towards", "afterwards", "lots", "plus", "virus", "campus", "circus", "chorus",
+        "genius", "status", "bonus", "census", "hippopotamus", "octopus", "cactus", "thesis", "crisis",
+        "oasis", "analysis", "basis", "tennis", "iris", "axis", "boss", "process", "princess",
+    };
 
     /// <summary>
     /// The term plus its plausible singular and plural spellings, lower-cased and de-duplicated.
@@ -35,6 +60,11 @@ public static class NegationTerms
         }
 
         var forms = new List<string> { raw };
+        if (NotPlurals.Contains(raw))
+        {
+            return forms;
+        }
+
         void Add(string form)
         {
             if (form.Length > 1 && !forms.Contains(form, StringComparer.Ordinal))
@@ -80,16 +110,21 @@ public static class NegationTerms
 
     /// <summary>
     /// True when any form of <paramref name="term"/> appears in <paramref name="text"/> as a whole
-    /// phrase — bounded on both sides by something that is not a letter or a digit.
+    /// phrase — bounded on both sides by something that is not a letter or a digit. With
+    /// <paramref name="literalOnly"/>, only the term as typed: the setting for free prose (a name, an
+    /// overview), where a generated singular is a different word.
     /// </summary>
-    public static bool MatchesPhrase(string? text, string? term)
+    public static bool MatchesPhrase(string? text, string? term, bool literalOnly = false)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
             return false;
         }
 
-        foreach (var form in Forms(term))
+        var forms = literalOnly
+            ? (term ?? string.Empty).Trim().ToLowerInvariant() is { Length: > 0 } literal ? [literal] : []
+            : Forms(term);
+        foreach (var form in forms)
         {
             if (form.Length > 2 && Regex.IsMatch(
                     text,

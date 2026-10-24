@@ -265,7 +265,8 @@ public sealed class LiveSearchExpansionService(
         string RerankPurpose,
         bool Debug = false,
         Guid? SourceTurnId = null,
-        AskTurnProgress? Progress = null);
+        AskTurnProgress? Progress = null,
+        SearchIntent? PriorIntent = null);
 
     /// <summary>
     /// Single-turn convenience overload (no conversation history / shown set) — a query EXPANDED
@@ -352,6 +353,7 @@ public sealed class LiveSearchExpansionService(
         string? conflictJson = null;
         var degraded = new List<string>();
 
+        progress.Attach(timings, ModelIdsJson(), SearchTurnDegraded.ProviderDefaultEffort);
         try
         {
             await Phase(new { stage = "searching", found = 0, scored = 0 });
@@ -413,6 +415,7 @@ public sealed class LiveSearchExpansionService(
             if (agentReply.Degraded)
             {
                 degraded.Add(SearchTurnDegraded.Plan);
+                progress.Degrade(SearchTurnDegraded.Plan);
             }
 
             // The server's correction of the model's reading: no negation phrase or ordinal as a
@@ -477,9 +480,15 @@ public sealed class LiveSearchExpansionService(
             var isPersonQuery = agentReply.Intent.People is { Count: > 0 };
 
             // An explicit media filter from the UI is a direct instruction and outranks the model.
+            // A follow-up silent about media keeps the conversation's media (AskReelCarry).
             var intent = input.MediaFilter.Count > 0
                 ? agentReply.Intent with { MediaTypes = input.MediaFilter.Distinct().ToList() }
-                : agentReply.Intent;
+                : isPersonQuery
+                    ? agentReply.Intent
+                    : agentReply.Intent with
+                    {
+                        MediaTypes = AskReelCarry.Media(agentReply.Intent.MediaTypes, input.PriorIntent?.MediaTypes, trimmed),
+                    };
             agentReply = agentReply with { Intent = intent };
 
             var shownSet = input.ShownTitleIds.ToHashSet();
@@ -688,9 +697,9 @@ public sealed class LiveSearchExpansionService(
             var referenceNames = referenceTitles.Count > 0
                 ? referenceTitles.Select(t => t.Name).ToList()
                 : (intent.ReferenceTitles ?? []).ToList();
-            var rerankQuery = referenceNames.Count > 0
-                ? $"{trimmed}\nThe user wants something like: {string.Join(", ", referenceNames)}"
-                : trimmed;
+            // The request in its conversation, never the bare follow-up (D2): the judge's verdict is
+            // the gate, and its cache key is this text.
+            var rerankQuery = AskReelJudgeRequest.Compose(trimmed, input.History, intent, referenceNames);
             var contexts = await RerankContextBuilder.BuildAsync(
                 db, judgeOrder.Select(r => r.Title.Id).ToList(), topContributions: null, ct);
             var inputs = judgeOrder
@@ -704,12 +713,23 @@ public sealed class LiveSearchExpansionService(
             var placed = new Dictionary<Guid, (AskReelGate.Placement Placement, RerankResult? Verdict)>();
             var picks = new List<GatedCard>();
             AskReelJudge.Summary judgeSummary;
+            // A failed batch is recorded on the progress AS IT RETURNS, so a turn aborted before the
+            // judge finishes still persists the judge flag (D9).
+            var judgeBatches = (Math.Min(inputs.Count, AskReelJudge.MaxJudged) + AskReelJudge.BatchSize - 1) / AskReelJudge.BatchSize;
+            var failedSoFar = 0;
             using (timings.Stage(AskStageTimings.Rerank))
             {
                 judgeSummary = await Judge.JudgeAsync(
                     accountId, rerankQuery, persona, inputs, input.RerankPurpose,
                     async batch =>
                     {
+                        if (batch.Failed)
+                        {
+                            failedSoFar++;
+                            progress.Degrade(FormattableString.Invariant(
+                                $"{SearchTurnDegraded.JudgePrefix}{failedSoFar}/{judgeBatches}"));
+                        }
+
                         var accepted = new List<GatedCard>();
                         foreach (var item in batch.Inputs)
                         {
@@ -738,8 +758,9 @@ public sealed class LiveSearchExpansionService(
 
             if (judgeSummary.FailedBatches > 0)
             {
-                degraded.Add(FormattableString.Invariant(
-                    $"{SearchTurnDegraded.JudgePrefix}{judgeSummary.FailedBatches}/{judgeSummary.Batches}"));
+                var judgeFlag = FormattableString.Invariant(
+                    $"{SearchTurnDegraded.JudgePrefix}{judgeSummary.FailedBatches}/{judgeSummary.Batches}");
+                degraded.Add(judgeFlag);
             }
 
             // ── Place everything the judge did not accept outright ───────────────────────────
@@ -747,10 +768,11 @@ public sealed class LiveSearchExpansionService(
             GatedCard Of((Title Title, double Sim) x, AskReelGate.Placement placement) =>
                 Gate(x.Title, x.Sim, PredictedOf(x.Title.Id), placed[x.Title.Id].Verdict, TagBoost(x.Title.Id), placement);
 
-            // Unjudged picks rank below every judged pick, in retrieval order, with no why (§4.10).
+            // Unjudged cards, in retrieval order, with no why (§4.10): below every judged pick when
+            // there is one, in the "not checked" tray when there is none (§4.8, D1).
             var unjudged = judgeOrder
-                .Where(x => placed.TryGetValue(x.Title.Id, out var p) && p.Placement == AskReelGate.Placement.UnjudgedPick)
-                .Select(x => Of(x, AskReelGate.Placement.UnjudgedPick))
+                .Where(x => placed.TryGetValue(x.Title.Id, out var p) && p.Placement == AskReelGate.Placement.Unjudged)
+                .Select(x => Of(x, AskReelGate.Placement.Unjudged))
                 .ToList();
             var nearMiss = judgeOrder
                 .Where(x => placed.TryGetValue(x.Title.Id, out var p) && p.Placement == AskReelGate.Placement.NearMiss)
@@ -762,19 +784,24 @@ public sealed class LiveSearchExpansionService(
                 .ToList();
             blendStage.Dispose();
 
-            if (picks.Count + unjudged.Count == 0)
+            // NoneFound exactly when no card was judged a match — unjudged cards never make an
+            // answer on their own (§4.8; D1).
+            if (AskReelGate.ModeFor(picks.Count) == SearchTurnMode.NoneFound)
             {
-                var underBar = belowFloor
+                // Judged matches the bar held back: named as under it only when they have a score.
+                var heldMatches = belowFloor
                     .Where(c => c.Verdict is { FitSource: ResultSource.Llm, Satisfies: Satisfies.Yes })
-                    .Select(c => c.Title.Name)
                     .ToList();
+                var underBar = heldMatches.Where(c => c.Predicted is not null).Select(c => c.Title.Name).ToList();
+                var unscoredHeld = heldMatches.Where(c => c.Predicted is null).Select(c => c.Title.Name).ToList();
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded, ReplyAsync, degraded, timings, input,
-                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, ct);
+                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, ct, unjudged, unscoredHeld);
             }
 
             await ReplyAsync(pickReply);
+            var judgedPicks = picks.Count;
             foreach (var card in unjudged)
             {
                 picks.Add(card);
@@ -782,16 +809,20 @@ public sealed class LiveSearchExpansionService(
             }
 
             // Outside cards trail every pick, each captioned with the exclusion it trips. They are
-            // shown only beside real picks — never as an answer of their own.
-            var outsideCards = outside
+            // shown only beside real picks — never as an answer of their own — and the bar binds
+            // them like any other card: one under it joins the floor tray rather than vanishing (1e).
+            var outsideAll = outside
                 .Select(x => Gate(x.Title, x.Sim, PredictedOf(x.Title.Id), verdict: null, TagBoost(x.Title.Id),
-                    AskReelGate.Placement.UnjudgedPick) with
+                    AskReelGate.Placement.Unjudged) with
                 {
                     Outside = true,
                     Why = OutsideWhy(NegationMatches(x.Title, negations)),
                 })
-                .Where(c => AskReelGate.Clears(c.Predicted, floor))
                 .ToList();
+            var outsideCards = outsideAll.Where(c => AskReelGate.Clears(c.Predicted, floor)).ToList();
+            belowFloor.AddRange(outsideAll
+                .Where(c => !AskReelGate.Clears(c.Predicted, floor))
+                .Select(c => c with { Placement = AskReelGate.Placement.BelowFloor }));
             foreach (var card in outsideCards)
             {
                 await EmitCardAsync(card, progress, emit);
@@ -799,13 +830,14 @@ public sealed class LiveSearchExpansionService(
 
             using var emitStage = timings.Stage(AskStageTimings.Emit);
             var final = picks.Concat(outsideCards).ToList();
-            var storedCards = Stored(final, nearMiss, belowFloor);
+            var storedCards = Stored(final, nearMiss, belowFloor, uncheckedTray: []);
             var reason = AskReelReason.Build(
                 new TurnCounts(
-                    Picks: picks.Count,
+                    Picks: judgedPicks,
                     Outside: outsideCards.Count,
                     Tray: belowFloor.Count,
-                    NearMiss: nearMiss.Count),
+                    NearMiss: nearMiss.Count,
+                    Unchecked: picks.Count - judgedPicks),
                 floor);
 
             await emit("done", new
@@ -819,6 +851,7 @@ public sealed class LiveSearchExpansionService(
                 droppedByFloor = belowFloor.Count,
                 belowFloor = belowFloor.Select(CardOf).ToList(),
                 nearMiss = nearMiss.Select(CardOf).ToList(),
+                @unchecked = Array.Empty<object>(),
                 mode = SearchTurnMode.Picks,
                 // Present and null on a turn with picks: one key set for one event name.
                 supply = (object?)null,
@@ -908,6 +941,7 @@ public sealed class LiveSearchExpansionService(
                 droppedByFloor = 0,
                 belowFloor = Array.Empty<object>(),
                 nearMiss = Array.Empty<object>(),
+                @unchecked = Array.Empty<object>(),
                 mode = (string?)null,
                 supply = (object?)null,
                 degraded = degraded.ToArray(),
@@ -974,16 +1008,22 @@ public sealed class LiveSearchExpansionService(
         await emit("candidate", CardOf(card));
     }
 
-    /// <summary>The stored rows: picks and outside cards first (ranks 0..n-1), then the near-miss tray, then the floor tray.</summary>
+    /// <summary>
+    /// The stored rows: picks and outside cards first (ranks 0..n-1), then the near-miss tray, then the
+    /// floor tray, then the unchecked tray.
+    /// </summary>
     private static List<TurnCard> Stored(
-        IReadOnlyList<GatedCard> final, IReadOnlyList<GatedCard> nearMiss, IReadOnlyList<GatedCard> belowFloor)
+        IReadOnlyList<GatedCard> final, IReadOnlyList<GatedCard> nearMiss, IReadOnlyList<GatedCard> belowFloor,
+        IReadOnlyList<GatedCard> uncheckedTray)
     {
-        var rows = new List<TurnCard>(final.Count + nearMiss.Count + belowFloor.Count);
+        var rows = new List<TurnCard>(final.Count + nearMiss.Count + belowFloor.Count + uncheckedTray.Count);
         rows.AddRange(final.Select((c, i) => Row(c, i, SearchTurnCardTier.Pick)));
         var offset = rows.Count;
         rows.AddRange(nearMiss.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.NearMiss)));
         offset = rows.Count;
         rows.AddRange(belowFloor.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.BelowFloor)));
+        offset = rows.Count;
+        rows.AddRange(uncheckedTray.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.Unchecked)));
         return rows;
     }
 
@@ -1041,8 +1081,11 @@ public sealed class LiveSearchExpansionService(
         string? conflictMessage,
         int judged,
         AskReelJudge.Summary? judge,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyList<GatedCard>? uncheckedTray = null,
+        IReadOnlyList<string>? unscoredHeld = null)
     {
+        uncheckedTray ??= [];
         Retrieval.SupplyReport? supply = facet?.Supply;
         if (supply is null && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
         {
@@ -1059,8 +1102,18 @@ public sealed class LiveSearchExpansionService(
         }
 
         var concept = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
+        var shownHere = supply is { ClearingFloor: > 0 }
+            ? await ShownInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct)
+            : 0;
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
-            supply, concept, hard.Media, underBar, nearMiss.Count, floor));
+            supply, concept, hard.Media, underBar, nearMiss.Count, floor,
+            Unchecked: uncheckedTray.Count,
+            JudgedAny: judge?.JudgedAny ?? true,
+            ShownHere: shownHere,
+            UnscoredHeld: unscoredHeld));
+
+        // A follow-up that changes nothing hears that it was heard, not the same paragraph again.
+        text = NoneFoundCopy.Again(text, PreviousReply(input.History));
 
         // A collision with the account's own conditions is the likeliest reason nothing is left,
         // so it leads: "Your conditions permanently exclude comedy and romance…" before the counts.
@@ -1076,7 +1129,7 @@ public sealed class LiveSearchExpansionService(
 
         await replyAsync(text);
         var reason = AskReelReason.Build(
-            new TurnCounts(Picks: 0, Outside: 0, Tray: belowFloor.Count, NearMiss: nearMiss.Count),
+            new TurnCounts(Picks: 0, Outside: 0, Tray: belowFloor.Count, NearMiss: nearMiss.Count, UncheckedTray: uncheckedTray.Count),
             floor);
         await emit("done", new
         {
@@ -1086,8 +1139,9 @@ public sealed class LiveSearchExpansionService(
             droppedByFloor = belowFloor.Count,
             belowFloor = belowFloor.Select(CardOf).ToList(),
             nearMiss = nearMiss.Select(CardOf).ToList(),
+            @unchecked = uncheckedTray.Select(CardOf).ToList(),
             mode = SearchTurnMode.NoneFound,
-            supply,
+            supply = SupplyWire(supply),
             degraded = degraded.ToArray(),
             reason,
             timingsMs = input.Debug ? timings.Snapshot() : null,
@@ -1121,13 +1175,113 @@ public sealed class LiveSearchExpansionService(
             System.Text.Json.JsonSerializer.Serialize(intent),
             await ActiveArtifactAsync(accountId, ct),
             agent.ModelId,
-            Stored([], nearMiss, belowFloor),
+            Stored([], nearMiss, belowFloor, uncheckedTray),
             conflictJson,
             SearchTurnMode.NoneFound,
             DegradedFlagsOf(degraded),
             TimingsJson(timings),
             ModelIdsJson(),
             SearchTurnDegraded.ProviderDefaultEffort);
+    }
+
+    /// <summary>
+    /// The supply report as the wire carries it: every enum as its NAME. The report's
+    /// <c>ConditionKnockout.Kind</c> is a <c>FilterKind</c>, and the stream's serializer writes enums
+    /// as numbers, so the client — which reads <c>kind</c> as a string — rejected every <c>done</c>
+    /// frame that carried a relaxation offer and left the turn spinning (acceptance D1). Projected
+    /// here rather than by a global converter, so no other frame's shape moves.
+    /// </summary>
+    internal static object? SupplyWire(Retrieval.SupplyReport? supply) =>
+        supply is null
+            ? null
+            : new
+            {
+                supply.MatchingInCatalogue,
+                supply.AlreadySeen,
+                supply.SavedOrDismissed,
+                supply.ExcludedByConditions,
+                supply.Eligible,
+                supply.BelowFloor,
+                supply.Unscored,
+                supply.ClearingFloor,
+                supply.LowVoteMatches,
+                supply.MinVotes,
+                supply.PredictedFloor,
+                supply.KnockoutsMeasured,
+                Knockouts = supply.Knockouts.Select(k => new
+                {
+                    Kind = k.Kind.ToString(),
+                    k.Value,
+                    k.ContentFilterId,
+                    k.Label,
+                    k.WouldUnlock,
+                    Sample = k.Sample.Select(t => new { t.TitleId, t.Name, t.Year, Media = t.Media.ToString() }).ToList(),
+                }).ToList(),
+            };
+
+    /// <summary>
+    /// How many of the titles the supply counts as clearing the bar this conversation has already
+    /// shown — counted through the same eligibility and topic predicates, then the same bar. They were
+    /// excluded before anything was judged, so the reply names them as shown rather than as rejected
+    /// (D4). A failure costs the sentence, never the turn.
+    /// </summary>
+    private async Task<int> ShownInSupplyAsync(
+        Guid accountId, Retrieval.HardConstraints hard, Retrieval.SupplyReport supply,
+        IReadOnlyCollection<Guid> shownIds, decimal floor, CancellationToken ct)
+    {
+        if (shownIds.Count == 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            var ids = shownIds.ToList();
+            var ceiling = await eligibility.MaturityCeilingAsync(accountId, ct);
+            var topical = (await Retrieval.HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard)
+                    .Where(t => ids.Contains(t.Id))
+                    .ToListAsync(ct))
+                .Where(t => Retrieval.CrowdVotes.Of(t) >= supply.MinVotes)
+                .Where(t => EligibilityQueryBuilder.PassesMaturity(t, ceiling))
+                .Select(t => t.Id)
+                .ToList();
+            if (topical.Count == 0)
+            {
+                return 0;
+            }
+
+            var artifactId = await ActiveArtifactAsync(accountId, ct);
+            if (artifactId is not { } activeId)
+            {
+                return 0;
+            }
+
+            var predicted = await db.TitleScores
+                .Where(x => x.AccountId == accountId && x.ModelArtifactId == activeId && topical.Contains(x.TitleId))
+                .Select(x => new { x.TitleId, x.PredictedRating })
+                .ToListAsync(ct);
+            return predicted
+                .GroupBy(x => x.TitleId)
+                .Count(g => AskReelGate.Clears(g.First().PredictedRating, floor));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel: counting the conversation's shown titles failed; the reply omits them.");
+            return 0;
+        }
+    }
+
+    /// <summary>The last thing Reel said in this conversation, without the card handles history appends.</summary>
+    private static string? PreviousReply(IReadOnlyList<ChatTurn> history)
+    {
+        var last = history.LastOrDefault(t => t.Role == "assistant")?.Text;
+        if (last is null)
+        {
+            return null;
+        }
+
+        var handles = last.IndexOf(AskReelHandles.HistoryMarker, StringComparison.Ordinal);
+        return (handles >= 0 ? last[..handles] : last).TrimEnd();
     }
 
     /// <summary>
@@ -1707,8 +1861,8 @@ public sealed class LiveSearchExpansionService(
         (title.Genres is { Length: > 0 } && title.Genres.Any(g => NegationTerms.EqualsAnyForm(g, word)))
         || NegationTerms.AnyLabelMatches(title.Keywords, word)
         || NegationTerms.AnyLabelMatches(title.Subgenres, word)
-        || NegationTerms.MatchesPhrase(title.Name, word)
-        || NegationTerms.MatchesPhrase(title.Overview, word);
+        || NegationTerms.MatchesPhrase(title.Name, word, literalOnly: true)
+        || NegationTerms.MatchesPhrase(title.Overview, word, literalOnly: true);
 
     /// <summary>
     /// Splits the similarity-ordered pool into the picks, the flagged "outside your request"

@@ -45,6 +45,9 @@ public static class AskReelHandles
     /// <summary>How many cards of one answer ride its history line.</summary>
     public const int MaxHistoryHandles = 8;
 
+    /// <summary>Where an assistant history line's handle suffix begins.</summary>
+    public const string HistoryMarker = " [Shown: ";
+
     /// <summary>
     /// The presented cards in prompt order: newest answer first, and within an answer by on-screen
     /// position. A pure function of the cards, so the same conversation state is the same prompt.
@@ -68,7 +71,7 @@ public static class AskReelHandles
     public static string HistorySuffix(IEnumerable<PresentedCard> ofOneAnswer)
     {
         var lines = ofOneAnswer.OrderBy(p => p.Rank).Take(MaxHistoryHandles).Select(p => p.Line).ToList();
-        return lines.Count == 0 ? string.Empty : $" [Shown: {string.Join(" · ", lines)}]";
+        return lines.Count == 0 ? string.Empty : $"{HistoryMarker}{string.Join(" · ", lines)}]";
     }
 
     /// <summary>

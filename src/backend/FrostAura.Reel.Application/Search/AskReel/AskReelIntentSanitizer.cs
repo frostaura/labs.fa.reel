@@ -20,6 +20,15 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// in the model's output only adds noise to the cache key and to the substring tests downstream, so
 /// they are stripped here. Discovery re-adds the account's excluded GENRES itself, deterministically,
 /// so the TMDB pull loses nothing.</para>
+///
+/// <para><b>Standing year bounds copied into the request.</b> The same restatement happens to the
+/// year window: on the live "ninja movies" and "samurai films" turns the model wrote the account's
+/// standing <c>MinYear=2000</c> into the intent (acceptance D2). Eligibility already applies the
+/// standing bound, so the copy filtered nothing — but it became a HARD constraint of the request, so
+/// the supply report counted only post-2000 titles ("Of the 43 …" against a catalogue truth of 62)
+/// and the year rule, probably the largest relaxation, was never offered. A bound equal to the
+/// standing one is dropped unless the user's own words name that year ("from 2000 on", "2000s",
+/// "'00s").</para>
 /// </summary>
 public static class AskReelIntentSanitizer
 {
@@ -54,7 +63,40 @@ public static class AskReelIntentSanitizer
             Keywords = keywords,
             ExcludeGenres = (intent.ExcludeGenres ?? []).Where(g => !IsStanding(g)).ToList(),
             ExcludeKeywords = (intent.ExcludeKeywords ?? []).Where(k => !IsStanding(k)).ToList(),
+            MinYear = CopiedStandingYear(intent.MinYear, standing.MinYear, rawQuery) ? null : intent.MinYear,
+            MaxYear = CopiedStandingYear(intent.MaxYear, standing.MaxYear, rawQuery) ? null : intent.MaxYear,
         };
+    }
+
+    /// <summary>
+    /// Whether a model-supplied year bound is only the account's standing bound restated: equal to it,
+    /// and not a year the user's own words name. Internal so the rule is pinned by unit tests.
+    /// </summary>
+    internal static bool CopiedStandingYear(int? asked, int? standing, string rawQuery)
+    {
+        if (asked is not { } year || standing != year)
+        {
+            return false;
+        }
+
+        var words = Words(rawQuery);
+        var full = year.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (words.Any(w => w == full || w == full + "s" || w == full + "'s"))
+        {
+            return false;
+        }
+
+        // A decade in the user's shorthand ("90s", "'90s", "00s") names its first year.
+        if (year % 10 == 0)
+        {
+            var decade = (year % 100).ToString("00", System.Globalization.CultureInfo.InvariantCulture) + "s";
+            if (words.Any(w => w.TrimStart('\'') == decade || w.TrimStart('\'') == decade[..^1] + "'s"))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

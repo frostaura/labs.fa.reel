@@ -62,4 +62,43 @@ public class AskReelIntentSanitizerTests
     [InlineData("horror, not gory", "horror")]
     public void The_positive_half_of_a_sentence_carries_no_negated_word(string raw, string expected) =>
         Assert.Equal(expected, AskReelIntentSanitizer.PositiveText(raw, ["superheroes", "ghosts", "gory"]));
+
+    /// <summary>
+    /// Acceptance D2: the model wrote the standing MinYear=2000 into the ninja and samurai intents, so
+    /// the supply counted post-2000 titles only (43 of a true 62) and never offered the year rule. A
+    /// bound equal to the standing one is dropped unless the user's words name the year.
+    /// </summary>
+    [Theory]
+    [InlineData(2000, 2000, "ninja movies", true)]
+    [InlineData(2000, 2000, "samurai films", true)]
+    [InlineData(2000, 2000, "ninja movies from 2000 on", false)]
+    [InlineData(2000, 2000, "2000s ninja movies", false)]
+    [InlineData(2000, 2000, "'00s ninja movies", false)]
+    [InlineData(1990, 1990, "ninja movies from the 90s", false)]
+    [InlineData(1990, 1990, "ninja movies from the '90s", false)]
+    [InlineData(1990, 1990, "ninja movies from the 90's", false)]
+    [InlineData(2010, 2000, "ninja movies", false)]
+    [InlineData(2000, null, "ninja movies", false)]
+    [InlineData(null, 2000, "ninja movies", false)]
+    [InlineData(2000, 2000, "ninja movies, 20000 leagues", true)]
+    public void A_year_bound_that_only_restates_the_standing_one_is_dropped(int? asked, int? standing, string raw, bool copied) =>
+        Assert.Equal(copied, AskReelIntentSanitizer.CopiedStandingYear(asked, standing, raw));
+
+    [Fact]
+    public void Sanitize_drops_a_copied_standing_window_and_keeps_an_asked_one()
+    {
+        var standing = FilterRuleSet.Create(
+            excludeGenres: null, includeGenres: null, excludeKeywords: null, languages: null,
+            minCrowdRating: null, minYear: 2000, maxYear: 2020);
+
+        var copied = AskReelIntentSanitizer.Sanitize(
+            Intent(["ninja"]) with { MinYear = 2000, MaxYear = 2020 }, standing, "ninja movies");
+        Assert.Null(copied.MinYear);
+        Assert.Null(copied.MaxYear);
+
+        var asked = AskReelIntentSanitizer.Sanitize(
+            Intent(["ninja"]) with { MinYear = 2010, MaxYear = 2020 }, standing, "ninja movies since 2010, up to 2020");
+        Assert.Equal(2010, asked.MinYear);
+        Assert.Equal(2020, asked.MaxYear);
+    }
 }

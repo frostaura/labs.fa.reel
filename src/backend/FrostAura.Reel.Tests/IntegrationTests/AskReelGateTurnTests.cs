@@ -8,8 +8,10 @@ using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Search;
@@ -138,12 +140,13 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     /// <summary>
-    /// A judge that failed claims nothing (§4.10): its cards are shown below every judged pick, in
-    /// retrieval order, with no why-line and no fit; the turn says it is degraded; and nothing it
-    /// returned is cached — the next identical turn asks the model again (A-8, C NEW-3).
+    /// A judge that failed claims nothing (§4.10), and with no card judged a match the turn is NOT an
+    /// answer (§4.8; D1): mode NoneFound, an empty grid, every card in the "not checked" tray with no
+    /// why-line, no fit and no verdict, a reply that says the cards went unchecked rather than the
+    /// model's pre-retrieval sentence, and nothing cached — the next identical turn asks again.
     /// </summary>
     [Fact]
-    public async Task A_failed_judge_shows_unjudged_cards_without_a_why_and_caches_nothing()
+    public async Task A_failed_judge_with_no_judged_pick_is_none_found_with_an_unchecked_tray()
     {
         if (!Fixture.Available)
         {
@@ -161,26 +164,276 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
 
         var done = Assert.Single(events, e => e.Event == "done").Data;
-        Assert.Equal(8, done.GetProperty("results").GetArrayLength());
-        Assert.All(done.GetProperty("results").EnumerateArray(), card =>
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Empty(done.GetProperty("results").EnumerateArray());
+        Assert.DoesNotContain(events, e => e.Event == "candidate");
+        Assert.Equal(8, done.GetProperty("unchecked").GetArrayLength());
+        Assert.All(done.GetProperty("unchecked").EnumerateArray(), card =>
         {
             Assert.Equal(JsonValueKind.Null, card.GetProperty("why").ValueKind);
             Assert.Equal(JsonValueKind.Null, card.GetProperty("fit").ValueKind);
             Assert.Equal(JsonValueKind.Null, card.GetProperty("satisfies").ValueKind);
         });
         Assert.Equal(["judge:2/2"], done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
+        Assert.Equal("8 not checked against what you asked — shown below", done.GetProperty("reason").GetString());
+
+        var reply = Assert.Single(events, e => e.Event == "assistant-message").Data.GetProperty("text").GetString()!;
+        Assert.DoesNotContain(VerdictAgent.Reply, reply, StringComparison.Ordinal);
+        Assert.Contains("couldn't check", reply, StringComparison.Ordinal);
+        Assert.Contains("8 titles I couldn't check against your request are below", reply, StringComparison.Ordinal);
+
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
         Assert.Equal("judge:2/2", outcome.DegradedFlags);
-        Assert.All(outcome.Cards, c => Assert.Equal("None", c.WhySource));
-        Assert.All(outcome.Cards, c => Assert.Equal("Fallback", c.FitSource));
-        Assert.DoesNotContain(
-            events.Where(e => e.Event == "candidate").Select(e => e.Data.GetProperty("why")),
-            why => why.ValueKind == JsonValueKind.String);
+        Assert.Equal(8, outcome.Cards.Count);
+        Assert.All(outcome.Cards, c =>
+        {
+            Assert.Equal(SearchTurnCardTier.Unchecked, c.Tier);
+            Assert.True(c.BelowFloor, "a non-grid tier must keep BelowFloor=true so an older image never promotes it.");
+            Assert.Equal("None", c.WhySource);
+            Assert.Equal("Fallback", c.FitSource);
+        });
 
         var judgedOnce = agent.Judged.Count;
         events.Clear();
         await service.StreamAsync(
             "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
         Assert.Equal(judgedOnce * 2, agent.Judged.Count);
+    }
+
+    /// <summary>
+    /// The other half of §4.10: with at least one judged match, cards whose batch failed are shown —
+    /// after every judged pick, with no why-line — and the reason line counts them apart rather than
+    /// as matching what was asked (D10).
+    /// </summary>
+    [Fact]
+    public async Task Unjudged_cards_trail_the_judged_picks_and_are_never_counted_as_matches()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 250, ("Yes", 3), ("Fail", 4)));
+        var agent = new VerdictAgent();
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit);
+
+        var outcome = await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("Picks", done.GetProperty("mode").GetString());
+        var results = done.GetProperty("results").EnumerateArray().ToList();
+        Assert.Equal(7, results.Count);
+        Assert.All(results.Take(3), c => Assert.Equal("yes", c.GetProperty("satisfies").GetString()));
+        Assert.All(results.Skip(3), c =>
+        {
+            Assert.StartsWith("Gate Fail", c.GetProperty("name").GetString(), StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, c.GetProperty("satisfies").ValueKind);
+            Assert.Equal(JsonValueKind.Null, c.GetProperty("why").ValueKind);
+        });
+        Assert.Empty(done.GetProperty("unchecked").EnumerateArray());
+        Assert.Equal("3 picks for you · 4 more not checked against what you asked", done.GetProperty("reason").GetString());
+        Assert.Equal(7, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.Pick));
+    }
+
+    /// <summary>
+    /// D2: the judge rules on the request in its conversation. "more please" after ninja films and
+    /// after romcoms are different requests, so the second conversation is judged afresh rather than
+    /// handed the first one's verdicts from the cache — while the same follow-up in the same context
+    /// still reuses them. The judge is told the earlier ask and the resolved reading.
+    /// </summary>
+    [Fact]
+    public async Task The_judge_rules_on_the_request_in_its_conversation_and_caches_by_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 600, ("Yes", 5)));
+        var agent = new VerdictAgent();
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var (service, _) = BuildService(accountId, tmdb, agent, out var emit, cache);
+
+        IReadOnlyList<ChatTurn> Thread(string ask) =>
+            [new ChatTurn("user", ask), new ChatTurn("assistant", "Here you go.")];
+
+        await service.StreamAsync("more please", Thread("ninja movies"), [], "US", [], emit, CancellationToken.None);
+        var afterNinja = agent.Judged.Count;
+        Assert.True(afterNinja > 0);
+        Assert.All(agent.Queries, q =>
+        {
+            Assert.StartsWith("more please\n", q, StringComparison.Ordinal);
+            Assert.Contains("Earlier in this conversation the user asked: “ninja movies”", q, StringComparison.Ordinal);
+            Assert.Contains("Read in context, they want", q, StringComparison.Ordinal);
+        });
+
+        await service.StreamAsync("more please", Thread("romantic comedies"), [], "US", [], emit, CancellationToken.None);
+        Assert.True(agent.Judged.Count > afterNinja, "a different conversation's verdicts were reused from the cache.");
+        Assert.Contains(agent.Queries, q => q.Contains("“romantic comedies”", StringComparison.Ordinal));
+
+        var afterRomcom = agent.Judged.Count;
+        await service.StreamAsync("more please", Thread("ninja movies"), [], "US", [], emit, CancellationToken.None);
+        Assert.Equal(afterRomcom, agent.Judged.Count);
+    }
+
+    /// <summary>
+    /// D3 (§4.8): a card with no prediction never clears a set bar. With a 6.0 bar and no model to
+    /// score anything, every judged match is held back with the under-bar cards, nothing reaches the
+    /// grid, and the turn says so — the gate and the supply's ClearingFloor agree.
+    /// </summary>
+    [Fact]
+    public async Task An_unscored_card_never_clears_a_set_bar()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await SetRatingFloorAsync(accountId, "6.0");
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 700, ("Yes", 4)));
+        var agent = new VerdictAgent();
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit);
+
+        var outcome = await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Empty(done.GetProperty("results").EnumerateArray());
+        Assert.Equal(4, done.GetProperty("belowFloor").GetArrayLength());
+        Assert.All(done.GetProperty("belowFloor").EnumerateArray(), c =>
+            Assert.Equal(JsonValueKind.Null, c.GetProperty("predictedRating").ValueKind));
+        Assert.Equal("no picks matched what you asked · 4 held back by your 6.0 bar — shown below", done.GetProperty("reason").GetString());
+        Assert.All(outcome.Cards, c => Assert.Equal(SearchTurnCardTier.BelowFloor, c.Tier));
+        Assert.DoesNotContain(events, e => e.Event == "candidate");
+        Assert.Contains("have no score from your model yet, so your 6.0 bar holds them back", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Under your", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// D4: titles the conversation already showed were excluded before anything was judged, so the
+    /// reply names them as shown — never "N unseen … none of the ones I checked is a match". And the
+    /// supply rides the wire with every enum as its NAME (acceptance D1): a numeric
+    /// <c>kind</c> made the client drop the whole <c>done</c> frame and spin forever.
+    /// </summary>
+    [Fact]
+    public async Task Titles_already_shown_here_are_named_as_shown_and_the_supply_kind_is_a_name()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = $"gateshown{Guid.NewGuid():N}"[..20];
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var shown = new List<Guid>();
+        for (var i = 0; i < 3; i++)
+        {
+            shown.Add(await SeedTopicalTitleAsync(topic));
+        }
+
+        // One more topical title, held out by a standing genre rule: the relaxation offer.
+        await SeedTopicalTitleAsync(topic, t => t.Genres = ["horror"]);
+        await AddFilterAsync(accountId, FilterKind.ExcludeGenre, "horror");
+        await SeedScoresAsync(accountId, shown, 8.0m);
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 800, ("No", 4)));
+        var agent = new VerdictAgent(keywords: [topic]);
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit, withRetrieval: true);
+
+        var outcome = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(
+                $"{topic} movies", [], shown, [], "US", [], ApiUsagePurpose.RerankAsk),
+            emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        var supply = done.GetProperty("supply");
+        Assert.Equal(3, supply.GetProperty("clearingFloor").GetInt32());
+        var knockout = Assert.Single(supply.GetProperty("knockouts").EnumerateArray());
+        Assert.Equal(JsonValueKind.String, knockout.GetProperty("kind").ValueKind);
+        Assert.Equal("ExcludeGenre", knockout.GetProperty("kind").GetString());
+        Assert.Equal(JsonValueKind.String, knockout.GetProperty("sample")[0].GetProperty("media").ValueKind);
+
+        Assert.StartsWith(
+            $"All 3 unseen {topic} titles inside your conditions were already shown in this conversation.",
+            outcome.AssistantText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("none of the ones I checked", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The acceptance's "feel-good movie" → "no superheroes please": a follow-up that names no media
+    /// keeps the conversation's single media type, and the judge is told so. One that names media
+    /// is read as it says.
+    /// </summary>
+    [Fact]
+    public async Task A_follow_up_silent_about_media_keeps_the_previous_reading_of_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 900, ("Yes", 3)));
+        var agent = new VerdictAgent();
+        var (service, _) = BuildService(accountId, tmdb, agent, out var emit);
+        var previous = new SearchIntent(["comedy"], ["feel-good"], [MediaType.Movie], "feel-good movie", null, null);
+
+        var carried = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(
+                "no superheroes please", [], [], [], "US", [], ApiUsagePurpose.RerankAsk, PriorIntent: previous),
+            emit, CancellationToken.None);
+        Assert.Equal([MediaType.Movie], AskReelCarry.Parse(carried.IntentJson)!.MediaTypes);
+        Assert.All(agent.Queries, q => Assert.Contains("they want a movie;", q, StringComparison.Ordinal));
+
+        var named = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(
+                "any shows instead?", [], [], [], "US", [], ApiUsagePurpose.RerankAsk, PriorIntent: previous),
+            emit, CancellationToken.None);
+        Assert.Empty(AskReelCarry.Parse(named.IntentJson)!.MediaTypes);
+    }
+
+    /// <summary>
+    /// D7: judging has a deadline. A provider that never answers costs its batches (unjudged, the
+    /// degraded flag), never the turn — which ends promptly instead of waiting on the adapter's
+    /// HTTP timeout.
+    /// </summary>
+    [Fact]
+    public async Task A_judge_that_never_answers_ends_the_turn_at_the_deadline()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 1000, ("Yes", 7)));
+        var agent = new VerdictAgent(delay: TimeSpan.FromMinutes(5));
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var judge = new AskReelJudge(agent, cache, NullLogger<AskReelJudge>.Instance) { StageDeadline = TimeSpan.FromMilliseconds(400) };
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit, cache, judge: judge);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var outcome = await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+        clock.Stop();
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), $"the turn waited {clock.Elapsed} on a silent judge.");
+        Assert.Equal("judge:2/2", outcome.DegradedFlags);
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.Equal(7, Assert.Single(events, e => e.Event == "done").Data.GetProperty("unchecked").GetArrayLength());
     }
 
     /// <summary>
@@ -400,7 +653,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
     private (LiveSearchExpansionService Service, List<(string Event, JsonElement Data)> Events) BuildService(
         Guid accountId, ITmdbClient tmdb, ISearchAgent agent, out LiveSearchExpansionService.Emit emit,
-        IMemoryCache? cache = null, bool withRetrieval = false)
+        IMemoryCache? cache = null, bool withRetrieval = false, AskReelJudge? judge = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -408,7 +661,9 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
         var eligibility = new EligibilityQueryBuilder(db);
         var featureBuilder = new FeatureVectorBuilder(db);
-        var engine = new FastTreeModelEngine();
+        // Scores only where an account has an active artifact, and then a constant: the gate's
+        // placement is under test here, not a model.
+        var engine = new ConstantModelEngine(8.4f);
         var residualModel = new OnlineResidualModel(
             db, featureBuilder, engine, new MemoryCache(new MemoryCacheOptions()), NullLogger<OnlineResidualModel>.Instance);
         var supply = withRetrieval ? new SupplyReporter(db, eligibility) : null;
@@ -433,7 +688,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             cache ?? new MemoryCache(new MemoryCacheOptions()),
             NullLogger<LiveSearchExpansionService>.Instance,
             supply is null ? null : new FacetRetriever(db, eligibility, supply),
-            supply);
+            supply,
+            judge);
 
         var events = new List<(string, JsonElement)>();
         emit = (name, payload) =>
@@ -447,6 +703,55 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             return Task.CompletedTask;
         };
         return (service, events);
+    }
+
+    private Task SetRatingFloorAsync(Guid accountId, string value) =>
+        AddFilterAsync(accountId, FilterKind.MinPredictedRating, value);
+
+    private async Task AddFilterAsync(Guid accountId, FilterKind kind, string value)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = kind,
+            Value = value,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>An active model artifact and a stored prediction for each title — what the supply report reads.</summary>
+    private async Task SeedScoresAsync(Guid accountId, IReadOnlyList<Guid> titleIds, decimal predicted)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var artifact = new ModelArtifact
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Version = 1,
+            ArtifactBytes = [1],
+            TrainingRunId = Guid.NewGuid(),
+            Status = ArtifactStatus.Active,
+            TrainedAt = DateTime.UtcNow,
+            FeatureSchemaJson = JsonSerializer.Serialize(new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
+        };
+        db.Add(artifact);
+        foreach (var titleId in titleIds)
+        {
+            db.Add(new TitleScore
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleId,
+                ModelArtifactId = artifact.Id,
+                PredictedRating = predicted,
+                ScoredAt = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedAccountAsync()
@@ -506,6 +811,9 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
         public List<string> Purposes { get; } = [];
 
+        /// <summary>The request text every judge call was given.</summary>
+        public List<string> Queries { get; } = [];
+
         public int MaxConcurrent { get; private set; }
 
         public int Interprets => Volatile.Read(ref _interprets);
@@ -538,6 +846,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
                 Judged.AddRange(titles.Select(t => t.TitleId));
                 BatchSizes.Add(titles.Count);
                 Purposes.Add(usagePurpose);
+                Queries.Add(query);
             }
 
             try
@@ -555,8 +864,13 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
                         .ToList();
                 }
 
-                return titles.Select(t => new RerankResult(
-                        t.TitleId, 0.8d, ResultSource.Llm, "Fits the request.", ResultSource.Llm, VerdictOf(t.Name)))
+                // "Gate Fail" titles come back as the adapter's fallback — a model that did not answer
+                // for them — so a batch can be part-judged and a turn can mix judged and unjudged cards.
+                return titles.Select(t => t.Name.StartsWith("Gate Fail", StringComparison.Ordinal)
+                        ? new RerankResult(
+                            t.TitleId, 0.66d, ResultSource.Fallback, "A science-fiction pick aligned with your taste.", ResultSource.Fallback)
+                        : new RerankResult(
+                            t.TitleId, 0.8d, ResultSource.Llm, "Fits the request.", ResultSource.Llm, VerdictOf(t.Name)))
                     .ToList();
             }
             finally
@@ -573,6 +887,23 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             : name.StartsWith("Gate Partial", StringComparison.Ordinal) ? Satisfies.Partial
             : name.StartsWith("Gate No", StringComparison.Ordinal) ? Satisfies.No
             : Satisfies.No;
+    }
+
+    private sealed class ConstantModelEngine(float score) : IModelEngine
+    {
+        public TrainedModel Train(TrainingMatrix matrix, string hyperparamsJson) =>
+            throw new NotSupportedException("The gate fixture scores; it never trains.");
+
+        public float[] Score(byte[] artifactBytes, float[][] features) => [.. features.Select(_ => score)];
+
+        public float[] ScoreCached(Guid modelKey, byte[] artifactBytes, float[][] features) => Score(artifactBytes, features);
+
+        public ScoredRow[] ScoreWithContributions(byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5) =>
+            [.. features.Select(_ => new ScoredRow(score, []))];
+
+        public ScoredRow[] ScoreWithContributionsCached(
+            Guid modelKey, byte[] artifactBytes, float[][] features, string[] featureNames, int topK = 5) =>
+            ScoreWithContributions(artifactBytes, features, featureNames, topK);
     }
 
     private sealed class UnitEmbeddingProvider : IEmbeddingProvider

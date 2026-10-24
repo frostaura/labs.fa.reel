@@ -262,6 +262,132 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
+    /// D9: an interrupted turn is recorded like a finished one — the judge flag for a batch that had
+    /// already failed, the stage timings to the moment of the abort, the models and the effort, and
+    /// the mode of what it showed.
+    /// </summary>
+    [Fact]
+    public async Task An_aborted_turn_records_its_degraded_flags_timings_and_mode()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Three batches: the first fails at once, the second answers, the third is slow — so the
+        // abort lands after a failed batch and a shown card, before the judge has finished.
+        var agent = new RecordingAgent(failFirstBatch: true, slowAfterFirstBatch: TimeSpan.FromSeconds(20));
+        using var factory = With(agent, new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 500, 18)));
+        var (accountId, client) = await SignInAsync(factory, $"turn-abort-flags-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await MarkExistingTitlesSeenAsync(accountId);
+            var clientTurnId = Guid.NewGuid();
+            var secondAnswered = 0;
+            using (var abort = new CancellationTokenSource())
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/api/search/ask")
+                {
+                    Content = JsonContent.Create(new { query = "something futuristic", clientTurnId }),
+                };
+                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, abort.Token);
+                await using var body = await response.Content.ReadAsStreamAsync(abort.Token);
+                using var reader = new StreamReader(body, Encoding.UTF8);
+                using var stopReading = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    while (await reader.ReadLineAsync(stopReading.Token) is { } line)
+                    {
+                        if (line.StartsWith("event: candidate", StringComparison.Ordinal))
+                        {
+                            secondAnswered++;
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Ten seconds in: the first two batches have long returned, the third is still out.
+                }
+
+                await abort.CancelAsync();
+            }
+
+            var failed = await EventuallyAsync(async () =>
+            {
+                await using var db = Scoped(accountId);
+                return await db.SearchTurns.FirstOrDefaultAsync(t => t.ClientTurnId == clientTurnId);
+            }, turn => turn is { Status: SearchTurnStatus.Failed });
+
+            Assert.NotNull(failed);
+            Assert.Equal(SearchTurnFailure.ClientAborted, failed!.FailureCode);
+            Assert.Equal(6, secondAnswered);
+            Assert.Equal("judge:1/3", failed.DegradedFlags);
+            Assert.Equal(SearchTurnMode.Picks, failed.Mode);
+            Assert.Equal(SearchTurnDegraded.ProviderDefaultEffort, failed.ReasoningEffort);
+            using var timings = JsonDocument.Parse(failed.StageTimingsJson!);
+            Assert.True(timings.RootElement.TryGetProperty("interpret", out _));
+            using var models = JsonDocument.Parse(failed.ModelIds!);
+            Assert.Equal(RecordingAgent.Model, models.RootElement.GetProperty("judge").GetString());
+        }
+    }
+
+    /// <summary>
+    /// D8: the model's handles are cut to the last answers that put PICKS on screen. Three tray-only
+    /// answers in a row used to push the last real answer out of "the second one".
+    /// </summary>
+    [Fact]
+    public async Task Tray_only_answers_never_push_real_picks_out_of_the_handles()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var agent = new RecordingAgent();
+        using var factory = With(agent, new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 600, 3)));
+        var (accountId, client) = await SignInAsync(factory, $"turn-handles-trays-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await MarkExistingTitlesSeenAsync(accountId);
+            var (conversationId, picks) = await SeedPicksThenTrayOnlyAnswersAsync(accountId);
+
+            await AskAsync(client, new { query = "more like the second one", conversationId, clientTurnId = Guid.NewGuid() });
+
+            var call = agent.Calls[^1];
+            Assert.Equal(picks.Select((n, i) => $"T1.{i + 1} {n} (2015)"), call.Shown);
+        }
+    }
+
+    /// <summary>
+    /// The endpoint half of the media carry: the second turn's reading names no media, the first one's
+    /// named movies, and the stored reading of the second turn is movies.
+    /// </summary>
+    [Fact]
+    public async Task A_follow_up_inherits_the_media_of_the_answer_before_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var agent = new RecordingAgent(mediaByCall: [[MediaType.Movie], []]);
+        using var factory = With(agent, new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 700, 8)));
+        var (accountId, client) = await SignInAsync(factory, $"turn-media-carry-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await MarkExistingTitlesSeenAsync(accountId);
+            var first = await AskAsync(client, new { query = "a feel-good movie", clientTurnId = Guid.NewGuid() });
+            var conversationId = Frame(first, "conversation").GetProperty("id").GetGuid();
+            var second = await AskAsync(client, new { query = "no superheroes please", conversationId, clientTurnId = Guid.NewGuid() });
+            var turnId = Frame(second, "conversation").GetProperty("turnId").GetGuid();
+
+            await using var db = Scoped(accountId);
+            var stored = await db.SearchTurns.SingleAsync(t => t.Id == turnId);
+            Assert.Equal([MediaType.Movie], Application.Search.AskReel.AskReelCarry.Parse(stored.IntentJson)!.MediaTypes);
+        }
+    }
+
+    /// <summary>
     /// Silence is never longer than the heartbeat: a turn whose model takes longer than five seconds
     /// sends a `phase` frame marked as a heartbeat, which re-arms the client's watchdog through the
     /// parser that `:keepalive` comments never reach (B-10).
@@ -321,6 +447,100 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
         var scope = new AccountContext();
         scope.SetAccount(accountId);
         return Fixture.CreateContext(scope);
+    }
+
+    /// <summary>
+    /// A conversation whose first answer showed two picks and whose next three showed trays only — a
+    /// near-miss tray, a floor tray, an unchecked tray.
+    /// </summary>
+    private async Task<(Guid ConversationId, IReadOnlyList<string> Picks)> SeedPicksThenTrayOnlyAnswersAsync(Guid accountId)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var now = DateTime.UtcNow;
+        var conversation = new SearchConversation
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Title = "picks, then trays",
+            CreatedAt = now,
+            LastTurnAt = now,
+            TurnCount = 8,
+            LastCardsAt = now,
+        };
+        db.SearchConversations.Add(conversation);
+        var picks = new List<string>();
+        string[] tiers = [SearchTurnCardTier.Pick, SearchTurnCardTier.NearMiss, SearchTurnCardTier.BelowFloor, SearchTurnCardTier.Unchecked];
+        for (var answer = 0; answer < tiers.Length; answer++)
+        {
+            db.SearchTurns.Add(new SearchTurn
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                ConversationId = conversation.Id,
+                Role = "user",
+                Text = $"question {answer}",
+                CreatedAt = now,
+                Sequence = answer * 2,
+                Kind = SearchTurnKind.Ask,
+                Status = SearchTurnStatus.Completed,
+                CompletedAt = now,
+            });
+            var assistant = new SearchTurn
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                ConversationId = conversation.Id,
+                Role = "assistant",
+                Text = $"answer {answer}",
+                CreatedAt = now,
+                Sequence = (answer * 2) + 1,
+                ClientTurnId = Guid.NewGuid(),
+                Kind = SearchTurnKind.Ask,
+                Status = SearchTurnStatus.Completed,
+                CompletedAt = now,
+                Mode = answer == 0 ? SearchTurnMode.Picks : SearchTurnMode.NoneFound,
+            };
+            db.SearchTurns.Add(assistant);
+            for (var rank = 0; rank < 2; rank++)
+            {
+                var tmdbId = Random.Shared.NextInt64(1_000_000_000, long.MaxValue);
+                var title = new Title
+                {
+                    Id = Guid.NewGuid(),
+                    MediaType = MediaType.Movie,
+                    TmdbId = tmdbId,
+                    TraktSlug = $"handles-{tmdbId}",
+                    Name = $"Handles {answer}.{rank} {tmdbId}",
+                    Year = 2015,
+                    Genres = ["science-fiction"],
+                    Language = "en",
+                };
+                db.Titles.Add(title);
+                if (answer == 0)
+                {
+                    picks.Add(title.Name);
+                }
+
+                db.SearchTurnCards.Add(new SearchTurnCard
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    ConversationId = conversation.Id,
+                    TurnId = assistant.Id,
+                    TitleId = title.Id,
+                    TmdbId = tmdbId,
+                    Rank = rank,
+                    Tier = tiers[answer],
+                    BelowFloor = tiers[answer] != SearchTurnCardTier.Pick,
+                    Blend = 0.5m,
+                    WhySource = "None",
+                    CreatedAt = now,
+                });
+            }
+        }
+
+        await db.SaveChangesAsync();
+        return (conversation.Id, picks);
     }
 
     private async Task MarkExistingTitlesSeenAsync(Guid accountId)
@@ -405,7 +625,8 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
     /// first reading, slow to start, or slow on every judge batch after the first.
     /// </summary>
     private sealed class RecordingAgent(
-        bool degradeFirst = false, TimeSpan? interpretDelay = null, TimeSpan? slowAfterFirstBatch = null) : ISearchAgent
+        bool degradeFirst = false, TimeSpan? interpretDelay = null, TimeSpan? slowAfterFirstBatch = null,
+        bool failFirstBatch = false, IReadOnlyList<IReadOnlyList<MediaType>>? mediaByCall = null) : ISearchAgent
     {
         public const string Model = "recording-agent";
 
@@ -437,7 +658,14 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
                 await Task.Delay(wait, ct);
             }
 
-            var intent = new SearchIntent(["science-fiction"], ["futuristic"], [], "futuristic", null, null);
+            int call;
+            lock (_gate)
+            {
+                call = Calls.Count - 1;
+            }
+
+            var media = mediaByCall is { Count: > 0 } byCall ? byCall[Math.Min(call, byCall.Count - 1)] : [];
+            var intent = new SearchIntent(["science-fiction"], ["futuristic"], media, "futuristic", null, null);
             if (degradeFirst && !_degradedOnce)
             {
                 _degradedOnce = true;
@@ -452,7 +680,14 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             var index = Interlocked.Increment(ref _batches);
-            if (index > 1 && SlowAfterFirstBatch is { } slow)
+            if (index == 1 && failFirstBatch)
+            {
+                // The adapter's own fallback for a batch the model did not answer.
+                return [.. titles.Select(t => new RerankResult(t.TitleId, 0.66d, ResultSource.Fallback, "A pick.", ResultSource.Fallback))];
+            }
+
+            // With a failing first batch, the second still answers promptly and only the third is slow.
+            if (index > (failFirstBatch ? 2 : 1) && SlowAfterFirstBatch is { } slow)
             {
                 await Task.Delay(slow, ct);
             }

@@ -347,7 +347,7 @@ public class AskReelRerankContextTests(PostgresFixture fixture) : EmbeddedCatalo
         {
             Judged.AddRange(titles);
             return Task.FromResult<IReadOnlyList<RerankResult>>(
-                titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
         }
     }
 

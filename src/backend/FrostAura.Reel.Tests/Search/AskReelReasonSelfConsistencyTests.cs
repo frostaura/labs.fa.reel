@@ -24,9 +24,13 @@ public class AskReelReasonSelfConsistencyTests
 
     private static readonly string Bar = AskReelReason.FormatFloor(Floor);
 
-    public static TheoryData<int, int, int, int> Branches()
+    /// <summary>
+    /// Every REACHABLE combination: unjudged cards reach the grid only beneath a judged pick, and the
+    /// unchecked tray exists only on a turn with nothing in the grid (§4.8, §4.10).
+    /// </summary>
+    public static TheoryData<int, int, int, int, int, int> Branches()
     {
-        var data = new TheoryData<int, int, int, int>();
+        var data = new TheoryData<int, int, int, int, int, int>();
         foreach (var picks in new[] { 0, 1, 2, 9, 16 })
         {
             foreach (var outside in new[] { 0, 1, 3, 11 })
@@ -35,7 +39,20 @@ public class AskReelReasonSelfConsistencyTests
                 {
                     foreach (var nearMiss in new[] { 0, 1, 4 })
                     {
-                        data.Add(picks, outside, tray, nearMiss);
+                        foreach (var notChecked in new[] { 0, 1, 5 })
+                        {
+                            if (picks == 0 && (outside > 0 || notChecked > 0))
+                            {
+                                // Neither reaches the grid without a judged pick above it.
+                                continue;
+                            }
+
+                            data.Add(picks, outside, tray, nearMiss, notChecked, 0);
+                            if (picks == 0)
+                            {
+                                data.Add(picks, outside, tray, nearMiss, 0, notChecked + 3);
+                            }
+                        }
                     }
                 }
             }
@@ -46,9 +63,10 @@ public class AskReelReasonSelfConsistencyTests
 
     [Theory]
     [MemberData(nameof(Branches))]
-    public void Every_clause_is_true_of_the_counts_that_produced_it(int picks, int outside, int tray, int nearMiss)
+    public void Every_clause_is_true_of_the_counts_that_produced_it(
+        int picks, int outside, int tray, int nearMiss, int uncheckedInGrid, int uncheckedTray)
     {
-        var line = AskReelReason.Build(new TurnCounts(picks, outside, tray, nearMiss), Floor);
+        var line = AskReelReason.Build(new TurnCounts(picks, outside, tray, nearMiss, uncheckedInGrid, uncheckedTray), Floor);
         var clauses = line.Split(AskReelReason.Separator);
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
@@ -60,8 +78,18 @@ public class AskReelReasonSelfConsistencyTests
 
             if (clause == AskReelReason.Empty)
             {
-                Assert.Equal(0, picks + outside);
+                Assert.Equal(0, picks + outside + uncheckedInGrid + uncheckedTray);
                 seen.Add("empty");
+            }
+            else if (Match(clause, @"^(\d+) more not checked against what you asked$") is { } u)
+            {
+                Assert.Equal(uncheckedInGrid, Count(u));
+                seen.Add("unchecked");
+            }
+            else if (Match(clause, @"^(\d+) not checked against what you asked — shown below$") is { } ut)
+            {
+                Assert.Equal(uncheckedTray, Count(ut));
+                seen.Add("uncheckedTray");
             }
             else if (Match(clause, @"^(\d+) (pick|picks) for you$") is { } forYou)
             {
@@ -81,7 +109,7 @@ public class AskReelReasonSelfConsistencyTests
                 Assert.Equal(outside, Count(o));
                 seen.Add("outside");
             }
-            else if (Match(clause, $@"^(\d+) under your {Regex.Escape(Bar)} bar — shown below$") is { } t)
+            else if (Match(clause, $@"^(\d+) held back by your {Regex.Escape(Bar)} bar — shown below$") is { } t)
             {
                 Assert.Equal(tray, Count(t));
                 seen.Add("tray");
@@ -98,8 +126,10 @@ public class AskReelReasonSelfConsistencyTests
         }
 
         // Every non-zero count is spoken, exactly once.
-        Assert.Equal(picks + outside == 0, seen.Contains("empty"));
-        Assert.Equal(picks + outside > 0, seen.Contains("picks"));
+        Assert.Equal(picks + outside + uncheckedInGrid + uncheckedTray == 0, seen.Contains("empty"));
+        Assert.Equal(picks + outside + uncheckedInGrid > 0, seen.Contains("picks"));
+        Assert.Equal(uncheckedInGrid > 0, seen.Contains("unchecked"));
+        Assert.Equal(uncheckedTray > 0, seen.Contains("uncheckedTray"));
         Assert.Equal(outside > 0, seen.Contains("outside"));
         Assert.Equal(tray > 0, seen.Contains("tray"));
         Assert.Equal(nearMiss > 0, seen.Contains("nearMiss"));

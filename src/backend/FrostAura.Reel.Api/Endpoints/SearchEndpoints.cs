@@ -541,10 +541,11 @@ public static class SearchEndpoints
                 // never read back to it.
                 var presented = await PresentedAsync(db, conversation.Id, priorSequences, ct);
                 var history = await HistoryAsync(db, conversation.Id, priorSequences, ct);
+                var priorIntent = await PriorIntentAsync(db, conversation.Id, priorSequences, ct);
                 outcome = await expansion.StreamAsync(
                     new LiveSearchExpansionService.AskTurnInput(
                         message, history, shown, presented, profile?.Region, mediaFilter,
-                        Domain.Sync.ApiUsagePurpose.RerankAsk, debug, assistantTurn.Id, progress),
+                        Domain.Sync.ApiUsagePurpose.RerankAsk, debug, assistantTurn.Id, progress, priorIntent),
                     emit,
                     ct);
             }
@@ -555,12 +556,22 @@ public static class SearchEndpoints
                 // failure for the row that keeps WHAT WAS SHOWN: the reply and every card already
                 // on screen are persisted, so the next turn's history and no-repeat set contain them
                 // and "none of the above" points at the cards it means (A-6, B-3).
+                // The record keeps what a finished turn keeps — every degraded flag raised so far
+                // (a failed judge batch included), the timings to the moment of the abort, the
+                // models in play — so an interrupted turn is as diagnosable as a finished one (D9).
+                var shownCards = progress.Cards;
                 outcome = LiveSearchExpansionService.TurnOutcome.Crashed(
                     progress.AssistantText,
                     "the answer was interrupted",
                     Domain.Search.SearchTurnFailure.ClientAborted,
-                    cards: progress.Cards,
-                    degradedFlags: progress.Degraded ? Domain.Search.SearchTurnDegraded.Plan : null);
+                    cards: shownCards,
+                    degradedFlags: progress.DegradedFlags) with
+                {
+                    StageTimingsJson = progress.StageTimingsJson,
+                    ModelIdsJson = progress.ModelIdsJson,
+                    ReasoningEffort = progress.ReasoningEffort,
+                    Mode = shownCards.Count > 0 ? Domain.Search.SearchTurnMode.Picks : null,
+                };
             }
             finally
             {
@@ -660,6 +671,7 @@ public static class SearchEndpoints
                             // Present-but-empty, so a poller renders one shape on both status codes.
                             belowFloor = Array.Empty<object>(),
                             nearMiss = Array.Empty<object>(),
+                            @unchecked = Array.Empty<object>(),
                             mode = (string?)null,
                         },
                         statusCode: StatusCodes.Status202Accepted);
@@ -682,6 +694,7 @@ public static class SearchEndpoints
                 // the whole answer, not the half of it that cleared the bar.
                 belowFloor = replay.BelowFloor,
                 nearMiss = replay.NearMiss ?? [],
+                @unchecked = replay.Unchecked ?? [],
                 mode = replay.Mode,
                 removed = replay.Removed,
             });
@@ -995,6 +1008,8 @@ public static class SearchEndpoints
                 // Whether this row's reply is the degraded copy — a turn whose reading failed — so a
                 // resumed thread can show it as degraded rather than as an ordinary answer.
                 degraded = Domain.Search.SearchTurnDegraded.PlanFailed(t.DegradedFlags),
+                // Whether a judge batch failed, so the screen can say some cards went unchecked.
+                judgeDegraded = Domain.Search.SearchTurnDegraded.JudgeFailed(t.DegradedFlags),
                 mode = t.Role == "assistant" ? Domain.Search.SearchTurnMode.Parse(t.Mode) : null,
             }),
             cards = replay.Cards,
@@ -1005,6 +1020,7 @@ public static class SearchEndpoints
             // your bar" fence had silently emptied.
             belowFloor = replay.BelowFloor,
             nearMiss = replay.NearMiss ?? [],
+            @unchecked = replay.Unchecked ?? [],
             mode = replay.Mode,
             reason = replay.Reason,
             // The collision notice the answer was produced under, restored with the answer. Null on
@@ -1054,9 +1070,11 @@ public static class SearchEndpoints
     /// </param>
     /// <param name="NearMiss">The stored near-miss tray, on the same terms as the floor tray.</param>
     /// <param name="Mode">The newest turn's mode — <c>Picks</c> or <c>NoneFound</c>.</param>
+    /// <param name="Unchecked">The stored "not checked against your request" tray, on the same terms.</param>
     private sealed record ReplayedTurns(
         IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason,
-        object? Conflict = null, IReadOnlyList<object>? NearMiss = null, string? Mode = null);
+        object? Conflict = null, IReadOnlyList<object>? NearMiss = null, string? Mode = null,
+        IReadOnlyList<object>? Unchecked = null);
 
     /// <summary>
     /// THE read projection. Every route that hands a stored turn back to a client goes through
@@ -1206,7 +1224,9 @@ public static class SearchEndpoints
             ConflictOf(turns[^1].ConflictJson),
             survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.NearMiss)
                 .Select(Project).ToList(),
-            mode);
+            mode,
+            survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.Unchecked)
+                .Select(Project).ToList());
     }
 
     /// <summary>
@@ -1286,11 +1306,20 @@ public static class SearchEndpoints
         }
 
         var answerNumber = assistantRows.Select((id, index) => (id, index)).ToDictionary(x => x.id, x => x.index + 1);
-        var withCards = await db.SearchTurnCards
-            .Where(c => c.ConversationId == conversationId)
+
+        // Answers that put PICKS on screen, decided before the cut to the last three: a tray-only
+        // none-found answer is not "the second one" of anything, and three of them in a row used to
+        // push the last real answer out of the model's handles (D8). The tier is read through
+        // SearchTurnCardTier.Of in memory — a row older than the column has no tier to query on.
+        var withCards = (await db.SearchTurnCards
+                .Where(c => c.ConversationId == conversationId)
+                .Select(c => new { c.TurnId, c.Tier, c.BelowFloor })
+                .ToListAsync(ct))
+            .Where(c => Domain.Search.SearchTurnCardTier.Of(
+                new Domain.Search.SearchTurnCard { Tier = c.Tier, BelowFloor = c.BelowFloor }) == Domain.Search.SearchTurnCardTier.Pick)
             .Select(c => c.TurnId)
             .Distinct()
-            .ToListAsync(ct);
+            .ToList();
         var recent = withCards
             .Where(answerNumber.ContainsKey)
             .OrderByDescending(id => answerNumber[id])
@@ -1311,6 +1340,27 @@ public static class SearchEndpoints
             .OrderByDescending(p => p.Turn)
             .ThenBy(p => p.Rank)
             .ToList();
+    }
+
+    /// <summary>
+    /// The previous answer's reading of the request — the newest assistant row before this turn that
+    /// stored one and whose plan did not fail — for what a follow-up inherits when its own words are
+    /// silent (AskReelCarry). Null on a first turn or an unreadable row.
+    /// </summary>
+    private static async Task<Domain.Ports.SearchIntent?> PriorIntentAsync(
+        IReelDbContext db, Guid conversationId, int beforeSequence, CancellationToken ct)
+    {
+        var rows = await db.SearchTurns
+            .Where(t => t.ConversationId == conversationId
+                && t.Role == "assistant"
+                && t.Sequence < beforeSequence
+                && t.IntentJson != null)
+            .OrderByDescending(t => t.Sequence)
+            .Select(t => new { t.IntentJson, t.DegradedFlags })
+            .Take(AskHistoryTurns)
+            .ToListAsync(ct);
+        var row = rows.FirstOrDefault(r => !Domain.Search.SearchTurnDegraded.PlanFailed(r.DegradedFlags));
+        return row is null ? null : AskReelCarry.Parse(row.IntentJson);
     }
 
     /// <summary>
@@ -1478,6 +1528,7 @@ public static class SearchEndpoints
             // delivery of one turn differ from the first.
             belowFloor = replay.BelowFloor,
             nearMiss = replay.NearMiss ?? [],
+            @unchecked = replay.Unchecked ?? [],
             mode = replay.Mode,
             // A failed turn replays as the failure it was. Answering a retry with a cheerful empty
             // result set would tell the client the question succeeded and returned nothing.

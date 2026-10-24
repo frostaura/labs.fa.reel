@@ -1,3 +1,5 @@
+using FrostAura.Reel.Domain.Search;
+
 namespace FrostAura.Reel.Application.Search.AskReel;
 
 /// <summary>
@@ -20,9 +22,13 @@ public sealed class AskTurnProgress
     private readonly object _gate = new();
     private readonly List<LiveSearchExpansionService.TurnCard> _cards = [];
     private readonly HashSet<Guid> _cardIds = [];
+    private readonly List<string> _flags = [];
     private string? _assistantText;
     private bool _degraded;
     private object? _lastPhase;
+    private AskStageTimings? _timings;
+    private string? _modelIdsJson;
+    private string? _effort;
 
     /// <summary>The reply the user was shown, once it was shown.</summary>
     public string? AssistantText
@@ -68,6 +74,92 @@ public sealed class AskTurnProgress
             lock (_gate)
             {
                 return [.. _cards];
+            }
+        }
+    }
+
+    /// <summary>
+    /// The turn's degraded flags so far (<c>plan</c>, <c>judge:n/m</c>), comma-joined as stored; null
+    /// when nothing degraded. An aborted turn records these exactly as a finished one would (D9).
+    /// </summary>
+    public string? DegradedFlags
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _flags.Count == 0 ? null : string.Join(',', _flags);
+            }
+        }
+    }
+
+    /// <summary>The stage timings up to now, as stored JSON; null before the pipeline attached them.</summary>
+    public string? StageTimingsJson
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _timings is null ? null : System.Text.Json.JsonSerializer.Serialize(_timings.Snapshot());
+            }
+        }
+    }
+
+    /// <summary>The models behind the turn, as stored JSON; null before the pipeline attached them.</summary>
+    public string? ModelIdsJson
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _modelIdsJson;
+            }
+        }
+    }
+
+    /// <summary>The reasoning effort the turn ran at; null before the pipeline attached it.</summary>
+    public string? ReasoningEffort
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _effort;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The turn's record-keeping, attached once at the start of the pipeline so an abort can persist
+    /// the timings so far and the models in play.
+    /// </summary>
+    public void Attach(AskStageTimings timings, string modelIdsJson, string effort)
+    {
+        lock (_gate)
+        {
+            _timings = timings;
+            _modelIdsJson = modelIdsJson;
+            _effort = effort;
+        }
+    }
+
+    /// <summary>
+    /// Records a degraded flag as it is raised. A flag already recorded is ignored; a judge flag
+    /// (<c>judge:n/m</c>) replaces the previous judge flag, so the count only ever grows in place.
+    /// </summary>
+    public void Degrade(string flag)
+    {
+        ArgumentNullException.ThrowIfNull(flag);
+        lock (_gate)
+        {
+            if (flag.StartsWith(SearchTurnDegraded.JudgePrefix, StringComparison.Ordinal))
+            {
+                _flags.RemoveAll(f => f.StartsWith(SearchTurnDegraded.JudgePrefix, StringComparison.Ordinal));
+            }
+
+            if (!_flags.Contains(flag, StringComparer.Ordinal))
+            {
+                _flags.Add(flag);
             }
         }
     }

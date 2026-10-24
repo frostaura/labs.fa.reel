@@ -95,7 +95,7 @@ data: {"stage":"searching","found":0,"scored":0}
 
 id: 9
 event: done
-data: {"results":[…],"streamed":10,"kept":8,"droppedByFloor":2,"belowFloor":[…],"nearMiss":[…],"mode":"Picks","supply":null,"degraded":[],"reason":"…","timingsMs":null,"debug":null}
+data: {"results":[…],"streamed":10,"kept":8,"droppedByFloor":2,"belowFloor":[…],"nearMiss":[…],"unchecked":[],"mode":"Picks","supply":null,"degraded":[],"reason":"…","timingsMs":null,"debug":null}
 ```
 
 **The interim gate (trust-v1, WS-2 task 1).** The top sixteen candidates are judged against the
@@ -105,21 +105,35 @@ REQUEST — at most three batches of six in flight at once — and each card is 
 | Verdict | Clears the bar | Goes to | Stored `Tier` | Exposure |
 | --- | --- | --- | --- | --- |
 | `yes` | yes | `results` (a pick), emitted as its batch returns | `Pick` | yes |
-| `yes` | no | `belowFloor` | `BelowFloor` | no |
+| `yes` or none | no, or no score while a bar is set | `belowFloor`, the "held back by your bar" tray | `BelowFloor` | no |
 | `partial` | either | `nearMiss`, a collapsed "close, but not quite" tray | `NearMiss` | no |
 | `no` | either | nowhere — not shown, not stored | — | no |
-| none (a failed batch, the stub) | yes | `results`, after every judged pick, in retrieval order, **no why-line, no fit** | `Pick` | yes, `WhySource=None` |
+| none (a failed batch, the stub), on a turn with at least one `yes` pick | yes | `results`, after every judged pick, in retrieval order, **no why-line, no fit** | `Pick` | yes, `WhySource=None` |
+| none, on a turn with **no** `yes` pick | yes | `unchecked`, the "not checked against your request" tray; the turn is `NoneFound` | `Unchecked` | no |
 
-The floor **never relaxes**. A fallback verdict is never cached, never shown as model output and
+The floor **never relaxes**, and a card with no prediction never clears a set bar (§4.8: unscored
+cards are never picks) — the same definition `SupplyReport.ClearingFloor` counts by. Unjudged cards
+never make an answer on their own: sixteen of them under the model's pre-retrieval sentence is the
+original "cards that don't match" failure. Every non-grid tier also stores `BelowFloor = true`, so an
+image older than the tier never promotes it; an unknown tier reads as `NearMiss`.
+
+The judge rules on the request **in its conversation** — the message, the conversation's last two
+user asks, and the resolved reading (media, genres, topic, years, exclusions) — and its verdict cache
+is keyed on that composed text, so a verdict is reused only where the same thing was asked in the
+same context. Judging has a 25 s deadline from the start of the stage; a batch still out by then is a
+failed batch. A fallback verdict is never cached, never shown as model output and
 never logged as `Llm`. The reply (`assistant-message`) goes out **once**, just before the first pick
 — not as the turn's opening frame — and carries `degraded: true` when every attempt to read the
 question failed (its text is then the degraded copy, which quotes nobody).
 
-**`mode: "NoneFound"`** when nothing reached `results`. The reply is then composed deterministically
+**`mode: "NoneFound"`** when no card was judged `yes` (unjudged cards then sit in `unchecked`). The reply is then composed deterministically
 from the `supply` report (seen, saved or dismissed, held out by conditions, under the bar, unscored,
 and the drop-one relaxations that would unlock something — "already seen" is never one of them);
 `supply` rides `done` on that turn only and is `null` on every other. `degraded` lists what did not
-run as designed: `plan`, `judge:{failed}/{batches}`.
+run as designed: `plan`, `judge:{failed}/{batches}`. Every enum inside `supply` is written as its
+name (`"kind": "Language"`), never a number. A follow-up that names no media inherits the previous
+reading's single media type. A client-aborted turn stores its degraded flags, stage timings, model ids
+and mode exactly as a finished turn does.
 
 The `conversation` frame is first and always present on a live turn: it is how the client learns
 the conversation id to remember, the turn id to reconnect to, and where in the transcript it sits.
@@ -186,7 +200,7 @@ not the thing another page would be a page *of*.
 | --- | --- |
 | `GET /api/search/conversations?limit=20` | `[{ id, title, turnCount, lastTurnAt, lastCardsAt }]` |
 | `GET /api/search/conversations/{id}` | the resume payload below; `404` if it is not the caller's |
-| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`**, unless the row is stale; see *Stale turns* |
+| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, nearMiss, unchecked, mode, removed }` — **`202` while `Pending`**, unless the row is stale; see *Stale turns* |
 | `DELETE /api/search/conversations/{id}` | `204`. Cards, turns, conversation. **Never exposures.** |
 | `GET /api/search/conversations/latest` | **deprecated** — the same payload for the newest conversation |
 
@@ -197,9 +211,13 @@ The resume payload:
   "id": "…", "title": "…", "lastCardsAt": null,
   "lastTurnAt": "2026-09-11T00:54:21.301Z",
   "turns":   [{ "id": "…", "sequence": 0, "role": "user", "text": "…",
-                "kind": "ask", "status": "Completed", "failureCode": null }],
+                "kind": "ask", "status": "Completed", "failureCode": null,
+                "degraded": false, "judgeDegraded": false, "mode": null }],
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
+  "nearMiss":    [ /* the near-miss tray */ ],
+  "unchecked":   [ /* the not-checked tray */ ],
+  "mode":        "Picks",
   "reason":  "…",        // the newest replayed turn's reason, verbatim
   "conflict": {          // the collision notice that turn emitted, or null — see below
     "excludedGenres":   ["comedy"],

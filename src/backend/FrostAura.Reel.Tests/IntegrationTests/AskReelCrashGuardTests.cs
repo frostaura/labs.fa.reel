@@ -412,7 +412,8 @@ public class AskReelCrashGuardTests(PostgresFixture fixture) : EmbeddedCatalogTe
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+            Task.FromResult<IReadOnlyList<RerankResult>>(
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     /// <summary>Deterministic unit vectors, one per text — the honest provider these tests contrast with.</summary>

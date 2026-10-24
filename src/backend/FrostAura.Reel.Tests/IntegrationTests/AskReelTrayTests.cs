@@ -167,6 +167,11 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
             // The same repeat behind a different fence — a tray title re-trayed is still a title
             // the user has already been shown twice.
             Assert.Empty(TmdbIds(page, "belowFloor").Intersect(tray));
+            // And the unchecked tray (a stub judge rules on nothing, so above-bar cards land there):
+            // shown once is shown, whichever fence it sat behind.
+            var uncheckedFirst = TmdbIds(first, "unchecked");
+            Assert.Empty(TmdbIds(page, "unchecked").Intersect(uncheckedFirst));
+            Assert.Empty(TmdbIds(page, "results").Intersect(uncheckedFirst));
 
             // And the mechanism, stated last so a failure above names the defect rather than the
             // implementation detail: what the user saw is what the server stored.
@@ -200,7 +205,8 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
             .Distinct()
             .ToListAsync();
         var tray = await db.SearchTurnCards
-            .Where(c => c.ConversationId == conversationId && c.BelowFloor)
+            .Where(c => c.ConversationId == conversationId
+                && (c.Tier == SearchTurnCardTier.BelowFloor || (c.Tier == null && c.BelowFloor)))
             .Select(c => c.TmdbId!.Value)
             .ToListAsync();
 
@@ -509,7 +515,10 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         return await db.SearchTurnCards
-            .Where(c => c.ConversationId == conversationId && c.BelowFloor && c.TmdbId != null)
+            // By TIER: the BelowFloor flag also marks every other non-grid tier (near miss, unchecked)
+            // so an older image never promotes them; the floor tray is one tier among those.
+            .Where(c => c.ConversationId == conversationId && c.TmdbId != null
+                && (c.Tier == SearchTurnCardTier.BelowFloor || (c.Tier == null && c.BelowFloor)))
             .Select(c => c.TmdbId!.Value)
             .ToListAsync();
     }
@@ -518,7 +527,8 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         return await db.SearchTurnCards
-            .Where(c => c.ConversationId == conversationId && c.BelowFloor)
+            .Where(c => c.ConversationId == conversationId
+                && (c.Tier == SearchTurnCardTier.BelowFloor || (c.Tier == null && c.BelowFloor)))
             .OrderBy(c => c.Rank)
             .Select(c => c.TitleId)
             .ToListAsync();

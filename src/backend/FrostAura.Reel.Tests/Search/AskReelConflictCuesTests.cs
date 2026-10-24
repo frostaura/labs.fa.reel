@@ -28,6 +28,11 @@ public class AskReelConflictCuesTests
     [InlineData("vintage sci-fi", true)]
     [InlineData("a recent thriller", false)]
     [InlineData("my older brother liked it", true)]
+    [InlineData("a modern classic", false)]
+    [InlineData("an instant classic from last year", false)]
+    [InlineData("new classics please", false)]
+    [InlineData("a modern take on classic noir", true)]
+    [InlineData("classic, modern either way", true)]
     public void Asking_for_older_titles_collides_with_a_lower_year_bound(string raw, bool collides)
     {
         var rules = FilterRuleSet.Create(null, null, null, null, null, minYear: 2000, maxYear: null);

@@ -13,8 +13,18 @@ public static class SearchTurnCardTier
     /// <summary>The judge called it a partial match: the collapsed "Close, but not …" tray. Never logged.</summary>
     public const string NearMiss = "NearMiss";
 
-    /// <summary>A match under the account's For-you bar: the "under your bar" tray. Never logged.</summary>
+    /// <summary>
+    /// Held back by the account's For-you bar — scored under it, or with no score at all while a bar
+    /// is set: the "held back by your bar" tray. Never logged.
+    /// </summary>
     public const string BelowFloor = "BelowFloor";
+
+    /// <summary>
+    /// The judge never ruled on it (every batch it rode in failed) on a turn where no card was judged
+    /// a match: the "not checked against your request" tray. Never the grid — an unjudged card with no
+    /// judged pick above it is exactly the "cards that don't match" failure (B-1) — and never logged.
+    /// </summary>
+    public const string Unchecked = "Unchecked";
 
     /// <summary>
     /// The tier a stored card belongs to. A row with no tier predates the column and is read from its
@@ -28,6 +38,7 @@ public static class SearchTurnCardTier
         Pick => Pick,
         NearMiss => NearMiss,
         BelowFloor => BelowFloor,
+        Unchecked => Unchecked,
         _ => NearMiss,
     };
 }

@@ -261,7 +261,7 @@ public class AskReelStarvedTurnTests(PostgresFixture fixture) : EmbeddedCatalogT
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>(
-                titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     private sealed class UnitEmbeddingProvider : IEmbeddingProvider

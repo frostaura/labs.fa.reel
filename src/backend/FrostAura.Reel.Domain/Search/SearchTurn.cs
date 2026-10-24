@@ -170,9 +170,21 @@ public static class SearchTurnDegraded
 
     /// <summary>Whether the stored flags say the PLAN failed — the case history must never read back.</summary>
     public static bool PlanFailed(string? flags) =>
+        Tokens(flags).Contains(Plan, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Whether the stored flags say at least one judge batch produced no model verdict — the turn's
+    /// cards were not all checked against the request, and the screen says so.
+    /// </summary>
+    public static bool JudgeFailed(string? flags) =>
+        Tokens(flags).Any(t => t.StartsWith(JudgePrefix, StringComparison.Ordinal)
+            && t.Length > JudgePrefix.Length
+            && !t.AsSpan(JudgePrefix.Length).StartsWith("0/", StringComparison.Ordinal));
+
+    private static string[] Tokens(string? flags) =>
         flags is { Length: > 0 }
-        && flags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Contains(Plan, StringComparer.Ordinal);
+            ? flags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : [];
 }
 
 /// <summary>

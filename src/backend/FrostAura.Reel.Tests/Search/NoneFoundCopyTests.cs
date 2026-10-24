@@ -46,12 +46,92 @@ public class NoneFoundCopyTests
         Assert.Contains("Under your 6.0 bar: Blade of the 47 Ronin — shown below.", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Acceptance D5: the live samurai reply said "There are no samurai movies left for you" above a
+    /// tray holding one. With titles under the bar, the honest sentence is that none clears it.
+    /// </summary>
+    [Fact]
+    public void Titles_under_the_bar_are_never_called_none_left()
+    {
+        var supply = Ninja() with { Eligible = 1, BelowFloor = 1 };
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            supply, "samurai", MediaScope.Movies, ["Blade of the 47 Ronin"], 0, 6m));
+
+        Assert.StartsWith("None of your unseen samurai movies clears your 6.0 bar.", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("left for you", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// D4: titles this conversation already showed were excluded before the judge saw anything, so
+    /// they are named as shown — never "unseen … none of the ones I checked is a match".
+    /// </summary>
+    [Fact]
+    public void Titles_already_shown_here_are_named_as_shown_not_as_rejected()
+    {
+        var all = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 6 }, "ninja", MediaScope.Movies, [], 0, 6m, ShownHere: 6));
+        Assert.Equal("All 6 unseen ninja movies inside your conditions were already shown in this conversation.", all);
+
+        var one = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 1 }, "ninja", MediaScope.Movies, [], 0, 6m, ShownHere: 1));
+        Assert.Equal("The one unseen ninja movie inside your conditions was already shown in this conversation.", one);
+
+        var some = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 8 }, "ninja", MediaScope.Movies, [], 0, 6m, ShownHere: 6));
+        Assert.Equal(
+            "6 of your unseen ninja movies were already shown in this conversation. "
+            + "You have 2 other unseen ninja movies tagged that way, but none of the ones I checked is really a match.",
+            some);
+    }
+
+    /// <summary>D1: with the judge down, no sentence claims a verdict, and the unchecked tray is announced.</summary>
+    [Fact]
+    public void A_failed_judge_claims_no_verdict_and_points_at_the_unchecked_tray()
+    {
+        var tagged = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 3 }, "ninja", MediaScope.Movies, [], 0, 6m, Unchecked: 3, JudgedAny: false));
+        Assert.Equal(
+            "You have 3 unseen ninja movies tagged that way, but I couldn't check them against what you asked this time. "
+            + "3 titles I couldn't check against your request are below, marked as unchecked.",
+            tagged);
+        Assert.DoesNotContain("is really a match", tagged, StringComparison.Ordinal);
+
+        var untagged = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            null, "feel-good", MediaScope.Movies, [], 0, 0m, Unchecked: 1, JudgedAny: false));
+        Assert.Equal(
+            "I couldn't check what I found against what you asked this time. "
+            + "1 title I couldn't check against your request is below, marked as unchecked.",
+            untagged);
+    }
+
+    /// <summary>D3: a match held back only because it has no score is never said to be under the bar.</summary>
+    [Fact]
+    public void A_match_with_no_score_is_named_as_unscored_not_as_under_the_bar()
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            null, null, MediaScope.Movies, [], 0, 6m, UnscoredHeld: ["Arrival", "Dune"]));
+        Assert.EndsWith("Arrival and Dune have no score from your model yet, so your 6.0 bar holds them back — shown below.", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Under your", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>Acceptance "weak": the ninja follow-up repeated the first reply word for word.</summary>
+    [Fact]
+    public void A_reply_identical_to_the_previous_one_says_it_looked_again()
+    {
+        const string reply = "There are no ninja movies left for you.";
+        Assert.Equal($"{NoneFoundCopy.AgainLead} {reply}", NoneFoundCopy.Again(reply, reply));
+        Assert.Equal($"{NoneFoundCopy.AgainLead} {reply}", NoneFoundCopy.Again(reply, $"{NoneFoundCopy.AgainLead} {reply}"));
+        Assert.Equal(reply, NoneFoundCopy.Again(reply, "Here are three samurai films."));
+        Assert.Equal(reply, NoneFoundCopy.Again(reply, null));
+    }
+
     [Fact]
     public void Unscored_titles_and_near_misses_are_counted()
     {
         var supply = Ninja() with { Eligible = 2, Unscored = 2 };
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(supply, "ninja", MediaScope.Movies, [], 3, 6m));
 
+        Assert.StartsWith("None of your unseen ninja movies clears your 6.0 bar.", text, StringComparison.Ordinal);
         Assert.Contains("2 have no score from your model yet.", text, StringComparison.Ordinal);
         Assert.Contains("3 close-but-not-quite titles are tucked away below.", text, StringComparison.Ordinal);
     }

@@ -25,7 +25,16 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// <para><b>What is cached, and what is not.</b> Only a verdict whose fit came from the model is
 /// cached. A fallback — a failed batch, a truncated completion, the deterministic stub — is never
 /// cached: caching one replayed "A action pick aligned with your taste." as a model verdict for six
-/// hours (A-8, C NEW-3, B NEW-1).</para>
+/// hours (A-8, C NEW-3, B NEW-1). The key is the COMPOSED request (<see cref="AskReelJudgeRequest"/>),
+/// so a verdict is reused only where the same thing was asked in the same context.</para>
+///
+/// <para><b>A deadline, and no orphaned calls.</b> The client's watchdog re-arms on keepalive bytes,
+/// so a provider that never answers would hold a turn open for as long as the adapter's HTTP timeout
+/// allowed (D7). Judging therefore has its own deadline, <see cref="Deadline"/>, measured from the
+/// start of the stage: a batch still out when it passes is a failed batch (unjudged cards, the
+/// degraded flag), never a hung turn. And every batch is awaited before this returns, on every path:
+/// a cancelled turn or a throwing caller cancels the siblings and waits for them, so no batch
+/// releases a disposed gate or keeps spending after the turn is gone.</para>
 /// </summary>
 public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger<AskReelJudge> logger)
 {
@@ -37,6 +46,9 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
 
     /// <summary>Judge calls in flight at once for one turn.</summary>
     public const int MaxConcurrent = 3;
+
+    /// <summary>How long judging may take, from the start of the stage, before an outstanding batch counts as failed.</summary>
+    public static readonly TimeSpan Deadline = TimeSpan.FromSeconds(25);
 
     /// <summary>How long a model verdict is reused for the same account, title and request.</summary>
     public static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
@@ -52,7 +64,14 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
     /// <param name="Batches">How many batches ran.</param>
     /// <param name="FailedBatches">How many of them produced no model verdict at all.</param>
     /// <param name="Results">Every verdict, by title.</param>
-    public sealed record Summary(int Batches, int FailedBatches, IReadOnlyDictionary<Guid, RerankResult> Results);
+    public sealed record Summary(int Batches, int FailedBatches, IReadOnlyDictionary<Guid, RerankResult> Results)
+    {
+        /// <summary>Whether the model ruled on at least one title.</summary>
+        public bool JudgedAny => Results.Values.Any(r => r.FitSource == ResultSource.Llm);
+    }
+
+    /// <summary>The judge's deadline; a test may shorten it. Never longer than <see cref="Deadline"/> in production.</summary>
+    internal TimeSpan StageDeadline { get; init; } = Deadline;
 
     /// <summary>
     /// Judges <paramref name="pool"/> (already cut to <see cref="MaxJudged"/> by the caller or here)
@@ -81,29 +100,53 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
             batches.Add(judged.Skip(offset).Take(BatchSize).ToList());
         }
 
+        var deadlineAt = DateTime.UtcNow + StageDeadline;
         using var gate = new SemaphoreSlim(MaxConcurrent, MaxConcurrent);
+        using var siblings = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var pending = batches
-            .Select((inputs, index) => RunBatchAsync(index, inputs, accountId, query, qnorm, persona, usagePurpose, gate, ct))
+            .Select((inputs, index) => RunBatchAsync(
+                index, inputs, accountId, query, qnorm, persona, usagePurpose, gate, deadlineAt, siblings.Token))
             .ToList();
 
         var all = new Dictionary<Guid, RerankResult>();
         var failed = 0;
-        while (pending.Count > 0)
+        try
         {
-            var finished = await Task.WhenAny(pending);
-            pending.Remove(finished);
-            var batch = await finished;
-            if (batch.Failed)
+            while (pending.Count > 0)
             {
-                failed++;
-            }
+                var finished = await Task.WhenAny(pending);
+                pending.Remove(finished);
+                var batch = await finished;
+                if (batch.Failed)
+                {
+                    failed++;
+                }
 
-            foreach (var (id, result) in batch.Results)
+                foreach (var (id, result) in batch.Results)
+                {
+                    all[id] = result;
+                }
+
+                await onBatch(batch);
+            }
+        }
+        finally
+        {
+            // Whatever ended the loop early — the turn being cancelled, or the caller's own handler
+            // throwing — the batches still out are cancelled and AWAITED before the gate and the
+            // token source are disposed. Their outcomes are discarded; their exceptions are observed.
+            if (pending.Count > 0)
             {
-                all[id] = result;
+                await siblings.CancelAsync();
+                try
+                {
+                    await Task.WhenAll(pending);
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    logger.LogDebug(ex, "Ask Reel judge: {Count} batch(es) abandoned with the turn.", pending.Count);
+                }
             }
-
-            await onBatch(batch);
         }
 
         return new Summary(batches.Count, failed, all);
@@ -118,6 +161,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
         LensPersona persona,
         string usagePurpose,
         SemaphoreSlim gate,
+        DateTime deadlineAt,
         CancellationToken ct)
     {
         var results = new Dictionary<Guid, RerankResult>();
@@ -140,7 +184,19 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
             await gate.WaitAsync(ct);
             try
             {
-                using var loop = new LlmBudgetLoop(LlmBudgetOptions.Unbounded(BatchSize), ct);
+                // The ceiling is what is left of the stage's deadline, so a batch that waited for the
+                // gate gets less, not a fresh allowance. A batch with nothing left is not attempted.
+                var remaining = deadlineAt - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    logger.LogWarning(
+                        "Ask Reel judge batch {Batch} skipped: the judging deadline passed; its {Count} titles are unjudged.",
+                        index, uncached.Count);
+                    return new Batch(index, inputs, results, NoModelVerdict(inputs, results));
+                }
+
+                using var loop = new LlmBudgetLoop(
+                    new LlmBudgetOptions(Timeout.InfiniteTimeSpan, remaining, BatchSize), ct);
                 var stop = await loop.RunAsync(uncached, async (slice, sliceCt) =>
                 {
                     var answered = await agent.RerankBatchAsync(slice, query, persona, anchorName: null, usagePurpose, sliceCt);
@@ -167,9 +223,11 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
             }
         }
 
-        var failed = !inputs.Any(i => results.TryGetValue(i.TitleId, out var r) && r.FitSource == ResultSource.Llm);
-        return new Batch(index, inputs, results, failed);
+        return new Batch(index, inputs, results, NoModelVerdict(inputs, results));
     }
+
+    private static bool NoModelVerdict(IReadOnlyList<RerankInput> inputs, IReadOnlyDictionary<Guid, RerankResult> results) =>
+        !inputs.Any(i => results.TryGetValue(i.TitleId, out var r) && r.FitSource == ResultSource.Llm);
 
     /// <summary>The query as cached: lower-cased, whitespace collapsed.</summary>
     internal static string NormalizeQuery(string query) =>

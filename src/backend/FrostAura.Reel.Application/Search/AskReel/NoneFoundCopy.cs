@@ -32,13 +32,47 @@ public static class NoneFoundCopy
     /// <param name="UnderBar">Names of judged matches the account's For-you bar put in the tray, in tray order.</param>
     /// <param name="NearMisses">How many partial matches went to the near-miss tray.</param>
     /// <param name="Floor">The account's For-you bar; 0 when none is set.</param>
+    /// <param name="Unchecked">How many cards the judge never ruled on, now in the "not checked" tray.</param>
+    /// <param name="JudgedAny">Whether the judge ruled on at least one card this turn.</param>
+    /// <param name="ShownHere">
+    /// How many of the titles the supply counts as clearing the bar this conversation has already
+    /// shown. They are excluded from the turn, so "you have 6 unseen ninja movies … none is a match"
+    /// about six cards nobody judged was false (D4); they are named as shown instead.
+    /// </param>
+    /// <param name="UnscoredHeld">
+    /// Names of judged matches the bar held back because the account's model has no score for them —
+    /// not "under" the bar, so not named as under it.
+    /// </param>
     public sealed record Facts(
         SupplyReport? Supply,
         string? ConceptWords,
         MediaScope Media,
         IReadOnlyList<string> UnderBar,
         int NearMisses,
-        decimal Floor);
+        decimal Floor,
+        int Unchecked = 0,
+        bool JudgedAny = true,
+        int ShownHere = 0,
+        IReadOnlyList<string>? UnscoredHeld = null);
+
+    /// <summary>The lead a reply gets when it would otherwise repeat the previous answer word for word.</summary>
+    public const string AgainLead = "Looking again turned up nothing new.";
+
+    /// <summary>
+    /// The reply, led by <see cref="AgainLead"/> when the conversation's previous answer said exactly
+    /// the same thing — a follow-up ("none of those are ninja films") deserves to hear that it was
+    /// heard, not the identical paragraph again.
+    /// </summary>
+    public static string Again(string reply, string? previousReply)
+    {
+        ArgumentNullException.ThrowIfNull(reply);
+        var previous = previousReply?.Trim();
+        return previous is { Length: > 0 }
+            && (string.Equals(previous, reply, StringComparison.Ordinal)
+                || string.Equals(previous, $"{AgainLead} {reply}", StringComparison.Ordinal))
+                ? $"{AgainLead} {reply}"
+                : reply;
+    }
 
     /// <summary>The reply, one to four short sentences, plain text.</summary>
     public static string Compose(Facts facts)
@@ -52,19 +86,48 @@ public static class NoneFoundCopy
         {
             // No catalogue count stands behind the topic words here — they are the model's reading
             // ("witty action playful tone"), not a tag anything carries — so they are not repeated
-            // back as if they named a shelf that came up empty.
-            sentences.Add("Nothing I found matches what you asked closely enough to show.");
+            // back as if they named a shelf that came up empty. With nothing judged, "nothing
+            // matches" would be a verdict nobody reached.
+            sentences.Add(facts.JudgedAny || facts.Unchecked == 0
+                ? "Nothing I found matches what you asked closely enough to show."
+                : "I couldn't check what I found against what you asked this time.");
         }
         else if (supply.ClearingFloor > 0)
         {
-            // The catalogue tags some unseen titles with the topic, but the judge did not accept any
-            // of the ones it saw. Say exactly that rather than "none left", which would be false.
-            sentences.Add(FormattableString.Invariant(
-                $"You have {supply.ClearingFloor} unseen {Noun(topic, supply.ClearingFloor)} tagged that way, but none of the ones I checked is really a match."));
+            // The catalogue tags some unseen titles with the topic. The ones this conversation has
+            // already shown were excluded before anything was judged, so they are named as shown;
+            // what is left is the part the judge actually saw.
+            var shown = Math.Clamp(facts.ShownHere, 0, supply.ClearingFloor);
+            var fresh = supply.ClearingFloor - shown;
+            if (shown > 0 && fresh == 0)
+            {
+                sentences.Add(FormattableString.Invariant(
+                    $"{(shown == 1 ? "The one unseen" : $"All {shown} unseen")} {Noun(topic, shown)} inside your conditions {(shown == 1 ? "was" : "were")} already shown in this conversation."));
+            }
+            else
+            {
+                if (shown > 0)
+                {
+                    sentences.Add(FormattableString.Invariant(
+                        $"{shown} of your unseen {Noun(topic, supply.ClearingFloor)} {(shown == 1 ? "was" : "were")} already shown in this conversation."));
+                }
+
+                var other = shown > 0 ? " other" : string.Empty;
+                sentences.Add(facts.JudgedAny
+                    ? FormattableString.Invariant(
+                        $"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way, but none of the ones I checked is really a match.")
+                    : FormattableString.Invariant(
+                        $"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way, but I couldn't check them against what you asked this time."));
+            }
         }
         else
         {
-            sentences.Add($"There are no {topic ?? "matches"} left for you.");
+            // Nothing clears the bar. When titles sit under it (or have no score while it is set),
+            // "none left" would be false — they are there, and the tray shows them.
+            sentences.Add(supply.PredictedFloor is { } bar && supply.BelowFloor + supply.Unscored > 0
+                ? FormattableString.Invariant(
+                    $"None of your unseen {topic ?? "matches"} clears your {AskReelReason.FormatFloor(bar)} bar.")
+                : $"There are no {topic ?? "matches"} left for you.");
             sentences.Add(Partition(supply, topic));
         }
 
@@ -79,7 +142,16 @@ public static class NoneFoundCopy
         else if (supply is { BelowFloor: > 0 } s && s.PredictedFloor is { } bar)
         {
             sentences.Add(FormattableString.Invariant(
-                $"{s.BelowFloor} more {Are(s.BelowFloor)} under your {AskReelReason.FormatFloor(bar)} bar."));
+                $"{s.BelowFloor} {Are(s.BelowFloor)} under your {AskReelReason.FormatFloor(bar)} bar."));
+        }
+
+        if (facts.UnscoredHeld is { Count: > 0 } held)
+        {
+            var named = held.Take(MaxUnderBarNamed).ToList();
+            var more = held.Count - named.Count;
+            var list = Joined(named) + (more > 0 ? FormattableString.Invariant($" and {more} more") : string.Empty);
+            sentences.Add(FormattableString.Invariant(
+                $"{list} {(held.Count == 1 ? "has" : "have")} no score from your model yet, so your {AskReelReason.FormatFloor(facts.Floor)} bar holds {(held.Count == 1 ? "it" : "them")} back — shown below."));
         }
 
         if (supply is { Unscored: > 0 } unscored)
@@ -95,6 +167,12 @@ public static class NoneFoundCopy
                 .Select(o => FormattableString.Invariant($"turning off “{o.Label}” would unlock {o.WouldUnlock}"))
                 .ToList();
             sentences.Add(Capitalised(string.Join("; ", offers)) + ".");
+        }
+
+        if (facts.Unchecked > 0)
+        {
+            sentences.Add(FormattableString.Invariant(
+                $"{facts.Unchecked} {(facts.Unchecked == 1 ? "title" : "titles")} I couldn't check against your request {Are(facts.Unchecked)} below, marked as unchecked."));
         }
 
         if (facts.NearMisses > 0)

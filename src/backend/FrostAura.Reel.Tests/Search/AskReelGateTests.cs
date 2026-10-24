@@ -16,11 +16,40 @@ public class AskReelGateTests
     [InlineData(Satisfies.Partial, 9.0, 6.0, AskReelGate.Placement.NearMiss)]
     [InlineData(Satisfies.Partial, 3.0, 6.0, AskReelGate.Placement.NearMiss)]
     [InlineData(Satisfies.No, 9.9, 0.0, AskReelGate.Placement.Dropped)]
-    [InlineData(null, 7.0, 6.0, AskReelGate.Placement.UnjudgedPick)]
+    [InlineData(null, 7.0, 6.0, AskReelGate.Placement.Unjudged)]
     [InlineData(null, 5.0, 6.0, AskReelGate.Placement.BelowFloor)]
     public void A_card_lands_where_its_verdict_and_the_bar_put_it(
         Satisfies? satisfies, double predicted, double floor, AskReelGate.Placement expected) =>
         Assert.Equal(expected, AskReelGate.Place(satisfies, (decimal)predicted, (decimal)floor));
+
+    /// <summary>
+    /// §4.8: "Unscored cards with no on-demand score are never picks." Under a bar a missing score is
+    /// held back with the under-bar cards, whatever the verdict; with no bar there is nothing to miss.
+    /// A <c>no</c> is dropped and a <c>partial</c> is a near miss either way — neither reaches the grid.
+    /// </summary>
+    [Theory]
+    [InlineData(Satisfies.Yes, 6.0, AskReelGate.Placement.BelowFloor)]
+    [InlineData(null, 6.0, AskReelGate.Placement.BelowFloor)]
+    [InlineData(Satisfies.Partial, 6.0, AskReelGate.Placement.NearMiss)]
+    [InlineData(Satisfies.No, 6.0, AskReelGate.Placement.Dropped)]
+    [InlineData(Satisfies.Yes, 0.0, AskReelGate.Placement.Pick)]
+    [InlineData(null, 0.0, AskReelGate.Placement.Unjudged)]
+    public void An_unscored_card_never_clears_a_bar(Satisfies? satisfies, double floor, AskReelGate.Placement expected) =>
+        Assert.Equal(expected, AskReelGate.Place(satisfies, predicted: null, (decimal)floor));
+
+    /// <summary>
+    /// §4.8 and §4.10 together: an unjudged card sits below the judged picks when the turn has one,
+    /// and in the unchecked tray — with the turn in NoneFound — when it has none.
+    /// </summary>
+    [Theory]
+    [InlineData(0, SearchTurnCardTier.Unchecked, SearchTurnMode.NoneFound)]
+    [InlineData(1, SearchTurnCardTier.Pick, SearchTurnMode.Picks)]
+    [InlineData(6, SearchTurnCardTier.Pick, SearchTurnMode.Picks)]
+    public void Unjudged_cards_reach_the_grid_only_beneath_a_judged_pick(int judgedPicks, string tier, string mode)
+    {
+        Assert.Equal(tier, AskReelGate.UnjudgedTier(judgedPicks));
+        Assert.Equal(mode, AskReelGate.ModeFor(judgedPicks));
+    }
 
     /// <summary>
     /// The floor never relaxes (C-7, N+2): every card under the bar goes to the tray however few
@@ -46,17 +75,19 @@ public class AskReelGateTests
         Assert.Equal(clears, AskReelGate.Clears((decimal)predicted, 6m));
 
     [Fact]
-    public void A_card_with_no_prediction_or_no_floor_clears()
+    public void With_no_floor_everything_clears_and_with_one_a_missing_score_does_not()
     {
-        Assert.True(AskReelGate.Clears(null, 6m));
+        Assert.True(AskReelGate.Clears(null, 0m));
         Assert.True(AskReelGate.Clears(1m, 0m));
+        Assert.False(AskReelGate.Clears(null, 6m));
+        Assert.False(AskReelGate.Clears(null, 0.1m));
     }
 
     [Fact]
     public void Every_shown_placement_has_a_stored_tier_and_a_drop_has_none()
     {
         Assert.Equal(SearchTurnCardTier.Pick, AskReelGate.TierOf(AskReelGate.Placement.Pick));
-        Assert.Equal(SearchTurnCardTier.Pick, AskReelGate.TierOf(AskReelGate.Placement.UnjudgedPick));
+        Assert.Equal(SearchTurnCardTier.Unchecked, AskReelGate.TierOf(AskReelGate.Placement.Unjudged));
         Assert.Equal(SearchTurnCardTier.NearMiss, AskReelGate.TierOf(AskReelGate.Placement.NearMiss));
         Assert.Equal(SearchTurnCardTier.BelowFloor, AskReelGate.TierOf(AskReelGate.Placement.BelowFloor));
         Assert.Null(AskReelGate.TierOf(AskReelGate.Placement.Dropped));
@@ -72,6 +103,7 @@ public class AskReelGateTests
     [InlineData("Pick", false, SearchTurnCardTier.Pick)]
     [InlineData("NearMiss", true, SearchTurnCardTier.NearMiss)]
     [InlineData("BelowFloor", true, SearchTurnCardTier.BelowFloor)]
+    [InlineData("Unchecked", true, SearchTurnCardTier.Unchecked)]
     [InlineData("SomethingNew", false, SearchTurnCardTier.NearMiss)]
     public void A_stored_tier_reads_back_safely(string? tier, bool belowFloor, string expected) =>
         Assert.Equal(expected, SearchTurnCardTier.Of(new SearchTurnCard { Tier = tier, BelowFloor = belowFloor }));
@@ -92,4 +124,14 @@ public class AskReelGateTests
     [InlineData("planned", false)]
     public void A_degraded_plan_is_read_off_the_flags(string? flags, bool planFailed) =>
         Assert.Equal(planFailed, SearchTurnDegraded.PlanFailed(flags));
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("plan", false)]
+    [InlineData("judge:1/3", true)]
+    [InlineData("plan,judge:3/3", true)]
+    [InlineData("judge:0/3", false)]
+    [InlineData("judge:", false)]
+    public void A_failed_judge_is_read_off_the_flags(string? flags, bool judgeFailed) =>
+        Assert.Equal(judgeFailed, SearchTurnDegraded.JudgeFailed(flags));
 }

@@ -1087,14 +1087,21 @@ public class AskReelEndpointTests(PostgresFixture fixture, ReelApiFactory api)
     private static Guid ConversationId(SseStream stream) =>
         Assert.Single(stream.Frames, f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
 
-    private static IReadOnlyList<long> TmdbIds(SseStream stream) =>
-        Assert.Single(stream.Frames, f => f.Event == "done")
-            .Data.GetProperty("results")
-            .EnumerateArray()
+    /// <summary>
+    /// Every card the turn put on screen — the grid and every tray. With the keyless stub judge no
+    /// card is ruled a match, so a turn's cards sit in the unchecked tray (§4.8); they were still
+    /// shown, and the no-repeat rule is about what was shown.
+    /// </summary>
+    private static IReadOnlyList<long> TmdbIds(SseStream stream)
+    {
+        var done = Assert.Single(stream.Frames, f => f.Event == "done").Data;
+        return new[] { "results", "unchecked", "nearMiss", "belowFloor" }
+            .SelectMany(p => done.TryGetProperty(p, out var a) && a.ValueKind == JsonValueKind.Array ? a.EnumerateArray() : [])
             .Select(c => c.GetProperty("tmdbId"))
             .Where(id => id.ValueKind == JsonValueKind.Number)
             .Select(id => id.GetInt64())
             .ToList();
+    }
 
     private static async Task<SseStream> AskAsync(HttpClient client, object body)
     {

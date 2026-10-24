@@ -269,7 +269,7 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
             // honest none-found. Every row carries all of them — present-but-null where they do not
             // apply, so the client has one shape to read.
             Assert.All(turns, turn => Assert.Equal(
-                ["degraded", "failureCode", "id", "kind", "mode", "role", "sequence", "status", "text"],
+                ["degraded", "failureCode", "id", "judgeDegraded", "kind", "mode", "role", "sequence", "status", "text"],
                 turn.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)));
 
             // The alias answers the same shape as /conversations/{id} — that is what makes it an
