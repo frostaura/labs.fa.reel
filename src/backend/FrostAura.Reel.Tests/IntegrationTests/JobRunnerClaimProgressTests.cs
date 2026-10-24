@@ -9,7 +9,7 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// <summary>
 /// The runner's claim starts every attempt from no progress. A retry used to inherit the failed
 /// attempt's "100% — nothing cross-referenced this run" and report it as live work for as long as
-/// the retry ran (H-1). Driven through the real claim statement on Postgres.
+/// the retry ran (H-1). Driven through the real runner's claim on Postgres.
 /// </summary>
 [Collection("postgres")]
 public class JobRunnerClaimProgressTests(PostgresFixture fixture)
@@ -46,13 +46,13 @@ public class JobRunnerClaimProgressTests(PostgresFixture fixture)
             await db.SaveChangesAsync();
         }
 
+        await using (var harness = JobRunnerHarness.Create(fixture.ConnectionString!, JobRunnerOptions.Default))
         await using (var claimer = fixture.CreateContext(unscoped))
         {
             Guid? claimed = null;
             for (var i = 0; i < 50 && claimed != jobId; i++)
             {
-                var ids = await claimer.Database.SqlQuery<Guid>(JobRunnerService.ClaimNextSql(DateTime.UtcNow)).ToListAsync();
-                claimed = ids.Count == 0 ? null : ids[0];
+                claimed = (await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None))?.Id;
                 if (claimed is null)
                 {
                     break;

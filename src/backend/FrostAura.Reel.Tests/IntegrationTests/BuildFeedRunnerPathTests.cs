@@ -15,11 +15,13 @@ using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Background;
 using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -408,36 +410,36 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     /// <summary>
-    /// Mirrors <c>JobRunnerService.RunJobAsync</c>: one scope, one context, the account pinned
-    /// BEFORE the handler is resolved, the handler run, and the job's own completion committed on
-    /// that same context afterwards.
+    /// Runs the job through the REAL runner's execution path (<see cref="JobRunnerService.RunAsync"/>):
+    /// one scope, the account pinned BEFORE the handler is resolved, the handler run on the scope's
+    /// context, then the runner's own fenced completion. Only the claim is issued here, on this one
+    /// row, because the shared test database holds other tests' queued jobs.
     /// </summary>
     private Task RunThroughJobRunnerPathAsync(Guid jobId) => RunThroughJobRunnerPathAsync(jobId, null);
 
     private async Task RunThroughJobRunnerPathAsync(Guid jobId, MemoryCache? clusterCache)
     {
-        var accountContext = new AccountContext();
-        await using var db = Fixture.CreateContext(accountContext);
+        List<int> attempts;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            attempts = await db.Database
+                .SqlQuery<int>(
+                    $"""
+                     UPDATE "SyncJobs" SET "Status" = 'Running', "StartedAt" = {DateTime.UtcNow},
+                         "HeartbeatAt" = {DateTime.UtcNow}, "AttemptCount" = "AttemptCount" + 1
+                     WHERE "Id" = {jobId}
+                     RETURNING "AttemptCount" AS "Value"
+                     """)
+                .ToListAsync();
+        }
 
-        // The claim, exactly as the runner issues it.
-        await db.Database.ExecuteSqlAsync(
-            $"""
-             UPDATE "SyncJobs" SET "Status" = 'Running', "StartedAt" = {DateTime.UtcNow},
-                 "HeartbeatAt" = {DateTime.UtcNow}, "AttemptCount" = "AttemptCount" + 1
-             WHERE "Id" = {jobId}
-             """);
+        var attempt = Assert.Single(attempts);
 
-        var job = await db.SyncJobs.FirstAsync(j => j.Id == jobId);
-        accountContext.SetAccount(job.AccountId!.Value);
-
-        var handler = HandlerFor(db, clusterCache);
-        await handler.ExecuteAsync(job, CancellationToken.None);
-
-        job.Status = JobStatus.Succeeded;
-        job.CompletedAt = DateTime.UtcNow;
-        job.ProgressPct = 100;
-        job.Error = null;
-        await db.SaveChangesAsync();
+        await using var harness = JobRunnerHarness.Create(Fixture.ConnectionString!, JobRunnerOptions.Default, services =>
+            services.AddScoped<IJobHandler>(sp => HandlerFor(sp.GetRequiredService<ReelDbContext>(), clusterCache)));
+        var outcome = await harness.Runner.RunAsync(
+            new JobRunnerService.ClaimedJob(jobId, attempt, JobKind.BuildFeed), CancellationToken.None);
+        Assert.Equal(JobRunOutcome.Succeeded, outcome);
     }
 
     private static BuildFeedJobHandler HandlerFor(ReelDbContext db) => HandlerFor(db, null);

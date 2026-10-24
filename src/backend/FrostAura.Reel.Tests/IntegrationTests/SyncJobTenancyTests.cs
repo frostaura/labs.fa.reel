@@ -139,13 +139,11 @@ public class SyncJobTenancyTests(PostgresFixture fixture)
             await db.SaveChangesAsync();
         }
 
+        await using var harness = JobRunnerHarness.Create(fixture.ConnectionString!, JobRunnerOptions.Default);
         await using var claimer = fixture.CreateContext(unscoped);
         var mine = new[] { sync, build, otherBuild };
-        async Task<Guid?> ClaimAsync()
-        {
-            var ids = await claimer.Database.SqlQuery<Guid>(JobRunnerService.ClaimNextSql(DateTime.UtcNow)).ToListAsync();
-            return ids.Count == 0 ? null : ids[0];
-        }
+        async Task<Guid?> ClaimAsync() =>
+            (await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None))?.Id;
 
         // Claims that land on rows other tests may have left behind are released, not counted.
         async Task<Guid?> ClaimMineAsync()
