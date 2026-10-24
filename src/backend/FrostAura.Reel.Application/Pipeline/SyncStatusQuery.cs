@@ -69,7 +69,10 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             ? await db.UserRatings.CountAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, ct)
             : 0;
 
-        var (effectiveStage, floor) = await ResolveStageAsync(accountId, storedStage, connectionStatus, ct);
+        var unrecognised = await HoldsUnrecognisedStateAsync(accountId, storedStage, connection, ct);
+        var (effectiveStage, floor) = unrecognised
+            ? (storedStage, null)
+            : await ResolveStageAsync(accountId, storedStage, connectionStatus, ct);
         var health = providerHealth.Current();
         var failures = await LastFailuresAsync(accountId, storedStage, now, ct);
 
@@ -98,7 +101,7 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             OutboxLastError: outboxLastError,
             LastFailures: failures,
             ProviderHealth: health,
-            DegradedReason: ResolveDegradedReason(connectionStatus, outboxDead, effectiveStage, health),
+            DegradedReason: ResolveDegradedReason(connectionStatus, outboxDead, effectiveStage, health, unrecognised),
             NotEnoughRatings: floor);
     }
 
@@ -136,10 +139,64 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
         return (stored, null);
     }
 
-    /// <summary>The single reason the account is not healthy, most actionable first; null when it is.</summary>
-    public static DegradedReason? ResolveDegradedReason(
-        ConnectionStatus connectionStatus, int outboxDeadLetters, PipelineStage effectiveStage, ProviderHealthSnapshot health)
+    /// <summary>
+    /// Whether the stage or the connection status the account was read with is a fallback for a
+    /// value this build does not know (written by a newer image, then rolled back). Those read as
+    /// <see cref="PipelineStage.Degraded"/> and <see cref="ConnectionStatus.Revoked"/>: inert, but
+    /// on their own they would tell a user with a healthy link to reconnect, or report a failure that
+    /// never happened. Only those two readings are checked against the stored text, so a healthy
+    /// account costs nothing extra.
+    /// </summary>
+    private async Task<bool> HoldsUnrecognisedStateAsync(
+        Guid accountId, PipelineStage storedStage, TraktConnection? connection, CancellationToken ct)
     {
+        if (storedStage == PipelineStage.Degraded)
+        {
+            var stored = await db.Database
+                .SqlQuery<string>($"""SELECT "PipelineStage" AS "Value" FROM "Accounts" WHERE "Id" = {accountId}""")
+                .FirstOrDefaultAsync(ct);
+            if (stored is not null && !Enum.GetNames<PipelineStage>().Contains(stored, StringComparer.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        if (connection?.Status == ConnectionStatus.Revoked)
+        {
+            var stored = await db.Database
+                .SqlQuery<string>($"""SELECT "Status" AS "Value" FROM "TraktConnections" WHERE "Id" = {connection.Id}""")
+                .FirstOrDefaultAsync(ct);
+            if (stored is not null && !Enum.GetNames<ConnectionStatus>().Contains(stored, StringComparer.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The single reason the account is not healthy, most actionable first; null when it is.</summary>
+    /// <param name="connectionStatus">The connection as read (an unreadable one reads as Revoked).</param>
+    /// <param name="outboxDeadLetters">Dead-lettered Trakt writes.</param>
+    /// <param name="effectiveStage">The stage after the cold-start reading.</param>
+    /// <param name="health">Provider health.</param>
+    /// <param name="unrecognisedState">
+    /// The stage or connection was written by a newer image. Checked first, because every reason
+    /// below would be read off a fallback and tell the user something false.
+    /// </param>
+    /// <returns>The reason, or null when the account is healthy.</returns>
+    public static DegradedReason? ResolveDegradedReason(
+        ConnectionStatus connectionStatus,
+        int outboxDeadLetters,
+        PipelineStage effectiveStage,
+        ProviderHealthSnapshot health,
+        bool unrecognisedState = false)
+    {
+        if (unrecognisedState)
+        {
+            return DegradedReason.UnrecognisedState;
+        }
+
         if (connectionStatus == ConnectionStatus.Revoked)
         {
             return DegradedReason.TraktRevoked;

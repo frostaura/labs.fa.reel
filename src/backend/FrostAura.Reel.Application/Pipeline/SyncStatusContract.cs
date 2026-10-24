@@ -34,6 +34,15 @@ public enum DegradedReason
 
     /// <summary>The pipeline is parked as Degraded and none of the causes above applies.</summary>
     PipelineFailed,
+
+    /// <summary>
+    /// The account's pipeline stage or Trakt connection holds a value a NEWER version of Reel wrote
+    /// and this one cannot read (a rollback). Nothing is known to be broken and nothing is asked of
+    /// the user: this build reads the value as its inert fallback (no Trakt calls on an unreadable
+    /// connection), so <c>pipelineStage</c> and <c>connectionStatus</c> carry that fallback, and this
+    /// reason says not to act on them. A client shows no reconnect or failure copy for it.
+    /// </summary>
+    UnrecognisedState,
 }
 
 /// <summary>One job as the header sees it.</summary>
