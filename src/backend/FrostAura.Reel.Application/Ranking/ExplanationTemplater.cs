@@ -33,7 +33,9 @@ public static class ExplanationTemplater
     /// <paramref name="AnchorSharedGenre"/> is a genre the title genuinely shares with the anchor,
     /// and <paramref name="Tone"/> the title's LLM-derived tone — printed ONLY when it is a member
     /// of the closed tone vocabulary, because rows extracted before vocabulary enforcement carry
-    /// polluted free-text labels.
+    /// polluted free-text labels. <paramref name="AnchorEvidence"/> is what <see cref="AnchorRowGate"/>
+    /// admitted the card on — a shared person, keyword or theme — and when present it is what the
+    /// anchor clause names, ahead of the softer genre/tone link.
     /// </summary>
     public record Context(
         Title Title,
@@ -42,7 +44,8 @@ public static class ExplanationTemplater
         IReadOnlySet<string> RatedGenres,
         string? AnchorName,
         string? AnchorSharedGenre = null,
-        string? Tone = null);
+        string? Tone = null,
+        IReadOnlyList<SharedEvidence>? AnchorEvidence = null);
 
     /// <summary>
     /// Builds the deterministic why-sentence. <paramref name="variantSeed"/> shifts every phrasing
@@ -145,13 +148,38 @@ public static class ExplanationTemplater
     private static string AnchorClause(Context context, string anchor, int seed)
     {
         var id = context.Title.Id;
+
+        // The admitting evidence first: it is the one link on this card that is checkable — the
+        // chip under the poster says the same thing in fewer words.
+        if (context.AnchorEvidence is [var top, ..])
+        {
+            return (top.Kind, top.Role) switch
+            {
+                ("person", "director") => Pick(id, seed,
+                    $"{top.Label} directs, as in {anchor}",
+                    $"Same director as {anchor}: {top.Label}"),
+                ("person", "writer") => Pick(id, seed,
+                    $"Written by {top.Label}, like {anchor}",
+                    $"Same writer as {anchor}: {top.Label}"),
+                ("person", _) => Pick(id, seed,
+                    $"{top.Label} again, as in {anchor}",
+                    $"Shares {top.Label} with {anchor}"),
+                ("keyword", _) => Pick(id, seed,
+                    $"Shares the {top.Label} thread with {anchor}",
+                    $"Like {anchor}, it turns on {top.Label}"),
+                _ => Pick(id, seed,
+                    $"Explores {top.Label}, like {anchor}",
+                    $"Shares {anchor}'s theme of {top.Label}"),
+            };
+        }
+
         var tone = AttributeVocabulary.IsClosedVocabTone(context.Tone) ? context.Tone : null;
         var genre = context.AnchorSharedGenre is { Length: > 0 } g ? Pretty(g) : null;
 
         return (genre, tone) switch
         {
             ({ } sharedGenre, { } sharedTone) => Pick(id, seed,
-                $"A {sharedGenre} pick with the same {sharedTone} streak as {anchor}",
+                $"{IndefiniteArticle(sharedGenre, capitalised: true)} {sharedGenre} pick with the same {sharedTone} streak as {anchor}",
                 $"Brings {anchor}'s {sharedTone} energy back to your {sharedGenre} lane",
                 $"Like {anchor}, it plays {sharedGenre} {sharedTone}"),
             (null, { } sharedTone) => Pick(id, seed,
@@ -159,7 +187,7 @@ public static class ExplanationTemplater
                 $"Shares {anchor}'s {sharedTone} tone",
                 $"Runs on the {sharedTone} mood that made {anchor} land for you"),
             ({ } sharedGenre, null) => Pick(id, seed,
-                $"A {sharedGenre} pick in the same lane as {anchor}",
+                $"{IndefiniteArticle(sharedGenre, capitalised: true)} {sharedGenre} pick in the same lane as {anchor}",
                 $"Sits right beside {anchor} on the {sharedGenre} shelf",
                 $"Scratches the {sharedGenre} itch {anchor} left you with"),
             _ => Pick(id, seed,
@@ -209,10 +237,11 @@ public static class ExplanationTemplater
                 Pick(id, seed,
                     $"matches the {Pretty(genre)} streak you've been on",
                     $"keeps your recent {Pretty(genre)} run going"),
-            "decadeAffinity" when context.Title.Year is { } year =>
-                Pick(id, seed,
-                    $"peak {(year / 10) * 10}s — your era",
-                    $"from the {(year / 10) * 10}s, a decade you rate highly"),
+            // decadeAffinity deliberately has NO clause. It is the model's top feature and a
+            // survivorship artefact — older titles reached the user pre-selected by reputation — and
+            // "a decade you rate highly" explained that artefact to the user as taste, on 60% of
+            // cards. The feature stays in the model (removing it from ranking is an offline
+            // question); the sentence is gone, and a null clause just moves on to the next one.
             "traktRating" when context.Title.TraktRating is { } rating =>
                 Pick(id, seed,
                     string.Create(CultureInfo.InvariantCulture, $"the crowd backs it too ({rating:0.0} on Trakt)"),
@@ -273,4 +302,21 @@ public static class ExplanationTemplater
     }
 
     private static string Pretty(string slug) => slug.Replace('-', ' ');
+
+    /// <summary>
+    /// "a" or "an" for <paramref name="word"/>, by its first letter — "an action pick", "a thriller".
+    /// Letter-based on purpose: every word this templater puts after an article is a genre slug from
+    /// a closed vocabulary, and none of them starts with a silent consonant or a "you" sound.
+    /// </summary>
+    public static string IndefiniteArticle(string word, bool capitalised = false)
+    {
+        var an = word.Length > 0 && "aeiouAEIOU".Contains(word[0]);
+        return (an, capitalised) switch
+        {
+            (true, true) => "An",
+            (true, false) => "an",
+            (false, true) => "A",
+            _ => "a",
+        };
+    }
 }

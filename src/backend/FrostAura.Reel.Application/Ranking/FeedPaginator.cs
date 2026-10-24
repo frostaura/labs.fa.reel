@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
@@ -42,10 +43,46 @@ public sealed record MoreFeedRequest(
     // media-aware: the eligible window is restricted to this medium on the server AND the TMDB
     // deepen only pulls this medium — so selecting Movies fills a lane with movies (deepening
     // when the eligible slice runs thin) instead of the client filtering ~5 hero picks to nothing.
-    string? MediaType = null);
+    string? MediaType = null,
+    // Titles already rendered ELSEWHERE on the page (other rails, tonight's picks). Excluded from
+    // this slice like ExcludeTitleIds, but never counted toward this row's depth — ExcludeTitleIds
+    // is also the row's paging cursor (page index, TMDB deepen page), and mixing the page's other
+    // rails into it would page a fresh rail as if it were ten pages deep.
+    IReadOnlyCollection<Guid>? PageExcludeTitleIds = null,
+    // One opaque nonce per page view, shared by every rail request that page makes. See
+    // FeedPageClaims: it is what keeps CONCURRENT rail requests from serving one title twice.
+    string? PageToken = null);
 
-/// <summary>One paginated card before provider hydration — the endpoint attaches the streaming strip.</summary>
-public sealed record ScoredFeedItem(Title Title, decimal Predicted, string WhyThis, bool IsReleased);
+/// <summary>
+/// One paginated card before provider hydration — the endpoint attaches the streaming strip and
+/// writes the exposure row from the rest.
+/// </summary>
+/// <param name="Title">The title on the card.</param>
+/// <param name="Predicted">The displayed prediction (2 dp).</param>
+/// <param name="WhyThis">The rendered why-line; empty when there was nothing honest to say.</param>
+/// <param name="IsReleased">Whether the title is out yet.</param>
+/// <param name="WhySource">How <paramref name="WhyThis"/> came to be — typed at the point it was chosen.</param>
+/// <param name="BaseScore">Base model score plus the online residual, before calibration and demotion.</param>
+/// <param name="CalibrationDelta">How far the calibrator moved <paramref name="BaseScore"/>.</param>
+/// <param name="ResidualApplied">The online residual head's contribution.</param>
+/// <param name="DemotionApplied">The dislike demotion subtracted after calibration.</param>
+/// <param name="LlmFit">The model's fit for this card, only where the MODEL produced it.</param>
+/// <param name="Evidence">
+/// What this card verifiably shares with the row's anchor — empty on un-anchored rows. On an
+/// anchored row (because-you-loved, similar) a card only exists if this is non-empty.
+/// </param>
+public sealed record ScoredFeedItem(
+    Title Title,
+    decimal Predicted,
+    string WhyThis,
+    bool IsReleased,
+    Ml.ClosedLoop.ExposureWhySource WhySource = default,
+    decimal? BaseScore = null,
+    decimal? CalibrationDelta = null,
+    decimal? ResidualApplied = null,
+    decimal? DemotionApplied = null,
+    decimal? LlmFit = null,
+    IReadOnlyList<SharedEvidence>? Evidence = null);
 
 /// <summary>
 /// The infinite-scroll engine. Where <see cref="Jobs.BuildFeedJobHandler"/> materializes a fixed
@@ -155,7 +192,11 @@ public sealed class FeedPaginator(
         // carries the same number the snapshot build would have given it.
         var calibrator = await calibration.GetAsync(account.Id, ct);
 
-        var pool = await FetchWindowAsync(account, req, exclude, taste, ct);
+        // The window excludes the page's other rails too; the depth cursor (exclude.Count) does not.
+        var windowExclude = req.PageExcludeTitleIds is { Count: > 0 } pageExclude
+            ? exclude.Concat(pageExclude).Distinct().ToList()
+            : exclude;
+        var pool = await FetchWindowAsync(account, req, windowExclude, taste, ct);
         var all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
         var scored = all.Where(s => s.Predicted >= minPredicted).ToList();
 
@@ -194,7 +235,7 @@ public sealed class FeedPaginator(
 
             if (grew > 0)
             {
-                pool = await FetchWindowAsync(account, req, exclude, taste, ct);
+                pool = await FetchWindowAsync(account, req, windowExclude, taste, ct);
                 all = await ScoreWindowAsync(artifact, taste, pool, residual, calibrator, now, ct);
                 scored = all.Where(s => s.Predicted >= minPredicted).ToList();
             }
@@ -225,6 +266,33 @@ public sealed class FeedPaginator(
         var prior = TastePrior.From(taste);
         var ranked = await RankAsync(req, taste, scored, boosts, prior, now, ct);
 
+        // ── The anchored-row gate ───────────────────────────────────────────────────────
+        // A because-you-loved or more-like-this page admits a card only when it sits inside the
+        // anchor's own 50-neighbour radius AND shares a person, a keyword or a theme with it
+        // (AnchorRowGate). The evidence that admitted it travels to the card as its chips. A page
+        // that comes up empty after the gate is honest: the anchor has nothing else to give here.
+        var evidence = new Dictionary<Guid, IReadOnlyList<SharedEvidence>>();
+        if (IsAnchored(req) && req.AnchorTitleId is { } gateAnchorId)
+        {
+            var admissions = await AnchorRowGate.AdmitAsync(
+                db, cache, gateAnchorId, ranked.Select(r => r.Title.Id).ToList(), ct);
+            ranked = ranked
+                .Where(r => admissions.TryGetValue(r.Title.Id, out var admission) && admission.Admitted)
+                .ToList();
+            foreach (var r in ranked)
+            {
+                evidence[r.Title.Id] = admissions[r.Title.Id].Evidence;
+            }
+
+            if (ranked.Count == 0)
+            {
+                logger.LogInformation(
+                    "Anchored page {Row}: no candidate cleared the anchor's neighbour floor with shared evidence.",
+                    RowKey(req));
+                return [];
+            }
+        }
+
         // The rail's anchor (name + genres), loaded once: the curation prompt names it so the LLM
         // can state the concrete link, and the templater fallback cites a genuinely shared genre.
         AnchorInfo? anchor = null;
@@ -240,7 +308,12 @@ public sealed class FeedPaginator(
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
         var curated = await CurateAsync(account, req, taste, curationPool, prior, anchor?.Name, ct);
-        var taken = curated.Take(req.Limit).ToList();
+        // Claimed against the page, not just taken: a title another rail on this page already
+        // served is skipped for the next best, so no title appears on two rails of one Home.
+        var claimedIds = await FeedPageClaims.ClaimAsync(
+            db, cache, account.Id, req.PageToken, curated.Select(c => c.Scored.Title.Id).ToList(), req.Limit, ct);
+        var claimedSet = claimedIds.ToHashSet();
+        var taken = curated.Where(c => claimedSet.Contains(c.Scored.Title.Id)).ToList();
 
         var whyContexts = await BuildWhyContextsAsync(taste, taken.Select(c => c.Scored).ToList(), anchor, ct);
         await PersistScoresAsync(account.Id, artifact.Id, taken.Select(c => c.Scored).ToList(), now, ct);
@@ -255,25 +328,33 @@ public sealed class FeedPaginator(
         foreach (var c in taken)
         {
             string why;
-            if (!string.IsNullOrWhiteSpace(c.Why) && !SecondPersonVoice.Rejects(c.Why)
-                && !SecondPersonVoice.SoundsAntiRecommendation(c.Why) && takenWhys.Add(c.Why!))
+            ExposureWhySource source;
+            if (c.ModelWhy is { } modelWhy && FeedWhyGuard.Accepts(modelWhy) && takenWhys.Add(modelWhy))
             {
-                why = c.Why!;
+                why = modelWhy;
+                source = ExposureWhySource.Llm;
             }
             else if (whyContexts.TryGetValue(c.Scored.Title.Id, out var whyContext))
             {
                 why = ExplanationTemplater.BuildDistinctSentence(whyContext, takenWhys);
+                source = c.Attempted ? ExposureWhySource.Fallback : ExposureWhySource.Templater;
             }
             else
             {
                 why = ExplanationTemplater.GenericFallback;
+                source = c.Attempted ? ExposureWhySource.Fallback : ExposureWhySource.Templater;
             }
 
             // The generic fallback may appear at most once per page: a later card with nothing
             // verifiable to say ships an empty why rather than repeating boilerplate.
             if (string.Equals(why, ExplanationTemplater.GenericFallback, StringComparison.Ordinal))
             {
-                why = genericUsed ? string.Empty : why;
+                if (genericUsed)
+                {
+                    why = string.Empty;
+                    source = ExposureWhySource.None;
+                }
+
                 genericUsed = true;
             }
 
@@ -281,8 +362,22 @@ public sealed class FeedPaginator(
             // same feed as page 1, so it must not be the one surface that quantises coarser: a
             // calibration join across FeedItem, TitleScore and ExposureLog would inherit the floor
             // from whichever side is coarsest. Invisible to users — the badge is toFixed(1).
+            //
+            // The breakdown is recovered by the same arithmetic the build's exposure rows use —
+            // the scoring order is fixed (base + residual → calibrator → demotion) — so a paginated
+            // card is no longer the one surface that logs zeros for a decomposition it actually had.
             items.Add(new ScoredFeedItem(
-                c.Scored.Title, Math.Round(c.Scored.Predicted, 2), why, IsReleased(c.Scored.Title, now)));
+                c.Scored.Title,
+                Math.Round(c.Scored.Predicted, 2),
+                why,
+                IsReleased(c.Scored.Title, now),
+                source,
+                BaseScore: c.Scored.BaseScore,
+                CalibrationDelta: c.Scored.CalibrationDelta,
+                ResidualApplied: c.Scored.BaseScore - (decimal)c.Scored.Row.Score,
+                DemotionApplied: c.Scored.BaseScore + c.Scored.CalibrationDelta - c.Scored.Predicted,
+                LlmFit: c.Fit is { FitSource: ResultSource.Llm } fit ? (decimal)fit.Fit : null,
+                Evidence: evidence.GetValueOrDefault(c.Scored.Title.Id)));
         }
 
         return items;
@@ -301,16 +396,21 @@ public sealed class FeedPaginator(
     {
         if (!agent.IsAvailable || pool.Count == 0)
         {
-            return pool.Select(s => new Curated(s, null)).ToList();
+            return pool.Select(s => new Curated(s, null, Attempted: false)).ToList();
         }
 
         var rowKey = RowKey(req);
         var query = QueryFor(req);
         var fitById = new Dictionary<Guid, RerankResult>();
+
+        // Titles a model pass was attempted for in this request, whatever came back — the exposure
+        // row says Fallback (attempted, failed) rather than Templater (never asked) for those.
+        var attempted = new HashSet<Guid>();
         var uncached = new List<RerankInput>();
         foreach (var s in pool)
         {
-            if (cache.TryGetValue<RerankResult>(FitKey(account.Id, s.Title.Id, rowKey), out var hit) && hit is not null)
+            if (cache.TryGetValue<RerankResult>(FitKey(account.Id, s.Title.Id, rowKey), out var hit)
+                && hit is { FitSource: ResultSource.Llm })
             {
                 fitById[s.Title.Id] = hit;
             }
@@ -375,6 +475,16 @@ public sealed class FeedPaginator(
                         batch, query, narrative, anchorName, ApiUsagePurpose.RerankPage, batchCt);
                     foreach (var r in results)
                     {
+                        attempted.Add(r.TitleId);
+
+                        // A fallback fit is the stub's predicted/10. Blending it in counts the
+                        // prediction twice under a model label, and caching it would replay the
+                        // failure for six hours — so it is neither used nor cached.
+                        if (r.FitSource != ResultSource.Llm)
+                        {
+                            continue;
+                        }
+
                         fitById[r.TitleId] = r;
                         cache.Set(FitKey(account.Id, r.TitleId, rowKey), r, FitTtl);
                     }
@@ -408,9 +518,13 @@ public sealed class FeedPaginator(
                 return (Scored: s, Fit: fit, Blend: blend);
             })
             .OrderByDescending(x => x.Blend)
-            .Select(x => new Curated(x.Scored, x.Fit?.Why))
+            .Select(x => new Curated(x.Scored, x.Fit, attempted.Contains(x.Scored.Title.Id)))
             .ToList();
     }
+
+    /// <summary>Rows whose every card must be admitted by <see cref="AnchorRowGate"/>.</summary>
+    private static bool IsAnchored(MoreFeedRequest req) =>
+        req.Context is FeedRowContext.BecauseYouLoved or FeedRowContext.Similar;
 
     private static string QueryFor(MoreFeedRequest req) => req.Context switch
     {
@@ -483,10 +597,13 @@ public sealed class FeedPaginator(
         var media = ParseMedia(req.MediaType);
 
         // "More like this" is anchored to the VIEWED title's embedding, not the user's taste centroid,
-        // so it takes a dedicated retrieval path rather than the hybrid pop+ANN union.
-        if (req.Context == FeedRowContext.Similar && req.AnchorTitleId is { } anchorId)
+        // so it takes a dedicated retrieval path rather than the hybrid pop+ANN union. A
+        // because-you-loved page takes the same path: its gate admits only the anchor's own
+        // neighbourhood, so a window drawn from the taste centroid would be almost entirely refused.
+        if (IsAnchored(req) && req.AnchorTitleId is { } anchorId)
         {
-            return await FetchSimilarWindowAsync(account, anchorId, exclude, taste, media, ct);
+            return await FetchSimilarWindowAsync(
+                account, anchorId, exclude, taste, media, sameMedium: req.Context == FeedRowContext.Similar, ct);
         }
 
         return await candidateRetriever.RetrieveAsync(
@@ -552,7 +669,8 @@ public sealed class FeedPaginator(
     /// (annCount 0, so the taste centroid is untouched) so the rail still fills.
     /// </summary>
     private async Task<IReadOnlyList<Title>> FetchSimilarWindowAsync(
-        Account account, Guid anchorId, List<Guid> exclude, FeatureVectorBuilder.TasteState taste, MediaType? media, CancellationToken ct)
+        Account account, Guid anchorId, List<Guid> exclude, FeatureVectorBuilder.TasteState taste, MediaType? media,
+        bool sameMedium, CancellationToken ct)
     {
         var anchor = await db.Titles
             .Where(t => t.Id == anchorId)
@@ -572,8 +690,12 @@ public sealed class FeedPaginator(
         var anchorMedia = anchor.MediaType;
         Func<IQueryable<Title>, IQueryable<Title>> lane = q =>
         {
-            q = q.Where(t => t.TmdbId != null && t.PosterPath != null && t.Id != anchorId
-                && t.MediaType == anchorMedia && !exclude.Contains(t.Id));
+            q = q.Where(t => t.TmdbId != null && t.PosterPath != null && t.Id != anchorId && !exclude.Contains(t.Id));
+            if (sameMedium)
+            {
+                q = q.Where(t => t.MediaType == anchorMedia);
+            }
+
             if (media is { } m)
             {
                 q = q.Where(t => t.MediaType == m);
@@ -923,6 +1045,10 @@ public sealed class FeedPaginator(
         return result;
     }
 
+    /// <summary>
+    /// Upserts the served slice's scores (<see cref="TitleScoreWriter"/>): nine rails scoring
+    /// overlapping titles in parallel used to race a load-then-insert into a 23505 and a 500.
+    /// </summary>
     private async Task PersistScoresAsync(Guid accountId, Guid artifactId, List<Scored> taken, DateTime now, CancellationToken ct)
     {
         if (taken.Count == 0)
@@ -930,26 +1056,17 @@ public sealed class FeedPaginator(
             return;
         }
 
-        var ids = taken.Select(s => s.Title.Id).ToList();
-        var existing = await db.TitleScores
-            .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifactId && ids.Contains(s.TitleId))
-            .ToDictionaryAsync(s => s.TitleId, ct);
-
-        foreach (var s in taken)
-        {
-            if (!existing.TryGetValue(s.Title.Id, out var score))
-            {
-                score = new TitleScore { Id = Guid.NewGuid(), AccountId = accountId, TitleId = s.Title.Id, ModelArtifactId = artifactId };
-                db.TitleScores.Add(score);
-            }
-
-            score.PredictedRating = Math.Round(s.Predicted, 2);
-            score.ContributionsJson = JsonSerializer.Serialize(
-                s.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) }));
-            score.ScoredAt = now;
-        }
-
-        await db.SaveChangesAsync(ct);
+        await TitleScoreWriter.UpsertAsync(
+            db,
+            accountId,
+            artifactId,
+            taken.Select(s => new TitleScoreWriter.Score(
+                s.Title.Id,
+                Math.Round(s.Predicted, 2),
+                JsonSerializer.Serialize(
+                    s.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })))),
+            now,
+            ct);
     }
 
     private async Task<decimal> MinPredictedAsync(Guid accountId, CancellationToken ct)
@@ -1032,6 +1149,14 @@ public sealed class FeedPaginator(
     private sealed record Scored(
         Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
 
-    /// <summary>A model-scored title after the LLM curation pass — Why is the agent's line, or null.</summary>
-    private sealed record Curated(Scored Scored, string? Why);
+    /// <summary>
+    /// A model-scored title after the LLM curation pass. <paramref name="Fit"/> is the model's
+    /// verdict (only ever a model-sourced fit) or null; <paramref name="Attempted"/> says whether a
+    /// model pass was tried for it in this request at all.
+    /// </summary>
+    private sealed record Curated(Scored Scored, RerankResult? Fit, bool Attempted)
+    {
+        /// <summary>The model's own sentence, or null — the source is read, never inferred.</summary>
+        public string? ModelWhy => Fit is { WhySource: ResultSource.Llm } fit ? fit.Why : null;
+    }
 }

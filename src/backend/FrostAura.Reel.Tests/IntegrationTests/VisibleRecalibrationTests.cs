@@ -340,8 +340,10 @@ public class VisibleRecalibrationTests(PostgresFixture fixture)
         Assert.Equal(1.1m, learned.Value.CalibrationMae);
         Assert.Equal(0.2m, learned.Value.CalibrationBias);
         Assert.Equal(0.31m, learned.Value.Spearman);
-        // "runs 0.4 closer on your scores now" — previous MAE minus current, so positive is better.
-        Assert.Equal(0.4m, learned.Value.MaeImprovement);
+        // No between-run "improvement" is offered any more: the record has no such member, so the
+        // band cannot claim "runs 0.4 closer" from the difference of two noisy holdouts.
+        Assert.DoesNotContain(
+            typeof(ModelLearned).GetProperties(), p => p.Name.Contains("Improvement", StringComparison.Ordinal));
         Assert.Equal(3, learned.Value.PicksChanged);
         Assert.Equal(4, shared);
     }

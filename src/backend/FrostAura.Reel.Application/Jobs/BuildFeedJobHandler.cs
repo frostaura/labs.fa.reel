@@ -88,6 +88,16 @@ public class BuildFeedJobHandler(
     private const int AnchorRowCount = 3;
     private const int RowSize = 10;
     private const int RowMinMembers = 4; // a row below this reads worse than no row, so it's dropped
+
+    /// <summary>
+    /// How many of an anchor's nearest ELIGIBLE titles a build pulls in and scores for that anchor's
+    /// rail. The gate admits only titles inside the anchor's 50-neighbour catalogue radius, and most
+    /// of those are already seen, so the eligible pull reaches a little further than 50.
+    /// </summary>
+    private const int AnchorNeighbourPull = 60;
+
+    /// <summary>The rating an anchor needs to be drawn from the top tier ("your 9–10 ratings").</summary>
+    private const short TopTierAnchorRating = 9;
     // Preference-tag re-rank nudge: a title whose plot embedding sits close to a declared preference
     // tag ("things I'm into") gets at most a +10% lift on top of the model's rating — enough to
     // sharpen ordering toward stated taste, never enough to float a weak prediction over a strong one.
@@ -260,34 +270,50 @@ public class BuildFeedJobHandler(
 
         // ── Phase 4: final score with contributions ─────────────────────────────────────
         ReportProgress(job, accountId, 70, "Final ranking");
-        var finalVectors = await featureBuilder.BuildAsync(taste, shortlist.Select(t => t.Id).ToList(), now, ct);
-        var ordered = shortlist.Where(t => finalVectors.ContainsKey(t.Id)).ToList();
-        var scored = engine.ScoreWithContributions(
-            artifact.ArtifactBytes,
-            ordered.Select(t => finalVectors[t.Id]).ToArray(),
-            FeatureSchema.AllNames());
 
-        // The residual is a scalar correction on the numeric score used for ranking + PredictedRating;
-        // the contribution list stays the base model's (a scalar can't be split into per-feature parts).
-        // The dislike demotion is subtracted here — on the shortlist scores, BEFORE hero and row
+        // The dislike demotion is subtracted on the shortlist scores, BEFORE hero and row
         // selection — so a title similar to what the user declined cannot ride a high base score
         // into the hero or a rail. Profile cached ~10 min; reaction endpoints both evict it and
         // request this very rebuild, so a fresh dislike reshapes the next feed immediately.
         var dislikeProfile = await dislikes.GetProfileAsync(accountId, ct);
-        var demotions = await dislikes.DemotionsForAsync(
-            dislikeProfile, ordered.Select(t => t.Id).ToList(), ct);
-        var candidates = ordered.Zip(scored, (title, row) =>
+
+        // The final scoring pass as a reusable step: the shortlist goes through it here, and the
+        // anchored rails send the anchor neighbourhoods they pull in through the SAME pass during
+        // assembly, so a card that reached a rail by the anchor's neighbourhood carries exactly the
+        // number, residual, calibration and demotion a shortlisted card would have.
+        async Task<IReadOnlyList<Candidate>> ScoreFinalAsync(IReadOnlyList<Title> titles, CancellationToken scoreCt)
         {
-            // base + residual, then the calibrator, then the demotion — the fixed order every
-            // scoring surface uses. The pre-calibration value and the map's delta are carried on the
-            // candidate so the exposure log (Phase 2) can persist what the model said before the
-            // calibrator touched it, without re-deriving it from a number that has already moved.
-            var adjusted = row.Score + OnlineResidualModel.Residual(residual, finalVectors[title.Id]);
-            var calibrated = calibrator.Calibrate(adjusted);
-            var predicted = DislikeSignal.ApplyDemotion(
-                (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
-            return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
-        }).ToList();
+            var finalVectors = await featureBuilder.BuildAsync(taste, titles.Select(t => t.Id).ToList(), now, scoreCt);
+            var ordered = titles.Where(t => finalVectors.ContainsKey(t.Id)).ToList();
+            if (ordered.Count == 0)
+            {
+                return [];
+            }
+
+            var scored = engine.ScoreWithContributions(
+                artifact.ArtifactBytes,
+                ordered.Select(t => finalVectors[t.Id]).ToArray(),
+                FeatureSchema.AllNames());
+
+            // The residual is a scalar correction on the numeric score used for ranking + PredictedRating;
+            // the contribution list stays the base model's (a scalar can't be split into per-feature parts).
+            var demotions = await dislikes.DemotionsForAsync(
+                dislikeProfile, ordered.Select(t => t.Id).ToList(), scoreCt);
+            return ordered.Zip(scored, (title, row) =>
+            {
+                // base + residual, then the calibrator, then the demotion — the fixed order every
+                // scoring surface uses. The pre-calibration value and the map's delta are carried on the
+                // candidate so the exposure log can persist what the model said before the
+                // calibrator touched it, without re-deriving it from a number that has already moved.
+                var adjusted = row.Score + OnlineResidualModel.Residual(residual, finalVectors[title.Id]);
+                var calibrated = calibrator.Calibrate(adjusted);
+                var predicted = DislikeSignal.ApplyDemotion(
+                    (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
+                return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
+            }).ToList();
+        }
+
+        var candidates = await ScoreFinalAsync(shortlist, ct);
         await PersistScoresAsync(accountId, artifact.Id, candidates, now, ct);
 
         // The taste fingerprint, computed ONCE and used three times: the two follow-up enqueues
@@ -304,7 +330,8 @@ public class BuildFeedJobHandler(
         // ── Phase 5: assemble the feed ──────────────────────────────────────────────────
         ReportProgress(job, accountId, 85, "Assembling tonight's picks");
         var snapshot = await AssembleAsync(
-            account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, profileHash, capture, ct);
+            account, artifact, taste, candidates, minPredicted, job.TriggerReason, now, profileHash, capture,
+            ScoreFinalAsync, ct);
 
         // Written on the tracked context before either exit below commits, so the no-op path records
         // its no-op. The eligible-pool count is the supply ceiling: when retrieval asks for more
@@ -758,31 +785,22 @@ public class BuildFeedJobHandler(
 
     private async Task PersistScoresAsync(Guid accountId, Guid artifactId, IReadOnlyList<Candidate> candidates, DateTime now, CancellationToken ct)
     {
-        var titleIds = candidates.Select(c => c.Title.Id).ToList();
-        var existing = await db.TitleScores
-            .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifactId && titleIds.Contains(s.TitleId))
-            .ToDictionaryAsync(s => s.TitleId, ct);
+        // One upsert on the unique key (TitleScoreWriter): the paginator scores the same titles
+        // against the same artifact concurrently, so a load-then-insert here raced it into a 23505.
+        await TitleScoreWriter.UpsertAsync(
+            db,
+            accountId,
+            artifactId,
+            candidates.Select(candidate => new TitleScoreWriter.Score(
+                candidate.Title.Id,
+                Math.Round(candidate.Predicted, 2),
+                JsonSerializer.Serialize(
+                    candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })))),
+            now,
+            ct);
 
-        foreach (var candidate in candidates)
-        {
-            if (!existing.TryGetValue(candidate.Title.Id, out var score))
-            {
-                score = new TitleScore
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = candidate.Title.Id,
-                    ModelArtifactId = artifactId,
-                };
-                db.TitleScores.Add(score);
-            }
-
-            score.PredictedRating = Math.Round(candidate.Predicted, 2);
-            score.ContributionsJson = JsonSerializer.Serialize(
-                candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) }));
-            score.ScoredAt = now;
-        }
-
+        // Still saved here: the job's progress line ("Final ranking") rides this context and was
+        // always persisted by this save. The scores themselves are no longer tracked.
         await db.SaveChangesAsync(ct);
     }
 
@@ -794,7 +812,8 @@ public class BuildFeedJobHandler(
     private async Task<FeedSnapshot?> AssembleAsync(
         Account account, ModelArtifact artifact, FeatureVectorBuilder.TasteState taste,
         IReadOnlyList<Candidate> candidates, decimal minPredicted, string? triggerReason, DateTime now,
-        string? profileHash, BuildCapture capture, CancellationToken ct)
+        string? profileHash, BuildCapture capture,
+        Func<IReadOnlyList<Title>, CancellationToken, Task<IReadOnlyList<Candidate>>> scoreFinal, CancellationToken ct)
     {
         // ── The floor is soft; the content rules are not ────────────────────────────────────
         // Content filters are the user's statement about CONTENT — they bind absolutely and are
@@ -958,6 +977,11 @@ public class BuildFeedJobHandler(
         var allTimeOrder = taste.TopLovedTitleIds.Where(anchorTitles.ContainsKey).ToList();
         var rotationOffset = AnchorRotation.OffsetFor(now);
 
+        // Anchors are drawn first from the titles the user rated 9–10 (AnchorRotation's top tier).
+        var topTierAnchors = anchorTitles.Keys
+            .Where(id => taste.Self.Ratings.TryGetValue(id, out var rated) && rated.Rating >= TopTierAnchorRating)
+            .ToHashSet();
+
         List<Guid> anchorIds;
         if (mode == FeedBuildMode.Preserve)
         {
@@ -994,7 +1018,7 @@ public class BuildFeedJobHandler(
                 var holdBack = new HashSet<Guid>(previousDayAnchors);
                 holdBack.UnionWith(anchorIds);
                 anchorIds.AddRange(AnchorRotation
-                    .Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount)
+                    .Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount, topTierAnchors)
                     .Where(id => !anchorIds.Contains(id))
                     .Take(railsOnThePage - anchorIds.Count));
             }
@@ -1008,7 +1032,7 @@ public class BuildFeedJobHandler(
             var holdBack = FeedBuildPolicy.IsUserForced(triggerReason)
                 ? previousAnchors.ToHashSet()
                 : previousDayAnchors;
-            anchorIds = AnchorRotation.Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount);
+            anchorIds = AnchorRotation.Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount, topTierAnchors);
         }
 
         var anchors = anchorIds.Select(id => anchorTitles[id]).ToList();
@@ -1346,9 +1370,18 @@ public class BuildFeedJobHandler(
         // is superseded until a genuinely different feed is in hand.
         var planned = new List<PlannedItem>();
 
+        // What each anchored card shares with its anchor (filled by the gate below, read by AddItem).
+        var railEvidence = new Dictionary<(Guid Anchor, Guid Title), IReadOnlyList<SharedEvidence>>();
+
         void AddItem(FeedRowKind row, Title? anchor, int rank, Candidate candidate)
         {
-            var item = new PlannedItem(row, anchor?.Id, rank, candidate, WhyContext(candidate, anchor));
+            var context = WhyContext(candidate, anchor);
+            if (anchor is not null && railEvidence.TryGetValue((anchor.Id, candidate.Title.Id), out var shared))
+            {
+                context = context with { AnchorEvidence = shared };
+            }
+
+            var item = new PlannedItem(row, anchor?.Id, rank, candidate, context);
             if (attribution.TryGetValue(candidate.Title.Id, out var drafted))
             {
                 item.PolicyId = drafted.PolicyId;
@@ -1437,6 +1470,80 @@ public class BuildFeedJobHandler(
             .GroupBy(i => i.AnchorTitleId!.Value)
             .ToDictionary(g => g.Key, g => g.OrderBy(i => i.Rank).Select(i => i.TitleId).ToList());
 
+        // ── The anchored-row gate (AnchorRowGate) ───────────────────────────────────────────
+        // A card joins "Because you loved X" only when it sits inside X's own 50-neighbour radius
+        // AND shares a person, a keyword or a theme with X. The shortlist alone almost never holds
+        // enough of an anchor's real neighbourhood — it was cut on taste, not on resemblance to one
+        // title — so each anchor's nearest ELIGIBLE titles are pulled in and scored through the same
+        // final pass the shortlist went through, and compete only for that anchor's rail.
+        var anchorExtras = new List<Candidate>();
+        var anchorPools = new Dictionary<Guid, List<(Candidate Candidate, double Sim)>>();
+        foreach (var anchor in anchors)
+        {
+            var anchorVector = await db.TitleEmbeddings
+                .Where(e => e.TitleId == anchor.Id)
+                .Select(e => e.Embedding)
+                .FirstOrDefaultAsync(ct);
+            if (anchorVector is not null)
+            {
+                var neighbours = await candidateRetriever.RetrieveSimilarAsync(
+                    account.Id,
+                    anchorVector,
+                    q => q.Where(t => t.TmdbId != null && t.PosterPath != null && t.Id != anchor.Id),
+                    AnchorNeighbourPull,
+                    account.Settings.MaturityCeiling,
+                    ct);
+                var unscored = neighbours.Where(t => !candidatesById.ContainsKey(t.Id)).ToList();
+                if (unscored.Count > 0)
+                {
+                    foreach (var extra in await scoreFinal(unscored, ct))
+                    {
+                        candidatesById[extra.Title.Id] = extra;
+                        anchorExtras.Add(extra);
+                    }
+                }
+            }
+
+            // Kept members are asked about too — not to re-gate them (tonight's contract keeps a
+            // seat that was dealt), but so their chips render from the same evidence the gate reads.
+            var keptIds = previousRailMembers.GetValueOrDefault(anchor.Id) ?? [];
+            var askIds = candidatesById.Keys.Where(id => id != anchor.Id).ToList();
+            var admissions = await AnchorRowGate.AdmitAsync(db, cache, anchor.Id, askIds, ct);
+            foreach (var (titleId, admission) in admissions)
+            {
+                if (admission.Admitted || keptIds.Contains(titleId))
+                {
+                    railEvidence[(anchor.Id, titleId)] = admission.Evidence;
+                }
+            }
+
+            anchorPools[anchor.Id] = admissions
+                .Where(a => a.Value.Admitted && a.Value.Similarity is not null)
+                .Select(a => (candidatesById[a.Key], a.Value.Similarity!.Value))
+                .ToList();
+        }
+
+        if (anchorExtras.Count > 0)
+        {
+            // The pulled-in neighbours get the same per-title context the shortlist got: verified
+            // people and tone for their why-lines, and a stored score so a later refill can find them.
+            foreach (var (titleId, persons) in VerifiedPeople.BestByRole(
+                         await VerifiedPeople.ForTitlesAsync(db, taste, anchorExtras.Select(c => c.Title.Id).ToList(), ct)))
+            {
+                personsByTitle[titleId] = persons;
+            }
+
+            var extraIds = anchorExtras.Select(c => c.Title.Id).ToList();
+            foreach (var (titleId, tone) in await db.TitleAttributes
+                         .Where(a => extraIds.Contains(a.TitleId) && a.Tone != null)
+                         .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct))
+            {
+                toneByTitle[titleId] = tone;
+            }
+
+            await PersistScoresAsync(account.Id, artifact.Id, anchorExtras, now, ct);
+        }
+
         foreach (var anchor in anchors)
         {
             var members = new List<Candidate>();
@@ -1463,11 +1570,10 @@ public class BuildFeedJobHandler(
             if (members.Count < RowSize)
             {
                 var keptIds = members.Select(m => m.Title.Id).ToHashSet();
-                var railPool = candidates
-                    .Where(c => !used.Contains(c.Title.Id) && !keptIds.Contains(c.Title.Id)
-                        && !reserved.Contains(c.Title.Id) && c.Predicted >= effectiveFloor)
-                    .Select(c => new { Candidate = c, Sim = Similarity(anchor, c.Title) })
-                    .Where(x => x.Sim > 0.15d)
+                var railPool = anchorPools.GetValueOrDefault(anchor.Id, [])
+                    .Where(x => !used.Contains(x.Candidate.Title.Id) && !keptIds.Contains(x.Candidate.Title.Id)
+                        && !reserved.Contains(x.Candidate.Title.Id) && x.Candidate.Predicted >= effectiveFloor)
+                    .Select(x => new { x.Candidate, x.Sim })
                     .ToList();
 
                 // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
@@ -1475,6 +1581,7 @@ public class BuildFeedJobHandler(
                 // than substituting the hero's.
                 var railOrder = railPool
                     .OrderByDescending(x => (double)RankKey(x.Candidate) * (0.5d + x.Sim))
+                    .ThenBy(x => x.Candidate.Title.Id)
                     .Select(x => x.Candidate)
                     .ToList();
                 var taking = RowSize - members.Count;
@@ -1857,8 +1964,11 @@ public class BuildFeedJobHandler(
         var uncached = new List<Candidate>(slice.Count);
         foreach (var candidate in slice)
         {
+            // Only a MODEL fit is ever cached (see below), but the source is read rather than assumed:
+            // a cached stub fit is the predicted rating divided by ten, and ranking on it would
+            // count the prediction twice under a label that says the model judged the title.
             if (cache.TryGetValue<RerankResult>(FeedPaginator.FitKey(accountId, candidate.Title.Id, rowKey), out var hit)
-                && hit is not null)
+                && hit is { FitSource: ResultSource.Llm })
             {
                 fits[candidate.Title.Id] = hit.Fit;
             }
@@ -1900,6 +2010,13 @@ public class BuildFeedJobHandler(
 
                 foreach (var raw in results)
                 {
+                    // A fallback verdict is not a verdict: never debiased, never cached, never ranked
+                    // on. The title simply stays unjudged — the documented NeutralFit path.
+                    if (raw.FitSource != ResultSource.Llm)
+                    {
+                        continue;
+                    }
+
                     // The same deterministic unscripted-format correction the why pass applies, for
                     // the same reason and revocable the same way (see UnscriptedFormats): an LLM's
                     // sense of how well a long-running panel show "fits" someone is contaminated by
@@ -1929,14 +2046,19 @@ public class BuildFeedJobHandler(
     }
 
     /// <summary>
-    /// True when an LLM why-line may be shown on a pick surface: the shared voice/shape guard
-    /// (<see cref="SecondPersonVoice.Rejects"/>) plus the anti-recommendation guard — a feed card
-    /// must never argue against its own pick, however honest the argument.
+    /// True when a why-line may be shown on a pick surface — <see cref="FeedWhyGuard.Accepts"/>, the
+    /// one gate every pick surface shares (voice, anti-recommendation, hedges, the stub sentence,
+    /// the retired era template and the a/an defect).
     /// </summary>
-    private static bool AcceptsWhy(string? why) =>
-        !string.IsNullOrWhiteSpace(why)
-        && !SecondPersonVoice.Rejects(why)
-        && !SecondPersonVoice.SoundsAntiRecommendation(why);
+    private static bool AcceptsWhy(string? why) => FeedWhyGuard.Accepts(why);
+
+    /// <summary>
+    /// A cached or fresh verdict's sentence, when — and only when — the MODEL wrote it and it passes
+    /// the guard. The source is read, never inferred from the sentence being non-empty: that
+    /// inference is how a deterministic stub was labelled model output on thousands of exposure rows.
+    /// </summary>
+    private static string? ModelWhy(RerankResult? verdict) =>
+        verdict is { WhySource: ResultSource.Llm } && AcceptsWhy(verdict.Why) ? verdict.Why : null;
 
     /// <summary>
     /// Fills every planned card's final why-line. Order of preference: the previous snapshot's
@@ -1990,19 +2112,20 @@ public class BuildFeedJobHandler(
             var rowKey = FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId);
             var cachedHit = cache.TryGetValue<RerankResult>(
                 FeedPaginator.FitKey(accountId, item.Candidate.Title.Id, rowKey), out var hit) && hit is not null;
-            if (cachedHit && item.Row == FeedRowKind.Hero)
+            var cachedFit = cachedHit && hit!.FitSource == ResultSource.Llm;
+            if (cachedFit && item.Row == FeedRowKind.Hero)
             {
                 heroFits[item.Candidate.Title.Id] = hit!.Fit;
             }
 
-            if (cachedHit)
+            if (cachedFit)
             {
                 item.LlmFit = (decimal)hit!.Fit;
             }
 
-            if (cachedHit && AcceptsWhy(hit!.Why))
+            if (cachedHit && ModelWhy(hit) is { } cachedWhy)
             {
-                item.WhyThis = hit.Why;
+                item.WhyThis = cachedWhy;
                 item.WhySource = ExposureWhySource.Cache;
             }
             else
@@ -2049,7 +2172,12 @@ public class BuildFeedJobHandler(
                 if (!seen.Add(item.WhyThis))
                 {
                     item.WhyThis = ExplanationTemplater.BuildDistinctSentence(item.WhyContext, seen);
-                    item.WhySource = ExposureWhySource.Templater;
+                    // A card whose model pass failed keeps saying so — the re-seeded line is still
+                    // deterministic copy standing in for a model line that never came.
+                    if (item.WhySource != ExposureWhySource.Fallback)
+                    {
+                        item.WhySource = ExposureWhySource.Templater;
+                    }
                 }
             }
         }
@@ -2159,6 +2287,7 @@ public class BuildFeedJobHandler(
                 // No spare, or no budget to earn the replacement a why: the pick stays, but its
                 // caption must not argue against it — fall back to the templater sentence.
                 item.WhyThis = ExplanationTemplater.BuildSentence(item.WhyContext);
+                item.WhySource = ExposureWhySource.Templater;
                 continue;
             }
 
@@ -2179,6 +2308,12 @@ public class BuildFeedJobHandler(
                 ApiUsagePurpose.RerankFeed, batchCt);
             foreach (var result in results)
             {
+                // Only a model fit can earn a swapped-in hero its seat; a fallback is no verdict.
+                if (result.FitSource != ResultSource.Llm)
+                {
+                    continue;
+                }
+
                 debiased.Observe(result);
                 resultByTitle[result.TitleId] = debiased.For(result.TitleId)!;
             }
@@ -2194,6 +2329,7 @@ public class BuildFeedJobHandler(
             foreach (var (item, _, _) in swaps)
             {
                 item.WhyThis = ExplanationTemplater.BuildSentence(item.WhyContext);
+                item.WhySource = ExposureWhySource.Templater;
             }
 
             return;
@@ -2208,11 +2344,21 @@ public class BuildFeedJobHandler(
             {
                 cache.Set(FeedPaginator.FitKey(accountId, replacement.Title.Id, rowKey), verdict, FitTtl);
                 item.LlmFit = (decimal)verdict.Fit;
-                if (AcceptsWhy(verdict.Why))
+                if (ModelWhy(verdict) is { } why)
                 {
-                    item.WhyThis = verdict.Why;
+                    item.WhyThis = why;
                     item.WhySource = ExposureWhySource.Llm;
                 }
+                else
+                {
+                    // Judged, but the sentence was the model's failure or failed the guard: the
+                    // templater line the swap installed stays, labelled as a failed model pass.
+                    item.WhySource = ExposureWhySource.Fallback;
+                }
+            }
+            else
+            {
+                item.WhySource = ExposureWhySource.Fallback;
             }
 
             logger.LogInformation(
@@ -2247,6 +2393,15 @@ public class BuildFeedJobHandler(
 
             var stop = await loop.RunAsync(items, async (batch, batchCt) =>
             {
+                // Every card in a batch that is sent is a card whose model pass was ATTEMPTED. It
+                // stays labelled Fallback unless the model actually supplies its sentence below —
+                // a failed, truncated or skipped entry must not read as plain templater copy that
+                // nobody tried to improve, and must never read as model output.
+                foreach (var attempted in batch)
+                {
+                    attempted.WhySource = ExposureWhySource.Fallback;
+                }
+
                 var inputs = batch.Select(p => RerankInputFor(p.Candidate, contexts)).ToList();
                 var results = await agent.RerankBatchAsync(
                     inputs, FeedPaginator.QueryForRow(rail.Key.Row), persona, anchorName,
@@ -2254,6 +2409,14 @@ public class BuildFeedJobHandler(
 
                 foreach (var raw in results)
                 {
+                    // A fallback FIT is the stub's predicted/10: never debiased, cached, logged as a
+                    // fit or allowed to swap a hero. A model fit with a fallback WHY (the voice guard
+                    // rejected only the sentence) is still a real fit and is kept.
+                    if (raw.FitSource != ResultSource.Llm)
+                    {
+                        continue;
+                    }
+
                     // The deterministic half of the prompt's "judge fit against who they are, not
                     // against reach" instruction — see UnscriptedFormats for why it is conditional
                     // on the account's own narrative and therefore revocable by editing it.
@@ -2273,9 +2436,9 @@ public class BuildFeedJobHandler(
                         scored.LlmFit = (decimal)result.Fit;
                     }
 
-                    if (AcceptsWhy(result.Why) && byTitleId.TryGetValue(result.TitleId, out var item))
+                    if (ModelWhy(result) is { } why && byTitleId.TryGetValue(result.TitleId, out var item))
                     {
-                        item.WhyThis = result.Why;
+                        item.WhyThis = why;
                         item.WhySource = ExposureWhySource.Llm;
                         curated++;
                     }
