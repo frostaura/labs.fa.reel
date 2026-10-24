@@ -228,7 +228,7 @@ public class TmdbClient(
         // over the most niche unseen titles, not just the popular ones. The feed build overrides it
         // back to 50 through options, so routing supply through here does not quietly widen its
         // quality floor. Genres + keywords OR-joined.
-        var query = $"?sort_by=popularity.desc&include_adult=false&page={page}"
+        var query = $"?sort_by={SortParameter(options?.Sort ?? TmdbDiscoverSort.Popularity, movies)}&include_adult=false&page={page}"
             + $"&vote_count.gte={options?.MinVoteCount ?? DefaultConceptVoteCount}";
         var dateField = movies ? "primary_release_date" : "first_air_date";
         if (genreIds.Count > 0)
@@ -300,6 +300,15 @@ public class TmdbClient(
 
         return GetListAsync(path + query, movies, options?.Priority ?? RatePriority.Interactive, ct);
     }
+
+    /// <summary>TMDB's <c>sort_by</c> value for a sort; the release-date field differs between movie and TV.</summary>
+    private static string SortParameter(TmdbDiscoverSort sort, bool movies) => sort switch
+    {
+        TmdbDiscoverSort.VoteCount => "vote_count.desc",
+        TmdbDiscoverSort.VoteAverage => "vote_average.desc",
+        TmdbDiscoverSort.Newest => movies ? "primary_release_date.desc" : "first_air_date.desc",
+        _ => "popularity.desc",
+    };
 
     public async Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default)
     {

@@ -72,7 +72,19 @@ public sealed record TmdbDiscoverOptions(
     IReadOnlyList<long>? PeopleIds = null,
     /// <summary>Which shared rate-gate lane the call drains. Interactive by default (Ask Reel);
     /// background supply passes Reconcile so a feed build cannot starve a live search.</summary>
-    RatePriority Priority = RatePriority.Interactive);
+    RatePriority Priority = RatePriority.Interactive,
+    /// <summary>The order TMDB pages in. Popularity by default, which is what every existing caller
+    /// was built against.</summary>
+    TmdbDiscoverSort Sort = TmdbDiscoverSort.Popularity);
+
+/// <summary>The <c>sort_by</c> orders a concept discover can page in (always descending).</summary>
+public enum TmdbDiscoverSort
+{
+    Popularity,
+    VoteCount,
+    VoteAverage,
+    Newest,
+}
 
 /// <summary>
 /// One discover page WITH its pagination envelope — what a bulk walk needs and what
