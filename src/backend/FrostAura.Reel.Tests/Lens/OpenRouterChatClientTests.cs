@@ -77,7 +77,7 @@ public class OpenRouterChatClientTests
 
         var judge = catalog.For(ApiUsagePurpose.AskJudge);
         Assert.Equal(ReasoningEfforts.None, judge.ReasoningEffort);
-        Assert.Equal(900, judge.MaxTokens);
+        Assert.Equal(100 + (110 * 6), judge.MaxTokensFor(6));
 
         Assert.Null(catalog.For(ApiUsagePurpose.AskAnswer).ReasoningEffort);
     }
@@ -182,7 +182,7 @@ public class OpenRouterChatClientTests
         Assert.Equal(LlmCallFailure.Truncated, result.Failure);
         Assert.Equal(AgentFailureKind.Truncated, result.AgentFailure);
         Assert.Equal(JobFailureReason.NoAnswer, result.ReasonCode);
-        Assert.Equal([900, 1800], handler.Bodies.Select(MaxTokensOf));
+        Assert.Equal([100, 200], handler.Bodies.Select(MaxTokensOf));
         var (calls, tokens) = recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankFeed);
         Assert.Equal(2, calls);
         Assert.Equal(2 * (100 + 900), tokens); // the truncated attempts' tokens are recorded, not dropped
@@ -195,7 +195,7 @@ public class OpenRouterChatClientTests
         var result = await Client(handler).CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
         Assert.True(result.Succeeded);
         Assert.Equal("""{"a":1}""", result.Content);
-        Assert.Equal(1400, result.MaxTokens);
+        Assert.Equal(700, result.MaxTokens);
     }
 
     [Fact]
@@ -223,6 +223,9 @@ public class OpenRouterChatClientTests
 
         Assert.Equal(LlmCallFailure.ProviderRefused, refused.Failure);
         Assert.Equal(reason, refused.ReasonCode);
+        // A refusal generated nothing: its tokens are a KNOWN zero, so the ledger never shows NULL for it.
+        Assert.Equal(0, refused.CompletionTokens);
+        Assert.Equal(0, refused.PromptTokens);
         Assert.Single(handler.Bodies); // the second call was never sent
         Assert.Equal(LlmCallFailure.ProviderUnavailable, next.Failure);
         Assert.Equal(reason, next.ReasonCode);
@@ -286,6 +289,15 @@ public class OpenRouterChatClientTests
         Assert.Equal(JobFailureReason.RateLimited, result.ReasonCode);
         Assert.Equal(2, handler.Bodies.Count);
         Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.Lens).Calls);
+    }
+
+    [Fact]
+    public async Task A_server_error_leaves_its_tokens_unknown_rather_than_zero()
+    {
+        var result = await Client(new Script(new Canned(HttpStatusCode.BadGateway, "{}")))
+            .CompleteAsync(Request(ApiUsagePurpose.ExtractAttributes), CancellationToken.None);
+        Assert.Equal(LlmCallFailure.ProviderError, result.Failure);
+        Assert.Null(result.CompletionTokens);
     }
 
     [Fact]

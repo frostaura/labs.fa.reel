@@ -347,26 +347,32 @@ public class OpenRouterSearchAgentLiveModeTests
     // ── Ceilings ────────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Interpret_sends_max_tokens_400()
+    public async Task Interpret_sends_its_measured_ceiling()
     {
+        // WS-1 task 3: p99 completion at effort none (125) x 1.5, rounded up — 200, where the
+        // mini-era 400 was spent on hidden reasoning by a reasoning model.
         var handler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
 
         await Agent(handler).InterpretAsync([], "80s sci-fi movies", "likes sci-fi", []);
 
-        Assert.Equal(400, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal(200, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal("none", EffortOf(handler.Bodies[0]));
     }
 
-    [Fact]
-    public async Task Rerank_sends_max_tokens_900()
+    [Theory]
+    [InlineData(ApiUsagePurpose.RerankFeed, 100 + (200 * 3))]
+    [InlineData(ApiUsagePurpose.RerankPage, 100 + (200 * 3))]
+    [InlineData(ApiUsagePurpose.RerankAsk, 100 + (110 * 3))]
+    public async Task Rerank_sends_an_envelope_plus_a_measured_per_title_share(string purpose, int expected)
     {
-        // Deliberately a DIFFERENT number from interpret's: a single shared constant would have
-        // passed a test that asserted only "max_tokens is present", while starving one of the two
-        // callers. The re-rank answer is per-title and an order of magnitude wider.
+        // Deliberately per title: the re-rank answer is one entry per title, and a flat ceiling
+        // sized for 9 either starves a 9-title batch at p99 (the old 900 against a measured 1,194)
+        // or over-provisions a 3-title one.
         var handler = new CannedHandler(Ok("""{"results":[]}"""));
 
-        await Agent(handler).RerankBatchAsync(Titles(), "q", "taste");
+        await Agent(handler).RerankBatchAsync(Titles(), "q", "taste", anchorName: null, purpose);
 
-        Assert.Equal(900, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal(expected, MaxTokensOf(handler.Bodies[0]));
     }
 
     [Fact]
@@ -564,8 +570,8 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Theory]
-    [InlineData("length", 800)]
-    [InlineData("empty", 400)]
+    [InlineData("length", 400)]
+    [InlineData("empty", 200)]
     public async Task Only_a_truncated_attempt_retries_at_twice_the_ceiling(string firstFailure, int retryBudget)
     {
         // At temperature 0 a ceiling that truncated once truncates again; any other failure has
@@ -579,7 +585,7 @@ public class OpenRouterSearchAgentLiveModeTests
         var reply = await Agent(handler, recorder).InterpretAsync([], "ninja movies", "likes action", []);
 
         Assert.False(reply.Degraded);
-        Assert.Equal([400, retryBudget], handler.Bodies.Select(MaxTokensOf));
+        Assert.Equal([200, retryBudget], handler.Bodies.Select(MaxTokensOf));
         // Both attempts are on the ledger: the failed one was billed too.
         Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.SearchAgent).Calls);
     }
@@ -818,6 +824,12 @@ public class OpenRouterSearchAgentLiveModeTests
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterSearchAgent(
             client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance, capabilities: capabilities);
+    }
+
+    private static string? EffortOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.TryGetProperty("reasoning", out var r) ? r.GetProperty("effort").GetString() : null;
     }
 
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);

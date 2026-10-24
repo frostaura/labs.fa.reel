@@ -419,7 +419,16 @@ public sealed class OpenRouterChatClient(
                 var status = (int)response.StatusCode;
                 if (!response.IsSuccessStatusCode)
                 {
-                    return new Attempt(Classify(response.StatusCode, body, strict, effort), status, null, null, null, null, null);
+                    if (status is >= 400 and < 500)
+                    {
+                        // A 4xx (a refusal, a rejected request, a rate limit) is the provider
+                        // declining to generate: zero tokens is KNOWN, not unknown, so the ledger
+                        // says 0 rather than NULL. A 5xx may have generated before failing — unknown.
+                        prompt = 0;
+                        completion = 0;
+                    }
+
+                    return new Attempt(Classify(response.StatusCode, body, strict, effort), status, null, null, prompt, completion, null);
                 }
 
                 var envelope = ReadEnvelope(body);

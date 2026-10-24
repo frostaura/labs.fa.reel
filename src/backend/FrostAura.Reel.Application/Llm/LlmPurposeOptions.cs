@@ -89,8 +89,8 @@ public interface ILlmPurposeCatalog
 /// extraction stamp, and FD-1 has not been answered.</para>
 ///
 /// <para><b>The token defaults are the measured ones</b> (WS-1 task 3: p99 completion tokens at
-/// effort none × 1.5, rounded up to a round number) where a measurement exists, and the old
-/// mini-era ceilings where it does not yet.</para>
+/// effort none × 1.5, rounded up) where a measurement exists, and §4.11-derived ceilings where
+/// no prompt exists yet to measure (ask-plan, ask-answer) or none was spent (lens-audit).</para>
 /// </summary>
 public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurposeCatalog
 {
@@ -113,33 +113,51 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
 
     private sealed record Default(ModelRule Rule, LlmPurposeOptions Options);
 
-    /// <summary>The defaults, model left blank — it is resolved from configuration per read.</summary>
+    /// <summary>
+    /// The defaults, model left blank — it is resolved from configuration per read.
+    ///
+    /// <para><b>Sized from WS-1 task 3's probe</b> (2026-10-24, gpt-6-luna at effort none, slot DB
+    /// reel_ws1, 205 calls, reasoning tokens 0 on every call): each ceiling is the measured p99
+    /// completion × 1.5, rounded up. Batch purposes are sized per item (p99 per item × 1.5) on top
+    /// of a fixed envelope allowance, because luna's per-entry cost is what scales — a 9-title feed
+    /// batch at p99 needed ~1,200 tokens, far past the old flat 900. p99 (p50) completion tokens:
+    /// interpret 125 (91), interpreter 80 (68), feed batch of 9 1,194 (586; 133/item p99), page
+    /// batch of 9 1,130 (592), Ask batch of 6 443 (412; 74/item), cross-reference batch of 10
+    /// 928 (464; 93/item), lens 205 (163), narrative 239 (212). Against the gpt-5.4-mini ledger
+    /// means: interpret 130, feed 368, page 424, Ask 366, cross-reference 1,490 per 60, lens 176,
+    /// narrative 255 — at effort none luna is back in mini's range everywhere but the re-rank
+    /// whys, which it writes about 1.6× longer.</para>
+    /// </summary>
     private static readonly IReadOnlyDictionary<string, Default> Defaults = new Dictionary<string, Default>(StringComparer.Ordinal)
     {
         // ── Ask Reel v1: the conversational interpret and the expansion interpreter ──
-        [ApiUsagePurpose.SearchAgent] = Search(maxTokens: 400, InteractiveAttempt, InteractiveTotal),
-        [ApiUsagePurpose.SearchInterpret] = Search(maxTokens: 400, InteractiveAttempt, InteractiveTotal),
+        [ApiUsagePurpose.SearchAgent] = Search(maxTokens: 200, InteractiveAttempt, InteractiveTotal),
+        [ApiUsagePurpose.SearchInterpret] = Search(maxTokens: 150, InteractiveAttempt, InteractiveTotal),
 
-        // ── The re-rank family ──
-        [ApiUsagePurpose.Rerank] = Search(maxTokens: 900, InteractiveAttempt, InteractiveTotal),
-        [ApiUsagePurpose.RerankFeed] = Search(maxTokens: 900, InteractiveAttempt, InteractiveTotal),
-        [ApiUsagePurpose.RerankPage] = Search(maxTokens: 900, InteractiveAttempt, InteractiveTotal),
-        [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 900, InteractiveAttempt, InteractiveTotal),
-        [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 900, InteractiveAttempt, InteractiveTotal),
+        // ── The re-rank family: an envelope plus a per-title share ──
+        // Feed curation is background work with nobody waiting, so it gets the longer clock: one
+        // 9-title batch took 25 s at p99 in the probe, past the interactive attempt timeout.
+        [ApiUsagePurpose.Rerank] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 200),
+        [ApiUsagePurpose.RerankFeed] = Search(maxTokens: 100, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90), perItem: 200),
+        [ApiUsagePurpose.RerankPage] = Search(maxTokens: 100, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), perItem: 200),
+        [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 110),
+        [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 110),
 
-        // ── Ask Reel v2 (§4.11 stage budgets: plan ~150 out, judge batch ~350 out, answer ~120 out) ──
+        // ── Ask Reel v2 (§4.11 stage budgets). Plan and answer are not measurable until WS-2's
+        // prompts exist and keep §4.11-derived ceilings; the judge uses the rerank-ask measurement,
+        // its closest existing shape (a satisfies verdict + fit + why per title). ──
         [ApiUsagePurpose.AskPlan] = Search(maxTokens: 600, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
-        [ApiUsagePurpose.AskJudge] = Search(maxTokens: 900, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30)),
+        [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 110),
         [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 300, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
 
         // ── Background writers ──
         // Cross-reference: a fixed allowance for the envelope (and any residual reasoning) plus a
         // per-candidate share, so the ceiling scales with the batch the way the answer does.
-        [ApiUsagePurpose.CrossReference] = General(maxTokens: 512, BackgroundAttempt, BackgroundTotal, perItem: 64),
-        [ApiUsagePurpose.CrossReferenceEval] = General(maxTokens: 512, BackgroundAttempt, BackgroundTotal, perItem: 64),
-        [ApiUsagePurpose.Lens] = General(maxTokens: 700, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90)),
+        [ApiUsagePurpose.CrossReference] = General(maxTokens: 256, BackgroundAttempt, BackgroundTotal, perItem: 140),
+        [ApiUsagePurpose.CrossReferenceEval] = General(maxTokens: 256, BackgroundAttempt, BackgroundTotal, perItem: 140),
+        [ApiUsagePurpose.Lens] = General(maxTokens: 350, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90)),
         [ApiUsagePurpose.LensAudit] = General(maxTokens: 300, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90)),
-        [ApiUsagePurpose.TasteNarrative] = General(maxTokens: 900, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90)),
+        [ApiUsagePurpose.TasteNarrative] = General(maxTokens: 400, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90)),
 
         // ── Extraction: untouched until FD-1 ──
         // No reasoning parameter, the same 500-token ceiling, no transient retry (a 500 is retried
@@ -218,9 +236,9 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
             ? TimeSpan.FromSeconds(v)
             : fallback;
 
-    private static Default Search(int maxTokens, TimeSpan attempt, TimeSpan total) =>
+    private static Default Search(int maxTokens, TimeSpan attempt, TimeSpan total, int perItem = 0) =>
         new(ModelRule.Search, new LlmPurposeOptions(
-            string.Empty, ReasoningEfforts.None, maxTokens, MaxRetries: 1, attempt, total));
+            string.Empty, ReasoningEfforts.None, maxTokens, MaxRetries: 1, attempt, total, perItem));
 
     private static Default General(int maxTokens, TimeSpan attempt, TimeSpan total, int perItem = 0) =>
         new(ModelRule.General, new LlmPurposeOptions(
