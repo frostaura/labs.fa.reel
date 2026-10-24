@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
@@ -45,6 +46,59 @@ public class SearchInterpreterLiveModeTests
         Assert.Equal(90, intent.MaxRuntimeMinutes);
     }
 
+    // ── The recovery path's conversation ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task The_history_overload_carries_the_conversation_into_the_user_message()
+    {
+        // Ask Reel's recovery path. A fallback blind to the conversation reads "the second one" as
+        // a keyword and forgets the negation made a turn earlier — a different question answered.
+        var handler = new CannedHandler(Ok("""{"genres":["action"]}"""));
+        IReadOnlyList<ChatTurn> history =
+        [
+            new("user", "ninja movies, nothing with superheroes"),
+            new("assistant", "Three ninja films coming up."),
+        ];
+
+        await Interpreter(handler).InterpretAsync("more like the second one", history, default, "never horror");
+
+        var user = UserMessageOf(handler.Bodies[0]);
+        Assert.Contains("user: ninja movies, nothing with superheroes", user, StringComparison.Ordinal);
+        Assert.Contains("assistant: Three ninja films coming up.", user, StringComparison.Ordinal);
+        Assert.Contains("never turn a reference or a negation into a keyword", user, StringComparison.Ordinal);
+        Assert.EndsWith("Request: more like the second one", user, StringComparison.Ordinal);
+        // The standing rules still lead, exactly as the shared line words them.
+        Assert.StartsWith(OpenRouterSearchAgent.StandingFiltersLine("never horror"), user, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_interface_overload_dispatches_to_the_live_adapter_rather_than_the_history_blind_default()
+    {
+        // The port's default for the history overload ignores the history so test doubles stay
+        // valid. Called through the INTERFACE — the way the agent calls it — the live adapter must
+        // be the one that answers, or the conversation is silently dropped in production.
+        var handler = new CannedHandler(Ok("""{"genres":["action"]}"""));
+        ISearchQueryInterpreter port = Interpreter(handler);
+
+        await port.InterpretAsync("the first one", [new ChatTurn("user", "samurai films")]);
+
+        Assert.Contains("user: samurai films", UserMessageOf(handler.Bodies[0]), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, "something scary")]
+    [InlineData("never horror", "Standing filters (the account's own rules; the answer space is limited to titles that pass them): never horror\nRequest: something scary")]
+    public async Task Without_history_the_user_message_is_byte_identical_to_before(string? filters, string expected)
+    {
+        // Both shapes the message had before the conversation could ride it: the bare query, and
+        // the query beneath the standing-filters line. An empty history must change neither.
+        var handler = new CannedHandler(Ok("""{"genres":["horror"]}"""));
+
+        await Interpreter(handler).InterpretAsync("something scary", [], default, filters);
+
+        Assert.Equal(expected, UserMessageOf(handler.Bodies[0]));
+    }
+
     // ── helpers (mirrors OpenRouterSearchAgentLiveModeTests) ────────────────────────────────
 
     private static OpenRouterSearchInterpreter Interpreter(CannedHandler handler)
@@ -69,6 +123,14 @@ public class SearchInterpreterLiveModeTests
         {
             choices = new[] { new { message = new { role = "assistant", content }, finish_reason = "stop" } },
         });
+
+    private static string UserMessageOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("messages").EnumerateArray()
+            .First(m => m.GetProperty("role").GetString() == "user")
+            .GetProperty("content").GetString()!;
+    }
 
     private static string SystemMessageOf(string body)
     {

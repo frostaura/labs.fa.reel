@@ -257,9 +257,11 @@ public class OpenRouterSearchAgentLiveModeTests
 
         var reply = await Agent(handler, interpreter).InterpretAsync([], "shark horrors", "likes horror", []);
 
+        Assert.Equal(2, handler.Bodies.Count); // the agent retried once before anything else
         Assert.Equal(1, interpreter.InterpretCalls);
         Assert.Equal(["shark horrors"], reply.Intent.Keywords); // the heuristic reading, not an empty intent
-        Assert.False(string.IsNullOrWhiteSpace(reply.Reply));
+        Assert.Equal(AgentReply.DegradedReply, reply.Reply);
+        Assert.True(reply.Degraded);
     }
 
     [Fact]
@@ -374,11 +376,15 @@ public class OpenRouterSearchAgentLiveModeTests
         var reply = await Agent(handler, interpreter).InterpretAsync(
             [], "horror but no ghosts", "likes horror", []);
 
-        // Discarded: the interpreter was consulted, and the intent is the recovered one — NOT the
-        // half-answer's "horror" genre, which is the thing that would have looked fine.
+        // Discarded twice — the first answer and the one retry — and only then is the interpreter
+        // consulted; the intent is the recovered one, NOT the half-answer's "horror" genre, which
+        // is the thing that would have looked fine. The turn says it is degraded.
+        Assert.Equal(2, handler.Bodies.Count);
         Assert.Equal(1, interpreter.InterpretCalls);
         Assert.Equal(["horror but no ghosts"], reply.Intent.Keywords);
         Assert.DoesNotContain("horror", reply.Intent.Genres);
+        Assert.True(reply.Degraded);
+        Assert.Equal(AgentFailureKind.Truncated, reply.Failure);
 
         // And the same finish on the re-rank path costs the batch its model fits, not a partial
         // set of them — every title lands on its deterministic, prediction-anchored stub.
@@ -389,6 +395,7 @@ public class OpenRouterSearchAgentLiveModeTests
         var results = await Agent(rerankHandler).RerankBatchAsync(Titles(), "q", "taste");
 
         Assert.Equal(0.9d, results[0].Fit, 3); // stub = predicted 9.0 / 10, not the truncated 0.91
+        Assert.All(results, r => Assert.Equal(ResultSource.Fallback, r.FitSource));
     }
 
     [Fact]
@@ -489,6 +496,278 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.InRange(OpenRouterSearchAgent.StableFit(-1), 0d, 0.999d);
     }
 
+    // ── Degraded turns: retry once, never echo, say so (WS-1 task 1a) ─────────────────────
+
+    public static TheoryData<string, int, string, AgentFailureKind> FailedAnswers => new()
+    {
+        { "http 500", 500, "{}", AgentFailureKind.ProviderError },
+        { "empty content", 200, Envelope(string.Empty), AgentFailureKind.EmptyAnswer },
+        { "length finish", 200, Envelope("""{"reply":"Here you go.","genres":["action"]}""", finishReason: "length"), AgentFailureKind.Truncated },
+        { "not json", 200, Envelope("Sure! Ninja films are great."), AgentFailureKind.MalformedAnswer },
+        { "no reply line", 200, Envelope("""{"genres":["action"],"keywords":["ninja"]}"""), AgentFailureKind.MalformedAnswer },
+        { "payment required", 402, """{"error":{"message":"insufficient credits"}}""", AgentFailureKind.ProviderRefused },
+    };
+
+    [Theory]
+    [MemberData(nameof(FailedAnswers))]
+    public async Task A_failed_turn_is_degraded_and_never_quotes_the_users_message(
+        string scenario, int status, string body, AgentFailureKind expected)
+    {
+        // The defect this pins: the fallback reply was "Here are some action picks for '<your
+        // sentence>' — leaning into what you tend to love", cached and replayed as history. Every
+        // failure shape must now yield the one reply that claims nothing, flagged as degraded.
+        const string message = "none of the above are ninja movies. I want ninja movies";
+        var handler = new CannedHandler(new CannedResponse((HttpStatusCode)status, body));
+
+        var reply = await Agent(handler).InterpretAsync([], message, "likes action", []);
+
+        Assert.True(reply.Degraded, scenario);
+        Assert.Equal(expected, reply.Failure);
+        Assert.Equal(AgentReply.DegradedReply, reply.Reply);
+        Assert.DoesNotContain("ninja", reply.Reply, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("picks for", reply.Reply, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u201C", reply.Reply, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_failed_attempt_retries_the_agent_once_and_a_good_retry_is_a_normal_turn()
+    {
+        var handler = new CannedHandler(
+            new CannedResponse(HttpStatusCode.InternalServerError, "{}"),
+            Ok("""{"reply":"Four ninja films you haven't seen.","genres":["action"],"keywords":["ninja"]}"""));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.Equal(2, handler.Bodies.Count);
+        Assert.Equal(0, interpreter.InterpretCalls); // the retry, not the history-blind fallback
+        Assert.False(reply.Degraded);
+        Assert.Null(reply.Failure);
+        Assert.Equal("Four ninja films you haven't seen.", reply.Reply);
+        Assert.Contains("ninja", reply.Intent.Keywords);
+    }
+
+    [Theory]
+    [InlineData("length", 800)]
+    [InlineData("empty", 400)]
+    public async Task Only_a_truncated_attempt_retries_at_twice_the_ceiling(string firstFailure, int retryBudget)
+    {
+        // At temperature 0 a ceiling that truncated once truncates again; any other failure has
+        // nothing to do with the ceiling and does not earn a bigger bill.
+        var first = firstFailure == "length"
+            ? new CannedResponse(HttpStatusCode.OK, Envelope("""{"reply":"Here","genres":[]}""", finishReason: "length"))
+            : Ok(string.Empty);
+        var handler = new CannedHandler(first, Ok("""{"reply":"ok","genres":["action"]}"""));
+        var recorder = Recorder();
+
+        var reply = await Agent(handler, recorder).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.False(reply.Degraded);
+        Assert.Equal([400, retryBudget], handler.Bodies.Select(MaxTokensOf));
+        // Both attempts are on the ledger: the failed one was billed too.
+        Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.SearchAgent).Calls);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.PaymentRequired)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    public async Task A_refusal_is_never_retried_and_never_reaches_the_interpreter(HttpStatusCode status)
+    {
+        // The key, the credit or the permission is gone: every further call on the same provider
+        // is another refusal, so the free reading carries the turn.
+        var handler = new CannedHandler(new CannedResponse(status, """{"error":{"message":"no"}}"""));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.Single(handler.Bodies);
+        Assert.Equal(0, interpreter.InterpretCalls);
+        Assert.Equal(1, interpreter.HeuristicCalls);
+        Assert.Equal(AgentFailureKind.ProviderRefused, reply.Failure);
+        Assert.Equal(["ninja movies"], reply.Intent.Keywords);
+    }
+
+    [Fact]
+    public async Task A_deterministic_bad_request_is_not_retried_but_still_recovers_through_the_interpreter()
+    {
+        // An identical request is an identical 400, paid twice. The interpreter's prompt is a
+        // different request, so it still gets its one chance at the intent.
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.BadRequest, """{"error":{"message":"bad"}}"""));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.Single(handler.Bodies);
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.True(reply.Degraded);
+        Assert.Equal(AgentFailureKind.ProviderError, reply.Failure);
+    }
+
+    [Fact]
+    public async Task Where_the_interpreter_still_runs_it_receives_the_conversation_history()
+    {
+        IReadOnlyList<ChatTurn> history =
+        [
+            new("user", "ninja movies"),
+            new("assistant", "Three ninja films coming up."),
+        ];
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.InternalServerError, "{}"));
+        var interpreter = new HeuristicInterpreter();
+
+        await Agent(handler, interpreter).InterpretAsync(
+            history, "more like the second one", "likes action", [], standingFilters: "never horror");
+
+        Assert.Equal(1, interpreter.InterpretCalls);
+        Assert.Same(history, interpreter.LastHistory);
+        Assert.Equal("never horror", interpreter.LastStandingFilters);
+    }
+
+    [Fact]
+    public async Task An_answer_missing_only_its_reply_keeps_the_models_intent_without_paying_the_interpreter()
+    {
+        // The model DID resolve the request — only the reply line is missing. Its intent beats any
+        // recovery; the turn is still degraded, because the reply the user reads is not the model's.
+        var handler = new CannedHandler(Ok("""{"genres":["horror"],"keywords":["slasher"]}"""));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "slashers", "likes horror", []);
+
+        Assert.Equal(2, handler.Bodies.Count);
+        Assert.Equal(0, interpreter.InterpretCalls);
+        Assert.True(reply.Degraded);
+        Assert.Equal(AgentFailureKind.MalformedAnswer, reply.Failure);
+        Assert.Contains("horror", reply.Intent.Genres);
+        Assert.Contains("slasher", reply.Intent.Keywords);
+        Assert.Equal(["slashers"], reply.Requested!.Keywords); // the unlaundered reading still rides
+    }
+
+    [Fact]
+    public async Task The_test_stub_answers_without_an_echo_and_a_keyless_install_says_it_has_no_model()
+    {
+        const string message = "ninja movies";
+
+        var stub = await StubAgent(new Dictionary<string, string?> { ["TestHelpers:ModelStubMode"] = "true" })
+            .InterpretAsync([], message, "likes action", []);
+        var keyless = await StubAgent(new Dictionary<string, string?>())
+            .InterpretAsync([], message, "likes action", []);
+
+        // The test double stands in for a WORKING model: not degraded, and it claims nothing.
+        Assert.False(stub.Degraded);
+        Assert.DoesNotContain(message, stub.Reply, StringComparison.OrdinalIgnoreCase);
+        // A keyless install has no model: degraded, and says so.
+        Assert.True(keyless.Degraded);
+        Assert.Equal(AgentFailureKind.NoModel, keyless.Failure);
+        Assert.Equal(AgentReply.DegradedReply, keyless.Reply);
+    }
+
+    // ── The Ask-only request check and typed sources ───────────────────────────────────────
+
+    [Theory]
+    [InlineData(ApiUsagePurpose.RerankAsk, true)]
+    [InlineData(ApiUsagePurpose.RerankExpand, true)]
+    [InlineData(ApiUsagePurpose.RerankFeed, false)]
+    [InlineData(ApiUsagePurpose.RerankPage, false)]
+    [InlineData(ApiUsagePurpose.Rerank, false)]
+    public async Task Only_the_request_judging_purposes_are_asked_whether_a_title_satisfies(string purpose, bool asked)
+    {
+        var feedHandler = new CannedHandler(Ok("""{"results":[]}"""));
+        await Agent(feedHandler).RerankBatchAsync(Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
+        var feedSystem = SystemMessageOf(feedHandler.Bodies[0]);
+
+        var handler = new CannedHandler(Ok("""{"results":[]}"""));
+        await Agent(handler).RerankBatchAsync(Titles(), "ninja movies", "taste", anchorName: null, purpose);
+        var system = SystemMessageOf(handler.Bodies[0]);
+
+        Assert.Equal(asked, OpenRouterSearchAgent.JudgesRequest(purpose));
+        // The feed's shared prompt is untouched: the Ask prompt is that prompt plus the check.
+        Assert.DoesNotContain("satisfies", feedSystem, StringComparison.Ordinal);
+        Assert.StartsWith(feedSystem, system, StringComparison.Ordinal);
+        Assert.Equal(asked, system.Contains("\"satisfies\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_feed_schema_is_byte_identical_and_the_ask_schema_requires_the_verdict()
+    {
+        // Pinned against the literal the feed sent before the Ask check existed: a feed purpose must
+        // not pay for, or be constrained by, a field it never reads.
+        const string feedSchema =
+            """{"type":"json_schema","json_schema":{"name":"reel_rerank","strict":true,"schema":{"type":"object","additionalProperties":false,"required":["results"],"properties":{"results":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["titleId","fit","why"],"properties":{"titleId":{"type":"string"},"fit":{"type":"number"},"why":{"type":"string","maxLength":160}}}}}}}}""";
+        Assert.Equal(feedSchema, JsonSerializer.Serialize(OpenRouterSearchAgent.RerankSchema(), WebJson));
+
+        using var ask = JsonDocument.Parse(JsonSerializer.Serialize(OpenRouterSearchAgent.AskRerankSchema(), WebJson));
+        var items = ask.RootElement.GetProperty("json_schema").GetProperty("schema").GetProperty("properties")
+            .GetProperty("results").GetProperty("items");
+        Assert.Equal(
+            ["titleId", "fit", "why", "satisfies"],
+            items.GetProperty("required").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(
+            ["yes", "partial", "no"],
+            items.GetProperty("properties").GetProperty("satisfies").GetProperty("enum").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
+    public async Task The_verdict_is_read_on_the_ask_purpose_and_ignored_on_the_feed()
+    {
+        // Same payload, two purposes. An unreadable verdict is UNJUDGED (null), never "no" — the
+        // entry's fit still stands.
+        var payload = $$"""
+            {"results":[
+              {"titleId":"{{TitleA}}","fit":0.91,"why":"A shinobi revenge tale you'll love","satisfies":"yes"},
+              {"titleId":"{{TitleB}}","fit":0.42,"why":"Your kind of slow drama","satisfies":"PARTIAL"},
+              {"titleId":"{{TitleC}}","fit":0.77,"why":"A tense one for you","satisfies":"maybe"}
+            ]}
+            """;
+
+        var ask = await Agent(new CannedHandler(Ok(payload))).RerankBatchAsync(
+            Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+        var feed = await Agent(new CannedHandler(Ok(payload))).RerankBatchAsync(
+            Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
+
+        Assert.Equal([Satisfies.Yes, Satisfies.Partial, null], ask.Select(r => r.Satisfies));
+        Assert.Equal(0.77d, ask[2].Fit, 3);
+        Assert.All(feed, r => Assert.Null(r.Satisfies));
+    }
+
+    [Fact]
+    public async Task Every_rerank_value_carries_the_source_that_produced_it()
+    {
+        // Title A: a clean model verdict. Title B: a model fit with a third-person why the guard
+        // rejects. Title C: skipped by the model. Each must say exactly where each half came from.
+        var payload = $$"""
+            {"results":[
+              {"titleId":"{{TitleA}}","fit":0.91,"why":"A shinobi revenge tale you'll love","satisfies":"yes"},
+              {"titleId":"{{TitleB}}","fit":0.42,"why":"Matches their taste for drama","satisfies":"no"}
+            ]}
+            """;
+
+        var results = await Agent(new CannedHandler(Ok(payload))).RerankBatchAsync(
+            Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+
+        Assert.Equal((ResultSource.Llm, ResultSource.Llm), (results[0].FitSource, results[0].WhySource));
+        Assert.Equal((ResultSource.Llm, ResultSource.Fallback), (results[1].FitSource, results[1].WhySource));
+        Assert.Equal(0.42d, results[1].Fit, 3);
+        Assert.Equal(Satisfies.No, results[1].Satisfies); // the guard replaces the sentence, not the verdict
+        Assert.Equal((ResultSource.Fallback, ResultSource.Fallback), (results[2].FitSource, results[2].WhySource));
+        Assert.Null(results[2].Satisfies);
+    }
+
+    [Fact]
+    public async Task A_failed_batch_and_the_stub_are_fallback_on_both_halves()
+    {
+        var failed = await Agent(new CannedHandler(new CannedResponse(HttpStatusCode.InternalServerError, "{}")))
+            .RerankBatchAsync(Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+        var stubbed = await StubAgent(new Dictionary<string, string?> { ["TestHelpers:ModelStubMode"] = "true" })
+            .RerankBatchAsync(Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+
+        Assert.All(failed.Concat(stubbed), r =>
+        {
+            Assert.Equal(ResultSource.Fallback, r.FitSource);
+            Assert.Equal(ResultSource.Fallback, r.WhySource);
+            Assert.Null(r.Satisfies);
+        });
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private static OpenRouterSearchAgent Agent(CannedHandler handler) => Agent(handler, new HeuristicInterpreter());
@@ -518,6 +797,20 @@ public class OpenRouterSearchAgentLiveModeTests
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterSearchAgent(
             client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
+    }
+
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>An agent whose configuration decides stub mode: no key, with or without the test flag.</summary>
+    private static OpenRouterSearchAgent StubAgent(Dictionary<string, string?> settings)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        var client = new HttpClient(new CannedHandler(new CannedResponse(HttpStatusCode.InternalServerError, "{}")))
+        {
+            BaseAddress = new Uri("https://openrouter.invalid/api/v1/"),
+        };
+        return new OpenRouterSearchAgent(
+            client, new HeuristicInterpreter(), Recorder(), config, NullLogger<OpenRouterSearchAgent>.Instance);
     }
 
     private static List<RerankInput> Titles() =>
@@ -596,12 +889,22 @@ public class OpenRouterSearchAgentLiveModeTests
 
         public string ModelId => "fake/heuristic";
 
+        /// <summary>The conversation the recovery path handed down, through the history overload.</summary>
+        public IReadOnlyList<ChatTurn>? LastHistory { get; private set; }
+
         public Task<SearchIntent> InterpretAsync(
             string query, CancellationToken ct = default, string? standingFilters = null)
         {
             InterpretCalls++;
             LastStandingFilters = standingFilters;
             return Task.FromResult(Intent(query));
+        }
+
+        public Task<SearchIntent> InterpretAsync(
+            string query, IReadOnlyList<ChatTurn> history, CancellationToken ct = default, string? standingFilters = null)
+        {
+            LastHistory = history;
+            return InterpretAsync(query, ct, standingFilters);
         }
 
         public SearchIntent Heuristic(string query)

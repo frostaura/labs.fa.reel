@@ -74,32 +74,79 @@ public static class RerankOrder
 /// LAST would do the same and additionally make the answer depend on request ordering. The mean is
 /// the only reading of several observations of the same quantity that does not privilege one of
 /// them for a reason unrelated to the title.</para>
+///
+/// <para><b>Sources are carried, never laundered.</b> Only <see cref="ResultSource.Llm"/> fits enter
+/// the mean once any exists: averaging a model verdict with a deterministic stand-in would produce
+/// a number that is neither, and labelling it either way would be a lie. A title that only ever
+/// received fallback fits reads back as a fallback. The why kept is the first model-written one,
+/// else the first sentence of any source, with that sentence's own source; the request verdict
+/// kept is the first one given.</para>
 /// </summary>
 public sealed class PositionDebiasedFit
 {
-    private readonly Dictionary<Guid, (double Sum, int Count, string Why)> _observations = [];
+    private readonly Dictionary<Guid, Observation> _observations = [];
 
     /// <summary>Records one verdict. The why kept is the first accepted one — averaging prose is not a thing.</summary>
     public void Observe(RerankResult result)
     {
-        if (_observations.TryGetValue(result.TitleId, out var existing))
+        var o = _observations.TryGetValue(result.TitleId, out var existing) ? existing : new Observation();
+        if (result.FitSource == ResultSource.Llm)
         {
-            _observations[result.TitleId] = (
-                existing.Sum + result.Fit,
-                existing.Count + 1,
-                string.IsNullOrWhiteSpace(existing.Why) ? result.Why : existing.Why);
-            return;
+            o.LlmSum += result.Fit;
+            o.LlmCount++;
+        }
+        else
+        {
+            o.OtherSum += result.Fit;
+            o.OtherCount++;
         }
 
-        _observations[result.TitleId] = (result.Fit, 1, result.Why);
+        var hasWhy = !string.IsNullOrWhiteSpace(result.Why);
+        var upgradesWhy = hasWhy && result.WhySource == ResultSource.Llm && o.WhySource != ResultSource.Llm;
+        if (o.Count == 0 || (hasWhy && string.IsNullOrWhiteSpace(o.Why)) || upgradesWhy)
+        {
+            o.Why = result.Why;
+            o.WhySource = result.WhySource;
+        }
+
+        o.Satisfies ??= result.Satisfies;
+        o.Count++;
+        _observations[result.TitleId] = o;
     }
 
     /// <summary>How many verdicts a title has attracted. One means no debiasing was possible.</summary>
     public int CountFor(Guid titleId) => _observations.TryGetValue(titleId, out var o) ? o.Count : 0;
 
     /// <summary>The averaged verdict, or null when the title was never judged.</summary>
-    public RerankResult? For(Guid titleId) =>
-        _observations.TryGetValue(titleId, out var o)
-            ? new RerankResult(titleId, o.Sum / o.Count, o.Why)
-            : null;
+    public RerankResult? For(Guid titleId)
+    {
+        if (!_observations.TryGetValue(titleId, out var o))
+        {
+            return null;
+        }
+
+        var (fit, fitSource) = o.LlmCount > 0
+            ? (o.LlmSum / o.LlmCount, ResultSource.Llm)
+            : (o.OtherSum / o.OtherCount, ResultSource.Fallback);
+        return new RerankResult(titleId, fit, fitSource, o.Why, o.WhySource, o.Satisfies);
+    }
+
+    private sealed class Observation
+    {
+        public double LlmSum { get; set; }
+
+        public int LlmCount { get; set; }
+
+        public double OtherSum { get; set; }
+
+        public int OtherCount { get; set; }
+
+        public string Why { get; set; } = string.Empty;
+
+        public ResultSource WhySource { get; set; } = ResultSource.Fallback;
+
+        public Satisfies? Satisfies { get; set; }
+
+        public int Count { get; set; }
+    }
 }

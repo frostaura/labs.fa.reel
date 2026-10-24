@@ -54,8 +54,12 @@ public class OpenRouterSearchInterpreter(
         : configuration["OPENROUTER_MODEL"] is { Length: > 0 } o ? o
         : "openai/gpt-6-luna";
 
+    public Task<SearchIntent> InterpretAsync(
+        string query, CancellationToken ct = default, string? standingFilters = null) =>
+        InterpretAsync(query, [], ct, standingFilters);
+
     public async Task<SearchIntent> InterpretAsync(
-        string query, CancellationToken ct = default, string? standingFilters = null)
+        string query, IReadOnlyList<ChatTurn> history, CancellationToken ct = default, string? standingFilters = null)
     {
         var trimmed = (query ?? string.Empty).Trim();
         if (trimmed.Length == 0 || StubMode)
@@ -78,7 +82,7 @@ public class OpenRouterSearchInterpreter(
                     messages = new object[]
                     {
                         new { role = "system", content = SystemPrompt },
-                        new { role = "user", content = BuildUserMessage(trimmed, standingFilters) },
+                        new { role = "user", content = BuildUserMessage(trimmed, standingFilters, history) },
                     },
                 }, options: JsonOptions),
             };
@@ -475,11 +479,38 @@ public class OpenRouterSearchInterpreter(
     /// Ask Reel prompts cannot express the same rules in two different sentences: this one is the
     /// FALLBACK half of that pair, and the pair drifting is a defect this codebase has already
     /// paid for once.
+    ///
+    /// <para>The conversation rides the same way, and only when there is one: Ask Reel's recovery
+    /// path hands it down so a reference ("the second one") or a negation from an earlier turn is
+    /// resolved rather than read as a keyword. The instruction sits in the conversation header, not
+    /// in the system prompt, so a request without history stays byte-identical.</para>
     /// </summary>
-    private static string BuildUserMessage(string query, string? standingFilters) =>
-        standingFilters is { Length: > 0 } filters
-            ? OpenRouterSearchAgent.StandingFiltersLine(filters) + "Request: " + query
-            : query;
+    internal static string BuildUserMessage(string query, string? standingFilters, IReadOnlyList<ChatTurn> history)
+    {
+        if (standingFilters is not { Length: > 0 } && history.Count == 0)
+        {
+            return query;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        if (standingFilters is { Length: > 0 } filters)
+        {
+            sb.Append(OpenRouterSearchAgent.StandingFiltersLine(filters));
+        }
+
+        if (history.Count > 0)
+        {
+            sb.Append("Conversation so far (resolve references like \"the second one\" against it, carry the user's ")
+                .Append("negations forward unless they retract them, and never turn a reference or a negation into a ")
+                .Append("keyword):\n");
+            foreach (var turn in history.TakeLast(8))
+            {
+                sb.Append(turn.Role).Append(": ").Append(turn.Text).Append('\n');
+            }
+        }
+
+        return sb.Append("Request: ").Append(query).ToString();
+    }
 
     private const string SystemPrompt =
         "You convert a movie/TV search request into a JSON discovery spec. Return ONLY a JSON object with keys: " +
