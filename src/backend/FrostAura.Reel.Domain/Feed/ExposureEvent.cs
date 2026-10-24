@@ -109,17 +109,26 @@ public class ExposureEvent : IAccountScoped
     /// </summary>
     public decimal PredictedRating { get; set; }
 
-    /// <summary>Base model score plus the online residual, BEFORE the calibrator and the demotion.</summary>
-    public decimal BaseScore { get; set; }
+    /// <summary>
+    /// Base model score plus the online residual, BEFORE the calibrator and the demotion.
+    ///
+    /// <para><b>NULL means the serving surface could not recover the decomposition</b> (a refill
+    /// read off a persisted <c>TitleScore</c>, a digest card), which is a different fact from a
+    /// score of zero. The column was NOT NULL until 2026-10-24 and every such surface wrote 0, so
+    /// rows before that date carrying <c>BaseScore = 0</c> with a non-zero prediction mean
+    /// "unknown", not "zero" — never back-filled, per the append-only rule. The four breakdown
+    /// columns are null together or not at all.</para>
+    /// </summary>
+    public decimal? BaseScore { get; set; }
 
-    /// <summary>How far the monotone predicted→actual calibrator moved <see cref="BaseScore"/>.</summary>
-    public decimal CalibrationDelta { get; set; }
+    /// <summary>How far the monotone predicted→actual calibrator moved <see cref="BaseScore"/>. Null with it.</summary>
+    public decimal? CalibrationDelta { get; set; }
 
-    /// <summary>The online residual head's scalar contribution — the only way to ever test the head.</summary>
-    public decimal ResidualApplied { get; set; }
+    /// <summary>The online residual head's scalar contribution — the only way to ever test the head. Null with it.</summary>
+    public decimal? ResidualApplied { get; set; }
 
-    /// <summary>The dislike demotion subtracted after calibration. Zero when nothing was demoted.</summary>
-    public decimal DemotionApplied { get; set; }
+    /// <summary>The dislike demotion subtracted after calibration. Zero when nothing was demoted; null with the others.</summary>
+    public decimal? DemotionApplied { get; set; }
 
     /// <summary>The LLM re-rank fit (0–1) where a surface computed one; today it is otherwise discarded.</summary>
     public decimal? LlmFit { get; set; }

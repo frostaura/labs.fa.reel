@@ -81,10 +81,6 @@ public sealed class OnDemandScorer(
         var profile = await dislikes.GetProfileAsync(accountId, ct);
         var demotions = await dislikes.DemotionsForAsync(profile, orderedIds, ct);
 
-        var existing = await db.TitleScores
-            .Where(s => s.AccountId == accountId && s.ModelArtifactId == artifact.Id && orderedIds.Contains(s.TitleId))
-            .ToDictionaryAsync(s => s.TitleId, ct);
-
         var result = new Dictionary<Guid, decimal>(orderedIds.Count);
         for (var i = 0; i < orderedIds.Count; i++)
         {
@@ -94,23 +90,21 @@ public sealed class OnDemandScorer(
             predicted = Math.Round(
                 DislikeSignal.ApplyDemotion(predicted, demotions.GetValueOrDefault(titleId)), 2);
             result[titleId] = predicted;
-
-            if (!existing.TryGetValue(titleId, out var row))
-            {
-                row = new TitleScore
-                {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = titleId,
-                    ModelArtifactId = artifact.Id,
-                };
-                db.TitleScores.Add(row);
-            }
-
-            row.PredictedRating = predicted;
-            row.ScoredAt = asOf;
         }
 
+        // An upsert, not load-then-insert: a title opened while the paginator is scoring it raced
+        // into a 23505. This scorer has no contributions, so a stored row keeps the build's.
+        await TitleScoreWriter.UpsertAsync(
+            db,
+            accountId,
+            artifact.Id,
+            result.Select(kv => new TitleScoreWriter.Score(kv.Key, kv.Value, "[]")),
+            asOf,
+            ct,
+            keepStoredContributions: true);
+
+        // Kept from the tracked write this replaced: callers have relied on this method saving
+        // their own pending changes alongside the scores. A no-op when nothing is tracked.
         await db.SaveChangesAsync(ct);
         return result;
     }

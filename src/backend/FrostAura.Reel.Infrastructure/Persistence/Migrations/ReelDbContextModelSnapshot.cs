@@ -18,7 +18,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.9")
+                .HasAnnotation("ProductVersion", "10.0.13")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
@@ -654,15 +654,15 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
-                    b.Property<decimal>("BaseScore")
+                    b.Property<decimal?>("BaseScore")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
-                    b.Property<decimal>("CalibrationDelta")
+                    b.Property<decimal?>("CalibrationDelta")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
-                    b.Property<decimal>("DemotionApplied")
+                    b.Property<decimal?>("DemotionApplied")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
@@ -701,7 +701,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("Rank")
                         .HasColumnType("integer");
 
-                    b.Property<decimal>("ResidualApplied")
+                    b.Property<decimal?>("ResidualApplied")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
