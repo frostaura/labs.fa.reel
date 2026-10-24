@@ -191,6 +191,58 @@ public class FilterCostMeterTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Draft_and_persisted_rules_agree_on_genre_stand_ins_and_aliases()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The TV taxonomy-gap arm exists twice (persisted rows, draft rules) like every other arm, so
+        // it is pinned the same way: same rules, both phrasings, identical sets — with a fixture that
+        // exercises every branch (show vs film, word vs substring, alias genre, a slug with no row).
+        var accountId = await SeedAccountAsync();
+        var romanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["office romance"]; });
+        var romanceFilm = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Keywords = ["office romance"]; });
+        var bromanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["bromance"]; });
+        var horrorShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["folk horror"]; });
+        var animeFilm = await SeedTitleAsync(t => { t.Keywords = ["anime"]; });
+        var childrenShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["children"]; });
+        var mine = new[] { romanceShow, romanceFilm, bromanceShow, horrorShow, animeFilm, childrenShow };
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "anime");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "family");
+
+        HashSet<Guid> persisted;
+        FilterRuleSet drafted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            persisted = (await new EligibilityQueryBuilder(db)
+                .EligibleTitles(accountId)
+                .Where(t => mine.Contains(t.Id))
+                .Select(t => t.Id)
+                .ToListAsync()).ToHashSet();
+            drafted = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        }
+
+        var draft = (await EligibleAsync(accountId, drafted, mine)).ToHashSet();
+        Assert.Equal(persisted, draft);
+        Assert.Equal(new HashSet<Guid> { romanceFilm, bromanceShow, horrorShow }, draft);
+
+        // And the meter costs the stand-ins as part of the rule they belong to: relaxing "romance"
+        // returns the romance-keyword show, so its marginal is not zero.
+        await using var scoped = fixture.CreateContext(new AccountContext());
+        var relaxed = (await new EligibilityQueryBuilder(scoped)
+            .EligibleTitles(accountId, drafted.Without(new FilterRule(FilterKind.ExcludeGenre, "romance")))
+            .Where(t => mine.Contains(t.Id))
+            .Select(t => t.Id)
+            .ToListAsync()).ToHashSet();
+        Assert.Contains(romanceShow, relaxed);
+        Assert.DoesNotContain(animeFilm, relaxed);
+    }
+
+    [Fact]
     public async Task An_unscoped_context_is_refused_rather_than_answered_for_nobody()
     {
         if (!fixture.Available)

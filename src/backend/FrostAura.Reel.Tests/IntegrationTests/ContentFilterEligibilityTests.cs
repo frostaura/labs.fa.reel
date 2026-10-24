@@ -149,7 +149,40 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task A_genre_rail_ignores_the_genre_filters_but_still_honours_every_other_condition()
+    public async Task A_genre_rail_never_waives_an_excluded_genre()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // F-2, reproduced: the founder excludes animation and comedy, and the Adventure rail served
+        // Frozen II, Puss in Boots and both Ice Age films. A rail's own genre outranks an allow-list
+        // that does not list it; it never outranks an exclusion (FD-6).
+        var accountId = await SeedAccountAsync();
+        var adventure = await SeedTitleAsync(t => t.Genres = ["adventure"]);
+        var adventureFamily = await SeedTitleAsync(t => t.Genres = ["adventure", "family"]);
+        var animated = await SeedTitleAsync(t => t.Genres = ["adventure", "animation", "family"]);
+        var comedy = await SeedTitleAsync(t => t.Genres = ["comedy", "adventure"]);
+        var both = await SeedTitleAsync(t => t.Genres = ["animation", "comedy", "adventure"]);
+        var mine = new[] { adventure, adventureFamily, animated, comedy, both };
+
+        // Before any rule: the rail carries all five, so the fixture is not trivially empty.
+        Assert.Equal(mine.ToHashSet(), (await RailAsync(accountId, mine, "adventure")).ToHashSet());
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "animation");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+
+        var rail = (await RailAsync(accountId, mine, "adventure")).ToHashSet();
+        Assert.Equal(new HashSet<Guid> { adventure, adventureFamily }, rail);
+
+        // The same holds through the builder directly, which is what every other rail-shaped caller
+        // reaches: the flag only ever loosens the allow-list.
+        Assert.Equal(rail, (await EligibleAsync(accountId, mine, ignoreIncludeGenreFilters: true)).ToHashSet());
+    }
+
+    [Fact]
+    public async Task A_genre_rail_waives_only_the_include_allow_list_and_every_other_condition_binds()
     {
         if (!fixture.Available)
         {
@@ -158,53 +191,143 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
 
         var accountId = await SeedAccountAsync();
 
-        // A documentary the user would otherwise never be shown, because they excluded the genre.
-        var doc = await SeedTitleAsync(t =>
+        // A comedy the allow-list (horror only) would keep off Tonight's picks.
+        var comedy = await SeedTitleAsync(t =>
         {
-            t.Genres = ["documentary"];
+            t.Genres = ["comedy"];
             t.Year = 2001;
             t.TmdbVoteAverage = 8.4m;
             t.TmdbVoteCount = 500;
         });
         // Same genre, but it trips the crowd floor — the rail must NOT waive that one.
-        var weakDoc = await SeedTitleAsync(t =>
+        var weakComedy = await SeedTitleAsync(t =>
         {
-            t.Genres = ["documentary"];
+            t.Genres = ["comedy"];
             t.Year = 2001;
             t.TmdbVoteAverage = 4.1m;
             t.TmdbVoteCount = 500;
         });
         // Same genre, outside the year window — also still excluded.
-        var oldDoc = await SeedTitleAsync(t =>
+        var oldComedy = await SeedTitleAsync(t =>
         {
-            t.Genres = ["documentary"];
+            t.Genres = ["comedy"];
             t.Year = 1965;
             t.TmdbVoteAverage = 8.9m;
             t.TmdbVoteCount = 500;
         });
-        var mine = new[] { doc, weakDoc, oldDoc };
+        // A comedy that is also a documentary — and documentaries are excluded. Still excluded on the rail.
+        var docComedy = await SeedTitleAsync(t =>
+        {
+            t.Genres = ["comedy", "documentary"];
+            t.Year = 2001;
+            t.TmdbVoteAverage = 8.9m;
+            t.TmdbVoteCount = 500;
+        });
+        var mine = new[] { comedy, weakComedy, oldComedy, docComedy };
 
+        await SeedFilterAsync(accountId, FilterKind.IncludeGenre, "horror");
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "documentary");
         await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, ContentFilterRules.FormatRating(7.0m));
         await SeedFilterAsync(accountId, FilterKind.MinYear, ContentFilterRules.FormatYear(1990));
 
-        // Tonight's picks: the excluded genre is gone entirely.
+        // Tonight's picks: nothing here is horror, so the allow-list keeps all four out.
         Assert.Empty(await EligibleAsync(accountId, mine));
 
-        // The genre rail: the rail's own genre is the user's explicit request, so the genre filter
-        // steps aside — but the crowd floor and the year window do not.
-        var rail = await RailAsync(accountId, mine);
-        Assert.Contains(doc, rail);
-        Assert.DoesNotContain(weakDoc, rail);
-        Assert.DoesNotContain(oldDoc, rail);
+        // The comedy rail: the allow-list steps aside for the rail's own genre; the exclusion, the
+        // crowd floor and the year window do not.
+        var rail = await RailAsync(accountId, mine, "comedy");
+        Assert.Equal([comedy], rail);
+    }
+
+    [Fact]
+    public async Task Tv_titles_are_excluded_by_the_keywords_that_stand_in_for_a_genre_their_taxonomy_lacks()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // H-7: TMDB's TV taxonomy has no romance, horror or history genre, so those shows carry the
+        // concept as a keyword — and "no romance / horror / history" used to remove 3, 14 and 2 shows.
+        var accountId = await SeedAccountAsync();
+        var romanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["teenage romance"]; });
+        var romanticShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["romantic comedy"]; });
+        var horrorShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["supernatural horror"]; });
+        var slasherShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["slasher"]; });
+        var periodShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["period drama"]; });
+        var historicalShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["historical fiction"]; });
+        // A Trakt-synced show that does carry the genre slug is excluded by the genre itself.
+        var taggedShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["drama", "romance"]; });
+
+        // Near misses that must stay: a word that merely CONTAINS the stem, a label that names
+        // history without being historical, and a FILM whose keyword is romance but whose TMDB genres
+        // (a taxonomy that does have romance) say thriller.
+        var bromanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["bromance"]; });
+        var datingHistoryShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["dating history"]; });
+        var plainShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["detective"]; });
+        var thrillerFilm = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Keywords = ["romance", "slasher"]; });
+        var romanceFilm = await SeedTitleAsync(t => t.Genres = ["romance"]);
+
+        var mine = new[]
+        {
+            romanceShow, romanticShow, horrorShow, slasherShow, periodShow, historicalShow, taggedShow,
+            bromanceShow, datingHistoryShow, plainShow, thrillerFilm, romanceFilm,
+        };
+
+        // No rule configured: every one is eligible, so the arms are inert without a row.
+        Assert.Equal(mine.ToHashSet(), (await EligibleAsync(accountId, mine)).ToHashSet());
+
+        // One slug at a time first: each arm answers only for its own slug.
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "horror");
+        var horrorOnly = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.DoesNotContain(horrorShow, horrorOnly);
+        Assert.DoesNotContain(slasherShow, horrorOnly);
+        Assert.Contains(romanceShow, horrorOnly);
+        Assert.Contains(periodShow, horrorOnly);
+        Assert.Contains(thrillerFilm, horrorOnly);
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "history");
+
+        var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.Equal(new HashSet<Guid> { bromanceShow, datingHistoryShow, plainShow, thrillerFilm }, survivors);
+    }
+
+    [Fact]
+    public async Task Genres_neither_taxonomy_has_and_trakt_alias_genres_are_excluded_on_both_media()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // anime and musical have no TMDB id on either medium — two of the founder's twelve conditions
+        // matched 0 and 21 films. "children" is Trakt's own slug for what TMDB TV calls Kids, which
+        // ingest folds into family.
+        var accountId = await SeedAccountAsync();
+        var animeFilm = await SeedTitleAsync(t => { t.Genres = ["action"]; t.Keywords = ["anime"]; });
+        var animeShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["anime", "mecha"]; });
+        var liveActionAdaptation = await SeedTitleAsync(t => { t.Genres = ["action"]; t.Keywords = ["based on anime"]; });
+        var jukeboxFilm = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Keywords = ["jukebox musical"]; });
+        var instrumentsFilm = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Keywords = ["musical instruments"]; });
+        var childrenShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["children"]; });
+        var mine = new[] { animeFilm, animeShow, liveActionAdaptation, jukeboxFilm, instrumentsFilm, childrenShow };
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "anime");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "musical");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "family");
+
+        var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
+        Assert.Equal(new HashSet<Guid> { liveActionAdaptation, instrumentsFilm }, survivors);
     }
 
     /// <summary>Eligible ids among <paramref name="mine"/> — the discovery path (Tonight's picks).</summary>
-    private async Task<IReadOnlyList<Guid>> EligibleAsync(Guid accountId, IReadOnlyCollection<Guid> mine)
+    private async Task<IReadOnlyList<Guid>> EligibleAsync(
+        Guid accountId, IReadOnlyCollection<Guid> mine, bool ignoreIncludeGenreFilters = false)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         return await new EligibilityQueryBuilder(db)
-            .EligibleTitles(accountId)
+            .EligibleTitles(accountId, ignoreIncludeGenreFilters)
             .Where(t => mine.Contains(t.Id))
             .Select(t => t.Id)
             .ToListAsync();
@@ -215,7 +338,7 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
     /// FeedPaginator makes for <c>FeedRowContext.Genre</c>. The lane is pinned to the seeded ids so a
     /// shared catalogue cannot crowd them out of the popularity window.
     /// </summary>
-    private async Task<IReadOnlyList<Guid>> RailAsync(Guid accountId, IReadOnlyCollection<Guid> mine)
+    private async Task<IReadOnlyList<Guid>> RailAsync(Guid accountId, IReadOnlyCollection<Guid> mine, string genre)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var retriever = new CandidateRetriever(db, new EligibilityQueryBuilder(db));
@@ -223,7 +346,7 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         var hits = await retriever.RetrieveAsync(
             accountId,
             taste,
-            lane: q => q.Where(t => mine.Contains(t.Id) && t.Genres.Contains("documentary")),
+            lane: q => q.Where(t => mine.Contains(t.Id) && t.Genres.Contains(genre)),
             popCount: 50,
             annCount: 0,
             maturityCeiling: null,

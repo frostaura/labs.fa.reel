@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Linq.Expressions;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
@@ -27,30 +29,38 @@ namespace FrostAura.Reel.Application.Search;
 /// in SQL) via <see cref="PassesMaturity"/>.
 ///
 /// The content-preference rules applied here: ExcludeGenre, IncludeGenre (an allowlist when any row
-/// exists), ExcludeKeyword, Language, MinCrowdRating and the MinYear/MaxYear window. MaxMaturity is
+/// exists), ExcludeKeyword, Language, MinCrowdRating and the MinYear/MaxYear window. An ExcludeGenre
+/// also reaches the titles a TMDB taxonomy cannot tag with that genre — TV has no romance, horror,
+/// history, thriller or music genre, and neither medium has anime or musical — through the stand-in
+/// keywords and alias genres in <see cref="GenreStandIns"/>, so an exclusion is as airtight for TV as
+/// for movies. MaxMaturity is
 /// the in-memory gate; MinPredictedRating is applied by the scoring surfaces, since it needs a model.
 /// </summary>
 public class EligibilityQueryBuilder(IReelDbContext db)
 {
-    /// <param name="ignoreGenreFilters">
-    /// Drops ExcludeGenre / IncludeGenre only — every other rule still binds. Set by the genre rails
-    /// (<c>FeedRowContext.Genre</c>), where the rail's own genre is the user's explicit request in
-    /// that moment and outranks their standing genre preference: without this a rail for a
-    /// filtered-out genre can only ever be empty (founder, 2026-08-07: "the filters should cascade
-    /// onto the genre specific suggestions too — of course in those cases the genre filters would be
-    /// ignored"). Never set it on a general discovery surface.
+    /// <param name="ignoreIncludeGenreFilters">
+    /// Drops the IncludeGenre allow-list only — every other rule still binds, ExcludeGenre above all.
+    /// Set by the genre rails (<c>FeedRowContext.Genre</c>), where the rail's own genre is the user's
+    /// explicit request in that moment and outranks a standing allow-list that does not list it:
+    /// without this a "Comedy" rail for an account that allow-lists only horror could only ever be
+    /// empty. An ExcludeGenre is NEVER waived (founder decision FD-6, 2026-10-24): the old
+    /// <c>ignoreGenreFilters</c> dropped every genre rule, so the Adventure rail served Frozen II and
+    /// Ice Age to an account that excludes animation and comedy — 20 of 96 rail cards broke a standing
+    /// exclusion (F-2). A rail for an excluded genre is not offered at all (<c>FeedEndpoints</c>), so
+    /// the only reason ever given for waiving exclusions — "the rail would be permanently empty" —
+    /// never applied. Never set it on a general discovery surface.
     /// </param>
     /// <param name="suppressed">
-    /// Content rules to leave OUT of the query, on top of <paramref name="ignoreGenreFilters"/>. This
+    /// Content rules to leave OUT of the query, on top of <paramref name="ignoreIncludeGenreFilters"/>. This
     /// exists for the empty-feed diagnostic (<see cref="Ranking.FeedStarvationDiagnostic"/>), which
     /// answers "which single condition emptied the pool?" by re-counting with one rule dropped at a
     /// time. It must never be used to SERVE titles — a surface that suppresses a rule is showing the
     /// user content they told it not to. Discovery surfaces pass nothing here.
     /// </param>
     public IQueryable<Title> EligibleTitles(
-        Guid accountId, bool ignoreGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
+        Guid accountId, bool ignoreIncludeGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
     {
-        return ContentFilteredTitles(accountId, ignoreGenreFilters, suppressed).Where(t =>
+        return ContentFilteredTitles(accountId, ignoreIncludeGenreFilters, suppressed).Where(t =>
             !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
             && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
             && !db.UserTitleReactions.Any(r =>
@@ -87,9 +97,9 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// is overwritten by every Trakt ratings walk, so a re-rate would drag a title backwards across
     /// the as-of line.</para>
     /// </summary>
-    public IQueryable<Title> EligibleTitlesAsOf(Guid accountId, DateTime asOf, bool ignoreGenreFilters = false)
+    public IQueryable<Title> EligibleTitlesAsOf(Guid accountId, DateTime asOf, bool ignoreIncludeGenreFilters = false)
     {
-        return ContentFilteredTitles(accountId, ignoreGenreFilters).Where(t =>
+        return ContentFilteredTitles(accountId, ignoreIncludeGenreFilters).Where(t =>
             !db.WatchedTitles.Any(w =>
                 w.AccountId == accountId && w.TitleId == t.Id
                 && w.LastWatchedAt != null && w.LastWatchedAt <= asOf)
@@ -161,15 +171,15 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// legitimately show watched titles (typeahead badges them) but must still honor every
     /// exclusion. Discovery surfaces use <see cref="EligibleTitles"/>, which composes this.
     /// </summary>
-    /// <param name="ignoreGenreFilters">See <see cref="EligibleTitles"/> — genre rails only.</param>
+    /// <param name="ignoreIncludeGenreFilters">See <see cref="EligibleTitles"/> — genre rails only.</param>
     /// <param name="suppressed">See <see cref="EligibleTitles"/> — the empty-feed diagnostic only.</param>
     public IQueryable<Title> ContentFilteredTitles(
-        Guid accountId, bool ignoreGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
+        Guid accountId, bool ignoreIncludeGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
     {
         // Captured as locals so each arm's predicate is a constant EF can fold away, rather than a
         // set lookup it would have to translate.
-        var skipExcludeGenre = ignoreGenreFilters || suppressed?.Contains(FilterKind.ExcludeGenre) == true;
-        var skipIncludeGenre = ignoreGenreFilters || suppressed?.Contains(FilterKind.IncludeGenre) == true;
+        var skipExcludeGenre = suppressed?.Contains(FilterKind.ExcludeGenre) == true;
+        var skipIncludeGenre = ignoreIncludeGenreFilters || suppressed?.Contains(FilterKind.IncludeGenre) == true;
         var skipKeyword = suppressed?.Contains(FilterKind.ExcludeKeyword) == true;
         var skipLanguage = suppressed?.Contains(FilterKind.Language) == true;
         var skipCrowd = suppressed?.Contains(FilterKind.MinCrowdRating) == true;
@@ -179,6 +189,17 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             skipExcludeGenre
             || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && t.Genres.Contains(f.Value)));
+
+        // The same exclusions, read through the TV (and no-id) taxonomy gaps: an excluded genre TMDB
+        // cannot tag on a medium is recognised there by its stand-in keywords or alias genres
+        // (GenreStandIns). Without this "no romance / horror / history" removed 3, 14 and 2 shows
+        // from a catalogue of ~10,000 (H-7). One arm per known slug, each gated on an uncorrelated
+        // EXISTS that Postgres evaluates once per query, so an account that excludes none of them
+        // pays nothing for the keyword scan.
+        if (!skipExcludeGenre)
+        {
+            query = WithoutStandIns(query, accountId);
+        }
 
         query = query.Where(t =>
             skipKeyword
@@ -325,6 +346,18 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         {
             var value = genre;
             query = query.Where(t => !t.Genres.Contains(value));
+
+            // The taxonomy-gap half of the same exclusion, exactly as the persisted arm applies it.
+            foreach (var alias in GenreStandIns.AliasesOf(value))
+            {
+                var aliasValue = alias;
+                query = query.Where(t => !t.Genres.Contains(aliasValue));
+            }
+
+            if (GenreStandIns.Patterns.ContainsKey(value))
+            {
+                query = query.Where(Not(GenreStandIns.CarriesStandIn(value)));
+            }
         }
 
         foreach (var keyword in rules.ExcludeKeywords)
@@ -364,6 +397,50 @@ public class EligibilityQueryBuilder(IReelDbContext db)
                     <= (maxYear ?? int.MaxValue)));
 
         return query;
+    }
+
+    /// <summary>
+    /// <paramref name="query"/> without the titles an ExcludeGenre row catches through a taxonomy gap:
+    /// for every slug <see cref="GenreStandIns"/> knows, "the account excludes this slug AND the title
+    /// carries one of its alias genres or stand-in keywords on a medium whose taxonomy cannot tag it".
+    /// </summary>
+    private IQueryable<Title> WithoutStandIns(IQueryable<Title> query, Guid accountId)
+    {
+        foreach (var slug in GenreStandIns.Slugs)
+        {
+            var value = slug;
+            Expression<Func<Title, bool>> excluded = t => db.ContentFilters.Any(f =>
+                f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && f.Value == value);
+            query = query.Where(Not(And(excluded, GenreStandIns.CarriesStandIn(value))));
+        }
+
+        foreach (var (slug, aliases) in GenreStandIns.Aliases)
+        {
+            var value = slug;
+            var aliasValues = aliases;
+            query = query.Where(t =>
+                !(t.Genres.Any(g => aliasValues.Contains(g))
+                    && db.ContentFilters.Any(f =>
+                        f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && f.Value == value)));
+        }
+
+        return query;
+    }
+
+    private static Expression<Func<Title, bool>> Not(Expression<Func<Title, bool>> predicate) =>
+        Expression.Lambda<Func<Title, bool>>(Expression.Not(predicate.Body), predicate.Parameters);
+
+    private static Expression<Func<Title, bool>> And(Expression<Func<Title, bool>> left, Expression<Func<Title, bool>> right)
+    {
+        var parameter = left.Parameters[0];
+        var rightBody = new ParameterRebinder(right.Parameters[0], parameter).Visit(right.Body);
+        return Expression.Lambda<Func<Title, bool>>(Expression.AndAlso(left.Body, rightBody), parameter);
+    }
+
+    /// <summary>Rebinds one lambda's parameter onto another so two predicates share a single <c>t</c>.</summary>
+    private sealed class ParameterRebinder(ParameterExpression from, ParameterExpression to) : ExpressionVisitor
+    {
+        protected override Expression VisitParameter(ParameterExpression node) => node == from ? to : node;
     }
 
     /// <summary>
