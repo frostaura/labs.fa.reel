@@ -61,8 +61,8 @@ Repository → Settings → Secrets and variables → Actions.
 2. Paste the contents of `docker-compose.prod.yml` as the stack file. It pulls published images rather than building, and ships the gateway nginx config inline via a compose `config` — Portainer stacks cannot mount repo files.
 3. Populate the stack environment variables. Required (the compose file refuses to start without them): `POSTGRES_PASSWORD`, `JWT_SECRET`, `TRAKT_CLIENT_ID`, `TRAKT_CLIENT_SECRET`, `TMDB_READ_ACCESS_TOKEN`. Everything else has a production-shaped default — see `.env.example` for the full surface.
 4. Note the stack id from the Portainer URL and set it as `PORTAINER_STACK_ID`.
-5. Point Cloudflared at `reel.frostaura.net → http://gateway:80` (the stack's `GATEWAY_PORT`, default `8090`, on the host). See [Network exposure](#network-exposure) before choosing which.
-6. Name the backup destination: set `BACKUP_HOST_DIR` to an absolute host path, ideally a mount of off-host storage. Until it is set, dumps go to the stack's `reel_backups` volume. See [Backups and restore](#backups-and-restore).
+5. Point Cloudflared at the gateway. A `cloudflared` running on the Docker host reaches it at `http://127.0.0.1:${GATEWAY_PORT}` (default `8090`). See [Network exposure](#network-exposure) for any other placement.
+6. Name the backup destination: `BACKUP_HOST_DIR` is **required**, an absolute host path, ideally a mount of off-host storage. The stack refuses to start without it. See [Backups and restore](#backups-and-restore).
 7. Set `DEPLOY_ENABLED=true`.
 
 The deploy job re-submits the stack's *existing* file content and env with `pullImage=true`, so redeploys never overwrite what an operator configured in Portainer — it only forces a fresh pull of `:latest`. It sleeps 30s first to let Docker Hub propagate the manifests.
@@ -79,11 +79,16 @@ Every descriptor publishes its ports on `127.0.0.1` unless a bind variable opts 
 Why: on 2026-10-22 the dev stack published its gateway on `0.0.0.0` with the host firewall off, and an unauthenticated request from another LAN host was answered by `/api/dev/residual-replay`, while `POST /api/auth/dev/link` would have minted a Founder session (J-1). Postgres has its own variable so that opening the gateway for phone QA never opens the database with it.
 
 - **Phone QA on the LAN:** set `GATEWAY_BIND=0.0.0.0`, recreate the gateway, and unset it again afterwards.
-- **Cloudflared** reaches the gateway at `http://gateway:80` inside the stack network, or through this host's loopback. Set `GATEWAY_BIND` only if the tunnel runs somewhere that needs another interface.
+- **Cloudflared.** No descriptor attaches a tunnel container to the stack network, so the gateway is reachable only through its published port:
+  - `cloudflared` as a process on the Docker host: target `http://127.0.0.1:${GATEWAY_PORT}`. The loopback default works.
+  - `cloudflared` in a container on the same host: it cannot reach the host's 127.0.0.1. Attach it to the stack network and target `http://gateway:80`, or set `GATEWAY_BIND` to the Docker bridge address it uses.
+  - `cloudflared` on another machine: set `GATEWAY_BIND` to the interface it connects to, and firewall that port to the tunnel host.
+- **Before the first rebuild on these descriptors (G0)**, read the live tunnel's ingress target (Cloudflare Zero Trust → Networks → Tunnels → the tunnel → Public hostnames, or `cloudflared tunnel info`) and match it to the list above. On 2026-10-24 no `cloudflared` process ran on the founder's Mac and no local ingress file existed, so the target could not be confirmed from that machine. If the tunnel reaches the gateway on a LAN address, the loopback default takes `reel.frostaura.net` offline until `GATEWAY_BIND` is set.
 
 The QA helpers are also locked in code, independently of the bind address:
 
-- `POST /api/auth/dev/link` answers only a caller on this machine whose request no proxy forwarded. Behind the gateway every request is forwarded, so the helper is reachable only from a host-side `dotnet run`.
+- `POST /api/auth/dev/link` answers only a caller on this machine. The peer must be loopback, and every hop a proxy recorded (`X-Forwarded-For`, `X-Original-For`, `X-Real-IP`, `Forwarded: for=`, `X-Forwarded-Host`) must be loopback too; any `CF-Connecting-IP` is refused. The compose gateway's hop is a Docker bridge address, so the helper is never reachable through it. Through Vite it is reachable from a browser on this machine and from nowhere else.
+- That last guarantee depends on Vite recording its client. A proxy that forwards without `X-Forwarded-For` looks exactly like a direct local caller, because its own hop to the API is loopback. On 2026-10-24 Vite's proxy did exactly that and listened on `0.0.0.0`, so a LAN host minted a Founder session through it. `make ci-vite-proxy` fails until the dev server listens on loopback by default (`VITE_HOST` opts in) and every proxy entry sets `xfwd: true`.
 - Every `/api/dev/*` route requires a signed-in Founder on this machine. An anonymous caller gets 401, any other tier 403, and a Founder session used from elsewhere gets 403 `loopback_only`.
 - `{"noCascade":true}` on dev/link issues a session for the already-linked dev account and nothing else: no Trakt call, no tier write and no sync job.
 - dev/link sessions are stored with the user agent `reel-dev-link …`, so QA sessions can be excluded by identity (FD-18).
@@ -115,18 +120,23 @@ Every service logs through Docker's `local` driver: 10 files of 50 MB each per c
 
 - **Image.** `pgvector/pgvector:pg16`, the same image as the database, so `pg_dump` always matches the server's major version.
 - **Script.** `deploy/backup/reel-backup.sh`. The dev stack mounts it. The prod and Portainer files carry identical inline copies, pinned by `BackupDescriptorParityTests`.
-- **Nightly dump.** `pg_dump -Fc` at `BACKUP_HOUR_UTC` (default 02:00 UTC) into `daily/`. A host that was asleep at that hour dumps when it wakes, and a stack with no dump yet takes one at once.
+- **Nightly dump.** `pg_dump -Fc` at `BACKUP_HOUR_UTC` (default 02:00 UTC) into `daily/`. A host that was asleep at that hour dumps when it wakes, and a stack with no dump for today takes one once it has been up for `BACKUP_FIRST_DUMP_GRACE_SECONDS` (default 120). During that grace period it serves only pre-migration requests, and a pre-migration dump also becomes today's daily dump, so a fresh stack takes one full dump, not two.
 - **Retention.** 14 daily and 8 weekly dumps. The weekly copy is a hard link taken on Sundays, or whenever the newest weekly copy is more than 6 days old.
 - **Verification.** Each dump is written as `.partial`, checked with `pg_restore --list`, and only then renamed. The result goes to `last-success` or `last-failure` in the backup directory.
 - **Health.** The container turns unhealthy when the newest successful dump is more than 26 hours old.
-- **Destination.** `BACKUP_HOST_DIR`: `./.backups` beside the dev compose file (outside Docker's VM, and outside `docker compose down -v`), or the `reel_backups` volume in prod and Portainer until an absolute host path is named. Copying dumps off-host waits on FD-12.
+- **Destination.** `BACKUP_HOST_DIR`:
+  - Dev: defaults to `~/.reel/backups`. That is outside Docker's VM, outside `docker compose down -v`, and outside the repository, so dumps of the founder's data never sit in a working tree.
+  - Prod and Portainer: required, an absolute host path. It is never a volume of the stack, because `down -v` or removing the stack with its volumes would delete the dumps together with the database. `make ci-compose` fails if either file parses without it.
+  - Copying dumps off-host waits on FD-12. Until then they are host-local, which is FD-12's default.
 
 **The dump before a migration.** Before `DatabaseInitializer` applies pending migrations, the API writes `<id>.request` to the shared `backup_requests` volume and waits for the backup service's answer:
 
 - `<id>.done` names the dump, and migration proceeds.
-- `<id>.failed`, or no answer within `BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS` (default 1800), makes the API refuse to migrate and exit, so the container restarts and asks again. `BACKUP_PRE_MIGRATION_REQUIRED=false` downgrades this to a warning.
+- `<id>.failed`, or no answer within `BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS` (default and maximum 1800), makes the API refuse to migrate and exit, so the container restarts and asks again. `BACKUP_PRE_MIGRATION_REQUIRED=false` downgrades this to a warning.
 - Pre-migration dumps are kept in `pre-migration/` (the last 10).
-- The 30-minute default covers the worst case: a request that arrives while the sidecar is mid-way through a nightly or first-start dump waits for that dump and then gets a fresh one of its own. The 930 MB live database is estimated at about 6 minutes per dump, from the drill's 359 MB in 157 s.
+- The 30-minute wait covers the worst case: a request that arrives while the sidecar is mid-way through a nightly dump waits for that dump and then gets a fresh one of its own. The 930 MB live database is estimated at about 6 minutes per dump, from the drill's 359 MB in 157 s.
+- **The backend's healthcheck is sized to that wait.** The listener opens only after the dump and the migrations, so the backend's `start_period` is 40 minutes: the 30-minute maximum plus 10 for migrations. The first passing probe ends the period, so an already-migrated database is healthy in seconds. With the old 120 s the backend went unhealthy after about 7 minutes, and `up` never started the gateway. `ComposeHardeningTests` pins `start_period` against the maximum, and the options class refuses a longer timeout.
+- **Ownership.** The request directory is mode `0777` with no sticky bit, and each answer is handed to the uid that wrote the request, so an API running as a non-root user can delete it. If an answer still cannot be deleted, the API proceeds on the answer it read, and the sidecar drops uncollected answers after a day.
 
 A Portainer redeploy recreates only services whose image changed, so a dump taken when the sidecar started would miss exactly the redeploy that carries a migration. Only the process about to migrate knows that it is about to.
 
@@ -185,9 +195,10 @@ The drill passed. Together with the LAN lockdown, it is a prerequisite for the f
 | `ci-frontend-lint` / `-typecheck` / `-test` | ESLint (`--max-warnings 0`), `tsc`, and vitest with the coverage ratchet |
 | `ci-frontend-build` | `vite build` that also fails on any printed warning, because Vite warns and still exits 0 |
 | `ci-knip` | Unused files, exports and dependencies |
+| `ci-vite-proxy` | The dev server listens on loopback unless `VITE_HOST` opts in, and every proxy entry records its client (`xfwd`), so the API's loopback guard can tell a LAN caller from this machine |
 | `ci-e2e` | Playwright, Chromium and WebKit projects |
 | `ci-trivy` | `trivy fs`: HIGH and CRITICAL vulnerable dependencies and committed secrets |
-| `ci-compose` / `ci-docker` | Descriptors parse, then the image build and stack smoke as project `reel-ci` |
+| `ci-compose` / `ci-docker` | Descriptors parse with their required variables and refuse without them (prod without `BACKUP_HOST_DIR`), then the image build and stack smoke as project `reel-ci` |
 
 A missing prerequisite fails its gate with the reason. None of them skip.
 

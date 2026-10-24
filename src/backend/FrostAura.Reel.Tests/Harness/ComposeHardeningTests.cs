@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using FrostAura.Reel.Api;
 
 namespace FrostAura.Reel.Tests.Harness;
 
@@ -83,7 +84,7 @@ public partial class ComposeHardeningTests
         Assert.Contains("    image: pgvector/pgvector:pg16", block);
         Assert.Contains("    entrypoint: [ \"/bin/sh\", \"/usr/local/bin/reel-backup.sh\" ]", block);
         Assert.Contains("      - backup_requests:/backup-requests", block);
-        Assert.Contains(block, l => l.StartsWith("      - ${BACKUP_HOST_DIR:-", StringComparison.Ordinal) && l.EndsWith("}:/backups", StringComparison.Ordinal));
+        Assert.Contains(block, l => l.StartsWith("      - ${BACKUP_HOST_DIR:", StringComparison.Ordinal) && l.EndsWith("}:/backups", StringComparison.Ordinal));
 
         var environment = compose.Environment("backup");
         Assert.Equal("postgres", environment["PGHOST"]);
@@ -106,7 +107,83 @@ public partial class ComposeHardeningTests
         Assert.Contains(compose.TopLevelBlock("volumes"), l => l == "  backup_requests:");
     }
 
-    [GeneratedRegex(@"^\$\{[A-Z_]+_BIND:-127\.0\.0\.1\}:")]
+    [Theory]
+    [MemberData(nameof(DeployableDescriptors))]
+    public void The_backend_healthcheck_outlasts_the_longest_pre_migration_dump_wait(string descriptor)
+    {
+        // The listener opens only after the dump and the migrations. If the healthcheck gives up
+        // first, compose marks the backend unhealthy and never starts the gateway (WS-8 review D2).
+        var block = ComposeDescriptor.Load(descriptor).ServiceBlock("backend");
+        var line = Assert.Single(block, l => l.StartsWith("      start_period: ", StringComparison.Ordinal));
+
+        var startPeriod = ParseDuration(line["      start_period: ".Length..].Trim());
+
+        Assert.True(
+            startPeriod >= TimeSpan.FromSeconds(PreMigrationBackupOptions.MaxTimeoutSeconds) + MigrationAllowance,
+            $"{descriptor}: backend start_period {startPeriod} must be at least the longest dump wait "
+            + $"({PreMigrationBackupOptions.MaxTimeoutSeconds}s) plus {MigrationAllowance.TotalMinutes} minutes for the migrations.");
+    }
+
+    [Theory]
+    [InlineData("docker-compose.prod.yml")]
+    [InlineData("deploy/portainer-stack.yml")]
+    public void Production_dumps_go_to_a_required_host_directory_never_a_stack_volume(string descriptor)
+    {
+        // A volume of the stack shares fate with the database: `down -v`, or removing the stack with
+        // its volumes, deletes both together (WS-8 review D3).
+        var compose = ComposeDescriptor.Load(descriptor);
+
+        Assert.Contains(compose.ServiceBlock("backup"), l => l.StartsWith("      - ${BACKUP_HOST_DIR:?", StringComparison.Ordinal));
+        Assert.DoesNotContain(compose.TopLevelBlock("volumes"), l => l == "  reel_backups:");
+    }
+
+    [Fact]
+    public void Dev_dumps_default_to_a_directory_outside_the_repository()
+    {
+        // ./.backups put 350 MB dumps of the founder's data into the working tree, untracked and
+        // un-ignored (WS-8 review defect 3).
+        var mount = Assert.Single(
+            ComposeDescriptor.Load("docker-compose.yml").ServiceBlock("backup"),
+            l => l.StartsWith("      - ${BACKUP_HOST_DIR:-", StringComparison.Ordinal));
+
+        Assert.Equal("      - ${BACKUP_HOST_DIR:-${HOME}/.reel/backups}:/backups", mount);
+    }
+
+    [Theory]
+    [InlineData("${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8090}:80", true)]
+    [InlineData("127.0.0.1:5434:5432", true)]
+    [InlineData("\"127.0.0.1:5434:5432\"", true)]
+    [InlineData("${GATEWAY_BIND:-0.0.0.0}:8090:80", false)]
+    [InlineData("0.0.0.0:5434:5432", false)]
+    [InlineData("5434:5432", false)]
+    [InlineData("${GATEWAY_PORT:-8090}:80", false)]
+    public void A_port_is_loopback_by_default_only_when_its_address_says_so(string port, bool loopback)
+    {
+        // WS-7's eval file publishes a literal 127.0.0.1 address; that is as closed as a *_BIND default.
+        var compose = ComposeDescriptor.Parse("x.yml", $"services:\n  db:\n    ports:\n      - {port}\n");
+
+        Assert.Equal(loopback, LoopbackDefaultBind().IsMatch(Assert.Single(compose.Ports("db"))));
+    }
+
+    private static readonly TimeSpan MigrationAllowance = TimeSpan.FromMinutes(10);
+
+    private static TimeSpan ParseDuration(string value)
+    {
+        var match = ComposeDuration().Match(value);
+        Assert.True(match.Success, $"Unrecognised compose duration '{value}'.");
+        var amount = int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        return match.Groups[2].Value switch
+        {
+            "h" => TimeSpan.FromHours(amount),
+            "m" => TimeSpan.FromMinutes(amount),
+            _ => TimeSpan.FromSeconds(amount),
+        };
+    }
+
+    [GeneratedRegex(@"^([0-9]+)(h|m|s)$")]
+    private static partial Regex ComposeDuration();
+
+    [GeneratedRegex(@"^(\$\{[A-Z_]+_BIND:-127\.0\.0\.1\}|127\.0\.0\.1):")]
     private static partial Regex LoopbackDefaultBind();
 }
 

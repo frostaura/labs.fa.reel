@@ -142,16 +142,16 @@ services:
       TRAKT_ACCESS_TOKEN: ${TRAKT_ACCESS_TOKEN:-}
       TRAKT_REFRESH_TOKEN: ${TRAKT_REFRESH_TOKEN:-}
       TRAKT_DEV_PROFILE: ${TRAKT_DEV_PROFILE:-}
-    # /health/ready, not /health — see the note in docker-compose.prod.yml. Locally the gateway also
-    # gates on this, and a locally built image usually faces an already-migrated database, so the
-    # long start_period costs nothing on the happy path and covers the first run against an empty
-    # volume, which is exactly when it used to flap.
+    # /health/ready, not /health, and a 40-minute start_period: see the note in
+    # docker-compose.prod.yml. The listener opens only after the pre-migration dump and the
+    # migrations, and the dump wait alone may take up to 30 minutes. The first passing probe ends the
+    # period, so an already-migrated database is healthy in seconds as before.
     healthcheck:
       test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health/ready >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 120s
+      start_period: 40m
     volumes:
       - backup_requests:/backup-requests
     depends_on:
@@ -163,8 +163,9 @@ services:
 
   # Nightly pg_dump -Fc (14 daily + 8 weekly kept) and the dump the backend asks for before it
   # migrates (K-1). Same image as postgres, so pg_dump always matches the server's major version.
-  # Dumps land in BACKUP_HOST_DIR on the host — outside Docker's VM and outside `down -v`, which
-  # deletes the database volume. Restore runbook: docs/deployment.md#backups-and-restore.
+  # Dumps land in BACKUP_HOST_DIR on the host (default ~/.reel/backups): outside Docker's VM,
+  # outside `down -v`, which deletes the database volume, and outside the repository, so 350 MB+
+  # dumps of the founder's data never sit in a working tree as untracked files. Restore runbook: docs/deployment.md#backups-and-restore.
   backup:
     image: pgvector/pgvector:pg16
     restart: always
@@ -181,7 +182,7 @@ services:
       BACKUP_KEEP_PRE_MIGRATION: ${BACKUP_KEEP_PRE_MIGRATION:-10}
     volumes:
       - ./deploy/backup/reel-backup.sh:/usr/local/bin/reel-backup.sh:ro
-      - ${BACKUP_HOST_DIR:-./.backups}:/backups
+      - ${BACKUP_HOST_DIR:-${HOME}/.reel/backups}:/backups
       - backup_requests:/backup-requests
     # Unhealthy when the newest successful dump is older than 26 hours.
     healthcheck:

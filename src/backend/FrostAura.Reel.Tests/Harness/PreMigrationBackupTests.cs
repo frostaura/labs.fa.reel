@@ -14,7 +14,15 @@ public sealed class PreMigrationBackupTests : IDisposable
 
     public PreMigrationBackupTests() => Directory.CreateDirectory(directory);
 
-    public void Dispose() => Directory.Delete(directory, recursive: true);
+    public void Dispose()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        Directory.Delete(directory, recursive: true);
+    }
 
     /// <summary>Plays the sidecar: waits for the request, checks it, answers with <paramref name="suffix"/>.</summary>
     private async Task<string> AnswerAsync(string suffix, string content)
@@ -47,6 +55,40 @@ public sealed class PreMigrationBackupTests : IDisposable
         Assert.Equal(new PreMigrationBackup.Answer(PreMigrationBackup.Outcome.Done, "/backups/pre-migration/reel-x.dump"), answer);
         Assert.Equal("pending=3\nlatest=20261101000000_M1\n", await sidecar);
         Assert.Empty(Directory.GetFiles(directory));
+    }
+
+    [Fact]
+    public async Task An_answer_this_process_may_not_delete_still_counts()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // The non-root API case: the sidecar (root) answered in a directory this user cannot delete
+        // from. Throwing here would exit after a successful dump and restart into another, forever.
+        var sidecar = Task.Run(async () =>
+        {
+            var body = await AnswerAsync(".done", "/backups/pre-migration/reel-y.dump\n");
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            }
+
+            return body;
+        });
+
+        // A 500 ms poll: the API checks once at once (nothing there yet), and by its second look the
+        // stand-in sidecar (10 ms polling) has answered and locked the directory.
+        var answer = await PreMigrationBackup.RequestAsync(directory, 2, "M", TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(500), default);
+        await sidecar;
+
+        Assert.Equal(new PreMigrationBackup.Answer(PreMigrationBackup.Outcome.Done, "/backups/pre-migration/reel-y.dump"), answer);
+        // Non-vacuous where it can be: as a non-root user the answer really could not be deleted.
+        if (Environment.UserName != "root")
+        {
+            Assert.Single(Directory.GetFiles(directory, "*.done"));
+        }
     }
 
     [Fact]
@@ -93,6 +135,8 @@ public sealed class PreMigrationBackupTests : IDisposable
 
     [Theory]
     [InlineData("BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS", "10")]
+    [InlineData("BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS", "1801")]
+    [InlineData("BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS", "7200")]
     [InlineData("BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS", "forever")]
     [InlineData("BACKUP_PRE_MIGRATION_REQUIRED", "yes")]
     public void A_wrong_value_is_a_startup_problem(string key, string value)

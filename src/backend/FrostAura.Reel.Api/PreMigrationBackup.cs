@@ -17,13 +17,23 @@ public sealed class PreMigrationBackupOptions : ValidatedOptions
     public const string TimeoutSecondsKey = "BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS";
     public const string RequiredKey = "BACKUP_PRE_MIGRATION_REQUIRED";
 
+    /// <summary>The longest wait a deployment may configure; see <see cref="TimeoutSeconds"/>.</summary>
+    public const int MaxTimeoutSeconds = 1800;
+
     /// <summary>The directory shared with the backup sidecar; null when this deployment has none.</summary>
     public string? RequestDirectory { get; private set; }
 
     /// <summary>
     /// How long to wait for the sidecar's answer. Thirty minutes: a request that lands during a nightly
-    /// or first-start dump waits for it, then for its own — two dumps of the live database.
+    /// dump waits for it, then for its own — two dumps of the live database.
     /// </summary>
+    /// <remarks>
+    /// Thirty minutes is also the MAXIMUM. The backend's healthcheck must outlast this wait (the
+    /// listener opens only after it), and its 40-minute <c>start_period</c> is sized to
+    /// <see cref="MaxTimeoutSeconds"/> plus ten minutes of migration; <c>ComposeHardeningTests</c>
+    /// pins the two together. A longer wait would let compose mark the backend unhealthy mid-dump
+    /// and never start the gateway.
+    /// </remarks>
     public int TimeoutSeconds { get; private set; } = 1800;
 
     /// <summary>When true, a failed or unanswered request stops the process instead of migrating.</summary>
@@ -32,7 +42,7 @@ public sealed class PreMigrationBackupOptions : ValidatedOptions
     protected override void Read(SettingReader reader)
     {
         RequestDirectory = reader.Raw(RequestDirectoryKey);
-        TimeoutSeconds = reader.Int(TimeoutSecondsKey, 1800, min: 30, max: 7200);
+        TimeoutSeconds = reader.Int(TimeoutSecondsKey, MaxTimeoutSeconds, min: 30, max: MaxTimeoutSeconds);
         Required = reader.Bool(RequiredKey, true);
     }
 }
@@ -152,22 +162,40 @@ public static class PreMigrationBackup
             if (File.Exists(done))
             {
                 var dump = (await File.ReadAllTextAsync(done, ct)).Trim();
-                File.Delete(done);
+                TryDelete(done);
                 return new Answer(Outcome.Done, dump);
             }
 
             if (File.Exists(failed))
             {
                 var reason = (await File.ReadAllTextAsync(failed, ct)).Trim();
-                File.Delete(failed);
+                TryDelete(failed);
                 return new Answer(Outcome.Failed, reason);
             }
 
             await Task.Delay(poll, ct);
         }
 
-        File.Delete(request);
+        TryDelete(request);
         return new Answer(Outcome.TimedOut, string.Create(CultureInfo.InvariantCulture, $"no answer from the backup sidecar within {timeout.TotalSeconds:0}s"));
+    }
+
+    /// <summary>
+    /// Clears a handshake file. The answer has already been read, so a file this process may not
+    /// delete (a sidecar that could not hand it over, say) must not turn a dump that succeeded into a
+    /// failed start — which would restart the container into another full dump, forever. The sidecar
+    /// drops uncollected answers after a day.
+    /// </summary>
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Nothing to do: see the summary.
+        }
     }
 
     /// <summary>
