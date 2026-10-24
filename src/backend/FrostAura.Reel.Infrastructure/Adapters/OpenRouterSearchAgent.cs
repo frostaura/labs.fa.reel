@@ -12,6 +12,7 @@ using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Polly.Timeout;
 
 namespace FrostAura.Reel.Infrastructure.Adapters;
 
@@ -20,8 +21,10 @@ namespace FrostAura.Reel.Infrastructure.Adapters;
 /// <c>openai/gpt-6-luna</c> — the "small model crunching more data" lever). Two jobs: turn a
 /// chat turn into a reply + discovery intent, and judge each candidate's hyper-personal fit for a
 /// live re-rank. Stub mode (no key / TestHelpers:ModelStubMode) is deterministic: it reuses the
-/// query interpreter for intent, returns a canned reply, and derives fit from the predicted rating
-/// — so keyless dev and tests get the whole experience without spend.
+/// query interpreter's free reading for intent and derives fit from the predicted rating, labelled
+/// <see cref="ResultSource.Fallback"/>. The test flag answers with a fixed reply that claims
+/// nothing; a keyless install answers DEGRADED, because it has no model and must not sound as if
+/// it did.
 /// </summary>
 public class OpenRouterSearchAgent(
     HttpClient httpClient,
@@ -70,7 +73,9 @@ public class OpenRouterSearchAgent(
 
     private string? ApiKey => configuration["OPENROUTER_API_KEY"] is { Length: > 0 } key ? key : null;
 
-    private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
+    private bool TestStubMode => configuration.GetValue("TestHelpers:ModelStubMode", false);
+
+    private bool StubMode => ApiKey is null || TestStubMode;
 
     // Honest availability: a real key, or an explicit test stub. A keyless production install used to
     // report available and present the deterministic stub's order as "LLM curation" — now the
@@ -89,59 +94,151 @@ public class OpenRouterSearchAgent(
         IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
         CancellationToken ct = default, string? standingFilters = null)
     {
-        // The interpreter's FREE deterministic reading, not a second billable round-trip. This
-        // value is only ever a fallback — SearchIntentParser consumes it solely when the model's
-        // own answer carries no usable signal, and StubReply only when the reply line is missing —
-        // yet the agent used to buy a full chat completion for it on EVERY turn, doubling the
-        // per-turn interpreter spend for output that is byte-identical whenever the primary call
-        // succeeds. The paid interpreter is now consulted only where this turn has already failed.
+        // The interpreter's FREE deterministic reading, not a billable round-trip. It rides every
+        // reply as the UNLAUNDERED reading of the turn (see AgentReply.Requested), and it is the
+        // intent of last resort when nothing better can be had.
         var intentFallback = interpreter.Heuristic(message);
         if (StubMode)
         {
-            return new AgentReply(StubReply(message, intentFallback), intentFallback, intentFallback);
+            // Two different situations share StubMode. The explicit test flag stands in for a
+            // WORKING model, so its reply is a deterministic answer that claims nothing; a keyless
+            // install has no model at all, and saying otherwise is the exact dishonesty this type
+            // now refuses — its reply is degraded and says so.
+            return TestStubMode
+                ? new AgentReply(StubModeReply, intentFallback, intentFallback)
+                : new AgentReply(AgentReply.DegradedReply, intentFallback, intentFallback, Degraded: true, AgentFailureKind.NoModel);
         }
 
+        var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles, standingFilters);
+        var first = await TryInterpretAsync(user, message, intentFallback, InterpretTokenBudget, ct);
+        if (first.Reply is { } answered)
+        {
+            return answered;
+        }
+
+        // ONE retry of the agent itself, replacing the old switch to a second, history-blind prompt
+        // that turned ordinals and negations into positive keywords. A truncated answer retries at
+        // twice the ceiling — at temperature 0 the same ceiling truncates the same way, and the
+        // hidden-reasoning models that caused most failures here spend the first budget thinking.
+        var last = first;
+        if (first.Retryable)
+        {
+            var budget = first.Failure == AgentFailureKind.Truncated ? InterpretTokenBudget * 2 : InterpretTokenBudget;
+            logger.LogInformation(
+                "Agent interpret attempt failed ({Failure}); retrying once at {Budget} tokens.", first.Failure, budget);
+            var second = await TryInterpretAsync(user, message, intentFallback, budget, ct);
+            if (second.Reply is { } recovered)
+            {
+                return recovered;
+            }
+
+            last = second;
+        }
+
+        // Every attempt failed, so the turn is DEGRADED whatever happens next: the reply is the
+        // degraded copy, never a sentence built around the user's own words. What is left to
+        // decide is only the best intent for the plain search underneath.
+        var failure = last.Failure ?? AgentFailureKind.MalformedAnswer;
+        SearchIntent intent;
+        if ((last.ParsedIntent ?? first.ParsedIntent) is { } parsed)
+        {
+            // The model resolved the request and only the reply line was missing or unusable.
+            intent = parsed;
+        }
+        else if (last.RecoverWithInterpreter)
+        {
+            // The interpreter's smaller single-purpose prompt often answers where this one did not.
+            // It is handed the conversation, because a recovery path blind to "the second one" or
+            // to a negation carried from an earlier turn answers a different question.
+            intent = await interpreter.InterpretAsync(message, history, ct, standingFilters);
+        }
+        else
+        {
+            // The provider refused the key or timed out: a second prompt on the same provider is
+            // another refusal or another wait, so the free reading carries the turn.
+            intent = intentFallback;
+        }
+
+        logger.LogWarning("Agent interpret degraded ({Failure}) for this turn; the reply says so.", failure);
+        return new AgentReply(AgentReply.DegradedReply, intent, intentFallback, Degraded: true, failure);
+    }
+
+    /// <summary>
+    /// One interpret attempt. Never throws except for cancellation: every other failure comes back
+    /// classified, because what the caller does next — retry, recover, or stop — depends on WHICH
+    /// failure it was, and an exception erases that.
+    /// </summary>
+    private async Task<InterpretAttempt> TryInterpretAsync(
+        string user, string message, SearchIntent intentFallback, int budget, CancellationToken ct)
+    {
         try
         {
-            var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles, standingFilters);
             // schema: null deliberately. The interpret spec is a dozen fields wide and strict mode
             // requires every one of them declared and required, with nullability expressed as a
-            // union type — that schema is Phase 3's, written against the finished field set rather
-            // than guessed at here. The ceiling and the length guard below are the parts that stop
-            // spend today, and they do not depend on it.
-            var (content, usage) = await ChatAsync(InterpretSystemPrompt, user, InterpretTokenBudget, schema: null, ct);
-            RecordCall(ApiUsagePurpose.SearchAgent, usage);
-            if (!string.IsNullOrWhiteSpace(content))
+            // union type — that schema is the planner's, written against the finished field set.
+            var completion = await ChatAsync(InterpretSystemPrompt, user, budget, schema: null, ct);
+            RecordCall(ApiUsagePurpose.SearchAgent, completion.Usage);
+            if (completion.Truncated)
             {
-                using var doc = JsonDocument.Parse(content);
-                var root = doc.RootElement;
-                var reply = root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } s
-                    ? CapReply(s) : StubReply(message, intentFallback);
-                var intent = SearchIntentParser.FromJson(root, message, intentFallback);
+                return InterpretAttempt.Failed(AgentFailureKind.Truncated);
+            }
+
+            if (string.IsNullOrWhiteSpace(completion.Content))
+            {
+                return InterpretAttempt.Failed(AgentFailureKind.EmptyAnswer);
+            }
+
+            using var doc = JsonDocument.Parse(completion.Content);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer);
+            }
+
+            var intent = SearchIntentParser.FromJson(root, message, intentFallback);
+            if (root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String
+                && r.GetString() is { } s && !string.IsNullOrWhiteSpace(s))
+            {
                 // The heuristic rides along as the UNLAUNDERED reading of the turn. `intent` has
                 // been through a prompt that was told what this account permanently excludes, so a
                 // well-behaved model has already removed the excluded genre from it — and the
                 // collision rung downstream cannot find what the model helpfully took out.
-                return new AgentReply(reply, intent, intentFallback);
+                return new InterpretAttempt(new AgentReply(CapReply(s), intent, intentFallback), null, null);
             }
 
-            logger.LogWarning("Agent interpret returned no content for '{Message}'; asking the interpreter.", message);
+            return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer, intent);
+        }
+        catch (JsonException ex)
+        {
+            logger.LogWarning(ex, "Agent interpret returned content that is not JSON.");
+            return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized
+            or HttpStatusCode.PaymentRequired or HttpStatusCode.Forbidden)
+        {
+            logger.LogWarning(ex, "Agent interpret refused by the provider (HTTP {Status}); not retrying.", (int)ex.StatusCode!);
+            return InterpretAttempt.Failed(AgentFailureKind.ProviderRefused);
+        }
+        catch (HttpRequestException ex)
+        {
+            // No status is a dropped connection or a body read that died mid-stream; 5xx and 429
+            // are the provider's own transient states. Any other 4xx is the request itself, and an
+            // identical request is an identical refusal — paid for twice.
+            var transient = ex.StatusCode is null or HttpStatusCode.TooManyRequests || (int)ex.StatusCode >= 500;
+            logger.LogWarning(ex, "Agent interpret failed (HTTP {Status}).", (int?)ex.StatusCode);
+            return InterpretAttempt.Failed(AgentFailureKind.ProviderError, retryable: transient);
+        }
+        catch (TimeoutRejectedException ex)
+        {
+            // The resilience pipeline's whole budget is already spent; a retry would double the wait.
+            logger.LogWarning(ex, "Agent interpret timed out; not retrying.");
+            return InterpretAttempt.Failed(AgentFailureKind.TimedOut);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Agent interpret failed for '{Message}'; asking the interpreter.", message);
+            logger.LogWarning(ex, "Agent interpret failed.");
+            return InterpretAttempt.Failed(AgentFailureKind.ProviderError, retryable: false);
         }
-
-        // Reached only when this turn's own model call produced nothing usable. HERE a second call
-        // earns its cost: the interpreter's prompt is smaller and single-purpose, so it often
-        // answers where the agent's did not — and it degrades to the same free heuristic if it
-        // fails too, which is exactly what the old code fell back to.
-        // The standing filters ride the fallback too. This is THE drift the two-prompt gotcha is
-        // about: the recovery path is the one a failing turn actually takes, so a rule the live
-        // prompt honours and this one does not is invisible until a user is told about a title
-        // their own filters exclude.
-        var recovered = await interpreter.InterpretAsync(message, ct, standingFilters);
-        return new AgentReply(StubReply(message, recovered), recovered, intentFallback);
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
@@ -158,18 +255,26 @@ public class OpenRouterSearchAgent(
             return titles.Select(StubRerank).ToList();
         }
 
+        // The request check is asked ONLY where the query is the user's own request. The feed's
+        // purposes judge fit to a row ("the best titles for you tonight"), where "is it what was
+        // asked for" has no meaning — and their shared system prompt and schema stay byte-identical.
+        var judgesRequest = JudgesRequest(usagePurpose);
         try
         {
             var user = BuildRerankPrompt(titles, query, persona, anchorName);
-            var (content, usage) = await ChatAsync(
-                RerankSystemPrompt, user, RerankTokenBudget, RerankSchema(), ct);
-            RecordCall(usagePurpose, usage);
-            if (string.IsNullOrWhiteSpace(content))
+            var completion = await ChatAsync(
+                judgesRequest ? AskRerankSystemPrompt : RerankSystemPrompt,
+                user,
+                RerankTokenBudget,
+                judgesRequest ? AskRerankSchema() : RerankSchema(),
+                ct);
+            RecordCall(usagePurpose, completion.Usage);
+            if (completion.Truncated || string.IsNullOrWhiteSpace(completion.Content))
             {
                 return titles.Select(StubRerank).ToList();
             }
 
-            using var doc = JsonDocument.Parse(content);
+            using var doc = JsonDocument.Parse(completion.Content);
             var byId = new Dictionary<Guid, RerankResult>();
             var rejected = 0;
             if (doc.RootElement.TryGetProperty("results", out var arr) && arr.ValueKind == JsonValueKind.Array)
@@ -182,7 +287,7 @@ public class OpenRouterSearchAgent(
                     // InvalidOperationException out of GetString(), and every OTHER title in the
                     // batch then silently lost its model fit score to the deterministic stub. One
                     // bad entry costs exactly one entry.
-                    if (!TryReadEntry(el, out var result))
+                    if (!TryReadEntry(el, judgesRequest, out var result))
                     {
                         rejected++;
                         continue;
@@ -210,8 +315,11 @@ public class OpenRouterSearchAgent(
                 // Output guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's"),
                 // opens with the banned "Because you loved" template, or blows the length contract
                 // is discarded for the deterministic second-person sentence. The model's fit score
-                // is kept — only the offending sentence is replaced.
-                return SecondPersonVoice.Rejects(res.Why) ? res with { Why = StubRerank(t).Why } : res;
+                // (and its request verdict) are kept — only the offending sentence is replaced, and
+                // the replacement is labelled as what it is.
+                return SecondPersonVoice.Rejects(res.Why)
+                    ? res with { Why = StubRerank(t).Why, WhySource = ResultSource.Fallback }
+                    : res;
             }).ToList();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -222,6 +330,13 @@ public class OpenRouterSearchAgent(
     }
 
     /// <summary>
+    /// True for the re-rank purposes whose query is the user's own request (Ask Reel's turn and the
+    /// single-turn expansion) — the only ones that are asked whether each title satisfies it.
+    /// </summary>
+    internal static bool JudgesRequest(string usagePurpose) =>
+        usagePurpose is ApiUsagePurpose.RerankAsk or ApiUsagePurpose.RerankExpand;
+
+    /// <summary>
     /// Reads one re-rank entry, or rejects it. Nothing in here may throw on hostile JSON: the
     /// caller iterates a whole batch and a throw would cost every title, not this one.
     ///
@@ -229,7 +344,7 @@ public class OpenRouterSearchAgent(
     /// title's deterministic stub fit, which is anchored on its personal prediction — strictly
     /// more informative than the flat 0.5 this used to invent for a missing or malformed score.
     /// </summary>
-    private static bool TryReadEntry(JsonElement el, out RerankResult result)
+    private static bool TryReadEntry(JsonElement el, bool judgesRequest, out RerankResult result)
     {
         result = default!;
         try
@@ -261,7 +376,15 @@ public class OpenRouterSearchAgent(
             var why = el.TryGetProperty("why", out var w) && w.ValueKind == JsonValueKind.String
                 ? w.GetString() ?? string.Empty
                 : string.Empty;
-            result = new RerankResult(id, Math.Clamp(raw, 0d, 1d), why);
+
+            // A missing or unreadable verdict leaves the entry's fit standing and the title
+            // UNJUDGED (null) — never "no", which would drop a title the model did not reject.
+            Satisfies? satisfies = judgesRequest
+                && el.TryGetProperty("satisfies", out var sat) && sat.ValueKind == JsonValueKind.String
+                ? LlmResultText.ParseSatisfies(sat.GetString())
+                : null;
+            result = new RerankResult(
+                id, Math.Clamp(raw, 0d, 1d), ResultSource.Llm, why, ResultSource.Llm, satisfies);
             return true;
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException)
@@ -298,7 +421,7 @@ public class OpenRouterSearchAgent(
     /// fallback (interpreter for intent, deterministic fit for re-rank) is a better answer than a
     /// half-answer that reads as a whole one.</para>
     /// </summary>
-    private async Task<(string? Content, OpenRouterUsage? Usage)> ChatAsync(
+    private async Task<Completion> ChatAsync(
         string system, string user, int maxTokens, object? schema, CancellationToken ct)
     {
         var strict = schema is not null && _strictSchemaSupported;
@@ -344,10 +467,10 @@ public class OpenRouterSearchAgent(
                 "Search agent completion hit its {MaxTokens}-token ceiling for {Model}; discarding the truncated "
                 + "object rather than parsing a partial answer as a whole one.",
                 maxTokens, ModelId);
-            return (null, dto?.Usage);
+            return new Completion(null, dto?.Usage, Truncated: true);
         }
 
-        return (choice?.Message?.Content, dto?.Usage);
+        return new Completion(choice?.Message?.Content, dto?.Usage, Truncated: false);
     }
 
     /// <summary>
@@ -378,41 +501,62 @@ public class OpenRouterSearchAgent(
     /// writer's schemas use exactly these); numeric bounds are left to the parser, which rejects an
     /// off-scale fit rather than clamping it.</para>
     /// </summary>
-    internal static object RerankSchema() => new
+    internal static object RerankSchema() => Schema("reel_rerank", withSatisfies: false);
+
+    /// <summary>
+    /// The request-judging purposes' schema: the feed's, plus a required <c>satisfies</c> verdict
+    /// per entry. A separate schema rather than an optional field, because strict mode cannot make
+    /// a field optional — and the feed's must stay exactly as it was.
+    /// </summary>
+    internal static object AskRerankSchema() => Schema("reel_rerank_ask", withSatisfies: true);
+
+    private static object Schema(string name, bool withSatisfies)
     {
-        type = "json_schema",
-        json_schema = new
+        var properties = new Dictionary<string, object>
         {
-            name = "reel_rerank",
-            strict = true,
-            schema = new
+            ["titleId"] = new { type = "string" },
+            ["fit"] = new { type = "number" },
+            ["why"] = new { type = "string", maxLength = 160 },
+        };
+        if (withSatisfies)
+        {
+            properties["satisfies"] = new { type = "string", @enum = SatisfiesVocabulary };
+        }
+
+        return new
+        {
+            type = "json_schema",
+            json_schema = new
             {
-                type = "object",
-                additionalProperties = false,
-                required = new[] { "results" },
-                properties = new Dictionary<string, object>
+                name,
+                strict = true,
+                schema = new
                 {
-                    ["results"] = new
+                    type = "object",
+                    additionalProperties = false,
+                    required = new[] { "results" },
+                    properties = new Dictionary<string, object>
                     {
-                        type = "array",
-                        items = new
+                        ["results"] = new
                         {
-                            type = "object",
-                            additionalProperties = false,
-                            // Strict mode requires EVERY property to be listed as required.
-                            required = new[] { "titleId", "fit", "why" },
-                            properties = new Dictionary<string, object>
+                            type = "array",
+                            items = new
                             {
-                                ["titleId"] = new { type = "string" },
-                                ["fit"] = new { type = "number" },
-                                ["why"] = new { type = "string", maxLength = 160 },
+                                type = "object",
+                                additionalProperties = false,
+                                // Strict mode requires EVERY property to be listed as required.
+                                required = properties.Keys.ToArray(),
+                                properties,
                             },
                         },
                     },
                 },
             },
-        },
-    };
+        };
+    }
+
+    private static readonly string[] SatisfiesVocabulary =
+        [LlmResultText.Wire(Satisfies.Yes), LlmResultText.Wire(Satisfies.Partial), LlmResultText.Wire(Satisfies.No)];
 
     /// <summary>
     /// Bounds the conversational reply, cutting at a SENTENCE boundary so the result reads as a
@@ -439,13 +583,11 @@ public class OpenRouterSearchAgent(
         return (char.IsHighSurrogate(window[^1]) ? window[..^1] : window).TrimEnd() + '\u2026';
     }
 
-    private static string StubReply(string message, SearchIntent intent)
-    {
-        var lens = intent.Genres.Count > 0 ? intent.Genres[0] : intent.Keywords.Count > 0 ? intent.Keywords[0] : "your taste";
-        // Capped like the model's own reply: this one interpolates the user's message, which the
-        // endpoint bounds at 1,000 chars — comfortably longer than a "short sentence".
-        return CapReply($"Here are some {lens} picks for “{message}” — leaning into what you tend to love.");
-    }
+    /// <summary>
+    /// The test double's reply (TestHelpers:ModelStubMode). Fixed and deterministic, and it claims
+    /// nothing — no echo of the message, no genre reading, no promise about what comes back.
+    /// </summary>
+    internal const string StubModeReply = "Looking through your catalogue for that.";
 
     /// <summary>
     /// The hash-derived fit, masked rather than <c>Math.Abs</c>-ed. <c>Math.Abs(int.MinValue)</c>
@@ -462,7 +604,10 @@ public class OpenRouterSearchAgent(
             ? Math.Clamp((double)p / 10d, 0d, 1d)
             : StableFit(t.Name.GetHashCode());
         var genre = t.Genres.Count > 0 ? t.Genres[0] : "this";
-        return new RerankResult(t.TitleId, fit, $"A {genre} pick aligned with your taste.");
+        // Labelled Fallback on both halves: neither number nor sentence came from the model, and
+        // the label is what keeps them out of caches, the debias mean and the exposure log.
+        return new RerankResult(
+            t.TitleId, fit, ResultSource.Fallback, $"A {genre} pick aligned with your taste.", ResultSource.Fallback);
     }
 
     /// <summary>
@@ -697,6 +842,37 @@ public class OpenRouterSearchAgent(
         "game and panel shows) earns a high fit ONLY if the viewer description actually says they " +
         "enjoy that kind of thing; its reach is not evidence about this person. " +
         "Be discerning — spread the scores. Output strictly valid JSON.";
+
+    /// <summary>
+    /// The request-judging purposes' system prompt: the feed's prompt, UNTOUCHED, followed by the
+    /// request check. Appended rather than edited in, so the feed's prompt stays byte-identical.
+    /// </summary>
+    private const string AskRerankSystemPrompt = RerankSystemPrompt + " " +
+        "ALSO, for every title, include \"satisfies\": \"yes\", \"partial\" or \"no\" — whether the title IS " +
+        "what the request asks for, judged only from what is given about the title (its genres, overview, themes, " +
+        "tone and people), and SEPARATELY from whether you would like it. \"yes\": it plainly is the thing asked " +
+        "for, every concept the request names. \"partial\": it matches some of the request, or only loosely. " +
+        "\"no\": it is not what was asked for — an action film with no ninjas is \"no\" for \"ninja movies\", " +
+        "however well it fits your taste. Never answer \"yes\" because a title is merely good or similar in mood.";
+
+    private sealed record Completion(string? Content, OpenRouterUsage? Usage, bool Truncated);
+
+    /// <summary>One interpret attempt's outcome: an answer, or a classified failure.</summary>
+    private sealed record InterpretAttempt(AgentReply? Reply, AgentFailureKind? Failure, SearchIntent? ParsedIntent)
+    {
+        /// <summary>Content failures and transient provider states are worth exactly one more try.</summary>
+        public bool Retryable { get; private init; }
+
+        /// <summary>False where a second prompt on the same provider can only fail the same way.</summary>
+        public bool RecoverWithInterpreter =>
+            Failure is not (AgentFailureKind.ProviderRefused or AgentFailureKind.TimedOut);
+
+        public static InterpretAttempt Failed(AgentFailureKind failure, SearchIntent? parsed = null, bool retryable = true) =>
+            new(null, failure, parsed)
+            {
+                Retryable = retryable && failure is not (AgentFailureKind.ProviderRefused or AgentFailureKind.TimedOut),
+            };
+    }
 
     private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
 

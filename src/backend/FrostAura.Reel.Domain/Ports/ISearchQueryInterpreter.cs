@@ -74,6 +74,17 @@ public interface ISearchQueryInterpreter
     Task<SearchIntent> InterpretAsync(string query, CancellationToken ct = default, string? standingFilters = null);
 
     /// <summary>
+    /// The same reading with the conversation it belongs to. This is the overload Ask Reel's
+    /// recovery path uses: a fallback that cannot see the conversation reads "the second one" as a
+    /// keyword and forgets a negation the user made two turns ago — it answers a different
+    /// question from the one asked. The default ignores the history, which keeps every test double
+    /// valid; the live adapter overrides it, and a test pins that it does.
+    /// </summary>
+    Task<SearchIntent> InterpretAsync(
+        string query, IReadOnlyList<ChatTurn> history, CancellationToken ct = default, string? standingFilters = null) =>
+        InterpretAsync(query, ct, standingFilters);
+
+    /// <summary>
     /// The deterministic, offline, FREE reading of the query — the same fallback
     /// <see cref="InterpretAsync"/> degrades to, exposed on its own so a caller that needs a
     /// fallback intent does not have to buy a chat completion to obtain one. Same input, same
