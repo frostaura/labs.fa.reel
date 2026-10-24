@@ -399,6 +399,26 @@ public class OpenRouterChatClientTests
         }
     }
 
+    [Fact]
+    public async Task Embeddings_on_the_openrouter_key_share_its_breaker()
+    {
+        var health = new ProviderHealthService();
+        var handler = new Script(new Canned(HttpStatusCode.PaymentRequired, "{}"), Ok("{}"));
+        var http = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
+        var embeddings = new OpenAiEmbeddingProvider(http, Recorder(), Config(), health: health);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => embeddings.EmbedAsync(["a"]));
+        Assert.Equal(ProviderHealthState.Down, health.Current().State);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => embeddings.EmbedAsync(["b"]));
+        Assert.Single(handler.Bodies); // the second embedding was never sent
+
+        // A separate embeddings key is a separate credit: the OpenRouter breaker does not apply.
+        var own = new OpenAiEmbeddingProvider(
+            new HttpClient(new Script(new Canned(HttpStatusCode.PaymentRequired, "{}"))) { BaseAddress = new Uri("https://api.invalid/v1/") },
+            Recorder(), Config(new() { ["EMBEDDINGS_API_KEY"] = "other-test-key" }), health: health);
+        await Assert.ThrowsAsync<HttpRequestException>(() => own.EmbedAsync(["c"]));
+    }
+
     // ── Fixtures ───────────────────────────────────────────────────────────────────────────
 
     private static LlmChatRequest Request(string purpose, object? schema = null) =>

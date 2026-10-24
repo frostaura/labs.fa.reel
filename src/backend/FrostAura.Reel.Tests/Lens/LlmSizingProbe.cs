@@ -226,6 +226,40 @@ public class LlmSizingProbe
                 OpenRouterLensWriter.LensSchema(), 0));
         }
 
+        if (Environment.GetEnvironmentVariable("REEL_PROBE_XREF_RUN") == "1")
+        {
+            // Task 6's acceptance batch: ONE real cross-reference batch of up to 20 candidates through
+            // the production adapter (purpose cross-reference, the computed ceiling, the shared
+            // client) with its verdicts written through the production service.
+            var judge = new OpenRouterCrossReferenceJudge(
+                new HttpClient { BaseAddress = http.BaseAddress, Timeout = TimeSpan.FromMinutes(5) },
+                recorder, config, NullLogger<OpenRouterCrossReferenceJudge>.Instance, account);
+            var verdicts = new CrossReferenceService(db, NullLogger<CrossReferenceService>.Instance);
+            var unjudged = await verdicts.UnjudgedAsync(
+                accountId, rows.Skip(400).ToList(), facts.ProfileHash, judge.PromptVersion, CrossReferenceRound.First, CancellationToken.None);
+            var batch = await new CrossReferenceCandidateBuilder(db, new NeighbourFinder(db)).BuildAsync(
+                accountId, unjudged.Take(20).ToList(), predictions,
+                new NeighbourFinder.Options(NeighbourFinder.DefaultK, 0, null, false), CancellationToken.None);
+            var clock = Stopwatch.StartNew();
+            var result = await ((ICrossReferenceJudge)judge).JudgeAsync(
+                batch.Candidates, persona, CrossReferenceRound.First, ApiUsagePurpose.CrossReference, CancellationToken.None);
+            var written = await verdicts.RecordBatchAsync(
+                accountId, facts.ProfileHash, judge.PromptVersion, CrossReferenceRound.First, judge.ModelId, artifactId, 0,
+                result.Entries, batch.Neighbours, DateTime.UtcNow, CancellationToken.None);
+            await output.WriteLineAsync(JsonSerializer.Serialize(new
+            {
+                purpose = "xref-run",
+                candidates = batch.Candidates.Count,
+                succeeded = result.Succeeded,
+                failure = result.Failure?.ToString(),
+                verdicts = written,
+                rejected = result.RejectedEntries,
+                prompt = result.PromptTokens,
+                completion = result.CompletionTokens,
+                ms = clock.ElapsedMilliseconds,
+            }));
+        }
+
         await Run(ApiUsagePurpose.TasteNarrative, Math.Min(calls, 15), _ => (
             [LlmMessage.System(OpenRouterLensWriter.NarrativeSystemPrompt), LlmMessage.User(OpenRouterLensWriter.NarrativePrompt(facts.Facts))],
             OpenRouterLensWriter.NarrativeSchema(), 0));
