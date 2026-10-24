@@ -16,6 +16,30 @@ public sealed record CrossReferenceAllowance(long CallsUsed, long CallsLimit, lo
     /// </summary>
     public bool HasHeadroom => CallsUsed < CallsLimit && TokensUsed < TokensLimit;
 
+    /// <summary>
+    /// Whether one more batch of <paramref name="candidates"/> fits under BOTH ceilings at its
+    /// estimated worst case — the same "after the call, still within" rule the budget gate
+    /// (<c>LlmCallGate</c>) applies before it sends. <see cref="HasHeadroom"/> alone said yes to a
+    /// day with 2,000 tokens left, the gate then refused the ~24k-token batch, and the run was
+    /// recorded as the judge "answering none". The gate stays the authority — its estimate is the
+    /// real prompt — so a refusal there is handled as the same ordinary budget stop.
+    /// </summary>
+    public bool AdmitsBatch(int candidates) =>
+        CallsUsed + 1 <= CallsLimit && TokensUsed + EstimateBatchTokens(candidates) <= TokensLimit;
+
+    /// <summary>
+    /// Measured prompt tokens per candidate, system prompt amortised: 5,084 prompt tokens for the
+    /// 20-candidate batch run on the slot database on 2026-10-24 (WS-1 task 6), rounded up.
+    /// </summary>
+    public const int PromptTokensPerCandidate = 260;
+
+    /// <summary>
+    /// A batch's worst case: its prompt plus the cross-reference completion ceiling at the default
+    /// purpose options (256 fixed + 140 per candidate, <c>LlmPurposeCatalog</c>). About 24k for 60.
+    /// </summary>
+    public static long EstimateBatchTokens(int candidates) =>
+        256L + ((long)Math.Max(0, candidates) * (PromptTokensPerCandidate + 140));
+
     /// <summary>How many more calls the gate will admit today. Never negative.</summary>
     public long CallsRemaining => Math.Max(0, CallsLimit - CallsUsed);
 

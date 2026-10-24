@@ -102,10 +102,16 @@ public sealed record RerankAllowance(
 /// signed off on. Legacy <c>"rerank"</c> rows are counted too — a ceiling that ignored them would
 /// read a day with real spend on it as empty.</para>
 ///
-/// <para><b>The numbers.</b> Measured 2026-09-10: 167 calls and 298k tokens across three days,
-/// i.e. ~56 calls and ~100k tokens on a busy day for one account. The defaults are ~2.7× that —
-/// generous enough that no ordinary day touches them and tight enough that a runaway loop stops
-/// inside one day rather than inside one month.</para>
+/// <para><b>The numbers.</b> First measured 2026-09-10 (~56 calls and ~100k tokens on a busy day),
+/// when the ceiling was set at 150 / 300k. Ask Reel v1 then grew to ~3.2 re-rank calls a turn
+/// (2026-10-22: 29 turns, 93 <c>rerank-ask</c> calls, 2.2k tokens each), and the heaviest observed
+/// curation day is 96 calls and 217k tokens (2026-10-14: 42 feed + 54 page). At 150 calls the
+/// 40% curation reserve is 60 calls, so the WS-1 task-5 acceptance — forty Ask turns plus an
+/// ordinary feed day with zero page or feed refusals — failed on the v1 path, the only Ask path
+/// that exists. 240 / 600k is the smallest round pair that passes it at the OBSERVED sizes: the
+/// reserve is 96 calls and 240k tokens, forty v1 turns (~128 calls, ~276k tokens) fit inside the
+/// 60% share, and the day stays at 224 calls. Both are configuration (<c>LLM_RERANK_DAILY_*</c>),
+/// and still a runaway backstop at ~$0.10 a day per account at luna's prices.</para>
 ///
 /// <para><b>Background stops at 70%.</b> The feed build's three re-rank passes are the family's
 /// heaviest spender and the only one nobody is waiting on. Ask Reel keeps the full ceiling: a
@@ -119,16 +125,15 @@ public sealed record RerankAllowance(
 /// </summary>
 public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null)
 {
-    /// <summary>Calls per account per day across the whole family. ~2.7× the measured busy day.</summary>
-    public const int DefaultDailyCalls = 150;
+    /// <summary>Calls per account per day across the whole family. See the type note for the derivation.</summary>
+    public const int DefaultDailyCalls = 240;
 
     /// <summary>Tokens per account per day across the whole family, prompt + completion.</summary>
-    public const int DefaultDailyTokens = 300_000;
+    public const int DefaultDailyTokens = 600_000;
 
     /// <summary>
-    /// The fraction of both ceilings background re-ranking may reach. 0.70 leaves roughly 45 calls
-    /// and 90k tokens — about fifteen Ask Reel turns — standing after a maximally expensive day of
-    /// feed builds.
+    /// The fraction of both ceilings background re-ranking may reach. 0.70 leaves 72 calls and 180k
+    /// tokens standing after a maximally expensive day of feed builds.
     /// </summary>
     public const double BackgroundFraction = 0.70d;
 

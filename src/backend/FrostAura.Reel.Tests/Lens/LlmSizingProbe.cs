@@ -69,7 +69,7 @@ public class LlmSizingProbe
 
         var cs = Environment.GetEnvironmentVariable("REEL_PROBE_CONNECTION_STRING")
             ?? throw new InvalidOperationException("REEL_PROBE_CONNECTION_STRING is required.");
-        Assert.DoesNotContain("Database=reel;", cs + ";", StringComparison.Ordinal);
+        AssertIsolatedEvalDatabase(cs);
         var outPath = Environment.GetEnvironmentVariable("REEL_PROBE_OUT")
             ?? throw new InvalidOperationException("REEL_PROBE_OUT is required.");
         var only = (Environment.GetEnvironmentVariable("REEL_PROBE_PURPOSES") ?? string.Empty)
@@ -162,7 +162,7 @@ public class LlmSizingProbe
                     "never horror; English only"))],
             null, 0));
 
-        await Run(ApiUsagePurpose.SearchInterpret, Math.Min(calls, 20), i => (
+        await Run(ApiUsagePurpose.SearchInterpret, calls, i => (
             [LlmMessage.System(OpenRouterSearchInterpreter.SystemPrompt),
                 LlmMessage.User(OpenRouterSearchInterpreter.BuildUserMessage(Queries[i % Queries.Length], "never horror", []))],
             null, 0));
@@ -179,9 +179,10 @@ public class LlmSizingProbe
                 OpenRouterSearchAgent.RerankSchema(), batch.Count);
         });
 
-        await Run(ApiUsagePurpose.RerankPage, Math.Min(calls, 20), i =>
+        await Run(ApiUsagePurpose.RerankPage, calls, i =>
         {
-            var batch = rows.Skip(270 + (i * 9)).Take(9).Select(Input).ToList();
+            // From row 270 on, wrapping inside the 600-title shortlist, so thirty batches never run dry.
+            var batch = rows.Skip(270 + (i * 9 % Math.Max(9, rows.Count - 279))).Take(9).Select(Input).ToList();
             return (
                 [LlmMessage.System(OpenRouterSearchAgent.RerankSystemPrompt),
                     LlmMessage.User(OpenRouterSearchAgent.BuildRerankPrompt(batch, FeedPaginator.QueryForRow(FeedRowKind.DeepCuts), persona))],
@@ -260,11 +261,41 @@ public class LlmSizingProbe
             }));
         }
 
-        await Run(ApiUsagePurpose.TasteNarrative, Math.Min(calls, 15), _ => (
+        await Run(ApiUsagePurpose.TasteNarrative, calls, _ => (
             [LlmMessage.System(OpenRouterLensWriter.NarrativeSystemPrompt), LlmMessage.User(OpenRouterLensWriter.NarrativePrompt(facts.Facts))],
             OpenRouterLensWriter.NarrativeSchema(), 0));
 
         await recorder.FlushAsync(CancellationToken.None);
         await output.WriteLineAsync(string.Create(CultureInfo.InvariantCulture, $"# done {DateTime.UtcNow:O}"));
     }
+
+    /// <summary>
+    /// The probe writes to the ledger and reads a whole account, so it may only ever point at the
+    /// ISOLATED eval Postgres (:5434, loopback) and never at the live <c>reel</c> database — parsed,
+    /// not substring-matched: "Database=Reel", a trailing space or a missing port all slipped past
+    /// the old <c>Database=reel;</c> check, and the port was never checked at all.
+    /// </summary>
+    internal static void AssertIsolatedEvalDatabase(string connectionString)
+    {
+        var parsed = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
+        Assert.True(parsed.Port == 5434, $"The probe runs only against the eval Postgres on :5434, not :{parsed.Port}.");
+        Assert.Contains(parsed.Host?.Trim(), new[] { "127.0.0.1", "localhost", "::1" });
+        Assert.False(
+            string.Equals(parsed.Database?.Trim(), "reel", StringComparison.OrdinalIgnoreCase),
+            "The probe never runs against the live database name.");
+        Assert.False(string.IsNullOrWhiteSpace(parsed.Database), "The probe needs an explicit slot database.");
+    }
+
+    [Theory]
+    [InlineData("Host=127.0.0.1;Port=5433;Username=reel;Password=x;Database=reel_ws1")]
+    [InlineData("Host=127.0.0.1;Port=5434;Username=reel;Password=x;Database=Reel")]
+    [InlineData("Host=127.0.0.1;Port=5434;Username=reel;Password=x;Database= reel ")]
+    [InlineData("Host=127.0.0.1;Username=reel;Password=x;Database=reel_ws1")]
+    [InlineData("Host=db.example.com;Port=5434;Username=reel;Password=x;Database=reel_ws1")]
+    public void The_probe_refuses_anything_but_a_slot_database_on_the_eval_postgres(string connectionString) =>
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => AssertIsolatedEvalDatabase(connectionString));
+
+    [Fact]
+    public void The_probe_accepts_a_slot_database_on_the_eval_postgres() =>
+        AssertIsolatedEvalDatabase("Host=127.0.0.1;Port=5434;Username=reel;Password=x;Database=reel_ws1");
 }

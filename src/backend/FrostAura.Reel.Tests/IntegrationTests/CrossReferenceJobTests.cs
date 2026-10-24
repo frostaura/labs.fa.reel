@@ -620,7 +620,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         var (paused, third) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
         Assert.Null(third);
         Assert.Equal(2, judge.Calls);
-        Assert.Equal("cross-reference paused (truncation_breaker)", paused.ProgressMessage);
+        Assert.Equal("Cross-reference paused: off for the rest of today after repeated unanswered runs", paused.ProgressMessage);
         Assert.False(await SchedulerFiresAsync(accountId, breaker: breaker, outcome: FeedBuildOutcome.Fresh));
     }
 
@@ -675,6 +675,141 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         // A refusal is not evidence about the model: the cross-run count did not move.
         health.ReportAnswered(ApiProvider.OpenRouter);
         Assert.Null(breaker.OpenBreaker);
+    }
+
+    [Theory]
+    [InlineData(AgentFailureKind.ProviderError)]
+    [InlineData(AgentFailureKind.TimedOut)]
+    public async Task Two_runs_lost_to_transient_failures_never_trip_the_cross_run_breaker(AgentFailureKind transient)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // A 5xx or a timeout says nothing about whether the NEXT identical run will truncate. Two of
+        // them — the runner's own retry is the second — used to turn the purpose off for the day.
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var breaker = new CrossReferenceRunBreaker(new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService());
+        var judge = new StubJudge { Fail = true, FailWith = transient };
+
+        var (firstJob, first) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+        var (_, second) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker, attemptCount: 2);
+        var (_, third) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker, attemptCount: 3);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotNull(third);
+        Assert.DoesNotContain("Off for the rest of the UTC day", third!.Message, StringComparison.Ordinal);
+        Assert.Null(breaker.OpenBreaker);
+        Assert.Equal(3, judge.Calls);
+        Assert.True(firstJob.AttemptCount < JobRunnerLimits.MaxAttempts); // transient: the runner may retry
+
+        // The same fixture with a deterministic failure trips on the second run — the contrast.
+        var truncating = new StubJudge { Fail = true, FailWith = AgentFailureKind.Truncated };
+        await RunCapturingAsync(accountId, truncating, new RecordingEventHub(), breaker: breaker);
+        await RunCapturingAsync(accountId, truncating, new RecordingEventHub(), breaker: breaker);
+        Assert.NotNull(breaker.OpenBreaker);
+    }
+
+    [Fact]
+    public async Task A_gate_refusal_on_the_first_batch_is_an_ordinary_budget_stop_not_a_failed_job()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The handler's old pre-check said yes with a few thousand tokens left; the gate refused the
+        // ~24k-token batch, and the run threw "answered none" (no_answer), forced its attempts to
+        // the cap and was queued again by every Fresh build.
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var breaker = new CrossReferenceRunBreaker(new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService());
+        var judge = new StubJudge { Fail = true, FailWith = AgentFailureKind.BudgetSpent };
+
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+
+        Assert.Null(error);
+        Assert.Equal(1, job.AttemptCount);
+        Assert.Equal("stopped at today's cross-reference ceiling before judging anything", job.ProgressMessage);
+        Assert.Null(breaker.OpenBreaker);
+    }
+
+    [Fact]
+    public async Task A_day_without_a_batchs_worth_of_tokens_stops_before_calling_and_the_scheduler_queues_nothing()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Vary the fixture: the ledger, not the judge, is what says no here. Headroom under one
+        // batch's worst case is a spent day at the gate's own rule.
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        Assert.True(await SchedulerFiresAsync(accountId, outcome: FeedBuildOutcome.Fresh)); // the control
+
+        await using (var ledger = Fixture.CreateContext(new AccountContext()))
+        {
+            ledger.ExternalApiUsages.Add(new ExternalApiUsage
+            {
+                Id = Guid.NewGuid(),
+                Provider = ApiProvider.OpenRouter,
+                Day = DateTime.UtcNow.Date,
+                AccountId = accountId,
+                Model = "test/xref-spent",
+                Purpose = ApiUsagePurpose.CrossReference,
+                CallCount = 10,
+                TokensUsed = CrossReferenceBudget.DefaultDailyTokens - 2_000,
+            });
+            await ledger.SaveChangesAsync();
+        }
+
+        var judge = new StubJudge();
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub());
+
+        Assert.Null(error);
+        Assert.Equal(0, judge.Calls);
+        Assert.Equal("stopped at today's cross-reference ceiling before judging anything", job.ProgressMessage);
+        Assert.False(await SchedulerFiresAsync(accountId, outcome: FeedBuildOutcome.Fresh));
+    }
+
+    [Fact]
+    public async Task A_breaker_that_closes_the_door_mid_run_pauses_the_run_rather_than_failing_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var judge = new StubJudge { Fail = true, FailWith = AgentFailureKind.ProviderUnavailable };
+
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub());
+
+        Assert.Null(error);
+        Assert.Equal(1, job.AttemptCount);
+        Assert.Equal("paused before judging anything: the model provider is not taking calls", job.ProgressMessage);
+    }
+
+    [Fact]
+    public async Task A_run_whose_answers_were_all_unusable_says_so_rather_than_nothing_judgeable()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+
+        var (job, error) = await RunCapturingAsync(accountId, new StubJudge { AnswerWithNothingUsable = true }, new RecordingEventHub());
+
+        Assert.Null(error);
+        Assert.Equal("the judge answered 1 batch(es) but none of its verdicts could be used", job.ProgressMessage);
     }
 
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
@@ -1104,6 +1239,9 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         /// <summary>Runs after the call is counted, so a test can move the world mid-run.</summary>
         public Func<int, Task>? Hook { get; init; }
 
+        /// <summary>Answer every batch, but with no usable entry — every one rejected by the adapter's validation.</summary>
+        public bool AnswerWithNothingUsable { get; init; }
+
         public bool IsAvailable => true;
 
         public string ModelId => "stub/cross-reference";
@@ -1150,6 +1288,11 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
                 // No rows, not Failed rows — absence is what the resume anti-join reads as "still
                 // to do".
                 return new CrossReferenceBatchResult([], Succeeded: false, null, null, 0, FailWith);
+            }
+
+            if (AnswerWithNothingUsable)
+            {
+                return new CrossReferenceBatchResult([], Succeeded: true, 100, 20, candidates.Count);
             }
 
             var entries = candidates

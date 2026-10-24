@@ -151,11 +151,27 @@ public sealed class CrossReferenceJobHandler(
         /// <summary>Failed batches whose failure is transient (a dropped call, a 5xx, a timeout) — worth the runner's retry.</summary>
         public int TransientFailures { get; set; }
 
-        /// <summary>Batches the provider refused, or that an open breaker or the budget stopped before sending.</summary>
+        /// <summary>Batches the provider refused with 401/402/403 — evidence about the key, not the model.</summary>
         public int StoppedBeforeAnswer { get; set; }
 
-        /// <summary>The run stopped at the daily ceiling (an ordinary stop, never an error).</summary>
+        /// <summary>
+        /// The run stopped at the daily ceiling (an ordinary stop, never an error) — either the
+        /// handler's own pre-check or the budget gate refusing a batch before it was sent.
+        /// </summary>
         public bool StoppedByBudget { get; set; }
+
+        /// <summary>
+        /// The run stopped because the provider breaker was holding calls back (another caller had
+        /// the half-open probe out). Nothing was sent; a pause, never an error.
+        /// </summary>
+        public bool StoppedByBreaker { get; set; }
+
+        /// <summary>
+        /// Failed batches that are evidence about the model and prompt: truncated, empty or
+        /// unreadable answers. The only kind the cross-run breaker counts — a 5xx, a timeout or a
+        /// refusal says nothing about whether the NEXT identical run will truncate.
+        /// </summary>
+        public int DeterministicFailures => FailedBatches - TransientFailures - StoppedBeforeAnswer;
     }
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
@@ -174,7 +190,9 @@ public sealed class CrossReferenceJobHandler(
         {
             // Paused, not failed: the breaker already says why on the status API, and a run that
             // went ahead would send nothing — the client refuses every call behind an open breaker.
-            await FinishAsync(job, $"cross-reference paused ({open.ReasonCode})", ct);
+            // Nothing is lost: the work is the verdict table's anti-join, and the next Fresh build
+            // queues it again once the breaker has closed.
+            await FinishAsync(job, $"Cross-reference paused: {ProviderBreakerReasons.Describe(open.ReasonCode)}", ct);
             return;
         }
 
@@ -251,8 +269,9 @@ public sealed class CrossReferenceJobHandler(
         // judgements to the resume anti-join and would suppress their own retry for ever.
         if (tally.SucceededBatches == 0 && tally.FailedBatches > 0)
         {
-            var tripped = breaker?.RecordRun(
-                judge.RunKey, judge.PromptVersion, 0, tally.FailedBatches - tally.StoppedBeforeAnswer) ?? false;
+            // Only deterministic failures are evidence for the cross-run breaker: two runs whose
+            // first batch met a 5xx would otherwise turn the purpose off for a whole UTC day.
+            var tripped = breaker?.RecordRun(judge.RunKey, judge.PromptVersion, 0, tally.DeterministicFailures) ?? false;
 
             // Deterministic failures are not retried: a truncation or an unreadable answer on this
             // model and prompt comes back the same on the runner's next attempt, and a refusal or an
@@ -365,7 +384,7 @@ public sealed class CrossReferenceJobHandler(
             }
 
             var allowance = await budget.AllowanceAsync(accountId, batchCt);
-            if (!allowance.HasHeadroom)
+            if (!allowance.AdmitsBatch(Math.Min(BatchSize, slice.Count)))
             {
                 // Exhaustion is not an error. The run keeps what it judged and stops; verdicts are
                 // additive, so a half-judged pool is a smaller instrument, never a wrong one.
@@ -397,6 +416,28 @@ public sealed class CrossReferenceJobHandler(
 
             var result = await judge.JudgeAsync(
                 batch.Candidates, persona, round, ApiUsagePurpose.CrossReference, batchCt);
+            if (result.Failure is AgentFailureKind.BudgetSpent or AgentFailureKind.ProviderUnavailable)
+            {
+                // Nothing was sent. The gate's admission rule is the authority (the pre-check above
+                // estimates it), and a breaker can close a run's door between batches — both are
+                // ordinary stops that keep what was judged, never a failed batch: a refused
+                // reservation is not the judge "answering none".
+                if (result.Failure is AgentFailureKind.BudgetSpent)
+                {
+                    tally.StoppedByBudget = true;
+                }
+                else
+                {
+                    tally.StoppedByBreaker = true;
+                }
+
+                logger.LogInformation(
+                    "Cross-reference for {AccountId} stopped before sending batch {Index} ({Failure}); {Judged} verdict(s) kept.",
+                    accountId, index, result.Failure, tally.Judged);
+                abandoned = true;
+                return;
+            }
+
             if (!result.Succeeded)
             {
                 tally.FailedBatches++;
@@ -406,8 +447,7 @@ public sealed class CrossReferenceJobHandler(
                     tally.TransientFailures++;
                 }
 
-                var stoppedBeforeAnswer = result.Failure is AgentFailureKind.ProviderRefused
-                    or AgentFailureKind.ProviderUnavailable or AgentFailureKind.BudgetSpent;
+                var stoppedBeforeAnswer = result.Failure is AgentFailureKind.ProviderRefused;
                 if (stoppedBeforeAnswer)
                 {
                     tally.StoppedBeforeAnswer++;
@@ -550,7 +590,13 @@ public sealed class CrossReferenceJobHandler(
                 $"Cross-referenced {tally.Judged:N0} titles · {tally.RuledOut:N0} ruled out")
             : tally.StoppedByBudget
                 ? "stopped at today's cross-reference ceiling before judging anything"
-                : "nothing judgeable this run";
+                : tally.StoppedByBreaker
+                    ? "paused before judging anything: the model provider is not taking calls"
+                    : tally.SucceededBatches > 0
+                        ? string.Create(
+                            CultureInfo.InvariantCulture,
+                            $"the judge answered {tally.SucceededBatches:N0} batch(es) but none of its verdicts could be used")
+                        : "nothing judgeable this run";
 
     private async Task FinishAsync(SyncJob job, string message, CancellationToken ct)
     {

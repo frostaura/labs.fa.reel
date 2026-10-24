@@ -11,8 +11,8 @@ using Microsoft.Extensions.Logging;
 namespace FrostAura.Reel.Application.CrossReference;
 
 /// <summary>
-/// The one place a <see cref="JobKind.CrossReference"/> run is queued from — the feed build, on
-/// both its Fresh and its Preserve exit.
+/// The one place a <see cref="JobKind.CrossReference"/> run is queued from — the feed build, and
+/// only after a Fresh build (see <see cref="ShouldEnqueue"/>).
 ///
 /// <para><b>Three brakes, and not one of them is a clock.</b> A run is queued only when nothing is
 /// already in flight for the account, the day's ceiling still has headroom, and the pool actually
@@ -168,8 +168,11 @@ public sealed class CrossReferenceScheduler(
 
         // Brake 2: the daily ceiling. A run queued with no allowance would claim a runner slot, hold
         // the process-wide gate, and stop on its first batch — the ceiling is cheaper to read here.
+        // Read at the gate's own rule for a full batch: a day with headroom for a few hundred
+        // tokens is a spent day for a sixty-candidate batch, and a run queued into it would claim a
+        // slot only to stop before its first call.
         var allowance = await budget.AllowanceAsync(accountId, ct);
-        if (!allowance.HasHeadroom)
+        if (!allowance.AdmitsBatch(Jobs.CrossReferenceJobHandler.BatchSize))
         {
             logger.LogInformation(
                 "Cross-reference not queued for {AccountId}: today's ceiling is spent ({Allowance}).",

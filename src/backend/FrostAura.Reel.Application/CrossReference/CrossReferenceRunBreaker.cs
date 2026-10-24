@@ -18,9 +18,11 @@ namespace FrostAura.Reel.Application.CrossReference;
 ///
 /// <para><b>Keyed by what makes the failure deterministic</b> — the judge's run key (model and
 /// effort) and its prompt version. A run on a different key is a different instrument and starts
-/// the count again; a run with even one answered batch resets it. Runs that stopped for a refusal,
-/// an open breaker or a spent budget are not evidence about the model and are not counted (the
-/// provider breaker and the budget gate own those).</para>
+/// the count again; a run with even one answered batch resets it. Only DETERMINISTIC failures count
+/// — truncated, empty or unreadable answers. A refusal, an open breaker or a spent budget sends
+/// nothing (the provider breaker and the budget gate own those), and a 5xx or a timeout says
+/// nothing about whether the next identical run truncates: the runner's own retry of a transient
+/// failure used to be the "second run" that turned the purpose off for a whole UTC day.</para>
 ///
 /// <para>Process-local, like the provider breaker it opens: a restart forgets the count and, at
 /// worst, buys two more failed runs before tripping again. Persisting it is the M5 purpose-health
@@ -41,7 +43,8 @@ public sealed class CrossReferenceRunBreaker(
 
     /// <summary>
     /// Records how a run ended. Returns true when THIS run tripped the breaker. A run with any
-    /// answered batch resets its key; a run that sent nothing is not counted.
+    /// answered batch resets its key; <paramref name="unansweredBatches"/> is the run's
+    /// DETERMINISTIC failures only, and a run with none is not counted.
     /// </summary>
     public bool RecordRun(string runKey, int promptVersion, int answeredBatches, int unansweredBatches)
     {
