@@ -238,8 +238,11 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             || (!db.ContentFilters.Any(f => f.AccountId == accountId && f.Kind == FilterKind.Language)
                 && t.Language == "en"));
 
-        // Crowd-rating floor. The resolution is TMDB-then-Trakt, re-expressed here inline because a
-        // method call (CrowdRating.Resolve) cannot cross into SQL — keep the two in step.
+        // Crowd-rating floor. The resolution is the RAW TMDB-then-Trakt average, re-expressed here
+        // inline because a method call (CrowdRating.ResolveRaw) cannot cross into SQL — keep the two
+        // in step. The badge now shows the vote-shrunk score (CrowdRating.Resolve); the floor moves
+        // to it only when the founder confirms FD-7, and until then the cost meter reports what the
+        // pool would be under the shrunk floor (CrowdFloorMeasure.Shrunk on the draft overload).
         //
         // A title with NO crowd rating from either source FAILS the floor. That is deliberate and it
         // mirrors PassesMaturity, where an unrated certification passes only when the ceiling is
@@ -302,9 +305,18 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// The interaction footprint half is unchanged and still reads the account's real rows: a draft
     /// changes what you are willing to be shown, never what you have already seen.
     /// </summary>
-    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules)
+    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules) =>
+        EligibleTitles(accountId, rules, CrowdFloorMeasure.Raw);
+
+    /// <summary>
+    /// <see cref="EligibleTitles(Guid, FilterRuleSet)"/> with the crowd floor read by an explicit
+    /// <paramref name="measure"/>. <see cref="CrowdFloorMeasure.Shrunk"/> is a QUESTION — "what would
+    /// the pool be if the floor compared the vote-shrunk badge?" — asked by the cost meter before the
+    /// founder decides FD-7. Nothing that serves titles passes it.
+    /// </summary>
+    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules, CrowdFloorMeasure measure)
     {
-        return ContentFilteredTitles(rules).Where(t =>
+        return ContentFilteredTitles(rules, measure).Where(t =>
             !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
             && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
             && !db.UserTitleReactions.Any(r =>
@@ -328,7 +340,14 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// If you change one arm here, change it there and let that test prove it. Anything that SERVES
     /// titles keeps using the persisted overload — a draft is a question, not a permission.
     /// </summary>
-    public IQueryable<Title> ContentFilteredTitles(FilterRuleSet rules)
+    public IQueryable<Title> ContentFilteredTitles(FilterRuleSet rules) =>
+        ContentFilteredTitles(rules, CrowdFloorMeasure.Raw);
+
+    /// <summary>
+    /// <see cref="ContentFilteredTitles(FilterRuleSet)"/> with the crowd floor read by
+    /// <paramref name="measure"/> — measurement only, see <see cref="EligibleTitles(Guid, FilterRuleSet, CrowdFloorMeasure)"/>.
+    /// </summary>
+    public IQueryable<Title> ContentFilteredTitles(FilterRuleSet rules, CrowdFloorMeasure measure)
     {
         var includeGenres = rules.IncludeGenres;
         var languages = rules.EffectiveLanguages;
@@ -379,13 +398,21 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             || (t.Language != null && languages.Contains(t.Language.ToLower())));
 
         // Crowd floor, resolved TMDB-then-Trakt inline exactly as above — a title with no crowd
-        // rating from either source FAILS the floor.
-        query = query.Where(t =>
-            crowdFloor == null
-            || (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
-                    ? t.TmdbVoteAverage
-                    : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
-                >= crowdFloor);
+        // rating from either source FAILS the floor. Under the Shrunk measure it compares the badge's
+        // vote-shrunk score at badge precision instead, with the same "no rating fails" call.
+        if (measure == CrowdFloorMeasure.Shrunk && crowdFloor is { } shrunkFloor)
+        {
+            query = query.Where(CrowdVotes.ShrunkAtLeast(shrunkFloor));
+        }
+        else
+        {
+            query = query.Where(t =>
+                crowdFloor == null
+                || (t.TmdbVoteAverage != null && t.TmdbVoteAverage > 0m
+                        ? t.TmdbVoteAverage
+                        : t.TraktRating != null && t.TraktRating > 0m ? t.TraktRating : null)
+                    >= crowdFloor);
+        }
 
         // Inclusive year window; a title with no year, release date or first-aired date PASSES.
         query = query.Where(t =>
@@ -483,4 +510,14 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         // profile must never see an unrated title by accident.
         return ordinal == 0 ? ceiling >= 4 : ordinal <= ceiling;
     }
+}
+
+/// <summary>Which number a crowd floor compares.</summary>
+public enum CrowdFloorMeasure
+{
+    /// <summary>The raw TMDB-then-Trakt average — what every serving surface uses until FD-7.</summary>
+    Raw,
+
+    /// <summary>The vote-shrunk badge score — measurement only, for the cost meter.</summary>
+    Shrunk,
 }

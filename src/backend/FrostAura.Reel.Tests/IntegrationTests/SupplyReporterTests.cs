@@ -195,8 +195,10 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         var topic = UniqueTopic();
         var accountId = await SeedAccountAsync();
 
-        // TMDB has a rating, so ITS vote count decides — a large Trakt count cannot rescue it.
+        // Trakt has a crowd (≥ 50 votes), so the badge reads Trakt and ITS count decides — 9,000.
         await SeedTitleAsync(topic, t => { t.TmdbVoteCount = 10; t.TraktRating = 7.0m; t.TraktVotes = 9_000; });
+        // A thin Trakt sample yields to TMDB, whose 10 votes are under the floor.
+        await SeedTitleAsync(topic, t => { t.TmdbVoteCount = 10; t.TraktRating = 7.0m; t.TraktVotes = 40; });
         // No TMDB rating: Trakt's rating and Trakt's votes decide.
         await SeedTitleAsync(topic, t => { t.TmdbVoteAverage = null; t.TmdbVoteCount = 0; t.TraktRating = 7.0m; t.TraktVotes = 80; });
         await SeedTitleAsync(topic, t => { t.TmdbVoteAverage = null; t.TmdbVoteCount = 0; t.TraktRating = 7.0m; t.TraktVotes = 49; });
@@ -204,12 +206,12 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         await SeedTitleAsync(topic, t => t.TmdbVoteCount = CrowdVotes.MinRelaxVotes);
 
         var floored = await ReportAsync(accountId, Concept(topic));
-        Assert.Equal(2, floored.MatchingInCatalogue);
+        Assert.Equal(3, floored.MatchingInCatalogue);
         Assert.Equal(2, floored.LowVoteMatches);
-        Assert.Equal(2, floored.Eligible);
+        Assert.Equal(3, floored.Eligible);
 
         var unfloored = await ReportAsync(accountId, Concept(topic), minVotes: 0);
-        Assert.Equal(4, unfloored.MatchingInCatalogue);
+        Assert.Equal(5, unfloored.MatchingInCatalogue);
         Assert.Equal(0, unfloored.LowVoteMatches);
         Assert.Equal(0, unfloored.MinVotes);
     }
