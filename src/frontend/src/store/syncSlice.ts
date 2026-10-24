@@ -41,9 +41,15 @@ export interface SyncUiState {
    * sync actually did instead of reverting to a timestamp. Cleared when the next job starts.
    */
   summary: SyncSummary | null;
+  /**
+   * When `summary` arrived (epoch ms). The sentence is undated, so the pill shows it only while it
+   * is recent (`SUMMARY_FRESH_MS` in lib/syncPill.ts); a long-lived tab otherwise said "Already up
+   * to date" for days on the strength of one background sync.
+   */
+  summaryAt: number | null;
 }
 
-const initialState: SyncUiState = { active: false, live: null, summary: null };
+const initialState: SyncUiState = { active: false, live: null, summary: null, summaryAt: null };
 
 export const syncSlice = createSlice({
   name: "syncUi",
@@ -75,11 +81,20 @@ export const syncSlice = createSlice({
       if (action.payload.jobChanged) state.live = null;
       // A new job the user is watching makes the last sync's outcome history — leaving it up would
       // report a result while a fresh sync runs. Background frames never clear it.
-      if (action.payload.jobChanged && action.payload.userVisible) state.summary = null;
+      if (action.payload.jobChanged && action.payload.userVisible) {
+        state.summary = null;
+        state.summaryAt = null;
+      }
     },
-    /** A delta/reconcile finished and said what it did. Survives the job going idle. */
-    syncCompleted(state, action: PayloadAction<SyncSummary>) {
-      state.summary = action.payload;
+    /** A delta/reconcile finished and said what it did. Survives the job going idle; dated. */
+    syncCompleted: {
+      reducer(state, action: PayloadAction<SyncSummary, string, { at: number }>) {
+        state.summary = action.payload;
+        state.summaryAt = action.meta.at;
+      },
+      prepare(summary: SyncSummary, at: number = Date.now()) {
+        return { payload: summary, meta: { at } };
+      },
     },
     /**
      * The rebuild that sync triggered has landed and knows how much of the page moved. Fills the
@@ -90,13 +105,8 @@ export const syncSlice = createSlice({
         state.summary.picksChanged = action.payload.picksChanged;
       }
     },
-    syncIdle(state) {
-      // Deliberately NOT a reset to initialState: the pill goes idle the moment the job finishes,
-      // and the whole point of the post-sync moment is that its sentence outlives the spinner.
-      return { ...initialState, summary: state.summary };
-    },
   },
 });
 
-export const { syncProgress, activeJobObserved, syncCompleted, picksChangedReported, syncIdle } = syncSlice.actions;
+export const { syncProgress, activeJobObserved, syncCompleted, picksChangedReported } = syncSlice.actions;
 export default syncSlice.reducer;

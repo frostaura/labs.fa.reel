@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import reducer, { activeJobObserved, syncCompleted, syncIdle, syncProgress } from "./syncSlice";
+import reducer, { activeJobObserved, syncCompleted, syncProgress } from "./syncSlice";
 
 const summary = { ratingsAdded: 2, ratingsChanged: 0, watchedAdded: 0, retrainQueued: false, retrainAt: null, picksChanged: null };
 
@@ -30,12 +30,17 @@ describe("syncSlice", () => {
   it("a new job the user is watching makes the last sentence history", () => {
     let s = reducer(undefined, syncCompleted(summary));
     s = reducer(s, activeJobObserved({ userVisible: true, jobChanged: true }));
-    expect(s.summary).toBeNull();
+    expect(s).toMatchObject({ summary: null, summaryAt: null });
   });
 
-  it("idle keeps the sentence", () => {
-    let s = reducer(undefined, syncCompleted(summary));
-    s = reducer(s, syncIdle());
-    expect(s.summary).toEqual(summary);
+  it("dates the sentence when it arrives", () => {
+    const s = reducer(undefined, syncCompleted(summary, 1_700_000_000_000));
+    expect(s).toMatchObject({ summary, summaryAt: 1_700_000_000_000 });
+  });
+
+  it("going idle keeps the sentence and its date", () => {
+    let s = reducer(undefined, syncCompleted(summary, 42));
+    s = reducer(s, activeJobObserved({ userVisible: false, jobChanged: true }));
+    expect(s).toMatchObject({ summary, summaryAt: 42 });
   });
 });

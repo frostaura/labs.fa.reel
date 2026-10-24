@@ -150,7 +150,10 @@ test.describe("error boundaries", () => {
     });
 
     await page.goto("/saved?q=private");
-    await expect(page.getByTestId("route-error-boundary")).toContainText("This page hit a problem");
+    const boundary = page.getByTestId("route-error-boundary");
+    await expect(boundary).toContainText("Something went wrong on this page");
+    // It cannot know the report landed or that nothing was affected, so it says neither.
+    await expect(boundary).not.toContainText(/reported|affected/i);
     await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
     await expect(page.getByTestId("sync-health")).toBeVisible();
 
@@ -249,6 +252,64 @@ test.describe("sign-out", () => {
     // asserts above cover: linking B is a full page load (Trakt redirects back), so the store
     // starts empty, and the only carriers left are the worker's API cache (deleted; the worker's
     // own guard is unit-tested in lib/swApiCache.test.ts) and reel.* storage (cleared).
+  });
+});
+
+test.describe("offline fallback", () => {
+  test("a cached answer stays flagged while unrelated queries answer live (I-11)", async ({ page }) => {
+    await bootQuiet(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    let savedFromCache = true;
+    // What the worker sends when the network failed or timed out: the saved answer, marked, with
+    // the server's Date from when it was saved. (Workers are blocked here, so the route stands in
+    // for it; the worker's marking itself is unit-tested in lib/swApiCache.test.ts.)
+    await page.route(
+      (url) => url.pathname === "/api/saved",
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: savedFromCache
+            ? { "X-Reel-From-Cache": "1", Date: new Date(Date.now() - 40 * 60_000).toUTCString() }
+            : {},
+          body: JSON.stringify(SAVED_A),
+        })
+    );
+    let statusAnswers = 0;
+    await page.route((url) => url.pathname === "/api/sync/status", (route) => {
+      statusAnswers += 1;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(syncStatus()) });
+    });
+
+    await page.goto("/saved");
+    const banner = page.getByTestId("offline-banner");
+    await expect(banner).toContainText("Couldn't reach Reel — showing what was saved");
+    await expect(banner).not.toContainText("Offline");
+
+    // The status query answers live again; the Saved list on screen is still the cached one.
+    const before = statusAnswers;
+    await page.evaluate(() =>
+      (window as unknown as { __sse: { emit: (t: string, d: unknown) => void } }).__sse.emit("failed", {})
+    );
+    await expect.poll(() => statusAnswers).toBeGreaterThan(before);
+    await page.waitForTimeout(200);
+    await expect(banner).toBeVisible();
+
+    // Leaving the page leaves its cached answer behind: Home's answers are live.
+    await page.getByRole("link", { name: "Reel home" }).click();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(banner).toHaveCount(0);
+
+    // Back on Saved, the list on screen is still the cached one, so the banner is back.
+    await page.getByRole("link", { name: "Saved" }).first().click();
+    await expect(banner).toBeVisible();
+
+    // Saved answers live: now the banner goes.
+    savedFromCache = false;
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
+    await expect(page.getByText("Account A Secret Pick").first()).toBeVisible();
+    await expect(banner).toHaveCount(0);
   });
 });
 

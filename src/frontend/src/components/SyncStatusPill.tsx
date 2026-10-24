@@ -4,6 +4,7 @@ import { relTime } from "../lib/format";
 import { derivePill, type PillTone, type PillView } from "../lib/syncPill";
 import { rememberOauthState } from "../lib/traktOauth";
 import { useGetSyncStatusQuery, useStartTraktAuthMutation, type SyncStatus } from "../store/api";
+import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 
 const DOT: Record<PillTone, string> = {
@@ -33,7 +34,13 @@ export default function SyncStatusPill() {
   const sync = useSelector((s: RootState) => s.syncUi);
   // Subscribes without its own interval: RealtimeSync owns the cadence for every subscriber.
   const { data: status, isError } = useGetSyncStatusQuery();
-  const view = derivePill({ status, statusFailed: isError, live: sync.live, summary: sync.summary });
+  const view = derivePill({
+    status,
+    statusFailed: isError,
+    live: sync.live,
+    summary: sync.summary,
+    summaryAt: sync.summaryAt,
+  });
 
   return (
     <>
@@ -59,18 +66,20 @@ function ReconnectTraktButton({ label }: { label: string }) {
   };
 
   return (
-    <button
+    <Button
       type="button"
+      variant="destructive"
+      size="sm"
       onClick={reconnect}
       disabled={isLoading}
       data-testid="sync-reconnect"
-      className="inline-flex items-center gap-2 rounded-full border border-fa-danger/60 bg-fa-glass px-3 py-1 fa-caption text-fa-danger transition hover:border-fa-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-danger/60 disabled:opacity-60"
+      className="rounded-full px-3 py-1 fa-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-danger/60"
     >
       <span className="h-1.5 w-1.5 rounded-full shrink-0 bg-fa-danger" aria-hidden />
       <span data-testid="sync-health-label" className="truncate max-w-[10rem]">
         {isLoading ? "Opening Trakt…" : isError ? "Couldn't reach Trakt — retry" : label}
       </span>
-    </button>
+    </Button>
   );
 }
 
@@ -137,8 +146,8 @@ function PillBody({ view, status }: { view: PillView; status: SyncStatus | undef
           )}
           {view.lines.length > 0 && (
             <ul className="space-y-1">
-              {view.lines.map((line) => (
-                <li key={line} className="fa-caption text-fa-frost-dim flex gap-1.5">
+              {view.lines.map((line, index) => (
+                <li key={`${index}:${line}`} className="fa-caption text-fa-frost-dim flex gap-1.5">
                   <span aria-hidden className="text-fa-frost/50">·</span>
                   {line}
                 </li>
@@ -148,8 +157,10 @@ function PillBody({ view, status }: { view: PillView; status: SyncStatus | undef
           {/* Everything else that needs attention, so a warning never hides behind the headline. */}
           {view.issues.length > 1 && (
             <ul className="mt-2 pt-2 border-t border-fa-edge/50 space-y-1" data-testid="sync-issues">
-              {view.issues.slice(1).map((issue) => (
-                <li key={issue.label} className="fa-caption flex flex-col">
+              {/* Two issues can share a label (two unknown job kinds both read "A background job
+                  failed"), so the key carries the position too. */}
+              {view.issues.slice(1).map((issue, index) => (
+                <li key={`${index}:${issue.label}`} className="fa-caption flex flex-col">
                   <span className={issue.tone === "danger" ? "text-fa-danger" : "text-fa-warning"}>{issue.label}</span>
                   <span className="text-fa-frost-dim">{issue.detail}</span>
                 </li>

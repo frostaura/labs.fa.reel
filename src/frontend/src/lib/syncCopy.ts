@@ -197,10 +197,12 @@ function utcHourMinute(iso: string): string {
  * home screen. Each phrase is a verb clause in the second person, so it reads as the tail of a
  * sentence rather than a label.
  *
- * `Degraded` is the hard-failure parking state (revoked token, dead-lettered writes) and is the
- * one stage with a REASON worth quoting: pass the persisted one (`outboxLastError` on
- * `/api/sync/status`) and it is shown verbatim instead of the generic line. Callers that do not
- * hold it get honest generic copy — never a blank, and never the enum.
+ * `Degraded` is the hard-failure parking state. Status v2 says WHY with a stable `degradedReason`
+ * code, and the clause is keyed on it: a revoked Trakt link, dead-lettered writes, a model provider
+ * that is down and a failed pipeline are different problems, and naming the Trakt link for all of
+ * them sent the user to fix the wrong thing. No reason, or one this build does not know, reads as
+ * the neutral fallback — never the code, and never free text (the persisted error strings stay off
+ * the screen).
  *
  * An unknown stage falls back to the generic clause, so a new backend stage ships safely ahead of
  * the frontend that names it.
@@ -215,18 +217,28 @@ const PIPELINE_STAGE_COPY: Record<string, string> = {
   FeedReady: "putting tonight's picks together",
 };
 
-/** The generic clause for an unknown stage, and for Degraded with no persisted reason. */
+/** The generic clause for an unknown stage. */
 export const PIPELINE_STAGE_FALLBACK = "getting your library ready";
 
-/** What Degraded says when nothing was persisted to explain it. */
-export const PIPELINE_DEGRADED_FALLBACK = "your Trakt link needs attention";
+/** `degradedReason` → the Degraded clause. */
+const DEGRADED_REASON_COPY: Record<string, string> = {
+  TraktRevoked: "your Trakt link needs reconnecting",
+  TraktRefreshFailed: "your Trakt link needs reconnecting",
+  TraktWritesDeadLettered: "some changes couldn't reach Trakt",
+  NotEnoughRatings: "waiting for a few more ratings",
+  ProviderDown: "the model provider is down",
+  PipelineFailed: "a step failed and stopped your picks updating",
+};
+
+/** What Degraded says with no reason, or one this build does not know. */
+export const PIPELINE_DEGRADED_FALLBACK = "something needs a look — the sync status in the header says what";
 
 export function pipelineStageCopy(
   stage: string | null | undefined,
   degradedReason?: string | null
 ): string {
   if (stage === "Degraded") {
-    return degradedReason?.trim() || PIPELINE_DEGRADED_FALLBACK;
+    return (degradedReason && DEGRADED_REASON_COPY[degradedReason]) || PIPELINE_DEGRADED_FALLBACK;
   }
 
   return (stage && PIPELINE_STAGE_COPY[stage]) || PIPELINE_STAGE_FALLBACK;
@@ -311,4 +323,33 @@ const TERMINAL_REASONS = new Set(["payment_required", "unauthorized", "forbidden
 
 export function isTerminalReason(code: string | null | undefined): boolean {
   return code != null && TERMINAL_REASONS.has(code);
+}
+
+/**
+ * Model-call purposes (`ExternalApiPurpose` in Domain/Sync/ExternalApiUsage.cs) → what the user
+ * would call that feature. The provider-health tooltip names the affected feature with these; a
+ * purpose this build does not know, or a whole-provider breaker, reads as the fallback — never as
+ * the identifier.
+ */
+const PURPOSE_COPY: Record<string, string> = {
+  "extract-attributes": "Reading new titles",
+  "search-interpret": "Ask Reel",
+  "search-agent": "Ask Reel",
+  rerank: "Ranking your picks",
+  "rerank-feed": "Ranking your picks",
+  "rerank-page": "Ranking your picks",
+  "rerank-ask": "Ask Reel",
+  "rerank-expand": "Ask Reel",
+  embed: "Search",
+  "taste-narrative": "Your taste story",
+  lens: "Lenses",
+  "lens-audit": "Lenses",
+  "cross-reference": "Cross-referencing",
+  "cross-reference-eval": "Cross-referencing",
+};
+
+export const PURPOSE_FALLBACK = "Some model features";
+
+export function purposeCopy(purpose: string | null | undefined): string {
+  return (purpose && PURPOSE_COPY[purpose]) || PURPOSE_FALLBACK;
 }

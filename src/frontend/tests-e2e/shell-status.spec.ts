@@ -46,38 +46,45 @@ const emit = (page: Page, type: string, data: Record<string, unknown>) =>
   ] as const);
 
 test.describe("sync pill", () => {
-  test("a refresh-failed Trakt link outranks a running job and offers the reconnect", async ({ page }) => {
-    await bootShell(
-      page,
-      syncStatus({
-        connectionStatus: "RefreshFailed",
-        degradedReason: "TraktRefreshFailed",
-        activeJob: syncJob({ kind: "FullIngest", sseKind: "ingest", progressPct: 40 }),
-      })
-    );
-    let started = 0;
-    await page.route("**/api/auth/trakt/start", (route) => {
-      started += 1;
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ authorizeUrl: "/__trakt-authorize-stub", state: "s-1" }),
+  // The acceptance fixture is a running Enrich (background upkeep); the import the user started is
+  // the harder case, since user-visible work otherwise owns the pill.
+  for (const running of [
+    syncJob({ kind: "Enrich", sseKind: "enrich", visibility: "Background", progressPct: 40 }),
+    syncJob({ kind: "FullIngest", sseKind: "ingest", progressPct: 40 }),
+  ]) {
+    test(`a refresh-failed Trakt link outranks a running ${String(running.kind)} job and offers the reconnect`, async ({ page }) => {
+      await bootShell(
+        page,
+        syncStatus({
+          connectionStatus: "RefreshFailed",
+          degradedReason: "TraktRefreshFailed",
+          activeJob: running,
+        })
+      );
+      let started = 0;
+      await page.route("**/api/auth/trakt/start", (route) => {
+        started += 1;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ authorizeUrl: "/__trakt-authorize-stub", state: "s-1" }),
+        });
       });
+      await page.route("**/__trakt-authorize-stub", (route) =>
+        route.fulfill({ status: 200, contentType: "text/html", body: "<title>Trakt</title>authorize" })
+      );
+
+      await page.goto("/home");
+      const reconnect = page.getByTestId("sync-reconnect");
+      await expect(reconnect).toHaveText("Reconnect Trakt");
+      await expect(page.getByTestId("sync-pill")).toHaveCount(0);
+      await expect(page.getByTestId("sync-announce")).toHaveText("Sync status: Reconnect Trakt");
+
+      await reconnect.click();
+      await expect(page).toHaveURL(/__trakt-authorize-stub/);
+      expect(started).toBe(1);
     });
-    await page.route("**/__trakt-authorize-stub", (route) =>
-      route.fulfill({ status: 200, contentType: "text/html", body: "<title>Trakt</title>authorize" })
-    );
-
-    await page.goto("/home");
-    const reconnect = page.getByTestId("sync-reconnect");
-    await expect(reconnect).toHaveText("Reconnect Trakt");
-    await expect(page.getByTestId("sync-pill")).toHaveCount(0);
-    await expect(page.getByTestId("sync-announce")).toHaveText("Sync status: Reconnect Trakt");
-
-    await reconnect.click();
-    await expect(page).toHaveURL(/__trakt-authorize-stub/);
-    expect(started).toBe(1);
-  });
+  }
 
   test("three failed cross-reference runs show the danger state with the reason", async ({ page }) => {
     await bootShell(

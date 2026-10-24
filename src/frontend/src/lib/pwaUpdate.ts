@@ -41,14 +41,18 @@ export function startPwaUpdates(): void {
   });
 }
 
-function subscribe(listener: Listener): () => void {
+export function subscribePwaUpdate(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
 /** True once a new build's worker is installed and waiting for the user's go-ahead. */
+export function isPwaUpdateReady(): boolean {
+  return updateReady;
+}
+
 export function usePwaUpdateReady(): boolean {
-  return useSyncExternalStore(subscribe, () => updateReady, () => false);
+  return useSyncExternalStore(subscribePwaUpdate, isPwaUpdateReady, () => false);
 }
 
 /** Activates the waiting worker; the page reloads when it takes control. */

@@ -3,12 +3,14 @@ import {
   ACTIVE_LABEL_FALLBACK,
   FAILURE_NOUN_FALLBACK,
   PIPELINE_DEGRADED_FALLBACK,
+  PURPOSE_FALLBACK,
   PIPELINE_STAGE_FALLBACK,
   REASON_FALLBACK,
   activeJobLabel,
   failureNoun,
   isTerminalReason,
   pipelineStageCopy,
+  purposeCopy,
   reasonCopy,
   syncExplainer,
   syncSummaryCopy,
@@ -181,7 +183,7 @@ describe("syncSummaryCopy", () => {
  * waiting copy, so the founder's home screen read "Your picks are being assembled (Extracting)".
  * The contract these pin: every stage maps to a second-person verb clause, an unknown stage still
  * says something honest (so a new backend stage ships safely ahead of the frontend), and Degraded
- * — the one stage with a reason worth quoting — prefers the persisted reason over generic copy.
+ * is keyed on its stable reason code — never free text, never the code.
  */
 describe("pipelineStageCopy", () => {
   it.each([
@@ -203,16 +205,28 @@ describe("pipelineStageCopy", () => {
     }
   });
 
-  it("quotes the persisted reason for Degraded", () => {
-    expect(pipelineStageCopy("Degraded", "Trakt revoked the token — re-link to carry on")).toBe(
-      "Trakt revoked the token — re-link to carry on"
-    );
+  it.each([
+    ["TraktRevoked", "your Trakt link needs reconnecting"],
+    ["TraktRefreshFailed", "your Trakt link needs reconnecting"],
+    ["TraktWritesDeadLettered", "some changes couldn't reach Trakt"],
+    ["NotEnoughRatings", "waiting for a few more ratings"],
+    ["ProviderDown", "the model provider is down"],
+    ["PipelineFailed", "a step failed and stopped your picks updating"],
+  ])("keys Degraded on its reason code: %s", (reason, expected) => {
+    expect(pipelineStageCopy("Degraded", reason)).toBe(expected);
   });
 
-  it("falls back to honest copy when Degraded carries no reason", () => {
+  it("names the Trakt link only when the reason is the Trakt link", () => {
+    for (const reason of ["TraktWritesDeadLettered", "ProviderDown", "PipelineFailed", null, "SomeFutureReason"]) {
+      expect(pipelineStageCopy("Degraded", reason)).not.toContain("Trakt link");
+    }
+  });
+
+  it("falls back to neutral copy with no reason, an unknown one, or free text — never quoting it", () => {
     expect(pipelineStageCopy("Degraded")).toBe(PIPELINE_DEGRADED_FALLBACK);
     expect(pipelineStageCopy("Degraded", null)).toBe(PIPELINE_DEGRADED_FALLBACK);
-    expect(pipelineStageCopy("Degraded", "   ")).toBe(PIPELINE_DEGRADED_FALLBACK);
+    expect(pipelineStageCopy("Degraded", "SomeFutureReason")).toBe(PIPELINE_DEGRADED_FALLBACK);
+    expect(pipelineStageCopy("Degraded", "Trakt revoked the token — re-link to carry on")).toBe(PIPELINE_DEGRADED_FALLBACK);
   });
 
   it("ignores a reason on any stage that is not Degraded", () => {
@@ -224,5 +238,22 @@ describe("pipelineStageCopy", () => {
     expect(pipelineStageCopy(undefined)).toBe(PIPELINE_STAGE_FALLBACK);
     expect(pipelineStageCopy(null)).toBe(PIPELINE_STAGE_FALLBACK);
     expect(pipelineStageCopy("")).toBe(PIPELINE_STAGE_FALLBACK);
+  });
+});
+
+describe("purposeCopy", () => {
+  it.each([
+    ["cross-reference", "Cross-referencing"],
+    ["rerank-feed", "Ranking your picks"],
+    ["search-agent", "Ask Reel"],
+    ["embed", "Search"],
+  ])("names %s as a feature", (purpose, expected) => {
+    expect(purposeCopy(purpose)).toBe(expected);
+  });
+
+  it("never shows an identifier: unknown, absent or whole-provider reads as the fallback", () => {
+    expect(purposeCopy("some-future-purpose")).toBe(PURPOSE_FALLBACK);
+    expect(purposeCopy(null)).toBe(PURPOSE_FALLBACK);
+    expect(purposeCopy(undefined)).toBe(PURPOSE_FALLBACK);
   });
 });

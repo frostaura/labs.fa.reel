@@ -8,6 +8,10 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // Node 25+ exposes an experimental `localStorage` global that warns on first touch unless given
+    // a backing file. Tests stub storage where they need it, so the experiment is switched off —
+    // code under test then sees no localStorage, exactly as in a browser that blocks it.
+    execArgv: ["--no-experimental-webstorage"],
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     coverage: {
       provider: "v8",

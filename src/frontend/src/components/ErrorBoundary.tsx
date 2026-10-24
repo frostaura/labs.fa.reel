@@ -1,5 +1,8 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { isChunkLoadError, reloadOnceForNewBuild } from "../lib/deployReload";
+import { Button } from "./ui/button";
+
+const BUTTON_CLASS = "rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50";
 
 interface Props {
   /** "route" keeps the shell (header, nav) and replaces only the page; "root" replaces everything. */
@@ -54,31 +57,28 @@ export default class ErrorBoundary extends Component<Props, State> {
         className={`flex items-center justify-center px-6 ${root ? "min-h-screen" : "py-24"}`}
       >
         <div className="max-w-md text-center space-y-4">
+          {/* Says only what this boundary knows. It cannot know whether the report reached the
+              server (the sink may be down, deduplicated or capped), whether anything saved was
+              affected, or why a chunk would not load (a deploy, or simply no connection). */}
           <h1 className="text-xl font-light text-fa-frost-bright">
-            {chunk ? "Reel was updated" : root ? "Reel hit a problem" : "This page hit a problem"}
+            {chunk ? "Couldn't load this page" : root ? "Something went wrong" : "Something went wrong on this page"}
           </h1>
           <p className="fa-body text-fa-frost-dim">
             {chunk
-              ? "This tab is running an older version. Reload to pick up the new one."
-              : "The error has been reported. Nothing you saved is affected."}
+              ? "Reel may have been updated, or the connection dropped. Reloading usually fixes it."
+              : root
+                ? "Reloading Reel usually fixes it."
+                : "Try again, or open another page — the rest of Reel still works."}
           </p>
           <div className="flex items-center justify-center gap-3">
             {!root && !chunk && (
-              <button
-                type="button"
-                onClick={this.retry}
-                className="inline-flex items-center justify-center rounded-full border border-fa-edge bg-fa-glass px-4 py-2 fa-caption text-fa-frost-bright transition hover:border-fa-frost/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
-              >
+              <Button type="button" variant="outline" onClick={this.retry} className={BUTTON_CLASS}>
                 Try again
-              </button>
+              </Button>
             )}
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="inline-flex items-center justify-center rounded-full border border-fa-edge bg-fa-glass px-4 py-2 fa-caption text-fa-frost-bright transition hover:border-fa-frost/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
-            >
+            <Button type="button" variant="outline" onClick={() => window.location.reload()} className={BUTTON_CLASS}>
               Reload Reel
-            </button>
+            </Button>
           </div>
         </div>
       </div>

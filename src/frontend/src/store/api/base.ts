@@ -63,14 +63,15 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
     }
   }
 
-  // The service worker marks an answer it served from its offline cache. Record it so the shell
-  // can say so; the next live answer clears it.
+  // The service worker marks an answer it served from its offline cache. Record it per query so
+  // the shell can say so; only that query's next live answer clears it.
   const response = result.meta?.response;
-  if (response) {
+  if (response && queryApi.type === "query") {
+    const key = queryApi.queryCacheKey ?? queryApi.endpoint;
     if (response.headers.get(FROM_CACHE_HEADER) === "1") {
-      queryApi.dispatch(servedFromCache({ savedAt: savedAtFromDateHeader(response.headers.get("Date")) }));
-    } else if ((queryApi.getState() as { connectivity?: ConnectivityState }).connectivity?.fromCache) {
-      queryApi.dispatch(servedLive());
+      queryApi.dispatch(servedFromCache({ key, savedAt: savedAtFromDateHeader(response.headers.get("Date")) }));
+    } else if ((queryApi.getState() as { connectivity?: ConnectivityState }).connectivity?.cached[key] !== undefined) {
+      queryApi.dispatch(servedLive({ key }));
     }
   }
 

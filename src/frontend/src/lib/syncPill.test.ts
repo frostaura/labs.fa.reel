@@ -3,6 +3,7 @@ import type { JobFailure, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import {
   ACTIVE_POLL_MS,
   IDLE_POLL_MS,
+  SUMMARY_FRESH_MS,
   derivePill,
   healthIssues,
   shownActiveJob,
@@ -204,15 +205,29 @@ describe("idle", () => {
     expect(view).toMatchObject({ mode: "health", tone: "ok", label: "Synced 3m ago" });
   });
 
-  it("says what the last sync did, when it said", () => {
-    const view = pill(status(), {
-      summary: { ratingsAdded: 3, ratingsChanged: 0, watchedAdded: 0, retrainQueued: false, retrainAt: null, picksChanged: null },
-    });
+  const summary = { ratingsAdded: 3, ratingsChanged: 0, watchedAdded: 0, retrainQueued: false, retrainAt: null, picksChanged: null };
+
+  it("says what the last sync did, while that is recent", () => {
+    const view = pill(status(), { summary, summaryAt: NOW.getTime() - 2 * 60_000 });
     expect(view?.label).toBe("Pulled 3 new ratings from Trakt");
   });
 
-  it("is honest before the first sync", () => {
-    expect(pill(status({ lastDeltaSyncAt: null }))?.label).toBe("Not synced yet");
+  it("falls back to the dated stamp once the sentence is stale, or was never dated", () => {
+    expect(pill(status(), { summary, summaryAt: NOW.getTime() - SUMMARY_FRESH_MS - 1 })?.label).toBe("Synced 3m ago");
+    expect(pill(status(), { summary, summaryAt: null })?.label).toBe("Synced 3m ago");
+    expect(pill(status(), { summary })?.label).toBe("Synced 3m ago");
+  });
+
+  it("is honest before the first sync — label and tooltip", () => {
+    expect(pill(status({ lastDeltaSyncAt: null }))).toMatchObject({ label: "Not synced yet", title: "Not synced yet" });
+  });
+
+  it("the idle tooltip heading claims nothing the stamp cannot back", () => {
+    const old = pill(status({ lastDeltaSyncAt: new Date(NOW.getTime() - 45 * 86_400_000).toISOString() }))!;
+    expect(old).toMatchObject({ label: "Synced 45d ago", title: "Last sync" });
+    for (const view of [old, pill(status())!, pill(status({ lastDeltaSyncAt: null }))!]) {
+      expect(view.title).not.toMatch(/everything|all synced|up to date/i);
+    }
   });
 
   it("queued write-backs are not a failure", () => {
@@ -236,13 +251,13 @@ describe("idle", () => {
         providerHealth: {
           state: "Degraded",
           checkedAt: null,
-          breakers: [{ provider: "OpenRouter", purpose: "ask-rerank", state: "Degraded", reasonCode: "truncation_breaker", since: "", retryAt: null }],
+          breakers: [{ provider: "OpenRouter", purpose: "rerank-ask", state: "Degraded", reasonCode: "truncation_breaker", since: "", retryAt: null }],
         },
       }),
       false
     );
     expect(issues.map((i) => i.detail)).toEqual([
-      "ask-rerank: Model replies keep getting cut off.",
+      "Ask Reel: Model replies keep getting cut off.",
       "4 of 10 usable ratings — rate a few more and Reel trains your model.",
     ]);
   });
@@ -261,5 +276,34 @@ describe("poll cadence", () => {
     expect(statusPollInterval(status({ activeJob: job({ visibility: "NamedPass", sseKind: "xref" }) }))).toBe(IDLE_POLL_MS);
     expect(statusPollInterval(status())).toBe(IDLE_POLL_MS);
     expect(statusPollInterval(undefined)).toBe(IDLE_POLL_MS);
+  });
+});
+
+describe("unknown values", () => {
+  it("a connection status this build does not know raises no alarm", () => {
+    const view = pill(status({ connectionStatus: "SomeFutureState" as SyncStatus["connectionStatus"] }))!;
+    expect(view).toMatchObject({ tone: "ok", reconnect: false });
+    expect(view.issues).toEqual([]);
+  });
+
+  it.each(["RefreshFailed", "Revoked"] as const)("%s still asks for a reconnect", (connectionStatus) => {
+    expect(pill(status({ connectionStatus }))).toMatchObject({ tone: "danger", label: "Reconnect Trakt", reconnect: true });
+  });
+
+  it("a degraded provider never prints a purpose or provider identifier", () => {
+    const issues = healthIssues(
+      status({
+        providerHealth: {
+          state: "Degraded",
+          checkedAt: null,
+          breakers: [
+            { provider: "OpenRouter", purpose: "some-future-purpose", state: "Degraded", reasonCode: "rate_limited", since: "", retryAt: null },
+          ],
+        },
+      }),
+      false
+    );
+    expect(issues.map((i) => i.detail)).toEqual(["Some model features: A provider is rate-limiting Reel (429)."]);
+    expect(JSON.stringify(issues)).not.toMatch(/OpenRouter|some-future-purpose/);
   });
 });

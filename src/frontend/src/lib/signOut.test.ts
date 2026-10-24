@@ -38,7 +38,7 @@ describe("sessionReset", () => {
   it("returns every client slice to its initial state and leaves the API cache to resetApiState", () => {
     let state = rootReducer(undefined, { type: "@@init" });
     const initial = state;
-    state = rootReducer(state, servedFromCache({ savedAt: "2026-10-24T10:00:00.000Z" }));
+    state = rootReducer(state, servedFromCache({ key: "getFeed(undefined)", savedAt: "2026-10-24T10:00:00.000Z" }));
     state = rootReducer(state, activeJobObserved({ userVisible: true, jobChanged: true }));
     state = rootReducer(
       state,

@@ -5,6 +5,7 @@ import {
   activeJobLabel,
   failureNoun,
   isTerminalReason,
+  purposeCopy,
   reasonCopy,
   syncExplainer,
   syncSummaryCopy,
@@ -65,11 +66,27 @@ export interface PillInput {
   statusFailed: boolean;
   live: LiveProgress | null;
   summary: SyncSummary | null;
+  /** When `summary` arrived (epoch ms); an undated or stale summary is not shown. */
+  summaryAt?: number | null;
+  /** The clock, for tests; defaults to now. */
+  now?: number;
 }
 
 /** Status-poll cadence: 5 s only while work the user started is in flight, otherwise 60 s. */
 export const ACTIVE_POLL_MS = 5_000;
 export const IDLE_POLL_MS = 60_000;
+
+/**
+ * How long the last sync's sentence ("Already up to date", "Pulled 3 new ratings…") stays on the
+ * idle pill. The sentence carries no date, so past this the pill falls back to the dated "Synced
+ * 12m ago" stamp rather than repeat an old result as if it were current.
+ */
+export const SUMMARY_FRESH_MS = 10 * 60_000;
+
+/** Connection states that mean Trakt refuses Reel's sign-in. Anything else — including a value this
+ *  build does not know — is not reported as a broken link: an appended enum value must not raise an
+ *  alarm, and the stable `degradedReason` still does when the link really is broken. */
+const BROKEN_CONNECTION = new Set(["RefreshFailed", "Revoked"]);
 
 /** A failure streak this long reads as danger, not a passing blip. */
 export const FAILURE_STREAK_DANGER = 3;
@@ -122,7 +139,7 @@ export function healthIssues(status: SyncStatus | undefined, statusFailed: boole
 
   const reason = status.degradedReason;
   if (
-    status.connectionStatus !== "Active" ||
+    BROKEN_CONNECTION.has(status.connectionStatus) ||
     reason === "TraktRevoked" ||
     reason === "TraktRefreshFailed"
   ) {
@@ -177,7 +194,7 @@ export function healthIssues(status: SyncStatus | undefined, statusFailed: boole
       tone: "warn",
       label: "Model provider degraded",
       detail: firstBreaker
-        ? `${firstBreaker.purpose ?? firstBreaker.provider}: ${reasonCopy(firstBreaker.reasonCode)}`
+        ? `${purposeCopy(firstBreaker.purpose)}: ${reasonCopy(firstBreaker.reasonCode)}`
         : "Some model calls are failing.",
       reconnect: false,
     });
@@ -258,7 +275,7 @@ function activeView(job: SyncJobSummary, live: LiveProgress | null, issues: Pill
   };
 }
 
-export function derivePill({ status, statusFailed, live, summary }: PillInput): PillView | null {
+export function derivePill({ status, statusFailed, live, summary, summaryAt, now = Date.now() }: PillInput): PillView | null {
   const issues = healthIssues(status, statusFailed);
   const danger = issues.find((i) => i.tone === "danger");
   if (danger) return healthView(danger, issues);
@@ -288,17 +305,19 @@ export function derivePill({ status, statusFailed, live, summary }: PillInput): 
     };
   }
 
-  const done = syncSummaryCopy(summary);
+  const fresh = summaryAt != null && now - summaryAt >= 0 && now - summaryAt <= SUMMARY_FRESH_MS;
+  const done = fresh ? syncSummaryCopy(summary) : null;
+  const synced = status.lastDeltaSyncAt ? `Synced ${relTime(status.lastDeltaSyncAt)}` : null;
   return {
     mode: "health",
     tone: "ok",
     // A timestamp, not "Up to date": a stamp 45 days old under the words "up to date" is a claim
-    // the pill cannot back.
-    label: done ?? (status.lastDeltaSyncAt ? `Synced ${relTime(status.lastDeltaSyncAt)}` : "Not synced yet"),
+    // the pill cannot back. The tooltip heading claims nothing either — it names what follows.
+    label: done ?? synced ?? "Not synced yet",
     pct: null,
     count: null,
     reconnect: false,
-    title: "Everything's synced",
+    title: synced ? "Last sync" : "Not synced yet",
     lines: [],
     issues,
   };
