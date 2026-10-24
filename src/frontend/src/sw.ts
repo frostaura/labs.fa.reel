@@ -11,7 +11,8 @@ import { NavigationRoute, registerRoute } from "workbox-routing";
 import { CacheFirst, NetworkFirst } from "workbox-strategies";
 import { ExpirationPlugin } from "workbox-expiration";
 import { CacheableResponsePlugin } from "workbox-cacheable-response";
-import { API_CACHE, FROM_CACHE_HEADER, SKIP_WAITING } from "./lib/swContract";
+import { API_CACHE, SIGNED_OUT, SKIP_WAITING } from "./lib/swContract";
+import { PROMPT_AWARE_MARKER, createSignOutGuard, markFromCache, shouldTakeOverOnInstall } from "./lib/swApiCache";
 
 declare let self: ServiceWorkerGlobalScope;
 
@@ -20,8 +21,33 @@ declare let self: ServiceWorkerGlobalScope;
 // route in those tabs went blank (I-3). The page shows "New version — reload" (lib/pwaUpdate.ts)
 // and, on the user's go-ahead, posts SKIP_WAITING. A first install has no previous build to protect,
 // so `clientsClaim` still lets it control the page at once.
+//
+// The one exception is the first deploy of this prompt: tabs on the previous build never post
+// SKIP_WAITING, so the new worker takes over once, as the old one always did (lib/swApiCache.ts).
+const signOutGuard = createSignOutGuard();
+
 self.addEventListener("message", (event) => {
-  if ((event.data as { type?: string } | null)?.type === SKIP_WAITING) void self.skipWaiting();
+  const type = (event.data as { type?: string } | null)?.type;
+  if (type === SKIP_WAITING) void self.skipWaiting();
+  // Sign-out (lib/signOut.ts): forget the account's API answers, including any still in flight.
+  if (type === SIGNED_OUT) {
+    signOutGuard.signedOut();
+    event.waitUntil(caches.delete(API_CACHE));
+  }
+});
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    (async () => {
+      const takeOver = shouldTakeOverOnInstall({
+        hasActiveWorker: self.registration.active != null,
+        promptAwareMarker: await caches.has(PROMPT_AWARE_MARKER),
+      });
+      if (takeOver) await self.skipWaiting();
+    })()
+  );
+});
+self.addEventListener("activate", (event) => {
+  event.waitUntil(caches.open(PROMPT_AWARE_MARKER).then(() => undefined));
 });
 clientsClaim();
 
@@ -55,7 +81,8 @@ registerRoute(
 // A response answered FROM the cache is marked (`X-Reel-From-Cache: 1`), so the app can say "offline —
 // showing what Reel saved at 4:17 PM" instead of presenting an hour-old answer as live (I-11). The
 // server's own `Date` header travels with it and says when it was saved. Sign-out deletes this cache
-// (lib/signOut.ts), so a second account on the same device never falls back to the first one's data.
+// (lib/signOut.ts posts SIGNED_OUT; the guard refuses answers to requests already in flight), so a
+// second account on the same device never falls back to the first one's data.
 registerRoute(
   ({ url, request }) =>
     request.method === "GET" &&
@@ -69,16 +96,9 @@ registerRoute(
       new ExpirationPlugin({ maxEntries: 300, maxAgeSeconds: 60 * 60 }),
       new CacheableResponsePlugin({ statuses: [0, 200] }),
       {
-        cachedResponseWillBeUsed: async ({ cachedResponse }) => {
-          if (!cachedResponse) return cachedResponse;
-          const headers = new Headers(cachedResponse.headers);
-          headers.set(FROM_CACHE_HEADER, "1");
-          return new Response(await cachedResponse.blob(), {
-            status: cachedResponse.status,
-            statusText: cachedResponse.statusText,
-            headers
-          });
-        }
+        requestWillFetch: async (param) => signOutGuard.requestWillFetch(param),
+        cacheWillUpdate: async (param) => signOutGuard.cacheWillUpdate(param),
+        cachedResponseWillBeUsed: async ({ cachedResponse }) => (await markFromCache(cachedResponse)) ?? undefined
       }
     ]
   })

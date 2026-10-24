@@ -13,6 +13,7 @@ import Footer from "./components/Footer";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
 import RequireFounder from "./components/RequireFounder";
+import SignOutCleanup from "./components/SignOutCleanup";
 import Landing from "./pages/Landing";
 import { LEGAL_PAGES } from "./lib/legalPages";
 import reelMark from "./assets/brand/reel-mark.svg";
@@ -87,7 +88,15 @@ function AppRoutes() {
           the very background page this arrangement exists to keep alive. */}
       <Suspense fallback={<RouteFallback />}>
         <Routes location={mainLocation}>
-          <Route path="/" element={<Landing />} />
+          <Route
+            path="/"
+            element={
+              <>
+                <SignOutCleanup />
+                <Landing />
+              </>
+            }
+          />
           <Route path="/auth/trakt/callback" element={<TraktCallback />} />
           {LEGAL_PAGES.map(({ path, Component }) => (
             <Route

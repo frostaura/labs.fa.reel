@@ -2,8 +2,6 @@ import { Suspense, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users, Target } from "lucide-react";
 import { useGetSessionQuery, useLogoutMutation } from "../store/api";
-import { useDispatch } from "react-redux";
-import type { AppDispatch } from "../store";
 import SyncStatusPill from "./SyncStatusPill";
 import SearchBox from "./search/SearchBox";
 import MobileTabBar from "./MobileTabBar";
@@ -13,7 +11,7 @@ import VerdictToast from "./VerdictToast";
 import ErrorBoundary from "./ErrorBoundary";
 import OfflineBanner from "./OfflineBanner";
 import UpdatePrompt from "./UpdatePrompt";
-import { clearClientState } from "../lib/signOut";
+import { markSignOutPending } from "../lib/signOut";
 import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
@@ -48,7 +46,6 @@ export default function Layout() {
   const [logout] = useLogoutMutation();
   const navigate = useNavigate();
   const location = useLocation();
-  const dispatch = useDispatch<AppDispatch>();
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
@@ -67,12 +64,12 @@ export default function Layout() {
 
   const handleSignOut = async () => {
     await logout().unwrap().catch(() => undefined);
-    // Leave the signed-in shell first, so its mounted queries are gone before the cache resets
-    // (a reset under live subscribers refetches every one of them). Then everything this browser
-    // holds for the account goes, not just the RTK cache: the slices, the reel.* keys and the
-    // worker's offline API cache (I-11).
+    // The cleanup runs on the landing page, once this shell and its pages have unmounted
+    // (components/SignOutCleanup.tsx): clearing here would reset the cache under live subscribers,
+    // and every one of them would refetch. Everything this browser holds for the account goes, not
+    // just the RTK cache: the slices, the reel.* keys and the worker's offline API cache (I-11).
+    markSignOutPending();
     navigate("/");
-    await clearClientState(dispatch);
   };
 
   return (

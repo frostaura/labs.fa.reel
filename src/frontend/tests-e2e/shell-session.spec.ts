@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
 
 /**
@@ -81,6 +81,40 @@ test.describe("session", () => {
     await expect(page).toHaveURL(/\/$/);
   });
 
+  // H-15 again, one hop later: the expired access cookie is refused statelessly, but the refresh
+  // needs the database. A refresh that gets no answer on its merits is not a sign-out.
+  for (const [name, answer] of [
+    ["a 503", (route: Route) => route.fulfill({ status: 503, contentType: "text/html", body: "Service Unavailable" })],
+    ["a dropped connection", (route: Route) => route.abort("connectionreset")],
+  ] as const) {
+    test(`an expired access cookie whose refresh meets ${name} keeps the URL and offers a retry`, async ({ page }) => {
+      await bootQuiet(page);
+      await mockJson(page, "**/api/saved", { ...SAVED_A, items: [] });
+      let databaseUp = false;
+      let refreshed = false;
+      await page.route("**/api/auth/refresh", (route) => {
+        if (!databaseUp) return answer(route);
+        refreshed = true;
+        return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      });
+      await page.route("**/api/auth/me", (route) =>
+        refreshed
+          ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(SESSION_FOUNDER) })
+          : route.fulfill({ status: 401, contentType: "application/json", body: "{}" })
+      );
+
+      await page.goto("/saved");
+      const shell = page.getByTestId("session-retry");
+      await expect(shell).toContainText("Reel couldn't reach its server.");
+      await expect(page).toHaveURL(/\/saved$/);
+
+      databaseUp = true;
+      await shell.getByRole("button", { name: "Try again" }).click();
+      await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
+      await expect(page).toHaveURL(/\/saved$/);
+    });
+  }
+
   test("a 502 on /auth/me keeps the URL and offers a retry (H-15)", async ({ page }) => {
     await bootQuiet(page);
     await mockJson(page, "**/api/saved", { ...SAVED_A, items: [] });
@@ -157,7 +191,7 @@ test.describe("error boundaries", () => {
 });
 
 test.describe("sign-out", () => {
-  test("signing out forgets account A, so linking B offline never shows A's Saved (I-11)", async ({ page }) => {
+  test("signing out forgets account A — worker cache, reel.* keys — and refetches nothing on the way out (I-11)", async ({ page }) => {
     await bootQuiet(page);
     let session: Record<string, unknown> | null = SESSION_FOUNDER;
     await page.route("**/api/auth/me", (route) =>
@@ -184,23 +218,37 @@ test.describe("sign-out", () => {
       localStorage.setItem("unrelated.key", "kept");
     });
 
+    // Every API request from the moment the user signs out: the signed-in pages must be gone
+    // before the cache resets, or each of their queries refetches with no session.
+    const afterSignOut: string[] = [];
+    let signingOut = false;
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (signingOut && path.startsWith("/api/") && path !== "/api/auth/logout") afterSignOut.push(path);
+    });
+
     await page.getByText(SESSION_FOUNDER.displayName).click();
+    signingOut = true;
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await expect(page).toHaveURL(/\/$/);
 
-    const leftovers = await page.evaluate(async () => ({
-      cache: await caches.has("reel-api"),
-      keys: Object.keys(localStorage).filter((k) => k.startsWith("reel.")),
-      unrelated: localStorage.getItem("unrelated.key"),
-    }));
-    expect(leftovers).toEqual({ cache: false, keys: [], unrelated: "kept" });
+    // The cleanup runs once the landing page has mounted.
+    await expect
+      .poll(() =>
+        page.evaluate(async () => ({
+          cache: await caches.has("reel-api"),
+          keys: Object.keys(localStorage).filter((k) => k.startsWith("reel.")),
+          unrelated: localStorage.getItem("unrelated.key"),
+        }))
+      )
+      .toEqual({ cache: false, keys: [], unrelated: "kept" });
+    await page.waitForTimeout(500);
+    expect(afterSignOut).toEqual([]);
 
-    // B links while the network is gone: /api/saved fails. A's list must not appear.
-    session = { ...SESSION_FOUNDER, accountId: "00000000-0000-0000-0000-00000000000b", displayName: "Account B" };
-    await page.route((url) => url.pathname === "/api/saved", (route) => route.abort("internetdisconnected"));
-    await page.goto("/saved");
-    await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
-    await expect(page.getByText("Account A Secret Pick")).toHaveCount(0);
+    // What account B could still be shown from this browser after A signed out is exactly what the
+    // asserts above cover: linking B is a full page load (Trakt redirects back), so the store
+    // starts empty, and the only carriers left are the worker's API cache (deleted; the worker's
+    // own guard is unit-tested in lib/swApiCache.test.ts) and reel.* storage (cleared).
   });
 });
 

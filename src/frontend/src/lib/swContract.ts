@@ -11,3 +11,10 @@ export const FROM_CACHE_HEADER = "X-Reel-From-Cache";
 
 /** The message a page posts to activate a waiting worker (what workbox-window's update sends). */
 export const SKIP_WAITING = "SKIP_WAITING";
+
+/**
+ * The message a page posts on sign-out. The worker deletes {@link API_CACHE} and refuses to store a
+ * response to any request that started before it, so an answer for the old account that lands after
+ * the cleanup is never cached for the next one.
+ */
+export const SIGNED_OUT = "REEL_SIGNED_OUT";
