@@ -176,6 +176,8 @@ The Data Protection keys live in the same database, so a restored database still
 | API boot on the restored database | `/health/ready` 200 in about 8 s |
 | Pre-migration handshake, fresh database | 25 pending migrations: dump requested, answered and written, then migrated, `/health/ready` 200 |
 | Pre-migration handshake, backup service stopped | The API refused the 25 migrations after its 30 s timeout and exited 1. Nothing was migrated, and the request was withdrawn. |
+| Sidecar and backend started together, 2026-10-24 (after the review's D2) | The sidecar dumped `reel_ws8` while the API faced an empty database with 25 pending migrations. The request landed 10 s after the sidecar started and was answered after **one** dump (79 s warm, 108 s cold); `/health/ready` 200 at 96 s. That dump is also today's daily and weekly copy (hard links), and no second dump followed. The previous script, same drill: the request waited for the first-start dump (57 s) and then took its own (61 s). |
+| Invalid setting on an empty database | `JWT_ACCESS_TOKEN_EXPIRY_MINUTES=2000`: exit 1 naming the key, the value not logged, no table created. |
 
 The drill passed. Together with the LAN lockdown, it is a prerequisite for the first live rebuild (G0). Repeat it on the live host before that rebuild.
 
