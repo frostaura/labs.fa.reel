@@ -46,8 +46,11 @@ export default defineConfig({
       strategies: "injectManifest",
       srcDir: "src",
       filename: "sw.ts",
-      registerType: "autoUpdate",
-      injectRegister: "auto",
+      // "prompt": a new worker waits for the user's go-ahead instead of taking over mid-session and
+      // deleting the chunks open tabs still need (I-3). Registration is done by hand in
+      // src/lib/pwaUpdate.ts (`virtual:pwa-register`), which raises the "New version" toast.
+      registerType: "prompt",
+      injectRegister: false,
       devOptions: { enabled: false, type: "module", navigateFallback: "index.html" },
       manifest: {
         name: "Reel by FrostAura",

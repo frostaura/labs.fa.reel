@@ -1,6 +1,7 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import {
   BrowserRouter,
+  Link,
   Navigate,
   Route,
   Routes,
@@ -8,10 +9,13 @@ import {
   useLocation,
   type Location,
 } from "react-router";
+import Footer from "./components/Footer";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
 import RequireFounder from "./components/RequireFounder";
 import Landing from "./pages/Landing";
+import { LEGAL_PAGES } from "./lib/legalPages";
+import reelMark from "./assets/brand/reel-mark.svg";
 
 // Landing stays eager — it is the signed-out entry point and must paint without a second
 // round-trip. Every other route is split out. This is not merely to quiet the bundle-size
@@ -40,6 +44,29 @@ function RouteFallback() {
 }
 
 /**
+ * The public shell around the privacy and terms pages: readable signed out (the Trakt write-access
+ * disclosure has to be readable BEFORE anyone signs in), with a way back and the footer.
+ */
+function PublicShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-h-screen flex flex-col">
+      <header className="border-b border-fa-edge/50">
+        <div className="mx-auto max-w-3xl px-4 sm:px-6 h-14 flex items-center">
+          <Link to="/" aria-label="Reel home" className="flex items-center gap-2 hover:opacity-80 transition">
+            <img src={reelMark} alt="" aria-hidden className="h-7 w-7 shrink-0" />
+            <span className="text-lg font-light tracking-wide text-fa-frost-bright">Reel</span>
+          </Link>
+        </div>
+      </header>
+      <main className="flex-1 mx-auto w-full max-w-3xl px-4 sm:px-6 py-8 min-h-[calc(100dvh-3.5rem)]">
+        {children}
+      </main>
+      <Footer />
+    </div>
+  );
+}
+
+/**
  * Title detail is a fixed-overlay modal that cards open with `state.backgroundLocation`. When that
  * marker is present we pin the main <Routes> to the background location so the page underneath
  * (Home and its carousels, Saved, search results…) stays MOUNTED while the modal is on top —
@@ -62,6 +89,17 @@ function AppRoutes() {
         <Routes location={mainLocation}>
           <Route path="/" element={<Landing />} />
           <Route path="/auth/trakt/callback" element={<TraktCallback />} />
+          {LEGAL_PAGES.map(({ path, Component }) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <PublicShell>
+                  <Component />
+                </PublicShell>
+              }
+            />
+          ))}
           <Route
             path="/onboarding"
             element={
