@@ -203,118 +203,134 @@ public sealed class OpenRouterChatClient(
             var effort = _capabilities.EffectiveEffort(model, options.ReasoningEffort);
             var strict = request.ResponseFormat is not null && _capabilities.SupportsStrictSchema(model);
 
-            if (!_health.TryAdmit(ApiProvider.OpenRouter, request.Purpose, out var breaker))
+            if (!_health.TryAdmit(ApiProvider.OpenRouter, request.Purpose, out var breaker, out var probe))
             {
                 logger.LogWarning(
                     "{Purpose} call not sent: the OpenRouter breaker is open ({Reason}).", request.Purpose, breaker?.ReasonCode);
                 return Result(last, LlmCallFailure.ProviderUnavailable, attempts, maxTokens, model, effort, clock, breaker?.ReasonCode);
             }
 
-            using var admission = gate is null
-                ? LlmAdmission.Unmetered
-                : await gate.TryReserveAsync(accountId, request.Purpose, EstimateTokens(request.Messages, maxTokens), ct);
-            if (!admission.Admitted)
+            // Whether this attempt told the breaker how the key is. A probe that leaves by any other
+            // door — a budget refusal, a timeout, the caller's cancellation, an exception — hands
+            // the half-open slot back in the finally below; a slot nobody returns would refuse every
+            // purpose on the provider until the lease lapsed.
+            var reported = false;
+            try
             {
-                // A half-open probe slot taken above must be handed back: this call never went out.
-                _health.ReportInconclusive(ApiProvider.OpenRouter);
-                return Result(last, LlmCallFailure.BudgetSpent, attempts, maxTokens, model, effort, clock, null);
-            }
+                using var admission = gate is null
+                    ? LlmAdmission.Unmetered
+                    : await gate.TryReserveAsync(accountId, request.Purpose, EstimateTokens(request.Messages, maxTokens), ct);
+                if (!admission.Admitted)
+                {
+                    return Result(last, LlmCallFailure.BudgetSpent, attempts, maxTokens, model, effort, clock, null);
+                }
 
-            attempts++;
-            last = await AttemptAsync(request, model, effort, strict, maxTokens, accountId, total, ct);
+                attempts++;
+                last = await AttemptAsync(request, model, effort, strict, maxTokens, accountId, total, ct);
 
-            switch (last.Outcome)
-            {
-                case Outcome.Answered:
-                    _health.ReportAnswered(ApiProvider.OpenRouter);
-                    if (string.Equals(last.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (options.RetryOnLength && !lengthRetried)
+                switch (last.Outcome)
+                {
+                    case Outcome.Answered:
+                        Answered();
+                        if (string.Equals(last.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
                         {
-                            lengthRetried = true;
+                            if (options.RetryOnLength && !lengthRetried)
+                            {
+                                lengthRetried = true;
+                                logger.LogWarning(
+                                    "{Purpose} completion hit its {MaxTokens}-token ceiling on {Model} (effort {Effort}); retrying once at {Retry}.",
+                                    request.Purpose, maxTokens, model, effort ?? "-", maxTokens * 2);
+                                maxTokens *= 2;
+                                continue;
+                            }
+
                             logger.LogWarning(
-                                "{Purpose} completion hit its {MaxTokens}-token ceiling on {Model} (effort {Effort}); retrying once at {Retry}.",
-                                request.Purpose, maxTokens, model, effort ?? "-", maxTokens * 2);
-                            maxTokens *= 2;
+                                "{Purpose} completion hit its {MaxTokens}-token ceiling on {Model} (effort {Effort}); the truncated "
+                                + "answer is discarded rather than parsed as a whole one.",
+                                request.Purpose, maxTokens, model, effort ?? "-");
+                            return Result(last, LlmCallFailure.Truncated, attempts, maxTokens, model, effort, clock, null);
+                        }
+
+                        return string.IsNullOrWhiteSpace(last.Content)
+                            ? Result(last, LlmCallFailure.EmptyAnswer, attempts, maxTokens, model, effort, clock, null)
+                            : Result(last, null, attempts, maxTokens, model, effort, clock, null);
+
+                    case Outcome.Refused:
+                        _health.ReportRefused(ApiProvider.OpenRouter, last.Status!.Value);
+                        reported = true;
+                        return Result(last, LlmCallFailure.ProviderRefused, attempts, maxTokens, model, effort, clock, null);
+
+                    case Outcome.StrictRejected:
+                        Answered();
+                        _capabilities.MarkStrictSchemaUnsupported(model);
+                        logger.LogWarning(
+                            "OpenRouter rejected strict json_schema for {Model} (HTTP {Status}); falling back to json_object "
+                            + "for this model for the rest of the process. Field validation now rests on the parser.",
+                            model, last.Status);
+                        continue;
+
+                    case Outcome.EffortRejected:
+                        Answered();
+                        _capabilities.MarkEffortUnsupported(model, effort!);
+                        logger.LogWarning(
+                            "{Model} rejected reasoning effort '{Effort}' (HTTP {Status}); falling back to '{Fallback}' for this model.",
+                            model, effort, last.Status, ReasoningEfforts.FallbackFor(effort!) ?? "no reasoning parameter");
+                        continue;
+
+                    case Outcome.BadRequest:
+                        Answered();
+                        return Result(last, LlmCallFailure.BadRequest, attempts, maxTokens, model, effort, clock, null);
+
+                    case Outcome.TimedOut:
+                        // Inconclusive: the finally hands a probe slot back.
+                        return Result(last, LlmCallFailure.TimedOut, attempts, maxTokens, model, effort, clock, null);
+
+                    case Outcome.BodyDropped when bodyDropRetries < MaxBodyDropRetries:
+                        bodyDropRetries++;
+                        logger.LogWarning(
+                            "{Purpose} response body dropped after HTTP 200 on {Model}; retrying once.", request.Purpose, model);
+                        continue;
+
+                    case Outcome.Transient or Outcome.BodyDropped:
+                        if (last.Status is not null)
+                        {
+                            // An HTTP answer that was not a refusal: the key works, whatever went wrong.
+                            Answered();
+                        }
+
+                        if (last.Outcome == Outcome.Transient && transientRetries < options.MaxRetries)
+                        {
+                            transientRetries++;
+                            logger.LogWarning(
+                                "{Purpose} call failed transiently (HTTP {Status}) on {Model}; retry {Retry} of {Max}.",
+                                request.Purpose, last.Status, model, transientRetries, options.MaxRetries);
+                            try
+                            {
+                                await Task.Delay(TransientBackoff, total.Token);
+                            }
+                            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                            {
+                                return Result(last, LlmCallFailure.TimedOut, attempts, maxTokens, model, effort, clock, null);
+                            }
+
                             continue;
                         }
 
-                        logger.LogWarning(
-                            "{Purpose} completion hit its {MaxTokens}-token ceiling on {Model} (effort {Effort}); the truncated "
-                            + "answer is discarded rather than parsed as a whole one.",
-                            request.Purpose, maxTokens, model, effort ?? "-");
-                        return Result(last, LlmCallFailure.Truncated, attempts, maxTokens, model, effort, clock, null);
-                    }
-
-                    return string.IsNullOrWhiteSpace(last.Content)
-                        ? Result(last, LlmCallFailure.EmptyAnswer, attempts, maxTokens, model, effort, clock, null)
-                        : Result(last, null, attempts, maxTokens, model, effort, clock, null);
-
-                case Outcome.Refused:
-                    _health.ReportRefused(ApiProvider.OpenRouter, last.Status!.Value);
-                    return Result(last, LlmCallFailure.ProviderRefused, attempts, maxTokens, model, effort, clock, null);
-
-                case Outcome.StrictRejected:
-                    _health.ReportAnswered(ApiProvider.OpenRouter);
-                    _capabilities.MarkStrictSchemaUnsupported(model);
-                    logger.LogWarning(
-                        "OpenRouter rejected strict json_schema for {Model} (HTTP {Status}); falling back to json_object "
-                        + "for this model for the rest of the process. Field validation now rests on the parser.",
-                        model, last.Status);
-                    continue;
-
-                case Outcome.EffortRejected:
-                    _health.ReportAnswered(ApiProvider.OpenRouter);
-                    _capabilities.MarkEffortUnsupported(model, effort!);
-                    logger.LogWarning(
-                        "{Model} rejected reasoning effort '{Effort}' (HTTP {Status}); falling back to '{Fallback}' for this model.",
-                        model, effort, last.Status, ReasoningEfforts.FallbackFor(effort!) ?? "no reasoning parameter");
-                    continue;
-
-                case Outcome.BadRequest:
-                    _health.ReportAnswered(ApiProvider.OpenRouter);
-                    return Result(last, LlmCallFailure.BadRequest, attempts, maxTokens, model, effort, clock, null);
-
-                case Outcome.TimedOut:
+                        return Result(last, LlmCallFailure.ProviderError, attempts, maxTokens, model, effort, clock, null);
+                }
+            }
+            finally
+            {
+                if (probe && !reported)
+                {
                     _health.ReportInconclusive(ApiProvider.OpenRouter);
-                    return Result(last, LlmCallFailure.TimedOut, attempts, maxTokens, model, effort, clock, null);
+                }
+            }
 
-                case Outcome.BodyDropped when bodyDropRetries < MaxBodyDropRetries:
-                    _health.ReportInconclusive(ApiProvider.OpenRouter);
-                    bodyDropRetries++;
-                    logger.LogWarning(
-                        "{Purpose} response body dropped after HTTP 200 on {Model}; retrying once.", request.Purpose, model);
-                    continue;
-
-                case Outcome.Transient or Outcome.BodyDropped:
-                    if (last.Status is not null)
-                    {
-                        _health.ReportAnswered(ApiProvider.OpenRouter);
-                    }
-                    else
-                    {
-                        _health.ReportInconclusive(ApiProvider.OpenRouter);
-                    }
-
-                    if (last.Outcome == Outcome.Transient && transientRetries < options.MaxRetries)
-                    {
-                        transientRetries++;
-                        logger.LogWarning(
-                            "{Purpose} call failed transiently (HTTP {Status}) on {Model}; retry {Retry} of {Max}.",
-                            request.Purpose, last.Status, model, transientRetries, options.MaxRetries);
-                        try
-                        {
-                            await Task.Delay(TransientBackoff, total.Token);
-                        }
-                        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-                        {
-                            return Result(last, LlmCallFailure.TimedOut, attempts, maxTokens, model, effort, clock, null);
-                        }
-
-                        continue;
-                    }
-
-                    return Result(last, LlmCallFailure.ProviderError, attempts, maxTokens, model, effort, clock, null);
+            void Answered()
+            {
+                _health.ReportAnswered(ApiProvider.OpenRouter);
+                reported = true;
             }
         }
 
@@ -445,8 +461,11 @@ public sealed class OpenRouterChatClient(
 
                 if (!envelope.Parsed)
                 {
+                    // A 200 whose body is not an envelope at all — a gateway's HTML error page, a
+                    // proxy's truncated JSON. Nothing about OUR request was wrong, so it is transient
+                    // and earns the purpose's retry; it ends as a ProviderError, never a BadRequest.
                     logger.LogWarning("{Purpose} response on {Model} was not a chat-completion envelope.", request.Purpose, model);
-                    return new Attempt(Outcome.BadRequest, status, null, null, null, null, null);
+                    return new Attempt(Outcome.Transient, status, null, null, null, null, null);
                 }
 
                 return new Attempt(

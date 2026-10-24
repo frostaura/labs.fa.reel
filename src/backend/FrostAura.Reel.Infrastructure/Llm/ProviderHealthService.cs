@@ -15,7 +15,9 @@ namespace FrostAura.Reel.Infrastructure.Llm;
 /// every purpose on that provider is refused before anything is sent — the 11-day unnoticed 402
 /// outage was every caller paying for (or waiting on) a refusal and then hiding it in a fallback.
 /// Past the cool-off exactly ONE call is let through as a probe (half-open); an answer closes the
-/// breaker, another refusal re-opens it for a fresh cool-off. A refused call costs nothing, so a
+/// breaker, another refusal re-opens it for a fresh cool-off, and a probe that ends without telling
+/// (a timeout, a cancellation) hands the slot back — or, if its holder never reports at all, the slot
+/// lapses after <see cref="ProbeLease"/>. A refused call costs nothing, so a
 /// probe every quarter of an hour is the cheapest honest way to notice the credit coming back.</para>
 ///
 /// <para><b>Purpose breakers</b> turn one purpose off until a stated time — the cross-reference
@@ -36,18 +38,31 @@ public sealed class ProviderHealthService(ILogger<ProviderHealthService>? logger
     private readonly Dictionary<ApiProvider, ProviderState> _providers = [];
     private readonly Dictionary<(ApiProvider Provider, string Purpose), ProviderBreaker> _purposes = [];
 
+    /// <summary>
+    /// How long a taken probe slot is honoured before it lapses. Longer than any purpose's total
+    /// timeout (the longest is three minutes), so a live probe is never doubled; short enough that a
+    /// holder that died without reporting — a bug, a killed thread — costs one lease rather than
+    /// locking every purpose until the process restarts.
+    /// </summary>
+    public static readonly TimeSpan ProbeLease = TimeSpan.FromMinutes(5);
+
     private sealed class ProviderState
     {
         public required ProviderBreaker Breaker { get; set; }
 
-        /// <summary>True while the single half-open probe call is out.</summary>
-        public bool ProbeInFlight { get; set; }
+        /// <summary>When the single half-open probe call went out; null while no probe is out.</summary>
+        public DateTime? ProbeTakenAt { get; set; }
     }
+
+    private bool ProbeOut(ProviderState state) => state.ProbeTakenAt is { } taken && taken + ProbeLease > Now;
+
+    private bool HalfOpen(ProviderState state) => state.Breaker.RetryAt is { } retryAt && retryAt <= Now;
 
     private DateTime Now => _clock.GetUtcNow().UtcDateTime;
 
-    public bool TryAdmit(ApiProvider provider, string purpose, out ProviderBreaker? breaker)
+    public bool TryAdmit(ApiProvider provider, string purpose, out ProviderBreaker? breaker, out bool probe)
     {
+        probe = false;
         lock (_lock)
         {
             if (_purposes.TryGetValue((provider, purpose), out var own))
@@ -65,15 +80,15 @@ public sealed class ProviderHealthService(ILogger<ProviderHealthService>? logger
 
             if (_providers.TryGetValue(provider, out var state))
             {
-                var halfOpen = state.Breaker.RetryAt is { } retryAt && retryAt <= Now;
-                if (!halfOpen || state.ProbeInFlight)
+                if (!HalfOpen(state) || ProbeOut(state))
                 {
                     breaker = state.Breaker;
                     return false;
                 }
 
                 // Half-open: this caller is the probe; everyone else waits on its outcome.
-                state.ProbeInFlight = true;
+                state.ProbeTakenAt = Now;
+                probe = true;
             }
 
             breaker = null;
@@ -118,7 +133,7 @@ public sealed class ProviderHealthService(ILogger<ProviderHealthService>? logger
         {
             if (_providers.TryGetValue(provider, out var state))
             {
-                state.ProbeInFlight = false;
+                state.ProbeTakenAt = null;
             }
         }
     }
@@ -144,7 +159,11 @@ public sealed class ProviderHealthService(ILogger<ProviderHealthService>? logger
                 return own;
             }
 
-            return _providers.TryGetValue(provider, out var state) ? state.Breaker : null;
+            // Half-open with no probe out is NOT open: the caller may go ahead, and its first call
+            // takes the probe slot through TryAdmit. Background work is often the only caller.
+            return _providers.TryGetValue(provider, out var state) && (!HalfOpen(state) || ProbeOut(state))
+                ? state.Breaker
+                : null;
         }
     }
 

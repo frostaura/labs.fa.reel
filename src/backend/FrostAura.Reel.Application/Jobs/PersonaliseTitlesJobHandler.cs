@@ -58,8 +58,9 @@ public sealed class PersonaliseTitlesJobHandler(
         if (health?.OpenBreakerFor(Domain.Sync.ApiProvider.OpenRouter, Domain.Sync.ApiUsagePurpose.Lens) is { } open)
         {
             // Paused, not failed: the provider breaker is open, every call would be refused before
-            // it was sent, and a run that "wrote" nothing must not read as one that tried.
-            job.ProgressMessage = $"lens paused ({open.ReasonCode})";
+            // it was sent, and a run that "wrote" nothing must not read as one that tried. Nothing
+            // is lost — every Fresh build and the nightly pass queue the lens again.
+            job.ProgressMessage = $"Lens paused: {Llm.ProviderBreakerReasons.Describe(open.ReasonCode)}";
             await db.SaveChangesAsync(ct);
             return;
         }

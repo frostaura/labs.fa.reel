@@ -21,8 +21,15 @@ public interface IProviderHealth
     /// <paramref name="breaker"/> is the open breaker that refuses it. A provider breaker past its
     /// retry time admits exactly ONE probe call (half-open); the rest stay refused until that call
     /// reports back.
+    ///
+    /// <para><paramref name="probe"/> is true when THIS caller holds the half-open slot. A probe
+    /// holder must end every path — an answer, a refusal, a timeout, a cancellation, an exception,
+    /// a call the budget gate stopped — with <see cref="ReportAnswered"/>,
+    /// <see cref="ReportRefused"/> or <see cref="ReportInconclusive"/>, because a slot nobody hands
+    /// back keeps every purpose on the provider refused. (The slot also lapses on its own after
+    /// a lease, so a holder that dies without reporting costs one lease, not the process.)</para>
     /// </summary>
-    bool TryAdmit(ApiProvider provider, string purpose, out ProviderBreaker? breaker);
+    bool TryAdmit(ApiProvider provider, string purpose, out ProviderBreaker? breaker, out bool probe);
 
     /// <summary>A call was refused by the provider with 401, 402 or 403. Opens the provider breaker.</summary>
     void ReportRefused(ApiProvider provider, int httpStatus);
@@ -34,15 +41,22 @@ public interface IProviderHealth
     void ReportAnswered(ApiProvider provider);
 
     /// <summary>
-    /// A call ended without telling us whether the key works (a dropped connection, a timeout). A
-    /// half-open probe in that state is released so the next call can probe again; nothing closes.
+    /// The probe holder's call ended without telling us whether the key works (a dropped
+    /// connection, a timeout, a cancellation, a budget refusal before sending). The half-open slot
+    /// is released so the next call can probe again; nothing closes. Only the probe holder calls
+    /// this — from anyone else it would release a probe still in flight.
     /// </summary>
     void ReportInconclusive(ApiProvider provider);
 
     /// <summary>Turns one purpose off until <paramref name="until"/>, with a stable reason code.</summary>
     void OpenPurpose(ApiProvider provider, string purpose, string reasonCode, DateTime until);
 
-    /// <summary>The open breaker for a purpose (its own, or the provider's), or null when calls may run.</summary>
+    /// <summary>
+    /// The open breaker for a purpose (its own, or the provider's), or null when calls may run.
+    /// A provider breaker past its retry time with no probe out reads as null — half-open — so a
+    /// background job may go ahead and its first call becomes the probe; otherwise a provider that
+    /// only background work calls would never be probed and would stay "down" until a restart.
+    /// </summary>
     ProviderBreaker? OpenBreakerFor(ApiProvider provider, string purpose);
 }
 
@@ -58,6 +72,19 @@ public static class ProviderBreakerReasons
 
     /// <summary>Every batch of two consecutive runs truncated or went unanswered on the same model and prompt.</summary>
     public const string TruncationBreaker = "truncation_breaker";
+
+    /// <summary>
+    /// The plain sentence a progress message or an error shows for a breaker code. A user reads
+    /// these; a code like <c>payment_required</c> is for the status API and the logs.
+    /// </summary>
+    public static string Describe(string? reasonCode) => reasonCode switch
+    {
+        Unauthorized => "the model provider rejected the key",
+        PaymentRequired => "the model provider account is out of credit",
+        Forbidden => "the model provider refused access",
+        TruncationBreaker => "off for the rest of today after repeated unanswered runs",
+        _ => "the model provider is unavailable",
+    };
 
     /// <summary>The code for a refusing HTTP status.</summary>
     public static string ForStatus(int httpStatus) => httpStatus switch

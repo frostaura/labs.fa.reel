@@ -140,14 +140,14 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
         [ApiUsagePurpose.Rerank] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 200),
         [ApiUsagePurpose.RerankFeed] = Search(maxTokens: 100, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90), perItem: 200),
         [ApiUsagePurpose.RerankPage] = Search(maxTokens: 100, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), perItem: 200),
-        [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 110),
-        [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 110),
+        [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 111),
+        [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 111),
 
         // ── Ask Reel v2 (§4.11 stage budgets). Plan and answer are not measurable until WS-2's
         // prompts exist and keep §4.11-derived ceilings; the judge uses the rerank-ask measurement,
         // its closest existing shape (a satisfies verdict + fit + why per title). ──
         [ApiUsagePurpose.AskPlan] = Search(maxTokens: 600, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
-        [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 110),
+        [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 111),
         [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 300, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
 
         // ── Background writers ──

@@ -223,7 +223,7 @@ public class OpenRouterSearchAgent(
 
         if (StubMode)
         {
-            return titles.Select(FallbackVerdict).ToList();
+            return titles.Select((t, i) => FallbackVerdict(t, i)).ToList();
         }
 
         // The request check is asked ONLY where the query is the user's own request. The feed's
@@ -245,7 +245,7 @@ public class OpenRouterSearchAgent(
             logger.LogWarning(
                 "Agent rerank for {Purpose} produced no verdicts ({Failure}, {Count} titles); the batch is a labelled fallback.",
                 usagePurpose, completion.Failure, titles.Count);
-            return titles.Select(FallbackVerdict).ToList();
+            return titles.Select((t, i) => FallbackVerdict(t, i)).ToList();
         }
 
         try
@@ -282,11 +282,11 @@ public class OpenRouterSearchAgent(
             }
 
             // Row-aligned: any title the model skipped is a labelled fallback.
-            return titles.Select(t =>
+            return titles.Select((t, index) =>
             {
                 if (!byId.TryGetValue(t.TitleId, out var res))
                 {
-                    return FallbackVerdict(t);
+                    return FallbackVerdict(t, index);
                 }
 
                 // Output guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's"),
@@ -302,7 +302,7 @@ public class OpenRouterSearchAgent(
         catch (JsonException ex)
         {
             logger.LogWarning(ex, "Agent rerank returned content that is not JSON ({Count} titles); the batch is a labelled fallback.", titles.Count);
-            return titles.Select(FallbackVerdict).ToList();
+            return titles.Select((t, i) => FallbackVerdict(t, i)).ToList();
         }
     }
 
@@ -469,12 +469,13 @@ public class OpenRouterSearchAgent(
     internal const string StubModeReply = "Looking through your catalogue for that.";
 
     /// <summary>
-    /// The hash-derived fit, masked rather than <c>Math.Abs</c>-ed. <c>Math.Abs(int.MinValue)</c>
-    /// THROWS OverflowException — and this is the fallback path, reached from inside a batch loop
-    /// whose whole purpose is to survive a bad response, so one unluckily-hashed title name would
-    /// have taken down every other title's fit with it. Masking the sign bit is total.
+    /// The fit a fallback carries for a title with no personal prediction: its position in the
+    /// batch as the caller ordered it (retrieval order), strictly decreasing and inside [0, 0.5].
+    /// It used to be a hash of the title's NAME — and .NET randomises string hashes per process,
+    /// so the same fallback batch came back in a different order after every restart while the
+    /// comment promised it kept retrieval order. A position is what that promise means.
     /// </summary>
-    internal static double StableFit(int hash) => (hash & int.MaxValue) % 1000 / 1000d;
+    internal static double PositionFit(int index) => 0.5d / (1d + Math.Max(0, index));
 
     /// <summary>
     /// The verdict for a title the model did not judge: a failed or skipped batch, a malformed
@@ -484,15 +485,16 @@ public class OpenRouterSearchAgent(
     /// exposure rows. No sentence is invented for a title nobody judged.
     ///
     /// <para>The fit is still a number in this revision, and only as a RANKING value: the personal
-    /// prediction scaled to 0–1 (else a stable hash), so a fallback batch keeps its retrieval order
-    /// instead of collapsing. The task-4 flip makes it null; until then <see cref="RerankResult.ModelFit"/>
-    /// is null for it and <see cref="RerankResult.Cacheable"/> is false — consumers must read those.</para>
+    /// prediction scaled to 0–1, else the title's <paramref name="index"/> in the batch (see
+    /// <see cref="PositionFit"/>), so a fallback batch keeps a stable, reproducible order instead of
+    /// collapsing. The task-4 flip makes it null; until then <see cref="RerankResult.ModelFit"/> is
+    /// null for it and <see cref="RerankResult.Cacheable"/> is false — consumers must read those.</para>
     /// </summary>
-    internal static RerankResult FallbackVerdict(RerankInput t)
+    internal static RerankResult FallbackVerdict(RerankInput t, int index)
     {
         var fit = t.Predicted is { } p
             ? Math.Clamp((double)p / 10d, 0d, 1d)
-            : StableFit(t.Name.GetHashCode());
+            : PositionFit(index);
         return new RerankResult(t.TitleId, fit, ResultSource.Fallback, string.Empty, ResultSource.Fallback);
     }
 

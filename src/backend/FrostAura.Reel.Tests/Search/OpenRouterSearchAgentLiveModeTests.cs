@@ -362,7 +362,7 @@ public class OpenRouterSearchAgentLiveModeTests
     [Theory]
     [InlineData(ApiUsagePurpose.RerankFeed, 100 + (200 * 3))]
     [InlineData(ApiUsagePurpose.RerankPage, 100 + (200 * 3))]
-    [InlineData(ApiUsagePurpose.RerankAsk, 100 + (110 * 3))]
+    [InlineData(ApiUsagePurpose.RerankAsk, 100 + (111 * 3))]
     public async Task Rerank_sends_an_envelope_plus_a_measured_per_title_share(string purpose, int expected)
     {
         // Deliberately per title: the re-rank answer is one entry per title, and a flat ceiling
@@ -507,16 +507,35 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
-    public void The_stub_fit_survives_the_one_hash_Math_Abs_cannot_negate()
+    public async Task A_failed_batch_without_predictions_keeps_its_input_order_and_the_same_order_every_time()
     {
-        // Math.Abs(int.MinValue) throws OverflowException. String hash codes are randomised per
-        // process, so the name that lands there is unpredictable rather than impossible — and the
-        // throw would come from inside the batch loop that exists to survive a bad response,
-        // costing every OTHER title in the batch its fit.
-        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MinValue), 0d, 0.999d);
-        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MaxValue), 0d, 0.999d);
-        Assert.InRange(OpenRouterSearchAgent.StableFit(-1), 0d, 0.999d);
+        // The fallback fit used to hash the title NAME — and string hashes are randomised per
+        // process, so "keeps retrieval order" was false and the order changed on every restart.
+        // Names are chosen so alphabetical, reverse and input order all differ.
+        List<RerankInput> unpredicted =
+        [
+            new(TitleB, "Zulu", 1990, "movie", ["drama"], "One.", null),
+            new(TitleA, "Mike", 1991, "movie", ["drama"], "Two.", null),
+            new(TitleC, "Alpha", 1992, "movie", ["drama"], "Three.", null),
+        ];
+
+        var first = await Agent(new CannedHandler(new CannedResponse(HttpStatusCode.BadRequest, "{}")))
+            .RerankBatchAsync(unpredicted, "q", "taste");
+        var second = await Agent(new CannedHandler(new CannedResponse(HttpStatusCode.BadRequest, "{}")))
+            .RerankBatchAsync(unpredicted, "q", "taste");
+
+        Assert.All(first, r => Assert.Equal(ResultSource.Fallback, r.FitSource));
+        Assert.Equal(unpredicted.Select(t => t.TitleId), first.OrderByDescending(r => r.Fit).Select(r => r.TitleId));
+        Assert.Equal(first.Select(r => r.Fit), second.Select(r => r.Fit));
+        Assert.All(first, r => Assert.InRange(r.Fit, 0d, 0.5d));
     }
+
+    [Theory]
+    [InlineData(-5)]
+    [InlineData(0)]
+    [InlineData(int.MaxValue)]
+    public void The_position_fit_is_total_and_bounded(int index) =>
+        Assert.InRange(OpenRouterSearchAgent.PositionFit(index), 0d, 0.5d);
 
     // ── Degraded turns: retry once, never echo, say so (WS-1 task 1a) ─────────────────────
 

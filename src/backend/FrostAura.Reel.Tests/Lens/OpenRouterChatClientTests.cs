@@ -77,7 +77,7 @@ public class OpenRouterChatClientTests
 
         var judge = catalog.For(ApiUsagePurpose.AskJudge);
         Assert.Equal(ReasoningEfforts.None, judge.ReasoningEffort);
-        Assert.Equal(100 + (110 * 6), judge.MaxTokensFor(6));
+        Assert.Equal(100 + (111 * 6), judge.MaxTokensFor(6));
 
         Assert.Null(catalog.For(ApiUsagePurpose.AskAnswer).ReasoningEffort);
     }
@@ -262,8 +262,9 @@ public class OpenRouterChatClientTests
         clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
 
         // The half-open slot is taken by the first caller; a concurrent second caller is refused.
-        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _));
-        Assert.False(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.AskPlan, out _));
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var isProbe));
+        Assert.True(isProbe);
+        Assert.False(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.AskPlan, out _, out _));
         health.ReportInconclusive(ApiProvider.OpenRouter); // hand the slot back for the real probe
 
         var probe = await client.CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
@@ -271,6 +272,144 @@ public class OpenRouterChatClientTests
         Assert.Equal(ProviderHealthState.Healthy, health.Current().State);
         Assert.True((await client.CompleteAsync(Request(ApiUsagePurpose.AskPlan), CancellationToken.None)).Succeeded);
         Assert.Equal(3, handler.Bodies.Count);
+    }
+
+    [Fact]
+    public async Task A_cancelled_probe_hands_the_slot_back_so_the_breaker_can_still_close()
+    {
+        // The reviewers' lock: a caller that aborts mid-probe (an Ask turn the user walked away
+        // from) used to leave the slot taken for ever — every purpose refused until a restart.
+        var clock = new ManualClock();
+        var health = new ProviderHealthService(clock: clock);
+        await Client(new Script(new Canned(HttpStatusCode.PaymentRequired, "{}")), health: health)
+            .CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
+        clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+        var client = Client(new Script(Ok("{}")) { Delay = TimeSpan.FromSeconds(5) }, health: health);
+
+        using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => client.CompleteAsync(Request(ApiUsagePurpose.AskPlan), cts.Token));
+        }
+
+        // The next caller is the probe, it is answered, and the breaker closes.
+        var next = Client(new Script(Ok("{}")), health: health);
+        Assert.True((await next.CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None)).Succeeded);
+        Assert.Equal(ProviderHealthState.Healthy, health.Current().State);
+    }
+
+    [Fact]
+    public async Task A_probe_whose_gate_throws_or_refuses_hands_the_slot_back()
+    {
+        foreach (ILlmCallGate gate in new ILlmCallGate[] { new ThrowingGate(), new RefusingGate() })
+        {
+            var clock = new ManualClock();
+            var health = new ProviderHealthService(clock: clock);
+            await Client(new Script(new Canned(HttpStatusCode.PaymentRequired, "{}")), health: health)
+                .CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
+            clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+
+            var gated = Client(new Script(Ok("{}")), health: health, gate: gate);
+            if (gate is ThrowingGate)
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => gated.CompleteAsync(Request(ApiUsagePurpose.AskJudge), CancellationToken.None));
+            }
+            else
+            {
+                Assert.Equal(LlmCallFailure.BudgetSpent,
+                    (await gated.CompleteAsync(Request(ApiUsagePurpose.AskJudge), CancellationToken.None)).Failure);
+            }
+
+            Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var probe));
+            Assert.True(probe);
+        }
+    }
+
+    [Fact]
+    public async Task A_timed_out_probe_releases_the_slot_and_a_non_probe_timeout_never_releases_someone_elses()
+    {
+        var clock = new ManualClock();
+        var health = new ProviderHealthService(clock: clock);
+        await Client(new Script(new Canned(HttpStatusCode.PaymentRequired, "{}")), health: health)
+            .CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
+        clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+
+        // Someone else holds the probe; this caller is refused before it sends anything, and its
+        // refusal must not hand back a slot it never held.
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var held));
+        Assert.True(held);
+        var refused = await Client(new Script(Ok("{}")), health: health).CompleteAsync(Request(ApiUsagePurpose.AskPlan), CancellationToken.None);
+        Assert.Equal(LlmCallFailure.ProviderUnavailable, refused.Failure);
+        Assert.False(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out _));
+
+        // The holder's probe times out: the slot is free again.
+        health.ReportInconclusive(ApiProvider.OpenRouter);
+        var slow = new Script(Ok("{}")) { Delay = TimeSpan.FromSeconds(5) };
+        var timedOut = await Client(slow, health: health, config: new() { ["LLM_LENS_ATTEMPT_TIMEOUT_SECONDS"] = "0.2" })
+            .CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
+        Assert.Equal(LlmCallFailure.TimedOut, timedOut.Failure);
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var again));
+        Assert.True(again);
+    }
+
+    [Fact]
+    public void A_probe_slot_nobody_returns_lapses_after_its_lease()
+    {
+        var clock = new ManualClock();
+        var health = new ProviderHealthService(clock: clock);
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var probe));
+        Assert.True(probe);
+        Assert.False(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out _));
+        Assert.NotNull(health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.Lens));
+
+        clock.Advance(ProviderHealthService.ProbeLease);
+        Assert.Null(health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.Lens));
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var second));
+        Assert.True(second);
+    }
+
+    [Fact]
+    public void Background_work_sees_a_half_open_breaker_as_open_only_while_a_probe_is_out()
+    {
+        // Background jobs ask OpenBreakerFor before they start. It used to say "open" for ever after
+        // a 402, so an account whose only traffic was background work was never probed.
+        var clock = new ManualClock();
+        var health = new ProviderHealthService(clock: clock);
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        Assert.Equal(ProviderBreakerReasons.PaymentRequired, health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.Lens)?.ReasonCode);
+
+        clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+        Assert.Null(health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.TasteNarrative));
+
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out _));
+        Assert.NotNull(health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.TasteNarrative));
+
+        // A purpose breaker is still honoured on its own terms.
+        health.OpenPurpose(ApiProvider.OpenRouter, ApiUsagePurpose.CrossReference, ProviderBreakerReasons.TruncationBreaker,
+            clock.GetUtcNow().UtcDateTime.AddHours(1));
+        health.ReportAnswered(ApiProvider.OpenRouter);
+        Assert.Null(health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.Lens));
+        Assert.Equal(ProviderBreakerReasons.TruncationBreaker,
+            health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.CrossReference)?.ReasonCode);
+    }
+
+    [Fact]
+    public async Task An_unreadable_200_is_transient_retried_and_ends_as_a_provider_error()
+    {
+        // A gateway's HTML error page served with a 200: nothing about the request was wrong.
+        var html = new Canned(HttpStatusCode.OK, "<html><body>Bad gateway</body></html>");
+        var recovered = new Script(html, Ok("{}"));
+        Assert.True((await Client(recovered).CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None)).Succeeded);
+        Assert.Equal(2, recovered.Bodies.Count);
+
+        var persistent = new Script(html);
+        var result = await Client(persistent).CompleteAsync(Request(ApiUsagePurpose.Lens), CancellationToken.None);
+        Assert.Equal(LlmCallFailure.ProviderError, result.Failure);
+        Assert.Equal(2, persistent.Bodies.Count); // lens allows one transient retry
     }
 
     [Fact]
@@ -419,6 +558,63 @@ public class OpenRouterChatClientTests
         await Assert.ThrowsAsync<HttpRequestException>(() => own.EmbedAsync(["c"]));
     }
 
+    [Fact]
+    public async Task Embeddings_probe_a_half_open_breaker_and_close_it_on_an_answer()
+    {
+        // Embeddings used to read the breaker but never report back, so an embedding-only day
+        // could never close it. They now take the probe like any chat call.
+        var clock = new ManualClock();
+        var health = new ProviderHealthService(clock: clock);
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        var handler = new Script(new Canned(HttpStatusCode.OK, """{"data":[{"index":0,"embedding":[3,4]}],"usage":{"prompt_tokens":2}}"""));
+        var embeddings = new OpenAiEmbeddingProvider(
+            new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") }, Recorder(), Config(), health: health);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => embeddings.EmbedAsync(["inside the cool-off"]));
+        Assert.Empty(handler.Bodies);
+
+        clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+        var vectors = await embeddings.EmbedAsync(["the probe"]);
+        Assert.Single(vectors);
+        Assert.Equal(ProviderHealthState.Healthy, health.Current().State);
+    }
+
+    [Fact]
+    public async Task An_embedding_probe_that_dies_hands_the_slot_back()
+    {
+        var clock = new ManualClock();
+        var health = new ProviderHealthService(clock: clock);
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        clock.Advance(ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+        var embeddings = new OpenAiEmbeddingProvider(
+            new HttpClient(new ThrowingHandler()) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            Recorder(), Config(), health: health);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => embeddings.EmbedAsync(["x"]));
+        Assert.True(health.TryAdmit(ApiProvider.OpenRouter, ApiUsagePurpose.Lens, out _, out var probe));
+        Assert.True(probe);
+    }
+
+    [Theory]
+    [InlineData(null, "openai/gpt-6-luna|none")]
+    [InlineData("low", "openai/gpt-6-luna|low")]
+    [InlineData("omit", "openai/gpt-6-luna|-")]
+    public void The_lens_cache_salt_carries_the_model_and_the_effort_actually_sent(string? effort, string expected)
+    {
+        var settings = new Dictionary<string, string?>();
+        if (effort is not null)
+        {
+            settings["LLM_LENS_EFFORT"] = effort;
+        }
+
+        var writer = new OpenRouterLensWriter(
+            new HttpClient { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") }, Recorder(), Config(settings),
+            NullLogger<OpenRouterLensWriter>.Instance);
+
+        Assert.Equal(expected, writer.LensCacheSalt);
+        Assert.Equal("openai/gpt-6-luna|none", writer.NarrativeCacheSalt); // its own purpose, its own override
+    }
+
     // ── Fixtures ───────────────────────────────────────────────────────────────────────────
 
     private static LlmChatRequest Request(string purpose, object? schema = null) =>
@@ -520,6 +716,18 @@ public class OpenRouterChatClientTests
             length = 0;
             return false;
         }
+    }
+
+    private sealed class ThrowingGate : ILlmCallGate
+    {
+        public Task<LlmAdmission> TryReserveAsync(Guid? accountId, string purpose, long estimatedTokens, CancellationToken ct) =>
+            throw new InvalidOperationException("the ledger is unreachable");
+    }
+
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            throw new HttpRequestException("connection reset");
     }
 
     private sealed class RefusingGate : ILlmCallGate
