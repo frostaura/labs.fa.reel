@@ -10,6 +10,7 @@ using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -708,6 +709,151 @@ public class ExposureLogIntegrationTests(PostgresFixture fixture)
     /// One exposure per rating, each on its own title, all under one standing — the shape the online
     /// half aggregates. A null <paramref name="verdict"/> seeds serves nothing had judged.
     /// </summary>
+    [Fact]
+    public async Task Every_typed_why_source_is_stored_by_name_and_reads_back_as_the_same_source()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, _, artifactId, snapshotId) = await SeedAsync("whysource");
+        var titles = ExposureWhySource.All.Select(s => NewTitle($"whysource-{s.Name}")).ToList();
+        var unset = NewTitle("whysource-unset");
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            seed.Titles.AddRange(titles);
+            seed.Titles.Add(unset);
+            await seed.SaveChangesAsync();
+        }
+
+        var cards = ExposureWhySource.All
+            .Select((source, i) => new ExposureCard(titles[i].Id, i, 7m, WhySentence: $"line {i}", WhySource: source))
+            .Append(new ExposureCard(unset.Id, ExposureWhySource.All.Count, 6m))
+            .ToList();
+
+        var log = LogFor(accountId, out var db);
+        await using (db)
+        {
+            Assert.Equal(cards.Count, await log.RecordAsync(
+                accountId, ExposureSurface.FeedRow, snapshotId, artifactId, Now, cards, CancellationToken.None));
+        }
+
+        await using var verify = fixture.CreateContext(Scoped(accountId));
+        var stored = await verify.ExposureEvents.ToDictionaryAsync(e => e.TitleId, e => e.WhySource);
+
+        for (var i = 0; i < titles.Count; i++)
+        {
+            var expected = ExposureWhySource.All[i];
+            Assert.Equal(expected.Name, stored[titles[i].Id]);
+            Assert.Equal(expected, ExposureWhySource.Parse(stored[titles[i].Id]));
+        }
+
+        // A writer that said nothing is recorded as having said nothing — never as the empty
+        // string the column held before the vocabulary was typed.
+        Assert.Equal("Unknown", stored[unset.Id]);
+    }
+
+    [Fact]
+    public async Task An_unattributed_card_is_still_written_and_the_batch_warns_once_with_the_count()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleId, artifactId, snapshotId) = await SeedAsync("unattributed");
+        var second = NewTitle("unattributed-second");
+        var third = NewTitle("unattributed-third");
+        var typedOnly = NewTitle("unattributed-typed");
+        await using (var seed = fixture.CreateContext(new AccountContext()))
+        {
+            seed.Titles.AddRange(second, third, typedOnly);
+            await seed.SaveChangesAsync();
+        }
+
+        var logger = new CapturingLogger();
+        await using (var db = fixture.CreateContext(Scoped(accountId)))
+        {
+            var log = new ExposureLog(db, logger);
+            var written = await log.RecordAsync(
+                accountId, ExposureSurface.FeedPage, snapshotId, artifactId, Now,
+                [
+                    new ExposureCard(titleId, 0, 8m, WhySource: ExposureWhySource.Templater),
+                    new ExposureCard(second.Id, 1, 7m),
+                    new ExposureCard(third.Id, 2, 6.5m),
+                    // The same film twice in one payload: the duplicate is not written, so it is
+                    // not counted either — the warning reports rows, not cards on the wire.
+                    new ExposureCard(third.Id, 3, 6.5m),
+                ],
+                CancellationToken.None);
+
+            Assert.Equal(3, written);
+        }
+
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Contains("FeedPage", warning.Message);
+        Assert.Contains("staged 2 of 3 cards with WhySource=Unknown", warning.Message);
+
+        // A fully attributed batch on the same log is silent.
+        logger.Entries.Clear();
+        await using (var db = fixture.CreateContext(Scoped(accountId)))
+        {
+            var log = new ExposureLog(db, logger);
+            Assert.Equal(1, await log.RecordAsync(
+                accountId, ExposureSurface.Similar, snapshotId, artifactId, Now,
+                [new ExposureCard(typedOnly.Id, 0, 7m, WhySource: ExposureWhySource.None)],
+                CancellationToken.None));
+        }
+
+        Assert.DoesNotContain(logger.Entries, e => e.Level >= LogLevel.Warning);
+
+        await using var verify = fixture.CreateContext(Scoped(accountId));
+        var unknownRows = await verify.ExposureEvents.CountAsync(e => e.WhySource == "Unknown");
+        Assert.Equal(2, unknownRows);
+    }
+
+    [Fact]
+    public async Task A_row_value_this_image_does_not_know_reads_back_as_unknown()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Rollback safety (§5.0 rule 8): rows a newer image wrote with a name this one has never
+        // seen, and the empty-string rows from before the vocabulary was typed, both read back.
+        var (accountId, titleId, artifactId, snapshotId) = await SeedAsync("futurename");
+        var legacy = NewTitle("futurename-legacy");
+        await using (var seed = fixture.CreateContext(Scoped(accountId)))
+        {
+            seed.Titles.Add(legacy);
+            seed.ExposureEvents.AddRange(
+                RawExposure(accountId, titleId, artifactId, snapshotId, "JudgeV3"),
+                RawExposure(accountId, legacy.Id, artifactId, snapshotId, string.Empty));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var verify = fixture.CreateContext(Scoped(accountId));
+        var stored = await verify.ExposureEvents.Select(e => e.WhySource).ToListAsync();
+
+        Assert.Equal(2, stored.Count);
+        Assert.All(stored, value => Assert.Equal(ExposureWhySource.Unknown, ExposureWhySource.Parse(value)));
+    }
+
+    private static ExposureEvent RawExposure(Guid accountId, Guid titleId, Guid artifactId, Guid snapshotId, string whySource) => new()
+    {
+        Id = Guid.NewGuid(),
+        AccountId = accountId,
+        TitleId = titleId,
+        OccurredAt = Now,
+        Surface = ExposureSurface.FeedRow,
+        FeedSnapshotId = snapshotId,
+        ModelArtifactId = artifactId,
+        PredictedRating = 7m,
+        WhySource = whySource,
+    };
+
     private async Task SeedJudgedExposuresAsync(
         Guid accountId, Guid artifactId, Guid snapshotId, string? verdict, decimal? confidence,
         IReadOnlyList<short> laterRatings)
@@ -822,4 +968,17 @@ public class ExposureLogIntegrationTests(PostgresFixture fixture)
         SyncedAt = ratedAt,
         Source = RatingSource.Trakt,
     };
+
+    private sealed class CapturingLogger : ILogger<ExposureLog>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
 }
