@@ -69,12 +69,17 @@ public class NoneFoundCopyTests
         Assert.DoesNotContain("left for you", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// No count stands behind the topic words, so they are not repeated back: the live "like John
+    /// Wick but funnier" turn read "I couldn't find any witty action playful tone movies".
+    /// </summary>
     [Theory]
-    [InlineData(MediaScope.Movies, "I couldn't find any heist movies left for you.")]
-    [InlineData(MediaScope.Shows, "I couldn't find any heist shows left for you.")]
-    [InlineData(MediaScope.Any, "I couldn't find any heist titles left for you.")]
-    public void No_supply_still_answers_honestly(MediaScope media, string expected) =>
-        Assert.Equal(expected, NoneFoundCopy.Compose(new NoneFoundCopy.Facts(null, "heist", media, [], 0, 0m)));
+    [InlineData(MediaScope.Movies)]
+    [InlineData(MediaScope.Any)]
+    public void No_supply_still_answers_honestly_without_repeating_the_models_words(MediaScope media) =>
+        Assert.Equal(
+            "Nothing I found matches what you asked closely enough to show.",
+            NoneFoundCopy.Compose(new NoneFoundCopy.Facts(null, "witty action", media, [], 0, 0m)));
 
     [Fact]
     public void No_concept_says_nothing_matched()

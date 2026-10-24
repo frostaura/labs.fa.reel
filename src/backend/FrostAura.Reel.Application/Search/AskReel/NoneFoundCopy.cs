@@ -50,9 +50,10 @@ public static class NoneFoundCopy
 
         if (supply is null || supply.MatchingInCatalogue == 0)
         {
-            sentences.Add(topic is null
-                ? "Nothing I found matches what you asked closely enough to show."
-                : $"I couldn't find any {topic} left for you.");
+            // No catalogue count stands behind the topic words here — they are the model's reading
+            // ("witty action playful tone"), not a tag anything carries — so they are not repeated
+            // back as if they named a shelf that came up empty.
+            sentences.Add("Nothing I found matches what you asked closely enough to show.");
         }
         else if (supply.ClearingFloor > 0)
         {

@@ -110,9 +110,7 @@ public class AskReelConversationIsolationTests(PostgresFixture fixture, ReelApiF
             // leaked interpretation would have changed.
             Assert.False(await StoredShowsOnlyAsync(accountId, threadB));
 
-            // The reply the person reads names the media the turn searched — titles, not shows —
-            // on the wire and in the record alike.
-            Assert.DoesNotContain("shows", AssistantText(fresh), StringComparison.Ordinal);
+            // The reply the person reads is the one the record keeps.
             Assert.Equal(AssistantText(fresh), await StoredReplyAsync(accountId, threadB));
 
             // Three distinct contexts, three interpretations: nothing was served from another

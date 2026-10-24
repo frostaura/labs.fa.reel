@@ -1158,11 +1158,12 @@ public sealed class LiveSearchExpansionService(
     }
 
     /// <summary>
-    /// The user's words for the request's concept: its positive keywords, joined. Read by the supply
-    /// report and the none-found reply ("ninja movies").
+    /// The user's words for the request's concept: its first positive keyword. Read by the supply
+    /// report and the none-found reply ("ninja movies"); every keyword still rides the concept's
+    /// catalogue labels.
     /// </summary>
     private static string? ConceptWords(SearchIntent intent) =>
-        intent.Keywords.Count > 0 ? string.Join(" ", intent.Keywords.Take(2)) : null;
+        intent.Keywords.Count > 0 ? intent.Keywords[0] : null;
 
     /// <summary>
     /// The discovery intent with the account's excluded GENRES added back as TMDB exclusions,
