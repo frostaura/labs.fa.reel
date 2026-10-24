@@ -17,8 +17,11 @@ namespace FrostAura.Reel.Application.Ml;
 /// person ratings and live reactions (the dislike features read them). A change here is the user
 /// telling the model something new.</item>
 /// <item><see cref="Hashes.Inputs"/> — the labels plus what the catalogue says about the rated
-/// titles (attribute extractions, embedding source text, metadata refreshes), the hyperparameters
-/// and the feature-schema version. A change here that leaves the labels alone is catalogue drift.</item>
+/// titles that the features actually read (attribute extractions, embedding source text, the crowd
+/// rating to one decimal and the vote count in log-tenths), the hyperparameters and the
+/// feature-schema version. A change here that leaves the labels alone is catalogue drift. A
+/// metadata refresh TIMESTAMP is not an input — it moved on every refresh whether or not anything
+/// the model reads changed.</item>
 /// </list>
 ///
 /// <para><b>Why raw inputs and not the feature matrix.</b> Several features are functions of the
@@ -64,7 +67,7 @@ public static class TrainingInputHash
             .ToListAsync(ct);
         var metadata = await db.Titles
             .Where(t => titleIds.Contains(t.Id))
-            .Select(t => new { t.Id, t.LastMetadataRefreshAt, t.TraktRating, t.TraktVotes })
+            .Select(t => new { t.Id, t.TraktRating, t.TraktVotes })
             .ToListAsync(ct);
 
         var labelLines = labels
@@ -77,7 +80,7 @@ public static class TrainingInputHash
         var catalogueLines = attributes
             .Select(a => Line("a", a.TitleId, a.Status, a.ExtractorVersion, a.ExtractedAt))
             .Concat(embeddings.Select(e => Line("e", e.TitleId, e.SourceTextHash)))
-            .Concat(metadata.Select(m => Line("m", m.Id, m.LastMetadataRefreshAt, m.TraktRating, m.TraktVotes)))
+            .Concat(metadata.Select(m => Line("m", m.Id, CrowdRatingBucket(m.TraktRating), VotesBucket(m.TraktVotes))))
             .Order(StringComparer.Ordinal)
             .ToList();
 
@@ -113,6 +116,46 @@ public static class TrainingInputHash
         catch (JsonException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The crowd rating at the resolution a retrain could act on: one decimal. Trakt's average
+    /// moves in the second decimal with every few votes, and the feature is one input among ~60.
+    /// </summary>
+    public static decimal? CrowdRatingBucket(decimal? rating) =>
+        rating is { } r ? Math.Round(r, 1, MidpointRounding.AwayFromZero) : null;
+
+    /// <summary>
+    /// The vote count as the feature reads it — <c>log1p(votes)</c> — bucketed to tenths: a change
+    /// only registers once the count moves by roughly 10%. Raw counts tick on every Trakt ingest
+    /// (IngestMapper rewrites them), which made every sync a "changed input" and a steady account
+    /// retrain hourly; a retrain for 10 more votes on a film with 40,000 is noise.
+    /// </summary>
+    public static decimal VotesBucket(int votes) =>
+        Math.Round((decimal)Math.Log(1d + Math.Max(0, votes)), 1, MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// <paramref name="featureSchemaJson"/> with the two fingerprints written in (replacing any
+    /// already there), every other property kept as it was. A document that is not a JSON object is
+    /// returned unchanged — the artifact then simply stays hashless.
+    /// </summary>
+    public static string StampInto(string featureSchemaJson, Hashes hashes)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(featureSchemaJson) is not System.Text.Json.Nodes.JsonObject doc)
+            {
+                return featureSchemaJson;
+            }
+
+            doc["labelHash"] = hashes.Labels;
+            doc["inputHash"] = hashes.Inputs;
+            return doc.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return featureSchemaJson;
         }
     }
 

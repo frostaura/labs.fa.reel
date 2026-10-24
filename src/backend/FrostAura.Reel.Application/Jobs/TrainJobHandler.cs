@@ -268,12 +268,14 @@ public class TrainJobHandler(
     }
 
     /// <summary>
-    /// How close two retrains on the same LABELS may land. Catalogue drift alone (an enrich pass
-    /// re-extracting rated titles' attributes) is a real input change, but a run of them minutes
-    /// apart is one change in progress, not several — so the model is refit at most hourly for it.
-    /// New labels are never debounced: the user rating something is the point of retraining.
+    /// How close two retrains on the same LABELS may land: one a day. Catalogue drift alone (an
+    /// enrich pass re-extracting rated titles' attributes, crowd numbers moving) is a real input
+    /// change, but every promotion re-deals the feed with a Fresh build and re-spends its model
+    /// passes, so drift with no new rating is folded in at most daily — the acceptance's "at most
+    /// one retrain a day without new ratings". New labels are never debounced: the user rating
+    /// something is the point of retraining.
     /// </summary>
-    public static readonly TimeSpan DriftDebounce = TimeSpan.FromHours(1);
+    public static readonly TimeSpan DriftDebounce = TimeSpan.FromHours(24);
 
     /// <summary>
     /// Why this run must not train, or null when it should. Only a STEADY account (its pipeline
@@ -291,11 +293,15 @@ public class TrainJobHandler(
         var active = await db.ModelArtifacts
             .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
             .OrderByDescending(a => a.Version)
-            .Select(a => new { a.Version, a.TrainedAt, a.FeatureSchemaJson })
             .FirstOrDefaultAsync(ct);
-        if (active is null || TrainingInputHash.ReadFrom(active.FeatureSchemaJson) is not { } trainedOn)
+        if (active is null)
         {
             return null;
+        }
+
+        if (TrainingInputHash.ReadFrom(active.FeatureSchemaJson) is not { } trainedOn)
+        {
+            return await SkipHashlessAsync(account.Id, active, current, ct);
         }
 
         if (trainedOn.Inputs == current.Inputs)
@@ -309,10 +315,41 @@ public class TrainJobHandler(
         {
             return string.Create(
                 CultureInfo.InvariantCulture,
-                $"Catalogue details changed but no ratings did; model v{active.Version} is under an hour old, so the refit waits.");
+                $"Catalogue details changed but no ratings did; model v{active.Version} is under a day old, so the refit waits.");
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// An Active artifact trained before input hashes existed. Treating "no hash" as "inputs
+    /// changed" made the first retrain after the deploy that introduced them ALWAYS train — and
+    /// promote, and force a Fresh build — on an account with zero new ratings: on the slot that was
+    /// purge build → enrich → Train v102 on 0 new labels → a second paid Fresh build replacing the
+    /// purge's own snapshot. So the hashless case asks the question the hash would have answered,
+    /// from timestamps: has the user said anything since this model was trained (a first rating, a
+    /// person rating, a reaction made or revoked)? If not, the run is skipped and the artifact is
+    /// stamped with today's hash, so every later check compares hashes. A re-rating of an existing
+    /// title moves no immutable timestamp and is missed by this one check only; the stamped hash
+    /// catches it from then on.
+    /// </summary>
+    private async Task<string?> SkipHashlessAsync(
+        Guid accountId, ModelArtifact active, TrainingInputHash.Hashes current, CancellationToken ct)
+    {
+        var since = active.TrainedAt;
+        var spoke = await db.UserRatings.AnyAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, ct)
+            || await db.UserPersonRatings.AnyAsync(r => r.AccountId == accountId && r.UpdatedAt > since, ct)
+            || await db.UserTitleReactions.AnyAsync(
+                r => r.AccountId == accountId && (r.CreatedAt > since || (r.RevokedAt != null && r.RevokedAt > since)), ct);
+        if (spoke)
+        {
+            return null;
+        }
+
+        active.FeatureSchemaJson = TrainingInputHash.StampInto(active.FeatureSchemaJson, current);
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"Nothing new to learn from since model v{active.Version} — no ratings or reactions since it was trained, so the current model stays.");
     }
 
     /// <summary>
