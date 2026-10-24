@@ -55,7 +55,9 @@ public sealed class CrossReferenceJobHandler(
     ICrossReferenceJudge judge,
     FeedRefreshCoordinator feedRefresh,
     IPipelineEventHub events,
-    ILogger<CrossReferenceJobHandler> logger) : IJobHandler
+    ILogger<CrossReferenceJobHandler> logger,
+    // Optional so a hand-built handler (a test) needs no breaker; DI always supplies it.
+    CrossReferenceRunBreaker? breaker = null) : IJobHandler
 {
     /// <summary>Candidates per provider call. The whole budget arithmetic is written against 60.</summary>
     public const int BatchSize = 60;
@@ -145,6 +147,15 @@ public sealed class CrossReferenceJobHandler(
         public int FailedBatches { get; set; }
 
         public int SucceededBatches { get; set; }
+
+        /// <summary>Failed batches whose failure is transient (a dropped call, a 5xx, a timeout) — worth the runner's retry.</summary>
+        public int TransientFailures { get; set; }
+
+        /// <summary>Batches the provider refused, or that an open breaker or the budget stopped before sending.</summary>
+        public int StoppedBeforeAnswer { get; set; }
+
+        /// <summary>The run stopped at the daily ceiling (an ordinary stop, never an error).</summary>
+        public bool StoppedByBudget { get; set; }
     }
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
@@ -156,6 +167,14 @@ public sealed class CrossReferenceJobHandler(
             // Configuration, not an outage: no key means the feature is off, and a job that failed
             // for it would retry three times and surface a red pill for a deliberate setting.
             await FinishAsync(job, "cross-reference is not configured", ct);
+            return;
+        }
+
+        if (breaker?.OpenBreaker is { } open)
+        {
+            // Paused, not failed: the breaker already says why on the status API, and a run that
+            // went ahead would send nothing — the client refuses every call behind an open breaker.
+            await FinishAsync(job, $"cross-reference paused ({open.ReasonCode})", ct);
             return;
         }
 
@@ -200,7 +219,13 @@ public sealed class CrossReferenceJobHandler(
         {
             // The warm-skip path, and the one that must cost ZERO provider calls: a second run over
             // an unchanged pool has nothing to ask.
-            await FinishAsync(job, "everything eligible is already cross-referenced", ct);
+            // Covered at the CURRENT key — this fingerprint, this prompt generation, this round —
+            // which is the same key the scheduler's brake and the resume anti-join read, so "already
+            // done" here and "work pending" at the enqueue point can no longer disagree.
+            await FinishAsync(
+                job,
+                string.Create(CultureInfo.InvariantCulture, $"everything eligible is already cross-referenced at prompt v{judge.PromptVersion}"),
+                ct);
             await PublishCompletedAsync(accountId, new Tally { NoSignal = noSignal }, ct);
             return;
         }
@@ -214,6 +239,36 @@ public sealed class CrossReferenceJobHandler(
         var tally = new Tally { NoSignal = noSignal };
         var stopped = await RunRoundAsync(job, accountId, artifact, profileHash, round, work, persona, predictions, tally, ct);
 
+        // The zero-answer check comes FIRST — before any progress, completion copy or rebuild is
+        // written. A run that answered nothing has not progressed, and the old order wrote "100%"
+        // and a completion line onto a job the runner then failed and retried, which the pill kept
+        // re-showing on every retry.
+        //
+        // Total provider failure is reported the only way this runner CAN report it: by throwing, so
+        // the message lands on job.Error — the success path clears that column. Nothing was
+        // written, so nothing is lost: the anti-join offers the same work to the next run. Rows are
+        // never written as Failed — two thousand of those would be indistinguishable from
+        // judgements to the resume anti-join and would suppress their own retry for ever.
+        if (tally.SucceededBatches == 0 && tally.FailedBatches > 0)
+        {
+            var tripped = breaker?.RecordRun(
+                judge.RunKey, judge.PromptVersion, 0, tally.FailedBatches - tally.StoppedBeforeAnswer) ?? false;
+
+            // Deterministic failures are not retried: a truncation or an unreadable answer on this
+            // model and prompt comes back the same on the runner's next attempt, and a refusal or an
+            // open breaker sends nothing at all. Only a transient failure earns the runner's retry.
+            // The runner retries while AttemptCount is under its cap, so a deterministic failure
+            // spends the cap here.
+            if (tripped || tally.TransientFailures == 0)
+            {
+                job.AttemptCount = Math.Max(job.AttemptCount, JobRunnerLimits.MaxAttempts);
+            }
+
+            throw new InvalidOperationException(FailureMessage(tally, tripped));
+        }
+
+        breaker?.RecordRun(judge.RunKey, judge.PromptVersion, tally.SucceededBatches, tally.FailedBatches);
+
         job.CursorJson = JsonSerializer.Serialize(new
         {
             round = (int)round,
@@ -221,7 +276,7 @@ public sealed class CrossReferenceJobHandler(
             ruledOutSoFar = tally.RuledOut,
         });
         job.ProgressPct = 100;
-        job.ProgressMessage = CompletionMessage(tally, work.Count);
+        job.ProgressMessage = CompletionMessage(tally);
 
         // A run that wrote nothing changed nothing, so it asks for nothing — and a run that wrote
         // a handful asks for nothing either (see MinJudgedForRebuild). The guard is not tidiness:
@@ -256,22 +311,6 @@ public sealed class CrossReferenceJobHandler(
             + "({Kept} keep, {RuledOut} out, {Unsure} unsure), {NoSignal} unjudgeable, {Failed} failed batch(es) — {Stop}.",
             accountId, profileHash, judge.PromptVersion, tally.Judged, work.Count,
             tally.Kept, tally.RuledOut, tally.Unsure, tally.NoSignal, tally.FailedBatches, stopped);
-
-        // Total provider failure is reported the only way this runner CAN report it: by throwing, so
-        // the message lands on job.Error — the success path clears that column. Nothing was
-        // written, so nothing is lost: the anti-join offers the same work to the next run, and the
-        // retry IS the provider recovering. Rows are never written as Failed — two thousand of
-        // those would be indistinguishable from judgements to the resume anti-join and would
-        // suppress their own retry for ever.
-        //
-        // Thrown BEFORE the completion frame, and that ordering is the point: a run that answered
-        // nothing has not completed, and telling the pill it did — moments before the runner
-        // retries the same job — is the pipeline contradicting itself on screen.
-        if (tally.SucceededBatches == 0 && tally.FailedBatches > 0)
-        {
-            throw new InvalidOperationException(
-                $"The cross-reference judge answered none of {tally.FailedBatches} batch(es); no verdicts were written.");
-        }
 
         await PublishCompletedAsync(accountId, tally, ct);
     }
@@ -333,6 +372,7 @@ public sealed class CrossReferenceJobHandler(
                 logger.LogInformation(
                     "Cross-reference for {AccountId} stopped at its daily ceiling after {Judged} verdict(s) ({Allowance}).",
                     accountId, tally.Judged, allowance.Describe());
+                tally.StoppedByBudget = true;
                 abandoned = true;
                 return;
             }
@@ -347,7 +387,11 @@ public sealed class CrossReferenceJobHandler(
             if (batch.Candidates.Count == 0)
             {
                 tally.Processed += slice.Count;
-                await ReportProgressAsync(job, accountId, tally, work.Count, round, batchCt);
+                if (tally.SucceededBatches > 0)
+                {
+                    await ReportProgressAsync(job, accountId, tally, round, batchCt);
+                }
+
                 return;
             }
 
@@ -357,11 +401,27 @@ public sealed class CrossReferenceJobHandler(
             {
                 tally.FailedBatches++;
                 consecutiveFailures++;
-                if (consecutiveFailures >= MaxConsecutiveFailures)
+                if (result.Failure is AgentFailureKind.ProviderError or AgentFailureKind.TimedOut)
+                {
+                    tally.TransientFailures++;
+                }
+
+                var stoppedBeforeAnswer = result.Failure is AgentFailureKind.ProviderRefused
+                    or AgentFailureKind.ProviderUnavailable or AgentFailureKind.BudgetSpent;
+                if (stoppedBeforeAnswer)
+                {
+                    tally.StoppedBeforeAnswer++;
+                }
+
+                // Fail fast: an unanswered FIRST batch ends the run — on a reasoning model that
+                // truncated, every later batch is the same request at the same ceiling, and the old
+                // three-strikes rule bought two of them per run. Once a batch has been answered the
+                // provider is evidently working, and the consecutive rule rides out a bad response.
+                if (tally.SucceededBatches == 0 || stoppedBeforeAnswer || consecutiveFailures >= MaxConsecutiveFailures)
                 {
                     logger.LogWarning(
-                        "Cross-reference for {AccountId} abandoned after {Count} consecutive unanswered batches.",
-                        accountId, consecutiveFailures);
+                        "Cross-reference for {AccountId} stopped after {Failed} unanswered batch(es) ({Failure}); {Answered} answered.",
+                        accountId, tally.FailedBatches, result.Failure?.ToString() ?? "unknown", tally.SucceededBatches);
                     abandoned = true;
                 }
 
@@ -385,26 +445,29 @@ public sealed class CrossReferenceJobHandler(
             tally.RuledOut += result.Entries.Count(e =>
                 e.Verdict == CrossReferenceVerdict.Out && e.Confidence >= VerdictAggregator.OutConfidenceThreshold);
 
-            await ReportProgressAsync(job, accountId, tally, work.Count, round, batchCt);
+            await ReportProgressAsync(job, accountId, tally, round, batchCt);
         });
 
         return abandoned ? LlmBudgetStop.SoftBudget : stop;
     }
 
     /// <summary>
-    /// The progress overload that carries <c>current</c>/<c>total</c> — the pill renders them as a
-    /// count under the explainer, which is the only honest way to describe a pass that can legally
-    /// take four days at ten thousand titles. A percentage alone reads as a stall.
+    /// The pass's progress — written only once a batch has been ANSWERED, and with no denominator.
+    ///
+    /// <para>No percentage and no "of N": a pass over a pool that can legally take four days at ten
+    /// thousand titles has no honest fraction, and "Cross-referencing 2,242 titles … 100%" was the
+    /// message a failing run left on screen through every retry. The pill names the pass and counts
+    /// what it has ruled out; the frame carries <c>current</c> (titles processed) and no
+    /// <c>total</c>, so the pill shows no count-of-total either.</para>
     /// </summary>
     private async Task ReportProgressAsync(
-        SyncJob job, Guid accountId, Tally tally, int total, CrossReferenceRound round, CancellationToken ct)
+        SyncJob job, Guid accountId, Tally tally, CrossReferenceRound round, CancellationToken ct)
     {
-        var pct = total <= 0 ? 100m : Math.Clamp(Math.Round(100m * tally.Processed / total, 0), 1m, 99m);
         var message = string.Create(
             CultureInfo.InvariantCulture,
-            $"Cross-referencing {total:N0} titles · {RoundLabel(round)} · {tally.RuledOut:N0} ruled out so far");
+            $"Cross-referencing · {RoundLabel(round)} · {tally.RuledOut:N0} ruled out so far");
 
-        job.ProgressPct = pct;
+        job.ProgressPct = null;
         job.ProgressMessage = message;
         // Persisted before it is published, the same order every other handler uses: the pill has
         // two sources — this frame and a five-second poll of the job row — and a reload mid-pass
@@ -413,11 +476,33 @@ public sealed class CrossReferenceJobHandler(
         events.Publish(accountId, PipelineEventTypes.JobProgress, new Dictionary<string, object?>
         {
             ["kind"] = SseKind,
-            ["pct"] = pct,
             ["message"] = message,
             ["current"] = tally.Processed,
-            ["total"] = total,
         });
+    }
+
+    /// <summary>
+    /// The job error for a run that answered nothing. Starts with the status line where the provider
+    /// refused, so the status API classifies it as the refusal it was (payment_required, …) rather
+    /// than as an unanswered batch; otherwise "answered none", which classifies as no_answer.
+    /// </summary>
+    private string FailureMessage(Tally tally, bool tripped)
+    {
+        var refusal = tally.StoppedBeforeAnswer > 0 && breaker?.OpenBreaker is { Purpose: null } provider
+            ? provider.ReasonCode switch
+            {
+                ProviderBreakerReasons.Unauthorized => "HTTP 401 Unauthorized — ",
+                ProviderBreakerReasons.PaymentRequired => "HTTP 402 Payment Required — ",
+                ProviderBreakerReasons.Forbidden => "HTTP 403 Forbidden — ",
+                _ => string.Empty,
+            }
+            : string.Empty;
+        var suffix = tripped
+            ? $" Off for the rest of the UTC day: {CrossReferenceRunBreaker.ConsecutiveFailedRuns} consecutive runs on this model and prompt answered nothing."
+            : string.Empty;
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{refusal}The cross-reference judge answered none of {tally.FailedBatches} batch(es); no verdicts were written.{suffix}");
     }
 
     /// <summary>
@@ -457,12 +542,15 @@ public sealed class CrossReferenceJobHandler(
             .Select(e => e.GatingDecision)
             .FirstOrDefaultAsync(ct) ?? Unmeasured;
 
-    private static string CompletionMessage(Tally tally, int total) =>
-        tally.Judged == 0
-            ? "nothing cross-referenced this run"
-            : string.Create(
+    /// <summary>The job's closing line — counted, with no denominator, and saying why a run that judged nothing stopped.</summary>
+    private static string CompletionMessage(Tally tally) =>
+        tally.Judged > 0
+            ? string.Create(
                 CultureInfo.InvariantCulture,
-                $"Cross-referenced {tally.Judged:N0} of {total:N0} titles · {tally.RuledOut:N0} ruled out");
+                $"Cross-referenced {tally.Judged:N0} titles · {tally.RuledOut:N0} ruled out")
+            : tally.StoppedByBudget
+                ? "stopped at today's cross-reference ceiling before judging anything"
+                : "nothing judgeable this run";
 
     private async Task FinishAsync(SyncJob job, string message, CancellationToken ct)
     {

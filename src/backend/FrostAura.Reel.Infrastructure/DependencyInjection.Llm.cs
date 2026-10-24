@@ -76,6 +76,8 @@ public static partial class DependencyInjection
         // The enqueue gate the feed build asks before queuing a pass. Scoped so the job it adds
         // lands on the BUILD's tracked context and commits with the build's own writes.
         services.AddScoped<Application.CrossReference.CrossReferenceScheduler>();
+        // The cross-run breaker: process-wide, because the runs it counts are separate scopes.
+        services.AddSingleton<Application.CrossReference.CrossReferenceRunBreaker>();
         // The read side of the same table, shared by the feed build and both read-path serves so
         // the three cannot disagree about which prompt generation or which fingerprint is current.
         services.AddScoped<Application.CrossReference.CrossReferenceFactors>();
