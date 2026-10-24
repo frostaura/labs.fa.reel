@@ -11,6 +11,7 @@ import { SESSION_FOUNDER, mockJson, stubEventSource, syncJob, syncStatus } from 
 async function bootShell(page: Page, initial: Record<string, unknown>) {
   let status = initial;
   let polls = 0;
+  let others = 0;
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await page.route(
@@ -23,13 +24,18 @@ async function bootShell(page: Page, initial: Record<string, unknown>) {
   // Everything else the page asks for answers empty; this spec is about the header.
   await page.route(
     (url) => url.pathname.startsWith("/api/") && url.pathname !== "/api/sync/status" && url.pathname !== "/api/auth/me",
-    (route) => route.fulfill({ status: 204, body: "" })
+    (route) => {
+      others += 1;
+      return route.fulfill({ status: 204, body: "" });
+    }
   );
   return {
     set(next: Record<string, unknown>) {
       status = next;
     },
     polls: () => polls,
+    /** Every other /api request (feed, taste DNA, …) — a hidden tab should send none of these either. */
+    others: () => others,
   };
 }
 
@@ -187,7 +193,7 @@ test.describe("sync pill", () => {
 });
 
 test.describe("status polling", () => {
-  test("idle polls once a minute, and a hidden tab sends no status polls for 10 minutes", async ({ page }) => {
+  test("idle polls once a minute, and a hidden tab sends no requests for 10 minutes however busy the stream is", async ({ page }) => {
     await page.clock.install();
     const shell = await bootShell(page, syncStatus({ lastDeltaSyncAt: new Date().toISOString() }));
     await page.goto("/home");
@@ -208,8 +214,18 @@ test.describe("status polling", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
     const hiddenAt = shell.polls();
-    await page.clock.runFor(10 * 60_000);
+    const othersAt = shell.others();
+    // The live stream stays open while hidden and real handlers keep finishing: a frame a minute —
+    // completions, a failure, a stream reconnect — must not turn into a single request.
+    await emit(page, "open", {});
+    for (let minute = 0; minute < 10; minute += 1) {
+      await emit(page, minute % 3 === 2 ? "failed" : "job-completed", { kind: minute % 2 ? "feed" : "delta" });
+      if (minute === 5) await emit(page, "open", {});
+      await page.clock.runFor(60_000);
+      await page.waitForTimeout(25);
+    }
     expect(shell.polls() - hiddenAt).toBe(0);
+    expect(shell.others() - othersAt).toBe(0);
 
     // Coming back with an answer older than the cadence asks at once.
     await page.evaluate(() => {
@@ -218,6 +234,9 @@ test.describe("status polling", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
     await expect.poll(() => shell.polls()).toBe(hiddenAt + 1);
+    // The held invalidations and the stale-answer refetch land as ONE status request, not two.
+    await page.waitForTimeout(500);
+    expect(shell.polls()).toBe(hiddenAt + 1);
   });
 
   test("work the user started polls every 5 s", async ({ page }) => {

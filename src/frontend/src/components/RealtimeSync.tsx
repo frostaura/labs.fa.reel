@@ -5,9 +5,12 @@ import { activeJobObserved, picksChangedReported, syncCompleted, syncProgress } 
 import { scoresRecalibrated, type ScoreChange } from "../store/scoreOverridesSlice";
 import { isUserVisibleWorkInFlight, shownActiveJob, statusPollInterval } from "../lib/syncPill";
 import { useDocumentVisible } from "../lib/useDocumentVisible";
+import { createInvalidationGate } from "../lib/invalidationGate";
 import type { AppDispatch } from "../store";
 
 const selectSyncStatus = api.endpoints.getSyncStatus.select();
+
+type Tag = Parameters<typeof api.util.invalidateTags>[0][number];
 
 /**
  * Headless steady-state SSE consumer mounted once in the app shell (fa.foresight's
@@ -19,6 +22,9 @@ const selectSyncStatus = api.endpoints.getSyncStatus.select();
  *   2. Live — `job-progress` frames carry numbers between polls; the pill applies one only while
  *      its kind matches the active job's `sseKind`. `job-completed` and `failed` invalidate the
  *      Sync tag so the next answer confirms idle, the next job, or the failure.
+ * Every frame-driven invalidation goes through an invalidation gate: while the tab is hidden the
+ * tags are held, and applied once when it is shown, so a hidden tab sends no requests however busy
+ * the stream is (lib/invalidationGate.ts).
  * `onerror` is a no-op: EventSource auto-reconnects and the poll is the fallback.
  */
 export default function RealtimeSync() {
@@ -73,6 +79,13 @@ export default function RealtimeSync() {
 
   useEffect(() => {
     const source = new EventSource("/sse/pipeline");
+    const gate = createInvalidationGate<Tag>(
+      () => document.visibilityState === "hidden",
+      (tags) => dispatch(api.util.invalidateTags(tags))
+    );
+    const invalidate = (...tags: Tag[]) => gate.invalidate(tags);
+    const onVisibility = () => gate.flush();
+    document.addEventListener("visibilitychange", onVisibility);
 
     source.addEventListener("job-progress", (ev) => {
       try {
@@ -97,14 +110,14 @@ export default function RealtimeSync() {
     source.addEventListener("job-completed", (ev) => {
       // The status refetch (Sync tag) decides whether the pill clears or hands over to
       // the next active job.
-      dispatch(api.util.invalidateTags(["Sync", "Feed", "TasteDna"]));
+      invalidate("Sync", "Feed", "TasteDna");
       // A finished train/evaluate run also stales the model-lab ledger. Today those handlers
       // publish no job-completed frame (the poll-transition above covers them); this listens
       // anyway so a backend that starts emitting them gets the instant refresh for free.
       try {
         const data = JSON.parse((ev as MessageEvent).data);
         if (data?.kind === "train" || data?.kind === "evaluate") {
-          dispatch(api.util.invalidateTags(["Lab"]));
+          invalidate("Lab");
         }
 
         // A finished cross-reference pass changes the band's numbers and the track record's online
@@ -112,7 +125,7 @@ export default function RealtimeSync() {
         // frame rather than polled: the pass runs for minutes and then lands all at once, so a poll
         // fast enough to catch it would spend the whole pass asking a question with no new answer.
         if (data?.kind === "xref") {
-          dispatch(api.util.invalidateTags(["CrossReference", "Accuracy"]));
+          invalidate("CrossReference", "Accuracy");
         }
 
         // The post-sync moment. A delta/reconcile now says what it actually did — new ratings,
@@ -142,7 +155,7 @@ export default function RealtimeSync() {
     // generatedAt. Invalidating Feed refetches it; the generatedAt-keyed rows in Home then remount
     // and reseed with the new, still-eligible picks — so fresh recommendations lazy-load in live.
     source.addEventListener("feed-ready", (ev) => {
-      dispatch(api.util.invalidateTags(["Feed", "TasteDna"]));
+      invalidate("Feed", "TasteDna");
       // The rebuild the last sync enqueued has landed and knows how much of the page moved — the
       // one number the sync itself could not report, because it must never block on the build.
       try {
@@ -192,7 +205,7 @@ export default function RealtimeSync() {
     // A job ran out of attempts. The frame's text is free text and stays off the screen; the
     // refetch brings the failure in as `lastFailures`, with a stable reason code.
     source.addEventListener("failed", () => {
-      dispatch(api.util.invalidateTags(["Sync"]));
+      invalidate("Sync");
     });
 
     // Floor against a feed-ready frame missed while the stream was down: the hub keeps no replay
@@ -201,11 +214,14 @@ export default function RealtimeSync() {
     // a duplicate request on every cold load (I-12).
     let opened = false;
     source.addEventListener("open", () => {
-      if (opened) dispatch(api.util.invalidateTags(["Feed", "Sync"]));
+      if (opened) invalidate("Feed", "Sync");
       opened = true;
     });
 
-    return () => source.close();
+    return () => {
+      source.close();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [dispatch]);
 
   return null;
