@@ -22,6 +22,33 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 public class ContentFilterEligibilityTests(PostgresFixture fixture)
 {
     [Fact]
+    public async Task The_footprint_is_excluded_by_hashed_lists_never_a_correlated_anti_join()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Many exclusion rules multiply into a planner estimate of ONE surviving title; with a
+        // correlated NOT EXISTS Postgres then nested-loops the watch list per survivor (the founder's
+        // draft count took 1.4 s instead of 59 ms). NOT IN runs as a hashed subplan regardless. Both
+        // overloads, served and draft, must keep that shape.
+        var accountId = await SeedAccountAsync();
+        await using var db = fixture.CreateContext(new AccountContext());
+        var builder = new EligibilityQueryBuilder(db);
+        var rules = FilterRuleSet.Create(["romance", "history", "music", "anime", "musical"], [], [], ["en"], 6.0m, 2000, null);
+        foreach (var sql in new[] { builder.EligibleTitles(accountId).ToQueryString(), builder.EligibleTitles(accountId, rules).ToQueryString() })
+        {
+            foreach (var table in new[] { "WatchedTitles", "UserRatings", "UserTitleReactions" })
+            {
+                Assert.Matches($"t\\.\"Id\" NOT IN \\(\\s*SELECT [a-z0-9]+\\.\"TitleId\"\\s*FROM \"{table}\"", sql);
+            }
+
+            Assert.DoesNotContain("\"TitleId\" = t.\"Id\"", sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task Crowd_floor_keeps_well_rated_titles_falls_back_to_trakt_and_drops_the_unrated()
     {
         if (!fixture.Available)

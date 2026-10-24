@@ -60,17 +60,34 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// user content they told it not to. Discovery surfaces pass nothing here.
     /// </param>
     public IQueryable<Title> EligibleTitles(
-        Guid accountId, bool ignoreIncludeGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null)
+        Guid accountId, bool ignoreIncludeGenreFilters = false, IReadOnlySet<FilterKind>? suppressed = null) =>
+        WithoutFootprint(ContentFilteredTitles(accountId, ignoreIncludeGenreFilters, suppressed), accountId);
+
+    /// <summary>
+    /// <paramref name="query"/> without the titles the account has watched, rated, or set aside
+    /// (NotInterested, SaveForLater, Dropped, unrevoked).
+    ///
+    /// <para>Written as <c>NOT IN</c> over each per-account id list rather than a correlated
+    /// <c>NOT EXISTS</c>, on purpose. Postgres runs <c>NOT IN</c> as a hashed subplan — each list
+    /// read once, one hash probe per title — whatever it estimates the content rules leave. With a
+    /// correlated <c>NOT EXISTS</c> it plans an anti join from that estimate, and many exclusion
+    /// rules multiply into an estimate of ONE surviving title: it then picked nested loops that
+    /// re-scanned the watch list for each of 5,000 real survivors, 15 million comparisons, and the
+    /// founder's draft count took 1.4 s instead of 59 ms (2026-10-24). Same rows either way: the
+    /// title ids are never null.</para>
+    /// </summary>
+    private IQueryable<Title> WithoutFootprint(IQueryable<Title> query, Guid accountId)
     {
-        return ContentFilteredTitles(accountId, ignoreIncludeGenreFilters, suppressed).Where(t =>
-            !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
-            && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
-            && !db.UserTitleReactions.Any(r =>
-                r.AccountId == accountId && r.TitleId == t.Id
+        var watched = db.WatchedTitles.Where(w => w.AccountId == accountId).Select(w => w.TitleId);
+        var rated = db.UserRatings.Where(r => r.AccountId == accountId).Select(r => r.TitleId);
+        var setAside = db.UserTitleReactions
+            .Where(r => r.AccountId == accountId
                 && (r.Kind == ReactionKind.NotInterested
                     || r.Kind == ReactionKind.SaveForLater
                     || r.Kind == ReactionKind.Dropped)
-                && r.RevokedAt == null));
+                && r.RevokedAt == null)
+            .Select(r => r.TitleId);
+        return query.Where(t => !watched.Contains(t.Id) && !rated.Contains(t.Id) && !setAside.Contains(t.Id));
     }
 
     /// <summary>
@@ -316,18 +333,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// the pool be if the floor compared the vote-shrunk badge?" — asked by the cost meter before the
     /// founder decides FD-7. Nothing that serves titles passes it.
     /// </summary>
-    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules, CrowdFloorMeasure measure)
-    {
-        return ContentFilteredTitles(rules, measure).Where(t =>
-            !db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == t.Id)
-            && !db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == t.Id)
-            && !db.UserTitleReactions.Any(r =>
-                r.AccountId == accountId && r.TitleId == t.Id
-                && (r.Kind == ReactionKind.NotInterested
-                    || r.Kind == ReactionKind.SaveForLater
-                    || r.Kind == ReactionKind.Dropped)
-                && r.RevokedAt == null));
-    }
+    public IQueryable<Title> EligibleTitles(Guid accountId, FilterRuleSet rules, CrowdFloorMeasure measure) =>
+        WithoutFootprint(ContentFilteredTitles(rules, measure), accountId);
 
     /// <summary>
     /// The content-preference rules from an explicit <see cref="FilterRuleSet"/> rather than from the
