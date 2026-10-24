@@ -289,7 +289,7 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     expect(stoppedPrecedesGrid).toBe(true);
 
     // Everything the Stop used to strip. Sixteen tray picks in the measured run.
-    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 1 under your 6.0 bar");
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 1 held back by your 6.0 bar");
     await expect(page.getByTestId("askreel-footnote"))
       .toHaveText("3 picks ranked for you, from 40 pulled · 1 under your 6.0 bar — shown below.");
     await expect(page.getByTestId("askreel-more")).toBeVisible();
@@ -723,7 +723,7 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(tray).toBeVisible();
     // …and "6.0", not "6": `minPredictedRating` is 6, and the server's own sentence beside this
     // one says "6.0 bar". One number, one rendering, whatever the browser's locale.
-    await expect(tray.locator("summary")).toHaveText("Show the 1 under your 6.0 bar");
+    await expect(tray.locator("summary")).toHaveText("Show the 1 held back by your 6.0 bar");
     await tray.locator("summary").click();
     await expect(tray.locator('a[href*="/title/"]')).toHaveCount(1);
   });
@@ -882,7 +882,7 @@ test.describe("Ask Reel — the grid holds its shape", () => {
     });
     await askEnd(page);
     await expect(page.getByTestId("semantic-results").locator("a")).toHaveCount(10);
-    await expect(page.getByTestId("askreel-below-floor")).toContainText("Show the 14 under your 6.0 bar");
+    await expect(page.getByTestId("askreel-below-floor")).toContainText("Show the 14 held back by your 6.0 bar");
 
     const settledHeight = await docHeight(page);
     const { cls, shifts } = await readCls(page);
@@ -969,7 +969,7 @@ test.describe("Ask Reel — the grid holds its shape", () => {
     await askPush(page, "candidate-scored", { titleId: BORDER.titleId, predictedRating: 5.2 });
     await expect(gridNames(page)).toHaveText(["Alpha Creek", "Cedar Falls"]);
     const tray = page.getByTestId("askreel-below-floor");
-    await expect(tray).toContainText("Show the 1 under your 6.0 bar");
+    await expect(tray).toContainText("Show the 1 held back by your 6.0 bar");
 
     // Badge precision, not the raw value: 5.96 prints as "6.0", and a card badged 6.0 inside a tray
     // labelled "under your 6.0 bar" is the same contradiction wearing the other hat.

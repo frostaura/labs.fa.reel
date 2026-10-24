@@ -112,7 +112,7 @@ function AskReel() {
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
-    conflictTerms, turnConflict, turnConflictTerms, belowFloor, nearMiss, mode, knockouts, droppedByFloor, holdingPrevious,
+    conflictTerms, turnConflict, turnConflictTerms, belowFloor, nearMiss, unchecked, mode, knockouts, droppedByFloor, holdingPrevious,
     arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
     pageQuery, pageRefusal, hasLocalTurn,
@@ -448,11 +448,13 @@ function AskReel() {
             className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
           >
             {floorLabel
-              ? `Show the ${heldBack} under your ${floorLabel} bar`
+              ? `Show the ${heldBack} held back by your ${floorLabel} bar`
               : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
           </summary>
+          {/* No claim that these matched: the tray also holds cards the judge never ruled on, and
+              cards with no score while a bar is set (acceptance D5). */}
           <p className="fa-caption text-fa-frost-dim/70 mt-1">
-            These matched the request but scored below the bar Reel holds itself to.
+            These scored under your bar, or have no score from your model yet, so they are not in your picks.
           </p>
           {belowFloorVisible.length > 0 && (
             <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
@@ -485,6 +487,32 @@ function AskReel() {
       </p>
       <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
         {nearMissVisible.map((card) => (
+          <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
+        ))}
+      </div>
+    </details>
+  );
+
+  // The cards nobody could check (a failed judge, the keyless stub): collapsed, never the grid,
+  // never counted as picks — and labelled for exactly what they are, because "matched" or "close"
+  // would be a verdict nobody reached (§4.8, D1).
+  const uncheckedVisible = unchecked.filter((c) => !removedSet.has(c.titleId));
+  const uncheckedTray = uncheckedVisible.length > 0 && (
+    <details
+      className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+      data-testid="askreel-unchecked"
+    >
+      <summary
+        data-testid="askreel-unchecked-toggle"
+        className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
+      >
+        {`Not checked against your request — ${uncheckedVisible.length} ${plural(uncheckedVisible.length, "title")}`}
+      </summary>
+      <p className="fa-caption text-fa-frost-dim/70 mt-1">
+        Reel couldn’t check these against what you asked this time, so they are not in your picks.
+      </p>
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+        {uncheckedVisible.map((card) => (
           <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
         ))}
       </div>
@@ -727,6 +755,16 @@ function AskReel() {
                       className="fa-caption ml-2 inline-flex items-center rounded-full border border-fa-warning/40 px-2 py-0.5 align-middle text-fa-warning"
                     >
                       couldn’t read that fully
+                    </span>
+                  )}
+                  {/* A judge batch failed on this turn: some of its cards were never checked against
+                      the request, and the bubble says so rather than vouching for them. */}
+                  {turn.unchecked && (
+                    <span
+                      data-testid="askreel-reply-unchecked"
+                      className="fa-caption ml-2 inline-flex items-center rounded-full border border-fa-warning/40 px-2 py-0.5 align-middle text-fa-warning"
+                    >
+                      some cards unchecked
                     </span>
                   )}
                   {turn.conflict && showsConflictPill(turn.text) && (
@@ -1045,7 +1083,9 @@ function AskReel() {
           <div className="fa-card p-6 max-w-xl mx-auto space-y-3" data-testid="askreel-none-found">
             <div className="flex items-center gap-2">
               <Sparkles className="h-5 w-5 text-fa-frost-dim" />
-              <p className="fa-body text-fa-frost-bright">Nothing left that matches</p>
+              <p className="fa-body text-fa-frost-bright">
+                {uncheckedVisible.length > 0 ? "Reel couldn’t check what it found" : "Nothing left that matches"}
+              </p>
             </div>
             {knockouts.length > 0 && (
               <ul className="flex flex-wrap gap-2" data-testid="askreel-none-found-relaxations">
@@ -1066,6 +1106,7 @@ function AskReel() {
           </div>
           {floorTray}
           {nearMissTray}
+          {uncheckedTray}
         </div>
       ) : status === "resumed" && lastCardsAt == null && resumedTail == null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
@@ -1185,6 +1226,7 @@ function AskReel() {
 
           {floorTray}
           {nearMissTray}
+          {uncheckedTray}
         </>
       )}
 

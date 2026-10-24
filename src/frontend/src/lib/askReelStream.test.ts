@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AskStreamError, streamAskReel, type AskCard, type AskEvent } from "./askReelStream";
+import { AskStreamError, isKnockout, judgeDegraded, streamAskReel, type AskCard, type AskEvent } from "./askReelStream";
 
 /**
  * The SSE parser, driven the way the network drives it: a chunked ReadableStream, not a string.
@@ -457,10 +457,66 @@ describe("streamAskReel — trust-v1 additions (WS-2 P0)", () => {
     ["a near-miss card with no id", { nearMiss: [{ name: "x" }] }],
     ["a non-string mode", { mode: 3 }],
     ["a degraded list with a number in it", { degraded: ["plan", 2] }],
-    ["a relaxation without a count", { supply: { knockouts: [{ kind: "Language", label: "English only" }] } }],
+    ["a supply whose offers are not a list", { supply: { knockouts: "English only" } }],
+    ["an unchecked tray card with no id", { unchecked: [{ name: "x" }] }],
     ["a satisfies verdict that is not a string", { results: [card(1, { satisfies: 1 as unknown as string })] }],
   ])("drops a done frame with %s", async (_label, extra) => {
     const events = await collect([frame("done", { results: [], reason: null, ...extra })]);
     expect(events).toEqual([]);
+  });
+});
+
+describe("WS-2 review round 1 — the frames the server really sends", () => {
+  it("keeps a done frame whose relaxation offer is malformed; the offer alone is filtered later", async () => {
+    // Acceptance D1: the server serialised `kind` as a number (`{"kind":5,…}`) and the whole done
+    // frame was rejected, leaving the turn spinning. A chip is not worth the answer.
+    const done = {
+      results: [],
+      reason: "no picks matched what you asked",
+      mode: "NoneFound",
+      unchecked: [card(1)],
+      supply: { knockouts: [{ kind: 5, value: "en", contentFilterId: null, label: "English only", wouldUnlock: 4 }] },
+    };
+    const events = await collect([frame("done", done)]);
+    expect(events).toEqual([{ event: "done", data: done }]);
+  });
+
+  it("accepts the server's own none-found shape, enums as names", async () => {
+    // Shaped as LiveSearchExpansionService.SupplyWire writes it under the endpoint's camelCase options.
+    const done = {
+      results: [], streamed: 1, kept: 0, droppedByFloor: 1, belowFloor: [card(2)], nearMiss: [], unchecked: [],
+      mode: "NoneFound",
+      supply: {
+        matchingInCatalogue: 62, alreadySeen: 16, savedOrDismissed: 0, excludedByConditions: 3, eligible: 43,
+        belowFloor: 1, unscored: 0, clearingFloor: 42, lowVoteMatches: 9, minVotes: 50, predictedFloor: 6, knockoutsMeasured: true,
+        knockouts: [{
+          kind: "MinYear", value: "2000", contentFilterId: "6b1f2c1e-0000-4000-8000-000000000001", label: "released 2000 or later",
+          wouldUnlock: 19, sample: [{ titleId: "t-s", name: "Shinobi", year: 1987, media: "Movie" }],
+        }],
+      },
+      degraded: [], reason: "no picks matched what you asked", timingsMs: null, debug: null,
+    };
+    const events = await collect([frame("done", done)]);
+    expect(events).toEqual([{ event: "done", data: done }]);
+  });
+
+  it.each([
+    [{ kind: "Language", value: "en", contentFilterId: null, label: "English only", wouldUnlock: 4 }, true],
+    [{ kind: 5, value: "en", contentFilterId: null, label: "English only", wouldUnlock: 4 }, false],
+    [{ kind: "Language", value: "en", contentFilterId: null, label: "English only" }, false],
+    [{ kind: "Language", value: 1, contentFilterId: null, label: "English only", wouldUnlock: 4 }, false],
+  ])("isKnockout(%j) is %s", (offer, ok) => {
+    expect(isKnockout(offer)).toBe(ok);
+  });
+
+  it.each([
+    [["judge:1/3"], true],
+    [["plan", "judge:3/3"], true],
+    [["judge:0/3"], false],
+    [["plan"], false],
+    [[], false],
+    [undefined, false],
+  ])("judgeDegraded(%j) is %s", (flags, failed) => {
+    expect(judgeDegraded(flags as string[] | undefined)).toBe(failed);
   });
 });

@@ -111,6 +111,12 @@ export interface DoneData {
    * Never mixed into `results`, never counted as picks. Absent on an older server.
    */
   nearMiss?: AskCard[];
+  /**
+   * Cards the judge never ruled on, on a turn where no card was judged a match — the collapsed
+   * "not checked against your request" tray of a none-found answer (§4.8, D1). Never the grid.
+   * Absent on an older server.
+   */
+  unchecked?: AskCard[];
   /** "Picks" or "NoneFound". A none-found answer has no grid; its reply says why. */
   mode?: string | null;
   /** The supply behind a none-found answer, null on every other turn. */
@@ -526,20 +532,40 @@ export function isDone(data: unknown): data is DoneData {
   if (data.failureCode != null && typeof data.failureCode !== "string") return false;
   // The near-miss tray renders cards exactly as the grid does, so every one passes the card guard.
   if (data.nearMiss != null && (!Array.isArray(data.nearMiss) || !data.nearMiss.every(isCard))) return false;
+  if (data.unchecked != null && (!Array.isArray(data.unchecked) || !data.unchecked.every(isCard))) return false;
   if (data.mode != null && typeof data.mode !== "string") return false;
   if (!isStringListOrAbsent(data.degraded)) return false;
   if (data.supply != null && !isSupply(data.supply)) return false;
   return true;
 }
 
-/** The relaxation offers print their label and count, so both are type-checked. */
+/**
+ * The supply only has to be an object whose offers are a list. Each OFFER is type-checked on its
+ * own ({@link isKnockout}) and a malformed one is dropped by the reader — never the frame. A
+ * server that wrote `kind` as a number once cost the user the whole `done` frame: the none-found
+ * card never rendered and the turn spun forever (acceptance D1). An optional chip is not worth an
+ * answer.
+ */
 function isSupply(v: unknown): v is AskSupply {
   if (!isRecord(v)) return false;
-  if (v.knockouts == null) return true;
+  return v.knockouts == null || Array.isArray(v.knockouts);
+}
+
+/** One relaxation offer: its label and count are printed, its kind and value key the chip. */
+export function isKnockout(k: unknown): k is AskKnockout {
   return (
-    Array.isArray(v.knockouts) &&
-    v.knockouts.every(
-      (k) => isRecord(k) && typeof k.label === "string" && typeof k.wouldUnlock === "number" && typeof k.kind === "string",
-    )
+    isRecord(k) &&
+    typeof k.label === "string" &&
+    typeof k.wouldUnlock === "number" &&
+    typeof k.kind === "string" &&
+    typeof k.value === "string"
   );
+}
+
+/**
+ * Whether a `done` frame's degraded list says a judge batch failed — some of the turn's cards were
+ * never checked against the request, and the reply is marked so.
+ */
+export function judgeDegraded(flags: readonly string[] | null | undefined): boolean {
+  return (flags ?? []).some((f) => f.startsWith("judge:") && f.length > "judge:".length && !f.startsWith("judge:0/"));
 }
