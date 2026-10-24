@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../store/scoreOverridesSlice";
-import { AskStreamError, isCard, isFailedDone, streamAskReel, type AskCard, type AskReelRequest, type AssistantMessageData, type ConflictData, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
+import { AskStreamError, isCard, isFailedDone, streamAskReel, type AskCard, type AskKnockout, type AskReelRequest, type AssistantMessageData, type ConflictData, type ConversationData, type DoneData, type PhaseData } from "./askReelStream";
 
 /**
  * `resumed` is a fourth state, not a flavour of `done`: the transcript came back from the server
@@ -36,6 +36,11 @@ export type ErrorReason = "session" | "timeout" | "conversation" | "request" | n
 export interface ChatTurn {
   role: "user" | "assistant";
   text: string;
+  /**
+   * Assistant rows only: the reply is the server's degraded copy — every attempt to read the
+   * question failed — so it is shown as degraded rather than as an answer (A-2, B-5).
+   */
+  degraded?: boolean;
   /**
    * Assistant rows only: the server rewrote this sentence because the question collided with a
    * standing exclusion. The reply is written before a single candidate exists, so an unqualified
@@ -344,6 +349,8 @@ export interface ConversationPayload {
     kind?: string;
     status?: string;
     failureCode?: string | null;
+    /** True when the row's reply is the degraded copy. Absent on an older server. */
+    degraded?: boolean;
     /** Both spellings accepted: the payload has never carried one, and the SSE frame calls it `turnId`. */
     id?: string | null;
     turnId?: string | null;
@@ -360,6 +367,10 @@ export interface ConversationPayload {
    * which is what keeps the tray's label from claiming a number it was never told.
    */
   belowFloor?: AskCard[];
+  /** The judge's partial matches, restored as their own collapsed tray. Absent on an older server. */
+  nearMiss?: AskCard[];
+  /** "Picks" or "NoneFound" for the newest answer. Absent on an older server. */
+  mode?: string | null;
   reason?: string | null;
   /**
    * The collision notice the newest replayed turn emitted, stored on the turn and handed back
@@ -791,7 +802,9 @@ export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
     .map((t) =>
       t.role === "assistant" && t.status === "Failed"
         ? { role: "assistant" as const, text: "", failed: true, failureCode: t.failureCode ?? null }
-        : { role: t.role as "user" | "assistant", text: t.text },
+        : t.role === "assistant" && t.degraded
+          ? { role: "assistant" as const, text: t.text, degraded: true }
+          : { role: t.role as "user" | "assistant", text: t.text },
     );
 }
 
@@ -1300,6 +1313,15 @@ interface State {
   /** The cards the quality floor cut on the last completed turn. Their own tray, never the grid. */
   belowFloor: AskCard[];
   /**
+   * The judge's partial matches on the last completed turn — the collapsed "close, but not quite"
+   * tray. Never the grid, never counted as picks.
+   */
+  nearMiss: AskCard[];
+  /** "Picks" or "NoneFound" for the answer on screen; null before any answer. */
+  mode: string | null;
+  /** What turning one condition off would unlock, on a none-found answer. Empty otherwise. */
+  knockouts: AskKnockout[];
+  /**
    * The server's own count of what the quality floor cut on the last completed turn. Distinct from
    * `belowFloor.length` on purpose: a turn can report a cut without sending the cards down, and the
    * tray has to be able to say "3 held back" when it was handed none of them. `null` = the server
@@ -1496,7 +1518,7 @@ export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], turnConflict: null, turnConflictTerms: [],
-  belowFloor: [], droppedByFloor: null, errorReason: null,
+  belowFloor: [], nearMiss: [], mode: null, knockouts: [], droppedByFloor: null, errorReason: null,
   holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
   pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
@@ -1580,8 +1602,11 @@ function sumDropped(carried: number | null, incoming: number | undefined): numbe
  * So they now move with the grid: held while the grid is held, and released at the single moment
  * the grid is replaced (the first candidate of the new turn) or completed.
  */
-function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "droppedByFloor" | "exhausted" | "conflict" | "conflictTerms"> {
-  return { reason: null, paged: false, belowFloor: [], droppedByFloor: null, exhausted: false, conflict: null, conflictTerms: [] };
+function clearedAnswerDescription(): Pick<State, "reason" | "paged" | "belowFloor" | "nearMiss" | "mode" | "knockouts" | "droppedByFloor" | "exhausted" | "conflict" | "conflictTerms"> {
+  return {
+    reason: null, paged: false, belowFloor: [], nearMiss: [], mode: null, knockouts: [], droppedByFloor: null,
+    exhausted: false, conflict: null, conflictTerms: [],
+  };
 }
 
 export function chatReducer(state: State, action: ChatAction): State {
@@ -1672,6 +1697,10 @@ export function chatReducer(state: State, action: ChatAction): State {
       };
     }
     case "phase":
+      // A heartbeat is the server repeating the LAST phase through a silence. It is proof of life
+      // (the watchdog already re-armed on its bytes), not a boundary: re-sorting on it would move
+      // cards that are already on screen every five seconds.
+      if (action.data.heartbeat) return state;
       // A phase boundary is the ONLY mid-stream moment the rows may re-order (see
       // partitionedOrder) — a settle-then-shuffle rhythm instead of jumping on every event. A held
       // previous answer is exempt: it is finished work, and reshuffling it while a new turn runs
@@ -1752,6 +1781,11 @@ export function chatReducer(state: State, action: ChatAction): State {
         // All of it is finished work — a resumed answer is never re-ordered by anything.
         settled: cards.length,
         belowFloor: tray,
+        nearMiss: (p.nearMiss ?? []).filter(isCard),
+        mode: p.mode ?? null,
+        // Not on the resume payload: the supply is not stored. The none-found reply restored above
+        // still carries every count in words.
+        knockouts: [],
         // The tray IS the count on a resume: the server hands the whole stored block back, so
         // `belowFloor.length` is what the fence can be opened and counted against. A payload that
         // carried the field and an empty array is a server saying the floor cut nothing; one that
@@ -1782,7 +1816,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         ? state
         : {
           ...state,
-          turns: [...state.turns, { role: "assistant", text: action.data.text, conflict: action.data.conflict }],
+          turns: [...state.turns, {
+            role: "assistant", text: action.data.text, conflict: action.data.conflict,
+            ...(action.data.degraded ? { degraded: true } : {}),
+          }],
         };
     case "candidate": {
       const c = action.data;
@@ -1885,6 +1922,10 @@ export function chatReducer(state: State, action: ChatAction): State {
         // The under-floor tray belongs to the turn that produced it. A page appends its own tray
         // to the previous one; a fresh answer replaces it.
         belowFloor: state.appending ? [...state.belowFloor, ...(action.data.belowFloor ?? [])] : action.data.belowFloor ?? [],
+        // The near-miss tray follows the floor tray's rule: a page adds its own, an answer replaces.
+        nearMiss: state.appending ? [...state.nearMiss, ...(action.data.nearMiss ?? [])] : action.data.nearMiss ?? [],
+        mode: state.appending ? state.mode : action.data.mode ?? null,
+        knockouts: state.appending ? state.knockouts : action.data.supply?.knockouts ?? [],
         // Same rule as the tray it labels: a page ADDS its cut to the running total, a fresh answer
         // replaces it. `null` rather than `0` where neither side said anything — a server that never
         // sent the field has not told us it cut nothing, and the tray falls back to counting the
@@ -2190,7 +2231,7 @@ export function useAskReelChat() {
         case "done": dispatch({ type: "done", data: ev.data, stream }); break;
         default: break;
       }
-    }, controller.signal)
+    }, controller.signal, armWatchdog)
       .then(() => {
         clearWatchdog();
       })
@@ -2409,6 +2450,12 @@ export function useAskReelChat() {
     conflictTerms: state.conflictTerms,
     /** Cards the quality floor cut on the last turn — their own tray, never the grid. */
     belowFloor,
+    /** The judge's partial matches on the last turn — the collapsed "close, but not quite" tray. */
+    nearMiss: applyScoreOverrides(state.nearMiss, overrides),
+    /** "NoneFound" when the answer on screen is an honest "nothing left", "Picks" otherwise. */
+    mode: state.mode,
+    /** The relaxation offers of a none-found answer. */
+    knockouts: state.knockouts,
     /**
      * How many the quality floor cut on the last turn, as the SERVER counted them. Cleared on a new
      * user turn, a re-ask and a fresh conversation, so last question's number never labels this

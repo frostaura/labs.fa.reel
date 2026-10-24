@@ -3440,3 +3440,78 @@ describe("chatReducer — a resumed notice pins to the answer, not the failed ta
     expect(state.conflict).toBe("Your conditions permanently exclude comedy and romance.");
   });
 });
+
+describe("chatReducer — trust-v1 (WS-2 P0)", () => {
+  it("a_heartbeat_phase_changes_nothing_and_never_reorders_the_grid", () => {
+    // Fixture variation, one field: the same phase frame with and without `heartbeat`. The real
+    // phase settles the in-flight cards by blend; the heartbeat must leave them exactly as shown.
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true });
+    const first = chatReducer(asked, { type: "candidate", data: card(1, { blend: 0.2 }) });
+    const second = chatReducer(first, { type: "candidate", data: card(2, { blend: 0.9 }) });
+    const beat = chatReducer(second, { type: "phase", data: { stage: "ranking", found: 2, scored: 2, heartbeat: true } });
+    expect(beat).toBe(second);
+    const real = chatReducer(second, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } });
+    expect(real.order).toEqual(["t2", "t1"]);
+  });
+
+  it("a_degraded_reply_is_marked_on_its_bubble", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "no superheroes please", fresh: true });
+    const degraded = chatReducer(asked, {
+      type: "assistant",
+      data: { text: "I couldn't think that one through just now. Try asking again in a moment.", degraded: true },
+    });
+    expect(degraded.turns.at(-1)).toMatchObject({ role: "assistant", degraded: true });
+    const plain = chatReducer(asked, { type: "assistant", data: { text: "Here you go." } });
+    expect(plain.turns.at(-1)?.degraded).toBeUndefined();
+  });
+
+  it("done_carries_the_near_miss_tray_the_mode_and_the_relaxations_and_a_new_answer_replaces_them", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "ninja movies", fresh: true });
+    const noneFound = chatReducer(asked, {
+      type: "done",
+      data: {
+        results: [],
+        reason: "no picks matched what you asked",
+        nearMiss: [card(7, { satisfies: "partial" })],
+        mode: "NoneFound",
+        supply: { knockouts: [{ kind: "Language", value: "en", contentFilterId: null, label: "English only", wouldUnlock: 11 }] },
+      },
+    });
+    expect(noneFound.mode).toBe("NoneFound");
+    expect(noneFound.nearMiss.map((c) => c.titleId)).toEqual(["t7"]);
+    expect(noneFound.knockouts.map((k) => k.label)).toEqual(["English only"]);
+    // The near-miss tray is never the grid.
+    expect(noneFound.order).toEqual([]);
+
+    const next = chatReducer(
+      chatReducer(noneFound, { type: "userTurn", message: "samurai films", fresh: false }),
+      { type: "done", data: { results: [card(1)], reason: "1 pick for you", mode: "Picks" } },
+    );
+    expect(next.mode).toBe("Picks");
+    expect(next.nearMiss).toEqual([]);
+    expect(next.knockouts).toEqual([]);
+  });
+
+  it("a_resume_restores_the_near_miss_tray_the_mode_and_the_degraded_bubble", () => {
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-nf",
+        lastCardsAt: "2026-10-24T09:00:00Z",
+        cards: [],
+        nearMiss: [card(7), { titleId: "broken" } as unknown as AskCard],
+        mode: "NoneFound",
+        turns: [
+          { sequence: 0, role: "user", text: "ninja movies", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "I couldn't think that one through just now.", kind: "ask", status: "Completed", degraded: true },
+        ],
+        reason: "no picks matched what you asked",
+        lastQuery: "ninja movies",
+        shown: [],
+      },
+    });
+    expect(state.mode).toBe("NoneFound");
+    expect(state.nearMiss.map((c) => c.titleId)).toEqual(["t7"]);
+    expect(state.turns.at(-1)).toMatchObject({ role: "assistant", degraded: true });
+  });
+});

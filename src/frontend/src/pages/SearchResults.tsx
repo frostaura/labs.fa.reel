@@ -14,6 +14,7 @@ import {
 import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import ConversationSwitcher from "../components/search/ConversationSwitcher";
 import SearchConditions from "../components/search/SearchConditions";
+import PickConditionsButton from "../components/rec/PickConditionsButton";
 import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
@@ -111,7 +112,7 @@ function AskReel() {
   const {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
-    conflictTerms, turnConflict, turnConflictTerms, belowFloor, droppedByFloor, holdingPrevious,
+    conflictTerms, turnConflict, turnConflictTerms, belowFloor, nearMiss, mode, knockouts, droppedByFloor, holdingPrevious,
     arrived, removed, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
     pageQuery, pageRefusal, hasLocalTurn,
@@ -421,6 +422,75 @@ function AskReel() {
   const heldBack = floorHeldBack(belowFloorVisible.length, stopped ? null : droppedByFloor);
   const floorLabel = formatFloor(floorBar);
 
+  // The two trays, defined once because they render under a grid AND under a none-found answer:
+  // "Blade of the 47 Ronin" is the samurai request's only match, under the bar, and the reply names
+  // it — so the tray it names has to be on the same screen when nothing reached the grid.
+  const floorTray = (
+    <>
+      {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
+          collapsed: these picks are not being recommended, they are being accounted for. The
+          count is what the tray actually holds, falling back to the server's own scalar only
+          on a turn where the cards were not sent down (see `floorHeldBack`) — a label the user
+          can count and disprove has to agree with its contents. The bar comes from the
+          account's own conditions, formatted to the one decimal the server's sentence uses:
+          naming it turns "Reel held some back" into something the user can act on, because
+          the number in it is one they chose and can change. */}
+      {heldBack > 0 && (
+        <details
+          className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+          data-testid="askreel-below-floor"
+        >
+          {/* `min-h-11` and padding rather than `flex`: a `display: flex` summary loses its
+              own disclosure marker, and the triangle is the affordance that says the block
+              opens. The box still measures 44 px, which is what a thumb needs. */}
+          <summary
+            data-testid="askreel-below-floor-toggle"
+            className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
+          >
+            {floorLabel
+              ? `Show the ${heldBack} under your ${floorLabel} bar`
+              : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
+          </summary>
+          <p className="fa-caption text-fa-frost-dim/70 mt-1">
+            These matched the request but scored below the bar Reel holds itself to.
+          </p>
+          {belowFloorVisible.length > 0 && (
+            <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+              {belowFloorVisible.map((card) => (
+                <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
+              ))}
+            </div>
+          )}
+        </details>
+      )}
+    </>
+  );
+
+  // The judge's partial matches (FD-2b): collapsed by default, never the grid, never counted as
+  // picks. A tray rather than a drop, because "close, but not quite" is still worth one tap.
+  const nearMissVisible = nearMiss.filter((c) => !removedSet.has(c.titleId));
+  const nearMissTray = nearMissVisible.length > 0 && (
+    <details
+      className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
+      data-testid="askreel-near-miss"
+    >
+      <summary
+        data-testid="askreel-near-miss-toggle"
+        className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
+      >
+        {`Close, but not quite — ${nearMissVisible.length} ${plural(nearMissVisible.length, "title")}`}
+      </summary>
+      <p className="fa-caption text-fa-frost-dim/70 mt-1">
+        Reel judged these a partial match for what you asked, so they are not in your picks.
+      </p>
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+        {nearMissVisible.map((card) => (
+          <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
+        ))}
+      </div>
+    </details>
+  );
+
   // Re-ask on a filter change rather than filtering locally. `setMediaTypes` is read by the next
   // request, so it must land before the re-ask. `reask` — not `send` — because the user asked the
   // question once: replaying it through `send` stamped another copy of their bubble into the
@@ -649,6 +719,16 @@ function AskReel() {
                       annotation repeating what it annotates, with no space between them. One of
                       the two has to go, and the sentence is the one that says something. See
                       {@link showsConflictPill} for why the pill survives at all. */}
+                  {/* A degraded reply is the server's own "I couldn't read that" — labelled, so it is
+                      never mistaken for an answer about the cards under it. */}
+                  {turn.degraded && (
+                    <span
+                      data-testid="askreel-reply-degraded"
+                      className="fa-caption ml-2 inline-flex items-center rounded-full border border-fa-warning/40 px-2 py-0.5 align-middle text-fa-warning"
+                    >
+                      couldn’t read that fully
+                    </span>
+                  )}
                   {turn.conflict && showsConflictPill(turn.text) && (
                     <span
                       data-testid="askreel-reply-conflict"
@@ -957,6 +1037,36 @@ function AskReel() {
           <p className="fa-caption text-fa-frost-dim">Reel couldn’t reach the search engine. It’s usually momentary.</p>
           {canRetry && <RetryButton onRetry={reask} disabled={streaming} />}
         </div>
+      ) : (status === "done" || status === "resumed") && mode === "NoneFound" && visible.length === 0 ? (
+        // An honest "nothing left" (WS-2 1j). The reply above already says why, with the counts —
+        // this card offers what can be done about it: the relaxations that would unlock something,
+        // and the editor where each of them lives. Already-seen titles are never offered.
+        <div className="space-y-5">
+          <div className="fa-card p-6 max-w-xl mx-auto space-y-3" data-testid="askreel-none-found">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-fa-frost-dim" />
+              <p className="fa-body text-fa-frost-bright">Nothing left that matches</p>
+            </div>
+            {knockouts.length > 0 && (
+              <ul className="flex flex-wrap gap-2" data-testid="askreel-none-found-relaxations">
+                {knockouts.map((k) => (
+                  <li
+                    key={`${k.kind}:${k.value}`}
+                    className="fa-caption rounded-full border border-fa-frost/20 px-3 py-1 text-fa-frost-dim"
+                  >
+                    {`Without “${k.label}”: +${k.wouldUnlock}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="flex flex-wrap items-center gap-3 [&_[data-testid=open-conditions]]:min-h-11">
+              <PickConditionsButton />
+              {canRetry && <RetryButton onRetry={reask} disabled={streaming} label="Ask again" />}
+            </div>
+          </div>
+          {floorTray}
+          {nearMissTray}
+        </div>
       ) : status === "resumed" && lastCardsAt == null && resumedTail == null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
         // "No matches for that one" under the user's own question — the page reporting a verdict
@@ -1073,42 +1183,8 @@ function AskReel() {
             </div>
           )}
 
-          {/* The floor, shown rather than assumed. Same fence as the outside-request channel, but
-              collapsed: these picks are not being recommended, they are being accounted for. The
-              count is what the tray actually holds, falling back to the server's own scalar only
-              on a turn where the cards were not sent down (see `floorHeldBack`) — a label the user
-              can count and disprove has to agree with its contents. The bar comes from the
-              account's own conditions, formatted to the one decimal the server's sentence uses:
-              naming it turns "Reel held some back" into something the user can act on, because
-              the number in it is one they chose and can change. */}
-          {heldBack > 0 && (
-            <details
-              className={`border-t border-fa-frost/10 pt-5 transition-opacity ${holdingPrevious ? "opacity-40" : ""}`}
-              data-testid="askreel-below-floor"
-            >
-              {/* `min-h-11` and padding rather than `flex`: a `display: flex` summary loses its
-                  own disclosure marker, and the triangle is the affordance that says the block
-                  opens. The box still measures 44 px, which is what a thumb needs. */}
-              <summary
-                data-testid="askreel-below-floor-toggle"
-                className="fa-body min-h-11 cursor-pointer py-3 text-fa-frost-dim marker:text-fa-frost/40 hover:text-fa-frost-bright"
-              >
-                {floorLabel
-                  ? `Show the ${heldBack} under your ${floorLabel} bar`
-                  : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
-              </summary>
-              <p className="fa-caption text-fa-frost-dim/70 mt-1">
-                These matched the request but scored below the bar Reel holds itself to.
-              </p>
-              {belowFloorVisible.length > 0 && (
-                <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
-                  {belowFloorVisible.map((card) => (
-                    <ResultCard key={card.titleId} card={card} onSaveTapped={setSavePending} />
-                  ))}
-                </div>
-              )}
-            </details>
-          )}
+          {floorTray}
+          {nearMissTray}
         </>
       )}
 

@@ -36,12 +36,39 @@ export interface AskCard {
    * under the main grid, never interleaved. Absent on older servers (= false).
    */
   outsideRequest?: boolean;
+  /**
+   * The judge's verdict on whether this title IS what was asked for — "yes" on a pick, "partial" in
+   * the near-miss tray, null where it was not judged (a failed judge batch, an older server).
+   */
+  satisfies?: string | null;
 }
 
 export interface PhaseData {
   stage: string;
   found: number;
   scored: number;
+  /**
+   * True on a phase the server REPEATED because the stream had been silent — a heartbeat, not a new
+   * phase. It re-arms the watchdog and must not re-sort anything (B-10).
+   */
+  heartbeat?: boolean;
+}
+
+/** One relaxation a none-found answer offers: what turning one condition off would unlock. */
+export interface AskKnockout {
+  kind: string;
+  value: string;
+  contentFilterId: string | null;
+  label: string;
+  wouldUnlock: number;
+}
+
+/**
+ * The supply behind a none-found answer — the counts the reply's sentence is built from. Only the
+ * relaxation offers are read here; the sentence itself arrives as the reply.
+ */
+export interface AskSupply {
+  knockouts?: AskKnockout[];
 }
 
 export interface DoneData {
@@ -79,6 +106,17 @@ export interface DoneData {
    * — never mixed into `results`, which is the answer.
    */
   belowFloor?: AskCard[];
+  /**
+   * The judge's partial matches — "close, but not what you asked" — in their own collapsed tray.
+   * Never mixed into `results`, never counted as picks. Absent on an older server.
+   */
+  nearMiss?: AskCard[];
+  /** "Picks" or "NoneFound". A none-found answer has no grid; its reply says why. */
+  mode?: string | null;
+  /** The supply behind a none-found answer, null on every other turn. */
+  supply?: AskSupply | null;
+  /** The parts of this turn that did not run as designed: "plan", "judge:1/3". Empty when none. */
+  degraded?: string[];
 }
 
 /** A conflict between the question and the account's standing exclusions. Informational. */
@@ -109,6 +147,11 @@ export interface ConflictData {
 export interface AssistantMessageData {
   text: string;
   conflict?: boolean;
+  /**
+   * True when the reply is the server's degraded copy: every attempt to read the question failed.
+   * It claims nothing and is rendered as degraded, never as an answer.
+   */
+  degraded?: boolean;
 }
 
 /** The phrase the server uses for a caught exception. See `LiveSearchExpansionService`. */
@@ -237,6 +280,7 @@ export async function streamAskReel(
   request: AskReelRequest,
   onEvent: (ev: AskEvent) => void,
   signal: AbortSignal,
+  onActivity?: () => void,
 ): Promise<void> {
   const init: RequestInit = {
     method: "POST",
@@ -274,6 +318,10 @@ export async function streamAskReel(
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    // ANY bytes are proof of life — the `:keepalive` comment included, which never becomes an
+    // event. The watchdog used to re-arm only on parsed events, so a stream the server was
+    // keeping alive through a long model call could still be declared dead (A-6, B-10).
+    onActivity?.();
     buffer += decoder.decode(value, { stream: true });
     drain();
   }
@@ -363,7 +411,8 @@ export function isPhase(data: unknown): data is PhaseData {
     isRecord(data) &&
     typeof data.stage === "string" &&
     typeof data.found === "number" &&
-    typeof data.scored === "number"
+    typeof data.scored === "number" &&
+    isBooleanOrAbsent(data.heartbeat)
   );
 }
 
@@ -419,7 +468,8 @@ export function isCard(data: unknown): data is AskCard {
     isNumberOrNull(data.tmdbId) &&
     (data.why == null || typeof data.why === "string") &&
     isBooleanOrAbsent(data.outsideRequest) &&
-    isBooleanOrAbsent(data.seen)
+    isBooleanOrAbsent(data.seen) &&
+    (data.satisfies == null || typeof data.satisfies === "string")
   );
 }
 
@@ -439,7 +489,12 @@ export function isReranked(data: unknown): data is { titleId: string; fit: numbe
 export function isAssistantMessage(data: unknown): data is AssistantMessageData {
   // `conflict` decides whether the reply renders an "under your conditions" tag, so a truthy
   // string would badge an unqualified answer. Absent stays fine — see AssistantMessageData.
-  return isRecord(data) && typeof data.text === "string" && isBooleanOrAbsent(data.conflict);
+  return (
+    isRecord(data) &&
+    typeof data.text === "string" &&
+    isBooleanOrAbsent(data.conflict) &&
+    isBooleanOrAbsent(data.degraded)
+  );
 }
 
 /** A list of terms the page joins into a sentence, or nothing. Absent is every older server. */
@@ -469,5 +524,22 @@ export function isDone(data: unknown): data is DoneData {
   // there. Absent stays fine — no server before Phase 1 sent it.
   if (data.removed != null && typeof data.removed !== "number") return false;
   if (data.failureCode != null && typeof data.failureCode !== "string") return false;
+  // The near-miss tray renders cards exactly as the grid does, so every one passes the card guard.
+  if (data.nearMiss != null && (!Array.isArray(data.nearMiss) || !data.nearMiss.every(isCard))) return false;
+  if (data.mode != null && typeof data.mode !== "string") return false;
+  if (!isStringListOrAbsent(data.degraded)) return false;
+  if (data.supply != null && !isSupply(data.supply)) return false;
   return true;
+}
+
+/** The relaxation offers print their label and count, so both are type-checked. */
+function isSupply(v: unknown): v is AskSupply {
+  if (!isRecord(v)) return false;
+  if (v.knockouts == null) return true;
+  return (
+    Array.isArray(v.knockouts) &&
+    v.knockouts.every(
+      (k) => isRecord(k) && typeof k.label === "string" && typeof k.wouldUnlock === "number" && typeof k.kind === "string",
+    )
+  );
 }
