@@ -160,7 +160,10 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         }
 
         // Twice in a row: the second run must supersede the first, not collide with the unique index.
+        // A new rating lands between them — a retrain over unchanged inputs is skipped by design
+        // (see Same_inputs_never_retrain…), and that is not what this test is about.
         await RunTrainAsync(accountId, new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow });
+        await SeedRatingAsync(accountId, await SeedTitleAsync("Trainable late"), 9);
         await RunTrainAsync(accountId, new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow });
 
         await using var db = fixture.CreateContext(new AccountContext());
@@ -174,6 +177,149 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
 
         // And the artifact it left behind is readable — i.e. stamped with the running schema version.
         Assert.NotNull(await db.ModelArtifacts.FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active));
+    }
+
+    [Fact]
+    public async Task Same_inputs_never_retrain_and_the_active_model_is_left_alone()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        var first = await ActiveAsync(accountId);
+        int runsAfterFirst;
+        await using (var count = fixture.CreateContext(new AccountContext()))
+        {
+            runsAfterFirst = await count.TrainingRuns.CountAsync(r => r.AccountId == accountId);
+        }
+
+        // The enrich-chain shape: three more Train jobs, nothing new rated, nothing re-extracted.
+        SyncJob? last = null;
+        for (var i = 0; i < 3; i++)
+        {
+            last = NewTrainJob(accountId);
+            await RunTrainAsync(accountId, last);
+        }
+
+        var active = await ActiveAsync(accountId);
+        Assert.Equal(first.Id, active.Id);
+        Assert.Equal(1, active.Version);
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Equal(1, await db.ModelArtifacts.IgnoreQueryFilters().CountAsync(a => a.AccountId == accountId));
+        // The skip comes before the eval harness, so no ledger row is written for a non-event either.
+        Assert.Equal(runsAfterFirst, await db.TrainingRuns.CountAsync(r => r.AccountId == accountId));
+        Assert.Contains("Nothing new to learn from", last!.ProgressMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_new_rating_always_retrains_even_minutes_later()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        await SeedRatingAsync(accountId, await SeedTitleAsync("Just rated"), 10);
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Fact]
+    public async Task Catalogue_drift_alone_waits_out_the_hour_then_retrains_once()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        // An enrich pass re-extracts a rated title: a real input change, but not a new label.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var ratedTitle = await db.UserRatings.Where(r => r.AccountId == accountId).Select(r => r.TitleId).FirstAsync();
+            db.TitleAttributes.Add(new TitleAttributes
+            {
+                TitleId = ratedTitle,
+                Status = AttributeExtractionStatus.Done,
+                ExtractorVersion = 3,
+                ExtractorModel = "test",
+                ExtractedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(1, (await ActiveAsync(accountId)).Version); // debounced: v1 is minutes old
+
+        // An hour later the same drift is worth one refit.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var artifact = await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+            artifact.TrainedAt = DateTime.UtcNow - TrainJobHandler.DriftDebounce - TimeSpan.FromMinutes(1);
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+
+        // And having absorbed it, the next one has nothing to learn.
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Fact]
+    public async Task An_onboarding_account_is_never_skipped()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        // A re-ingest put the account back mid-pipeline: skipping would leave it behind a spinner.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var account = await db.Accounts.SingleAsync(a => a.Id == accountId);
+            account.PipelineStage = PipelineStage.Extracting;
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+        await using var verify = fixture.CreateContext(new AccountContext());
+        Assert.Equal(PipelineStage.Evaluated, (await verify.Accounts.SingleAsync(a => a.Id == accountId)).PipelineStage);
+    }
+
+    private static SyncJob NewTrainJob(Guid accountId) =>
+        new() { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow };
+
+    private async Task<Guid> SeedTrainableAccountAsync()
+    {
+        var accountId = await SeedAccountAsync();
+        for (var i = 0; i < TrainJobHandler.MinTrainingRows + 4; i++)
+        {
+            await SeedRatingAsync(accountId, await SeedTitleAsync($"Hygiene {i}"), (short)(4 + (i % 7)));
+        }
+
+        return accountId;
+    }
+
+    private async Task<ModelArtifact> ActiveAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        return await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
     }
 
     private async Task RunTrainAsync(Guid accountId, SyncJob job)

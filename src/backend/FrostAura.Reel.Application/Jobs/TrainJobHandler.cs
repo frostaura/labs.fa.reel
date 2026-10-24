@@ -78,6 +78,22 @@ public class TrainJobHandler(
             return;
         }
 
+        // ── Retrain hygiene: same inputs, same model ──────────────────────────────────────
+        // Every enrich run used to chain a retrain and every retrain was promoted — four in eight
+        // minutes with zero new ratings, each re-dealing the feed and re-spending the cross-reference
+        // pass on noise. A retrain now has to have something to learn from. There is deliberately NO
+        // "promote only if it beats the current model" rule: on this holdout that would select on
+        // noise (0 of 101 evaluations beat popularity), so the honest rule is about INPUTS.
+        var inputHashes = await TrainingInputHash.ComputeAsync(db, accountId, hyperparams, ct);
+        if (await SkipReasonAsync(account, inputHashes, now, ct) is { } skip)
+        {
+            job.ProgressMessage = skip;
+            job.ProgressPct = 100;
+            await db.SaveChangesAsync(ct);
+            logger.LogInformation("Train skipped for {AccountId}: {Reason}", accountId, skip);
+            return;
+        }
+
         if (account.PipelineStage is PipelineStage.Extracting or PipelineStage.Linked or PipelineStage.Ingesting
             || (account.PipelineStage is PipelineStage.Degraded && await ConnectionIsHealthyAsync(accountId, ct)))
         {
@@ -189,6 +205,10 @@ public class TrainJobHandler(
                 version = FeatureSchema.Version,
                 names = FeatureSchema.AllNames(),
                 stats = standardizer.ToPayload(),
+                // What this artifact learned from, for the next retrain's same-inputs check. In the
+                // existing document for the same reason the standardizer stats are: no column.
+                labelHash = inputHashes.Labels,
+                inputHash = inputHashes.Inputs,
             }),
             TrainingRunId = trainingRunId,
             Status = ArtifactStatus.Active,
@@ -245,6 +265,54 @@ public class TrainJobHandler(
         }
 
         logger.LogInformation("Serving model v{Version} trained for {AccountId} on {Rows} labels.", version + 1, accountId, rows.Count);
+    }
+
+    /// <summary>
+    /// How close two retrains on the same LABELS may land. Catalogue drift alone (an enrich pass
+    /// re-extracting rated titles' attributes) is a real input change, but a run of them minutes
+    /// apart is one change in progress, not several — so the model is refit at most hourly for it.
+    /// New labels are never debounced: the user rating something is the point of retraining.
+    /// </summary>
+    public static readonly TimeSpan DriftDebounce = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Why this run must not train, or null when it should. Only a STEADY account (its pipeline
+    /// already past evaluation) is ever skipped: an onboarding account parked mid-pipeline would
+    /// otherwise wait behind a spinner for a model it already has.
+    /// </summary>
+    private async Task<string?> SkipReasonAsync(
+        Account account, TrainingInputHash.Hashes current, DateTime now, CancellationToken ct)
+    {
+        if (account.PipelineStage is not (PipelineStage.FeedReady or PipelineStage.Evaluated))
+        {
+            return null;
+        }
+
+        var active = await db.ModelArtifacts
+            .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
+            .OrderByDescending(a => a.Version)
+            .Select(a => new { a.Version, a.TrainedAt, a.FeatureSchemaJson })
+            .FirstOrDefaultAsync(ct);
+        if (active is null || TrainingInputHash.ReadFrom(active.FeatureSchemaJson) is not { } trainedOn)
+        {
+            return null;
+        }
+
+        if (trainedOn.Inputs == current.Inputs)
+        {
+            return string.Create(
+                CultureInfo.InvariantCulture,
+                $"Nothing new to learn from since model v{active.Version} — no new ratings and no changed inputs, so the current model stays.");
+        }
+
+        if (trainedOn.Labels == current.Labels && now - active.TrainedAt < DriftDebounce)
+        {
+            return string.Create(
+                CultureInfo.InvariantCulture,
+                $"Catalogue details changed but no ratings did; model v{active.Version} is under an hour old, so the refit waits.");
+        }
+
+        return null;
     }
 
     /// <summary>
