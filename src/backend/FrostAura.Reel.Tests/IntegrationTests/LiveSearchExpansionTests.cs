@@ -244,10 +244,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
                 r.GetProperty("why").GetString());
         }
 
-        // The reason is a CLAUSE LIST now, not a sentence with optional tails — see AskReelReason for
-        // why (the old nesting made the rating-floor clause unreachable in one of its two branches).
+        // The reason is a CLAUSE LIST in the user's words — see AskReelReason for why.
         Assert.Equal(
-            "5 picks matched everything you asked · 7 closest-but-outside shown separately",
+            "5 picks match what you asked · 7 close but outside what you asked, shown separately",
             done.Data.GetProperty("reason").GetString());
 
         // Nothing vanishes unexplained: everything streamed is either kept or in the tray.

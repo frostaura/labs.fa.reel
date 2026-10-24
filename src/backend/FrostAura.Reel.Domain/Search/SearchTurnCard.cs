@@ -3,6 +3,36 @@ using FrostAura.Reel.Domain.Tenancy;
 namespace FrostAura.Reel.Domain.Search;
 
 /// <summary>
+/// The closed vocabulary for <see cref="SearchTurnCard.Tier"/>.
+/// </summary>
+public static class SearchTurnCardTier
+{
+    /// <summary>A pick: in the grid, logged as an exposure.</summary>
+    public const string Pick = "Pick";
+
+    /// <summary>The judge called it a partial match: the collapsed "Close, but not …" tray. Never logged.</summary>
+    public const string NearMiss = "NearMiss";
+
+    /// <summary>A match under the account's For-you bar: the "under your bar" tray. Never logged.</summary>
+    public const string BelowFloor = "BelowFloor";
+
+    /// <summary>
+    /// The tier a stored card belongs to. A row with no tier predates the column and is read from its
+    /// <see cref="SearchTurnCard.BelowFloor"/> flag. A tier this build does not know was written by a
+    /// later one, and it is read as <see cref="NearMiss"/> — a tray, never the grid — because the one
+    /// wrong answer that matters is promoting a card nobody recommended.
+    /// </summary>
+    public static string Of(SearchTurnCard card) => card.Tier switch
+    {
+        null or "" => card.BelowFloor ? BelowFloor : Pick,
+        Pick => Pick,
+        NearMiss => NearMiss,
+        BelowFloor => BelowFloor,
+        _ => NearMiss,
+    };
+}
+
+/// <summary>
 /// One card an Ask Reel turn actually returned, stored so the turn can be replayed. Modelled on
 /// <c>FeedItem</c>: the same shape of thing — a ranked pick belonging to one durable serve — and
 /// the same rule that <see cref="Rank"/> is the position on screen rather than a score to re-sort
@@ -79,6 +109,31 @@ public class SearchTurnCard : IAccountScoped
     /// what they all were, since the tray was not stored.</para>
     /// </summary>
     public bool BelowFloor { get; set; }
+
+    /// <summary>
+    /// Which part of the answer this card sat in: one of <see cref="SearchTurnCardTier"/>. Null on
+    /// every row written before the tier existed; <see cref="SearchTurnCardTier.Of"/> reads those
+    /// from <see cref="BelowFloor"/>, which is exactly what they meant.
+    ///
+    /// <para><b><see cref="BelowFloor"/> stays true for EVERY non-pick tier</b>, not only the floor
+    /// tray. An image from before this column reads only that flag, so a near-miss row written with
+    /// it false would replay on a rollback as a PICK — the promotion the tier exists to prevent.
+    /// Mislabelled as under the bar is the safe way to be wrong; promoted into the grid is not.</para>
+    /// </summary>
+    public string? Tier { get; set; }
+
+    /// <summary>
+    /// The judge's request verdict for this title — <c>yes</c>, <c>partial</c> or <c>no</c> — or null
+    /// where it was not judged (a failed batch, a stub, a row older than the verdict). Null is
+    /// UNJUDGED, never <c>no</c>, and is never re-shown as judged.
+    /// </summary>
+    public string? Satisfies { get; set; }
+
+    /// <summary>
+    /// Where <see cref="LlmFit"/> came from (<c>Llm</c>, <c>Facet</c>, <c>Fallback</c>), typed at the
+    /// point it was produced. Null on rows older than the column.
+    /// </summary>
+    public string? FitSource { get; set; }
 
     /// <summary>The closest-but-outside reserve flag, exactly as it was on the wire.</summary>
     public bool OutsideRequest { get; set; }

@@ -291,6 +291,11 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(t => t.IntentJson).HasColumnType("jsonb");
             e.Property(t => t.ConflictJson).HasColumnType("jsonb");
             e.Property(t => t.StageTimingsJson).HasColumnType("jsonb");
+            // Ask Reel trust-v1 (WS-2): what kind of answer, what degraded, which models and effort.
+            e.Property(t => t.Mode).HasMaxLength(16);
+            e.Property(t => t.DegradedFlags).HasMaxLength(128);
+            e.Property(t => t.ModelIds).HasColumnType("jsonb");
+            e.Property(t => t.ReasoningEffort).HasMaxLength(32);
         });
 
         modelBuilder.Entity<Domain.Search.SearchTurnCard>(e =>
@@ -303,6 +308,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // The no-repeat set: SELECT DISTINCT "TmdbId" WHERE "ConversationId" = @c, on the hot
             // path of every turn before discovery runs.
             e.HasIndex(c => new { c.ConversationId, c.TmdbId });
+            // The no-repeat set keyed on the title itself (B-16): TMDB's movie and TV id spaces
+            // overlap, so a TmdbId-keyed set hid unrelated shows that shared a number with a movie.
+            e.HasIndex(c => new { c.ConversationId, c.TitleId });
             e.HasIndex(c => c.AccountId);
 
             // Mirrors ExposureEvent's precisions exactly, so a card and the exposure row that
@@ -312,6 +320,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(c => c.Blend).HasPrecision(6, 4);
             e.Property(c => c.Why).HasMaxLength(1024);
             e.Property(c => c.WhySource).HasMaxLength(32);
+            e.Property(c => c.Tier).HasMaxLength(16);
+            e.Property(c => c.Satisfies).HasMaxLength(16);
+            e.Property(c => c.FitSource).HasMaxLength(16);
 
             // A DATABASE-level default, not merely a CLR one. Every row written before the tray was
             // stored is a pick, and the default is what makes that true of the existing table

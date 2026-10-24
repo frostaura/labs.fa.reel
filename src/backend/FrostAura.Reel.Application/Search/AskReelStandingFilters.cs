@@ -119,9 +119,27 @@ public static class AskReelStandingFilters
     /// <c>minYear: 2000</c>, and the window it hands back is inside the standing one by
     /// construction. EITHER window colliding is a collision — the model's reading is not evidence
     /// that the user did not ask.</para>
+    ///
+    /// <para><paramref name="rawQuery"/> closes A-12's second half: "older stuff is fine" against a
+    /// "2000 onwards" rule names no year at all, so neither reading carries a window to compare — and
+    /// the reply then promised "older shows from 2000 onward". An explicit request for OLDER titles
+    /// ("older", "classic", "vintage", "oldies", "retro") collides with any standing lower bound,
+    /// deterministically, because the bound is exactly what it asks past.</para>
     /// </summary>
-    public static bool YearWindowCollides(FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
-        WindowCollides(rules, intent) || (requested is not null && WindowCollides(rules, requested));
+    public static bool YearWindowCollides(
+        FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null, string? rawQuery = null) =>
+        WindowCollides(rules, intent)
+        || (requested is not null && WindowCollides(rules, requested))
+        || (rules.MinYear is not null && AsksForOlder(rawQuery));
+
+    /// <summary>Words that ask for titles older than whatever is on offer.</summary>
+    private static readonly IReadOnlySet<string> OlderCues = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "older", "oldies", "classic", "classics", "vintage", "retro", "oldschool",
+    };
+
+    /// <summary>Whether the raw sentence asks for older titles, by a whole word.</summary>
+    internal static bool AsksForOlder(string? rawQuery) => Tokens(rawQuery).Any(OlderCues.Contains);
 
     private static bool WindowCollides(FilterRuleSet rules, SearchIntent intent) =>
         (rules.MinYear is { } standingMin && intent.MaxYear is { } askedMax && askedMax < standingMin)

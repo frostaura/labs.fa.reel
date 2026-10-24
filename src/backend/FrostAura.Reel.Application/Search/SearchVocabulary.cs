@@ -59,6 +59,12 @@ public static class SearchVocabulary
             ["frightening"] = ["horror"],
 
             ["funny"] = ["comedy"],
+            // A-12: "like John Wick but FUNNIER" against a standing comedy exclusion emitted no
+            // conflict frame while the reply itself said comedy was excluded. A comparative or
+            // superlative of "funny" asks for comedy as plainly as the adjective does.
+            ["funnier"] = ["comedy"],
+            ["funniest"] = ["comedy"],
+            ["hilarious"] = ["comedy"],
             ["comedies"] = ["comedy"],
             ["comedic"] = ["comedy"],
             ["humorous"] = ["comedy"],
