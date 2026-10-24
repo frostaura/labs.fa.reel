@@ -472,6 +472,72 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         FeedBuildOutcome outcome, string? reason, bool expected) =>
         Assert.Equal(expected, CrossReferenceScheduler.ShouldEnqueue(outcome, reason));
 
+    // ── WS-1 task 4: a failed re-rank never reaches the page as model output ─────────────────
+
+    [Fact]
+    public async Task A_truncating_reranker_writes_no_model_labelled_or_invented_why_into_the_feed()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedBuildableAccountAsync();
+        await SeedCandidatesAsync(accountId, 12, embedded: false, scored: false);
+
+        // The real adapter over a provider that truncates every completion: each batch fails after
+        // the client's one 2x retry and every verdict is a labelled fallback with an EMPTY why.
+        var provider = new TruncatingProvider();
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["OPENROUTER_API_KEY"] = "test-key-not-a-real-one" })
+            .Build();
+        var scopeFactory = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions
+            .BuildServiceProvider(new Microsoft.Extensions.DependencyInjection.ServiceCollection())
+            .GetService(typeof(Microsoft.Extensions.DependencyInjection.IServiceScopeFactory)) as Microsoft.Extensions.DependencyInjection.IServiceScopeFactory;
+        var recorder = new FrostAura.Reel.Infrastructure.Telemetry.ApiUsageRecorder(
+            scopeFactory!, NullLogger<FrostAura.Reel.Infrastructure.Telemetry.ApiUsageRecorder>.Instance);
+        var keyless = new ConfigurationBuilder().Build();
+        var agent = new FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchAgent(
+            new HttpClient(provider) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            new FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchInterpreter(
+                new HttpClient(), recorder, keyless, NullLogger<FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchInterpreter>.Instance),
+            recorder,
+            config,
+            NullLogger<FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchAgent>.Instance);
+
+        await RunBuildAsync(accountId, agent: agent);
+
+        Assert.True(provider.Calls > 0); // the why pass really did ask
+
+        await using var db = Fixture.CreateContext(Scoped(accountId));
+        var whys = await db.FeedItems.Where(i => i.AccountId == accountId).Select(i => i.WhyThisSentence).ToListAsync();
+        Assert.NotEmpty(whys);
+        Assert.DoesNotContain(whys, w => w.Contains("aligned with your taste", StringComparison.OrdinalIgnoreCase));
+        var sources = await db.ExposureEvents.Where(e => e.AccountId == accountId).Select(e => e.WhySource).ToListAsync();
+        Assert.NotEmpty(sources);
+        Assert.DoesNotContain(ExposureWhySource.Llm.Name, sources);
+    }
+
+    /// <summary>Every completion stops at its ceiling.</summary>
+    private sealed class TruncatingProvider : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++;
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                choices = new[] { new { message = new { content = "{\"results\":[" }, finish_reason = "length" } },
+                usage = new { prompt_tokens = 900, completion_tokens = 900 },
+            });
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
     // ── Fail fast, never retry the deterministic, and the cross-run breaker ──────────────────
 
     [Fact]
@@ -967,7 +1033,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
     }
 
     /// <summary>Runs the real feed build, with the cross-reference scheduler wired in as DI supplies it.</summary>
-    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null)
+    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null, ISearchAgent? agent = null)
     {
         await using var db = Fixture.CreateContext(Scoped(accountId));
         var cache = new MemoryCache(new MemoryCacheOptions());
@@ -988,7 +1054,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
                 db, features, new FastTreeModelEngine(), cache, NullLogger<OnlineResidualModel>.Instance),
             new RatingCalibrationService(db, cache),
             dislikes,
-            new UnavailableSearchAgent(),
+            agent ?? new UnavailableSearchAgent(),
             new TasteFactsBuilder(db, dislikes, features, cache),
             new PersonalisationContext(db, dislikes),
             cache,
