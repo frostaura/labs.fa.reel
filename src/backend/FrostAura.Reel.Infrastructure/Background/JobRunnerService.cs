@@ -166,10 +166,14 @@ public sealed class JobRunnerService(
             var lane = reservedFree && options.InteractiveKinds.Contains(claim.Kind) ? JobLane.Reserved : JobLane.General;
             Interlocked.Increment(ref Busy(lane));
 
+            // Registered as live BEFORE it can start, so a job that finishes at once can never
+            // leave a stale entry behind (which would exempt its id from the stale-job reclaim).
+            var registered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var run = Task.Run(async () =>
             {
                 try
                 {
+                    await registered.Task;
                     await RunAsync(claim, stoppingToken);
                 }
                 catch (Exception ex)
@@ -183,6 +187,7 @@ public sealed class JobRunnerService(
                 }
             }, CancellationToken.None);
             _live[claim.Id] = new LiveJob(claim, run);
+            registered.SetResult();
         }
     }
 
