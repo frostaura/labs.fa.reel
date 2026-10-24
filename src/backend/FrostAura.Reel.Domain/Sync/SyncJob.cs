@@ -53,6 +53,24 @@ public enum JobKind
     CrossReference,
 }
 
+/// <summary>
+/// The job runner's retry and liveness limits, shared with every reader that has to tell a live job
+/// from a dead or retrying one (the status API above all). One definition, so the status payload's
+/// <c>maxAttempts</c> can never disagree with the runner that enforces it.
+/// </summary>
+public static class JobRunnerLimits
+{
+    /// <summary>Attempts a job gets before it is Failed for good. The claim bumps AttemptCount.</summary>
+    public const int MaxAttempts = 3;
+
+    /// <summary>
+    /// A Running job whose heartbeat is older than this is presumed dead and is reclaimed (or
+    /// failed, past <see cref="MaxAttempts"/>). Comfortably longer than the slowest single external
+    /// call, so a slow-but-alive ingest is never mistaken for a crash and duplicated.
+    /// </summary>
+    public static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(12);
+}
+
 public enum JobStatus
 {
     Pending,

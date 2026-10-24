@@ -1,8 +1,8 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
-using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
@@ -18,8 +18,11 @@ public static class SyncEndpoints
     {
         var group = app.MapGroup("/api/sync").RequireAccount();
 
+        // Contract v2 — the shape lives in Application/Pipeline/SyncStatusContract.cs and the rules
+        // in SyncStatusQuery. Typed, so the build-time OpenAPI document carries the full schema
+        // and the generated frontend types follow it.
         group.MapGet("/status", async (
-            IReelDbContext db, IAccountContext accountContext, IConfiguration configuration,
+            IReelDbContext db, SyncStatusQuery statusQuery, IConfiguration configuration,
             HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -28,97 +31,15 @@ public static class SyncEndpoints
                 return Results.Unauthorized();
             }
 
-            var connection = await db.TraktConnections.FirstOrDefaultAsync(c => c.AccountId == account.Id, ct);
-            var jobs = await db.SyncJobs
-                .Where(j => j.AccountId == account.Id)
-                .OrderByDescending(j => j.EnqueuedAt)
-                .Take(6)
-                .ToListAsync(ct);
-
-            var outboxPending = await db.TraktOutbox.CountAsync(o => o.Status == OutboxStatus.Pending || o.Status == OutboxStatus.Failed, ct);
-            var outboxDead = await db.TraktOutbox.CountAsync(o => o.Status == OutboxStatus.DeadLetter, ct);
-
-            // List/write-back health for the header indicator: when Trakt last accepted a write, and
-            // the most recent failure text (so a stuck list surfaces the actual reason on hover).
-            var lastListSyncAt = await db.TraktOutbox
-                .Where(o => o.Status == OutboxStatus.Sent && o.SentAt != null)
-                .MaxAsync(o => (DateTime?)o.SentAt, ct);
-            var outboxLastError = await db.TraktOutbox
-                .Where(o => (o.Status == OutboxStatus.Failed || o.Status == OutboxStatus.DeadLetter) && o.Error != null)
-                .OrderByDescending(o => o.NextAttemptAt)
-                .Select(o => o.Error)
-                .FirstOrDefaultAsync(ct);
-
-            static object ToJobSummary(SyncJob job) => new
-            {
-                kind = job.Kind.ToString(),
-                status = job.Status.ToString(),
-                progressPct = job.ProgressPct,
-                progressMessage = job.ProgressMessage,
-                enqueuedAt = job.EnqueuedAt,
-                completedAt = job.CompletedAt,
-            };
-
-            // The pill should surface the job the user cares about. A primary pipeline job
-            // (onboarding/enrichment/training) outranks a background Trakt poll (delta/reconcile)
-            // that fires every few minutes — otherwise a transient DeltaSync, enqueued after a
-            // long EnrichCatalog, would hijack the pill and read as a generic "Syncing".
-            //
-            // JobKind.CrossReference is deliberately NOT here, and its "xref" kind is deliberately
-            // not in the frontend's BACKGROUND_KINDS either. A pass that can legitimately run for
-            // ten minutes is the most interesting thing happening to the account while it runs, and
-            // the founder asked to watch it count; letting a delta poll steal the pill from it would
-            // report a five-second sync over a ten-minute one. The two sets must stay mirrored:
-            // src/frontend/src/lib/syncCopy.ts.
-            static bool IsBackground(JobKind k) =>
-                k is JobKind.DeltaSync or JobKind.FullReconcile or JobKind.RefreshAvailability;
-
-            var active = jobs.Where(j => j.Status == JobStatus.Running)
-                    .OrderBy(j => IsBackground(j.Kind) ? 1 : 0)
-                    .ThenByDescending(j => j.EnqueuedAt)
-                    .FirstOrDefault()
-                ?? jobs.Where(j => j.Status == JobStatus.Pending)
-                    .OrderBy(j => IsBackground(j.Kind) ? 1 : 0)
-                    .ThenByDescending(j => j.EnqueuedAt)
-                    .FirstOrDefault();
-
             // Progress toward the next retrain, so a screen that asks for ratings can say what they
-            // BUY: "7 more ratings and Reel retrains tonight". Same two inputs the nightly
-            // reconcile's gate uses, read the same way — FirstRatedAt, never Trakt's mutable
-            // RatedAt, because the question is what Reel has learned since the artifact trained.
+            // BUY: "7 more ratings and Reel retrains tonight". The same threshold the nightly
+            // reconcile's gate uses.
             var retrainThreshold = configuration.GetValue("RETRAIN_MIN_NEW_RATINGS", 10);
-            var trainedAt = await db.ModelArtifacts
-                .Where(a => a.AccountId == account.Id && a.Status == ArtifactStatus.Active)
-                .Select(a => (DateTime?)a.TrainedAt)
-                .FirstOrDefaultAsync(ct);
-            var newRatingsSinceTrain = trainedAt is { } since
-                ? await db.UserRatings.CountAsync(r => r.AccountId == account.Id && r.FirstRatedAt > since, ct)
-                : 0;
-
-            return Results.Ok(new
-            {
-                pipelineStage = account.PipelineStage.ToString(),
-                retrain = new
-                {
-                    minNewRatings = retrainThreshold,
-                    newRatingsSinceTrain,
-                    // No Active artifact yet ⇒ the next train is the FIRST one, not a drift
-                    // retrain, and no count is meaningful. The UI says so rather than implying a
-                    // threshold that is not what will actually fire.
-                    hasActiveModel = trainedAt is not null,
-                    lastTrainedAt = trainedAt,
-                },
-                connectionStatus = connection?.Status.ToString() ?? "Revoked",
-                lastDeltaSyncAt = connection?.LastDeltaSyncAt,
-                lastFullReconcileAt = connection?.LastFullReconcileAt,
-                activeJob = active is null ? null : ToJobSummary(active),
-                recentJobs = jobs.Select(ToJobSummary),
-                outboxPending,
-                outboxDeadLetters = outboxDead,
-                lastListSyncAt,
-                outboxLastError,
-            });
-        });
+            var status = await statusQuery.GetAsync(account, retrainThreshold, DateTime.UtcNow, ct);
+            return Results.Ok(status);
+        })
+        .Produces<SyncStatusResponse>()
+        .Produces(StatusCodes.Status401Unauthorized);
 
         group.MapPost("/now", async (IReelDbContext db, IAccountContext accountContext, CancellationToken ct) =>
         {
@@ -137,6 +58,8 @@ public static class SyncEndpoints
                     Kind = JobKind.DeltaSync,
                     Priority = 0, // user asked — interactive priority
                     EnqueuedAt = DateTime.UtcNow,
+                    // The one DeltaSync the header shows: the user asked for it and is watching.
+                    TriggerReason = JobVisibilityPolicy.SyncNowReason,
                     // Force a full refetch, not an activity-diffed delta. A user hitting "sync now"
                     // wants the authoritative state — and Trakt does not bump last_activities
                     // watched_at when history is *removed*, so a diffed delta would silently skip a
