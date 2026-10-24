@@ -1,12 +1,12 @@
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
-import { ensureFreshSession } from "../../lib/session";
+import { refreshSession } from "../../lib/session";
 import { FROM_CACHE_HEADER } from "../../lib/swContract";
 import { servedFromCache, servedLive, type ConnectivityState } from "../connectivitySlice";
 
 /**
  * Auth rides in HttpOnly cookies (reel_at / reel_rt) — no headers to prepare; every request
  * just needs credentials included. The access cookie lives 15 minutes: on a 401 the base
- * query silently rotates the session via `ensureFreshSession` (single-flight, shared with the
+ * query silently rotates the session via `refreshSession` (single-flight, shared with the
  * raw-fetch callers in `lib/session.ts`) and retries once. A refreshed access cookie also heals
  * the SSE EventSource on its next auto-reconnect.
  *
@@ -16,8 +16,10 @@ import { servedFromCache, servedLive, type ConnectivityState } from "../connecti
  * (H+1). The other auth endpoints stay exempt: refreshing around `auth/refresh` itself would
  * recurse, and the OAuth and logout calls have no session to heal.
  *
- * Only a 401 that survives the refresh is terminal; it surfaces through the query's `error`, and
- * RequireAuth redirects on that alone (anything else gets a retry shell — H-15).
+ * Only a 401 whose refresh the server REJECTED is terminal; it surfaces through the query's
+ * `error`, and RequireAuth redirects on that alone. A refresh that got no answer on its merits
+ * (5xx, 429, offline) replaces the 401 with that failure, so the session probe shows the retry
+ * shell instead of signing the user out (H-15).
  */
 const rawBaseQuery = fetchBaseQuery({ baseUrl: "/api", credentials: "include" });
 
@@ -26,6 +28,17 @@ export function savedAtFromDateHeader(value: string | null): string | null {
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+/**
+ * The error a request reports when its 401 could not be healed because the refresh itself got no
+ * answer: the refresh's own status when it had one, otherwise a fetch error. Never a 401 — that
+ * would read as "signed out".
+ */
+export function refreshUnavailableError(status: number | null): FetchBaseQueryError {
+  return status == null
+    ? { status: "FETCH_ERROR", error: "The session refresh did not reach the server." }
+    : { status, data: null };
 }
 
 /** Every endpoint outside `auth/*`, plus the session probe. */
@@ -42,8 +55,11 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
 
   const url = typeof args === "string" ? args : args.url;
   if (result.error?.status === 401 && refreshesOn401(url)) {
-    if (await ensureFreshSession()) {
+    const refresh = await refreshSession();
+    if (refresh.outcome === "refreshed") {
       result = await rawBaseQuery(args, queryApi, extraOptions);
+    } else if (refresh.outcome === "unavailable") {
+      result = { error: refreshUnavailableError(refresh.status), meta: result.meta };
     }
   }
 

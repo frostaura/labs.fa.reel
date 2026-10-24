@@ -1,7 +1,8 @@
 import { useEffect, type ReactNode } from "react";
 import { Navigate } from "react-router";
 import { useGetSessionQuery } from "../store/api";
-import { isSignedOutError } from "../lib/sessionErrors";
+import { isSignedOutError, sessionGate } from "../lib/sessionErrors";
+import { Button } from "./ui/button";
 
 /**
  * Frost splash while the session resolves; the landing page only when the session is really gone.
@@ -21,41 +22,40 @@ export default function RequireAuth({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("online", retry);
   }, [error, refetch]);
 
-  if (isLoading) {
+  const gate = sessionGate({ isLoading, hasSession: data != null, error });
+  if (gate === "signed-out") return <Navigate to="/" replace />;
+  if (gate === "children") return <>{children}</>;
+  if (gate === "splash") {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-2xl font-light tracking-wide text-fa-frost animate-pulse">Reel</div>
       </div>
     );
   }
-  // A session already in hand outlives a failed re-check; only a missing one can strand the page.
-  if (data) return <>{children}</>;
-  if (error && isSignedOutError(error)) return <Navigate to="/" replace />;
-  if (error) {
-    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
-    return (
-      <div className="min-h-screen flex items-center justify-center px-6" data-testid="session-retry">
-        <div className="max-w-sm text-center space-y-4" role="alert">
-          <div className="text-2xl font-light tracking-wide text-fa-frost">Reel</div>
-          <p className="fa-body text-fa-frost">
-            {offline ? "You're offline." : "Reel couldn't reach its server."}
-          </p>
-          <p className="fa-caption text-fa-frost-dim">
-            {offline
-              ? "You're still signed in. This page loads as soon as you're back online."
-              : "You're still signed in. Try again in a moment."}
-          </p>
-          <button
-            type="button"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            className="inline-flex items-center justify-center rounded-full border border-fa-edge bg-fa-glass px-4 py-2 fa-caption text-fa-frost-bright transition hover:border-fa-frost/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50 disabled:opacity-60"
-          >
-            {isFetching ? "Trying…" : "Try again"}
-          </button>
-        </div>
+  // gate === "retry": no session in hand and the probe failed for a reason that is not a 401.
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" data-testid="session-retry">
+      <div className="max-w-sm text-center space-y-4" role="alert">
+        <div className="text-2xl font-light tracking-wide text-fa-frost">Reel</div>
+        <p className="fa-body text-fa-frost">
+          {offline ? "You're offline." : "Reel couldn't reach its server."}
+        </p>
+        <p className="fa-caption text-fa-frost-dim">
+          {offline
+            ? "This page loads as soon as you're back online."
+            : "Try again in a moment — you'll stay on this page."}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50"
+        >
+          {isFetching ? "Trying…" : "Try again"}
+        </Button>
       </div>
-    );
-  }
-  return <>{children}</>;
+    </div>
+  );
 }

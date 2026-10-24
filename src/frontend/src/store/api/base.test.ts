@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { refreshesOn401, savedAtFromDateHeader } from "./base";
+import { refreshUnavailableError, refreshesOn401, savedAtFromDateHeader } from "./base";
 
 describe("refreshesOn401", () => {
   it("refreshes for the session probe and every non-auth endpoint (H+1)", () => {
@@ -24,5 +24,15 @@ describe("savedAtFromDateHeader", () => {
   it("is null for an absent or unparseable header", () => {
     expect(savedAtFromDateHeader(null)).toBeNull();
     expect(savedAtFromDateHeader("yesterday-ish")).toBeNull();
+  });
+});
+
+describe("refreshUnavailableError", () => {
+  it("carries the refresh's own status, never a 401", () => {
+    expect(refreshUnavailableError(503)).toEqual({ status: 503, data: null });
+  });
+
+  it("is a fetch error when the refresh never got an answer", () => {
+    expect(refreshUnavailableError(null)).toMatchObject({ status: "FETCH_ERROR" });
   });
 });
