@@ -110,7 +110,25 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
 
         // A different model id arrives (simulating real OpenRouter): stub rows must re-extract,
         // not stay frozen. The fake reports a distinct ModelId and writes it onto each row.
-        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), new RenamingExtractor("openai/gpt-5.4-mini"));
+        //
+        // Re-extraction waits behind every title that has NO answer at all (NEW-3), and this
+        // catalogue is shared — so the cap is sized to clear whatever unanswered backlog the other
+        // classes left behind, and the order is asserted rather than assumed: every unanswered title
+        // the run touched came before these two answered ones.
+        int backlog;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            backlog = await db.Titles.CountAsync(t => t.LastMetadataRefreshAt != null
+                && !db.TitleAttributes.Any(a => a.TitleId == t.Id
+                    && a.Status == AttributeExtractionStatus.Done && a.ExtractorVersion >= 1));
+        }
+
+        var renaming = new RenamingExtractor("openai/gpt-5.4-mini");
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), renaming, cap: backlog + titleIds.Count);
+
+        var firstReExtraction = titleIds.Min(id => renaming.TitlesSeen.IndexOf(id));
+        Assert.True(firstReExtraction >= 0, "the stub rows were never re-extracted");
+        Assert.All(renaming.TitlesSeen.Take(firstReExtraction), id => Assert.DoesNotContain(id, titleIds));
 
         await using (var db = Fixture.CreateContext(new AccountContext()))
         {
