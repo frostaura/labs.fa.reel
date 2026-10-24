@@ -126,6 +126,30 @@ public class FeedStarvationTopicTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Several_conditions_are_listed_as_a_list()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Three titles, each held out by a different single condition: dropping any one of the three
+        // refills the topic, so all three are named — comma-separated, the last after "and".
+        var topic = $"topic-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitleAsync(topic, t => t.TmdbVoteAverage = 5.5m);
+        await SeedTitleAsync(topic, t => t.Genres = ["comedy"]);
+        await SeedTitleAsync(topic, t => t.Year = 1990);
+        await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, "7.0");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await SeedFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        Assert.Equal(
+            $"Your crowd-rating floor, release-year window and excluded genres each leave no {topic} titles you have not already seen. Relax one to see picks again.",
+            await ExplainAsync(accountId, topic));
+    }
+
+    [Fact]
     public async Task A_topic_with_eligible_titles_needs_no_explanation()
     {
         if (!fixture.Available)

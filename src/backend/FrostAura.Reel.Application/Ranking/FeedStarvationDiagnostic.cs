@@ -169,7 +169,7 @@ public sealed class FeedStarvationDiagnostic(IReelDbContext db, EligibilityQuery
             [] => $"Your content filters together leave {subject} you have not already seen — {count} unseen titles are excluded by them.",
             [var (label, plural)] =>
                 $"Your {label} {(plural ? "leave" : "leaves")} {subject} you have not already seen. Relax {(plural ? "them" : "it")} to see picks again.",
-            _ => $"Your {string.Join(" and ", culprits.Select(c => c.Label))} each leave {subject} you have not already seen. Relax one to see picks again.",
+            _ => $"Your {string.Join(", ", culprits.Take(culprits.Count - 1).Select(c => c.Label))} and {culprits[^1].Label} each leave {subject} you have not already seen. Relax one to see picks again.",
         };
     }
 }
