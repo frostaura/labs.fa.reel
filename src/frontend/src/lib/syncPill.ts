@@ -292,7 +292,9 @@ export function derivePill({ status, statusFailed, live, summary }: PillInput): 
   return {
     mode: "health",
     tone: "ok",
-    label: done ?? (status.lastDeltaSyncAt ? `Up to date · ${relTime(status.lastDeltaSyncAt)}` : "Not synced yet"),
+    // A timestamp, not "Up to date": a stamp 45 days old under the words "up to date" is a claim
+    // the pill cannot back.
+    label: done ?? (status.lastDeltaSyncAt ? `Synced ${relTime(status.lastDeltaSyncAt)}` : "Not synced yet"),
     pct: null,
     count: null,
     reconnect: false,

@@ -154,7 +154,7 @@ test.describe("sync pill", () => {
 
     // User-visible work polls every 5 s; the next answer says idle and the pill must follow it.
     await expect(page.getByTestId("sync-pill")).toHaveCount(0, { timeout: 7_000 });
-    await expect(page.getByTestId("sync-health-label")).toHaveText(/^Up to date/);
+    await expect(page.getByTestId("sync-health-label")).toHaveText(/^Synced/);
     expect(shell.polls() - pollsAtEnd).toBeLessThanOrEqual(1);
   });
 

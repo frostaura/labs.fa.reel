@@ -201,7 +201,7 @@ describe("progress", () => {
 describe("idle", () => {
   it("a late progress frame cannot keep the pill active once the poll says idle (H-17)", () => {
     const view = pill(status({ activeJob: null }), { live: { kind: "delta", pct: 100, current: null, total: null } })!;
-    expect(view).toMatchObject({ mode: "health", tone: "ok", label: "Up to date · 3m ago" });
+    expect(view).toMatchObject({ mode: "health", tone: "ok", label: "Synced 3m ago" });
   });
 
   it("says what the last sync did, when it said", () => {
