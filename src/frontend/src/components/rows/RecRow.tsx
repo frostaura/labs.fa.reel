@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { FeedCard } from "../../store/feedTypes";
 import RecCard from "../rec/RecCard";
 import FadeScrollRow from "../FadeScrollRow";
+import RailRetryTile from "./RailRetryTile";
 
 interface Props {
   title: ReactNode;
@@ -12,6 +13,9 @@ interface Props {
   loadMore?: () => void;
   loading?: boolean;
   exhausted?: boolean;
+  /** Automatic retries are spent: show the Retry tile instead of a placeholder. */
+  failed?: boolean;
+  onRetry?: () => void;
 }
 
 /** A skeleton poster card trailing the rail while the next page resolves. */
@@ -24,10 +28,11 @@ function ShimmerCard() {
 }
 
 /** Generic horizontal scroll-snap row of collapsed cards, with optional infinite paging. */
-export default function RecRow({ title, items, variant = "default", loadMore, loading }: Props) {
+export default function RecRow({ title, items, variant = "default", loadMore, loading, failed, onRetry }: Props) {
   // Nothing to show and nothing coming — render nothing. While a first page is in flight (genre
-  // rails mount empty), fall through so the shimmer rail appears instead of a gap.
-  if (items.length === 0 && !loading) {
+  // rails mount empty), fall through so the shimmer rail appears instead of a gap; a rail that
+  // failed says so rather than vanishing, because an empty rail and a broken one are different news.
+  if (items.length === 0 && !loading && !failed) {
     return null;
   }
 
@@ -62,7 +67,8 @@ export default function RecRow({ title, items, variant = "default", loadMore, lo
             <RecCard card={card} />
           </div>
         ))}
-        {loading && <ShimmerCard />}
+        {loading && !failed && <ShimmerCard />}
+        {failed && onRetry && <RailRetryTile onRetry={onRetry} />}
       </FadeScrollRow>
     </section>
   );

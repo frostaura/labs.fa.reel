@@ -17,6 +17,7 @@ import CrossReferenceBand from "../components/rec/CrossReferenceBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
 import RecRow from "../components/rows/RecRow";
 import GenreRow from "../components/rows/GenreRow";
+import RailPageProvider from "../components/rows/RailPageProvider";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
@@ -191,6 +192,10 @@ export default function Home() {
           {/* Above the hero, because it is a question about tonight rather than about the model. */}
           <TonightMoodChips value={mood} onChange={setMood} />
 
+          {/* One registry of titles on screen per page view (F+3): every rail sends what the
+              others already show, so a title never repeats across rails. Keyed like the rows it
+              wraps — a re-seed or a medium switch is a new page view. */}
+          <RailPageProvider key={`page:${filter.media}:${resetKey}`}>
           <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
 
           <ContinueWatchingRow entries={continueFiltered} />
@@ -224,6 +229,7 @@ export default function Home() {
           {(genres ?? []).map((g) => (
             <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />
           ))}
+          </RailPageProvider>
 
           {(feed?.lockedRowCount ?? 0) > 0 && (
             <section className="fa-card p-5 flex items-center gap-4">
