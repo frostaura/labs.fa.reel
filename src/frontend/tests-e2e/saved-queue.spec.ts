@@ -274,3 +274,96 @@ test.describe("saved queue", () => {
     await expect(page.getByTestId("watch-tonight")).toHaveCount(0);
   });
 });
+
+/**
+ * Saved tells the truth about itself (G-3, G-15). The list line says "syncing…" only for a card
+ * whose write-back the server reports pending, and a failed read is a failure with a retry — never
+ * the "Nothing in the queue yet" empty state.
+ */
+test.describe("saved states", () => {
+  async function serveSaved(page: Page, items: unknown[]) {
+    await mockJson(page, "**/api/saved", {
+      managedListUrl: "https://trakt.tv/lists/42",
+      sort: "tonight",
+      eveningBudgetMinutes: EVENING_BUDGET,
+      expectedAbsoluteError: 1.9,
+      unscoredRemaining: 0,
+      items,
+    });
+  }
+
+  const shelf = (listSync: Array<string | undefined>, onManagedList: boolean[]) =>
+    listSync.map((state, i) =>
+      savedItem({
+        titleId: `00000000-0000-0000-0000-0000000000b${i}`,
+        tmdbId: 2000 + i,
+        name: `Saved ${i}`,
+        // Not streaming, so nothing is pinned and every card renders in the grid.
+        availableNow: false,
+        onManagedList: onManagedList[i]!,
+        ...(state === undefined ? {} : { listSync: state }),
+      })
+    );
+
+  test("no card says syncing when no write-back is pending", async ({ page }) => {
+    await bootSaved(page);
+    // The founder's shelf in miniature: on the list, off the list, and an older server's card.
+    await serveSaved(page, shelf(["onList", "offList", "offList", undefined, undefined], [true, false, false, true, false]));
+    await page.goto("/saved");
+    await expect(page.getByTestId("saved-card")).toHaveCount(5);
+    await expect(page.getByText("syncing…")).toHaveCount(0);
+    await expect(page.getByTestId("saved-list-sync")).toHaveText(["on Up Next", "not on Up Next", "not on Up Next", "on Up Next"]);
+  });
+
+  test("a pending write-back is the only thing that says syncing", async ({ page }) => {
+    await bootSaved(page);
+    await serveSaved(page, shelf(["pending", "onList", "pending"], [true, true, true]));
+    await page.goto("/saved");
+    await expect(page.getByTestId("saved-card")).toHaveCount(3);
+    await expect(page.getByText("syncing…")).toHaveCount(2);
+  });
+
+  test("loading holds a skeleton, and a failed read shows an error with a working retry", async ({ page }) => {
+    await bootSaved(page);
+    let calls = 0;
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route(
+      (url) => url.pathname === "/api/saved",
+      async (route) => {
+        calls += 1;
+        if (calls === 1) {
+          await held;
+          return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            managedListUrl: null, sort: "tonight", eveningBudgetMinutes: EVENING_BUDGET,
+            expectedAbsoluteError: 1.9, unscoredRemaining: 0, items: TONIGHT_ORDER,
+          }),
+        });
+      }
+    );
+    await page.goto("/saved");
+    await expect(page.getByTestId("saved-loading")).toBeVisible();
+    release();
+
+    await expect(page.getByTestId("saved-error")).toBeVisible();
+    await expect(page.getByTestId("saved-empty")).toHaveCount(0);
+    await expect(page.getByTestId("saved-error")).toContainText("Couldn't load your queue");
+
+    await page.getByTestId("saved-retry").click();
+    await expect(page.getByTestId("watch-tonight")).toContainText("Sicario");
+    await expect(page.getByTestId("saved-error")).toHaveCount(0);
+  });
+
+  test("an empty shelf is the empty state, not an error", async ({ page }) => {
+    await bootSaved(page);
+    await serveSaved(page, []);
+    await page.goto("/saved");
+    await expect(page.getByTestId("saved-empty")).toBeVisible();
+    await expect(page.getByTestId("saved-error")).toHaveCount(0);
+  });
+});

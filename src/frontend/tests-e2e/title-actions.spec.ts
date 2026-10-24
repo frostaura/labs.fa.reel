@@ -225,3 +225,125 @@ test.describe("the after-rating verdict", () => {
     await expect(toast).toHaveCount(0);
   });
 });
+
+/**
+ * The title modal's own failure and navigation states (F-8, F-9, O+3).
+ */
+test.describe("title detail states", () => {
+  async function bootShell(page: Page) {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
+    await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 });
+    await mockJson(page, "**/api/feed/continue-watching", []);
+    await mockJson(page, "**/api/feed/genres", { genres: [] });
+    await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
+  }
+
+  test("a deep link's Close goes to Home and replaces the entry, so Back does not reopen it", async ({ page }) => {
+    await bootTitle(page);
+    await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: [], rows: [], lockedRowCount: 0 });
+    await page.getByRole("button", { name: "Close" }).first().click();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("title-detail")).toHaveCount(0);
+    const historyLength = await page.evaluate(() => window.history.length);
+    // Replaced, not pushed: the title entry is gone from the stack.
+    expect(historyLength).toBeLessThanOrEqual(2);
+  });
+
+  test("Escape on a deep link also lands on Home", async ({ page }) => {
+    await bootTitle(page);
+    await page.keyboard.press("Escape");
+    await expect(page).toHaveURL(/\/home$/);
+  });
+
+  test("a 404 says not found, not an endless shimmer, and offers no pointless retry", async ({ page }) => {
+    await bootShell(page);
+    await mockJson(page, "**/api/titles/movie/999999999", { error: "not found" }, 404);
+    await page.goto("/title/movie/999999999");
+    await expect(page.getByTestId("title-not-found")).toBeVisible();
+    await expect(page.getByTestId("title-detail").locator(".reel-shimmer")).toHaveCount(0);
+    await expect(page.getByTestId("title-retry")).toHaveCount(0);
+  });
+
+  test("a 404 renders within one second of its response", async ({ page }) => {
+    await bootShell(page);
+    let answeredAt = 0;
+    await page.route(
+      (u) => u.pathname === "/api/titles/movie/999999999",
+      (route) => {
+        answeredAt = Date.now();
+        return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+      }
+    );
+    await page.goto("/title/movie/999999999");
+    await expect(page.getByTestId("title-not-found")).toBeVisible();
+    expect(Date.now() - answeredAt).toBeLessThan(1000);
+  });
+
+  test("a server error offers a retry that recovers", async ({ page }) => {
+    await bootShell(page);
+    await mockJson(page, "**/api/titles/movie/1001/providers", {
+      region: "US", attribution: "JustWatch", tmdbWatchPage: "https://www.themoviedb.org/movie/1001/watch", providers: [],
+    });
+    let calls = 0;
+    await page.route(
+      (u) => u.pathname === "/api/titles/movie/1001",
+      (route) => {
+        calls += 1;
+        return calls === 1
+          ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(TITLE) });
+      }
+    );
+    await page.goto("/title/movie/1001");
+    await expect(page.getByTestId("title-error")).toBeVisible();
+    await expect(page.getByTestId("title-not-found")).toHaveCount(0);
+    await page.getByTestId("title-retry").click();
+    await expect(page.getByRole("heading", { level: 1, name: "Quiet Harbor" })).toBeVisible();
+  });
+
+  test("a rated title's header leads with your rating and keeps the prediction as a note", async ({ page }) => {
+    await bootTitle(page, {
+      userState: { ...TITLE.userState, userRating: 9, isFullyWatched: true, plays: 1 },
+      prediction: { predictedRating: 8.2, contributions: [], scoredAt: "2026-10-01T00:00:00Z" },
+    });
+    await expect(page.getByTestId("title-your-rating")).toHaveText("You rated 9");
+    await expect(page.getByTestId("title-prediction-note")).toHaveText("Reel predicted 8.2 for you");
+    // The big "for you" badge is the prediction speaking over you; it is gone from the header.
+    await expect(page.getByTestId("title-detail").locator("h1 ~ *").filter({ hasText: /for you/i })).toHaveCount(0);
+  });
+
+  test("an unrated title keeps the prediction badge and no note", async ({ page }) => {
+    await bootTitle(page, {
+      prediction: { predictedRating: 8.2, contributions: [], scoredAt: "2026-10-01T00:00:00Z" },
+    });
+    await expect(page.getByTestId("title-your-rating")).toHaveCount(0);
+    await expect(page.getByTestId("title-prediction-note")).toHaveCount(0);
+    await expect(page.getByTestId("title-detail").getByText("8.2", { exact: false }).first()).toBeVisible();
+  });
+});
+
+test.describe("person page states", () => {
+  test("a 404 says not found instead of Loading… forever", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/people/00000000-0000-0000-0000-000000000000", {}, 404);
+    await page.goto("/person/00000000-0000-0000-0000-000000000000");
+    await expect(page.getByTestId("person-not-found")).toBeVisible();
+    await expect(page.getByText("Loading…")).toHaveCount(0);
+  });
+
+  test("a server error offers a retry", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/people/00000000-0000-0000-0000-000000000000", {}, 503);
+    await page.goto("/person/00000000-0000-0000-0000-000000000000");
+    await expect(page.getByTestId("person-error")).toBeVisible();
+    await expect(page.getByTestId("person-retry")).toBeVisible();
+  });
+});

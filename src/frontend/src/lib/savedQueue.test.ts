@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isSavedSort,
+  listSyncLabel,
   pinnedPick,
   predictionWithBand,
   queueBelowPin,
@@ -125,5 +126,42 @@ describe("honest presentation", () => {
     expect(isSavedSort("runtime")).toBe(true);
     expect(isSavedSort("nonsense")).toBe(false);
     expect(isSavedSort(null)).toBe(false);
+  });
+});
+
+describe("listSyncLabel (G-3)", () => {
+  it("says syncing only for a pending write-back", () => {
+    expect(listSyncLabel({ listSync: "pending", onManagedList: true })?.text).toBe("syncing…");
+  });
+
+  it("never says syncing for a card that is simply off the list", () => {
+    // The 116: off the list, nothing pending. The old label called every one of them "syncing".
+    expect(listSyncLabel({ listSync: "offList", onManagedList: false })?.text).toBe("not on Up Next");
+    expect(listSyncLabel({ listSync: "onList", onManagedList: true })?.text).toBe("on Up Next");
+  });
+
+  it("the server's listSync wins over the legacy flag", () => {
+    // onManagedList is true for pending AND onList, so it cannot tell them apart.
+    expect(listSyncLabel({ listSync: "onList", onManagedList: false })?.text).toBe("on Up Next");
+    expect(listSyncLabel({ listSync: "offList", onManagedList: true })?.text).toBe("not on Up Next");
+  });
+
+  it("an older server without listSync never yields syncing", () => {
+    expect(listSyncLabel({ onManagedList: true })?.text).toBe("on Up Next");
+    expect(listSyncLabel({ onManagedList: false })).toBeNull();
+  });
+
+  it("an unknown value from a newer server reads as unknown, not as syncing", () => {
+    const fromTheFuture = { listSync: "archived" as unknown as "pending", onManagedList: false };
+    expect(listSyncLabel(fromTheFuture)).toBeNull();
+  });
+
+  it("no state of any card says syncing unless it is pending", () => {
+    const states = [undefined, "onList", "offList"] as const;
+    for (const listSync of states) {
+      for (const onManagedList of [true, false]) {
+        expect(listSyncLabel({ listSync, onManagedList })?.text).not.toBe("syncing…");
+      }
+    }
   });
 });

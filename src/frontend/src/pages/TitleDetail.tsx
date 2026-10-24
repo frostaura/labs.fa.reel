@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
-import { Bookmark, BookmarkCheck, ChevronDown, Eye, EyeOff, Play, Undo2, X } from "lucide-react";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
+import { Bookmark, BookmarkCheck, ChevronDown, Eye, EyeOff, Play, RotateCw, Undo2, X } from "lucide-react";
 import {
   useGetTitleQuery,
   useMarkNotInterestedMutation,
@@ -25,6 +25,7 @@ import { DISLIKE_REASONS } from "../lib/dislikeReasons";
 import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
+import { canGoBack, titleFailure } from "../components/title/titleRouting";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import {
   DropdownMenu,
@@ -157,7 +158,11 @@ export default function TitleDetail() {
   const { mediaType = "movie", tmdbId = "0" } = useParams();
   const navigate = useNavigate();
   const args = { mediaType, tmdbId: Number(tmdbId) };
-  const { data: title, isLoading } = useGetTitleQuery(args);
+  const { data: title, isLoading, isError, error, isFetching, refetch } = useGetTitleQuery(args);
+  const location = useLocation();
+  // A 404 is an answer ("no such title"), anything else is a failure to get one; both used to fall
+  // into `isLoading || !title` and shimmer forever (F-9).
+  const failure = !title && isError ? titleFailure(error) : null;
 
   const [rate] = useRateTitleMutation();
   const [unrate] = useUnrateTitleMutation();
@@ -179,7 +184,14 @@ export default function TitleDetail() {
   // React Compiler rules (correctly) reject.
   const [opener] = useState<HTMLElement | null>(() => document.activeElement as HTMLElement | null);
 
-  const close = () => navigate(-1);
+  // Opened from a card, the page underneath is still mounted and Back reveals it. Opened from a
+  // deep link (a shared URL, a notification, a fresh tab) there is nothing behind it: `navigate(-1)`
+  // used to leave the app or do nothing (F-8). Then Close goes to Home, replacing the history entry
+  // so Back does not reopen the modal.
+  const close = () => {
+    if (canGoBack(location.state)) navigate(-1);
+    else navigate("/home", { replace: true });
+  };
 
   const trailerKey = youTubeVideoId(title?.trailerUrl);
 
@@ -217,7 +229,40 @@ export default function TitleDetail() {
           </DialogClose>
 
           <div className="overflow-y-auto">
-            {isLoading || !title ? (
+            {failure ? (
+              <>
+                <DialogTitle className="sr-only">{failure === "not-found" ? "Title not found" : "Couldn't load this title"}</DialogTitle>
+                <div className="p-8 pt-14 text-center space-y-4" role="alert" data-testid={`title-${failure}`}>
+                  <p className="fa-body text-fa-frost-bright">
+                    {failure === "not-found"
+                      ? "Reel has no title at this address."
+                      : "Couldn't load this title — nothing about it has changed."}
+                  </p>
+                  <p className="fa-caption text-fa-frost-dim">
+                    {failure === "not-found"
+                      ? "The link may be mistyped, or the title has left TMDB's catalogue."
+                      : "The server didn't answer. It is usually brief."}
+                  </p>
+                  <div className="flex items-center justify-center gap-2">
+                    {failure === "error" && (
+                      <button
+                        type="button"
+                        onClick={() => void refetch()}
+                        disabled={isFetching}
+                        className="fa-button min-h-11"
+                        data-testid="title-retry"
+                      >
+                        <RotateCw className="h-4 w-4" />
+                        {isFetching ? "Retrying…" : "Retry"}
+                      </button>
+                    )}
+                    <button type="button" onClick={close} className="fa-button-ghost min-h-11" data-testid="title-failure-close">
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : isLoading || !title ? (
               <>
                 {/* The dialog needs an accessible name from its first frame, before the title lands. */}
                 <DialogTitle className="sr-only">Loading title…</DialogTitle>
@@ -260,8 +305,25 @@ export default function TitleDetail() {
                         <div className="space-y-1.5">
                           <div className="flex items-center gap-3 flex-wrap">
                             <h1 className="text-2xl sm:text-3xl font-light text-fa-frost-bright">{title.name}</h1>
-                            {title.prediction && <PredictedRatingBadge rating={title.prediction.predictedRating} size="lg" />}
+                            {/* Once you have rated it, your number is the headline: a "for you"
+                                guess beside your own score is the model talking over you (O+3). The
+                                prediction stays, demoted to a note, because the gap is the evidence. */}
+                            {title.userState.userRating != null ? (
+                              <span
+                                className="inline-flex items-baseline gap-1 rounded-full border border-fa-frost/50 bg-fa-ink/80 px-3 py-1 text-base font-medium tabular-nums text-fa-frost-bright"
+                                data-testid="title-your-rating"
+                              >
+                                You rated {title.userState.userRating}
+                              </span>
+                            ) : (
+                              title.prediction && <PredictedRatingBadge rating={title.prediction.predictedRating} size="lg" />
+                            )}
                           </div>
+                          {title.userState.userRating != null && title.prediction && (
+                            <p className="fa-caption text-fa-frost" data-testid="title-prediction-note">
+                              Reel predicted {title.prediction.predictedRating.toFixed(1)} for you
+                            </p>
+                          )}
                           <p className="fa-caption text-fa-frost-dim">
                             {[
                               title.year,

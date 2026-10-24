@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Link, useLocation, useParams } from "react-router";
-import { Star } from "lucide-react";
+import { RotateCw, Star } from "lucide-react";
 import { useGetPersonQuery, useRatePersonMutation, useUnratePersonMutation } from "../store/api";
 import { profileUrl } from "../lib/tmdbImages";
 import PosterImage from "../components/rec/PosterImage";
 import ScoreBadges from "../components/rec/ScoreBadges";
+import { titleFailure } from "../components/title/titleRouting";
 
 /** Initials for the avatar fallback — first letters of the first two words of a name. */
 function initials(name: string): string {
@@ -43,9 +44,33 @@ function PersonAvatar({ name, profilePath }: { name: string; profilePath: string
 export default function Person() {
   const { personId = "" } = useParams();
   const location = useLocation();
-  const { data: person, isLoading } = useGetPersonQuery(personId, { skip: !personId });
+  const { data: person, isLoading, isError, error, isFetching, refetch } = useGetPersonQuery(personId, { skip: !personId });
   const [ratePerson] = useRatePersonMutation();
   const [unratePerson] = useUnratePersonMutation();
+
+  // A 404 is an answer and any other failure is a retryable one; both used to read as "Loading…"
+  // forever (F-9).
+  if (!person && (isError || !personId)) {
+    const failure = personId ? titleFailure(error) : "not-found";
+    return (
+      <div className="fa-card p-8 text-center space-y-4" role="alert" data-testid={`person-${failure}`}>
+        <p className="fa-body text-fa-frost-bright">
+          {failure === "not-found" ? "Reel has no person at this address." : "Couldn't load this person — try again."}
+        </p>
+        <div className="flex items-center justify-center gap-2">
+          {failure === "error" && (
+            <button type="button" onClick={() => void refetch()} disabled={isFetching} className="fa-button min-h-11" data-testid="person-retry">
+              <RotateCw className="h-4 w-4" />
+              {isFetching ? "Retrying…" : "Retry"}
+            </button>
+          )}
+          <Link to="/home" className="fa-button-ghost min-h-11">
+            Back to Home
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading || !person) {
     return <div className="fa-body text-fa-frost-dim py-10 text-center">Loading…</div>;

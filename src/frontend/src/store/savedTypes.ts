@@ -4,6 +4,9 @@ export interface SavedProvider {
   logoPath: string | null;
 }
 
+/** The three list states a saved card can be in. Anything else from a newer server reads as unknown. */
+export type SavedListSync = "pending" | "onList" | "offList";
+
 /**
  * One card in the Saved queue.
  *
@@ -29,6 +32,12 @@ export interface SavedQueueItem {
   daysSaved: number;
   fitsEveningBudget: boolean;
   onManagedList: boolean;
+  /**
+   * Where the card stands against the managed Trakt list, from the server's outbox (WS-4):
+   * "pending" only while a ListAdd write-back is genuinely waiting, else "onList" / "offList".
+   * Optional because an older server omits it — see `listSyncLabel`.
+   */
+  listSync?: SavedListSync;
   /** True on at most one item: the server's pinned pick, and the head of the client's candidate list. */
   watchTonight: boolean;
   watchTonightReason: string | null;
