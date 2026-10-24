@@ -33,7 +33,7 @@ public class FeedStarvationTopicTests(PostgresFixture fixture)
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
 
         var sentence = await ExplainAsync(accountId, topic);
-        Assert.Equal($"Your excluded genres leaves no {topic} films you have not already seen. Relax it to see picks again.", sentence);
+        Assert.Equal($"Your excluded genres leave no {topic} titles you have not already seen. Relax them to see picks again.", sentence);
 
         // The whole-feed question has a different answer on the same account: the shared catalogue
         // still has eligible titles, so the feed is not empty and the plain diagnostic says nothing.
@@ -58,12 +58,42 @@ public class FeedStarvationTopicTests(PostgresFixture fixture)
         await RateAsync(accountId, rated);
 
         var sentence = await ExplainAsync(accountId, topic);
-        Assert.Equal($"Every {topic} films title in the catalogue is one you have already seen, rated or dismissed.", sentence);
+        Assert.Equal($"Every {topic} title in the catalogue is one you have already seen, rated or dismissed.", sentence);
         Assert.DoesNotContain("Relax", sentence!, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Low_vote_matches_do_not_count_and_are_not_blamed_on_the_user()
+    public async Task Low_vote_matches_do_not_count_and_the_sentence_says_so_truthfully()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // One unseen match with 3 votes: it exists, so "the catalogue has none" would be false, and
+        // it is unseen, so "you have seen them all" would be false too. The sentence names the votes.
+        var topic = $"topic-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitleAsync(topic, t => t.TmdbVoteCount = 3);
+
+        Assert.Equal(
+            $"The one {topic} title you have not seen has fewer than 50 crowd votes — too few to judge it.",
+            await ExplainAsync(accountId, topic));
+
+        // Counted with no vote floor, the same title is a live, eligible match: nothing to explain.
+        Assert.Null(await ExplainAsync(accountId, topic, minVotes: 0));
+
+        // A seen, well-voted match plus a second low-vote one: still about the votes, and counted.
+        var seen = await SeedTitleAsync(topic, _ => { });
+        await WatchAsync(accountId, seen);
+        await SeedTitleAsync(topic, t => t.TmdbVoteCount = 12);
+        Assert.Equal(
+            $"All 2 {topic} titles you have not seen have fewer than 50 crowd votes — too few to judge them.",
+            await ExplainAsync(accountId, topic));
+    }
+
+    [Fact]
+    public async Task A_topic_the_catalogue_does_not_hold_says_so_and_blames_no_one()
     {
         if (!fixture.Available)
         {
@@ -72,12 +102,27 @@ public class FeedStarvationTopicTests(PostgresFixture fixture)
 
         var topic = $"topic-{Guid.NewGuid():N}";
         var accountId = await SeedAccountAsync();
-        await SeedTitleAsync(topic, t => t.TmdbVoteCount = 3);
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
 
-        Assert.Equal($"The catalogue has no {topic} films titles to offer.", await ExplainAsync(accountId, topic));
+        Assert.Equal($"The catalogue has no {topic} titles.", await ExplainAsync(accountId, topic));
+    }
 
-        // Counted with no vote floor, the same title is a live, eligible match: nothing to explain.
-        Assert.Null(await ExplainAsync(accountId, topic, minVotes: 0));
+    [Fact]
+    public async Task A_singular_condition_reads_in_the_singular()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var topic = $"topic-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitleAsync(topic, t => t.TmdbVoteAverage = 5.5m);
+        await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, "7.0");
+
+        Assert.Equal(
+            $"Your crowd-rating floor leaves no {topic} titles you have not already seen. Relax it to see picks again.",
+            await ExplainAsync(accountId, topic));
     }
 
     [Fact]
@@ -101,8 +146,7 @@ public class FeedStarvationTopicTests(PostgresFixture fixture)
         await using var db = fixture.CreateContext(new AccountContext());
         var diagnostic = new FeedStarvationDiagnostic(db, new EligibilityQueryBuilder(db));
         var hard = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [topic], [])] };
-        return await diagnostic.ExplainEmptyPoolAsync(
-            accountId, diagnostic.TopicFor(hard, minVotes), $"{topic} films", CancellationToken.None);
+        return await diagnostic.ExplainEmptyPoolAsync(accountId, diagnostic.TopicFor(hard, topic, minVotes), CancellationToken.None);
     }
 
     private async Task<Guid> SeedAccountAsync()
