@@ -48,7 +48,7 @@ public static partial class FeedWhyGuard
     private static partial Regex WrongArticleRegex();
 
     [GeneratedRegex(
-        @"\b(?:suits? you less|less (?:than|suited|your speed)"
+        @"\b(?:suits? you less|less (?:than|suited|aligned|of a (?:fit|match)|your speed)"
         + @"|(?:quieter|slower|gentler|softer) detour|\bdetour\b"
         + @"|not (?:an? )?[\w-]+ (?:sprint|thrill-ride|thrill ride|crowd-pleaser)"
         + @"|(?:may|might) not (?:land|suit|appeal|grab|click|work)"

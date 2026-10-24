@@ -116,6 +116,9 @@ public class WhyLineHonestyTests
     [InlineData("Not an action sprint, but the dialogue crackles.")]
     [InlineData("It might not land, but the cast is strong.")]
     [InlineData("Worth it if you can get past the pacing.")]
+    // Caught live on the slot run, 2026-10-24 — and it also matches the acceptance stub regex.
+    [InlineData("A widowed suburban mom selling weed gives you a crime hook, but the comedy-led tone is less aligned with your tastes.")]
+    [InlineData("Sharp writing, though less of a fit for your usual pace.")]
     public void A_hedge_against_its_own_pick_is_refused(string why)
     {
         Assert.True(FeedWhyGuard.IsHedged(why));

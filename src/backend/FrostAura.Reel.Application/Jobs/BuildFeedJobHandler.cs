@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using FrostAura.Reel.Application.Ingestion;
 using FrostAura.Reel.Application.Llm;
@@ -95,6 +96,12 @@ public class BuildFeedJobHandler(
     /// of those are already seen, so the eligible pull reaches a little further than 50.
     /// </summary>
     private const int AnchorNeighbourPull = 60;
+
+    /// <summary>
+    /// How many candidate anchors a build may try per rail it wants. An anchor whose eligible
+    /// neighbourhood cannot fill a rail through the gate is passed over for the next in rotation.
+    /// </summary>
+    private const int AnchorCandidateFactor = 4;
 
     /// <summary>The rating an anchor needs to be drawn from the top tier ("your 9–10 ratings").</summary>
     private const short TopTierAnchorRating = 9;
@@ -493,8 +500,10 @@ public class BuildFeedJobHandler(
         });
         logger.LogInformation(
             "Feed snapshot {SnapshotId} active for {AccountId} ({Candidates} scored, mean taste-prior magnitude {PriorMagnitude:0.000}, "
-                + "{Judged} candidates judged before assembly).",
-            snapshot.Id, accountId, candidates.Count, capture.AveragePriorMagnitude, capture.JudgedBeforeAssembly);
+                + "{Judged} candidates judged before assembly, {PassedOver} anchor(s) passed over by the anchored-row gate, "
+                + "{Dropped} rail(s) dropped).",
+            snapshot.Id, accountId, candidates.Count, capture.AveragePriorMagnitude, capture.JudgedBeforeAssembly,
+            capture.AnchorsPassedOver, capture.RailsDropped);
     }
 
     /// <summary>
@@ -733,6 +742,12 @@ public class BuildFeedJobHandler(
         public int HeroEligibleCount { get; set; }
 
         public int RailsDropped { get; set; }
+
+        /// <summary>
+        /// Candidate anchors tried and passed over because their gated neighbourhood could not fill
+        /// a rail. Logged with the build; not a FeedBuildStat column (no migration for a diagnostic).
+        /// </summary>
+        public int AnchorsPassedOver { get; set; }
 
         public string? DegradedReason { get; set; }
 
@@ -982,7 +997,11 @@ public class BuildFeedJobHandler(
             .Where(id => taste.Self.Ratings.TryGetValue(id, out var rated) && rated.Rating >= TopTierAnchorRating)
             .ToHashSet();
 
+        // anchorIds is an ORDERED CANDIDATE list, longer than the rails wanted: an anchor only gets a
+        // rail if the anchored-row gate finds enough of its neighbourhood (the rail loop below walks
+        // the list until railTarget rails are dealt). Kept anchors (Preserve) lead the list.
         List<Guid> anchorIds;
+        var railTarget = AnchorRowCount;
         if (mode == FeedBuildMode.Preserve)
         {
             // Tonight's contract: the anchors the user is already looking at survive the rebuild
@@ -1012,15 +1031,18 @@ public class BuildFeedJobHandler(
             // "refill exactly the slot that was vacated" the hero does. New loves are real signal and
             // they get their rails on the next FRESH build, which is at most a day away and which
             // the user can force from the refresh button at any time.
-            var railsOnThePage = Math.Min(previousAnchors.Count, AnchorRowCount);
-            if (anchorIds.Count < railsOnThePage)
+            railTarget = Math.Min(previousAnchors.Count, AnchorRowCount);
+            if (anchorIds.Count < railTarget)
             {
                 var holdBack = new HashSet<Guid>(previousDayAnchors);
                 holdBack.UnionWith(anchorIds);
+                // Candidates for the vacated seats, in rotation order — more than the vacancies,
+                // because a replacement anchor only takes a seat if its neighbourhood can fill a
+                // rail through the gate (see the rail loop).
                 anchorIds.AddRange(AnchorRotation
-                    .Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount, topTierAnchors)
-                    .Where(id => !anchorIds.Contains(id))
-                    .Take(railsOnThePage - anchorIds.Count));
+                    .Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset,
+                        AnchorRowCount * AnchorCandidateFactor, topTierAnchors)
+                    .Where(id => !anchorIds.Contains(id)));
             }
         }
         else
@@ -1032,14 +1054,18 @@ public class BuildFeedJobHandler(
             var holdBack = FeedBuildPolicy.IsUserForced(triggerReason)
                 ? previousAnchors.ToHashSet()
                 : previousDayAnchors;
-            anchorIds = AnchorRotation.Select(driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount, topTierAnchors);
+            anchorIds = AnchorRotation.Select(
+                driftPick, anchorPool, allTimeOrder, holdBack, rotationOffset, AnchorRowCount * AnchorCandidateFactor, topTierAnchors);
         }
 
-        var anchors = anchorIds.Select(id => anchorTitles[id]).ToList();
+        var anchorCandidates = anchorIds.Select(id => anchorTitles[id]).ToList();
+
+        // The anchors that actually got a rail — filled by the rail loop, read by the why pass.
+        var anchors = new List<Title>(railTarget);
 
         // Plot-embedding cosine for "because you loved" similarity + hero diversity — far richer
         // than genre overlap. Falls back to genre Jaccard for any title not yet embedded.
-        var embIds = candidates.Select(c => c.Title.Id).Concat(anchors.Select(a => a.Id)).Distinct().ToList();
+        var embIds = candidates.Select(c => c.Title.Id).Distinct().ToList();
         var embByTitle = (await db.TitleEmbeddings.Where(e => embIds.Contains(e.TitleId)).ToListAsync(ct))
             .ToDictionary(e => e.TitleId, e => e.Embedding.ToArray());
         double Similarity(Title a, Title b) =>
@@ -1476,10 +1502,20 @@ public class BuildFeedJobHandler(
         // enough of an anchor's real neighbourhood — it was cut on taste, not on resemblance to one
         // title — so each anchor's nearest ELIGIBLE titles are pulled in and scored through the same
         // final pass the shortlist went through, and compete only for that anchor's rail.
+        //
+        // The candidate anchors are walked in rotation order until railTarget rails are dealt: on a
+        // long history most of a loved title's 50 nearest neighbours are already seen, and an anchor
+        // whose remaining neighbourhood cannot fill a rail honestly is passed over for the next one
+        // rather than padded with strangers.
         var anchorExtras = new List<Candidate>();
-        var anchorPools = new Dictionary<Guid, List<(Candidate Candidate, double Sim)>>();
-        foreach (var anchor in anchors)
+        var anchorTrace = new List<string>();
+        foreach (var anchor in anchorCandidates)
         {
+            if (anchors.Count >= railTarget)
+            {
+                break;
+            }
+
             var anchorVector = await db.TitleEmbeddings
                 .Where(e => e.TitleId == anchor.Id)
                 .Select(e => e.Embedding)
@@ -1496,56 +1532,49 @@ public class BuildFeedJobHandler(
                 var unscored = neighbours.Where(t => !candidatesById.ContainsKey(t.Id)).ToList();
                 if (unscored.Count > 0)
                 {
-                    foreach (var extra in await scoreFinal(unscored, ct))
+                    var scoredExtras = await scoreFinal(unscored, ct);
+                    foreach (var extra in scoredExtras)
                     {
                         candidatesById[extra.Title.Id] = extra;
                         anchorExtras.Add(extra);
+                    }
+
+                    // The pulled-in neighbours get the same per-title context the shortlist got:
+                    // verified people and tone for their why-lines.
+                    var extraIds = scoredExtras.Select(c => c.Title.Id).ToList();
+                    foreach (var (titleId, persons) in VerifiedPeople.BestByRole(
+                                 await VerifiedPeople.ForTitlesAsync(db, taste, extraIds, ct)))
+                    {
+                        personsByTitle[titleId] = persons;
+                    }
+
+                    foreach (var (titleId, tone) in await db.TitleAttributes
+                                 .Where(a => extraIds.Contains(a.TitleId) && a.Tone != null)
+                                 .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct))
+                    {
+                        toneByTitle[titleId] = tone;
                     }
                 }
             }
 
             // Kept members are asked about too — not to re-gate them (tonight's contract keeps a
             // seat that was dealt), but so their chips render from the same evidence the gate reads.
-            var keptIds = previousRailMembers.GetValueOrDefault(anchor.Id) ?? [];
-            var askIds = candidatesById.Keys.Where(id => id != anchor.Id).ToList();
-            var admissions = await AnchorRowGate.AdmitAsync(db, cache, anchor.Id, askIds, ct);
+            var keptMemberIds = previousRailMembers.GetValueOrDefault(anchor.Id) ?? [];
+            var admissions = await AnchorRowGate.AdmitAsync(
+                db, cache, anchor.Id, candidatesById.Keys.Where(id => id != anchor.Id).ToList(), ct);
             foreach (var (titleId, admission) in admissions)
             {
-                if (admission.Admitted || keptIds.Contains(titleId))
+                if (admission.Admitted || keptMemberIds.Contains(titleId))
                 {
                     railEvidence[(anchor.Id, titleId)] = admission.Evidence;
                 }
             }
 
-            anchorPools[anchor.Id] = admissions
+            var admittedPool = admissions
                 .Where(a => a.Value.Admitted && a.Value.Similarity is not null)
-                .Select(a => (candidatesById[a.Key], a.Value.Similarity!.Value))
+                .Select(a => (Candidate: candidatesById[a.Key], Sim: a.Value.Similarity!.Value))
                 .ToList();
-        }
 
-        if (anchorExtras.Count > 0)
-        {
-            // The pulled-in neighbours get the same per-title context the shortlist got: verified
-            // people and tone for their why-lines, and a stored score so a later refill can find them.
-            foreach (var (titleId, persons) in VerifiedPeople.BestByRole(
-                         await VerifiedPeople.ForTitlesAsync(db, taste, anchorExtras.Select(c => c.Title.Id).ToList(), ct)))
-            {
-                personsByTitle[titleId] = persons;
-            }
-
-            var extraIds = anchorExtras.Select(c => c.Title.Id).ToList();
-            foreach (var (titleId, tone) in await db.TitleAttributes
-                         .Where(a => extraIds.Contains(a.TitleId) && a.Tone != null)
-                         .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct))
-            {
-                toneByTitle[titleId] = tone;
-            }
-
-            await PersistScoresAsync(account.Id, artifact.Id, anchorExtras, now, ct);
-        }
-
-        foreach (var anchor in anchors)
-        {
             var members = new List<Candidate>();
             if (mode == FeedBuildMode.Preserve && previousRailMembers.TryGetValue(anchor.Id, out var previousMemberIds))
             {
@@ -1570,10 +1599,9 @@ public class BuildFeedJobHandler(
             if (members.Count < RowSize)
             {
                 var keptIds = members.Select(m => m.Title.Id).ToHashSet();
-                var railPool = anchorPools.GetValueOrDefault(anchor.Id, [])
+                var railPool = admittedPool
                     .Where(x => !used.Contains(x.Candidate.Title.Id) && !keptIds.Contains(x.Candidate.Title.Id)
                         && !reserved.Contains(x.Candidate.Title.Id) && x.Candidate.Predicted >= effectiveFloor)
-                    .Select(x => new { x.Candidate, x.Sim })
                     .ToList();
 
                 // The rail's ordering key folds the anchor-similarity term into SlateAffinity, so
@@ -1596,17 +1624,37 @@ public class BuildFeedJobHandler(
                         [.. railOrder.Skip(taking)]));
             }
 
+            anchorTrace.Add(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{anchor.Name}: {admittedPool.Count} admitted, {admittedPool.Count(x => x.Candidate.Predicted >= effectiveFloor)} at the floor, {members.Count} dealt"));
             if (members.Count < RowMinMembers)
             {
-                capture.RailsDropped++;
-                continue; // a thin row reads worse than no row
+                capture.AnchorsPassedOver++;
+                continue; // a thin row reads worse than no row; the next candidate anchor is tried
             }
 
+            anchors.Add(anchor);
             for (var i = 0; i < members.Count; i++)
             {
                 used.Add(members[i].Title.Id);
                 AddItem(FeedRowKind.BecauseYouLoved, anchor, i, members[i]);
             }
+        }
+
+        capture.RailsDropped += railTarget - anchors.Count;
+        if (anchorTrace.Count > 0)
+        {
+            // One line per build: where each candidate anchor's supply went (gate → floor → dealt).
+            // The diagnostic that says whether an empty rail is the gate, the floor, or the catalogue.
+            logger.LogInformation(
+                "Anchored rails for {AccountId} (floor {Floor}): {Trace}",
+                account.Id, effectiveFloor, string.Join("; ", anchorTrace));
+        }
+
+        if (anchorExtras.Count > 0)
+        {
+            // A stored score for every pulled-in neighbour, so a later refill can find them.
+            await PersistScoresAsync(account.Id, artifact.Id, anchorExtras, now, ct);
         }
 
         // ── v1.1 rows: Deep cuts (high predicted × low popularity) + New & for you ──────────

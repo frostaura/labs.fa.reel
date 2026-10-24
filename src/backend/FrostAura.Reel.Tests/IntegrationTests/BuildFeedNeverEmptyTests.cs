@@ -779,6 +779,52 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Assert.DoesNotContain(await UntrustedSnapshotSweep.FindAsync(verify, CancellationToken.None), f => f.AccountId == accountId);
     }
 
+    [Fact]
+    public async Task An_anchor_whose_neighbourhood_cannot_fill_a_rail_is_passed_over_for_the_next()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Six fresh 10s at the head of the loved pool, each alone in its own direction of the plot
+        // space: nothing eligible sits inside their radius, so no honest rail can be dealt on them.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        var orphans = new List<Guid>();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            for (var i = 0; i < 6; i++)
+            {
+                var orphan = NewTitle($"orphan {i}", popularity: 1.2m, "drama");
+                orphan.Keywords = [$"orphan-{i}"];
+                db.Add(orphan);
+                db.TitleEmbeddings.Add(NewEmbedding(orphan.Id, 600 + (_sharedAxis % 290) + i));
+                db.UserRatings.Add(new UserRating
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    TitleId = orphan.Id,
+                    SubjectType = RatingSubjectType.Movie,
+                    Rating = 10,
+                    RatedAt = DateTime.UtcNow.AddDays(-1),
+                });
+                orphans.Add(orphan.Id);
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+
+        var anchors = await AnchorsOfActiveSnapshotAsync(accountId);
+        Assert.NotEmpty(anchors);
+        Assert.Empty(anchors.Intersect(orphans));
+    }
+
     /// <summary>Answers every batch with fixed sources — a stand-in for each WS-1 failure shape.</summary>
     private sealed class SourcedAgent(ResultSource fitSource, ResultSource whySource) : ISearchAgent
     {
