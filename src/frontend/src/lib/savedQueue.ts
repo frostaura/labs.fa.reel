@@ -116,11 +116,13 @@ export interface ListSyncLabel {
 /**
  * The managed-list line on a saved card (G-3). "syncing…" is said ONLY when the server reports a
  * ListAdd write-back still waiting — it used to be said for every card not on the list, which put it
- * on 116 watched titles that nothing was ever going to sync. An older server without `listSync` gets
- * "on Up Next" when that is known and no line at all otherwise: absent evidence of a pending write
- * is not evidence of one. An unrecognised value from a newer server is treated the same way.
+ * on 116 watched titles that nothing was ever going to sync. Every line comes from `listSync` and
+ * nothing else: an older server without it, or a newer value this client does not know, gets no
+ * line at all. The legacy `onManagedList` flag is deliberately NOT a fallback — it is true for a
+ * write still queued as well as for one that landed, so reading it as "on Up Next" would claim a
+ * pending write was done (review D6). Absent evidence is not evidence, in either direction.
  */
-export function listSyncLabel(item: Pick<SavedQueueItem, "listSync" | "onManagedList">): ListSyncLabel | null {
+export function listSyncLabel(item: Pick<SavedQueueItem, "listSync">): ListSyncLabel | null {
   switch (item.listSync) {
     case "pending":
       return { text: "syncing…", title: "Queued for the managed Trakt list — Reel writes it back in the background." };
@@ -132,6 +134,6 @@ export function listSyncLabel(item: Pick<SavedQueueItem, "listSync" | "onManaged
         title: "Saved here but not on the Trakt list — it was taken off on Trakt, or the write-back gave up.",
       };
     default:
-      return item.onManagedList ? { text: "on Up Next", title: "On your Reel — Up Next list on Trakt." } : null;
+      return null;
   }
 }

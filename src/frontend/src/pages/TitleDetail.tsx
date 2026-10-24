@@ -234,15 +234,16 @@ export default function TitleDetail() {
                 <DialogTitle className="sr-only">{failure === "not-found" ? "Title not found" : "Couldn't load this title"}</DialogTitle>
                 <div className="p-8 pt-14 text-center space-y-4" role="alert" data-testid={`title-${failure}`}>
                   <p className="fa-body text-fa-frost-bright">
-                    {failure === "not-found"
-                      ? "Reel has no title at this address."
-                      : "Couldn't load this title — nothing about it has changed."}
+                    {failure === "not-found" ? "Reel has no title at this address." : "Couldn't load this title."}
                   </p>
-                  <p className="fa-caption text-fa-frost-dim">
-                    {failure === "not-found"
-                      ? "The link may be mistyped, or the title has left TMDB's catalogue."
-                      : "The server didn't answer. It is usually brief."}
-                  </p>
+                  {/* Only the 404 gets an explanation, because only the 404 has one. Any other
+                      failure may be a 500, a 403 or no answer at all, and how long it lasts is not
+                      something this screen knows — so it says nothing it cannot back. */}
+                  {failure === "not-found" && (
+                    <p className="fa-caption text-fa-frost-dim">
+                      The link may be mistyped, or the title has left TMDB&apos;s catalogue.
+                    </p>
+                  )}
                   <div className="flex items-center justify-center gap-2">
                     {failure === "error" && (
                       <button

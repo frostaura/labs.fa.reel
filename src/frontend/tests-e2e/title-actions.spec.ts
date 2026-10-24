@@ -285,6 +285,30 @@ test.describe("title detail states", () => {
     expect(Date.now() - answeredAt).toBeLessThan(1000);
   });
 
+  /**
+   * The acceptance is "404s show not-found within 1 s", timed from the navigation, not from the
+   * response. This times the client's whole share — route change, request, render — from an
+   * in-app navigation with the server answering at once. The server's share is NOT covered here:
+   * a cold TMDB miss took 1.19 s on the slot, so end to end the second holds only once the server
+   * negative-caches the miss (WS-5). Replace the instant answer with the measured server time when
+   * that lands.
+   */
+  test("a 404 renders within one second of the navigation that asked for it", async ({ page }) => {
+    await bootShell(page);
+    await mockJson(page, "**/api/titles/movie/999999999", { error: "not found" }, 404);
+    await page.goto("/home");
+    await expect(page.getByRole("heading", { name: "Tonight's picks" })).toBeVisible();
+    const started = await page.evaluate(() => {
+      const t = performance.now();
+      history.pushState({}, "", "/title/movie/999999999");
+      dispatchEvent(new PopStateEvent("popstate"));
+      return t;
+    });
+    await expect(page.getByTestId("title-not-found")).toBeVisible();
+    const elapsed = await page.evaluate((t) => performance.now() - t, started);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
   test("a server error offers a retry that recovers", async ({ page }) => {
     await bootShell(page);
     await mockJson(page, "**/api/titles/movie/1001/providers", {
@@ -303,6 +327,10 @@ test.describe("title detail states", () => {
     await page.goto("/title/movie/1001");
     await expect(page.getByTestId("title-error")).toBeVisible();
     await expect(page.getByTestId("title-not-found")).toHaveCount(0);
+    // A 500 is an answer: the copy claims neither silence nor a duration nobody has measured.
+    await expect(page.getByTestId("title-error")).toContainText("Couldn't load this title.");
+    await expect(page.getByTestId("title-error")).not.toContainText("didn't answer");
+    await expect(page.getByTestId("title-error")).not.toContainText("usually");
     await page.getByTestId("title-retry").click();
     await expect(page.getByRole("heading", { level: 1, name: "Quiet Harbor" })).toBeVisible();
   });

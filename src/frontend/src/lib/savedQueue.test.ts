@@ -130,37 +130,45 @@ describe("honest presentation", () => {
 });
 
 describe("listSyncLabel (G-3)", () => {
+  // A card as the server sends it: the label reads `listSync` only, whatever the legacy flag says.
+  const card = (listSync: SavedQueueItem["listSync"], onManagedList: boolean): Pick<SavedQueueItem, "listSync" | "onManagedList"> =>
+    listSync === undefined ? { onManagedList } : { listSync, onManagedList };
+  const label = (listSync: SavedQueueItem["listSync"], onManagedList: boolean) => listSyncLabel(card(listSync, onManagedList));
+
   it("says syncing only for a pending write-back", () => {
-    expect(listSyncLabel({ listSync: "pending", onManagedList: true })?.text).toBe("syncing…");
+    expect(label("pending", true)?.text).toBe("syncing…");
   });
 
   it("never says syncing for a card that is simply off the list", () => {
     // The 116: off the list, nothing pending. The old label called every one of them "syncing".
-    expect(listSyncLabel({ listSync: "offList", onManagedList: false })?.text).toBe("not on Up Next");
-    expect(listSyncLabel({ listSync: "onList", onManagedList: true })?.text).toBe("on Up Next");
+    expect(label("offList", false)?.text).toBe("not on Up Next");
+    expect(label("onList", true)?.text).toBe("on Up Next");
   });
 
   it("the server's listSync wins over the legacy flag", () => {
     // onManagedList is true for pending AND onList, so it cannot tell them apart.
-    expect(listSyncLabel({ listSync: "onList", onManagedList: false })?.text).toBe("on Up Next");
-    expect(listSyncLabel({ listSync: "offList", onManagedList: true })?.text).toBe("not on Up Next");
+    expect(label("onList", false)?.text).toBe("on Up Next");
+    expect(label("offList", true)?.text).toBe("not on Up Next");
   });
 
-  it("an older server without listSync never yields syncing", () => {
-    expect(listSyncLabel({ onManagedList: true })?.text).toBe("on Up Next");
-    expect(listSyncLabel({ onManagedList: false })).toBeNull();
+  it("an older server without listSync gets no line at all — the legacy flag is not evidence", () => {
+    // onManagedList is true while a ListAdd is still queued, so "on Up Next" from it would claim a
+    // pending write had landed. Both values of the flag say nothing.
+    expect(label(undefined, true)).toBeNull();
+    expect(label(undefined, false)).toBeNull();
   });
 
   it("an unknown value from a newer server reads as unknown, not as syncing", () => {
-    const fromTheFuture = { listSync: "archived" as unknown as "pending", onManagedList: false };
-    expect(listSyncLabel(fromTheFuture)).toBeNull();
+    for (const onManagedList of [true, false]) {
+      expect(label("archived" as unknown as "pending", onManagedList)).toBeNull();
+    }
   });
 
   it("no state of any card says syncing unless it is pending", () => {
     const states = [undefined, "onList", "offList"] as const;
     for (const listSync of states) {
       for (const onManagedList of [true, false]) {
-        expect(listSyncLabel({ listSync, onManagedList })?.text).not.toBe("syncing…");
+        expect(label(listSync, onManagedList)?.text).not.toBe("syncing…");
       }
     }
   });

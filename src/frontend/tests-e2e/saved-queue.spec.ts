@@ -65,6 +65,7 @@ const UNAVAILABLE = savedItem({
   runtimeMinutes: 105,
   availableNow: false,
   daysSaved: 120,
+  listSync: "onList",
 });
 
 const TONIGHT_ORDER = [PINNED, RUNNER_UP, UNAVAILABLE];
@@ -312,7 +313,8 @@ test.describe("saved states", () => {
     await page.goto("/saved");
     await expect(page.getByTestId("saved-card")).toHaveCount(5);
     await expect(page.getByText("syncing…")).toHaveCount(0);
-    await expect(page.getByTestId("saved-list-sync")).toHaveText(["on Up Next", "not on Up Next", "not on Up Next", "on Up Next"]);
+    // The older server's cards say nothing about the list, whatever their legacy flag says.
+    await expect(page.getByTestId("saved-list-sync")).toHaveText(["on Up Next", "not on Up Next", "not on Up Next"]);
   });
 
   test("a pending write-back is the only thing that says syncing", async ({ page }) => {
