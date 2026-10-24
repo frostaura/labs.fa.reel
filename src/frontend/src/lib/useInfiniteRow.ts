@@ -67,6 +67,9 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
   const exhaustedRef = useRef(false);
   const pagingRef = useRef<RailPaging>(INITIAL_RAIL_PAGING);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Whether the row is still mounted, so a request that settles after the unmount can neither
+  // transition nor schedule the next attempt.
+  const mounted = useRef(true);
   // Titles the user just made ineligible (seen/rated, not-interested, saved) drop from view at
   // once. Pagination still tracks the full set via seenRef, so excluding these doesn't re-fetch them.
   const removed = useSelector(selectRemovedKeys);
@@ -90,16 +93,26 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
     page?.register(items.map((c) => c.titleId));
   }, [page, items]);
 
-  // A scheduled retry must not fire into an unmounted row.
-  useEffect(
-    () => () => {
+  // Leaving the page (or a re-key: a medium switch, a re-seed) ends this row's paging for good: the
+  // scheduled retry is cleared, and `mounted` stops a request still in flight from scheduling the
+  // next one when it settles. Without the flag a failing request in flight at unmount re-armed the
+  // backoff from beyond the grave, and a user who had already left Home paid for up to three more
+  // billed `/feed/more` calls (review D1).
+  //
+  // The request itself is deliberately NOT aborted. The server has it already, so an abort saves
+  // no curation call; and under StrictMode's mount → unmount → mount an abort would kill the first
+  // page and count it as a failure, putting a one-second backoff in front of every cold rail.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
       if (retryTimer.current !== null) clearTimeout(retryTimer.current);
-    },
-    []
-  );
+      retryTimer.current = null;
+    };
+  }, []);
 
   const attempt = useCallback(async () => {
-    if (inFlight.current || exhaustedRef.current) return;
+    if (!mounted.current || inFlight.current || exhaustedRef.current) return;
     inFlight.current = true;
     transition({ type: "start" });
     const body: MoreFeedRequest = {
@@ -122,11 +135,14 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
     } finally {
       inFlight.current = false;
     }
+    // Unmounted while the request was out: nothing to update, and above all nothing to schedule.
+    if (!mounted.current) return;
     if (next === null) {
       const after = transition({ type: "failure" });
       if (after.phase === "backoff" && after.retryInMs !== null) {
         retryTimer.current = setTimeout(() => {
           retryTimer.current = null;
+          if (!mounted.current) return;
           void attemptRef.current();
         }, after.retryInMs);
       }

@@ -49,8 +49,12 @@ export default function GenreRow({ slug, label, filter }: Props) {
         items={visible}
         variant="genre"
         loadMore={near ? loadMore : undefined}
-        // Not yet near and nothing loaded: hold the rail's place rather than collapse to nothing.
-        loading={loading || (!near && items.length === 0 && !exhausted)}
+        // Nothing loaded yet: hold the rail's place rather than collapse to nothing — whether or not
+        // it is near. Holding it only while NOT near left one frame, between `near` latching and the
+        // first request starting, in which the rail had no height: every rail below jumped up by a
+        // rail's height, came into range, and fetched too (review D4 — a cold phone Home with no
+        // personalised rows asked for drama and horror from 1,385px down).
+        loading={loading || (items.length === 0 && !exhausted && !failed)}
         failed={failed}
         onRetry={retry}
         exhausted={exhausted}

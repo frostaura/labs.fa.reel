@@ -1,10 +1,15 @@
 import { useEffect, useState, type RefObject } from "react";
 
 /**
- * How far below (and above) the viewport a rail may be and still start loading. Chosen against the
- * cold-load acceptance at 1440×900 and 390×844: one screen of rails is never within this margin of
- * the fold on a cold Home, so below-the-fold genre rails fire nothing — no billed curation call and
- * no exposure row (I-2, O-22) — while a rail still lands ahead of a normal scroll.
+ * How far below (and above) the viewport a rail may be and still start loading: far enough that a
+ * rail lands ahead of a normal scroll, near enough that a rail nobody is approaching fires nothing
+ * — no billed curation call and no exposure row (I-2, O-22).
+ *
+ * It is a distance, not a count. On a cold Home with personalised rows (three, or even one, at
+ * 1440×900 and 390×844) every genre rail starts beyond it and none fetches; on a feed with no
+ * personalised rows the first genre rail is on screen, and it does fetch, as a rail on screen
+ * should. `hero-rails-paging.spec.ts` pins both shapes, and that every rail that asks was inside
+ * the margin when it asked.
  */
 export const RAIL_PREFETCH_MARGIN_PX = 200;
 
