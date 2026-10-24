@@ -4,6 +4,8 @@ using System.Text.Json;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Ports.Trakt;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
@@ -14,6 +16,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -190,7 +193,60 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
     }
 
     [Fact]
-    public async Task Dev_link_with_no_cascade_issues_a_marked_session_and_starts_nothing()
+    public async Task Dev_link_through_a_proxy_that_recorded_a_lan_hop_is_refused()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The review's bypass once Vite records its client: the attacker writes 127.0.0.1 itself and
+        // Vite (xfwd) appends the LAN address it really saw. Kestrel's peer is still loopback.
+        var slug = $"dev-lock-vite-lan-{Guid.NewGuid():N}";
+        var accountId = await api.SeedAccountAsync(slug);
+        await using var host = WithDevProfile(slug);
+
+        var answer = await SendAsync(host, "POST", DevEndpoints.DevLinkRoute, IPAddress.Loopback, body: "{}",
+            headers: new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "127.0.0.1,::ffff:192.168.0.148",
+                ["X-Forwarded-Host"] = "192.168.0.149:5173",
+            });
+
+        Assert.Equal(StatusCodes.Status403Forbidden, answer.Status);
+        Assert.Equal(LoopbackGuard.RefusalCode, ErrorCode(answer.Body));
+        Assert.False(answer.SetCookie);
+        await using var db = Db();
+        Assert.Equal(0, await db.RefreshSessions.IgnoreQueryFilters().CountAsync(s => s.AccountId == accountId));
+    }
+
+    [Fact]
+    public async Task Dev_link_through_vite_on_this_machine_is_granted()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // A browser on this machine through Vite with xfwd: every recorded hop is loopback. This is
+        // the headed-QA path ("re-POST dev/link from the page origin"), and it must keep working.
+        var slug = $"dev-lock-vite-local-{Guid.NewGuid():N}";
+        await api.SeedAccountAsync(slug);
+        await using var host = WithDevProfile(slug);
+
+        var answer = await SendAsync(host, "POST", DevEndpoints.DevLinkRoute, IPAddress.Loopback, body: """{"noCascade":true}""",
+            headers: new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "::ffff:127.0.0.1",
+                ["X-Forwarded-Host"] = "localhost:5208",
+            });
+
+        Assert.Equal(StatusCodes.Status200OK, answer.Status);
+        Assert.True(answer.SetCookie);
+    }
+
+    [Fact]
+    public async Task Dev_link_with_no_cascade_on_a_linked_account_writes_only_the_marked_session()
     {
         if (!fixture.Available)
         {
@@ -209,30 +265,60 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
 
         await using var db = Db();
         var account = await db.Accounts.IgnoreQueryFilters().SingleAsync(a => a.Id == accountId);
+        // The one write the default call makes to a linked account (tier to Founder) did not happen;
+        // Dev_link_from_this_machine_keeps_its_old_behaviour shows the same fixture DOES change tier.
         Assert.Equal(AccountTier.Free, account.Tier);
-        Assert.Equal(0, await db.SyncJobs.IgnoreQueryFilters().CountAsync(j => j.AccountId == accountId));
         var session = await db.RefreshSessions.IgnoreQueryFilters().SingleAsync(s => s.AccountId == accountId);
         Assert.Equal("reel-dev-link curl/8.7.1", session.UserAgent);
     }
 
     [Fact]
-    public async Task Dev_link_with_no_cascade_and_no_linked_account_is_409_and_links_nothing()
+    public async Task Dev_link_with_no_cascade_and_no_linked_account_stops_before_trakt_and_starts_nothing()
     {
         if (!fixture.Available)
         {
             return;
         }
 
+        // The cascade lives on this path: no linked dev account, so the default call goes on to the
+        // pre-provisioned-token branch, Trakt, LinkAccountAsync and a FullIngest job. This harness
+        // refuses to run with any Trakt token configured (ReelApiFactory's live-credential guard), so
+        // the link itself cannot be driven here; what is pinned is that noCascade answers BEFORE that
+        // branch. The contrast test below sends the same fixture without the flag and reaches it.
         var slug = $"dev-lock-unlinked-{Guid.NewGuid():N}";
-        await using var host = WithDevProfile(slug);
+        var trakt = new RecordingTraktClient(slug);
+        await using var host = WithUnlinkedDevProfile(slug, trakt);
+        var jobsBefore = await CountSyncJobsAsync();
 
         var answer = await SendAsync(host, "POST", DevEndpoints.DevLinkRoute, IPAddress.Loopback, body: """{"noCascade":true}""");
 
         Assert.Equal(StatusCodes.Status409Conflict, answer.Status);
         Assert.Equal("dev_account_not_linked", ErrorCode(answer.Body));
+        Assert.False(answer.SetCookie);
+        Assert.Equal(0, trakt.Calls);
+        Assert.Equal(jobsBefore, await CountSyncJobsAsync());
 
         await using var db = Db();
         Assert.False(await db.Accounts.IgnoreQueryFilters().AnyAsync(a => a.TraktUserSlug == slug));
+    }
+
+    [Fact]
+    public async Task Dev_link_without_no_cascade_on_the_same_unlinked_fixture_goes_on_to_the_linking_branch()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var slug = $"dev-lock-cascade-{Guid.NewGuid():N}";
+        var trakt = new RecordingTraktClient(slug);
+        await using var host = WithUnlinkedDevProfile(slug, trakt);
+
+        var answer = await SendAsync(host, "POST", DevEndpoints.DevLinkRoute, IPAddress.Loopback, body: "{}");
+
+        // Past the point where noCascade answers: the token branch, which here has no tokens.
+        Assert.Equal(StatusCodes.Status400BadRequest, answer.Status);
+        Assert.Contains("TRAKT_ACCESS_TOKEN", answer.Body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -283,6 +369,26 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
     private WebApplicationFactory<Program> WithDevProfile(string slug) =>
         api.WithWebHostBuilder(builder => builder.ConfigureAppConfiguration(c => c.AddInMemoryCollection(
             new Dictionary<string, string?> { ["TRAKT_DEV_PROFILE"] = slug })));
+
+    private WebApplicationFactory<Program> WithUnlinkedDevProfile(string slug, ITraktClient trakt) =>
+        api.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration(c => c.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["TRAKT_DEV_PROFILE"] = slug,
+            }));
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ITraktClient>();
+                services.AddSingleton(trakt);
+            });
+        });
+
+    private async Task<int> CountSyncJobsAsync()
+    {
+        await using var db = Db();
+        return await db.SyncJobs.IgnoreQueryFilters().CountAsync();
+    }
 
     private ReelDbContext Db() =>
         api.Services.CreateScope().ServiceProvider.GetRequiredService<ReelDbContext>();
@@ -351,6 +457,53 @@ public class DevSurfaceLockdownTests(PostgresFixture fixture, ReelApiFactory api
         using var reader = new StreamReader(context.Response.Body);
         var text = await reader.ReadToEndAsync();
         return new Answer(context.Response.StatusCode, text, context.Response.Headers.SetCookie.Count > 0);
+    }
+
+    /// <summary>
+    /// Answers the profile read a dev/link link makes and counts every call; any other call throws
+    /// (and is counted), so an unexpected Trakt call fails the test loudly.
+    /// </summary>
+    private sealed class RecordingTraktClient(string slug) : ITraktClient
+    {
+        private int calls;
+
+        public int Calls => calls;
+
+        public Task<TraktUserSettings> GetUserSettingsAsync(string accessToken, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(new TraktUserSettings(slug, slug, null, false, null));
+        }
+
+        public Task<TraktTokenResponse> RefreshTokenAsync(string refreshToken, CancellationToken ct = default) => Unexpected<TraktTokenResponse>();
+
+        public Task<TraktTokenResponse> ExchangeCodeAsync(string code, CancellationToken ct = default) => Unexpected<TraktTokenResponse>();
+
+        public Task<IReadOnlyList<TraktWatchedMovie>> GetWatchedMoviesAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => Unexpected<IReadOnlyList<TraktWatchedMovie>>();
+
+        public Task<IReadOnlyList<TraktWatchedShow>> GetWatchedShowsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => Unexpected<IReadOnlyList<TraktWatchedShow>>();
+
+        public Task<IReadOnlyList<TraktRatingItem>> GetRatingsAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => Unexpected<IReadOnlyList<TraktRatingItem>>();
+
+        public Task<TraktShowProgress?> GetShowProgressAsync(string accessToken, long showTraktId, RatePriority priority, CancellationToken ct = default) => Unexpected<TraktShowProgress?>();
+
+        public Task<string> GetLastActivitiesRawAsync(string accessToken, RatePriority priority, CancellationToken ct = default) => Unexpected<string>();
+
+        public Task<IReadOnlyList<TraktHistoryItem>> GetHistoryAsync(string accessToken, string type, long traktId, DateTime? startAt, DateTime? endAt, RatePriority priority, CancellationToken ct = default) => Unexpected<IReadOnlyList<TraktHistoryItem>>();
+
+        public Task<long?> ResolveTraktIdByTmdbAsync(string accessToken, long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default) => Unexpected<long?>();
+
+        public Task PostSyncBatchAsync(string accessToken, string endpoint, object payload, RatePriority priority, CancellationToken ct = default) => Unexpected<bool>();
+
+        public Task<long> EnsureListAsync(string accessToken, string name, string description, RatePriority priority, CancellationToken ct = default) => Unexpected<long>();
+
+        public Task PostListItemsAsync(string accessToken, long listId, object payload, bool remove, RatePriority priority, CancellationToken ct = default) => Unexpected<bool>();
+
+        private Task<T> Unexpected<T>()
+        {
+            Interlocked.Increment(ref calls);
+            throw new NotSupportedException("dev/link made a Trakt call it has no reason to make.");
+        }
     }
 
     private sealed class HasBody : IHttpRequestBodyDetectionFeature

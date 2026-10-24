@@ -1,6 +1,6 @@
 .PHONY: up down build test lint lint-backend lint-frontend e2e docker-build docker-ready docker-down release-validation qa \
 	ci ci-backend ci-frontend ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit \
-	ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-e2e ci-trivy ci-compose ci-docker
+	ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-vite-proxy ci-e2e ci-trivy ci-compose ci-docker
 
 # Compose needs these two before it will interpolate (both are `:?` required in the compose
 # files). Real values live in .env locally / Portainer in prod; these defaults exist so
@@ -99,7 +99,7 @@ ci: ci-backend ci-frontend ci-trivy ci-compose ci-docker
 
 ci-backend: ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit
 
-ci-frontend: ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-e2e
+ci-frontend: ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-vite-proxy ci-e2e
 
 ci-format:
 	$(DOTNET) format $(SLN) --verify-no-changes --verbosity minimal
@@ -160,6 +160,12 @@ ci-frontend-build:
 ci-knip:
 	cd src/frontend && npx --no-install knip
 
+# The dev proxy must not make a LAN caller look like this machine (J-1; WS-8 review 2026-10-24): the
+# dev server listens on loopback unless VITE_HOST opts in, and every proxy entry sets xfwd so the API's
+# loopback guard sees the real client. Starts the repo's own Vite config against a local echo server.
+ci-vite-proxy:
+	cd src/frontend && node ../../deploy/ci/vite-proxy-probe.mjs
+
 # Both engines: Safari is where the founder's installed PWA runs. Service workers are blocked by the
 # Playwright config; PW_PORT keeps parallel runs apart.
 ci-e2e:
@@ -172,11 +178,16 @@ ci-trivy:
 	trivy fs --quiet --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
 		--skip-dirs src/frontend/node_modules --skip-dirs .tmp --skip-dirs .backups .
 
-# Every descriptor parses with only its required variables supplied.
+# Every descriptor parses with only its required variables supplied, and not without them.
 ci-compose:
 	$(COMPOSE_ENV) docker compose -f docker-compose.yml config -q
-	$(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci docker compose -f docker-compose.prod.yml config -q
-	$(COMPOSE_ENV) DOCKERHUB_USERNAME=ci APP_PUBLIC_URL=https://ci.invalid docker compose -f deploy/portainer-stack.yml config -q
+	$(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f docker-compose.prod.yml config -q
+	$(COMPOSE_ENV) DOCKERHUB_USERNAME=ci APP_PUBLIC_URL=https://ci.invalid BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f deploy/portainer-stack.yml config -q
+	@# And the production files refuse to start with nowhere for the dumps but a volume of the stack.
+	@! env -u BACKUP_HOST_DIR $(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci docker compose -f docker-compose.prod.yml config -q 2> /dev/null \
+		|| { echo "ci-compose: docker-compose.prod.yml parsed without BACKUP_HOST_DIR" >&2; exit 1; }
+	@! env -u BACKUP_HOST_DIR $(COMPOSE_ENV) DOCKERHUB_USERNAME=ci APP_PUBLIC_URL=https://ci.invalid docker compose -f deploy/portainer-stack.yml config -q 2> /dev/null \
+		|| { echo "ci-compose: deploy/portainer-stack.yml parsed without BACKUP_HOST_DIR" >&2; exit 1; }
 
 # Build both images and prove the composed stack serves, under its own project name and ports.
 ci-docker:

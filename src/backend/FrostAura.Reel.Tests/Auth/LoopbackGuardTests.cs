@@ -2,6 +2,7 @@ using System.Net;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Security;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Primitives;
 
 namespace FrostAura.Reel.Tests.Auth;
 
@@ -45,20 +46,105 @@ public class LoopbackGuardTests
     }
 
     [Theory]
+    // Someone else, as each proxy records it.
     [InlineData("X-Forwarded-For", "192.168.0.148")]
-    [InlineData("X-Forwarded-For", "127.0.0.1")]
     [InlineData("X-Forwarded-Host", "reel.frostaura.net")]
+    [InlineData("X-Forwarded-Host", "192.168.0.149:5173")]
     [InlineData("X-Original-For", "192.168.0.148:51234")]
     [InlineData("X-Real-IP", "192.168.0.148")]
     [InlineData("Forwarded", "for=192.168.0.148")]
+    // Cloudflare's edge is refused even when it claims loopback.
     [InlineData("CF-Connecting-IP", "203.0.113.9")]
+    [InlineData("CF-Connecting-IP", "127.0.0.1")]
+    // The 2026-10-24 review case: a client writes 127.0.0.1 itself, and Vite (xfwd) appends the
+    // LAN address it really saw. The real last hop decides.
+    [InlineData("X-Forwarded-For", "127.0.0.1, 192.168.0.148")]
+    [InlineData("X-Forwarded-For", "127.0.0.1,::ffff:192.168.0.148")]
+    // The compose gateway: nginx's hop to the backend is a Docker bridge address.
+    [InlineData("X-Forwarded-For", "172.18.0.1")]
+    [InlineData("X-Real-IP", "192.168.65.1")]
+    // Values that do not parse are refused, never skipped.
+    [InlineData("X-Forwarded-For", "")]
+    [InlineData("X-Forwarded-For", "127.0.0.1,")]
+    [InlineData("X-Forwarded-For", "unknown")]
+    [InlineData("X-Forwarded-For", "localhost")]
+    [InlineData("Forwarded", "for=unknown")]
+    [InlineData("Forwarded", "for=_hidden")]
+    [InlineData("Forwarded", "proto=http")]
+    [InlineData("Forwarded", "for=127.0.0.1, for=192.168.0.148")]
+    [InlineData("Forwarded", "for=\"[::1]:5173\", for=\"[fe80::1]\"")]
     public void A_loopback_peer_that_forwarded_someone_else_is_refused(string header, string value)
     {
-        // A proxy on loopback says nothing about who is behind it — even a forwarded "127.0.0.1",
-        // which any client can write into its own request before the proxy appends to it.
+        // A proxy on loopback says nothing about who is behind it; only the hops it recorded do.
         var headers = new HeaderDictionary { [header] = value };
 
         Assert.False(LoopbackGuard.IsDirectLoopback(IPAddress.Loopback, headers));
+    }
+
+    [Theory]
+    // Vite on this machine with xfwd, serving a browser on this machine (both address families).
+    [InlineData("X-Forwarded-For", "127.0.0.1")]
+    [InlineData("X-Forwarded-For", "::1")]
+    [InlineData("X-Forwarded-For", "::ffff:127.0.0.1")]
+    [InlineData("X-Forwarded-For", "127.0.0.1, ::1")]
+    [InlineData("X-Forwarded-Host", "localhost:5208")]
+    [InlineData("X-Forwarded-Host", "127.0.0.1:5173")]
+    [InlineData("X-Forwarded-Host", "[::1]:5173")]
+    [InlineData("X-Original-For", "127.0.0.1:51234")]
+    [InlineData("X-Real-IP", "127.0.0.1")]
+    [InlineData("Forwarded", "for=127.0.0.1;proto=http")]
+    [InlineData("Forwarded", "for=\"[::1]:5173\"")]
+    public void A_loopback_peer_that_forwarded_this_machine_is_local(string header, string value)
+    {
+        var headers = new HeaderDictionary { [header] = value };
+
+        Assert.True(LoopbackGuard.IsDirectLoopback(IPAddress.Loopback, headers));
+    }
+
+    [Fact]
+    public void What_vite_with_xfwd_sends_for_a_local_browser_is_local()
+    {
+        // Byte for byte what Vite 8's proxy adds with xfwd on (node.js chunk XHeaders): the socket's
+        // remote address, port and scheme, and the Host the browser used.
+        var headers = new HeaderDictionary
+        {
+            ["X-Forwarded-For"] = "::ffff:127.0.0.1",
+            ["X-Forwarded-Port"] = "5208",
+            ["X-Forwarded-Proto"] = "http",
+            ["X-Forwarded-Host"] = "localhost:5208",
+        };
+
+        Assert.True(LoopbackGuard.IsDirectLoopback(IPAddress.Loopback, headers));
+    }
+
+    [Fact]
+    public void What_vite_with_xfwd_sends_for_a_lan_host_is_refused()
+    {
+        var headers = new HeaderDictionary
+        {
+            ["X-Forwarded-For"] = "::ffff:192.168.0.148",
+            ["X-Forwarded-Port"] = "5173",
+            ["X-Forwarded-Proto"] = "http",
+            ["X-Forwarded-Host"] = "192.168.0.149:5173",
+        };
+
+        Assert.False(LoopbackGuard.IsDirectLoopback(IPAddress.Loopback, headers));
+    }
+
+    [Fact]
+    public void One_bad_hop_among_several_header_values_is_refused()
+    {
+        var headers = new HeaderDictionary { ["X-Forwarded-For"] = new StringValues(["127.0.0.1", "192.168.0.148"]) };
+
+        Assert.False(LoopbackGuard.IsDirectLoopback(IPAddress.Loopback, headers));
+    }
+
+    [Fact]
+    public void Loopback_hops_do_not_rescue_a_lan_peer()
+    {
+        var headers = new HeaderDictionary { ["X-Forwarded-For"] = "127.0.0.1" };
+
+        Assert.False(LoopbackGuard.IsDirectLoopback(IPAddress.Parse("192.168.0.148"), headers));
     }
 
     [Fact]

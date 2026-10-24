@@ -81,7 +81,7 @@ jobs:
         run: make ci-openapi
 
   # ============================================================================
-  # Frontend — lint, typecheck, unit tests + coverage, warning-free build, knip
+  # Frontend — lint, typecheck, unit tests + coverage, warning-free build, knip, dev-proxy probe
   # ============================================================================
   frontend:
     name: Frontend
@@ -116,6 +116,9 @@ jobs:
 
       - name: Unused files, exports and dependencies (knip)
         run: make ci-knip
+
+      - name: Dev proxy records its client and listens on loopback (J-1)
+        run: make ci-vite-proxy
 
   # ============================================================================
   # Frontend E2E — Playwright, Chromium and WebKit
