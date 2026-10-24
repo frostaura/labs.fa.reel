@@ -32,8 +32,8 @@ namespace FrostAura.Reel.Application.Search;
 /// exists), ExcludeKeyword, Language, MinCrowdRating and the MinYear/MaxYear window. An ExcludeGenre
 /// also reaches the titles a TMDB taxonomy cannot tag with that genre — TV has no romance, horror,
 /// history, thriller or music genre, and neither medium has anime or musical — through the stand-in
-/// keywords and alias genres in <see cref="GenreStandIns"/>, so an exclusion is as airtight for TV as
-/// for movies. MaxMaturity is
+/// keywords and alias genres in <see cref="GenreStandIns"/>, so TV is judged as strictly as movies
+/// as far as TMDB's keywords allow (their measured catch rate is recorded there). MaxMaturity is
 /// the in-memory gate; MinPredictedRating is applied by the scoring surfaces, since it needs a model.
 /// </summary>
 public class EligibilityQueryBuilder(IReelDbContext db)
@@ -43,7 +43,9 @@ public class EligibilityQueryBuilder(IReelDbContext db)
     /// Set by the genre rails (<c>FeedRowContext.Genre</c>), where the rail's own genre is the user's
     /// explicit request in that moment and outranks a standing allow-list that does not list it:
     /// without this a "Comedy" rail for an account that allow-lists only horror could only ever be
-    /// empty. An ExcludeGenre is NEVER waived (founder decision FD-6, 2026-10-24): the old
+    /// empty. An ExcludeGenre is NEVER waived (program FD-6's recommendation and default, which binds
+    /// until the founder rules otherwise; it also follows from the founder-locked "exclusions are
+    /// airtight on every surface"): the old
     /// <c>ignoreGenreFilters</c> dropped every genre rule, so the Adventure rail served Frozen II and
     /// Ice Age to an account that excludes animation and comedy — 20 of 96 rail cards broke a standing
     /// exclusion (F-2). A rail for an excluded genre is not offered at all (<c>FeedEndpoints</c>), so

@@ -254,7 +254,8 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         var romanticShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["romantic comedy"]; });
         var horrorShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["supernatural horror"]; });
         var slasherShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["slasher"]; });
-        var periodShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["period drama"]; });
+        var periodShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["british history"]; });
+        var loveTriangleShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["love triangle"]; });
         var historicalShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["historical fiction"]; });
         // A Trakt-synced show that does carry the genre slug is excluded by the genre itself.
         var taggedShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["drama", "romance"]; });
@@ -265,13 +266,19 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         var bromanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["bromance"]; });
         var datingHistoryShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["dating history"]; });
         var plainShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["detective"]; });
+        // Labels that read as on-genre but fail the film calibration (GenreStandIns.Patterns): only
+        // 36% of "period drama" films are History and 28% of "19th century" ones, and a "shark" show
+        // is a nature show as often as a horror one. TV must be as strict as films, not stricter.
+        var periodDramaShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["period drama", "19th century"]; });
+        var sharkShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["shark", "scuba diving"]; });
         var thrillerFilm = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Keywords = ["romance", "slasher"]; });
         var romanceFilm = await SeedTitleAsync(t => t.Genres = ["romance"]);
 
         var mine = new[]
         {
             romanceShow, romanticShow, horrorShow, slasherShow, periodShow, historicalShow, taggedShow,
-            bromanceShow, datingHistoryShow, plainShow, thrillerFilm, romanceFilm,
+            bromanceShow, datingHistoryShow, plainShow, thrillerFilm, romanceFilm, loveTriangleShow,
+            periodDramaShow, sharkShow,
         };
 
         // No rule configured: every one is eligible, so the arms are inert without a row.
@@ -290,7 +297,9 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "history");
 
         var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
-        Assert.Equal(new HashSet<Guid> { bromanceShow, datingHistoryShow, plainShow, thrillerFilm }, survivors);
+        Assert.Equal(
+            new HashSet<Guid> { bromanceShow, datingHistoryShow, plainShow, thrillerFilm, periodDramaShow, sharkShow },
+            survivors);
     }
 
     [Fact]
@@ -303,7 +312,7 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
 
         // anime and musical have no TMDB id on either medium — two of the founder's twelve conditions
         // matched 0 and 21 films. "children" is Trakt's own slug for what TMDB TV calls Kids, which
-        // ingest folds into family.
+        // ingest folds into family, and "suspense" is Trakt's slug for thriller.
         var accountId = await SeedAccountAsync();
         var animeFilm = await SeedTitleAsync(t => { t.Genres = ["action"]; t.Keywords = ["anime"]; });
         var animeShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["anime", "mecha"]; });
@@ -311,11 +320,13 @@ public class ContentFilterEligibilityTests(PostgresFixture fixture)
         var jukeboxFilm = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Keywords = ["jukebox musical"]; });
         var instrumentsFilm = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Keywords = ["musical instruments"]; });
         var childrenShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["children"]; });
-        var mine = new[] { animeFilm, animeShow, liveActionAdaptation, jukeboxFilm, instrumentsFilm, childrenShow };
+        var suspenseShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["suspense"]; });
+        var mine = new[] { animeFilm, animeShow, liveActionAdaptation, jukeboxFilm, instrumentsFilm, childrenShow, suspenseShow };
 
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "anime");
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "musical");
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "family");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "thriller");   // Trakt's "suspense" is thriller
 
         var survivors = (await EligibleAsync(accountId, mine)).ToHashSet();
         Assert.Equal(new HashSet<Guid> { liveActionAdaptation, instrumentsFilm }, survivors);

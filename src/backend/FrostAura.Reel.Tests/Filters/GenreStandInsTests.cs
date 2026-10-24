@@ -51,7 +51,21 @@ public class GenreStandInsTests
     [InlineData("horror", "horrors of war", false)]
     [InlineData("history", "history", true)]
     [InlineData("history", "historical drama", true)]
-    [InlineData("history", "period drama", true)]
+    [InlineData("history", "period drama", false)]          // 36% of such films are History: calibration drops it
+    [InlineData("history", "19th century", false)]          // 28%
+    [InlineData("history", "british history", true)]
+    [InlineData("romance", "love triangle", true)]
+    [InlineData("romance", "forbidden love", true)]
+    [InlineData("romance", "love story", true)]
+    [InlineData("romance", "unrequited", false)]
+    [InlineData("music", "rock music", true)]
+    [InlineData("music", "music competition", true)]
+    [InlineData("music", "musician", false)]                // 54%: below the bar
+    [InlineData("music", "musical", false)]                 // a different genre, not a word match
+    [InlineData("music", "soap opera", false)]              // "opera" is an exact label only
+    [InlineData("horror", "shark", false)]                  // a setting, not the genre's subject
+    [InlineData("horror", "zombie apocalypse", true)]
+    [InlineData("thriller", "suspenseful", true)]
     [InlineData("history", "dating history", false)]
     [InlineData("history", "alternate history", false)]
     [InlineData("history", "prehistory", false)]
@@ -75,7 +89,8 @@ public class GenreStandInsTests
         [
             "romance", "teenage romance", "bromance", "supernatural horror", "slasher", "period drama",
             "dating history", "anime", "based on anime", "jukebox musical", "musical instruments",
-            "psychological thriller", "musician", "music video",
+            "psychological thriller", "musician", "music video", "love triangle", "british history",
+            "joseon dynasty (1392–1910)", "séance", "boys' love (bl)", "rock 'n' roll", "rock music",
         ];
         foreach (var media in new[] { MediaType.Movie, MediaType.Show })
         {
@@ -106,12 +121,15 @@ public class GenreStandInsTests
         var familyFilm = new Title { MediaType = MediaType.Movie, Genres = ["family"] };
         var romanceShow = new Title { MediaType = MediaType.Show, Keywords = ["gay romance"] };
         var romanceKeywordFilm = new Title { MediaType = MediaType.Movie, Genres = ["thriller"], Keywords = ["romance"] };
+        var suspenseShow = new Title { MediaType = MediaType.Show, Genres = ["suspense"] };
 
         Assert.True(GenreStandIns.ExcludedBy(childrenShow, "family"));
         Assert.True(GenreStandIns.ExcludedBy(familyFilm, "family"));
         Assert.True(GenreStandIns.ExcludedBy(romanceShow, "romance"));
         Assert.False(GenreStandIns.ExcludedBy(romanceKeywordFilm, "romance"));
         Assert.False(GenreStandIns.ExcludedBy(childrenShow, "animation"));
+        Assert.True(GenreStandIns.ExcludedBy(suspenseShow, "thriller"));
+        Assert.False(GenreStandIns.ExcludedBy(suspenseShow, "horror"));
     }
 
     [Fact]
