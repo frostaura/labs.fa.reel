@@ -7,17 +7,21 @@ import CrowdRatingBadge from "./CrowdRatingBadge";
 import { formatRuntime } from "../../lib/format";
 import { hasPredictedRating } from "../../lib/predictedRating";
 import CardQuickActions from "./CardQuickActions";
+import RailRetryTile from "../rows/RailRetryTile";
 import { heroReachingNote, reachingLabel } from "../../lib/heroConfidence";
-import { MD_BREAKPOINT_PX, useMinWidth } from "../../lib/useMinWidth";
+import { useMinWidth } from "../../lib/useMinWidth";
 import {
+  LG_BREAKPOINT_PX,
   clampColumn,
   heroActiveColumn,
+  heroArtClass,
   heroCardClass,
   heroColumns,
   heroContainerClass,
   heroEagerCount,
   heroProseScale,
   heroRowsInEffect,
+  heroScrimClass,
   heroShimmerClass,
   heroTextBlockClass,
   heroTitleClass,
@@ -30,6 +34,9 @@ interface HeroProps {
   /** Infinite scroll — tonight's picks never run out; fired as the carousel nears its end. */
   loadMore?: () => void;
   loading?: boolean;
+  /** Paging failed after its automatic retries: the trailing cell becomes a Retry control. */
+  failed?: boolean;
+  onRetry?: () => void;
   /**
    * How many rows of picks to lay out. Two rows is one scroll container flowed by column, so the
    * rows move together and rank 1 sits above rank 2 — see lib/heroLayout.ts. Defaults to the single
@@ -50,13 +57,13 @@ const NEAR_END_PX = 1200;
  * case. So a pick that came in under the bar says so on the card, and a row where every measured
  * pick is a reach says so once above the row — the derivation is in lib/heroConfidence.ts.
  */
-export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: HeroProps) {
+export default function RecCardHero({ cards, loadMore, loading, failed, onRetry, rows = 1 }: HeroProps) {
   const [active, setActive] = useState(0);
   const location = useLocation();
-  // Two rows is a request; below `md` the grid collapses back to one and every derived count has to
+  // Two rows is a request; below `lg` the grid collapses back to one and every derived count has to
   // collapse with it, or the dots promise scroll positions that do not exist.
-  const isMdUp = useMinWidth(MD_BREAKPOINT_PX);
-  const rowsInEffect = heroRowsInEffect(rows, isMdUp);
+  const isLgUp = useMinWidth(LG_BREAKPOINT_PX);
+  const rowsInEffect = heroRowsInEffect(rows, isLgUp);
   const scroller = useRef<HTMLDivElement>(null);
   // A re-sort (a tonight-mood chip, the availability toggle) puts a different card first. Chrome's
   // snap-target tracking would otherwise follow the previously snapped card to its new column, and
@@ -111,30 +118,20 @@ export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: Hero
               className={heroCardClass(rows)}
               data-testid="hero-card"
             >
-              {art && (
-                <img
-                  src={art}
-                  alt=""
-                  loading={index < eagerCount ? "eager" : "lazy"}
-                  decoding="async"
-                  className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
-                />
-              )}
-              <div className="absolute inset-0 reel-scrim" />
-              {/* The same three actions the rail cards carry, at hero scale. The headline pick was
-                  the ONE card you could not act on without navigating into the modal and back —
-                  which is a strange thing to say about the card the whole screen is built around.
-                  Every button calls preventDefault, so the whole-card link still works everywhere
-                  the buttons are not. */}
-              <CardQuickActions
-                titleId={card.titleId}
-                mediaType={card.mediaType}
-                tmdbId={card.tmdbId}
-                name={card.name}
-                size="lg"
-              />
-              <div className={heroTextBlockClass(rows)}>
-                <div className="flex items-center gap-3 flex-wrap">
+              <div className={heroArtClass()}>
+                {art && (
+                  <img
+                    src={art}
+                    alt=""
+                    loading={index < eagerCount ? "eager" : "lazy"}
+                    decoding="async"
+                    className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
+                  />
+                )}
+                <div className={heroScrimClass()} />
+              </div>
+              <div className={heroTextBlockClass(rows)} data-testid="hero-text">
+                <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap">
                   <h2 className={heroTitleClass(rows)}>{card.name}</h2>
                   {/* Guarded like every other consumer — see lib/predictedRating.ts. The crowd
                       score sits directly beside the prediction (there is room at hero scale) so the
@@ -147,29 +144,25 @@ export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: Hero
                     <CrowdRatingBadge rating={card.crowdRating} votes={card.crowdVotes} size="lg" />
                   )}
                 </div>
-                <p className="fa-caption text-fa-frost-dim">
+                <p className="fa-caption text-fa-frost">
                   {[card.year, formatRuntime(card.runtimeMinutes), card.genres.slice(0, 3).join(" / ")]
                     .filter(Boolean)
                     .join(" · ")}
                 </p>
-                {/* The hook first — the one line written to make you press play tonight — with the
-                    lens's opening clause beneath it. Falls back to the single templated why-line
-                    when no copy exists, which is the shape the hero has always had. */}
+                {/* The hook — the one line written to make you press play tonight — clamped to two
+                    lines. The lens clause that used to sit under it now lives only in the detail
+                    view: on the card it was the line that pushed the title out of the box. Falls
+                    back to the single templated why-line when no hook exists. */}
                 {card.hook ? (
-                  <>
-                    <p className={`${heroProseScale(rows)} text-fa-frost-bright max-w-2xl leading-snug`} data-testid="hero-hook">
-                      {card.hook}
-                    </p>
-                    {card.lensClause && (
-                      <p className="fa-caption text-fa-frost max-w-2xl leading-snug" data-testid="hero-lens-clause">
-                        {card.lensClause}
-                      </p>
-                    )}
-                  </>
-                ) : (
-                  <p className={`${heroProseScale(rows)} text-fa-frost max-w-2xl leading-snug`} data-testid="hero-why">
-                    {card.whyThis}
+                  <p className={`${heroProseScale(rows)} text-fa-frost-bright max-w-2xl leading-snug`} data-testid="hero-hook">
+                    {card.hook}
                   </p>
+                ) : (
+                  card.whyThis && (
+                    <p className={`${heroProseScale(rows)} text-fa-frost max-w-2xl leading-snug`} data-testid="hero-why">
+                      {card.whyThis}
+                    </p>
+                  )
                 )}
                 {/* Quiet on purpose: an admission, not an alarm. It sits under the why-line so the
                     pick is still the headline and the caveat is attached to it, not to the row. */}
@@ -179,14 +172,30 @@ export default function RecCardHero({ cards, loadMore, loading, rows = 1 }: Hero
                   </p>
                 )}
               </div>
+              {/* The same three actions the rail cards carry, at hero scale. Below `lg` they are a
+                  row of their own under the text (I-10: over the art they sat on the meta and hook
+                  lines); from `lg` they are a row in the art's top-right corner. Every button calls
+                  preventDefault, so the whole-card link still works everywhere the buttons are not. */}
+              <CardQuickActions
+                titleId={card.titleId}
+                mediaType={card.mediaType}
+                tmdbId={card.tmdbId}
+                name={card.name}
+                size="lg"
+              />
             </Link>
           );
         })}
-        {loading && (
+        {loading && !failed && (
           <div
             className={heroShimmerClass(rows)}
             aria-hidden
           />
+        )}
+        {failed && onRetry && (
+          <div className="snap-center self-center shrink-0 w-48">
+            <RailRetryTile shape="inline" onRetry={onRetry} />
+          </div>
         )}
       </div>
       {showHeroDots(columns) && (

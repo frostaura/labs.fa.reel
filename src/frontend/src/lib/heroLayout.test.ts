@@ -1,93 +1,154 @@
 import { describe, expect, it } from "vitest";
 import {
+  LG_BREAKPOINT_PX,
   clampColumn,
   heroActiveColumn,
+  heroArtClass,
   heroCardClass,
   heroColumns,
   heroContainerClass,
   heroEagerCount,
   heroProseScale,
   heroRowsInEffect,
+  heroScrimClass,
   heroShimmerClass,
   heroTextBlockClass,
   heroTitleClass,
   showHeroDots,
 } from "./heroLayout";
 
-/**
- * The single-row strings as the hero rendered them before two-row mode existed, copied out of the
- * component at the commit that introduced `rows`. They are duplicated here on purpose: two rows is
- * an addition, and the whole safety argument for shipping it is that a phone and the free tier get
- * back exactly the row they had. A diff in any of these is that argument breaking, and it is the
- * kind of break that no screenshot catches and no e2e spec asserts.
- */
-const LEGACY = {
-  container: "flex gap-4 overflow-x-auto snap-x snap-mandatory scroll-smooth pb-1 -mx-1 px-1",
-  card:
-    "relative w-[min(92%,860px)] shrink-0 snap-center overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 aspect-[16/8.5] group focus:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60",
-  shimmer:
-    "relative w-[min(92%,860px)] shrink-0 snap-center overflow-hidden rounded-2xl border border-fa-edge bg-fa-ink-2 aspect-[16/8.5] reel-shimmer",
-  textBlock: "absolute inset-x-0 bottom-0 p-5 sm:p-7 space-y-2",
-  title: "text-xl sm:text-3xl font-light text-fa-frost-bright drop-shadow",
-  prose: "fa-body sm:text-base",
-};
+/** Every whitespace-separated class token, so assertions test tokens rather than substrings. */
+function tokens(className: string): string[] {
+  return className.split(/\s+/).filter(Boolean);
+}
 
-describe("single row is byte-identical to what the hero always rendered", () => {
-  it("keeps the container class exactly", () => {
-    expect(heroContainerClass(1)).toBe(LEGACY.container);
+describe("the card stacks below lg and overlays from lg (F-4, O-1)", () => {
+  for (const rows of [1, 2] as const) {
+    it(`rows=${rows}: a column with no fixed aspect below lg, so its text can never be cut off the top`, () => {
+      const card = tokens(heroCardClass(rows));
+      expect(card).toContain("flex");
+      expect(card).toContain("flex-col");
+      expect(card).toContain("lg:block");
+      // The defect: a fixed aspect at every width with the copy pinned to the bottom. Any
+      // un-prefixed aspect class brings it back.
+      expect(card.filter((t) => t.startsWith("aspect-"))).toEqual([]);
+      expect(card.some((t) => t.startsWith("lg:aspect-"))).toBe(true);
+    });
+
+    it(`rows=${rows}: the text block is in flow below lg and pinned over the art only from lg`, () => {
+      const text = tokens(heroTextBlockClass(rows));
+      expect(text).not.toContain("absolute");
+      expect(text).not.toContain("bottom-0");
+      expect(text).toContain("lg:absolute");
+      expect(text).toContain("lg:bottom-0");
+    });
+
+    it(`rows=${rows}: the overlay panel is at least 0.85 opaque at its lightest point (O-2)`, () => {
+      const text = tokens(heroTextBlockClass(rows));
+      const alphas = text
+        .map((t) => /^lg:(?:from|via|to|bg)-fa-ink\/(\d+)$/.exec(t))
+        .filter((m): m is RegExpExecArray => m !== null)
+        .map((m) => Number(m[1]));
+      expect(alphas.length).toBeGreaterThan(0);
+      expect(Math.min(...alphas)).toBeGreaterThanOrEqual(85);
+    });
+
+    it(`rows=${rows}: the title and hook are clamped to two lines`, () => {
+      expect(tokens(heroTitleClass(rows))).toContain("line-clamp-2");
+      expect(tokens(heroProseScale(rows))).toContain("line-clamp-2");
+    });
+
+    it(`rows=${rows}: the shimmer holds a stacked card's space below lg and the overlay aspect from lg`, () => {
+      const shimmer = tokens(heroShimmerClass(rows));
+      expect(shimmer).toContain("reel-shimmer");
+      expect(shimmer.filter((t) => t.startsWith("aspect-"))).toEqual([]);
+      expect(shimmer.some((t) => t.startsWith("min-h-[calc("))).toBe(true);
+      expect(shimmer).toContain("lg:min-h-0");
+      // Same overlay aspect as the card it stands in for, so the card lands in the held space.
+      const cardAspects = tokens(heroCardClass(rows)).filter((t) => /^(lg|xl):aspect-/.test(t));
+      for (const aspect of cardAspects) expect(shimmer).toContain(aspect);
+    });
+  }
+
+  it("the art is a 16:9 block in the column below lg and fills the card from lg", () => {
+    const art = tokens(heroArtClass());
+    expect(art).toContain("aspect-video");
+    expect(art).toContain("lg:absolute");
+    expect(art).toContain("lg:inset-0");
+    expect(art).toContain("lg:aspect-auto");
   });
 
-  it("keeps the card, shimmer and text classes exactly", () => {
-    expect(heroCardClass(1)).toBe(LEGACY.card);
-    expect(heroShimmerClass(1)).toBe(LEGACY.shimmer);
-    expect(heroTextBlockClass(1)).toBe(LEGACY.textBlock);
-    expect(heroTitleClass(1)).toBe(LEGACY.title);
-    expect(heroProseScale(1)).toBe(LEGACY.prose);
+  it("the gradient scrim only exists where text overlays art", () => {
+    const scrim = tokens(heroScrimClass());
+    expect(scrim).toContain("hidden");
+    expect(scrim).toContain("lg:block");
+  });
+
+  it("a half-width two-row card gets a taller overlay aspect until xl", () => {
+    const card = tokens(heroCardClass(2));
+    expect(card).toContain("lg:aspect-[16/10]");
+    expect(card).toContain("xl:aspect-[16/8.5]");
+  });
+
+  it("the shape changes at Tailwind's lg breakpoint", () => {
+    expect(LG_BREAKPOINT_PX).toBe(1024);
+  });
+});
+
+describe("single-row container", () => {
+  it("is a flex scroller, one card per screen on a phone and two on a tablet", () => {
+    expect(tokens(heroContainerClass(1))[0]).toBe("flex");
+    const card = tokens(heroCardClass(1));
+    expect(card).toContain("w-[min(92%,860px)]");
+    expect(card).toContain("md:w-[min(48%,620px)]");
+    expect(card).toContain("lg:w-[min(92%,860px)]");
+    expect(card).toContain("shrink-0");
   });
 });
 
 describe("two-row container", () => {
   it("is one column-flowed grid, so both rows share a single scrollLeft", () => {
-    const container = heroContainerClass(2);
+    const container = tokens(heroContainerClass(2));
     expect(container).toContain("grid");
     expect(container).toContain("grid-flow-col");
-    // One row on phones, two from `md` — the free/phone collapse lives in CSS, not in an effect.
+    // One row below lg, two from lg — the phone/tablet collapse lives in CSS, not in an effect.
     expect(container).toContain("grid-rows-1");
-    expect(container).toContain("md:grid-rows-2");
+    expect(container).toContain("lg:grid-rows-2");
+    expect(container).not.toContain("md:grid-rows-2");
     expect(container).toContain("auto-cols-[min(92%,860px)]");
     expect(container).toContain("md:auto-cols-[min(48%,620px)]");
   });
 
   it("keeps the scroll and snap behaviour of the single row", () => {
     for (const token of ["overflow-x-auto", "snap-x", "snap-mandatory", "scroll-smooth", "gap-4"]) {
-      expect(heroContainerClass(2)).toContain(token);
+      expect(tokens(heroContainerClass(2))).toContain(token);
+      expect(tokens(heroContainerClass(1))).toContain(token);
     }
   });
 
   it("hands card width to the grid rather than the card", () => {
-    expect(heroCardClass(2)).not.toContain("w-[min(92%,860px)]");
-    expect(heroCardClass(2)).not.toContain("shrink-0");
+    const card = tokens(heroCardClass(2));
+    expect(card.some((t) => t.includes("w-[min("))).toBe(false);
+    expect(card).not.toContain("shrink-0");
     // Everything a card needs to still BE a hero card survives.
-    expect(heroCardClass(2)).toContain("snap-center");
-    expect(heroCardClass(2)).toContain("aspect-[16/8.5]");
-    expect(heroCardClass(2)).toContain("focus-visible:ring-fa-frost/60");
+    expect(card).toContain("snap-center");
+    expect(card).toContain("focus-visible:ring-fa-frost/60");
   });
 
-  it("gives the trailing shimmer the same metrics so it lands as one more grid cell", () => {
-    expect(heroShimmerClass(2)).not.toContain("shrink-0");
-    expect(heroShimmerClass(2)).toContain("aspect-[16/8.5]");
-    expect(heroShimmerClass(2)).toContain("reel-shimmer");
+  it("gives the trailing shimmer no width of its own so it lands as one more grid cell", () => {
+    expect(tokens(heroShimmerClass(2))).not.toContain("shrink-0");
   });
 
   it("shrinks the copy to fit a half-width card", () => {
-    expect(heroTextBlockClass(2)).toBe("absolute inset-x-0 bottom-0 p-5 space-y-2");
-    expect(heroTitleClass(2)).toBe("text-xl md:text-2xl font-light text-fa-frost-bright drop-shadow");
-    expect(heroProseScale(2)).toBe("fa-body");
+    expect(tokens(heroTextBlockClass(2))).not.toContain("lg:p-7");
+    expect(tokens(heroTextBlockClass(1))).toContain("lg:p-7");
+    expect(tokens(heroProseScale(2))).not.toContain("sm:text-base");
+    expect(tokens(heroProseScale(1))).toContain("sm:text-base");
   });
 });
 
 describe("rows in effect", () => {
-  it("collapses a two-row request to one row below md", () => {
+  it("collapses a two-row request to one row below lg", () => {
     expect(heroRowsInEffect(2, false)).toBe(1);
     expect(heroRowsInEffect(2, true)).toBe(2);
   });
@@ -161,8 +222,8 @@ describe("dot indicator", () => {
 });
 
 describe("eager image loading", () => {
-  it("loads the first visible column in one row and the first two in two", () => {
-    expect(heroEagerCount(1)).toBe(1);
+  it("loads the cards visible at rest: up to two in one row (a tablet shows two), four in two rows", () => {
+    expect(heroEagerCount(1)).toBe(2);
     expect(heroEagerCount(2)).toBe(4);
   });
 });

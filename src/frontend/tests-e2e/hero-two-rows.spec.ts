@@ -14,8 +14,8 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
  * apart — there is nothing to keep in sync. A JS-synced pair would pass a screenshot and fail the
  * moment someone flicked it, so the scroll assertion below is the load-bearing one.
  *
- * The other half is that nothing regresses for anyone who cannot use two rows: a phone has no room
- * for them, and the free tier is capped at three hero cards server-side with a `/more` that returns
+ * The other half is that nothing regresses for anyone who cannot use two rows: below `lg` the card
+ * stacks (art above text), so a phone or tablet has no room for two rows of them, and the free tier is capped at three hero cards server-side with a `/more` that returns
  * exhausted, so a second row there would be a half-empty grid advertising the cap.
  */
 
@@ -82,7 +82,7 @@ test.describe("two-row hero at desktop width", () => {
 
     // The grid shape itself, so a future refactor that quietly reverts to a flex row fails loudly
     // rather than passing on a coincidence of positions.
-    await expect(page.getByTestId("hero-carousel")).toHaveClass(/md:grid-rows-2/);
+    await expect(page.getByTestId("hero-carousel")).toHaveClass(/lg:grid-rows-2/);
     await expect(page.getByTestId("hero-carousel")).toHaveClass(/grid-flow-col/);
 
     const [one, two, three] = [await box(heroCard(page, 0)), await box(heroCard(page, 1)), await box(heroCard(page, 2))];
@@ -151,6 +151,17 @@ test.describe("one row where two rows would be wrong", () => {
     expect(Math.abs(two.y - one.y)).toBeLessThanOrEqual(1);
     expect(two.x).toBeGreaterThan(one.x + one.width / 2);
     // One row means one column per card, and the dots follow.
+    await expect(page.getByTestId("hero-dots").locator("span")).toHaveCount(5);
+  });
+
+  test("a tablet gets one row of two side-by-side cards, not one card at 92%", async ({ page }) => {
+    await page.setViewportSize({ width: 834, height: 1194 });
+    await bootHome(page, FIVE);
+
+    const [one, two] = [await box(heroCard(page, 0)), await box(heroCard(page, 1))];
+    expect(Math.abs(two.y - one.y)).toBeLessThanOrEqual(1);
+    // Both fully on screen at rest: the tablet uses its width.
+    expect(two.x + two.width).toBeLessThanOrEqual(834);
     await expect(page.getByTestId("hero-dots").locator("span")).toHaveCount(5);
   });
 
