@@ -4,6 +4,15 @@
 # bring them back when the daemon starts again — the stack stays dead until someone runs
 # `docker compose up` by hand. `always` restarts them with the daemon. On the Portainer host
 # `unless-stopped` remains correct, because there an operator's stop should stick.
+# Every service logs through Docker's `local` driver with rotation (J*2). The json-file default kept
+# about 30 minutes of the backend's log on the live host, which made every after-the-fact diagnosis
+# a guess. 10 x 50 MB per container; the parity test pins this block in every descriptor.
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "50m"
+    max-file: "10"
+
 services:
   postgres:
     # pgvector-enabled Postgres — deliberate deviation from the postgres:16-alpine FrostAura
@@ -18,9 +27,12 @@ services:
     ports:
       # Published for host-side dev (dotnet run / dotnet ef / tests). 5433 avoids colliding
       # with other Postgres instances on this machine; in-stack traffic uses postgres:5432.
-      - "${POSTGRES_HOST_PORT:-5433}:5432"
+      # Loopback only unless POSTGRES_BIND opts in (J-1): the database never needs the LAN, and it
+      # has its own variable so opening the gateway for phone QA does not open Postgres with it.
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reel} -d ${POSTGRES_DB:-reel}" ]
       interval: 5s
@@ -48,7 +60,6 @@ services:
       TRAKT_CLIENT_SECRET: ${TRAKT_CLIENT_SECRET:-}
       TRAKT_REDIRECT_URI: ${TRAKT_REDIRECT_URI:-http://localhost:5173/auth/trakt/callback}
       TRAKT_RATE_BUDGET_PER_5MIN: ${TRAKT_RATE_BUDGET_PER_5MIN:-900}
-      TRAKT_POST_BUDGET_PER_SEC: ${TRAKT_POST_BUDGET_PER_SEC:-1}
       # TMDB
       TMDB_READ_ACCESS_TOKEN: ${TMDB_READ_ACCESS_TOKEN:-}
       TMDB_RATE_PER_SEC: ${TMDB_RATE_PER_SEC:-40}
@@ -60,9 +71,7 @@ services:
       # Embeddings — base URL is load-bearing: OpenRouter serves text-embedding-3-small, so the
       # provider must point there, not the api.openai.com default. The key falls back to
       # OPENROUTER_API_KEY, since both go to the same gateway; set EMBEDDINGS_API_KEY only to split them.
-      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-openai}
       EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
-      EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-1536}
       EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://openrouter.ai/api/v1}
       EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-$OPENROUTER_API_KEY}
       # Conversational search model (defaults to OPENROUTER_MODEL)
@@ -88,6 +97,44 @@ services:
       HYDRATE_MAX_TITLES_PER_DAY: ${HYDRATE_MAX_TITLES_PER_DAY:-1500}
       EXTRACT_DAILY_TOKENS: ${EXTRACT_DAILY_TOKENS:-1500000}
       EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
+      # LLM spend ceilings per account per day (K-5: these never reached the container before).
+      # Blank means "the code default"; the effective numbers are printed in one startup log line
+      # beginning "Effective LLM ceilings". LLM_XREF_DAILY_CALLS=0 is the cross-reference off switch.
+      LLM_XREF_DAILY_CALLS: ${LLM_XREF_DAILY_CALLS:-}
+      LLM_XREF_DAILY_TOKENS: ${LLM_XREF_DAILY_TOKENS:-}
+      LLM_RERANK_DAILY_CALLS: ${LLM_RERANK_DAILY_CALLS:-}
+      LLM_RERANK_DAILY_TOKENS: ${LLM_RERANK_DAILY_TOKENS:-}
+      LLM_LENS_DAILY_CALLS: ${LLM_LENS_DAILY_CALLS:-}
+      LLM_LENS_DAILY_TOKENS: ${LLM_LENS_DAILY_TOKENS:-}
+      # Model and experiment switches (blank = code default; see CLAUDE.md "Runtime flags").
+      CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
+      RESIDUAL_HEAD_ENABLED: ${RESIDUAL_HEAD_ENABLED:-}
+      RESIDUAL_OBSERVE_TRAKT_RATINGS: ${RESIDUAL_OBSERVE_TRAKT_RATINGS:-}
+      INTERLEAVE_ENABLED: ${INTERLEAVE_ENABLED:-}
+      INTERLEAVE_POLICY_A: ${INTERLEAVE_POLICY_A:-}
+      INTERLEAVE_POLICY_B: ${INTERLEAVE_POLICY_B:-}
+      INTERLEAVE_ALPHA: ${INTERLEAVE_ALPHA:-}
+      INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
+      KILL_CRITERION_ITERATIONS: ${KILL_CRITERION_ITERATIONS:-3}
+      ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
+      ENRICH_MAX_TITLES_PER_RUN: ${ENRICH_MAX_TITLES_PER_RUN:-}
+      # Background loops — each a kill switch. These are read with typed parsing, so a blank value
+      # would fail the read: the defaults are spelled out.
+      Background__JobRunner: ${Background__JobRunner:-true}
+      Background__DeltaPoll: ${Background__DeltaPoll:-true}
+      Background__TokenRefresh: ${Background__TokenRefresh:-true}
+      Background__OutboxDispatcher: ${Background__OutboxDispatcher:-true}
+      Background__NightlyReconcile: ${Background__NightlyReconcile:-true}
+      Background__Digest: ${Background__Digest:-true}
+      Background__CatalogGrowth: ${Background__CatalogGrowth:-true}
+      Background__CatalogFollowThrough: ${Background__CatalogFollowThrough:-true}
+      Background__LanguageBackfill: ${Background__LanguageBackfill:-true}
+      Push__Subject: ${Push__Subject:-https://reel.frostaura.net}
+      # The dump before any pending migration (K-1): the API asks the backup service over the shared
+      # backup_requests volume and refuses to migrate without an answer. docs/deployment.md#backups-and-restore.
+      BACKUP_REQUEST_DIR: /backup-requests
+      BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS: ${BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS:-900}
+      BACKUP_PRE_MIGRATION_REQUIRED: ${BACKUP_PRE_MIGRATION_REQUIRED:-true}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8090}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8090,http://localhost:5173}
       TestHelpers__ModelStubMode: ${TestHelpers__ModelStubMode:-false}
@@ -105,9 +152,48 @@ services:
       timeout: 5s
       retries: 30
       start_period: 120s
+    volumes:
+      - backup_requests:/backup-requests
     depends_on:
       postgres:
         condition: service_healthy
+      backup:
+        condition: service_started
+    logging: *default-logging
+
+  # Nightly pg_dump -Fc (14 daily + 8 weekly kept) and the dump the backend asks for before it
+  # migrates (K-1). Same image as postgres, so pg_dump always matches the server's major version.
+  # Dumps land in BACKUP_HOST_DIR on the host — outside Docker's VM and outside `down -v`, which
+  # deletes the database volume. Restore runbook: docs/deployment.md#backups-and-restore.
+  backup:
+    image: pgvector/pgvector:pg16
+    restart: always
+    entrypoint: [ "/bin/sh", "/usr/local/bin/reel-backup.sh" ]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-reel}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATABASE: ${POSTGRES_DB:-reel}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-2}
+      BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-14}
+      BACKUP_KEEP_WEEKLY: ${BACKUP_KEEP_WEEKLY:-8}
+      BACKUP_KEEP_PRE_MIGRATION: ${BACKUP_KEEP_PRE_MIGRATION:-10}
+    volumes:
+      - ./deploy/backup/reel-backup.sh:/usr/local/bin/reel-backup.sh:ro
+      - ${BACKUP_HOST_DIR:-./.backups}:/backups
+      - backup_requests:/backup-requests
+    # Unhealthy when the newest successful dump is older than 26 hours.
+    healthcheck:
+      test: [ "CMD-SHELL", "test -n \"$$(find /backups/last-success -mmin -1560 2>/dev/null)\"" ]
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 10m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
 
   frontend:
     build:
@@ -116,12 +202,15 @@ services:
     restart: always
     depends_on:
       - backend
+    logging: *default-logging
 
   gateway:
     image: nginx:alpine
     restart: always
     ports:
-      - "${GATEWAY_PORT:-8090}:80"
+      # Loopback only by default (J-1): on 2026-10-22 this port on 0.0.0.0 handed a Founder session
+      # to the LAN. Set GATEWAY_BIND=0.0.0.0 to opt in for phone QA on the LAN, and back after.
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8090}:80"
     environment:
       NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
       NGINX_BACKEND_PORT: ${NGINX_BACKEND_PORT:-5000}
@@ -134,6 +223,9 @@ services:
         condition: service_healthy
       frontend:
         condition: service_started
+    logging: *default-logging
 
 volumes:
   postgres_data:
+  # Handshake files only (<id>.request / .done / .failed); never holds a dump.
+  backup_requests:
