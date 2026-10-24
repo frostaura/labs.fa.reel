@@ -534,6 +534,31 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
         Assert.Equal("Pending", status);
     }
 
+    [Fact]
+    public async Task A_queued_job_of_a_known_kind_with_no_handler_is_failed_rather_than_left_waiting()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        await using var harness = Harness(JobRunnerHarness.FastOptions(), ScriptedHandler.Succeeds(JobKind.SeedCatalog));
+        var id = await AddJobAsync(JobKind.FullReconcile);
+
+        await harness.Runner.StartAsync(CancellationToken.None);
+        try
+        {
+            var failed = await WaitForAsync(id, j => j.Status == JobStatus.Failed, Patience);
+            Assert.NotNull(failed.CompletedAt);
+            Assert.Equal(0, failed.AttemptCount);
+            Assert.Contains("No handler", failed.Error!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await harness.Runner.StopAsync(CancellationToken.None);
+        }
+    }
+
     // ── Plumbing ───────────────────────────────────────────────────────────────────────────────
 
     private JobRunnerHarness Harness(JobRunnerOptions options, params ScriptedHandler[] handlers) =>

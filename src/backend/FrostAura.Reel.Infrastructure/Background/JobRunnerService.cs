@@ -602,6 +602,7 @@ public sealed class JobRunnerService(
     /// stuck job respawn forever), otherwise it goes back to Pending. A Pending row whose attempts
     /// are already spent (rows from before the claim cap) is Failed rather than stranded, because the
     /// claim will never take it and a stranded DeltaSync would hold every build of its account back.
+    /// So is a queued row of a known kind this process has no handler for.
     /// </summary>
     internal async Task SweepAsync(CancellationToken ct)
     {
@@ -635,6 +636,24 @@ public sealed class JobRunnerService(
              SET "Status" = 'Failed', "CompletedAt" = {now}, "Error" = COALESCE("Error", {exhausted})
              WHERE "Status" = 'Pending' AND "AttemptCount" >= {max}
              """, ct);
+
+        // A kind this build knows but has no handler for would otherwise wait forever, because the
+        // claim only takes kinds it can run. (A kind it does not know at all belongs to a newer
+        // image and is left alone for it.)
+        var unhandled = Enum.GetNames<JobKind>().Except(_handledKinds, StringComparer.Ordinal).ToArray();
+        var noHandler = unhandled.Length == 0
+            ? 0
+            : await db.Database.ExecuteSqlAsync(
+                $"""
+                 UPDATE "SyncJobs"
+                 SET "Status" = 'Failed', "CompletedAt" = {now}, "Error" = 'No handler is registered for this job kind.'
+                 WHERE "Status" = 'Pending' AND "Kind" = ANY({unhandled})
+                 """, ct);
+
+        if (noHandler > 0)
+        {
+            logger.LogError("Failed {Count} queued job(s) of a kind with no registered handler ({Kinds}).", noHandler, string.Join(",", unhandled));
+        }
 
         if (failed > 0)
         {
