@@ -36,6 +36,14 @@ namespace FrostAura.Reel.Application.Ml;
 /// </summary>
 public static class TrainingInputHash
 {
+    /// <summary>
+    /// The version of the fingerprint FORMULA. Stored beside the hashes; a stored pair from another
+    /// formula reads as no pair at all (<see cref="ReadFrom"/>), so changing what is hashed is never
+    /// mistaken for the inputs changing — which would retrain every account once on nothing. v2
+    /// dropped the metadata-refresh timestamp and bucketed the crowd numbers.
+    /// </summary>
+    public const int FormulaVersion = 2;
+
     /// <summary>The two fingerprints, as lower-case hex SHA-256.</summary>
     public readonly record struct Hashes(string Labels, string Inputs);
 
@@ -98,7 +106,8 @@ public static class TrainingInputHash
     /// <summary>
     /// The fingerprints an artifact was trained on, read from its <c>FeatureSchemaJson</c>
     /// document (where they are written — no column, no migration). Null for an artifact trained
-    /// before they existed, which therefore never matches and always permits the next retrain.
+    /// before they existed or under another <see cref="FormulaVersion"/>; the trainer then asks
+    /// the timestamp question instead and restamps (TrainJobHandler.SkipHashlessAsync).
     /// </summary>
     public static Hashes? ReadFrom(string featureSchemaJson)
     {
@@ -106,6 +115,8 @@ public static class TrainingInputHash
         {
             using var doc = JsonDocument.Parse(featureSchemaJson);
             return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("hashVersion", out var formula)
+                && formula.ValueKind == JsonValueKind.Number && formula.TryGetInt32(out var v) && v == FormulaVersion
                 && doc.RootElement.TryGetProperty("labelHash", out var labels)
                 && doc.RootElement.TryGetProperty("inputHash", out var inputs)
                 && labels.GetString() is { Length: > 0 } l
@@ -149,6 +160,7 @@ public static class TrainingInputHash
                 return featureSchemaJson;
             }
 
+            doc["hashVersion"] = FormulaVersion;
             doc["labelHash"] = hashes.Labels;
             doc["inputHash"] = hashes.Inputs;
             return doc.ToJsonString();

@@ -311,8 +311,10 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         Assert.Equal(2, (await ActiveAsync(accountId)).Version);
     }
 
-    [Fact]
-    public async Task A_model_trained_before_input_hashes_skips_when_nothing_was_said_since_and_is_stamped()
+    [Theory]
+    [InlineData(null)] // trained before hashes existed
+    [InlineData(1)] // hashed under the earlier formula (raw vote counts, refresh timestamps)
+    public async Task A_model_without_a_current_hash_skips_when_nothing_was_said_since_and_is_stamped(int? earlierFormula)
     {
         if (!fixture.Available)
         {
@@ -324,7 +326,7 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         // and force a second paid Fresh build (purge build -> enrich -> Train -> model-trained build).
         var accountId = await SeedTrainableAccountAsync();
         await RunTrainAsync(accountId, NewTrainJob(accountId));
-        await StripHashesAsync(accountId);
+        await StripHashesAsync(accountId, earlierFormula);
 
         var job = NewTrainJob(accountId);
         await RunTrainAsync(accountId, job);
@@ -430,13 +432,22 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         await db.SaveChangesAsync();
     }
 
-    private async Task StripHashesAsync(Guid accountId)
+    private async Task StripHashesAsync(Guid accountId, int? keepHashesUnderFormula = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var artifact = await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
         var doc = System.Text.Json.Nodes.JsonNode.Parse(artifact.FeatureSchemaJson)!.AsObject();
-        doc.Remove("labelHash");
-        doc.Remove("inputHash");
+        if (keepHashesUnderFormula is { } formula)
+        {
+            doc["hashVersion"] = formula; // hashes present, but from another formula
+        }
+        else
+        {
+            doc.Remove("hashVersion");
+            doc.Remove("labelHash");
+            doc.Remove("inputHash");
+        }
+
         artifact.FeatureSchemaJson = doc.ToJsonString();
         await db.SaveChangesAsync();
         Assert.Null(TrainingInputHash.ReadFrom(artifact.FeatureSchemaJson));

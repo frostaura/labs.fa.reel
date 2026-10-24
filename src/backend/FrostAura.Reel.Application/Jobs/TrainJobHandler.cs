@@ -207,6 +207,7 @@ public class TrainJobHandler(
                 stats = standardizer.ToPayload(),
                 // What this artifact learned from, for the next retrain's same-inputs check. In the
                 // existing document for the same reason the standardizer stats are: no column.
+                hashVersion = TrainingInputHash.FormulaVersion,
                 labelHash = inputHashes.Labels,
                 inputHash = inputHashes.Inputs,
             }),
