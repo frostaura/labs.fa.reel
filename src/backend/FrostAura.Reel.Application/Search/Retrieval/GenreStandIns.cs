@@ -67,8 +67,8 @@ public static partial class GenreStandIns
     ///
     /// <para><b>What that buys, measured on films (the stand-ins scored against TMDB's own genre
     /// tags).</b> Share of genre-tagged films the stand-ins catch, before → after: romance 0.12 →
-    /// 0.36, horror 0.22 → 0.51, history 0.12 → 0.37, thriller 0.07 → 0.16, music 0.16 → 0.51; with
-    /// precision 0.65, 0.79, 0.40, 0.72, 0.54 (each several times its genre's base rate). Keywords
+    /// 0.36, horror 0.22 → 0.51, history 0.12 → 0.38, thriller 0.07 → 0.16, music 0.16 → 0.52; with
+    /// precision 0.65, 0.78, 0.40, 0.72, 0.54 (each several times its genre's base rate). Keywords
     /// alone cannot make a TV exclusion airtight: the measured catch rate is the honest ceiling of
     /// this proxy, and 476 shows carry no keyword at all although hydrated. TV is tagged with
     /// genre-name labels far more often than films (742 shows carry "romance" against 295 films), so
@@ -97,6 +97,9 @@ public static partial class GenreStandIns
                 new Exact("unrequited love"), new Exact("heartbreak"), new Exact("crush"), new Exact("ex-lover"),
                 new Exact("online dating"), new Exact("older woman younger man relationship"),
                 new Exact("older man younger woman relationship"), new Exact("boyfriend girlfriend relationship"),
+                new Exact("enemies to lovers"), new Exact("star crossed lovers"), new Exact("matchmaking"),
+                new Exact("searching for love"), new Exact("long distance relationship"),
+                new Exact("high school sweetheart"), new Exact("dating app"),
             ],
             ["horror"] =
             [
@@ -117,7 +120,9 @@ public static partial class GenreStandIns
                 new Exact("urban legend"), new Exact("lovecraftian"), new Exact("cabin in the woods"),
                 new Exact("axe murder"), new Exact("decapitation"), new Exact("chainsaw"), new Exact("evil child"),
                 new Exact("ancient evil"), new Exact("reanimation"), new Exact("human sacrifice"),
-                new Exact("monster"), new Exact("sea monster"), new Exact("satan"),
+                new Exact("monster"), new Exact("sea monster"), new Exact("satan"), new Exact("anti-christ"),
+                new Exact("ritual murder"), new Exact("devil worship"), new Exact("ritual sacrifice"),
+                new Exact("reanimated corpse"), new Exact("apparition"), new Exact("mutilation"),
             ],
             ["history"] =
             [
@@ -134,7 +139,8 @@ public static partial class GenreStandIns
                 new Exact("holocaust (shoah)"), new Exact("ancient rome"), new Exact("roman empire"),
                 new Exact("edo period"), new Exact("feudal japan"), new Exact("american civil war"),
                 new Exact("usa history"), new Exact("royal family"), new Exact("japanese occupation of korea"),
-                new Exact("historical event"),
+                new Exact("historical event"), new Exact("palace intrigue"), new Exact("pacific war"),
+                new Exact("auschwitz-birkenau concentration camp"),
             ],
             ["thriller"] =
             [
@@ -153,6 +159,7 @@ public static partial class GenreStandIns
                 new Exact("opera"), new Exact("record producer"), new Exact("singing"), new Exact("musician"),
                 new Exact("singer"), new Exact("aspiring singer"), new Exact("rapper"), new Exact("hip-hop"),
                 new Exact("composer"), new Exact("rock star"), new Exact("punk rock"), new Exact("idol"),
+                new Exact("k-pop"), new Exact("singing competition"), new Exact("dj"),
             ],
             ["musical"] =
             [

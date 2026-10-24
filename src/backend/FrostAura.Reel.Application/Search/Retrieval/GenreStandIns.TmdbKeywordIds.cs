@@ -9,7 +9,7 @@ public static partial class GenreStandIns
     /// alone name about 80 TV stand-in phrases. Resolving them per turn through /search/keyword at
     /// TMDB's 40 requests a second costs two seconds on a cold cache — longer than the discovery
     /// arm's whole 1.5 s budget, so a cold turn would fetch nothing. Resolved once (2026-10-24, live
-    /// TMDB, exact case-insensitive name match: 198 of 198 phrases found). A pattern added without an
+    /// TMDB, exact case-insensitive name match: 218 of 218 phrases found). A pattern added without an
     /// id here fails <c>GenreStandInsTests.Every_pattern_has_a_tmdb_keyword_id</c>; the arm still
     /// resolves anything missing at run time.</para>
     /// </summary>
@@ -214,5 +214,25 @@ public static partial class GenreStandIns
             ["rock star"] = 2570,
             ["punk rock"] = 4470,
             ["idol"] = 287664,
+            ["enemies to lovers"] = 282986,
+            ["star crossed lovers"] = 165086,
+            ["matchmaking"] = 10132,
+            ["searching for love"] = 210589,
+            ["long distance relationship"] = 185332,
+            ["high school sweetheart"] = 161272,
+            ["dating app"] = 246985,
+            ["anti-christ"] = 8685,
+            ["ritual murder"] = 156593,
+            ["devil worship"] = 190396,
+            ["ritual sacrifice"] = 162745,
+            ["reanimated corpse"] = 174413,
+            ["apparition"] = 10164,
+            ["mutilation"] = 157512,
+            ["palace intrigue"] = 191599,
+            ["pacific war"] = 9525,
+            ["auschwitz-birkenau concentration camp"] = 2450,
+            ["k-pop"] = 225273,
+            ["singing competition"] = 186120,
+            ["dj"] = 186117,
         };
 }

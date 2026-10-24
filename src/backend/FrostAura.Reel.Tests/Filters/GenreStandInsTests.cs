@@ -58,6 +58,7 @@ public class GenreStandInsTests
     [InlineData("romance", "love triangle", true)]
     [InlineData("romance", "forbidden love", true)]
     [InlineData("romance", "love story", true)]
+    [InlineData("romance", "star crossed lovers", true)]      // 13 films, all romance: 10 films is the floor
     [InlineData("romance", "unrequited", false)]
     [InlineData("music", "rock music", true)]
     [InlineData("music", "music competition", true)]
