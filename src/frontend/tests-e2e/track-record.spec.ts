@@ -194,6 +194,61 @@ test.describe("track record", () => {
     // No stat tiles claiming a 0% accuracy the data cannot support.
     await expect(page.getByTestId("headline")).not.toContainText("0%");
     await expect(page.getByTestId("learned")).toHaveCount(0);
+    // And it says where the ratings that fill it come from.
+    await expect(page.getByTestId("track-record-empty-rate")).toHaveAttribute("href", "/rate");
+  });
+
+  test("a failed read is an error with a Retry, not a shimmer that never ends", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    let fail = true;
+    await page.route(
+      (url) => url.pathname === "/api/accuracy",
+      (route) =>
+        fail
+          ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ACCURACY_EXPOSURES) })
+    );
+
+    await page.goto("/track-record");
+    await expect(page.getByTestId("track-record-error")).toBeVisible();
+    await expect(page.getByTestId("track-record-loading")).toHaveCount(0);
+    // The window switch survives the failure, so another window is still one tap away.
+    await expect(page.getByRole("button", { name: "all time" })).toBeVisible();
+
+    fail = false;
+    await page.getByTestId("track-record-error-retry").click();
+    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of what you rate");
+  });
+
+  test("a window that fails never shows the previous window's numbers under its button", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await page.route(
+      (url) => url.pathname === "/api/accuracy",
+      (route) =>
+        new URL(route.request().url()).searchParams.get("window") === "all"
+          ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ACCURACY_EXPOSURES) })
+    );
+
+    await page.goto("/track-record");
+    await expect(page.getByTestId("headline-sentence")).toBeVisible();
+    await page.getByRole("button", { name: "all time" }).click();
+    await expect(page.getByTestId("track-record-error")).toBeVisible();
+    await expect(page.getByTestId("headline-sentence")).toHaveCount(0);
+
+    // Stepping back to the window that loaded shows it again.
+    await page.getByRole("button", { name: "90 days" }).click();
+    await expect(page.getByTestId("headline-sentence")).toHaveText("Within one point on 26% of what you rate");
   });
 
   test("switching the window re-asks the server for that window", async ({ page }) => {

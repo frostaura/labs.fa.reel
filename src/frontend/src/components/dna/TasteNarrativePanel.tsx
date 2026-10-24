@@ -5,6 +5,7 @@ import {
   useRegenerateNarrativeMutation,
   useSaveNarrativeMutation,
 } from "../../store/api";
+import LoadFailed from "../settings/LoadFailed";
 
 /**
  * What Reel believes about your taste, in words — and your correction to it.
@@ -18,7 +19,7 @@ import {
  * everywhere and survives every rewrite except the one you ask for.
  */
 export default function TasteNarrativePanel() {
-  const { data, isLoading } = useGetNarrativeQuery(undefined, {
+  const { data, isLoading, isError, isFetching, refetch } = useGetNarrativeQuery(undefined, {
     // While a rewrite is queued, poll so the new text arrives without a reload. Stops on its own
     // the moment the job clears.
     pollingInterval: 4000,
@@ -42,6 +43,20 @@ export default function TasteNarrativePanel() {
 
   if (isLoading) {
     return <div className="fa-card h-40 reel-shimmer" data-testid="narrative-loading" />;
+  }
+
+  // A failed read is not "no writer configured": without this branch the panel below told a user
+  // whose request merely failed that Reel has no language model.
+  if (isError && !data) {
+    return (
+      <LoadFailed
+        what="what Reel believes about your taste"
+        onRetry={() => void refetch()}
+        retrying={isFetching}
+        variant="inline"
+        testId="narrative-error"
+      />
+    );
   }
 
   // No narrative yet, and no writer configured to produce one. Say so plainly rather than showing

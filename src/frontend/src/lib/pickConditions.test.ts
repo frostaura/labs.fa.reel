@@ -7,6 +7,7 @@ import {
   normalizeFilters,
   normalizeYearRange,
   parseYearInput,
+  sameConditions,
   setGenreState,
   summaryChips,
   yearCeiling,
@@ -350,5 +351,51 @@ describe("summaryChips — browse toggles", () => {
     const filters = base({ excludeGenres: ["documentary"], languages: ["en"] });
     expect(summaryChips(filters)).toHaveLength(2);
     expect(summaryChips(filters, browse({ media: "movie", availability: "coming" }))).toHaveLength(4);
+  });
+});
+
+describe("sameConditions — what marks the editor's draft unsaved", () => {
+  it("a draft seeded from the saved rules is not dirty", () => {
+    const saved = base({ excludeGenres: ["horror", "war"], minCrowdRating: 6 });
+    expect(sameConditions(normalizeFilters(saved), saved)).toBe(true);
+  });
+
+  it("a server payload that predates the crowd and year fields equals the draft seeded from it", () => {
+    const legacy = { excludeGenres: ["horror"], includeGenres: [], excludeKeywords: [], maturityCeiling: null, minPredictedRating: null };
+    expect(sameConditions(normalizeFilters(legacy), legacy)).toBe(true);
+  });
+
+  it("order is not meaning: genres, keywords and languages compare as sets", () => {
+    const a = base({ excludeGenres: ["war", "horror"], excludeKeywords: ["gore", "clown"], languages: ["fr", "en"] });
+    const b = base({ excludeGenres: ["horror", "war"], excludeKeywords: ["clown", "gore"], languages: ["en", "fr"] });
+    expect(sameConditions(a, b)).toBe(true);
+  });
+
+  it("toggling a genre all the way round returns to clean", () => {
+    const saved = base({ excludeGenres: ["horror"] });
+    let draft = normalizeFilters(saved);
+    draft = cycleGenre(draft, "war");
+    expect(sameConditions(draft, saved)).toBe(false);
+    draft = cycleGenre(cycleGenre(draft, "war"), "war");
+    expect(genreState(draft, "war")).toBe("neutral");
+    expect(sameConditions(draft, saved)).toBe(true);
+  });
+
+  it.each<[string, Partial<FiltersPayload>]>([
+    ["an excluded genre", { excludeGenres: ["horror"] }],
+    ["a required genre", { includeGenres: ["horror"] }],
+    ["a keyword", { excludeKeywords: ["gore"] }],
+    ["the maturity ceiling", { maturityCeiling: "PG-13" }],
+    ["the predicted floor", { minPredictedRating: 6 }],
+    ["the crowd floor", { minCrowdRating: 6 }],
+    ["a language", { languages: ["en", "fr"] }],
+    ["the earliest year", { minYear: 1990 }],
+    ["the latest year", { maxYear: 2010 }],
+  ])("a change to %s makes the draft dirty", (_label, change) => {
+    expect(sameConditions(base(change), base())).toBe(false);
+  });
+
+  it("an absent payload (still loading) equals the defaults rather than throwing", () => {
+    expect(sameConditions(null, DEFAULT_FILTERS)).toBe(true);
   });
 });

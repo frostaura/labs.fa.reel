@@ -21,9 +21,13 @@ const MOCK_POSTERS: { genre: string; gradient: string; tilt: string }[] = [
  */
 function PosterMockRow() {
   return (
-    <div className="max-w-3xl mx-auto flex items-end justify-center" aria-hidden>
-      {MOCK_POSTERS.slice(0, 2).map((p) => (
-        <MockPoster key={p.genre} poster={p} />
+    // `overflow-hidden` is the backstop, not the fix: below `sm` the two outer posters drop out
+    // (MockPoster's `outer`), which is what brings the row's intrinsic width (~440 px with all
+    // five) under a 320 px phone's column. Without both, the row pushed the column 32 px off the
+    // left edge at 375 px and clipped the pitch sentence ("nk your Trakt profile").
+    <div className="w-full max-w-3xl mx-auto flex items-end justify-center overflow-hidden pt-2 pb-4" aria-hidden>
+      {MOCK_POSTERS.slice(0, 2).map((p, i) => (
+        <MockPoster key={p.genre} poster={p} outer={i === 0} />
       ))}
 
       {/* The featured card — a real pick's anatomy: badges up top, why-line below. */}
@@ -43,17 +47,19 @@ function PosterMockRow() {
         </p>
       </div>
 
-      {MOCK_POSTERS.slice(2).map((p) => (
-        <MockPoster key={p.genre} poster={p} />
+      {MOCK_POSTERS.slice(2).map((p, i, rest) => (
+        <MockPoster key={p.genre} poster={p} outer={i === rest.length - 1} />
       ))}
     </div>
   );
 }
 
-function MockPoster({ poster }: { poster: (typeof MOCK_POSTERS)[number] }) {
+function MockPoster({ poster, outer }: { poster: (typeof MOCK_POSTERS)[number]; outer: boolean }) {
   return (
     <div
-      className={`relative w-20 sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden ring-1 ring-fa-edge shadow-fa-glass ${poster.tilt}`}
+      className={`relative w-20 sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden ring-1 ring-fa-edge shadow-fa-glass ${poster.tilt} ${
+        outer ? "hidden sm:block" : ""
+      }`}
       style={{ backgroundImage: poster.gradient }}
     >
       <span className="absolute bottom-1.5 left-2 fa-overline text-fa-frost-dim">{poster.genre}</span>
@@ -86,8 +92,11 @@ export default function Landing() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <main className="flex-1 flex items-center justify-center px-6">
-        <div className="max-w-3xl text-center space-y-8 reel-rise">
+      {/* A 16 px gutter on phones, and a column that may shrink below its content's intrinsic width
+          (`w-full min-w-0`): a flex item defaults to `min-width: auto`, which is how one wide child
+          used to widen the whole column past the viewport. */}
+      <main className="flex-1 flex items-center justify-center px-4 sm:px-6">
+        <div className="w-full min-w-0 max-w-3xl text-center space-y-8 reel-rise">
           <div className="space-y-4 max-w-xl mx-auto">
             <h1 className="text-5xl font-light tracking-wide text-fa-frost-bright">Reel</h1>
             <p className="text-lg text-fa-frost/90 leading-relaxed">

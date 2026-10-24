@@ -10,16 +10,29 @@ import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
  * The 15s sync/status poll is authoritative: pollAdvance() can move the stage even when SSE
  * stalls, so the show never wedges on a dropped connection.
  */
-export type ShowStage = "connecting" | "ingesting" | "profiling" | "fitting" | "reveal" | "failed";
+export type ShowStage = "connecting" | "ingesting" | "profiling" | "fitting" | "reveal" | "needsRatings" | "failed";
 
+/**
+ * `needsRatings` is not a failure and is not on the forward path either: it is the trainer saying
+ * "too few ratings to fit a model" (fewer than its floor of usable movie and show ratings). It
+ * applies from any stage, like `failed`, and only the authoritative poll moves the show off it —
+ * once the account has rated enough, the next train runs and the poll reports the stage it reached.
+ */
 const STAGE_ORDER: Record<ShowStage, number> = {
   connecting: 0,
   ingesting: 1,
   profiling: 2,
   fitting: 3,
   reveal: 4,
+  needsRatings: 98,
   failed: 99,
 };
+
+/** The trainer's floor as the status API reports it (`notEnoughRatings`). */
+export interface RatingsFloor {
+  usableRatings: number;
+  required: number;
+}
 
 export type IngestKind = "movies" | "shows" | "episodes" | "ratings";
 
@@ -55,6 +68,10 @@ export interface OnboardingState {
   lastEventAt: number | null;
   stalled: boolean;
   error: string | null;
+  /** The status API's `degradedReason` (a stable code), when the account is degraded. */
+  degradedReason: string | null;
+  /** Counts behind `needsRatings`; null when the server did not send them. */
+  ratingsFloor: RatingsFloor | null;
 }
 
 const initialState: OnboardingState = {
@@ -68,15 +85,20 @@ const initialState: OnboardingState = {
   lastEventAt: null,
   stalled: false,
   error: null,
+  degradedReason: null,
+  ratingsFloor: null,
 };
 
 const MAX_INSIGHTS = 50;
 
 function advance(state: OnboardingState, target: ShowStage) {
-  if (target === "failed" || STAGE_ORDER[target] > STAGE_ORDER[state.stage]) {
+  if (target === "failed" || target === "needsRatings" || STAGE_ORDER[target] > STAGE_ORDER[state.stage]) {
     state.stage = target;
   }
 }
+
+/** The status API's reason code for "below the training floor". */
+const NOT_ENOUGH_RATINGS = "NotEnoughRatings";
 
 /** Backend PipelineStage → show stage, used by both stage-changed events and the status poll. */
 export function stageFromPipeline(pipelineStage: string): ShowStage | null {
@@ -86,6 +108,7 @@ export function stageFromPipeline(pipelineStage: string): ShowStage | null {
     case "Training": return "fitting";
     case "Evaluated": return "fitting";
     case "FeedReady": return "reveal";
+    case "NotEnoughRatings": return "needsRatings";
     case "Degraded": return "failed";
     default: return null;
   }
@@ -140,7 +163,10 @@ export const onboardingSlice = createSlice({
           };
           break;
         case "stage-changed": {
-          const mapped = stageFromPipeline(String(data.stage ?? ""));
+          // The trainer parks a too-few-ratings account as Degraded and says why in `reason`; that
+          // is the NotEnoughRatings case, not a failure. The counts arrive with the next poll.
+          const insufficient = data.reason === "insufficient-ratings";
+          const mapped = insufficient ? "needsRatings" : stageFromPipeline(String(data.stage ?? ""));
           if (mapped) advance(state, mapped);
           break;
         }
@@ -156,10 +182,32 @@ export const onboardingSlice = createSlice({
           break; // heartbeats only refresh lastEventAt/stalled above
       }
     },
-    /** The authoritative sync/status poll can advance the show when SSE is stalled or lost. */
-    pollAdvance(state, action: PayloadAction<{ pipelineStage: string }>) {
-      const mapped = stageFromPipeline(action.payload.pipelineStage);
-      if (mapped) advance(state, mapped);
+    /**
+     * The authoritative sync/status poll can advance the show when SSE is stalled or lost. It also
+     * carries the v2 status fields that explain a stop: `degradedReason` and, below the training
+     * floor, `notEnoughRatings`. Both are optional — a backend that predates them still advances.
+     */
+    pollAdvance(
+      state,
+      action: PayloadAction<{
+        pipelineStage: string;
+        degradedReason?: string | null;
+        notEnoughRatings?: RatingsFloor | null;
+      }>
+    ) {
+      const { pipelineStage, degradedReason, notEnoughRatings } = action.payload;
+      state.degradedReason = degradedReason ?? null;
+      state.ratingsFloor = notEnoughRatings ?? null;
+      const mapped =
+        degradedReason === NOT_ENOUGH_RATINGS || notEnoughRatings ? "needsRatings" : stageFromPipeline(pipelineStage);
+      if (!mapped) return;
+      // The poll is authoritative, so it is also the one thing that can lift the show off
+      // `needsRatings` once enough ratings exist — but only forward, never into another stop.
+      if (state.stage === "needsRatings" && mapped !== "needsRatings" && mapped !== "failed") {
+        state.stage = mapped;
+        return;
+      }
+      advance(state, mapped);
     },
     markStalled(state) {
       state.stalled = true;
@@ -172,3 +220,37 @@ export const onboardingSlice = createSlice({
 
 export const { eventReceived, pollAdvance, markStalled, reset } = onboardingSlice.actions;
 export default onboardingSlice.reducer;
+
+/** "4 of 10 ratings — rate a few": what the show says below the training floor. */
+export function ratingsNeededCopy(floor: RatingsFloor | null): string {
+  if (!floor) return "Reel needs a few more of your ratings before it can build your model — rate a few.";
+  const { usableRatings: have, required: need } = floor;
+  const short = Math.max(0, need - have);
+  return `${have} of ${need} ratings — rate ${short === 1 ? "one more" : `${short} more`} and Reel builds your model.`;
+}
+
+/**
+ * Why the show stopped, by the status API's `degradedReason` code. A free-text `failed` event
+ * wins when there is one; this is what renders instead of the old blank "Something went wrong.".
+ * Unknown codes get the generic line, so a reason appended on the server ships safely ahead of this.
+ */
+export function failureCopy(degradedReason: string | null, error: string | null): string {
+  if (error && error.trim().length > 0) return error.trim();
+  switch (degradedReason) {
+    case "TraktRevoked":
+      return "Reel no longer has access to your Trakt account. Reconnect Trakt to pick up where you left off.";
+    case "TraktRefreshFailed":
+      return "Reel couldn't renew its access to your Trakt account. Reconnect Trakt to pick up where you left off.";
+    case "TraktWritesDeadLettered":
+      return "Reel couldn't write your changes back to Trakt after several tries.";
+    case "ProviderDown":
+      return "The model service Reel uses is refusing requests, so your profile can't be built right now. Nothing is lost — it resumes when the service is back.";
+    default:
+      return "Building your profile stopped on Reel's side. Nothing is lost — try again.";
+  }
+}
+
+/** Whether the way forward from this failure is signing in with Trakt again. */
+export function needsReconnect(degradedReason: string | null): boolean {
+  return degradedReason === "TraktRevoked" || degradedReason === "TraktRefreshFailed";
+}

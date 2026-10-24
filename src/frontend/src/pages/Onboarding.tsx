@@ -1,11 +1,39 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { useDispatch, useSelector } from "react-redux";
 import { BarChart3, CalendarRange, Clapperboard, Sparkles, Tags, UserRound } from "lucide-react";
-import { api, useGetSessionQuery, useGetSyncStatusQuery, useUpdateSettingsMutation } from "../store/api";
+import {
+  api,
+  useGetSessionQuery,
+  useGetSyncStatusQuery,
+  useStartTraktAuthMutation,
+  useTriggerSyncMutation,
+  useUpdateSettingsMutation,
+  type SyncStatus,
+} from "../store/api";
 import { useOnboardingStream } from "../lib/onboardingStream";
+import { rememberOauthState } from "../lib/traktOauth";
 import { useCountUp } from "../lib/useCountUp";
-import { pollAdvance, type IngestKind, type Insight } from "../store/onboardingSlice";
+import {
+  failureCopy,
+  needsReconnect,
+  pollAdvance,
+  ratingsNeededCopy,
+  reset,
+  type IngestKind,
+  type Insight,
+  type RatingsFloor,
+} from "../store/onboardingSlice";
+
+/**
+ * The status API v2 fields this page reads. `SyncStatus` (store/api/sync.ts, WS-9's) does not
+ * declare them yet; until it does they are read as optional here, and an older backend that omits
+ * them simply never reaches the needs-ratings branch.
+ */
+type StatusWithReason = SyncStatus & {
+  degradedReason?: string | null;
+  notEnoughRatings?: RatingsFloor | null;
+};
 import type { AppDispatch, RootState } from "../store";
 
 const COUNTER_LABELS: Record<IngestKind, string> = {
@@ -21,7 +49,8 @@ const STAGE_COPY: Record<string, string> = {
   profiling: "Reading your taste…",
   fitting: "Teaching your model…",
   reveal: "Your taste DNA is ready.",
-  failed: "Something went wrong.",
+  needsRatings: "Almost there — Reel needs a few more of your ratings.",
+  failed: "Building your profile stopped.",
 };
 
 const INSIGHT_ICONS: Record<Insight["kind"], typeof Sparkles> = {
@@ -53,18 +82,48 @@ export default function Onboarding() {
   const onboarding = useSelector((s: RootState) => s.onboarding);
   const { data: session } = useGetSessionQuery();
   const [updateSettings] = useUpdateSettingsMutation();
+  const [triggerSync, { isLoading: retrying }] = useTriggerSyncMutation();
+  const [startTraktAuth, { isLoading: reconnecting, isError: reconnectFailed }] = useStartTraktAuthMutation();
   const [melting, setMelting] = useState(false);
 
+  // `needsRatings` keeps the stream and the poll alive: rating enough titles elsewhere lets the
+  // next train run, and the poll is what moves this page on when it does.
   const streaming = onboarding.stage !== "reveal" && onboarding.stage !== "failed";
   useOnboardingStream(streaming);
 
   // Authoritative fallback: the status poll can advance a stalled show (poll wins).
-  const { data: syncStatus } = useGetSyncStatusQuery(undefined, {
+  const { data: syncStatus, refetch: refetchStatus } = useGetSyncStatusQuery(undefined, {
     pollingInterval: streaming ? 15_000 : 0,
   });
   useEffect(() => {
-    if (syncStatus) dispatch(pollAdvance({ pipelineStage: syncStatus.pipelineStage }));
+    if (!syncStatus) return;
+    const status = syncStatus as StatusWithReason;
+    dispatch(
+      pollAdvance({
+        pipelineStage: status.pipelineStage,
+        degradedReason: status.degradedReason ?? null,
+        notEnoughRatings: status.notEnoughRatings ?? null,
+      })
+    );
   }, [syncStatus, dispatch]);
+
+  // "Try again" asks the server for a sync and restarts the show, rather than reloading the page
+  // into the same stopped state (what the old "Retry sync" did).
+  const retry = async () => {
+    await triggerSync().unwrap().catch(() => undefined);
+    dispatch(reset());
+    void refetchStatus();
+  };
+
+  const reconnect = async () => {
+    try {
+      const { authorizeUrl, state } = await startTraktAuth().unwrap();
+      rememberOauthState(state);
+      window.location.assign(authorizeUrl);
+    } catch {
+      // `reconnectFailed` renders the message below.
+    }
+  };
 
   // Prefetch the feed the moment the reveal is reachable — entry must feel instant.
   useEffect(() => {
@@ -86,9 +145,11 @@ export default function Onboarding() {
       <div className={`w-full max-w-2xl space-y-8 ${melting ? "reel-melt" : ""}`}>
         <div className="text-center space-y-2">
           <div className="text-3xl font-light tracking-wide text-fa-frost-bright">Reel</div>
+          {/* The display name, as everywhere else in the app — the slug ("deanmar09") is an
+              identifier, not a greeting. The slug is the last resort for a profile with no name. */}
           {session && (
-            <p className="fa-caption text-fa-frost-dim">
-              Hello, {onboarding.traktUser ?? session.traktSlug}
+            <p className="fa-caption text-fa-frost-dim" data-testid="onboarding-greeting">
+              Hello, {session.displayName?.trim() || onboarding.traktUser || session.traktSlug}
             </p>
           )}
           <p className="fa-body text-fa-frost" data-testid="stage-copy">
@@ -153,12 +214,38 @@ export default function Onboarding() {
           </div>
         )}
 
+        {onboarding.stage === "needsRatings" && (
+          <div className="fa-card border-fa-frost/30 px-6 py-5 text-center space-y-3 reel-rise" data-testid="needs-ratings">
+            <p className="fa-body text-fa-frost-bright" data-testid="needs-ratings-copy">
+              {ratingsNeededCopy(onboarding.ratingsFloor)}
+            </p>
+            <p className="fa-caption text-fa-frost-dim">
+              Your model learns from what you&apos;ve rated. Titles you&apos;ve watched and never scored are the
+              quickest to rate — this page picks up as soon as there are enough.
+            </p>
+            <Link to="/rate" className="fa-button-primary inline-flex" data-testid="needs-ratings-rate">
+              Rate a few titles
+            </Link>
+          </div>
+        )}
+
         {onboarding.stage === "failed" && (
-          <div className="fa-card border-fa-danger/40 px-6 py-4 text-center space-y-3">
-            <p className="fa-body text-fa-danger">{onboarding.error}</p>
-            <button onClick={() => window.location.reload()} className="fa-button">
-              Retry sync
-            </button>
+          <div role="alert" className="fa-card border-fa-danger/40 px-6 py-4 text-center space-y-3" data-testid="onboarding-failed">
+            <p className="fa-body text-fa-danger" data-testid="onboarding-failed-reason">
+              {failureCopy(onboarding.degradedReason, onboarding.error)}
+            </p>
+            {needsReconnect(onboarding.degradedReason) ? (
+              <button onClick={reconnect} disabled={reconnecting} className="fa-button-primary" data-testid="onboarding-reconnect">
+                {reconnecting ? "Opening Trakt…" : "Reconnect Trakt"}
+              </button>
+            ) : (
+              <button onClick={retry} disabled={retrying} className="fa-button" data-testid="onboarding-retry">
+                {retrying ? "Starting…" : "Try again"}
+              </button>
+            )}
+            {reconnectFailed && (
+              <p className="fa-caption text-fa-danger">Couldn&apos;t reach Trakt. Try again in a moment.</p>
+            )}
           </div>
         )}
       </div>

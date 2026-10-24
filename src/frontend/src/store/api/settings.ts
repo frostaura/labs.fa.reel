@@ -61,6 +61,14 @@ export const settingsApi = api.injectEndpoints({
   // Vite HMR re-runs this module; let the re-injection replace the old definitions.
   overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
+    // What the account has stored — read so the email box shows (and can clear) what is on file
+    // instead of always starting empty. Tagged "Session" because every PUT below invalidates that.
+    getSettings: b.query<AccountSettings, void>({
+      query: () => "settings",
+      providesTags: ["Session"],
+    }),
+    // Returns the stored settings AFTER the write. Callers compare it with what they sent: the
+    // endpoint answers 200 and keeps the old value for an email it does not accept.
     updateSettings: b.mutation<AccountSettings, Partial<AccountSettings>>({
       query: (body) => ({ url: "settings", method: "PUT", body }),
       invalidatesTags: ["Session"],
@@ -134,6 +142,7 @@ export const settingsApi = api.injectEndpoints({
 });
 
 export const {
+  useGetSettingsQuery,
   useUpdateSettingsMutation,
   useGetFiltersQuery,
   useUpdateFiltersMutation,

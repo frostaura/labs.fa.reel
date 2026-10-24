@@ -7,6 +7,7 @@ import {
   useUndropMutation,
   type DislikeEntry,
 } from "../../store/api";
+import LoadFailed from "../settings/LoadFailed";
 
 const PAGE_SIZE = 20;
 
@@ -46,10 +47,23 @@ function formatDate(iso: string): string {
  */
 export default function DislikePanel() {
   const [offset, setOffset] = useState(0);
-  const { data } = useGetDislikesQuery({ offset, limit: PAGE_SIZE });
+  const { data, isError, isFetching, refetch } = useGetDislikesQuery({ offset, limit: PAGE_SIZE });
   const [undoNotInterested] = useUndoNotInterestedMutation();
   const [undrop] = useUndropMutation();
 
+  // A failed read says so; returning null here used to make "couldn't load" look like "you have
+  // never said no to anything".
+  if (isError && !data) {
+    return (
+      <LoadFailed
+        what="what you've said no to"
+        onRetry={() => void refetch()}
+        retrying={isFetching}
+        variant="inline"
+        testId="dislikes-error"
+      />
+    );
+  }
   if (!data || data.total === 0) return null;
 
   const { profile } = data;

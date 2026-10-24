@@ -31,11 +31,16 @@ import {
   normalizeFilters,
   normalizeYearRange,
   parseYearInput,
+  sameConditions,
   YEAR_FLOOR,
   yearCeiling,
   type GenreState,
 } from "../../lib/pickConditions";
 import ConditionSummary from "./ConditionSummary";
+import LoadFailed from "./LoadFailed";
+import SaveStatus from "./SaveStatus";
+import { saveFailureMessage, savedMessage, type SaveMessage } from "./saveOutcome";
+import { useLeaveGuard } from "./useLeaveGuard";
 
 interface Props {
   /** Fired after a successful save — the feed surface uses it to adopt the regenerated picks. */
@@ -86,14 +91,14 @@ const GENRE_ARIA: Record<GenreState, string> = {
  */
 export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions", bare, testIds }: Props) {
   const { data: session } = useGetSessionQuery();
-  const { data: saved } = useGetFiltersQuery();
+  const { data: saved, isError: loadFailed, isFetching: loadingSaved, refetch: refetchSaved } = useGetFiltersQuery();
   const [updateFilters, { isLoading: saving }] = useUpdateFiltersMutation();
   const [verifyPin] = useVerifyPinMutation();
   const unlockToken = useUnlockToken();
 
   const [draft, setDraft] = useState<FiltersPayload | null>(null);
   const [years, setYears] = useState({ min: "", max: "" });
-  const [flash, setFlash] = useState<string | null>(null);
+  const [status, setStatus] = useState<SaveMessage | null>(null);
   const [pinEntry, setPinEntry] = useState("");
   const [pinError, setPinError] = useState(false);
 
@@ -111,6 +116,33 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
 
   const pinConfigured = session?.pinConfigured ?? false;
   const locked = pinConfigured && unlockToken === null;
+
+  // Unsaved means "the draft would save different rules", not "a control was touched": toggling a
+  // genre round to where it started is clean again. It stays true through a failed save, because
+  // nothing was saved — the marker and the leave guard both read it, the guard even while a lapsed
+  // unlock has put the PIN gate over the draft.
+  //
+  // `justSaved` bridges the gap between a successful PUT and the refetch of the saved rules it
+  // invalidates; without it "Unsaved changes" flickers up beside "Saved" for one round trip. It is
+  // dropped as soon as the server's copy changes, so the server stays the baseline.
+  const [justSaved, setJustSaved] = useState<FiltersPayload | null>(null);
+  const [baselineSource, setBaselineSource] = useState(saved);
+  if (saved !== baselineSource) {
+    setBaselineSource(saved);
+    setJustSaved(null);
+  }
+  const baseline = justSaved ?? saved;
+  const dirty = draft !== null && baseline !== undefined && !sameConditions(draft, baseline);
+  useLeaveGuard(dirty);
+
+  // A success fades; a failure stays until the next save (SaveStatus). The timer is keyed on the
+  // message object so a newer message is never cleared by an older one's timer.
+  useEffect(() => {
+    if (!status || status.persistent) return;
+    const handle = window.setTimeout(() => setStatus(null), 2500);
+    return () => window.clearTimeout(handle);
+  }, [status]);
+
   const shell = bare ? "space-y-5" : "fa-card p-5 space-y-5";
 
   // The costed draft trails the edited one. Serialising it is what makes the effect stable: a fresh
@@ -148,6 +180,13 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
           <Lock className="h-4 w-4" /> Content preferences
         </h2>
         <p className="fa-caption text-fa-frost-dim">Locked with your settings PIN.</p>
+        {/* A save that hit the lock lands here: the draft is kept, and this says why it did not save. */}
+        {status?.kind === "locked" && (
+          <p role="alert" className="fa-caption text-fa-danger" data-testid="conditions-locked-reason">
+            {status.text}
+            {dirty ? " Your unsaved changes are kept — unlock to save them." : ""}
+          </p>
+        )}
         <div className="flex items-center gap-2">
           <input
             type="password"
@@ -171,6 +210,18 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
 
   // Until the saved filters land there is no honest value to draw: rendering the controls from this
   // component's defaults is what produced the flash. A skeleton says "loading" instead of lying.
+  // A failed read of the saved rules is its own state: the skeleton below used to shimmer for ever.
+  if (!draft && loadFailed) {
+    return (
+      <LoadFailed
+        what="your conditions"
+        onRetry={() => void refetchSaved()}
+        retrying={loadingSaved}
+        variant="inline"
+        testId="conditions-load-error"
+      />
+    );
+  }
   if (!draft) {
     return (
       <section className={bare ? "space-y-3" : "fa-card p-5 space-y-3"} data-testid={testIds?.loading ?? "conditions-loading"}>
@@ -212,20 +263,25 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
     const payload = normalizeFilters({ ...draft, ...range });
     setDraft(payload);
     setYears({ min: range.minYear?.toString() ?? "", max: range.maxYear?.toString() ?? "" });
-    await updateFilters({ filters: payload, unlockToken: unlockToken?.token }).unwrap()
-      .then(() => {
-        setFlash("Saved — your picks are being re-cut.");
-        onSaved?.();
-      })
-      .catch((error: unknown) => {
-        // A 423 means the unlock aged out server-side (or the token is from a rotated key ring):
-        // drop the stale token so the PIN gate re-shows instead of every save failing the same way.
-        if ((error as { status?: number } | null)?.status === 423) {
-          clearUnlockToken();
-        }
-        setFlash("Locked — verify the settings PIN first.");
-      });
-    window.setTimeout(() => setFlash(null), 2500);
+    setStatus(null);
+    try {
+      await updateFilters({ filters: payload, unlockToken: unlockToken?.token }).unwrap();
+    } catch (error: unknown) {
+      // The status decides the copy: 423 is the PIN, 400 is the server's own reason, anything else
+      // is "nothing changed" with a Retry. One catch-all used to call a 500 a PIN lock, in green.
+      const message = saveFailureMessage(error);
+      // A 423 means the unlock aged out server-side (or the token is from a rotated key ring):
+      // drop the stale token so the PIN gate re-shows instead of every save failing the same way.
+      // The draft survives the lock screen — it is this component's state, not the server's.
+      if (message.kind === "locked") {
+        clearUnlockToken();
+      }
+      setStatus(message);
+      return;
+    }
+    setJustSaved(payload);
+    setStatus(savedMessage("Saved — your picks are being re-cut."));
+    onSaved?.();
   };
 
   return (
@@ -520,11 +576,16 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
         />
       </div>
 
-      <div className="flex items-center gap-3 border-t border-fa-edge/50 pt-4">
+      <div className="flex flex-wrap items-center gap-3 border-t border-fa-edge/50 pt-4">
         <button onClick={save} disabled={saving} className="fa-button-primary" data-testid="save-prefs">
-          {saveLabel}
+          {saving ? "Saving…" : saveLabel}
         </button>
-        {flash && <span className="fa-caption text-fa-success">{flash}</span>}
+        {dirty && !saving && (
+          <span className="fa-caption text-fa-warning" data-testid="conditions-unsaved">
+            Unsaved changes
+          </span>
+        )}
+        <SaveStatus message={status} onRetry={save} retrying={saving} testId="conditions-save-status" />
       </div>
     </section>
   );

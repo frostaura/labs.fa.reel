@@ -148,3 +148,78 @@ test.describe("taste DNA dislikes", () => {
     await expect(page.getByTestId("dislike-panel")).toHaveCount(0);
   });
 });
+
+/**
+ * The page's three states. A failed read used to shimmer for ever, a failed narrative read claimed
+ * Reel had no language model, and a failed dislike read hid the panel as if nothing had been
+ * declined — "an empty collection is not an answer".
+ */
+test.describe("taste DNA data states", () => {
+  async function bootWith(page: Page, routes: { taste?: number; narrative?: number; dislikes?: number; dna?: unknown }) {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    const respond = (status: number | undefined, body: unknown) => (route: import("@playwright/test").Route) =>
+      status && status !== 200
+        ? route.fulfill({ status, contentType: "application/json", body: "{}" })
+        : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    await page.route((u) => u.pathname === "/api/taste", respond(routes.taste, routes.dna ?? DNA));
+    await page.route((u) => u.pathname === "/api/taste/dislikes", respond(routes.dislikes, DISLIKES));
+    await page.route(
+      (u) => u.pathname === "/api/taste/narrative",
+      respond(routes.narrative, { text: "You like slow-burn crime.", isEdited: false, version: 1, ratingsCount: 2044, generatedAt: null, isStale: false, regenerating: false, writerAvailable: true })
+    );
+    await page.goto("/dna");
+  }
+
+  test("a failed DNA read is an error with a Retry, and the retry recovers", async ({ page }) => {
+    let fail = true;
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/taste/dislikes", DISLIKES);
+    await page.route(
+      (u) => u.pathname === "/api/taste",
+      (route) =>
+        fail
+          ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(DNA) })
+    );
+    await page.goto("/dna");
+
+    await expect(page.getByTestId("dna-error")).toBeVisible();
+    await expect(page.getByTestId("dna-error")).toContainText("Couldn't load your taste DNA");
+    await expect(page.getByTestId("dna-loading")).toHaveCount(0);
+
+    fail = false;
+    await page.getByTestId("dna-error-retry").click();
+    await expect(page.getByText("Your taste DNA")).toBeVisible();
+    await expect(page.getByTestId("dna-error")).toHaveCount(0);
+  });
+
+  test("an account with no ratings gets an empty state that points at /rate", async ({ page }) => {
+    await bootWith(page, { dna: { ...DNA, ratingsCount: 0, histogram: [] } });
+    await expect(page.getByTestId("dna-empty")).toBeVisible();
+    await expect(page.getByTestId("dna-empty-rate")).toHaveAttribute("href", "/rate");
+    await expect(page.getByTestId("dna-error")).toHaveCount(0);
+  });
+
+  test("a failed narrative read says it failed — not that Reel has no language model", async ({ page }) => {
+    await bootWith(page, { narrative: 500 });
+    await expect(page.getByText("Your taste DNA")).toBeVisible();
+    await expect(page.getByTestId("narrative-error")).toBeVisible();
+    await expect(page.getByText(/without a language model/i)).toHaveCount(0);
+  });
+
+  test("a failed dislikes read says it failed instead of hiding the panel", async ({ page }) => {
+    await bootWith(page, { dislikes: 502 });
+    await expect(page.getByText("Your taste DNA")).toBeVisible();
+    await expect(page.getByTestId("dislikes-error")).toBeVisible();
+  });
+});
