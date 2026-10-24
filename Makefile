@@ -1,4 +1,6 @@
-.PHONY: up down build test lint lint-backend lint-frontend e2e docker-build docker-ready docker-down release-validation qa
+.PHONY: up down build test lint lint-backend lint-frontend e2e docker-build docker-ready docker-down release-validation qa \
+	ci ci-backend ci-frontend ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit \
+	ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-e2e ci-trivy ci-compose ci-docker
 
 # Compose needs these two before it will interpolate (both are `:?` required in the compose
 # files). Real values live in .env locally / Portainer in prod; these defaults exist so
@@ -65,3 +67,118 @@ docker-down:
 release-validation: lint build test e2e docker-ready
 
 qa: release-validation
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# make ci — every CI gate, run by exactly the commands .github/workflows/ci.yml runs (I-15, I-18).
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ci.yml calls these targets rather than repeating the commands, so a green `make ci` on a laptop
+# and a green CI run are the same claim. Nothing here calls a paid provider: the integration and
+# replay suites run on ReelApiFactory, which refuses live keys.
+#
+#   make ci                         all of it, stopping at the first red gate
+#   make -k ci                      all of it, reporting every red gate
+#   make ci DOTNET=~/.dotnet/dotnet a dotnet that is not on PATH (this Mac's user-local SDK)
+#
+# Needs: REEL_TEST_CONNECTION_STRING pointing at a THROWAWAY database (the fixture drops it), trivy
+# on PATH, the frontend's node_modules, Playwright's chromium and webkit, and Docker for ci-docker.
+# A missing prerequisite FAILS its gate with the reason — a gate that skips is a gate that lies.
+
+DOTNET ?= dotnet
+SLN := fa.reel.slnx
+TEST_PROJECT := src/backend/FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj
+CI_OUT ?= $(CURDIR)/.tmp/ci
+# Ratchets, not targets (regression guards; raise them as the suites grow).
+BACKEND_COVERAGE_MIN ?= 10
+FRONTEND_COVERAGE_MIN ?= 6
+# The CI image-smoke project: its own name and ports, so it never collides with a stack already
+# running on this machine (the live stack publishes 5433).
+CI_COMPOSE_ENV = $(COMPOSE_ENV) COMPOSE_PROJECT_NAME=reel-ci GATEWAY_PORT=18090 POSTGRES_HOST_PORT=15433 BACKUP_HOST_DIR=$(CI_OUT)/backups
+export MSBuildEnableWorkloadResolver := false
+
+ci: ci-backend ci-frontend ci-trivy ci-compose ci-docker
+
+ci-backend: ci-format ci-build ci-test ci-integration ci-replay ci-openapi ci-audit
+
+ci-frontend: ci-frontend-lint ci-frontend-typecheck ci-frontend-test ci-frontend-build ci-knip ci-e2e
+
+ci-format:
+	$(DOTNET) format $(SLN) --verify-no-changes --verbosity minimal
+
+# --no-incremental: an incremental build of an unchanged project does not re-print its warnings,
+# and warnings are what this gate exists to catch. TreatWarningsAsErrors is also set in
+# Directory.Build.props; it is repeated here so no project can opt itself out.
+ci-build:
+	$(DOTNET) build $(SLN) --nologo --no-incremental -p:TreatWarningsAsErrors=true -warnaserror
+
+ci-test:
+	rm -rf $(CI_OUT)/backend-coverage
+	$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "FullyQualifiedName!~IntegrationTests" \
+		--settings src/backend/coverlet.runsettings --results-directory $(CI_OUT)/backend-coverage
+	python3 deploy/ci/coverage-gate.py cobertura $(CI_OUT)/backend-coverage $(BACKEND_COVERAGE_MIN)
+
+ci-integration:
+	@test -n "$$REEL_TEST_CONNECTION_STRING" || { echo "ci-integration: set REEL_TEST_CONNECTION_STRING to a THROWAWAY database (the fixture drops it)" >&2; exit 1; }
+	REEL_REQUIRE_INTEGRATION=1 sh deploy/ci/require-tests.sh \
+		$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
+
+# WS-7's deterministic Ask Reel replay suite: recorded plans and verdicts, zero paid calls. Its
+# tests carry [Trait("Suite", "Replay")]. Red until that suite exists — by design.
+ci-replay:
+	sh deploy/ci/require-tests.sh \
+		$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "Suite=Replay"
+
+# The OpenAPI contract: regenerate the document from the build (no running API) into a scratch
+# directory and compare it, and the TypeScript generated from it, with what is committed. A diff
+# means an endpoint changed without `npm run gen:api` being rerun and committed.
+ci-openapi:
+	rm -rf $(CI_OUT)/openapi && mkdir -p $(CI_OUT)/openapi
+	$(DOTNET) build src/backend/FrostAura.Reel.Api/FrostAura.Reel.Api.csproj --nologo -v q --no-incremental \
+		-p:OpenApiGenerateDocuments=true -p:OpenApiDocumentsDirectory=$(CI_OUT)/openapi
+	diff -u src/frontend/openapi/reel-api.json $(CI_OUT)/openapi/reel-api.json
+	cd src/frontend && npx --no-install openapi-typescript $(CI_OUT)/openapi/reel-api.json -o $(CI_OUT)/openapi/openapi.ts
+	diff -u src/frontend/src/store/generated/openapi.ts $(CI_OUT)/openapi/openapi.ts
+
+ci-audit:
+	cd src/frontend && npm run audit:gate
+	$(DOTNET) list $(SLN) package --vulnerable --include-transitive --format json | python3 deploy/ci/nuget-vulnerable-gate.py
+
+ci-frontend-lint:
+	cd src/frontend && npm run lint
+
+ci-frontend-typecheck:
+	cd src/frontend && npm run typecheck
+
+ci-frontend-test:
+	cd src/frontend && npm run test -- --run --coverage
+	python3 deploy/ci/coverage-gate.py istanbul src/frontend/coverage/coverage-summary.json $(FRONTEND_COVERAGE_MIN)
+
+# Vite and its plugins print warnings and still exit 0; this gate fails on the printed warning.
+ci-frontend-build:
+	cd src/frontend && sh ../../deploy/ci/no-build-warnings.sh npm run build
+
+# Unused files, exports and dependencies (WS-9 owns the knip config and dependency).
+ci-knip:
+	cd src/frontend && npx --no-install knip
+
+# Both engines: Safari is where the founder's installed PWA runs. Service workers are blocked by the
+# Playwright config; PW_PORT keeps parallel runs apart.
+ci-e2e:
+	cd src/frontend && CI=1 npx --no-install playwright test --project=chromium --project=webkit
+
+# Known-vulnerable dependencies and committed secrets across the whole tree. HIGH and CRITICAL with
+# a fix available fail the gate. (Misconfiguration scanning joins once the images run non-root.)
+ci-trivy:
+	@command -v trivy > /dev/null || { echo "ci-trivy: trivy is not installed (https://trivy.dev; macOS: brew install trivy)" >&2; exit 1; }
+	trivy fs --quiet --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+		--skip-dirs src/frontend/node_modules --skip-dirs .tmp --skip-dirs .backups .
+
+# Every descriptor parses with only its required variables supplied.
+ci-compose:
+	$(COMPOSE_ENV) docker compose -f docker-compose.yml config -q
+	$(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci docker compose -f docker-compose.prod.yml config -q
+	$(COMPOSE_ENV) DOCKERHUB_USERNAME=ci APP_PUBLIC_URL=https://ci.invalid docker compose -f deploy/portainer-stack.yml config -q
+
+# Build both images and prove the composed stack serves, under its own project name and ports.
+ci-docker:
+	$(MAKE) docker-ready COMPOSE_ENV="$(CI_COMPOSE_ENV)" GATEWAY_PORT=18090; status=$$?; \
+		$(MAKE) docker-down COMPOSE_ENV="$(CI_COMPOSE_ENV)"; exit $$status

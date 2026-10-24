@@ -11,16 +11,17 @@ permissions:
   contents: read
 
 jobs:
+  # Every gate below runs a `make ci-*` target, never its own copy of the command: `make ci` on a
+  # laptop and this workflow are the same claim (docs/deployment.md#local-ci). Change a gate in the
+  # Makefile, not here.
+
   # ============================================================================
-  # Backend — lint, build, test (.NET 10)
+  # Backend — format, warning-free build, unit tests + coverage, replay suite
   # ============================================================================
   backend:
     name: Backend
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: ./src/backend
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -37,52 +38,55 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('src/backend/**/*.csproj', '*.slnx') }}
           restore-keys: nuget-${{ runner.os }}-
 
-      - name: Restore
-        run: dotnet restore ../../fa.reel.slnx
+      - name: Format
+        run: make ci-format
 
-      - name: Lint (format check)
-        run: dotnet format ../../fa.reel.slnx --verify-no-changes --no-restore
+      - name: Build (warnings are errors)
+        run: make ci-build
 
-      - name: Build
-        run: dotnet build ../../fa.reel.slnx --nologo -v q --no-restore
+      - name: Unit tests + coverage ratchet
+        run: make ci-test
 
-      - name: Test with coverage
-        run: dotnet test FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo -v q --settings coverlet.runsettings --results-directory ./TestResults
-
-      - name: Enforce coverage threshold
-        run: |
-          # Baseline ratchet — set to current measured backend line coverage (~11% after the
-          # M3 surface landed; pure logic is tested, endpoint/handler suites raise this in M4
-          # hardening). A regression guard, not a target.
-          THRESHOLD=10
-          REPORT=$(find ./TestResults -name "coverage.cobertura.xml" | head -1)
-          if [ -z "$REPORT" ]; then
-            echo "No Cobertura coverage report found"
-            exit 1
-          fi
-          echo "Parsing: $REPORT"
-          line_rate=$(grep -oP 'line-rate="\K[^"]+' "$REPORT" | head -1)
-          if [ -z "$line_rate" ]; then
-            echo "Could not parse line-rate from report"
-            exit 1
-          fi
-          coverage=$(awk "BEGIN {printf \"%.1f\", $line_rate * 100}")
-          echo "Line coverage: ${coverage}%  (threshold ${THRESHOLD}%)"
-          if [ "$(awk "BEGIN {print ($coverage < $THRESHOLD)}")" -eq 1 ]; then
-            echo "Coverage ${coverage}% is below the ${THRESHOLD}% threshold"
-            exit 1
-          fi
+      - name: Ask Reel replay suite (recorded plans and verdicts, zero paid calls)
+        run: make ci-replay
 
   # ============================================================================
-  # Frontend — lint, build, test (Node 22 / React 19 / Vite)
+  # Contract — the committed OpenAPI document and generated TS types match the build
+  # ============================================================================
+  contract:
+    name: OpenAPI contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ./src/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ./src/frontend
+        run: npm ci
+
+      - name: OpenAPI diff
+        run: make ci-openapi
+
+  # ============================================================================
+  # Frontend — lint, typecheck, unit tests + coverage, warning-free build, knip
   # ============================================================================
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: ./src/frontend
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -95,46 +99,32 @@ jobs:
           cache-dependency-path: ./src/frontend/package-lock.json
 
       - name: Install dependencies
+        working-directory: ./src/frontend
         run: npm ci
 
       - name: Lint
-        run: npm run lint
+        run: make ci-frontend-lint
 
-      - name: Build
-        run: npm run build
+      - name: Typecheck
+        run: make ci-frontend-typecheck
 
-      - name: Test with coverage
-        run: npm run test -- --run --coverage
+      - name: Unit tests + coverage ratchet
+        run: make ci-frontend-test
 
-      - name: Enforce frontend coverage threshold
-        run: |
-          # Baseline guard that the test infra + coverage report stay intact (~7% after the M3
-          # surface; e2e carries the UI contract). Raise as the unit suite grows.
-          THRESHOLD=6
-          REPORT="coverage/coverage-summary.json"
-          if [ ! -f "$REPORT" ]; then
-            echo "Missing coverage summary artifact at $REPORT"
-            exit 1
-          fi
-          node -e "
-            const r = require('./coverage/coverage-summary.json');
-            const pct = r.total.lines.pct;
-            const threshold = ${THRESHOLD};
-            console.log('Line coverage: ' + pct + '%  (threshold ' + threshold + '%)');
-            if (pct < threshold) process.exit(1);
-          "
+      - name: Build (warnings are errors)
+        run: make ci-frontend-build
+
+      - name: Unused files, exports and dependencies (knip)
+        run: make ci-knip
 
   # ============================================================================
-  # Frontend E2E — single-shard Playwright smoke (chromium only)
+  # Frontend E2E — Playwright, Chromium and WebKit
   # ============================================================================
   frontend-e2e:
     name: Frontend E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: [frontend]
-    defaults:
-      run:
-        working-directory: ./src/frontend
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -147,14 +137,16 @@ jobs:
           cache-dependency-path: ./src/frontend/package-lock.json
 
       - name: Install dependencies
+        working-directory: ./src/frontend
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        working-directory: ./src/frontend
+        run: npx playwright install --with-deps chromium webkit
 
-      - name: Run E2E tests
-        timeout-minutes: 10
-        run: CI=1 npm run test:e2e
+      - name: Run E2E tests (Chromium + WebKit)
+        timeout-minutes: 15
+        run: make ci-e2e
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v7
@@ -170,7 +162,7 @@ jobs:
           if-no-files-found: ignore
 
   # ============================================================================
-  # Security — npm audit + dotnet vulnerable package scan
+  # Security — npm + NuGet advisories, Trivy (vulnerable dependencies, committed secrets)
   # ============================================================================
   security:
     name: Security Scan
@@ -192,52 +184,34 @@ jobs:
         working-directory: ./src/frontend
         run: npm ci
 
-      # Equivalent to `npm audit --audit-level=high`, except that an advisory with no fixed
-      # version can be waived individually, with a reason and a review date it cannot outlive.
-      # See src/frontend/scripts/audit-gate.mjs for why that beats deleting the gate.
-      - name: npm audit (high severity, expiring allowlist)
-        working-directory: ./src/frontend
-        run: npm run audit:gate
-
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
 
-      - name: Restore backend packages
-        working-directory: ./src/backend
-        run: dotnet restore ../../fa.reel.slnx
+      # npm: `npm audit --audit-level=high` with an expiring, per-advisory allowlist
+      # (src/frontend/scripts/audit-gate.mjs). NuGet: any vulnerable package, transitive included.
+      - name: Dependency advisories (npm + NuGet)
+        run: make ci-audit
 
-      - name: Check vulnerable NuGet packages
-        working-directory: ./src/backend
+      # A pinned release binary, verified against the release's checksum file — not a floating
+      # action tag, which can be repointed under a workflow that trusts it.
+      - name: Install Trivy (pinned)
+        env:
+          TRIVY_VERSION: "0.58.1"
         run: |
           set -euo pipefail
-          dotnet list ../../fa.reel.slnx package --vulnerable --include-transitive --format json > vulnerable-packages.json
-          node -e "
-            const fs = require('fs');
-            const report = JSON.parse(fs.readFileSync('vulnerable-packages.json', 'utf8'));
-            const projects = report.projects || [];
-            const vulnerable = [];
-            for (const project of projects) {
-              for (const framework of project.frameworks || []) {
-                for (const pkg of framework.topLevelPackages || []) {
-                  if ((pkg.vulnerabilities || []).length > 0) vulnerable.push(pkg);
-                }
-                for (const pkg of framework.transitivePackages || []) {
-                  if ((pkg.vulnerabilities || []).length > 0) vulnerable.push(pkg);
-                }
-              }
-            }
-            if (vulnerable.length > 0) {
-              console.error('Vulnerable NuGet packages detected:');
-              for (const pkg of vulnerable) {
-                const ids = (pkg.vulnerabilities || []).map(v => v.severity + ':' + v.advisoryUrl).join(', ');
-                console.error('- ' + pkg.id + ' ' + pkg.resolvedVersion + ' -> ' + ids);
-              }
-              process.exit(1);
-            }
-            console.log('No vulnerable NuGet packages detected');
-          "
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSLO "${base}/${tarball}"
+          curl -fsSLO "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " ${tarball}\$" "trivy_${TRIVY_VERSION}_checksums.txt" | sha256sum -c -
+          tar -xzf "${tarball}" trivy
+          sudo install -m 0755 trivy /usr/local/bin/trivy
+          rm -f trivy "${tarball}" "trivy_${TRIVY_VERSION}_checksums.txt"
+
+      - name: Trivy
+        run: make ci-trivy
 
   # ============================================================================
   # Backend Integration — real Postgres (pgvector) boundary checks
@@ -245,7 +219,7 @@ jobs:
   backend-integration:
     name: Backend Integration (Postgres + pgvector)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: [backend]
     services:
       postgres:
@@ -262,9 +236,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    defaults:
-      run:
-        working-directory: ./src/backend
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -274,21 +245,16 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Restore
-        run: dotnet restore FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj
-
       - name: Run integration tests against Postgres
         env:
           REEL_TEST_CONNECTION_STRING: Host=localhost;Port=5432;Database=reel_test;Username=reel;Password=reel_test_pw
-          # Turn a missing/unreachable database into a hard failure. Without this the fixture
-          # skips and 21 integration files report green having executed nothing — including the
-          # real-Postgres tenancy audit. Note there is deliberately NO REEL_SKIP_LOCAL_FLAKY
-          # here: CI's pgvector service is authoritative and runs the quarantined tests too.
-          REEL_REQUIRE_INTEGRATION: "1"
-        run: dotnet test FrostAura.Reel.Tests/FrostAura.Reel.Tests.csproj --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
+          # ci-integration sets REEL_REQUIRE_INTEGRATION=1, turning a missing database into a hard
+          # failure, and fails if no test ran. There is deliberately NO REEL_SKIP_LOCAL_FLAKY here:
+          # CI's pgvector service is authoritative and runs the quarantined tests too.
+        run: make ci-integration
 
   # ============================================================================
-  # Docker — build both images and smoke the composed stack (lifeos qa-compose parity)
+  # Docker — every descriptor parses; both images build; the composed stack serves
   # ============================================================================
   # Runs on pull requests too, deliberately: until this job existed the Dockerfiles and the
   # compose wiring were only exercised by the publish jobs, which are push-to-main only. A
@@ -303,26 +269,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Validate the production stack file
-        # docker-compose.prod.yml is the literal file content behind the Portainer stack, and
-        # nothing else in CI parses it. Placeholder values only satisfy its `:?` required vars.
-        env:
-          POSTGRES_PASSWORD: ci_placeholder
-          JWT_SECRET: ci_placeholder_jwt_secret_at_least_32_chars
-          TRAKT_CLIENT_ID: ci_placeholder
-          TRAKT_CLIENT_SECRET: ci_placeholder
-          TMDB_READ_ACCESS_TOKEN: ci_placeholder
-        run: docker compose -f docker-compose.prod.yml config -q
+      - name: Validate every compose descriptor
+        run: make ci-compose
 
       - name: Build images and smoke the composed stack
-        # Same target a developer runs locally, so a green CI means `make docker-ready` works
-        # on a laptop too. Probes /health, /health/ready (real pgvector migrations applied)
-        # and / (SPA bundle) through the gateway.
-        run: make docker-ready
-
-      - name: Tear down compose stack
-        if: always()
-        run: make docker-down
+        # /health, /health/ready (real pgvector migrations applied, after the pre-migration dump
+        # handshake with the backup service) and / (SPA bundle) through the gateway.
+        run: make ci-docker
 
   # ============================================================================
   # Docker Build & Push — only on push to main, after all CI gates pass
@@ -331,7 +284,7 @@ jobs:
     name: Build Backend (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
+    needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
@@ -359,7 +312,7 @@ jobs:
     name: Build Backend (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
+    needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
@@ -408,7 +361,7 @@ jobs:
     name: Build Frontend (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
+    needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
@@ -436,7 +389,7 @@ jobs:
     name: Build Frontend (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
-    needs: [backend, frontend, frontend-e2e, backend-integration, security, docker]
+    needs: [backend, contract, frontend, frontend-e2e, backend-integration, security, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
