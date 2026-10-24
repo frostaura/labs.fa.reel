@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Infrastructure.RateLimiting;
@@ -21,6 +22,7 @@ public static partial class DependencyInjection
         services.AddSingleton<ISecretProtector, SecretProtector>();
 
         // ── Application services ───────────────────────────────────────────────────────────
+        services.AddValidatedOptions<SessionOptions>();
         services.AddSingleton<OAuthStateCodec>();
         services.AddScoped<SessionService>();
         services.AddScoped<TraktOAuthService>();

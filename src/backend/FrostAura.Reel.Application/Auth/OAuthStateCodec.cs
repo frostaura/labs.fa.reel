@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace FrostAura.Reel.Application.Auth;
 
@@ -15,10 +15,11 @@ public class OAuthStateCodec
     private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(15);
     private readonly byte[] _key;
 
-    public OAuthStateCodec(IConfiguration configuration)
+    public OAuthStateCodec(IOptions<SessionOptions> options)
     {
-        var secret = configuration["JWT_SECRET"]
-            ?? throw new InvalidOperationException("JWT_SECRET is required.");
+        var secret = options.Value.Secret is { Length: > 0 } configured
+            ? configured
+            : throw new InvalidOperationException($"{SessionOptions.SecretKey} is required.");
         // Purpose-separated from the JWT signing key.
         _key = SHA256.HashData(Encoding.UTF8.GetBytes("reel.oauth-state.v1:" + secret));
     }
