@@ -166,9 +166,12 @@ public static class SearchVocabulary
     }
 
     /// <summary>
-    /// True when a token names a concept a turn's own words are allowed to rule out. Both readings
-    /// of an "-ies" plural are tried, because only one of them is ever a word: "zombies" reduces to
-    /// "zomby" under the "-y" rule and to "zombie" under the plain one.
+    /// True when a token names a concept a turn's own words are allowed to rule out. Every singular
+    /// and plural reading is tried (<see cref="AskReel.NegationTerms.Forms"/>), because only one of
+    /// them is ever a word: "zombies" reduces to "zomby" under the "-y" rule and to "zombie" under
+    /// the plain one, and "superheroes" reduces to "superheroe" under the "-s" rule — which is how
+    /// "no superheroes please" stopped being a negation at all and showed eleven superhero titles
+    /// as picks (A-9).
     /// </summary>
     public static bool IsNegatableKeyword(string? token)
     {
@@ -178,9 +181,7 @@ public static class SearchVocabulary
             return false;
         }
 
-        return NegatableKeywords.Contains(raw)
-            || NegatableKeywords.Contains(Singularise(raw))
-            || (raw.EndsWith("ies", StringComparison.Ordinal) && NegatableKeywords.Contains(raw[..^1]));
+        return AskReel.NegationTerms.Forms(raw).Any(NegatableKeywords.Contains);
     }
 
     /// <summary>

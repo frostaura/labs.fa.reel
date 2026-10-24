@@ -231,6 +231,39 @@ public class AskReelFilterConflictTests(PostgresFixture fixture) : EmbeddedCatal
     }
 
     /// <summary>
+    /// The same romcom request with nothing discoverable: an honest none-found answer — and the
+    /// collision, the likeliest reason nothing is left, leads the reply rather than being lost with
+    /// the model's sentence.
+    /// </summary>
+    [Fact]
+    public async Task A_none_found_answer_leads_with_the_collision_that_explains_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        foreach (var genre in FounderExclusions)
+        {
+            await AddFilterAsync(accountId, FilterKind.ExcludeGenre, genre);
+        }
+
+        await AddFilterAsync(accountId, FilterKind.MinYear, "2000");
+
+        var (service, events) = BuildService(accountId, new ScriptedTmdbClient([]), new LaunderingAgent(), out var emit);
+        var outcome = await service.StreamAsync(
+            "a 90s romantic comedy", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var message = events.Single(e => e.Event == "conflict").Data.GetProperty("message").GetString()!;
+        var reply = events.Single(e => e.Event == "assistant-message").Data.GetProperty("text").GetString()!;
+        Assert.StartsWith(message + " ", reply, StringComparison.Ordinal);
+        Assert.Equal(reply, outcome.AssistantText);
+        Assert.Equal(Domain.Search.SearchTurnMode.NoneFound, outcome.Mode);
+    }
+
+    /// <summary>
     /// F5-03's other half. <c>excludedKeywords</c> was empty on every conflict frame ever captured,
     /// and the reason turned out not to be the producer: the founder's account holds twelve filter
     /// rows and <b>not one of them is an <c>ExcludeKeyword</c></b>, so the list had no account-side

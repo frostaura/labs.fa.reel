@@ -602,7 +602,8 @@ public sealed class LiveSearchExpansionService(
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligibleCount: 0, eligiblePoolSize, discovered.Count,
                     underBar: [], nearMiss: [], belowFloor: [], floor: MinPredictedFloor(filterRows),
-                    agentReply.Degraded, ReplyAsync, degraded, timings, input, emit, conflictJson, judged: 0, judge: null, ct);
+                    agentReply.Degraded, ReplyAsync, degraded, timings, input, emit, conflictJson, conflict?.Message,
+                    judged: 0, judge: null, ct);
             }
 
             // Person queries are a filmography, not a vibe match: order chronologically, badge what
@@ -770,7 +771,7 @@ public sealed class LiveSearchExpansionService(
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded, ReplyAsync, degraded, timings, input,
-                    emit, conflictJson, judgeOrder.Count, judgeSummary, ct);
+                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, ct);
             }
 
             await ReplyAsync(pickReply);
@@ -1037,6 +1038,7 @@ public sealed class LiveSearchExpansionService(
         AskTurnInput input,
         Emit emit,
         string? conflictJson,
+        string? conflictMessage,
         int judged,
         AskReelJudge.Summary? judge,
         CancellationToken ct)
@@ -1059,6 +1061,14 @@ public sealed class LiveSearchExpansionService(
         var concept = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
             supply, concept, hard.Media, underBar, nearMiss.Count, floor));
+
+        // A collision with the account's own conditions is the likeliest reason nothing is left,
+        // so it leads: "Your conditions permanently exclude comedy and romance…" before the counts.
+        if (conflictMessage is { Length: > 0 })
+        {
+            text = $"{conflictMessage} {text}";
+        }
+
         if (planDegraded)
         {
             text = $"{AgentReply.DegradedReply} {text}";

@@ -1403,18 +1403,27 @@ public static class SearchEndpoints
                     continue;
                 }
 
-                var last = progress.LastPhase;
-                var stage = last is null
-                    ? "searching"
-                    : System.Text.Json.JsonSerializer.SerializeToElement(last).TryGetProperty("stage", out var s)
-                        ? s.GetString() ?? "searching"
-                        : "searching";
-                await emit("phase", new { stage, found = (int?)null, scored = (int?)null, heartbeat = true });
+                // The last phase again, verbatim, plus the marker — so a client that renders the
+                // phase's counts renders the same counts, and one that sorts at phase boundaries can
+                // tell this is not one.
+                var beat = new Dictionary<string, object?> { ["stage"] = "searching", ["found"] = 0, ["scored"] = 0 };
+                if (progress.LastPhase is { } last)
+                {
+                    foreach (var property in System.Text.Json.JsonSerializer.SerializeToElement(last).EnumerateObject())
+                    {
+                        beat[property.Name] = property.Value.Clone();
+                    }
+                }
+
+                beat["heartbeat"] = true;
+                await emit("phase", beat);
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException
+                                   or InvalidOperationException)
         {
-            // The turn ended or the client left — both are how this loop is meant to stop.
+            // The turn ended or the client left — both are how this loop is meant to stop. A
+            // heartbeat that cannot be written must never become the turn's failure.
         }
     }
 

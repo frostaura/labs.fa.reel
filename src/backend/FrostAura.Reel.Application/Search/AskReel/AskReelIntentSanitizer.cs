@@ -127,23 +127,25 @@ public static class AskReelIntentSanitizer
         var suppressing = false;
         foreach (var token in (raw ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            var word = Words(token).FirstOrDefault() ?? string.Empty;
-            var endsClause = token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';');
-            if (NegationCues.Contains(word))
+            foreach (var word in Words(token))
             {
-                suppressing = true;
-            }
-            else if (word is "but" or "and" or "with")
-            {
-                suppressing = false;
-            }
-            else if (!suppressing && word.Length > 0 && !SearchVocabulary.IsFloorWord(word)
-                     && !negated.Any(n => NegationTerms.EqualsAnyForm(word, n)))
-            {
-                kept.Add(word);
+                if (NegationCues.Contains(word))
+                {
+                    suppressing = true;
+                }
+                else if (word is "but" or "and" or "with")
+                {
+                    suppressing = false;
+                }
+                else if (!suppressing && !SearchVocabulary.IsFloorWord(word)
+                         && !negated.Any(n => NegationTerms.EqualsAnyForm(word, n)))
+                {
+                    kept.Add(word);
+                }
             }
 
-            if (endsClause)
+            // A comma, a full stop or a semicolon closes the clause a negation cue opened.
+            if (token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';'))
             {
                 suppressing = false;
             }
