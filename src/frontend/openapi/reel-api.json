@@ -114,7 +114,17 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }
@@ -1398,6 +1408,13 @@
   },
   "components": {
     "schemas": {
+      "ApiProvider": {
+        "enum": [
+          "Trakt",
+          "Tmdb",
+          "OpenRouter"
+        ]
+      },
       "CallbackRequest": {
         "required": [
           "code",
@@ -1413,6 +1430,13 @@
           }
         }
       },
+      "ConnectionStatus": {
+        "enum": [
+          "Active",
+          "RefreshFailed",
+          "Revoked"
+        ]
+      },
       "CreateTagRequest": {
         "required": [
           "text"
@@ -1423,6 +1447,17 @@
             "type": "string"
           }
         }
+      },
+      "DegradedReason": {
+        "enum": [
+          "TraktRevoked",
+          "TraktRefreshFailed",
+          "TraktWritesDeadLettered",
+          "NotEnoughRatings",
+          "ProviderDown",
+          "PipelineFailed",
+          null
+        ]
       },
       "FiltersPayload": {
         "required": [
@@ -1537,6 +1572,86 @@
           }
         }
       },
+      "JobFailure": {
+        "required": [
+          "kind",
+          "sseKind",
+          "visibility",
+          "failedAt",
+          "consecutiveFailures",
+          "attempts",
+          "reasonCode"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "sseKind": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/JobVisibility"
+          },
+          "failedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "consecutiveFailures": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "attempts": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "reasonCode": {
+            "type": "string"
+          }
+        }
+      },
+      "JobKind": {
+        "enum": [
+          "FullIngest",
+          "DeltaSync",
+          "FullReconcile",
+          "HydrateCatalog",
+          "EnrichCatalog",
+          "Train",
+          "Evaluate",
+          "BuildFeed",
+          "RefreshAvailability",
+          "BuildDigest",
+          "BuildTasteNarrative",
+          "PersonaliseTitles",
+          "SeedCatalog",
+          "CrossReference"
+        ]
+      },
+      "JobStatus": {
+        "enum": [
+          "Pending",
+          "Running",
+          "Succeeded",
+          "Failed",
+          "Cancelled"
+        ]
+      },
+      "JobVisibility": {
+        "enum": [
+          "Background",
+          "UserVisible",
+          "NamedPass"
+        ]
+      },
       "MoreRequestDto": {
         "required": [
           "row",
@@ -1647,6 +1762,97 @@
           }
         }
       },
+      "PipelineStage": {
+        "enum": [
+          "Linked",
+          "Ingesting",
+          "Extracting",
+          "Training",
+          "Evaluated",
+          "FeedReady",
+          "Degraded",
+          "NotEnoughRatings"
+        ]
+      },
+      "ProviderBreaker": {
+        "required": [
+          "provider",
+          "purpose",
+          "state",
+          "reasonCode",
+          "since",
+          "retryAt"
+        ],
+        "type": "object",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/ApiProvider"
+          },
+          "purpose": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/ProviderBreakerState"
+          },
+          "reasonCode": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "retryAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ProviderBreakerState": {
+        "enum": [
+          "Open",
+          "Degraded"
+        ]
+      },
+      "ProviderHealthSnapshot": {
+        "required": [
+          "state",
+          "checkedAt",
+          "breakers"
+        ],
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/ProviderHealthState"
+          },
+          "checkedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "breakers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderBreaker"
+            }
+          }
+        }
+      },
+      "ProviderHealthState": {
+        "enum": [
+          "Unmonitored",
+          "Healthy",
+          "Degraded",
+          "Down"
+        ]
+      },
       "RateRequest": {
         "required": [
           "rating"
@@ -1667,6 +1873,31 @@
           }
         }
       },
+      "RatingsFloor": {
+        "required": [
+          "usableRatings",
+          "required"
+        ],
+        "type": "object",
+        "properties": {
+          "usableRatings": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "required": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "ReactionRequest": {
         "required": [
           "reason"
@@ -1678,6 +1909,43 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "RetrainProgress": {
+        "required": [
+          "minNewRatings",
+          "newRatingsSinceTrain",
+          "hasActiveModel",
+          "lastTrainedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "minNewRatings": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "newRatingsSinceTrain": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hasActiveModel": {
+            "type": "boolean"
+          },
+          "lastTrainedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
           }
         }
       },
@@ -1708,6 +1976,229 @@
           },
           "keys": {
             "$ref": "#/components/schemas/SubscribeKeys"
+          }
+        }
+      },
+      "SyncJobSummary": {
+        "required": [
+          "id",
+          "kind",
+          "sseKind",
+          "visibility",
+          "status",
+          "progressPct",
+          "progressMessage",
+          "enqueuedAt",
+          "startedAt",
+          "completedAt",
+          "attempt",
+          "maxAttempts",
+          "retrying",
+          "retryReasonCode"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "sseKind": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/JobVisibility"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "progressPct": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "progressMessage": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "enqueuedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "attempt": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "maxAttempts": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "retrying": {
+            "type": "boolean"
+          },
+          "retryReasonCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "SyncStatusResponse": {
+        "required": [
+          "contractVersion",
+          "pipelineStage",
+          "retrain",
+          "connectionStatus",
+          "lastDeltaSyncAt",
+          "lastFullReconcileAt",
+          "activeJob",
+          "recentJobs",
+          "outboxPending",
+          "outboxDeadLetters",
+          "lastListSyncAt",
+          "outboxLastError",
+          "lastFailures",
+          "providerHealth",
+          "degradedReason",
+          "notEnoughRatings"
+        ],
+        "type": "object",
+        "properties": {
+          "contractVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pipelineStage": {
+            "$ref": "#/components/schemas/PipelineStage"
+          },
+          "retrain": {
+            "$ref": "#/components/schemas/RetrainProgress"
+          },
+          "connectionStatus": {
+            "$ref": "#/components/schemas/ConnectionStatus"
+          },
+          "lastDeltaSyncAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "lastFullReconcileAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "activeJob": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SyncJobSummary"
+              }
+            ]
+          },
+          "recentJobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncJobSummary"
+            }
+          },
+          "outboxPending": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "outboxDeadLetters": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "lastListSyncAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "outboxLastError": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lastFailures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobFailure"
+            }
+          },
+          "providerHealth": {
+            "$ref": "#/components/schemas/ProviderHealthSnapshot"
+          },
+          "degradedReason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DegradedReason"
+              }
+            ]
+          },
+          "notEnoughRatings": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RatingsFloor"
+              }
+            ]
           }
         }
       },
