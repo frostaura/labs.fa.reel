@@ -18,6 +18,8 @@ export interface RateSuggestion {
 }
 
 export const onboardingApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     getRateSuggestions: b.query<RateSuggestion[], void>({
       query: () => "titles/rate-suggestions",

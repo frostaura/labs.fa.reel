@@ -58,6 +58,8 @@ export interface AccountSettings {
 }
 
 export const settingsApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     updateSettings: b.mutation<AccountSettings, Partial<AccountSettings>>({
       query: (body) => ({ url: "settings", method: "PUT", body }),

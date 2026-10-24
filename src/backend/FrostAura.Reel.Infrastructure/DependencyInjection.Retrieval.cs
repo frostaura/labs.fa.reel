@@ -21,7 +21,7 @@ public static partial class DependencyInjection
         services.AddScoped<Application.Search.EligibilityQueryBuilder>();
         services.AddScoped<Application.Search.FilterCostMeter>();
         services.AddScoped<Application.Search.LexicalSearchService>();
-        // Offline diagnostic, reached only through the founder-only /api/dev surface.
+        // Feed-starvation diagnostic: injected by BuildFeedJobHandler on the serving path, and read by /api/dev.
         services.AddScoped<Application.Ranking.FeedStarvationDiagnostic>();
 
         return services;

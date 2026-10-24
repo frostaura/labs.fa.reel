@@ -40,6 +40,8 @@ export interface CrossReferenceStatus {
 }
 
 export const feedApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     getFeed: b.query<FeedPayload, void>({
       query: () => "feed",

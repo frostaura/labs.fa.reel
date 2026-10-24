@@ -66,6 +66,8 @@ export interface DislikesPayload {
 }
 
 export const tasteApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     getTasteDna: b.query<TasteDnaPayload, void>({
       query: () => "taste",

@@ -39,6 +39,8 @@ export interface SyncStatus {
 }
 
 export const syncApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     getSyncStatus: b.query<SyncStatus, void>({
       query: () => "sync/status",

@@ -7,6 +7,8 @@ import { api } from "./base";
 import { feedApi } from "./feed";
 
 export const titlesApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     getTitle: b.query<TitleDetailPayload, { mediaType: string; tmdbId: number }>({
       query: ({ mediaType, tmdbId }) => `titles/${mediaType}/${tmdbId}`,

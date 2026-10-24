@@ -31,6 +31,8 @@ export interface TypeaheadPayload {
 }
 
 export const typeaheadApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     searchTypeahead: b.query<TypeaheadPayload, string>({
       query: (q) => `search/typeahead?q=${encodeURIComponent(q)}`,

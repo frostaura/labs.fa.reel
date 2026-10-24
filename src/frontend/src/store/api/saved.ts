@@ -2,6 +2,8 @@ import type { RecentlyWatchedResponse, SavedQueueResponse } from "../savedTypes"
 import { api } from "./base";
 
 export const savedApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     // The queue, in the order the user asked for. `sort` is part of the cache key, so switching
     // orders is a fresh request rather than a client-side re-sort — the server owns the comparator

@@ -299,6 +299,8 @@ export interface CrossReferenceAccuracy {
 }
 
 export const metricsApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     /**
      * The track record. Free for every tier — a paid accuracy report reads as hiding the scorecard.

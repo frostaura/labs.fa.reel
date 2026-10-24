@@ -31,6 +31,8 @@ export interface TraktAuthStart {
 }
 
 export const authApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     getSession: b.query<Session, void>({
       query: () => "auth/me",

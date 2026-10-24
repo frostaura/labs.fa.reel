@@ -40,6 +40,10 @@ if (generatingOpenApiDocument)
 {
     // Registration needs a connection string; nothing in a generation run ever opens it.
     builder.Configuration["ConnectionStrings:Postgres"] = "Host=localhost;Database=openapi_generation";
+    // The document describes the production surface whatever the caller's shell exports — a
+    // Development shell with QA_HELPERS_ENABLED would otherwise add the /api/dev routes to it.
+    builder.Environment.EnvironmentName = Environments.Production;
+    builder.Configuration["QA_HELPERS_ENABLED"] = "false";
 }
 
 builder.Services.AddReelInfrastructure(builder.Configuration);

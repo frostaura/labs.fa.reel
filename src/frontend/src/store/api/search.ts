@@ -30,6 +30,8 @@ export interface TurnStatusPayload {
 }
 
 export const searchApi = api.injectEndpoints({
+  // Vite HMR re-runs this module; let the re-injection replace the old definitions.
+  overrideExisting: Boolean(import.meta.hot),
   endpoints: (b) => ({
     /**
      * Ask Reel's thread list — enough to render the `Recent` menu and nothing more.
