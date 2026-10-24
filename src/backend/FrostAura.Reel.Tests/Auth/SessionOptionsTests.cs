@@ -85,6 +85,73 @@ public class SessionOptionsTests
         Assert.DoesNotContain(options.Problems, p => p.Contains("sk-or-v1", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("JWT_ACCESS_TOKEN_EXPIRY_MINUTES", "2000")]
+    [InlineData("JWT_ACCESS_TOKEN_EXPIRY_MINUTES", "1234567")]
+    [InlineData("JWT_REFRESH_TOKEN_EXPIRY_DAYS", "987654")]
+    public void A_problem_never_echoes_an_out_of_range_value(string key, string value)
+    {
+        // A number is still a value: a PIN or an account number pasted into the wrong key parses.
+        var options = ValidatedOptions.From<SessionOptions>(Config(("JWT_SECRET", Secret), (key, value)));
+
+        var problem = Assert.Single(options.Problems);
+        Assert.DoesNotContain(value, problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_secret_is_kept_exactly_as_configured()
+    {
+        // Trimming would derive a different signing key from the same configured secret.
+        var padded = "  " + Secret + "\t";
+
+        var options = ValidatedOptions.From<SessionOptions>(Config(("JWT_SECRET", padded)));
+
+        Assert.Empty(options.Problems);
+        Assert.Equal(padded, options.Secret);
+    }
+
+    [Theory]
+    [InlineData(" 60 ", 60)]
+    [InlineData("\t20\n", 20)]
+    public void Numbers_tolerate_surrounding_whitespace(string value, int expected)
+    {
+        var options = ValidatedOptions.From<SessionOptions>(Config(("JWT_SECRET", Secret), ("JWT_ACCESS_TOKEN_EXPIRY_MINUTES", value)));
+
+        Assert.Empty(options.Problems);
+        Assert.Equal(expected, options.AccessMinutes);
+    }
+
+    [Fact]
+    public void The_startup_validator_fails_before_any_host_starts()
+    {
+        // What Program calls before the pre-migration dump and the migrations: the same validation
+        // app.Run() would do, but early enough that an invalid setting changes nothing (MOD-2).
+        var services = new ServiceCollection();
+        services.AddSingleton<IConfiguration>(Config(("JWT_SECRET", Secret), ("JWT_ACCESS_TOKEN_EXPIRY_MINUTES", "2000")));
+        services.AddValidatedOptions<SessionOptions>();
+        using var provider = services.BuildServiceProvider();
+
+        var failure = Assert.Throws<OptionsValidationException>(() => provider.GetRequiredService<IStartupValidator>().Validate());
+
+        Assert.Equal(["SessionOptions: JWT_ACCESS_TOKEN_EXPIRY_MINUTES must be between 1 and 1440."], failure.Failures);
+    }
+
+    [Fact]
+    public void Program_validates_options_before_it_dumps_or_migrates()
+    {
+        // The call above only helps if Program makes it first. Source order is the contract here:
+        // Program's startup block is top-level statements, not a method a test can invoke alone.
+        var program = File.ReadAllText(Path.Combine(
+            FrostAura.Reel.Tests.Harness.ComposeDescriptor.RepositoryRoot(), "src", "backend", "FrostAura.Reel.Api", "Program.cs"));
+
+        var validate = program.IndexOf("GetService<IStartupValidator>()?.Validate();", StringComparison.Ordinal);
+        var dump = program.IndexOf("await PreMigrationBackup.EnsureAsync(", StringComparison.Ordinal);
+        var migrate = program.IndexOf("await DatabaseInitializer.InitializeAsync(", StringComparison.Ordinal);
+
+        Assert.True(validate > 0, "Program no longer runs the startup validator explicitly.");
+        Assert.True(dump > validate && migrate > validate, "Program must validate options before the pre-migration dump and the migrations.");
+    }
+
     [Fact]
     public async Task An_invalid_value_stops_the_host_at_start_with_every_problem_named()
     {

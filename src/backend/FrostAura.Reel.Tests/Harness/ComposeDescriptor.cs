@@ -28,6 +28,9 @@ internal sealed partial class ComposeDescriptor
     public static ComposeDescriptor Load(string relativePath) =>
         new(relativePath, File.ReadAllText(Path.Combine(RepositoryRoot(), relativePath)));
 
+    /// <summary>Reads descriptor text that is not in the repository (a test's own shape of a file another lane owns).</summary>
+    public static ComposeDescriptor Parse(string relativePath, string text) => new(relativePath, text);
+
     /// <summary>True when the repository holds this descriptor.</summary>
     public static bool Exists(string relativePath) => File.Exists(Path.Combine(RepositoryRoot(), relativePath));
 

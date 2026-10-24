@@ -70,9 +70,14 @@ public abstract class ValidatedOptions
 /// </summary>
 public sealed class SettingReader(IConfiguration configuration, List<string> problems)
 {
-    /// <summary>The raw value, or null when the key is absent or blank.</summary>
+    /// <summary>
+    /// The value exactly as configured, or null when the key is absent or blank. Never trimmed: a
+    /// secret with surrounding whitespace is a different secret, and quietly signing with a trimmed
+    /// copy would invalidate every session it had issued. The number and boolean readers tolerate
+    /// surrounding whitespace themselves.
+    /// </summary>
     public string? Raw(string key) =>
-        configuration[key] is { } raw && !string.IsNullOrWhiteSpace(raw) ? raw.Trim() : null;
+        configuration[key] is { } raw && !string.IsNullOrWhiteSpace(raw) ? raw : null;
 
     /// <summary>An optional string; absent or blank gives <paramref name="fallback"/>.</summary>
     public string String(string key, string fallback) => Raw(key) ?? fallback;
@@ -112,7 +117,8 @@ public sealed class SettingReader(IConfiguration configuration, List<string> pro
 
         if (parsed < min || parsed > max)
         {
-            problems.Add($"{key} must be between {min.ToString(CultureInfo.InvariantCulture)} and {max.ToString(CultureInfo.InvariantCulture)}; got {parsed.ToString(CultureInfo.InvariantCulture)}.");
+            // The value is not echoed: problems are logged, and a mis-pasted secret can parse as a number.
+            problems.Add($"{key} must be between {min.ToString(CultureInfo.InvariantCulture)} and {max.ToString(CultureInfo.InvariantCulture)}.");
             return fallback;
         }
 
@@ -128,7 +134,7 @@ public sealed class SettingReader(IConfiguration configuration, List<string> pro
             return fallback;
         }
 
-        if (!bool.TryParse(raw, out var parsed))
+        if (!bool.TryParse(raw.Trim(), out var parsed))
         {
             problems.Add($"{key} must be true or false.");
             return fallback;

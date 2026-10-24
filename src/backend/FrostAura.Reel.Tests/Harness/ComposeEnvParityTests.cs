@@ -29,6 +29,31 @@ public partial class ComposeEnvParityTests
     /// <summary>Descriptors whose backend runs Production.</summary>
     private static readonly string[] ProdDescriptors = ["docker-compose.prod.yml", "deploy/portainer-stack.yml"];
 
+    /// <summary>
+    /// The API service in each descriptor. WS-7's eval stack names its API <c>eval-api</c>; a lookup
+    /// that assumed <c>backend</c> there would find no environment block at all and report every key
+    /// missing, so the service name is part of the descriptor's identity, not a constant.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> ApiService = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["docker-compose.yml"] = "backend",
+        ["docker-compose.prod.yml"] = "backend",
+        ["deploy/portainer-stack.yml"] = "backend",
+        ["docker-compose.eval.yml"] = "eval-api",
+    };
+
+    private static IReadOnlyDictionary<string, string> ApiEnvironment(string descriptor) =>
+        ApiEnvironment(ComposeDescriptor.Load(descriptor), descriptor);
+
+    private static IReadOnlyDictionary<string, string> ApiEnvironment(ComposeDescriptor compose, string descriptor)
+    {
+        var service = ApiService[descriptor];
+        Assert.True(compose.Services.Contains(service), $"{descriptor} has no '{service}' service; the parity rules check that service's environment.");
+        var environment = compose.Environment(service);
+        Assert.True(environment.Count > 0, $"{descriptor}: the '{service}' service has no environment: block.");
+        return environment;
+    }
+
     /// <summary>Read by the code, deliberately NOT plumbed into any container.</summary>
     private static readonly Dictionary<string, string> NeverPlumbed = new(StringComparer.Ordinal)
     {
@@ -94,7 +119,7 @@ public partial class ComposeEnvParityTests
     [MemberData(nameof(AllDescriptors))]
     public void Every_key_the_code_reads_reaches_the_backend(string descriptor)
     {
-        var environment = ComposeDescriptor.Load(descriptor).Environment("backend");
+        var environment = ApiEnvironment(descriptor);
         var production = ProdDescriptors.Contains(descriptor);
 
         var missing = CodeReadKeys()
@@ -118,7 +143,7 @@ public partial class ComposeEnvParityTests
     {
         // The other direction: a key nothing reads is a setting the founder can change to no effect.
         var codeKeys = CodeReadKeys();
-        var dead = ComposeDescriptor.Load(descriptor).Environment("backend").Keys
+        var dead = ApiEnvironment(descriptor).Keys
             .Where(key => !codeKeys.Contains(key) && !FrameworkKeys.Contains(key))
             .Order(StringComparer.Ordinal)
             .ToList();
@@ -135,7 +160,7 @@ public partial class ComposeEnvParityTests
             return;
         }
 
-        var environment = ComposeDescriptor.Load(descriptor).Environment("backend");
+        var environment = ApiEnvironment(descriptor);
         var present = DevelopmentOnly.Where(environment.ContainsKey).ToList();
 
         Assert.True(present.Count == 0, $"{descriptor} passes QA-only key(s) to a production backend: {string.Join(", ", present)}");
@@ -149,7 +174,7 @@ public partial class ComposeEnvParityTests
         // IConfiguration.GetValue<bool|int>("KEY", default) THROWS on an empty string rather than
         // falling back — so `KEY: ${KEY:-}` in a descriptor is a startup crash (or a 500 on the one
         // request that reads it) the moment the variable is unset.
-        var environment = ComposeDescriptor.Load(descriptor).Environment("backend");
+        var environment = ApiEnvironment(descriptor);
 
         var blank = TypedReadKeys()
             .Where(environment.ContainsKey)
@@ -178,7 +203,7 @@ public partial class ComposeEnvParityTests
     public void The_parity_check_fails_when_a_key_is_removed()
     {
         // Proves the check above can fail: drop one key from a real descriptor and re-run the rule.
-        var environment = new Dictionary<string, string>(ComposeDescriptor.Load("docker-compose.prod.yml").Environment("backend"), StringComparer.Ordinal);
+        var environment = new Dictionary<string, string>(ApiEnvironment("docker-compose.prod.yml"), StringComparer.Ordinal);
         Assert.True(environment.Remove("LLM_XREF_DAILY_CALLS"));
 
         var missing = CodeReadKeys()
@@ -186,6 +211,50 @@ public partial class ComposeEnvParityTests
             .ToList();
 
         Assert.Equal(["LLM_XREF_DAILY_CALLS"], missing);
+    }
+
+    [Fact]
+    public void The_api_service_is_found_by_its_own_name_in_a_descriptor_that_does_not_call_it_backend()
+    {
+        // WS-7's eval file, in the shape it has on its branch: the API is `eval-api`, and its
+        // database is published on a literal loopback address.
+        var eval = ComposeDescriptor.Parse(
+            "docker-compose.eval.yml",
+            "services:\n  eval-postgres:\n    image: pgvector/pgvector:pg16\n  eval-api:\n    environment:\n      LLM_XREF_DAILY_CALLS: ${LLM_XREF_DAILY_CALLS:-}\n      ASPNETCORE_ENVIRONMENT: Development\n");
+
+        var environment = ApiEnvironment(eval, "docker-compose.eval.yml");
+
+        Assert.Equal(["ASPNETCORE_ENVIRONMENT", "LLM_XREF_DAILY_CALLS"], environment.Keys.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void A_descriptor_without_its_api_service_fails_loudly_rather_than_reporting_every_key_missing()
+    {
+        var renamed = ComposeDescriptor.Parse("docker-compose.eval.yml", "services:\n  backend:\n    environment:\n      A_KEY: x\n");
+
+        var failure = Assert.ThrowsAny<Exception>(() => ApiEnvironment(renamed, "docker-compose.eval.yml"));
+
+        Assert.Contains("has no 'eval-api' service", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Every_descriptor_the_rules_know_has_an_api_service_named()
+    {
+        Assert.Equal(
+            DevDescriptors.Concat(ProdDescriptors).Order(StringComparer.Ordinal),
+            ApiService.Keys.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void A_typed_key_with_digits_in_its_name_is_held_to_the_blank_default_rule()
+    {
+        // The key class once stopped at [A-Za-z_:], so TRAKT_RATE_BUDGET_PER_5MIN was never checked.
+        var match = TypedGetValue().Match("configuration.GetValue(\"TRAKT_RATE_BUDGET_PER_5MIN\", 1000)");
+
+        Assert.True(match.Success);
+        Assert.Equal("TRAKT_RATE_BUDGET_PER_5MIN", match.Groups[1].Value);
+        // And the real scan sees the real read in DependencyInjection.Security.cs.
+        Assert.Contains("TRAKT_RATE_BUDGET_PER_5MIN", TypedReadKeys());
     }
 
     // ── the scan ────────────────────────────────────────────────────────────────────────────
@@ -263,7 +332,7 @@ public partial class ComposeEnvParityTests
     [GeneratedRegex(@"""([A-Z][A-Za-z]+):([A-Z][A-Za-z]+)""")]
     private static partial Regex SectionKeyLiteral();
 
-    [GeneratedRegex(@"GetValue(?:<[^>]+>)?\(\s*""([A-Za-z_:]+)""\s*,([^)]*)\)")]
+    [GeneratedRegex(@"GetValue(?:<[^>]+>)?\(\s*""([A-Za-z0-9_:]+)""\s*,([^)]*)\)")]
     private static partial Regex TypedGetValue();
 
     [GeneratedRegex(@"^#?\s*([A-Za-z_][A-Za-z0-9_]*)=", RegexOptions.Multiline)]

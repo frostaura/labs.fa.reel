@@ -10,6 +10,7 @@ using FrostAura.Reel.Infrastructure;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 // ── Invariant culture, process-wide, before anything else runs ────────────────────────────────
 // Nothing this service formats is localised: prompts sent to OpenRouter, TMDB and Trakt query
@@ -131,6 +132,11 @@ if (generatingOpenApiDocument)
 // container runtime.
 try
 {
+    // Every ValidateOnStart options class, NOW: app.Run() would validate them too, but only after
+    // the dump and the migrations below had already run against the database. A present-but-invalid
+    // setting must stop the process before it changes anything (MOD-2).
+    app.Services.GetService<IStartupValidator>()?.Validate();
+
     // What this process will actually spend, from the same budget objects the jobs read (K-5).
     using (var ceilingsScope = app.Services.CreateScope())
     {
