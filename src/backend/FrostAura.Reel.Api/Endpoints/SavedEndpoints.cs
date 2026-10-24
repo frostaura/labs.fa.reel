@@ -80,7 +80,7 @@ public static class SavedEndpoints
         string? Hook = null,
         // Where the card stands against the managed Trakt list: "pending" (a ListAdd write-back is
         // still waiting — the only state that may say "syncing"), "onList" or "offList". See
-        // SavedListSync. OnManagedList stays for older clients and is true unless the card is "offList".
+        // SavedListSync. OnManagedList stays for older clients and is true only for "onList".
         string ListSync = SavedListSync.OffList);
 
     /// <param name="ExpectedAbsoluteError">What a displayed prediction is typically off by. Null until the account's closed loop has pairs — an unmeasured band is not a band.</param>
@@ -248,7 +248,10 @@ public static class SavedEndpoints
                 entry.SavedAt,
                 Math.Max(0, (int)(nowUtc - entry.SavedAt).TotalDays),
                 title.RuntimeMinutes is { } runtime && runtime <= eveningBudget,
-                listSync.GetValueOrDefault(entry.TitleId) is SavedListSync.OnList or SavedListSync.Pending,
+                // True only when the title is confirmed on the list. An older client renders
+                // "syncing…" for false, so a pending card now says so honestly; a dead-lettered or
+                // removed-on-Trakt card still does until the client reads ListSync (CR-2).
+                listSync.GetValueOrDefault(entry.TitleId) == SavedListSync.OnList,
                 isPinned,
                 isPinned
                     ? SavedQueue.WatchTonightReason(

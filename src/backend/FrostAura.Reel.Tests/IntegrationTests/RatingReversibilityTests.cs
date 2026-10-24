@@ -201,7 +201,59 @@ public class RatingReversibilityTests(PostgresFixture fixture)
         Assert.NotNull(listItem.RemovedAt);
         Assert.Equal(ListRemovalReason.Watched, listItem.RemovalReason);
         Assert.Equal(1, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.ListRemove));
+        // The save put it on the Trakt watchlist; consuming it takes it off, as un-saving does.
+        Assert.Equal(1, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.RemoveFromWatchlist));
         Assert.Empty(await SaveConsumption.LiveSaves(verify, accountId).ToListAsync());
+    }
+
+    /// <summary>
+    /// Review D1/D5: saving a title the user already rated is a rewatch save. It is live — it shows
+    /// on the shelf, and nothing revokes it — until the user says they have seen it again. A
+    /// "seen it + rate" at the SAME score is that statement: the save is consumed although the
+    /// rating does not move, and a duplicate of that click changes nothing at all.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_rewatch_save_stays_live_until_the_title_is_rated_again(bool sameScore)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var tmdbId = await SeedTitleAsync(MediaType.Movie);
+        await RateAsync(accountId, "movie", tmdbId, 8, markWatched: true);
+        await SaveAsync(accountId, "movie", tmdbId);
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            Assert.Single(await SaveConsumption.LiveSaves(db, accountId).Unconsumed(db).ToListAsync());
+            // The reconciler, the boot repair's rule, leaves it alone: nothing consumed it since.
+            Assert.Empty(await new ManagedListReconciler(db).RemoveWatchedAsync(accountId, DateTime.UtcNow, CancellationToken.None));
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            Assert.Single(await SaveConsumption.LiveSaves(db, accountId).ToListAsync());
+            Assert.Equal(0, await db.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.ListRemove));
+        }
+
+        await RateAsync(accountId, "movie", tmdbId, sameScore ? (short)8 : (short)9, markWatched: true);
+        var rowsAfterConsume = await OutboxCountAsync(accountId);
+        await RateAsync(accountId, "movie", tmdbId, sameScore ? (short)8 : (short)9, markWatched: true);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        Assert.Empty(await SaveConsumption.LiveSaves(verify, accountId).ToListAsync());
+        Assert.NotNull((await verify.ManagedListItems.SingleAsync(m => m.AccountId == accountId)).RemovedAt);
+        Assert.Equal(1, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.ListRemove));
+        Assert.Equal(1, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.RemoveFromWatchlist));
+        // The duplicate click wrote nothing.
+        Assert.Equal(rowsAfterConsume, await OutboxCountAsync(accountId));
+        // The same-score click consumed the save without touching the rating's own history.
+        Assert.Equal(sameScore ? 1 : 2, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.AddRating));
     }
 
     /// <summary>

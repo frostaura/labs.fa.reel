@@ -327,11 +327,22 @@ public static class ReactionEndpoints
 
         if (rating is not null && rating.Rating == request.Rating)
         {
-            // Same value already stored — return current state and change NOTHING: no outbox
-            // rows, no play increments, no residual observation, no feed rebuild. No verdict
-            // either: re-submitting a rating you already gave is not a new verdict on the model,
-            // and firing the toast again would make a duplicate click look like a second data
+            // Same value already stored — return current state and change NOTHING about the rating:
+            // no rating outbox rows, no play increments, no residual observation, no feed rebuild.
+            // No verdict either: re-submitting a rating you already gave is not a new verdict on the
+            // model, and firing the toast again would make a duplicate click look like a second data
             // point. No rating-history row for the same reason.
+            //
+            // The one exception is a save made AFTER that rating — a rewatch save. "Seen it + rate"
+            // on it is the user saying they have now rewatched it, so the save is consumed even
+            // though the score did not move. A duplicate click finds no live save and changes nothing.
+            if (await SaveConsumption.LiveSaves(db, accountId)
+                    .AnyAsync(r => r.TitleId == title.Id && r.CreatedAt > rating.RatedAt, ct))
+            {
+                await ConsumeSaveAsync(db, accountId, title, now, ct);
+                await db.SaveChangesAsync(ct);
+            }
+
             return Results.Ok(new
             {
                 userRating = rating.Rating,
@@ -404,19 +415,8 @@ public static class ReactionEndpoints
             Enqueue(db, accountId, OutboxKind.AddToHistory, title, null, now);
         }
 
-        // A rated save is a consumed save, whether or not this gesture logged the play: it leaves the
-        // live queue — list row closed with its Trakt write-back, and the save itself REVOKED (never
-        // deleted) — in this same transaction. Closing only the list row is what left 116 watched,
-        // rated titles on the Saved shelf. Un-rating does not restore either: the user has seen it.
-        await SaveConsumption.RevokeAsync(db, accountId, title.Id, now, ct);
-        var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
-            m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
-        if (listItem is not null)
-        {
-            listItem.RemovedAt = now;
-            listItem.RemovalReason = ListRemovalReason.Watched;
-            Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
-        }
+        // The save this rating consumed leaves the live queue in this same transaction.
+        await ConsumeSaveAsync(db, accountId, title, now, ct);
 
         // Teach the online residual head the fresh label FIRST (target = the rating), so the
         // rebuild enqueued next already scores with the updated correction.
@@ -504,6 +504,27 @@ public static class ReactionEndpoints
         }
 
         return Results.Ok(new { userRating = (short?)null });
+    }
+
+    /// <summary>
+    /// A rated save is a consumed save, whether or not the gesture logged the play: it leaves the
+    /// live queue — the save REVOKED (never deleted) with its Trakt watchlist removal, and the list
+    /// row closed with its ListRemove — on the caller's tracked context, so it commits in the same
+    /// transaction as the rating. Closing only the list row is what left 116 watched, rated titles on
+    /// the Saved shelf. Un-rating does not restore either: the user has seen it.
+    /// </summary>
+    private static async Task ConsumeSaveAsync(
+        IReelDbContext db, Guid accountId, Title title, DateTime now, CancellationToken ct)
+    {
+        await SaveConsumption.RevokeAsync(db, accountId, title, now, ct);
+        var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
+            m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
+        if (listItem is not null)
+        {
+            listItem.RemovedAt = now;
+            listItem.RemovalReason = ListRemovalReason.Watched;
+            Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
+        }
     }
 
     private static void Enqueue(IReelDbContext db, Guid accountId, OutboxKind kind, Title title, short? rating, DateTime? watchedAt)

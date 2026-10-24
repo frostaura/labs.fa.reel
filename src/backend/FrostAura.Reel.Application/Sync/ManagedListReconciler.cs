@@ -24,9 +24,10 @@ namespace FrostAura.Reel.Application.Sync;
 public sealed class ManagedListReconciler(IReelDbContext db)
 {
     /// <summary>
-    /// Marks every not-yet-removed managed-list item the account has since fully watched or rated as
-    /// Removed (reason <see cref="ListRemovalReason.Watched"/>), enqueues the Trakt ListRemove
-    /// write-back, and revokes every consumed live save (revoked, never deleted).
+    /// Marks every not-yet-removed managed-list item the account has fully watched or rated since it
+    /// was added as Removed (reason <see cref="ListRemovalReason.Watched"/>), enqueues the Trakt
+    /// ListRemove write-back, and revokes every consumed live save (revoked, never deleted) with its
+    /// Trakt watchlist removal.
     /// Returns the ids of the titles removed — not a count: this is the product's only genuine
     /// "a recommendation was consumed" event, and callers need to know WHICH titles converted, not
     /// how many. Does not call SaveChanges — the caller commits it in its own transaction alongside
@@ -38,11 +39,16 @@ public sealed class ManagedListReconciler(IReelDbContext db)
             from m in db.ManagedListItems
             join t in db.Titles on m.TitleId equals t.Id
             where m.AccountId == accountId && m.RemovedAt == null
-                && (db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == m.TitleId && w.IsFullyWatched)
-                    || db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == m.TitleId))
+                // Consumed since it went on the list — the same time-aware rule as the save itself
+                // (SaveConsumption): a rewatch save of a film rated years ago stays on the list.
+                && (db.WatchedTitles.Any(w => w.AccountId == accountId && w.TitleId == m.TitleId && w.IsFullyWatched
+                        && (w.LastWatchedAt ?? w.UpdatedAt) >= m.AddedAt)
+                    || db.UserRatings.Any(r => r.AccountId == accountId && r.TitleId == m.TitleId
+                        && r.RatedAt >= m.AddedAt))
             select new { Item = m, Title = t }).ToListAsync(ct);
 
-        // Same transaction, same rule: the shelf and the list leave together or not at all.
+        // Same transaction, same rule: the shelf and the list leave together or not at all. The
+        // revocation queues each consumed save's Trakt watchlist removal itself.
         await SaveConsumption.RevokeConsumedAsync(db, accountId, now, ct);
 
         foreach (var x in watchedInList)

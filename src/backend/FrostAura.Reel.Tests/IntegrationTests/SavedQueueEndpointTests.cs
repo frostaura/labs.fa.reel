@@ -14,9 +14,12 @@ using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Providers;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Background;
 using FrostAura.Reel.Infrastructure.Ml;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -275,8 +278,13 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         Assert.Equal(SavedListSync.Pending, byTitle[retryingAdd].ListSync);
         Assert.Equal(SavedListSync.OffList, byTitle[deadLettered].ListSync);
         Assert.Equal(SavedListSync.OffList, byTitle[removedOnTrakt].ListSync);
-        Assert.False(byTitle[removedOnTrakt].OnManagedList);
+        // OnManagedList (what an older client reads) is true only when the title is confirmed on the
+        // list: a pending card is not on it yet, so an older client says "syncing…" for it.
         Assert.True(byTitle[onList].OnManagedList);
+        Assert.False(byTitle[pendingAdd].OnManagedList);
+        Assert.False(byTitle[retryingAdd].OnManagedList);
+        Assert.False(byTitle[deadLettered].OnManagedList);
+        Assert.False(byTitle[removedOnTrakt].OnManagedList);
 
         await using var db = fixture.CreateContext(new AccountContext());
         var pendingListAdds = await db.TraktOutbox.CountAsync(o => o.AccountId == accountId
@@ -334,6 +342,82 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         Assert.Equal(ListRemovalReason.Watched, list[ratedOnTrakt].RemovalReason);
         Assert.Null(list[untouched].RemovedAt);
         Assert.Equal(2, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.ListRemove));
+        // The save put the title on the Trakt watchlist; consuming it takes it off, as un-saving does
+        // — the rated-but-unwatched title is the case Trakt would never clear by itself.
+        var watchlistRemovals = (await verify.TraktOutbox
+                .Where(o => o.AccountId == accountId && o.Kind == OutboxKind.RemoveFromWatchlist)
+                .Select(o => o.PayloadJson)
+                .ToListAsync())
+            .Select(json => JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(json)!.TitleId)
+            .OrderBy(id => id);
+        Assert.Equal(new[] { watchedOnTrakt, ratedOnTrakt }.OrderBy(id => id), watchlistRemovals);
+    }
+
+    /// <summary>
+    /// Review D1: a save made AFTER the title was watched or rated is a deliberate rewatch, and it is
+    /// live. Consumption is time-aware — only a watch or rating after the save consumes it — so the
+    /// card shows, the reconciler leaves both the save and its list row alone, and the boot repair
+    /// does too. Each fixture differs from a consumed one by one timestamp.
+    /// </summary>
+    [Fact]
+    public async Task A_save_made_after_the_title_was_seen_is_a_live_rewatch_save()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var ratedBefore = await SeedTitleAsync("rated-years-ago-then-saved");
+        var watchedBefore = await SeedTitleAsync("watched-years-ago-then-saved");
+        var ratedAfter = await SeedTitleAsync("saved-then-rated");
+        var reRatedAfter = await SeedTitleAsync("rated-then-saved-then-re-rated");
+        await SaveAllAsync(accountId, [ratedBefore, watchedBefore, ratedAfter, reRatedAfter]);
+        foreach (var id in new[] { ratedBefore, watchedBefore, ratedAfter, reRatedAfter })
+        {
+            await SeedListItemAsync(accountId, id);
+        }
+
+        var yearsAgo = Now.AddYears(-3);
+        await SeedRatingAsync(accountId, ratedBefore, 8, yearsAgo);
+        await SeedWatchedAsync(accountId, watchedBefore, fullyWatched: true, watchedAt: yearsAgo);
+        await SeedRatingAsync(accountId, ratedAfter, 8, Now.AddDays(-1));
+        // A re-rate moves RatedAt forward, past the save: rewatched and re-scored, so consumed.
+        await SeedRatingAsync(accountId, reRatedAfter, 9, Now.AddDays(-1));
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            await db.UserRatings.Where(r => r.AccountId == accountId && r.TitleId == reRatedAfter)
+                .ExecuteUpdateAsync(set => set.SetProperty(r => r.FirstRatedAt, yearsAgo));
+        }
+
+        var queue = await QueueAsync(accountId, sort: "added");
+        Assert.Equal(
+            new[] { ratedBefore, watchedBefore }.OrderBy(id => id),
+            queue.Items.Select(i => i.TitleId).OrderBy(id => id));
+
+        IReadOnlyList<Guid> removed;
+        await using (var db = fixture.CreateContext(Pinned(accountId)))
+        {
+            removed = await new ManagedListReconciler(db).RemoveWatchedAsync(accountId, Now, CancellationToken.None);
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Equal(new[] { ratedAfter, reRatedAfter }.OrderBy(id => id), removed.OrderBy(id => id));
+        // The boot repair applies the same rule, so it leaves both rewatch saves live.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            await DataRepairs.RevokeConsumedSavesAsync(db, Now, CancellationToken.None);
+        }
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var live = await SaveConsumption.LiveSaves(verify, accountId).Select(r => r.TitleId).ToListAsync();
+        Assert.Equal(new[] { ratedBefore, watchedBefore }.OrderBy(id => id), live.OrderBy(id => id));
+        var openList = await verify.ManagedListItems
+            .Where(m => m.AccountId == accountId && m.RemovedAt == null)
+            .Select(m => m.TitleId)
+            .ToListAsync();
+        Assert.Equal(new[] { ratedBefore, watchedBefore }.OrderBy(id => id), openList.OrderBy(id => id));
+        Assert.Equal(2, (await QueueAsync(accountId)).Items.Count);
     }
 
     /// <summary>
@@ -352,9 +436,13 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         var accountId = await SeedAccountAsync();
         var consumed = await SeedTitleAsync("consumed");
         var live = await SeedTitleAsync("live");
-        await SaveAllAsync(accountId, [consumed, live]);
+        var rewatch = await SeedTitleAsync("rewatch");
+        await SaveAllAsync(accountId, [consumed, live, rewatch]);
         await SeedWatchedAsync(accountId, consumed, fullyWatched: true);
         await SeedRatingAsync(accountId, consumed, 9, Now.AddDays(-2));
+        // Watched and rated BEFORE it was saved: a rewatch save, live in intent.
+        await SeedWatchedAsync(accountId, rewatch, fullyWatched: true, watchedAt: Now.AddYears(-2));
+        await SeedRatingAsync(accountId, rewatch, 9, Now.AddYears(-2));
 
         await using (var db = fixture.CreateContext(new AccountContext()))
         {
@@ -367,6 +455,7 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
             firstRevokedAt = (await db.UserTitleReactions.SingleAsync(r => r.AccountId == accountId && r.TitleId == consumed)).RevokedAt;
             Assert.Equal(Now, firstRevokedAt);
             Assert.Null((await db.UserTitleReactions.SingleAsync(r => r.AccountId == accountId && r.TitleId == live)).RevokedAt);
+            Assert.Null((await db.UserTitleReactions.SingleAsync(r => r.AccountId == accountId && r.TitleId == rewatch)).RevokedAt);
         }
 
         await using (var db = fixture.CreateContext(new AccountContext()))
@@ -379,7 +468,67 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         await using var verify = fixture.CreateContext(new AccountContext());
         // The second pass did not move the first pass's timestamp: same end state, not a re-write.
         Assert.Equal(firstRevokedAt, (await verify.UserTitleReactions.SingleAsync(r => r.AccountId == accountId && r.TitleId == consumed)).RevokedAt);
-        Assert.Equal([live], (await QueueAsync(accountId)).Items.Select(i => i.TitleId).ToArray());
+        Assert.Equal(
+            new[] { live, rewatch }.OrderBy(id => id),
+            (await QueueAsync(accountId)).Items.Select(i => i.TitleId).OrderBy(id => id));
+        // A boot repair never writes to Trakt.
+        Assert.Equal(0, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId));
+    }
+
+    /// <summary>
+    /// The route to live: <see cref="DataRepairStartupService"/> runs the repairs in the host's
+    /// STARTING phase — before any hosted service's StartAsync, so before the job runner — and its
+    /// gate turns it off. Gate off: nothing changes. Gate on: the consumed save is revoked and the
+    /// pass reports it. A second boot changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task The_boot_repair_runs_before_the_host_starts_and_honours_its_gate()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var consumed = await SeedTitleAsync("consumed-at-boot");
+        await SaveAllAsync(accountId, [consumed]);
+        await SeedRatingAsync(accountId, consumed, 7, Now.AddDays(-1));
+
+        var services = new ServiceCollection()
+            .AddScoped(_ => fixture.CreateContext(new AccountContext()))
+            .BuildServiceProvider();
+
+        DataRepairStartupService Boot(bool enabled) => new(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    [DataRepairStartupService.GateKey] = enabled ? "true" : "false",
+                })
+                .Build(),
+            NullLogger<DataRepairStartupService>.Instance);
+
+        async Task<DateTime?> RevokedAtAsync()
+        {
+            await using var db = fixture.CreateContext(new AccountContext());
+            return (await db.UserTitleReactions.SingleAsync(r => r.AccountId == accountId && r.TitleId == consumed)).RevokedAt;
+        }
+
+        var off = Boot(enabled: false);
+        await off.StartingAsync(CancellationToken.None);
+        Assert.Empty(off.LastResults);
+        Assert.Null(await RevokedAtAsync());
+
+        var on = Boot(enabled: true);
+        await on.StartingAsync(CancellationToken.None);
+        Assert.True(on.LastResults.Single(r => r.Name == DataRepairs.RevokeConsumedSavesName).RowsChanged >= 1);
+        var revokedAt = await RevokedAtAsync();
+        Assert.NotNull(revokedAt);
+
+        var again = Boot(enabled: true);
+        await again.StartingAsync(CancellationToken.None);
+        Assert.All(again.LastResults, r => Assert.Equal(0, r.RowsChanged));
+        Assert.Equal(revokedAt, await RevokedAtAsync());
     }
 
     // ── Invocation ──────────────────────────────────────────────────────────────────────────
@@ -484,8 +633,10 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
                 AccountId = accountId,
                 TitleId = titleId,
                 Kind = ReactionKind.SaveForLater,
-                // Distinct save times, so "newest first" is a real order rather than a tie.
-                CreatedAt = Now.AddDays(-offset++),
+                // Distinct save times, so "newest first" is a real order rather than a tie — and all
+                // a month back, BEFORE any watch or rating the fixtures seed (a day back), because
+                // consumption is time-aware: only a watch or rating after the save consumes it.
+                CreatedAt = Now.AddDays(-30 - offset++),
             });
         }
 
@@ -601,9 +752,10 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedWatchedAsync(Guid accountId, Guid titleId, bool fullyWatched)
+    private async Task SeedWatchedAsync(Guid accountId, Guid titleId, bool fullyWatched, DateTime? watchedAt = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
+        var at = watchedAt ?? Now.AddDays(-1);
         db.WatchedTitles.Add(new WatchedTitle
         {
             Id = Guid.NewGuid(),
@@ -611,14 +763,14 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
             TitleId = titleId,
             Plays = 1,
             IsFullyWatched = fullyWatched,
-            LastWatchedAt = Now.AddDays(-1),
-            FirstSyncedAt = Now.AddDays(-1),
-            UpdatedAt = Now.AddDays(-1),
+            LastWatchedAt = at,
+            FirstSyncedAt = at,
+            UpdatedAt = at,
         });
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedListItemAsync(Guid accountId, Guid titleId)
+    private async Task SeedListItemAsync(Guid accountId, Guid titleId, DateTime? addedAt = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         db.ManagedListItems.Add(new ManagedListItem
@@ -626,7 +778,7 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
             Id = Guid.NewGuid(),
             AccountId = accountId,
             TitleId = titleId,
-            AddedAt = Now.AddDays(-5),
+            AddedAt = addedAt ?? Now.AddDays(-30),
         });
         await db.SaveChangesAsync();
     }
