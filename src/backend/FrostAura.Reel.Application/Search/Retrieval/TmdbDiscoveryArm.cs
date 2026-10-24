@@ -423,10 +423,12 @@ public sealed class TmdbDiscoveryArm(
     /// <summary>
     /// The TMDB keyword ids that stand in for the turn's excluded genres (standing and this turn's)
     /// on a medium whose taxonomy cannot name them (TV: romance, horror, history, …; both: anime,
-    /// musical). Each pattern's text is resolved as an exact TMDB keyword; a stem that is not itself a
-    /// TMDB keyword resolves to nothing, and the eligibility check catches the rest after the fetch.
+    /// musical). Read from <see cref="GenreStandIns.TmdbKeywordIds"/> — a per-turn lookup of some
+    /// eighty phrases would not fit the arm's deadline on a cold cache — and resolved as exact TMDB
+    /// keywords only for a pattern the table lacks. Compound labels a whole-word stem matches are not
+    /// sent; the eligibility check catches them after the fetch.
     /// </summary>
-    private Task<IReadOnlyList<int>> StandInKeywordIdsAsync(FilterRuleSet rules, bool movies, CancellationToken ct)
+    private async Task<IReadOnlyList<int>> StandInKeywordIdsAsync(FilterRuleSet rules, bool movies, CancellationToken ct)
     {
         var media = movies ? MediaType.Movie : MediaType.Show;
         var phrases = rules.ExcludeGenres
@@ -434,7 +436,12 @@ public sealed class TmdbDiscoveryArm(
             .SelectMany(slug => GenreStandIns.Patterns[slug].Select(p => p.Text))
             .Distinct(StringComparer.Ordinal)
             .ToList();
-        return ResolveKeywordIdsAsync(phrases, ct, exactOnly: true);
+        var known = phrases
+            .Where(GenreStandIns.TmdbKeywordIds.ContainsKey)
+            .Select(phrase => GenreStandIns.TmdbKeywordIds[phrase]);
+        var unknown = phrases.Where(phrase => !GenreStandIns.TmdbKeywordIds.ContainsKey(phrase)).ToList();
+        var resolved = unknown.Count == 0 ? [] : await ResolveKeywordIdsAsync(unknown, ct, exactOnly: true);
+        return [.. known.Concat(resolved).Distinct()];
     }
 
     /// <summary>

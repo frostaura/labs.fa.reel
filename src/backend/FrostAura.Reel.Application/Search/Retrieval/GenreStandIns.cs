@@ -34,7 +34,7 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// a stand-in widening an allow-list would admit titles the user never asked for, which is the
 /// opposite direction from the lock this exists to hold.</para>
 /// </summary>
-public static class GenreStandIns
+public static partial class GenreStandIns
 {
     /// <summary>One way a keyword label can stand in for a genre.</summary>
     public abstract record Pattern(string Text);

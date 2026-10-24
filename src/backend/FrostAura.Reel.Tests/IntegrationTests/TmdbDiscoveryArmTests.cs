@@ -77,7 +77,11 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         Assert.Equal([16, 10749], movie.ExcludeGenreIds!.Order().ToList());
         Assert.Equal([16], show.ExcludeGenreIds);
         Assert.Empty(movie.ExcludeKeywordIds!);
-        Assert.Equal([9840, 9841], show.ExcludeKeywordIds!.Order().ToList());
+        var romanceIds = GenreStandIns.Patterns["romance"].Select(p => GenreStandIns.TmdbKeywordIds[p.Text]).Order().ToList();
+        Assert.Equal(romanceIds, show.ExcludeKeywordIds!.Order().ToList());
+        Assert.Contains(9840, show.ExcludeKeywordIds!);
+        // The ids come from the table: the only keyword TMDB was asked about is the request's concept.
+        Assert.Equal(["ninja"], tmdb.KeywordSearches);
 
         // "ninja" is the request's own concept — a topic, not a title — so no title search ran.
         Assert.Null(result.TitleSearched);
@@ -366,8 +370,8 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
 
         var accountId = await SeedAccountAsync();
         await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
-        // The concept resolves at once and the movie medium needs no stand-in, but TV's "romance"
-        // stand-ins hang: a movie page must not already be running (and judging on the shared
+        // The concept resolves at once, the stand-ins come from the table, but the turn's own
+        // rejected concept hangs: no page may already be running (and judging on the shared
         // context) when the deadline fires.
         var tmdb = new RecordingTmdbClient
         {
@@ -379,7 +383,8 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         await using var db = fixture.CreateContext(new AccountContext());
         using var cache = new MemoryCache(new MemoryCacheOptions());
         var arm = new TmdbDiscoveryArm(tmdb, db, new EligibilityQueryBuilder(db), cache);
-        var result = await arm.DiscoverAsync(Request(accountId, concepts: ["ninja"]), TimeSpan.FromMilliseconds(300), CancellationToken.None);
+        var result = await arm.DiscoverAsync(
+            Request(accountId, concepts: ["ninja"], excludeConcepts: ["slow phrase"]), TimeSpan.FromMilliseconds(300), CancellationToken.None);
 
         Assert.True(result.TimedOut);
         Assert.Empty(tmdb.Discovers);   // no page was started, so none can outlive the call

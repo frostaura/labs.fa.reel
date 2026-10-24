@@ -133,6 +133,18 @@ public class GenreStandInsTests
     }
 
     [Fact]
+    public void Every_pattern_has_a_tmdb_keyword_id()
+    {
+        var missing = GenreStandIns.Patterns.Values
+            .SelectMany(patterns => patterns)
+            .Select(p => p.Text)
+            .Where(text => !GenreStandIns.TmdbKeywordIds.ContainsKey(text))
+            .ToList();
+        Assert.Empty(missing);
+        Assert.All(GenreStandIns.TmdbKeywordIds.Values, id => Assert.True(id > 0));
+    }
+
+    [Fact]
     public void A_slug_without_stand_ins_yields_a_predicate_that_matches_nothing()
     {
         var predicate = GenreStandIns.CarriesStandIn("action").Compile();
