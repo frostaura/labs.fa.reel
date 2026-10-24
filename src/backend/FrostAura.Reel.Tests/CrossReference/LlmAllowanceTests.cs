@@ -15,15 +15,15 @@ namespace FrostAura.Reel.Tests.CrossReference;
 /// heaviest curation day is 2026-10-14 — 42 <c>rerank-feed</c> calls at 2,096 tokens and 54
 /// <c>rerank-page</c> at 2,397. The heaviest Ask day is 2026-10-22 — 29 v1 turns made 93
 /// <c>rerank-ask</c> calls at 2,153 tokens, 3.2 a turn. The gate RESERVES a call's worst case
-/// (prompt plus completion ceiling): ~3.9k for a 9-title curation batch and ~2.7k for a 6-title Ask
-/// batch, then releases it for the recorded figure.</para>
+/// (prompt plus completion ceiling): ~5.5k for a 9-title curation batch (2.2k prompt + 3.3k
+/// ceiling) and ~2.7k for a 6-title Ask batch, then releases it for the recorded figure.</para>
 /// </summary>
 public class LlmAllowanceTests
 {
     private const long Limit = RerankBudget.DefaultDailyCalls; // 240
     private const long TokenLimit = RerankBudget.DefaultDailyTokens; // 600k
 
-    private const long CurationReserve = 3_900;
+    private const long CurationReserve = 5_500;
     private const long AskReserve = 2_700;
 
     // ── The admission rule (pure) ──────────────────────────────────────────────────────────

@@ -295,9 +295,9 @@ public class LlmBudgetGateTests(PostgresFixture fixture)
             return;
         }
 
-        // The token half, on the family: 100k tokens of headroom and twenty concurrent 9-title
-        // page batches reserving ~3.9k each — exactly 25 would fit, so twenty all fit; at 30k of
-        // headroom exactly 7 do. Vary the fixture, not just the code.
+        // The token half, on the family: 100k tokens of headroom and twenty concurrent page calls
+        // reserving 3.9k each — 25 would fit, so all twenty do; at 30k of headroom exactly 7 do.
+        // Vary the fixture, not just the code.
         foreach (var (headroom, expected) in new[] { (100_000L, 20), (30_000L, 7) })
         {
             var accountId = await SeedAccountAsync();

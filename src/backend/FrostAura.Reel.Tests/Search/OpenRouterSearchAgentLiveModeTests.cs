@@ -360,8 +360,8 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Theory]
-    [InlineData(ApiUsagePurpose.RerankFeed, 100 + (200 * 3))]
-    [InlineData(ApiUsagePurpose.RerankPage, 100 + (200 * 3))]
+    [InlineData(ApiUsagePurpose.RerankFeed, 100 + (356 * 3))]
+    [InlineData(ApiUsagePurpose.RerankPage, 100 + (356 * 3))]
     [InlineData(ApiUsagePurpose.RerankAsk, 100 + (111 * 3))]
     public async Task Rerank_sends_an_envelope_plus_a_measured_per_title_share(string purpose, int expected)
     {

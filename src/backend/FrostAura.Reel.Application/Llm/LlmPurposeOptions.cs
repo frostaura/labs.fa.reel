@@ -122,8 +122,10 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
     /// of a fixed envelope allowance, because luna's per-entry cost is what scales — a 9-title feed
     /// batch at p99 needed ~1,200 tokens, far past the old flat 900. p99 (p50) completion tokens:
     /// interpret 125 (91), interpreter 80 (68), feed batch of 9 1,194 (586; 133/item p99), page
-    /// batch of 9 1,130 (592), Ask batch of 6 443 (412; 74/item), cross-reference batch of 10
-    /// 928 (464; 93/item), lens 205 (163), narrative 239 (212). Against the gpt-5.4-mini ledger
+    /// batch of 9 1,130 (592) — 2,180 (590) when re-measured over 30 calls, see the re-rank rows —
+    /// Ask batch of 6 443 (412; 74/item), cross-reference batch of 10 928 (464; 93/item), lens
+    /// 205 (163), narrative 239 (212). The purposes first sampled under 30 were re-measured at 30
+    /// the same evening: interpreter 81 (68) and narrative 240 (216), both inside their ceilings. Against the gpt-5.4-mini ledger
     /// means: interpret 130, feed 368, page 424, Ask 366, cross-reference 1,490 per 60, lens 176,
     /// narrative 255 — at effort none luna is back in mini's range everywhere but the re-rank
     /// whys, which it writes about 1.6× longer.</para>
@@ -137,9 +139,15 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
         // ── The re-rank family: an envelope plus a per-title share ──
         // Feed curation is background work with nobody waiting, so it gets the longer clock: one
         // 9-title batch took 25 s at p99 in the probe, past the interactive attempt timeout.
-        [ApiUsagePurpose.Rerank] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 200),
-        [ApiUsagePurpose.RerankFeed] = Search(maxTokens: 100, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90), perItem: 200),
-        [ApiUsagePurpose.RerankPage] = Search(maxTokens: 100, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), perItem: 200),
+        // Feed, page and the legacy purpose share ONE prompt and schema, so they share one size:
+        // the 30-call page re-measure (2026-10-24, 20:00 UTC) found a tail the first 20 calls had
+        // not — 3 of 29 answered 9-title batches finished naturally at 1,205, 1,760 and 2,344
+        // tokens (p99 2,180), past the old 100 + 200 x 9 = 1,900, i.e. a ~10% length rate. p99 x
+        // 1.5 = 3,270, rounded up to 3,300: 100 + 356 per title. A ceiling costs nothing until it
+        // is generated; truncating those answers paid for them twice.
+        [ApiUsagePurpose.Rerank] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 356),
+        [ApiUsagePurpose.RerankFeed] = Search(maxTokens: 100, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90), perItem: 356),
+        [ApiUsagePurpose.RerankPage] = Search(maxTokens: 100, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), perItem: 356),
         [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 111),
         [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 111),
 
