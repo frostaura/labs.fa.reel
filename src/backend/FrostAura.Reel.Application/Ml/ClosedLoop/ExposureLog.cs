@@ -20,7 +20,11 @@ namespace FrostAura.Reel.Application.Ml.ClosedLoop;
 /// <param name="DemotionApplied">The dislike demotion subtracted after calibration.</param>
 /// <param name="LlmFit">The re-rank fit where the surface computed one.</param>
 /// <param name="WhySentence">The exact why-line rendered.</param>
-/// <param name="WhySource">How that sentence was produced.</param>
+/// <param name="WhySource">
+/// How that sentence was produced — typed, and the only way to say it: there is no conversion from
+/// a string. Left at its default it records <see cref="ExposureWhySource.Unknown"/>, which the log
+/// accepts and reports (see <see cref="ExposureLog.Stage"/>) but the trust acceptance counts to zero.
+/// </param>
 /// <param name="RowKey">The rail's identity, anchor-qualified; null on hero/digest/search surfaces.</param>
 /// <param name="PageIndex">Pagination depth; 0 on the first page and every non-paginated surface.</param>
 /// <param name="PolicyId">The ranking policy that drafted this card, when a slate was interleaved.</param>
@@ -41,42 +45,13 @@ public readonly record struct ExposureCard(
     decimal DemotionApplied = 0m,
     decimal? LlmFit = null,
     string? WhySentence = null,
-    string WhySource = ExposureWhySource.Unknown,
+    ExposureWhySource WhySource = default,
     string? RowKey = null,
     int PageIndex = 0,
     string? PolicyId = null,
     Guid? InterleaveGroup = null,
     string? XrefVerdict = null,
     decimal? XrefConfidence = null);
-
-/// <summary>
-/// The closed vocabulary for <see cref="ExposureEvent.WhySource"/>. Strings rather than an enum
-/// because the producing surfaces disagree about what a "source" is and a shared enum would force
-/// a migration every time one of them learns a new way to caption a card.
-/// </summary>
-public static class ExposureWhySource
-{
-    /// <summary>An LLM curation/why pass wrote it.</summary>
-    public const string Llm = "Llm";
-
-    /// <summary>Served from the per-(account, title, row) fit cache.</summary>
-    public const string Cache = "Cache";
-
-    /// <summary>The deterministic templater wrote it from verified contributions.</summary>
-    public const string Templater = "Templater";
-
-    /// <summary>Carried over unchanged from the previous snapshot's row.</summary>
-    public const string Preserved = "Preserved";
-
-    /// <summary>The single generic floor sentence, or an empty caption.</summary>
-    public const string Generic = "Generic";
-
-    /// <summary>The digest's own fixed reason copy.</summary>
-    public const string Digest = "Digest";
-
-    /// <summary>The surface did not say. Never guessed at — an unattributed why is recorded as one.</summary>
-    public const string Unknown = "Unknown";
-}
 
 /// <summary>
 /// Writes the exposure log. The rule this class exists to enforce is that <b>recording a serve may
@@ -102,6 +77,12 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
     /// same idempotency key are skipped. Returns the entries staged, so a caller that later needs
     /// to abandon them (a guarded save) can detach exactly those.
     /// </summary>
+    /// <remarks>
+    /// Every card states its <see cref="ExposureCard.WhySource"/>. A card left at
+    /// <see cref="ExposureWhySource.Unknown"/> is still written — the serve happened — and the batch
+    /// logs one warning naming the surface and the count, so an unattributed writer is visible in
+    /// the logs the day it ships rather than in a month's accuracy numbers.
+    /// </remarks>
     /// <param name="sourceTurnId">
     /// The Ask Reel turn that served these cards, where one did. Trailing and optional because it
     /// is meaningful on exactly one of the eight write sites: every other surface passes nothing
@@ -152,11 +133,17 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
         // idempotency key does not separate them, so the batch dedupes against itself too —
         // otherwise the two inserts collide inside one SaveChanges and neither lands.
         var seen = new HashSet<Guid>();
+        var unattributed = 0;
         foreach (var card in cards)
         {
             if (alreadyLogged.Contains(card.TitleId) || !seen.Add(card.TitleId))
             {
                 continue;
+            }
+
+            if (card.WhySource.Kind == WhySourceKind.Unknown)
+            {
+                unattributed++;
             }
 
             staged.Add(db.ExposureEvents.Add(new ExposureEvent
@@ -178,7 +165,7 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
                 DemotionApplied = Round3(card.DemotionApplied),
                 LlmFit = card.LlmFit is { } fit ? Math.Round(fit, 3, MidpointRounding.AwayFromZero) : null,
                 WhySentence = string.IsNullOrWhiteSpace(card.WhySentence) ? null : card.WhySentence,
-                WhySource = card.WhySource,
+                WhySource = card.WhySource.Name,
                 // Attribution is written only where it was actually established. The two travel as
                 // a pair — a policy with no slate, or a slate with no policy, would be an exposure
                 // the sequential test could neither count nor attribute — so a card missing either
@@ -194,6 +181,16 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
                     : null,
                 SourceTurnId = sourceTurnId,
             }));
+        }
+
+        if (unattributed > 0)
+        {
+            // Recorded, not refused: an unattributed row is still a true record of a serve, and
+            // dropping it would short the closed loop. But it is a writer defect, so it is loud.
+            logger.LogWarning(
+                "Exposure writer for {Surface} staged {Unattributed} of {Count} cards with WhySource=Unknown — "
+                + "the writer did not say how the why-line was produced.",
+                surface, unattributed, staged.Count);
         }
 
         return staged;

@@ -127,7 +127,13 @@ public class ExposureEvent : IAccountScoped
     /// <summary>The exact why-line rendered on the card.</summary>
     public string? WhySentence { get; set; }
 
-    /// <summary>How that sentence was produced — Llm | Cache | Templater | Preserved | Generic | Digest.</summary>
+    /// <summary>
+    /// How that sentence was produced, stored by name: Llm | Cache | Templater | Preserved | Generic |
+    /// Digest | Facet | Fallback | None | Unknown. Writers set it only through the typed
+    /// <c>ExposureWhySource</c> on <c>ExposureCard</c>; readers go through
+    /// <c>ExposureWhySource.Parse</c>, which maps any value it does not know — including the empty
+    /// string some legacy rows hold — to Unknown.
+    /// </summary>
     public string WhySource { get; set; } = string.Empty;
 
     /// <summary>

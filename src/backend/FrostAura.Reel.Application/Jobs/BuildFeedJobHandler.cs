@@ -1748,7 +1748,7 @@ public class BuildFeedJobHandler(
         /// Where <see cref="WhyThis"/> came from, for the exposure log. Defaults to the templater
         /// because that is what the constructor just wrote; every upgrade path re-stamps it.
         /// </summary>
-        public string WhySource { get; set; } = ExposureWhySource.Templater;
+        public ExposureWhySource WhySource { get; set; } = ExposureWhySource.Templater;
 
         /// <summary>The agent's fit verdict for this card where one was observed — otherwise discarded.</summary>
         public decimal? LlmFit { get; set; }
