@@ -32,8 +32,8 @@ public sealed record RerankAllowance(
     /// </summary>
     public bool HasBackgroundHeadroom =>
         HasHeadroom
-        && CallsUsed - AskCallsUsed < (long)((CallsLimit - AskCallsUsed) * RerankBudget.BackgroundFraction)
-        && TokensUsed - AskTokensUsed < (long)((TokensLimit - AskTokensUsed) * RerankBudget.BackgroundFraction);
+        && CallsUsed - AskCallsUsed < RerankBudget.Share(CallsLimit - AskCallsUsed, RerankBudget.BackgroundFraction)
+        && TokensUsed - AskTokensUsed < RerankBudget.Share(TokensLimit - AskTokensUsed, RerankBudget.BackgroundFraction);
 
     /// <summary>
     /// Whether an ASK member (<c>rerank-ask</c>, <c>rerank-expand</c>) may spend: the Ask members'
@@ -42,8 +42,8 @@ public sealed record RerankAllowance(
     /// </summary>
     public bool HasAskHeadroom =>
         HasHeadroom
-        && AskCallsUsed < (long)(CallsLimit * RerankBudget.AskShare)
-        && AskTokensUsed < (long)(TokensLimit * RerankBudget.AskShare);
+        && AskCallsUsed < RerankBudget.Share(CallsLimit, RerankBudget.AskShare)
+        && AskTokensUsed < RerankBudget.Share(TokensLimit, RerankBudget.AskShare);
 
     public long CallsRemaining => Math.Max(0, CallsLimit - CallsUsed);
 
@@ -71,14 +71,14 @@ public sealed record RerankAllowance(
 
         if (RerankBudget.IsAskMember(purpose))
         {
-            return after.AskCallsUsed <= (long)(CallsLimit * RerankBudget.AskShare)
-                && after.AskTokensUsed <= (long)(TokensLimit * RerankBudget.AskShare);
+            return after.AskCallsUsed <= RerankBudget.Share(CallsLimit, RerankBudget.AskShare)
+                && after.AskTokensUsed <= RerankBudget.Share(TokensLimit, RerankBudget.AskShare);
         }
 
         if (purpose == ApiUsagePurpose.RerankFeed)
         {
-            return after.CallsUsed - after.AskCallsUsed <= (long)((CallsLimit - AskCallsUsed) * RerankBudget.BackgroundFraction)
-                && after.TokensUsed - after.AskTokensUsed <= (long)((TokensLimit - AskTokensUsed) * RerankBudget.BackgroundFraction);
+            return after.CallsUsed - after.AskCallsUsed <= RerankBudget.Share(CallsLimit - AskCallsUsed, RerankBudget.BackgroundFraction)
+                && after.TokensUsed - after.AskTokensUsed <= RerankBudget.Share(TokensLimit - AskTokensUsed, RerankBudget.BackgroundFraction);
         }
 
         return true;
@@ -138,6 +138,12 @@ public sealed class RerankBudget(IReelDbContext db, IConfiguration configuration
     /// bills its own purposes (<c>AskBudget</c>) and never reaches this share at all.
     /// </summary>
     public const double AskShare = 0.60d;
+
+    /// <summary>
+    /// <paramref name="fraction"/> of <paramref name="limit"/>, floored — with a hair of slack so
+    /// binary floating point cannot turn 150 × 0.6 into 89.999… and a 90-call share into 89.
+    /// </summary>
+    public static long Share(long limit, double fraction) => (long)Math.Floor((limit * fraction) + 1e-6);
 
     /// <summary>True for the family members that are a person mid-conversation.</summary>
     public static bool IsAskMember(string purpose) =>
