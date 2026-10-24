@@ -304,18 +304,53 @@ public sealed class FeedPaginator(
                 .FirstOrDefaultAsync(ct);
         }
 
+        // Titles another rail of this page already holds leave the lane BEFORE the curation slice
+        // is cut, so a deep lane still fills: cutting the slice first and claiming after left
+        // three same-genre rails on one page with 12, 8 and 0 cards over a 60-title pool.
+        var rowKey = RowKey(req);
+        var heldElsewhere = await FeedPageClaims.HeldElsewhereAsync(
+            db, account.Id, req.PageToken, rowKey, ranked.Select(r => r.Title.Id).ToList(), now, ct);
+        if (heldElsewhere.Count > 0)
+        {
+            ranked = ranked.Where(r => !heldElsewhere.Contains(r.Title.Id)).ToList();
+            if (ranked.Count == 0)
+            {
+                logger.LogInformation(
+                    "Feed page {Row}: every candidate in the window is already on another rail of this page.", rowKey);
+                return [];
+            }
+        }
+
         // LLM curation pass over the top slice: the model gives the personalised rating, the agent
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
-        var curated = await CurateAsync(account, req, taste, curationPool, prior, anchor?.Name, ct);
-        // Claimed against the page, not just taken: a title another rail on this page already
-        // served is skipped for the next best, so no title appears on two rails of one Home.
-        var claimedIds = await FeedPageClaims.ClaimAsync(
-            db, cache, account.Id, req.PageToken, curated.Select(c => c.Scored.Title.Id).ToList(), req.Limit, ct);
-        var claimedSet = claimedIds.ToHashSet();
-        var taken = curated.Where(c => claimedSet.Contains(c.Scored.Title.Id)).ToList();
+        var curated = await CurateAsync(account, req, taste, curationPool, prior, anchor?.Name, evidence, ct);
 
-        var whyContexts = await BuildWhyContextsAsync(taste, taken.Select(c => c.Scored).ToList(), anchor, ct);
+        // Claimed against the page, not just taken: a title another rail claimed between the read
+        // above and now is skipped for the next best — the curated slice first, then the rest of
+        // the ranked lane uncurated — so a lost race shortens nothing that the lane could fill.
+        var curatedById = new Dictionary<Guid, Curated>();
+        foreach (var c in curated)
+        {
+            curatedById.TryAdd(c.Scored.Title.Id, c);
+        }
+
+        var claimOrder = curated.Select(c => c.Scored.Title.Id)
+            .Concat(ranked.Skip(curationPool.Count).Select(r => r.Title.Id))
+            .ToList();
+        var rankedById = new Dictionary<Guid, Scored>();
+        foreach (var r in ranked)
+        {
+            rankedById.TryAdd(r.Title.Id, r);
+        }
+
+        var claimedIds = await FeedPageClaims.ClaimAsync(
+            db, account.Id, req.PageToken, rowKey, claimOrder, req.Limit, now, ct);
+        var taken = claimedIds
+            .Select(id => curatedById.TryGetValue(id, out var c) ? c : new Curated(rankedById[id], null, Attempted: false))
+            .ToList();
+
+        var whyContexts = await BuildWhyContextsAsync(taste, taken.Select(c => c.Scored).ToList(), anchor, evidence, ct);
         await PersistScoresAsync(account.Id, artifact.Id, taken.Select(c => c.Scored).ToList(), now, ct);
 
         // Output guard + no-repeat: a cached/LLM line that leaks third person, opens with the
@@ -343,6 +378,16 @@ public sealed class FeedPaginator(
             {
                 why = ExplanationTemplater.GenericFallback;
                 source = c.Attempted ? ExposureWhySource.Fallback : ExposureWhySource.Templater;
+            }
+
+            // A card whose model pass was attempted and failed shows the templated ANCHORED line
+            // (built from the gate's evidence, so it is checkable) or nothing at all: off an
+            // anchored row the templater has only soft contribution copy to offer, and serving it in
+            // the model's place reads as a reason nobody actually checked. The source stays
+            // Fallback — the attempt and its failure are what the log must keep.
+            if (source == ExposureWhySource.Fallback && !IsAnchored(req))
+            {
+                why = string.Empty;
             }
 
             // The generic fallback may appear at most once per page: a later card with nothing
@@ -392,7 +437,8 @@ public sealed class FeedPaginator(
     /// </summary>
     private async Task<List<Curated>> CurateAsync(
         Account account, MoreFeedRequest req, FeatureVectorBuilder.TasteState taste, List<Scored> pool,
-        TastePrior prior, string? anchorName, CancellationToken ct)
+        TastePrior prior, string? anchorName, IReadOnlyDictionary<Guid, IReadOnlyList<SharedEvidence>> evidence,
+        CancellationToken ct)
     {
         if (!agent.IsAvailable || pool.Count == 0)
         {
@@ -416,7 +462,9 @@ public sealed class FeedPaginator(
             }
             else
             {
-                uncached.Add(new RerankInput(s.Title.Id, s.Title.Name, s.Title.Year, s.Title.MediaType.ToString(), s.Title.Genres, s.Title.Overview, s.Predicted));
+                uncached.Add(new RerankInput(
+                    s.Title.Id, s.Title.Name, s.Title.Year, s.Title.MediaType.ToString(), s.Title.Genres, s.Title.Overview, s.Predicted,
+                    AnchorEvidencePrompt.ContextFor(evidence.GetValueOrDefault(s.Title.Id), anchorName)));
             }
         }
 
@@ -1018,7 +1066,8 @@ public sealed class FeedPaginator(
     /// so the caller's no-repeat guard can re-seed a collision.
     /// </summary>
     private async Task<Dictionary<Guid, ExplanationTemplater.Context>> BuildWhyContextsAsync(
-        FeatureVectorBuilder.TasteState taste, List<Scored> taken, AnchorInfo? anchor, CancellationToken ct)
+        FeatureVectorBuilder.TasteState taste, List<Scored> taken, AnchorInfo? anchor,
+        IReadOnlyDictionary<Guid, IReadOnlyList<SharedEvidence>> evidence, CancellationToken ct)
     {
         var titleIds = taken.Select(s => s.Title.Id).ToList();
         // Per-title, per-role best-affinity person among people the user has actually rated (count ≥ 2),
@@ -1039,7 +1088,9 @@ public sealed class FeedPaginator(
             var sharedGenre = anchorGenres is null ? null : s.Title.Genres.FirstOrDefault(anchorGenres.Contains);
             result[s.Title.Id] = new ExplanationTemplater.Context(
                 s.Title, s.Row.TopContributions, persons, ratedGenres, anchor?.Name,
-                sharedGenre, toneByTitle.GetValueOrDefault(s.Title.Id));
+                sharedGenre, toneByTitle.GetValueOrDefault(s.Title.Id),
+                // The anchored-row gate's evidence names the link, exactly as on the built rail.
+                evidence.GetValueOrDefault(s.Title.Id));
         }
 
         return result;

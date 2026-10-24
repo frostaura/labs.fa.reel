@@ -61,6 +61,159 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
                 Math.Round(i.BaseScore!.Value + i.CalibrationDelta!.Value - i.DemotionApplied!.Value, 2));
         });
         Assert.Contains(items, i => i.WhySource == ExposureWhySource.Fallback);
+
+        // Off an anchored row, a card whose model pass failed shows no line at all: the soft
+        // templater copy is not shown in the model's place.
+        Assert.All(items.Where(i => i.WhySource == ExposureWhySource.Fallback), i => Assert.Equal(string.Empty, i.WhyThis));
+    }
+
+    [Fact]
+    public async Task On_an_anchored_page_a_failed_pass_shows_the_evidence_line_and_the_model_was_given_the_evidence()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var genre = $"trust-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        var axis = Random.Shared.Next(300, 590);
+        var anchor = await SeedTitlesAsync(1, genre, keywords: ["heist"], axis: axis, name: "Anchor Heat");
+        await SeedTitlesAsync(10, genre, keywords: ["heist"], axis: axis);
+        await SeedActiveArtifactAsync(accountId);
+        var agent = new StubbingAgent();
+
+        var items = await MoreAsync(
+            accountId, new MoreFeedRequest(FeedRowContext.BecauseYouLoved, anchor[0], null, [], 12), agent);
+
+        Assert.NotEmpty(items);
+        Assert.All(items, i =>
+        {
+            Assert.Equal(ExposureWhySource.Fallback, i.WhySource);
+            // The templated ANCHORED line, built from the evidence the gate admitted the card on.
+            Assert.Contains("heist", i.WhyThis, StringComparison.Ordinal);
+            Assert.Contains("Anchor Heat", i.WhyThis, StringComparison.Ordinal);
+        });
+
+        // And the model was told the checked link, naming the title rather than "the anchor".
+        Assert.NotEmpty(agent.Inputs);
+        Assert.All(agent.Inputs, input =>
+            Assert.Contains("shares the heist premise with Anchor Heat", input.Context!.TopContributions));
+    }
+
+    [Fact]
+    public async Task Three_rails_sharing_one_pool_each_fill_from_the_lane_not_from_a_pre_cut_slice()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The review's proof: three genre rails over ONE 60-title pool, one token, limit 12. Claiming
+        // only from the curation slice (limit + 8) dealt 12, 8 and 0 — and an empty page reports
+        // exhausted, which the client latches.
+        var a = $"trust-a-{Guid.NewGuid():N}";
+        var b = $"trust-b-{Guid.NewGuid():N}";
+        var c = $"trust-c-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitlesAsync(60, a, b, thirdGenre: c);
+        await SeedActiveArtifactAsync(accountId);
+        var token = Guid.NewGuid().ToString("N");
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var pages = new List<IReadOnlyList<ScoredFeedItem>>();
+        foreach (var genre in new[] { a, b, c })
+        {
+            pages.Add(await MoreAsync(
+                accountId, Genre(genre) with { Limit = 12, PageToken = token }, new UnavailableSearchAgent(), cache));
+        }
+
+        Assert.All(pages, page => Assert.Equal(12, page.Count));
+        var all = pages.SelectMany(p => p.Select(i => i.Title.Id)).ToList();
+        Assert.Equal(all.Count, all.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task A_rail_re_requested_with_its_own_token_gets_its_own_cards_back()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // An RTK refetch or tag invalidation inside one Home view: the same rail, the same token.
+        // Before claims were owned by their row it found its own cards taken and dealt 8 different ones.
+        var a = $"trust-a-{Guid.NewGuid():N}";
+        var b = $"trust-b-{Guid.NewGuid():N}";
+        var accountId = await SeedAccountAsync();
+        await SeedTitlesAsync(40, a, b);
+        await SeedActiveArtifactAsync(accountId);
+        var token = Guid.NewGuid().ToString("N");
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = await MoreAsync(accountId, Genre(a) with { PageToken = token }, new UnavailableSearchAgent(), cache);
+        var other = await MoreAsync(accountId, Genre(b) with { PageToken = token }, new UnavailableSearchAgent(), cache);
+        var again = await MoreAsync(accountId, Genre(a) with { PageToken = token }, new UnavailableSearchAgent(), cache);
+
+        Assert.Equal(10, first.Count);
+        Assert.Equal(first.Select(i => i.Title.Id), again.Select(i => i.Title.Id));
+        Assert.Empty(other.Select(i => i.Title.Id).Intersect(first.Select(i => i.Title.Id)));
+    }
+
+    [Fact]
+    public async Task Concurrent_first_requests_for_one_page_all_claim_into_one_set()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Twenty rails race to create the page's set, each wanting the single best title. With an
+        // atomic create every rail sees the others' claims, so twenty distinct titles are dealt;
+        // the old check-then-create let racing first requests each build a private set.
+        var accountId = await SeedAccountAsync();
+        var titles = await SeedTitlesAsync(20, $"claims-{Guid.NewGuid():N}");
+        for (var round = 0; round < 10; round++)
+        {
+            var token = Guid.NewGuid().ToString("N");
+            var claims = Enumerable.Range(0, 20).Select(async rail =>
+            {
+                await using var db = Fixture.CreateContext(new AccountContext());
+                return await FeedPageClaims.ClaimAsync(
+                    db, accountId, token, $"genre:rail-{rail}", titles, 1, DateTime.UtcNow, CancellationToken.None);
+            });
+
+            var dealt = (await Task.WhenAll(claims)).Select(c => Assert.Single(c)).ToList();
+            Assert.Equal(20, dealt.Distinct().Count());
+        }
+    }
+
+    [Fact]
+    public async Task One_account_cannot_grow_the_page_store_without_bound()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titles = await SeedTitlesAsync(3, $"claims-{Guid.NewGuid():N}");
+        var start = DateTime.UtcNow;
+        for (var page = 0; page < 30; page++)
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            await FeedPageClaims.ClaimAsync(
+                db, accountId, $"page-{page}", "genre:x", titles, 1, start.AddSeconds(page), CancellationToken.None);
+        }
+
+        Assert.InRange(FeedPageClaims.HeldPages(accountId), 1, FeedPageClaims.MaxPagesPerAccount);
+
+        // An over-long token is not a page at all: no set, every title free.
+        await using var check = Fixture.CreateContext(new AccountContext());
+        var unclaimed = await FeedPageClaims.ClaimAsync(
+            check, accountId, new string('x', FeedPageClaims.MaxTokenLength + 1), "genre:y", titles, 3,
+            DateTime.UtcNow, CancellationToken.None);
+        Assert.Equal(3, unclaimed.Count);
     }
 
     [Fact]
@@ -218,7 +371,8 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
     }
 
     private async Task<IReadOnlyList<Guid>> SeedTitlesAsync(
-        int count, string genre, string? secondGenre = null, string[]? keywords = null, int? axis = null)
+        int count, string genre, string? secondGenre = null, string[]? keywords = null, int? axis = null,
+        string? name = null, string? thirdGenre = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var ids = new List<Guid>(count);
@@ -230,10 +384,10 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
                 MediaType = MediaType.Movie,
                 TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
                 TraktSlug = string.Empty,
-                Name = $"trust {genre} {i} {Guid.NewGuid():N}",
+                Name = name ?? $"trust {genre} {i} {Guid.NewGuid():N}",
                 Language = "en",
                 PosterPath = "/p.jpg",
-                Genres = secondGenre is null ? [genre] : [genre, secondGenre],
+                Genres = new[] { genre, secondGenre, thirdGenre }.OfType<string>().ToArray(),
                 Keywords = keywords ?? [],
                 // Low popularity: never perturbs the shared catalogue's popularity head.
                 TmdbPopularity = 1.5m - (i * 0.001m),
@@ -337,6 +491,9 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
     {
         public int Calls;
 
+        /// <summary>Every candidate the paginator handed the model.</summary>
+        public System.Collections.Concurrent.ConcurrentBag<RerankInput> Inputs { get; } = [];
+
         public bool IsAvailable => true;
 
         public string ModelId => "stubbing-agent";
@@ -348,6 +505,11 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
         {
             Interlocked.Increment(ref Calls);
+            foreach (var title in titles)
+            {
+                Inputs.Add(title);
+            }
+
             return Task.FromResult<IReadOnlyList<RerankResult>>(titles
                 .Select(t => new RerankResult(
                     t.TitleId, (double)(t.Predicted ?? 6m) / 10d, ResultSource.Fallback,

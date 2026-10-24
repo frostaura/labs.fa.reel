@@ -208,6 +208,104 @@ public class ExposureWriteIntegrationTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Score_writers_covering_the_same_titles_in_opposite_orders_never_deadlock()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The review's proof, kept as the regression: four concurrent writers per round over 300
+        // shared titles, half in ascending and half in descending order — rank order differs per
+        // rail, which is exactly what two Home rails hand the writer. Before the writer sorted its
+        // VALUES this produced 35 x 40P01 in 15 rounds.
+        var (accountId, titles, artifactId) = await SeedAsync(300);
+        var ascending = titles.OrderBy(t => t).ToList();
+        var descending = titles.OrderByDescending(t => t).ToList();
+
+        for (var round = 0; round < 15; round++)
+        {
+            var writers = Enumerable.Range(0, 4).Select(async writer =>
+            {
+                await using var db = fixture.CreateContext(Scoped(accountId));
+                var order = writer % 2 == 0 ? ascending : descending;
+                return await TitleScoreWriter.UpsertAsync(
+                    db, accountId, artifactId,
+                    order.Select(t => new TitleScoreWriter.Score(t, 6m + (writer * 0.1m), "[]")),
+                    Now.AddSeconds(round),
+                    CancellationToken.None);
+            });
+
+            Assert.All(await Task.WhenAll(writers), written => Assert.Equal(300, written));
+        }
+
+        await using var verify = fixture.CreateContext(Scoped(accountId));
+        Assert.Equal(300, await verify.TitleScores.CountAsync(s => s.AccountId == accountId));
+    }
+
+    [Fact]
+    public async Task Exposure_writers_covering_the_same_titles_in_opposite_orders_lose_no_batch()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Same shape for the exposure insert: two genre rails of one Home logging overlapping titles
+        // in the same minute, one rail ranking them the other way round. A deadlock here is
+        // swallowed by RecordAsync (logging never fails a request), so it shows up as a warning
+        // and a lost batch rather than an exception — both are counted.
+        var (accountId, titles, artifactId) = await SeedAsync(300);
+        var ascending = titles.OrderBy(t => t).ToList();
+        var descending = titles.OrderByDescending(t => t).ToList();
+        var logger = new CountingLogger<ExposureLog>();
+
+        for (var round = 0; round < 15; round++)
+        {
+            var at = Now.AddMinutes(round);
+            var writers = Enumerable.Range(0, 4).Select(async writer =>
+            {
+                await using var db = fixture.CreateContext(Scoped(accountId));
+                var order = writer % 2 == 0 ? ascending : descending;
+                await new ExposureLog(db, logger).RecordAsync(
+                    accountId, ExposureSurface.GenreRail, null, artifactId, at,
+                    [.. order.Select((t, i) => new ExposureCard(
+                        t, i, 7m, WhySource: ExposureWhySource.Templater, RowKey: $"genre:rail-{writer}"))],
+                    CancellationToken.None);
+            });
+            await Task.WhenAll(writers);
+        }
+
+        Assert.Equal(0, logger.Warnings);
+        await using var verify = fixture.CreateContext(Scoped(accountId));
+        // One row per (title, minute): every round landed whole, whichever writer won each title.
+        Assert.Equal(300 * 15, await verify.ExposureEvents.CountAsync(e => e.AccountId == accountId));
+    }
+
+    /// <summary>Counts warnings and errors, so a swallowed write failure is still visible to a test.</summary>
+    private sealed class CountingLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+    {
+        private int warnings;
+
+        public int Warnings => Volatile.Read(ref warnings);
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                Interlocked.Increment(ref warnings);
+            }
+        }
+    }
+
+    [Fact]
     public async Task A_number_only_refresh_keeps_the_contributions_a_build_stored()
     {
         if (!fixture.Available)

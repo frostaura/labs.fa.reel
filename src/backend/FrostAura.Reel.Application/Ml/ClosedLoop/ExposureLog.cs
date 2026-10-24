@@ -300,12 +300,18 @@ public sealed class ExposureLog(IReelDbContext db, ILogger<ExposureLog> logger)
     /// <c>MinuteBucket</c> is a stored generated column and is deliberately not written. Every
     /// value is a TYPED parameter — a raw-SQL null has no CLR type for the provider to map — and
     /// the column list is the only text spliced in, from a constant.
+    ///
+    /// <para>Rows go in <c>TitleId</c> order. Within one call every other key column is shared, so
+    /// that is the unique key's order, and two concurrent writers whose batches overlap (two rails
+    /// of one Home logging the same title in the same minute) wait on each other's speculative
+    /// inserts in one direction only instead of deadlocking — the lesson TitleScoreWriter learned
+    /// with 35 <c>40P01</c>s.</para>
     /// </summary>
     private static (string Sql, object[] Parameters) InsertIgnoringConflicts(IReadOnlyList<ExposureEvent> rows)
     {
         var parameters = new List<object>(rows.Count * InsertColumns.Length);
         var values = new List<string>(rows.Count);
-        foreach (var row in rows)
+        foreach (var row in rows.OrderBy(r => r.TitleId).ThenBy(r => r.Id))
         {
             (object? Value, NpgsqlDbType Type)[] cells =
             [

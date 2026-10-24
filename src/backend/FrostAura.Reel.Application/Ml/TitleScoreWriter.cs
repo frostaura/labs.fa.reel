@@ -2,6 +2,7 @@ using System.Globalization;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Ml;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace FrostAura.Reel.Application.Ml;
 
@@ -20,6 +21,16 @@ namespace FrostAura.Reel.Application.Ml;
 /// <para>The write is a raw statement, so nothing is tracked and the caller's context is left as it
 /// was. Callers that also rely on their own pending changes being saved still call
 /// <c>SaveChangesAsync</c> themselves.</para>
+///
+/// <para><b>Rows are written in <c>TitleId</c> order, always.</b> A multi-row upsert locks its
+/// conflicting rows in VALUES order, so two writers covering the same titles in different orders
+/// (the paginator writes rank order, and two rails rank the same titles differently) each held a
+/// row the other wanted: 35 deadlocks (<c>40P01</c>) in 15 rounds of 4 concurrent writers alternating
+/// ascending and descending order, every one an HTTP 500 out of <c>/feed/more</c>. One global
+/// order makes the wait-for graph acyclic. A deadlock that still happens (another statement in the
+/// caller's own transaction holding a lock) is retried once when there is no ambient transaction,
+/// because the statement is idempotent; inside a transaction it is rethrown, since Postgres has
+/// already aborted that transaction.</para>
 /// </summary>
 public static class TitleScoreWriter
 {
@@ -69,6 +80,7 @@ public static class TitleScoreWriter
         }
 
         var values = byTitle.Values
+            .OrderBy(score => score.TitleId)
             .Select(score =>
                 "(" + Next(Guid.NewGuid()) + ", " + Next(accountId) + ", " + Next(score.TitleId) + ", "
                 + Next(artifactId) + ", " + Next(score.PredictedRating) + ", CAST(" + Next(score.ContributionsJson)
@@ -82,6 +94,14 @@ public static class TitleScoreWriter
             + "\"PredictedRating\" = EXCLUDED.\"PredictedRating\", \"ScoredAt\" = EXCLUDED.\"ScoredAt\""
             + (keepStoredContributions ? string.Empty : ", \"ContributionsJson\" = EXCLUDED.\"ContributionsJson\"");
 
-        return await db.Database.ExecuteSqlRawAsync(sql, parameters, ct);
+        try
+        {
+            return await db.Database.ExecuteSqlRawAsync(sql, parameters, ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected
+            && db.Database.CurrentTransaction is null)
+        {
+            return await db.Database.ExecuteSqlRawAsync(sql, parameters, ct);
+        }
     }
 }
