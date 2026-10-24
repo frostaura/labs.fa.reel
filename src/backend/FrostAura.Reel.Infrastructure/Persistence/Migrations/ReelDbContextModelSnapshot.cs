@@ -18,7 +18,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.9")
+                .HasAnnotation("ProductVersion", "10.0.13")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
@@ -2194,6 +2194,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("CursorJson")
                         .HasColumnType("jsonb");
+
+                    b.Property<int>("DeadlineYields")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
 
                     b.Property<DateTime>("EnqueuedAt")
                         .HasColumnType("timestamp with time zone");

@@ -125,5 +125,12 @@ public class SyncJob
     /// </summary>
     public string? TriggerReason { get; set; }
 
+    /// <summary>
+    /// How many times the runner has ended an attempt at the kind's deadline and put the job back
+    /// in the queue to resume from its checkpoint (a slice, not a failure, so the attempt was
+    /// refunded). Bounded by the runner, so a job that never makes progress cannot slice forever.
+    /// </summary>
+    public int DeadlineYields { get; set; }
+
     public string? Error { get; set; }
 }
