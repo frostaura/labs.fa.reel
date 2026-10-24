@@ -116,6 +116,18 @@ public interface ILensWriter
     /// <summary>The prompt generation for taste narratives.</summary>
     int NarrativePromptVersion { get; }
 
+    /// <summary>
+    /// The model AND reasoning effort lens notes are written at — <c>model|effort</c> — stored on
+    /// every row as its <c>ModelId</c> and part of what makes a note current. A note written by a
+    /// different model or at a different effort is a different generation: it is served as stale
+    /// (old prose beats none) and rewritten, never mistaken for the current one. Defaults to the
+    /// model id alone, for a writer that sends no effort.
+    /// </summary>
+    string LensCacheSalt => ModelId;
+
+    /// <summary>The same salt for taste narratives (their own purpose, so their own overrides).</summary>
+    string NarrativeCacheSalt => ModelId;
+
     /// <summary>6–10 second-person sentences drawn ONLY from <paramref name="facts"/>. Null on failure.</summary>
     Task<NarrativeDraft?> WriteNarrativeAsync(TasteFacts facts, CancellationToken ct = default);
 

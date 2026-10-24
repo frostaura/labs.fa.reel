@@ -67,6 +67,17 @@ public sealed class LensService(
     public int PromptVersion => writer.LensPromptVersion;
 
     /// <summary>
+    /// The model-and-effort every row this service writes is stamped with (in <c>ModelId</c>), and
+    /// the third part of what makes a note CURRENT beside the profile hash and prompt version. A
+    /// model swap or an effort change re-keys the cache the way a prompt bump does: older notes
+    /// step down the ladder to stale — still rendered — and are rewritten in place.
+    /// </summary>
+    public string CacheSalt => writer.LensCacheSalt;
+
+    private bool IsCurrent(TitleLensCopy c, string profileHash, string salt) =>
+        c.ProfileHash == profileHash && c.PromptVersion == PromptVersion && c.ModelId == salt;
+
+    /// <summary>
     /// The best note available for one title WITHOUT generating anything. This is what every
     /// render path calls; only the on-demand endpoint and the background job may generate.
     /// </summary>
@@ -79,7 +90,8 @@ public sealed class LensService(
             .Take(4)
             .ToListAsync(ct);
 
-        var current = rows.FirstOrDefault(c => c.ProfileHash == profileHash && c.PromptVersion == PromptVersion);
+        var salt = CacheSalt;
+        var current = rows.FirstOrDefault(c => IsCurrent(c, profileHash, salt));
         if (current is not null && Deserialise(current) is { } fresh)
         {
             return new ResolvedLens(fresh, LensSource.Fresh, current.ProfileHash, current.GeneratedAt);
@@ -113,9 +125,10 @@ public sealed class LensService(
             .OrderByDescending(c => c.GeneratedAt)
             .ToListAsync(ct);
 
+        var salt = CacheSalt;
         foreach (var group in rows.GroupBy(r => r.TitleId))
         {
-            var current = group.FirstOrDefault(c => c.ProfileHash == profileHash && c.PromptVersion == PromptVersion);
+            var current = group.FirstOrDefault(c => IsCurrent(c, profileHash, salt));
             if (current is not null && Deserialise(current) is { } fresh)
             {
                 resolved[group.Key] = new ResolvedLens(fresh, LensSource.Fresh, current.ProfileHash, current.GeneratedAt);
@@ -155,12 +168,20 @@ public sealed class LensService(
         }
 
         // Anything already written at this key — including a Rejected row, which is a decision and
-        // must not be re-attempted at the same key — needs no spend.
-        var known = await db.TitleLensCopies
+        // must not be re-attempted at the same key — needs no spend. A row at the same (hash,
+        // prompt) from ANOTHER model or effort is a different generation: it is rewritten in place
+        // (the unique index is on hash and prompt), except a user's spoiler report, which stands
+        // whatever model asks — the refusal is the record.
+        var salt = CacheSalt;
+        var atKey = await db.TitleLensCopies
             .Where(c => c.AccountId == accountId && titleIds.Contains(c.TitleId)
                 && c.ProfileHash == profileHash && c.PromptVersion == PromptVersion)
-            .Select(c => c.TitleId)
             .ToListAsync(ct);
+        var known = atKey
+            .Where(c => c.ModelId == salt || c.RejectionReason == LensRejectionReasons.UserReportedSpoiler)
+            .Select(c => c.TitleId)
+            .ToHashSet();
+        var superseded = atKey.Where(c => !known.Contains(c.TitleId)).ToDictionary(c => c.TitleId);
         var pending = titleIds.Where(id => !known.Contains(id)).ToList();
         if (pending.Count == 0)
         {
@@ -196,6 +217,9 @@ public sealed class LensService(
         var stop = await loop.RunAsync(built.Titles, async (batch, batchCt) =>
         {
             var drafts = await writer.WriteLensAsync(batch, persona, batchCt);
+            // Read AFTER the call: a model that rejected the requested effort mid-call was answered
+            // at its fallback, and the row must say which effort actually wrote it.
+            var writtenAt = CacheSalt;
             for (var i = 0; i < batch.Count; i++)
             {
                 var title = batch[i];
@@ -232,21 +256,29 @@ public sealed class LensService(
                         title.Name, verdict.StrippedAnchors.Count, string.Join(", ", verdict.StrippedAnchors));
                 }
 
-                db.TitleLensCopies.Add(new TitleLensCopy
+                var row = superseded.GetValueOrDefault(title.TitleId);
+                if (row is null)
                 {
-                    Id = Guid.NewGuid(),
-                    AccountId = accountId,
-                    TitleId = title.TitleId,
-                    ProfileHash = profileHash,
-                    PromptVersion = PromptVersion,
-                    LensJson = JsonSerializer.Serialize(verdict.Note, JsonOptions),
-                    ModelId = draft.ModelId,
-                    PromptTokens = draft.PromptTokens,
-                    CompletionTokens = draft.CompletionTokens,
-                    Status = verdict.IsRejected ? LensStatus.Rejected : LensStatus.Done,
-                    RejectionReason = verdict.Reason,
-                    GeneratedAt = DateTime.UtcNow,
-                });
+                    row = new TitleLensCopy
+                    {
+                        Id = Guid.NewGuid(),
+                        AccountId = accountId,
+                        TitleId = title.TitleId,
+                        ProfileHash = profileHash,
+                        PromptVersion = PromptVersion,
+                    };
+                    db.TitleLensCopies.Add(row);
+                }
+
+                // A superseded row (same hash and prompt, another model or effort) is rewritten in
+                // place; everything below describes THIS generation.
+                row.LensJson = JsonSerializer.Serialize(verdict.Note, JsonOptions);
+                row.ModelId = writtenAt;
+                row.PromptTokens = draft.PromptTokens;
+                row.CompletionTokens = draft.CompletionTokens;
+                row.Status = verdict.IsRejected ? LensStatus.Rejected : LensStatus.Done;
+                row.RejectionReason = verdict.Reason;
+                row.GeneratedAt = DateTime.UtcNow;
 
                 if (!verdict.IsRejected)
                 {

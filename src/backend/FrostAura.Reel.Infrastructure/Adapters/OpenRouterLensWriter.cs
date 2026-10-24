@@ -132,6 +132,12 @@ public class OpenRouterLensWriter(
         ? "stub/deterministic-v1"
         : _chat.Options(ApiUsagePurpose.Lens).Model;
 
+    /// <summary>The lens purpose's model and the effort actually sent — see <see cref="ILensWriter.LensCacheSalt"/>.</summary>
+    public string LensCacheSalt => StubMode ? ModelId : _chat.CacheSalt(ApiUsagePurpose.Lens);
+
+    /// <summary>The taste-narrative purpose's model and the effort actually sent.</summary>
+    public string NarrativeCacheSalt => StubMode ? ModelId : _chat.CacheSalt(ApiUsagePurpose.TasteNarrative);
+
     public int LensPromptVersion => CurrentLensPromptVersion;
 
     public int NarrativePromptVersion => CurrentNarrativePromptVersion;
