@@ -215,13 +215,15 @@ public class DeltaSyncJobHandler(
         // Managed-list hygiene, moved off the nightly-only path: a title just detected watched (movies
         // or shows category moved) leaves "Reel — Up Next" now — within minutes of the play, not up to
         // 24h later. The Trakt ListRemove enqueue rides the same tracked context and commits below.
-        if (changes.Movies || changes.Shows)
+        // Ratings count too: a title rated on Trakt is a title seen, and its save is consumed — the
+        // reconciler revokes it in this same transaction rather than leaving it on the Saved shelf.
+        if (changes.Movies || changes.Shows || changes.Ratings)
         {
             var removed = await managedList.RemoveWatchedAsync(accountId, DateTime.UtcNow, ct);
             if (removed.Count > 0)
             {
                 logger.LogInformation(
-                    "DeltaSync for {AccountId}: removed {Count} watched item(s) from the managed list ({TitleIds}).",
+                    "DeltaSync for {AccountId}: removed {Count} watched or rated item(s) from the managed list ({TitleIds}).",
                     accountId, removed.Count, string.Join(", ", removed));
             }
         }

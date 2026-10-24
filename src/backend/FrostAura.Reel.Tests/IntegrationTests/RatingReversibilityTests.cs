@@ -4,6 +4,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Saved;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -166,6 +167,79 @@ public class RatingReversibilityTests(PostgresFixture fixture)
         Assert.Equal(9, rerated.Rating);
         Assert.True(rerated.RatedAt > backdated, "a re-rate must move Trakt's own RatedAt forward");
         Assert.Equal(backdated, rerated.FirstRatedAt);
+    }
+
+    /// <summary>
+    /// G-1, on the in-app path: rating a saved title consumes the save. It is revoked (never
+    /// deleted) and its managed-list row closed with a ListRemove write-back in the same transaction
+    /// as the rating — for a movie the gesture logged as watched, for one rated without logging a
+    /// play, and for a show, whose rating never touches watched state at all.
+    /// </summary>
+    [Theory]
+    [InlineData(MediaType.Movie, "movie", true)]
+    [InlineData(MediaType.Movie, "movie", false)]
+    [InlineData(MediaType.Show, "show", true)]
+    public async Task Rating_a_saved_title_revokes_the_save_and_takes_it_off_the_list(
+        MediaType media, string mediaType, bool markWatched)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var tmdbId = await SeedTitleAsync(media);
+        await SaveAsync(accountId, mediaType, tmdbId);
+
+        await RateAsync(accountId, mediaType, tmdbId, 8, markWatched);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var save = await verify.UserTitleReactions.SingleAsync(
+            r => r.AccountId == accountId && r.Kind == ReactionKind.SaveForLater);
+        Assert.NotNull(save.RevokedAt);
+        var listItem = await verify.ManagedListItems.SingleAsync(m => m.AccountId == accountId);
+        Assert.NotNull(listItem.RemovedAt);
+        Assert.Equal(ListRemovalReason.Watched, listItem.RemovalReason);
+        Assert.Equal(1, await verify.TraktOutbox.CountAsync(o => o.AccountId == accountId && o.Kind == OutboxKind.ListRemove));
+        Assert.Empty(await SaveConsumption.LiveSaves(verify, accountId).ToListAsync());
+    }
+
+    /// <summary>
+    /// Un-rating reverses the play Reel logged, and deliberately does NOT resurrect the save: the
+    /// user has seen the title, and a seen title does not go back on the "watch next" shelf.
+    /// </summary>
+    [Fact]
+    public async Task Unrating_does_not_put_a_consumed_save_back_on_the_shelf()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var tmdbId = await SeedTitleAsync(MediaType.Movie);
+        await SaveAsync(accountId, "movie", tmdbId);
+        await RateAsync(accountId, "movie", tmdbId, 6);
+        await UnrateAsync(accountId, "movie", tmdbId);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        Assert.Empty(await SaveConsumption.LiveSaves(verify, accountId).ToListAsync());
+        Assert.Equal(1, await verify.UserTitleReactions.CountAsync(r => r.AccountId == accountId));
+    }
+
+    private async Task SaveAsync(Guid accountId, string mediaType, long tmdbId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        await ReactionEndpoints.SaveForLaterAsync(
+            mediaType, tmdbId, db, accountId, FeedRefresh(db), Residual(db), CancellationToken.None);
+    }
+
+    private async Task RateAsync(Guid accountId, string mediaType, long tmdbId, short rating, bool markWatched)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        await ReactionEndpoints.RateAsync(
+            mediaType, tmdbId, new ReactionEndpoints.RateRequest(rating, markWatched),
+            db, accountId, FeedRefresh(db), Residual(db), Calibration(db), new RatingVerdictQuery(db), CancellationToken.None);
     }
 
     private async Task RateAsync(Guid accountId, string mediaType, long tmdbId, short rating)

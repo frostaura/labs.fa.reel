@@ -77,7 +77,11 @@ public static class SavedEndpoints
         // Trailing and optional: the lens's one-line hook where copy exists for this account and
         // title, and null everywhere it does not. The queue is where deliberation happens, so it is
         // where the richest copy belongs — but a saved card has to read perfectly well without it.
-        string? Hook = null);
+        string? Hook = null,
+        // Where the card stands against the managed Trakt list: "pending" (a ListAdd write-back is
+        // still waiting — the only state that may say "syncing"), "onList" or "offList". See
+        // SavedListSync. OnManagedList stays for older clients and is true unless the card is "offList".
+        string ListSync = SavedListSync.OffList);
 
     /// <param name="ExpectedAbsoluteError">What a displayed prediction is typically off by. Null until the account's closed loop has pairs — an unmeasured band is not a band.</param>
     /// <param name="UnscoredRemaining">Saves still without a prediction after this request's budget was spent.</param>
@@ -171,8 +175,10 @@ public static class SavedEndpoints
         var requestedSort = SavedQueue.ParseSort(sort);
         var eveningBudget = SavedQueue.EffectiveEveningBudget(account.Settings.EveningBudgetMinutes);
 
-        var saved = await db.UserTitleReactions
-            .Where(r => r.AccountId == accountId && r.Kind == ReactionKind.SaveForLater && r.RevokedAt == null)
+        // Consumed saves — fully watched, or rated — never render, even before the reconciler or the
+        // one-off repair has revoked them: the read is the guarantee, the revocation is hygiene.
+        var saved = await SaveConsumption.LiveSaves(db, accountId)
+            .Unconsumed(db)
             .Join(db.Titles, r => r.TitleId, t => t.Id, (r, t) => new { Reaction = r, Title = t })
             .ToListAsync(ct);
 
@@ -202,11 +208,7 @@ public static class SavedEndpoints
         var unscoredRemaining = titleIds.Count(id => !scores.ContainsKey(id));
 
         var providers = await FeedEndpoints.ProvidersForAsync(db, account.Region, titleIds, nowUtc, ct);
-        var onList = (await db.ManagedListItems
-                .Where(m => m.AccountId == accountId && m.RemovedAt == null && titleIds.Contains(m.TitleId))
-                .Select(m => m.TitleId)
-                .ToListAsync(ct))
-            .ToHashSet();
+        var listSync = await SavedListSync.ForAsync(db, accountId, titleIds, ct);
 
         var expectedAbsoluteError = await ExpectedAbsoluteErrorAsync(calibration, accountId, ct);
 
@@ -246,7 +248,7 @@ public static class SavedEndpoints
                 entry.SavedAt,
                 Math.Max(0, (int)(nowUtc - entry.SavedAt).TotalDays),
                 title.RuntimeMinutes is { } runtime && runtime <= eveningBudget,
-                onList.Contains(entry.TitleId),
+                listSync.GetValueOrDefault(entry.TitleId) is SavedListSync.OnList or SavedListSync.Pending,
                 isPinned,
                 isPinned
                     ? SavedQueue.WatchTonightReason(
@@ -255,7 +257,8 @@ public static class SavedEndpoints
                         entry.RuntimeMinutes!.Value,
                         eveningBudget,
                         titleProviders.FirstOrDefault()?.Name)
-                    : null);
+                    : null,
+                ListSync: listSync.GetValueOrDefault(entry.TitleId, SavedListSync.OffList));
         }).ToList();
 
         return new SavedQueueResponse(

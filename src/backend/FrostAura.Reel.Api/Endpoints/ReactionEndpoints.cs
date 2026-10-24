@@ -3,6 +3,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Saved;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -401,16 +402,20 @@ public static class ReactionEndpoints
             watchedLogged = true;
 
             Enqueue(db, accountId, OutboxKind.AddToHistory, title, null, now);
+        }
 
-            // A watched save leaves the live queue automatically.
-            var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
-                m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
-            if (listItem is not null)
-            {
-                listItem.RemovedAt = now;
-                listItem.RemovalReason = ListRemovalReason.Watched;
-                Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
-            }
+        // A rated save is a consumed save, whether or not this gesture logged the play: it leaves the
+        // live queue — list row closed with its Trakt write-back, and the save itself REVOKED (never
+        // deleted) — in this same transaction. Closing only the list row is what left 116 watched,
+        // rated titles on the Saved shelf. Un-rating does not restore either: the user has seen it.
+        await SaveConsumption.RevokeAsync(db, accountId, title.Id, now, ct);
+        var listItem = await db.ManagedListItems.FirstOrDefaultAsync(
+            m => m.AccountId == accountId && m.TitleId == title.Id && m.RemovedAt == null, ct);
+        if (listItem is not null)
+        {
+            listItem.RemovedAt = now;
+            listItem.RemovalReason = ListRemovalReason.Watched;
+            Enqueue(db, accountId, OutboxKind.ListRemove, title, null, null);
         }
 
         // Teach the online residual head the fresh label FIRST (target = the rating), so the
