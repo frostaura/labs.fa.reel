@@ -1,3 +1,4 @@
+using FrostAura.Reel.Api.Security;
 using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
@@ -11,9 +12,29 @@ namespace FrostAura.Reel.Api.Endpoints;
 /// <summary>
 /// QA helpers — Development environment + QA_HELPERS_ENABLED=true only (fa.startup precedent).
 /// Never mapped in production builds of the compose stack.
+///
+/// <para><b>Three locks, not one.</b> Mapping them at all needs Development plus the flag. Then
+/// every route is loopback-only (<see cref="LoopbackGuard"/>): dev/link mints a Founder session, so
+/// a founder check alone protected nothing on a stack reachable from the LAN (J-1). And every
+/// <c>/api/dev/*</c> route additionally needs a signed-in Founder, in that order — an anonymous
+/// caller gets 401, a non-founder 403, a founder calling from another machine 403
+/// <c>loopback_only</c>.</para>
 /// </summary>
 public static class DevEndpoints
 {
+    /// <summary>The prefix every founder diagnostic lives under.</summary>
+    public const string DevPrefix = "/api/dev";
+
+    /// <summary>The QA sign-in route. Outside <see cref="DevPrefix"/> because it is pre-auth.</summary>
+    public const string DevLinkRoute = "/api/auth/dev/link";
+
+    /// <summary>
+    /// Prefix written onto the stored <c>RefreshSessions.UserAgent</c> of every session dev/link
+    /// issues, so QA sessions can be excluded from the founder's data by identity rather than by
+    /// clock (FD-18).
+    /// </summary>
+    public const string DevLinkSessionMarker = "reel-dev-link";
+
     public static void MapDevEndpoints(this WebApplication app)
     {
         if (!app.Environment.IsDevelopment() || !app.Configuration.GetValue("QA_HELPERS_ENABLED", false))
@@ -21,18 +42,31 @@ public static class DevEndpoints
             return;
         }
 
+        var dev = app.MapGroup(DevPrefix)
+            .RequireAccount()
+            .RequireFounder()
+            .RequireLoopback();
+
         // Links the configured dev profile using pre-provisioned tokens (TRAKT_ACCESS_TOKEN /
         // TRAKT_REFRESH_TOKEN from .env) — full pipeline + session without the browser consent
         // hop. The production path of record stays the OAuth callback.
-        app.MapPost("/api/auth/dev/link", async (
+        //
+        // `{"noCascade": true}` issues a session for the ALREADY-linked dev account and does nothing
+        // else: no Trakt call, no token write, no tier write, no job. A link that falls through to
+        // LinkAccountAsync enqueues a FullIngest/DeltaSync, and that chain ends in feed builds and
+        // re-rank calls that bill the account's model budget (D-17); QA that only needs a cookie
+        // should never start it.
+        app.MapPost(DevLinkRoute, async (
             TraktOAuthService oauth,
             SessionService sessions,
             ITraktClient trakt,
             IReelDbContext db,
             HttpContext http,
             IConfiguration configuration,
+            DevLinkRequest? request,
             CancellationToken ct) =>
         {
+            var noCascade = request?.NoCascade == true;
             // Preferred QA path: the dev profile is normally already linked — its Account and
             // TraktConnection live in the DB and self-heal their Trakt tokens on 401 during sync. A
             // session only needs the Account, so we don't re-link through Trakt (which would depend on
@@ -45,6 +79,13 @@ public static class DevEndpoints
                 account = await db.Accounts
                     .IgnoreQueryFilters()
                     .FirstOrDefaultAsync(a => a.TraktUserSlug == devProfile || a.TraktUsername == devProfile, ct);
+            }
+
+            if (account is null && noCascade)
+            {
+                return Results.Json(
+                    new { error = "dev_account_not_linked", detail = "noCascade issues sessions for an already-linked dev account only; link once without it." },
+                    statusCode: StatusCodes.Status409Conflict);
             }
 
             // Fresh QA database — nothing linked yet. Fall back to linking via the pre-provisioned
@@ -82,11 +123,15 @@ public static class DevEndpoints
                 account = await db.Accounts.IgnoreQueryFilters().FirstAsync(a => a.Id == result.Account.Id, ct);
             }
 
-            // The dev profile is the founder account — everything unlocked during the beta.
-            account.Tier = AccountTier.Founder;
-            await db.SaveChangesAsync(ct);
+            // The dev profile is the founder account — everything unlocked during the beta. A
+            // no-cascade call writes nothing but the session row.
+            if (!noCascade && account.Tier != AccountTier.Founder)
+            {
+                account.Tier = AccountTier.Founder;
+                await db.SaveChangesAsync(ct);
+            }
 
-            var session = await sessions.IssueAsync(account, http.Request.Headers.UserAgent.FirstOrDefault(), ct);
+            var session = await sessions.IssueAsync(account, MarkDevLinkUserAgent(http.Request.Headers.UserAgent.FirstOrDefault()), ct);
             http.Response.Cookies.Append("reel_at", session.AccessToken, new CookieOptions
             {
                 HttpOnly = true,
@@ -103,7 +148,7 @@ public static class DevEndpoints
             });
 
             return Results.Ok(account.ToSessionPayload());
-        });
+        }).RequireLoopback();
 
         // ── Residual-head dry run ───────────────────────────────────────────────────────
         // The offline replay the plan requires BEFORE RESIDUAL_OBSERVE_TRAKT_RATINGS is turned on:
@@ -117,7 +162,7 @@ public static class DevEndpoints
         //
         // Optional ?slug= picks an account when more than one is linked; otherwise TRAKT_DEV_PROFILE
         // and then "the only account" are tried, in that order.
-        app.MapGet("/api/dev/residual-replay", async (
+        dev.MapGet("/residual-replay", async (
             string? slug,
             IReelDbContext db,
             ResidualReplay replay,
@@ -185,7 +230,7 @@ public static class DevEndpoints
         //
         // ?score=false returns the same rows without paying for a judgement, which is the right
         // call when you only want to read fifty generations yourself.
-        app.MapGet("/api/dev/lens-audit", async (
+        dev.MapGet("/lens-audit", async (
             Application.Lens.LensAudit audit,
             Application.Tenancy.IAccountContext accountContext,
             FeatureVectorBuilder featureBuilder,
@@ -239,7 +284,7 @@ public static class DevEndpoints
         //
         // Optional ?slug= picks an account when more than one is linked; otherwise TRAKT_DEV_PROFILE
         // and then "the only account" are tried, in that order — same resolution as the replay above.
-        app.MapGet("/api/dev/retrieval-recall", async (
+        dev.MapGet("/retrieval-recall", async (
             string? slug,
             int? window,
             int? popCount,
@@ -292,7 +337,7 @@ public static class DevEndpoints
         // figure the estimate divides by — measured from the last week of the token ledger where
         // there is one, and a stated assumption where there is not, so an estimate that looks wrong
         // can be checked rather than argued with.
-        app.MapPost("/api/dev/seed-catalog", async (
+        dev.MapPost("/seed-catalog", async (
             IReelDbContext db,
             HttpContext http,
             CancellationToken ct) =>
@@ -318,7 +363,7 @@ public static class DevEndpoints
             });
         });
 
-        app.MapGet("/api/dev/seed-catalog", async (
+        dev.MapGet("/seed-catalog", async (
             IReelDbContext db,
             HttpContext http,
             Application.Jobs.CatalogSeedProgressQuery progress,
@@ -442,7 +487,7 @@ public static class DevEndpoints
         // replaces, never by a caller selecting it here. GET is free: with no query it returns the
         // newest run PER prompt version, so v1 and v2 sit side by side; with `?runId=` it returns
         // that run's per-title items so a human can read the actual misses.
-        app.MapPost("/api/dev/cross-reference-eval", async (
+        dev.MapPost("/cross-reference-eval", async (
             IReelDbContext db,
             HttpContext http,
             Application.CrossReference.CrossReferenceBacktest backtest,
@@ -474,7 +519,7 @@ public static class DevEndpoints
                 });
         });
 
-        app.MapGet("/api/dev/cross-reference-eval", async (
+        dev.MapGet("/cross-reference-eval", async (
             IReelDbContext db,
             HttpContext http,
             Guid? runId,
@@ -492,6 +537,18 @@ public static class DevEndpoints
                 ? await ItemsAsync(db, account.Id, requested, skip ?? 0, take ?? MaxEvaluationItemsPerPage, ct)
                 : await LatestRunsAsync(db, account.Id, ct);
         });
+    }
+
+    /// <summary>
+    /// The stored user agent of a dev/link session: <see cref="DevLinkSessionMarker"/>, then the
+    /// caller's own agent when it sent one, cut to the column's 256 characters.
+    /// </summary>
+    internal static string MarkDevLinkUserAgent(string? userAgent)
+    {
+        var marked = string.IsNullOrWhiteSpace(userAgent)
+            ? DevLinkSessionMarker
+            : DevLinkSessionMarker + " " + userAgent.Trim();
+        return marked.Length <= 256 ? marked : marked[..256];
     }
 
     /// <summary>Per-title items returned in one page. A page is for reading, not for exporting.</summary>
@@ -662,3 +719,7 @@ public static class DevEndpoints
         evaluatedAt = e.EvaluatedAt,
     };
 }
+
+/// <summary>Body of <c>POST /api/auth/dev/link</c>. Every field is optional; <c>{}</c> keeps the old behaviour.</summary>
+/// <param name="NoCascade">Issue a session for the already-linked dev account and do nothing else.</param>
+public sealed record DevLinkRequest(bool? NoCascade);
