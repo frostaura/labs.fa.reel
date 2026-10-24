@@ -14,13 +14,9 @@ last_verified: 2026-09-11
   swaps the embedding provider for the shared fake, removes every hosted service, points DI at the Postgres fixture,
   and **refuses to boot if a live credential is still in configuration**. Ledger assertions read
   `IPendingApiUsage.PendingToday`, because the recorder's flush is `internal`.
-- **The integration fixture drops and re-migrates the database it is given.** Throwaway `reel_test_*` databases live
-  on port 5433 for parallel worktrees; pointing the variable at `reel` destroys the founder's live data. Absent the
-  variable the DB tests skip in silence, which is why CI sets the require-integration flag — a suite reporting green
-  having run nothing is worse than a red one. Both rules are in [`../CLAUDE.md`](../CLAUDE.md); what the throwaway
-  copies cost is a watch item.
-- **CI's integration job filters on the `IntegrationTests` namespace.** A DB-backed test written anywhere else
-  silently never runs in CI and reports green from the unit job.
+- **Give each parallel worktree its own throwaway `reel_test_*` database on 5433** — the fixture drops what it is
+  given, and the drop, skip-in-silence and namespace-filter rules are in [`../CLAUDE.md`](../CLAUDE.md); what the
+  leftover copies cost is a watch item.
 - **A DELETE leaves the element in pgvector's HNSW graph until `VACUUM`, and `hnsw.iterative_scan` cannot reach past
   it.** This is what the `LiveSearchExpansionTests` "semantic-arm order flake" actually was: dead entries left by
   `EmbeddedCatalogTestBase.DisposeAsync` crowded the candidate window for the next class, so a test was green alone and

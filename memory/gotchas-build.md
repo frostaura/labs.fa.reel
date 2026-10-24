@@ -53,6 +53,7 @@ last_verified: 2026-09-11
 - **Never leave the compose `backend` container running beside the dev loop.** Both connect to the same Postgres and
   share the job queue, so a month-old image silently claimed training and feed builds: it kept writing artifacts at an
   old schema while the new binary's sweep kept superseding them, and the stats tables stayed at zero while snapshots
-  appeared. Only `postgres` stays up. The local compose file uses `restart: always` on purpose — `unless-stopped`
+  appeared. Run the compose stack *or* the dev loop, never both: before a dev loop, stop the compose `backend`,
+  `frontend` and `gateway` and leave only `postgres` up. The local compose file uses `restart: always` on purpose — `unless-stopped`
   leaves the stack dead after Docker Desktop is quit — and the two production files keep `unless-stopped` equally
   deliberately, so do not "harmonize" them.

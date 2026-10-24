@@ -23,6 +23,3 @@ last_verified: 2026-09-11
 - **Another session may be driving the app while you probe.** During one panel a rating and several feed builds
   appeared mid-probe; the rating's source column and the sync job's trigger reason identified a real second client —
   the founder's own parallel session. **Attribute database writes by those columns, never by timing.**
-- **Attribution is a temporal join because only about 2% of ratings are made in-app.** Most of the exposure surfaces
-  cannot be joined back to what served them, which is why the append-only exposure log and its derived rollups exist
-  at all (`decisions-model.md`).

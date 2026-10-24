@@ -2,7 +2,7 @@
 name: fa-reel-watch
 description: "The chat surface still has NO ceilings — no rate limiter, tier check or budget — and the OpenRouter spend cap is unconfirmed. Every in-app reaction re-judges the whole cross-reference pool at LLM cost. QA-copy databases pile up."
 type: watch
-last_verified: 2026-10-14
+last_verified: 2026-10-22
 ---
 
 # Watch list
@@ -11,7 +11,7 @@ last_verified: 2026-10-14
 - **The chat surface has no ceilings.** Ask Reel's phase 0 and 1 shipped; **phase 2 did not**: no rate limiter, no
   tier rungs (Free gets the whole pipeline), no chat budget, no kill switch, no narrative fencing, no export or
   erasure, secrets not rotated. At the measured per-turn cost one account can run up tens of dollars an hour (still no
-  rate limiter anywhere in the backend, 2026-10-14). **A provider-side spend cap at OpenRouter is the cheapest
+  rate limiter anywhere in the backend, 2026-10-22). **A provider-side spend cap at OpenRouter is the cheapest
   mitigation** — recorded unclicked 2026-09-11; whether it is set now cannot be seen from the repo, so ask Dean.
 - **Every in-app reaction re-judges the whole cross-reference pool.** The taste-profile hash carries the dislike
   centroid and loved anchors by design (a lens note must not survive a dismissal), so each reaction turns the scored
@@ -45,7 +45,7 @@ last_verified: 2026-10-14
   Delete each through the UI or `DELETE /api/search/conversations/{id}` — never SQL, which leaves the turn record and
   the usage ledger disagreeing.
 - **Throwaway `reel_test_*` databases have piled up on port 5433** — fixture copies plus the `w*`/`p2*` QA-walk
-  copies, `reel_test_w9` among them (listed 2026-10-14). Drop the QA copies; one with background jobs on spends real
+  copies, 28 of them on 2026-10-22. Drop the QA copies; one with background jobs on spends real
   provider calls.
 
 ## Standing

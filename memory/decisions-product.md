@@ -31,7 +31,7 @@ last_verified: 2026-10-14
   automatically.
 - **No hero exploration slot.** *Why:* a few hundred eligible titles left nothing to explore. Revisit post-seed.
 - Extraction model, no manual pipelines, zero-footprint eligibility and Trakt-only identity: founder-locked
-  2026-06-12, rules in [`../CLAUDE.md`](../CLAUDE.md). An uncommitted model swap is open in `questions.md`.
+  2026-06-12, rules in [`../CLAUDE.md`](../CLAUDE.md); the unconfirmed `gpt-6-luna` swap is open in `questions.md`.
 - **Collaborative filtering shipped** 2026-06-18 (item-based, via TMDB recommendations); the old "deferred to ~200
   tenants" framing is dead. **Stripe is scaffolded and deploy-ready**, flag-gated off with blank keys. **Embeddings
   are remote** (`text-embedding-3-small`, 1536 dims, via OpenRouter); the local 384-dim ONNX model is no longer the

@@ -20,22 +20,19 @@ these is still open as a question — `questions.md`.
   founder decision before the first external user.
 - **Tier rungs and a chat budget were proposed as config, not built.** Free still gets the whole pipeline. This is the
   single largest unpaid debt on the surface — `watch.md`.
-- **The `REEL_SEARCH_MODEL` lock was left untouched**, because whether the founder's extraction-model lock reaches the
-  rerank model was never stated.
+- **The programme left `REEL_SEARCH_MODEL` untouched**, because whether the founder's extraction-model lock reaches the
+  rerank model was never stated. The 2026-10-22 `gpt-6-luna` commit changed its default anyway — open in `questions.md`.
 - **No MCP surface** (it collides with "Sign in with Trakt only") and **no ad-hoc lists** (the spec defines one list
   per profile with an auto-removal contract; extra lists need one written).
 - **Probe conversations are deleted through the endpoint, never SQL.**
 
 ## Engineering calls, each with its why
 - **An Ask Reel turn is a server-owned record.** *Why:* a client-supplied transcript and no-repeat list are a
-  fabrication vector, and both were lost on reload anyway. The server persists the question, the answer's cards
-  including tray rows, the resolved intent, the conflict, the reason and the stage timings; the client sends a
-  question, a conversation id, an idempotency key, an optional media filter and an explicit page, and nothing else.
-  Contract and refusal codes live in `docs/ask-reel-turns.md`; the invariant is in [`../CLAUDE.md`](../CLAUDE.md).
-- **A standing exclusion is airtight on every channel, and only the user's own words are negations.** *Why:* the
-  "outside your request" channel exists to keep a negation from emptying the screen — it may relax something the user
-  *typed*, never a stored content filter. A negation counts only when its object resolves to a genre or a vocabulary
-  keyword; the model's own inferred exclusions steer discovery and never caption a card.
+  fabrication vector, and both were lost on reload anyway. What is persisted and what the client may send is the
+  invariant in [`../CLAUDE.md`](../CLAUDE.md); contract and refusal codes live in `docs/ask-reel-turns.md`.
+- **A standing exclusion is airtight on every channel, and only the user's own words are negations** (rule in
+  [`../CLAUDE.md`](../CLAUDE.md)). *Why:* the "outside your request" channel exists to keep a negation from emptying
+  the screen, so it may relax only what the user typed.
 - **A page is stated, not inferred.** *Why:* inferring "more like this" from the last user turn broke the moment a
   turn was stopped mid-stream.
 - **Every `/ask` refusal is a coded `{error, code}`, and the progressive floor compares at badge precision.** *Why:* a
