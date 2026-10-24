@@ -18,6 +18,7 @@ using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -106,6 +107,44 @@ public class EnrichSchedulingTests(PostgresFixture fixture)
         queued.CompletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
         Assert.True(await EnrichmentScheduler.EnqueueAsync(db, accountId, now, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// E-15: after the day's extraction ceiling was hit, the follow-through pass still queued a
+    /// global run every 15 minutes, each opening only to log "paused for today's token ceiling". With
+    /// a budget, nothing is queued unless the run could buy something today — extraction headroom,
+    /// or embedding headroom with a title still missing its vector. Each case differs by one
+    /// setting.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, false)]
+    [InlineData(2_000_000_000, 0, true)]
+    [InlineData(0, 2_000_000_000, true)]
+    public async Task Nothing_is_queued_while_the_days_ceiling_is_spent(int extractTokens, int embedTokens, bool expectQueued)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        // A hydrated title with no vector, so embedding headroom is worth a run when it exists.
+        await SeedHydratedTitlesAsync(1);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [CatalogEnrichmentBudget.ExtractTokensKey] = extractTokens.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                [CatalogEnrichmentBudget.EmbedTokensKey] = embedTokens.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            })
+            .Build();
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var queued = await EnrichmentScheduler.EnqueueAsync(
+            db, accountId, DateTime.UtcNow, CancellationToken.None, new CatalogEnrichmentBudget(db, configuration));
+        await db.SaveChangesAsync();
+
+        Assert.Equal(expectQueued, queued);
+        Assert.Equal(expectQueued, await EnrichPendingAsync(db, accountId));
     }
 
     /// <summary>

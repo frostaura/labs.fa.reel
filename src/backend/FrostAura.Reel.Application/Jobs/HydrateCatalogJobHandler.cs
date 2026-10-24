@@ -31,7 +31,8 @@ public class HydrateCatalogJobHandler(
     IPipelineEventHub events,
     CatalogHydrationBudget budget,
     IConfiguration configuration,
-    ILogger<HydrateCatalogJobHandler> logger) : IJobHandler
+    ILogger<HydrateCatalogJobHandler> logger,
+    CatalogEnrichmentBudget? enrichmentBudget = null) : IJobHandler
 {
     public JobKind Kind => JobKind.HydrateCatalog;
 
@@ -324,7 +325,7 @@ public class HydrateCatalogJobHandler(
 
         // Newly hydrated rows have an overview and keywords and nothing derived from them. Enrich is
         // a clean no-op without LLM keys, so queueing it is safe regardless of configuration.
-        if (processed > 0 && await EnrichmentScheduler.EnqueueAsync(db, null, DateTime.UtcNow, ct))
+        if (processed > 0 && await EnrichmentScheduler.EnqueueAsync(db, null, DateTime.UtcNow, ct, enrichmentBudget))
         {
             await db.SaveChangesAsync(ct);
         }

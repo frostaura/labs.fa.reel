@@ -47,10 +47,23 @@ public static class EnrichmentScheduler
     /// index keys as distinct, so the partial index does <b>not</b> dedup global jobs; for those the
     /// check below is the only dedup there is, exactly as the index's own comment states.
     /// </para>
+    /// <para>
+    /// <b>Nothing is queued while the day's ceiling is spent.</b> With a <paramref name="budget"/>,
+    /// a run is queued only if it could buy something today: extraction headroom, or embedding
+    /// headroom with a title still missing its vector. Without the check the follow-through pass
+    /// queued a global run every 15 minutes after the ceiling was hit, each one opening only to log
+    /// "paused for today's token ceiling" (E-15). Callers that do not pass a budget keep the old
+    /// behaviour; every caller should pass one.
+    /// </para>
     /// </summary>
     public static async Task<bool> EnqueueAsync(
-        IReelDbContext db, Guid? accountId, DateTime now, CancellationToken ct)
+        IReelDbContext db, Guid? accountId, DateTime now, CancellationToken ct, CatalogEnrichmentBudget? budget = null)
     {
+        if (budget is not null && !await CanSpendTodayAsync(db, budget, now, ct))
+        {
+            return false;
+        }
+
         var inFlight = db.SyncJobs.Where(j =>
             j.Kind == JobKind.EnrichCatalog
             && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running));
@@ -75,6 +88,23 @@ public static class EnrichmentScheduler
             EnqueuedAt = now,
         });
         return true;
+    }
+
+    /// <summary>
+    /// Whether an enrich run queued now could spend anything today: extraction has headroom, or
+    /// embedding has headroom and some hydrated title still lacks a vector.
+    /// </summary>
+    public static async Task<bool> CanSpendTodayAsync(
+        IReelDbContext db, CatalogEnrichmentBudget budget, DateTime now, CancellationToken ct)
+    {
+        if ((await budget.ExtractAllowanceAsync(now, ct)).HasHeadroom)
+        {
+            return true;
+        }
+
+        return (await budget.EmbedAllowanceAsync(now, ct)).HasHeadroom
+            && await db.Titles.AnyAsync(
+                t => t.LastMetadataRefreshAt != null && !db.TitleEmbeddings.Any(e => e.TitleId == t.Id), ct);
     }
 
     /// <summary>

@@ -238,6 +238,12 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("AttemptCount")
                         .HasColumnType("integer");
 
+                    b.Property<Guid?>("ClaimedBy")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("ClaimedUntil")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<decimal>("Complexity")
                         .HasColumnType("numeric");
 
@@ -266,6 +272,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal>("Humor")
                         .HasColumnType("numeric");
 
+                    b.Property<DateTime?>("LastAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<decimal>("Optimism")
                         .HasColumnType("numeric");
 
@@ -274,6 +283,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("RawJson")
                         .HasColumnType("jsonb");
+
+                    b.Property<DateTime?>("RetryAfter")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -286,6 +298,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("Tone")
                         .HasColumnType("text");
+
+                    b.Property<int>("TransportFailures")
+                        .HasColumnType("integer");
 
                     b.HasKey("TitleId");
 

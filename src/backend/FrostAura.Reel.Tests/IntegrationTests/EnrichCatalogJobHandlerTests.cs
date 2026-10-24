@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
@@ -363,6 +364,450 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
     }
 
     /// <summary>
+    /// E-6: 1,110 of 1,116 extractor warnings in 72 hours were dropped connections, and each one
+    /// spent half of a title's two-attempt budget. A transport failure now backs off by TIME and
+    /// leaves the budget alone: the row is not Failed, its attempts are untouched, the title is not
+    /// re-asked inside its backoff, the wait doubles on a repeat, and the next answer clears it all.
+    /// The run log counts transport and parse failures separately.
+    /// </summary>
+    [Fact]
+    public async Task Transport_failures_back_off_by_time_and_never_spend_the_attempt_budget()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var titleId = titleIds[0];
+        var dropping = new ClassifyingExtractor("transport/test-model", _ => AttributeFailureClass.Transport);
+        var log = new CapturingLogger();
+
+        var before = DateTime.UtcNow;
+        for (var run = 0; run < 3; run++)
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), dropping, cap: 1, logger: log);
+        }
+
+        // Asked once: the 30-minute gate keeps the next two runs off it.
+        Assert.Equal(1, dropping.TitlesSeen.Count(seen => seen == titleId));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleId);
+            Assert.Equal(AttributeExtractionStatus.Pending, row.Status);
+            Assert.Equal(0, row.AttemptCount);
+            Assert.Equal(1, row.TransportFailures);
+            Assert.NotNull(row.LastAttemptAt);
+            Assert.InRange(row.RetryAfter!.Value, before.AddMinutes(29), DateTime.UtcNow.AddMinutes(31));
+            Assert.Null(row.ClaimedBy); // released after the batch
+        }
+
+        Assert.Contains(log.Lines, l => l.Contains("1 transport failure(s)", StringComparison.Ordinal)
+            && l.Contains("0 parse failure(s)", StringComparison.Ordinal));
+
+        // The gate lapses; a second drop doubles the wait instead of charging an attempt.
+        await ExpireRetryGateAsync(titleId);
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), dropping, cap: 1);
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleId);
+            Assert.Equal(0, row.AttemptCount);
+            Assert.Equal(2, row.TransportFailures);
+            Assert.True(row.RetryAfter > DateTime.UtcNow.AddMinutes(59));
+        }
+
+        // And the answer, when it comes, clears the backoff completely.
+        await ExpireRetryGateAsync(titleId);
+        var answering = new RenamingExtractor("transport/test-model");
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), answering, cap: 1);
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleId);
+            Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+            Assert.Equal(1, row.AttemptCount);
+            Assert.Equal(0, row.TransportFailures);
+            Assert.Null(row.RetryAfter);
+        }
+    }
+
+    /// <summary>The same three runs with a classified PARSE failure do spend the budget, and stop at it.</summary>
+    [Fact]
+    public async Task Parse_failures_spend_the_attempt_budget_and_stop_at_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var malformed = new ClassifyingExtractor("parse/test-model", _ => AttributeFailureClass.Parse);
+
+        for (var run = 0; run < 3; run++)
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), malformed, cap: 1);
+        }
+
+        Assert.Equal(2, malformed.TitlesSeen.Count(seen => seen == titleIds[0]));
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleIds[0]);
+        Assert.Equal(AttributeExtractionStatus.Failed, row.Status);
+        Assert.Equal(2, row.AttemptCount);
+        Assert.Equal(0, row.TransportFailures);
+        Assert.Null(row.RawJson);
+    }
+
+    /// <summary>
+    /// NEW-1/NEW-2, the exact race: a run's slow model call fails while ANOTHER run answers the same
+    /// title. The old handler wrote Failed through the entity it loaded after the call, leaving a
+    /// complete answer under a Failed status that every reader ignores — 1,077 rows on the founder's
+    /// catalogue. The failure write is now conditional on the row holding no answer.
+    /// </summary>
+    [Theory]
+    [InlineData(AttributeFailureClass.Parse)]
+    [InlineData(AttributeFailureClass.Transport)]
+    [InlineData(AttributeFailureClass.Unclassified)]
+    public async Task A_failure_landing_after_another_run_answered_never_demotes_the_answer(AttributeFailureClass failure)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var titleId = titleIds[0];
+        var racing = new ClassifyingExtractor("race/test-model", _ => failure)
+        {
+            // Inside the model call — after this run claimed the title, before it writes its
+            // outcome — a run that ignored the claim (its lease had lapsed) answers the title.
+            DuringCall = async () =>
+            {
+                await using var other = Fixture.CreateContext(new AccountContext());
+                await other.TitleAttributes
+                    .Where(a => a.TitleId == titleId)
+                    .ExecuteUpdateAsync(set => set
+                        .SetProperty(a => a.Status, AttributeExtractionStatus.Done)
+                        .SetProperty(a => a.RawJson, "{\"answeredBy\":\"the other run\"}")
+                        .SetProperty(a => a.Darkness, 0.9m)
+                        .SetProperty(a => a.ExtractedAt, DateTime.UtcNow));
+            },
+        };
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), racing, cap: 1);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleId);
+        Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+        Assert.Equal(0.9m, row.Darkness);
+        Assert.Contains("the other run", row.RawJson!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A failed RE-extraction of a row that already holds an answer (here: an older prompt
+    /// generation's Done row) keeps the answer and is time-gated for a week instead — the attempt
+    /// cannot be charged without demoting it, so time bounds the spend.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_re_extraction_keeps_the_existing_answer_and_waits_a_week()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var titleId = titleIds[0];
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), new RenamingExtractor("reextract/test-model", version: 1), cap: 1);
+
+        var failingV2 = new ClassifyingExtractor("reextract/test-model", _ => AttributeFailureClass.Parse, version: 2);
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), failingV2, cap: 1);
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), failingV2, cap: 1);
+
+        Assert.Equal(1, failingV2.TitlesSeen.Count(seen => seen == titleId));
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleId);
+        Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+        Assert.Equal(1, row.ExtractorVersion);
+        Assert.Equal(0.5m, row.Darkness);
+        Assert.True(row.RetryAfter > DateTime.UtcNow.AddDays(6));
+    }
+
+    /// <summary>
+    /// A title held by another live run is skipped, not bought twice; once that run's lease lapses
+    /// the title is fair game again.
+    /// </summary>
+    [Fact]
+    public async Task A_title_claimed_by_another_live_run_is_skipped_until_the_lease_lapses()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var titleId = titleIds[0];
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            db.TitleAttributes.Add(new TitleAttributes
+            {
+                TitleId = titleId,
+                ExtractorModel = "claim/test-model",
+                ExtractorVersion = 1,
+                ClaimedBy = Guid.NewGuid(),
+                ClaimedUntil = DateTime.UtcNow.AddMinutes(10),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var extractor = new RenamingExtractor("claim/test-model");
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+        Assert.DoesNotContain(titleId, extractor.TitlesSeen);
+
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            await db.TitleAttributes
+                .Where(a => a.TitleId == titleId)
+                .ExecuteUpdateAsync(set => set.SetProperty(a => a.ClaimedUntil, DateTime.UtcNow.AddMinutes(-1)));
+        }
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+        Assert.Equal(1, extractor.TitlesSeen.Count(seen => seen == titleId));
+    }
+
+    /// <summary>
+    /// Two runs started together over the same titles — the shape of the 24 overlapping
+    /// EnrichCatalog pairs found in ten days — buy each title exactly once between them.
+    /// </summary>
+    [Fact]
+    public async Task Two_concurrent_runs_never_extract_the_same_title_twice()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Two accounts whose libraries hold the same six titles: both runs rank them first (tier 2),
+        // exactly as a global and an account run both reached the founder's titles.
+        var (accountId, titleIds) = await SeedLibraryAsync(6);
+        var (otherAccountId, _) = await SeedLibraryAsync(0);
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.UserRatings.AddRange(titleIds.Select(id => new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = otherAccountId,
+                TitleId = id,
+                SubjectType = RatingSubjectType.Movie,
+                Rating = 7,
+                RatedAt = DateTime.UtcNow,
+                SyncedAt = DateTime.UtcNow,
+            }));
+            await seed.SaveChangesAsync();
+        }
+
+        var extractor = new ClassifyingExtractor("concurrent/test-model", _ => AttributeFailureClass.None)
+        {
+            Delay = TimeSpan.FromMilliseconds(300),
+        };
+
+        await Task.WhenAll(
+            RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 6),
+            RunEnrichAsync(otherAccountId, new StubEmbeddingProvider(false), extractor, cap: 6));
+
+        Assert.All(titleIds, id => Assert.Equal(1, extractor.TitlesSeen.Count(seen => seen == id)));
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+        Assert.Equal(6, rows.Count);
+        Assert.All(rows, a => Assert.Equal(AttributeExtractionStatus.Done, a.Status));
+        Assert.All(rows, a => Assert.Null(a.ClaimedBy));
+    }
+
+    /// <summary>
+    /// NEW-3: after the model switch the ceiling was spent re-attributing titles that already had
+    /// usable answers while ~24k had none. A title with no answer goes first even against a far
+    /// more popular title that only awaits re-extraction under a new model.
+    /// </summary>
+    [Fact]
+    public async Task Never_attributed_titles_go_before_re_extraction_under_a_new_model()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        Guid reExtract;
+        Guid neverAttributed;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var popular = NewHydratedTitle("Popular, answered by the old model");
+            popular.TmdbVoteCount = 2_000_000_000;
+            var unanswered = NewHydratedTitle("Less popular, never answered");
+            unanswered.TmdbVoteCount = 1_900_000_000;
+            db.AddRange(popular, unanswered);
+            db.TitleAttributes.Add(new TitleAttributes
+            {
+                TitleId = popular.Id,
+                ExtractorModel = "order/old-model",
+                ExtractorVersion = 1,
+                Status = AttributeExtractionStatus.Done,
+                RawJson = "{}",
+                ExtractedAt = DateTime.UtcNow.AddDays(-30),
+            });
+            await db.SaveChangesAsync();
+            (reExtract, neverAttributed) = (popular.Id, unanswered.Id);
+        }
+
+        var extractor = new RenamingExtractor("order/new-model");
+        await RunEnrichAsync(null, new StubEmbeddingProvider(false), extractor, cap: 1);
+
+        Assert.Equal([neverAttributed], extractor.TitlesSeen);
+        Assert.DoesNotContain(reExtract, extractor.TitlesSeen);
+    }
+
+    /// <summary>
+    /// E-8: an account run's last tier was the whole rest of the catalogue in id order — a random
+    /// sample. It now takes the account's ELIGIBLE POOL first: here a title the account has turned
+    /// down loses to an eligible one despite out-voting it.
+    /// </summary>
+    [Fact]
+    public async Task An_account_run_takes_its_eligible_pool_before_the_rest_of_the_catalogue()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, _) = await SeedLibraryAsync(0);
+        Guid eligible;
+        Guid turnedDown;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            // Both English (no language rows means English-only), so the ONLY difference between
+            // them is the account's "not interested".
+            var e = NewHydratedTitle("Eligible for this account");
+            e.TmdbVoteCount = int.MaxValue - 1;
+            e.Language = "en";
+            var x = NewHydratedTitle("Turned down by this account");
+            x.TmdbVoteCount = int.MaxValue;
+            x.Language = "en";
+            db.AddRange(e, x);
+            db.UserTitleReactions.Add(new UserTitleReaction
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = x.Id,
+                Kind = ReactionKind.NotInterested,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+            (eligible, turnedDown) = (e.Id, x.Id);
+        }
+
+        try
+        {
+            var extractor = new RenamingExtractor("pool/test-model");
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+            Assert.Equal([eligible], extractor.TitlesSeen);
+        }
+        finally
+        {
+            // The turned-down title would out-vote every later run's fixtures in this shared
+            // catalogue; un-hydrate it so it leaves the sweep's scope.
+            await using var db = Fixture.CreateContext(new AccountContext());
+            await db.Titles.Where(t => t.Id == turnedDown)
+                .ExecuteUpdateAsync(set => set.SetProperty(t => t.LastMetadataRefreshAt, (DateTime?)null));
+        }
+    }
+
+    /// <summary>
+    /// The two attribute repairs, on rows shaped like the founder's: a Failed row holding a
+    /// current-era answer becomes Done; a Failed row holding an answer older than every era goes back
+    /// to Pending at version 0; a Failed row with no answer is reopened with a fresh budget; and a
+    /// row the fixed handler has touched (<c>LastAttemptAt</c> set) is left alone. A second pass
+    /// changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task The_attribute_repairs_settle_answers_reopen_the_rest_and_are_idempotent()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var eraStart = new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var ids = new Dictionary<string, Guid>();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            TitleAttributes Row(string key, Action<TitleAttributes> shape)
+            {
+                // Unhydrated, so no enrich run in this collection ever selects these fixtures.
+                var title = NewHydratedTitle(key);
+                title.LastMetadataRefreshAt = null;
+                db.Add(title);
+                ids[key] = title.Id;
+                var row = new TitleAttributes { TitleId = title.Id, ExtractorVersion = 2, AttemptCount = 2 };
+                shape(row);
+                return row;
+            }
+
+            db.TitleAttributes.AddRange(
+                // The era: a Done row under "repair/era-model" v2 from 2001-01-01.
+                Row("era", a => { a.Status = AttributeExtractionStatus.Done; a.ExtractorModel = "repair/era-model"; a.RawJson = "{}"; a.ExtractedAt = eraStart; }),
+                // Answered inside that era, then demoted by a later model's stale failure.
+                Row("demoted", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; a.RawJson = "{\"d\":1}"; a.ExtractedAt = eraStart.AddMonths(5); }),
+                // Answered before any era existed: an older prompt generation's values.
+                Row("prehistoric", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; a.RawJson = "{\"p\":1}"; a.ExtractedAt = new DateTime(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc); }),
+                // Two dropped connections and no answer.
+                Row("dropped", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; }),
+                // The same shape, but written by the fixed handler: a genuine failure, not backlog.
+                Row("genuine", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; a.LastAttemptAt = DateTime.UtcNow; }));
+            await db.SaveChangesAsync();
+        }
+
+        async Task<Dictionary<string, TitleAttributes>> SnapshotAsync()
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            var rows = await db.TitleAttributes.AsNoTracking()
+                .Where(a => ids.Values.Contains(a.TitleId)).ToDictionaryAsync(a => a.TitleId);
+            return ids.ToDictionary(kv => kv.Key, kv => rows[kv.Value]);
+        }
+
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            await DataRepairs.RunAllAsync(db, DateTime.UtcNow, CancellationToken.None);
+        }
+
+        var first = await SnapshotAsync();
+        Assert.Equal(AttributeExtractionStatus.Done, first["demoted"].Status);
+        Assert.Equal("repair/era-model", first["demoted"].ExtractorModel);
+        Assert.Equal(2, first["demoted"].ExtractorVersion);
+        Assert.Equal(0, first["demoted"].AttemptCount);
+        Assert.Equal(AttributeExtractionStatus.Pending, first["prehistoric"].Status);
+        Assert.Equal(0, first["prehistoric"].ExtractorVersion);
+        Assert.Equal(AttributeExtractionStatus.Pending, first["dropped"].Status);
+        Assert.Equal(0, first["dropped"].AttemptCount);
+        Assert.Equal(AttributeExtractionStatus.Failed, first["genuine"].Status);
+        Assert.Equal(2, first["genuine"].AttemptCount);
+        Assert.Equal(AttributeExtractionStatus.Done, first["era"].Status);
+
+        IReadOnlyList<DataRepairResult> second;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            second = await DataRepairs.RunAllAsync(db, DateTime.UtcNow, CancellationToken.None);
+            Assert.All(await DataRepairs.PendingAsync(db, CancellationToken.None), p => Assert.Equal(0, p.RowsChanged));
+        }
+
+        Assert.Equal(0, second.Single(r => r.Name == DataRepairs.SettleAnsweredFailuresName).RowsChanged);
+        Assert.Equal(0, second.Single(r => r.Name == DataRepairs.ReopenUnansweredFailuresName).RowsChanged);
+        var again = await SnapshotAsync();
+        foreach (var key in ids.Keys)
+        {
+            Assert.Equal(
+                (first[key].Status, first[key].ExtractorModel, first[key].ExtractorVersion, first[key].AttemptCount),
+                (again[key].Status, again[key].ExtractorModel, again[key].ExtractorVersion, again[key].AttemptCount));
+        }
+    }
+
+    /// <summary>
     /// A GLOBAL run — the shape the weekly catalogue-growth sweep queues. It has no account, so it
     /// must neither demand one nor chain a Train for one, and it still enriches. This used to throw
     /// on the first line of the handler.
@@ -403,7 +848,8 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
     /// </para>
     /// </summary>
     private async Task RunEnrichAsync(
-        Guid? accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor, int? cap = null)
+        Guid? accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor, int? cap = null,
+        Microsoft.Extensions.Logging.ILogger<EnrichCatalogJobHandler>? logger = null)
     {
         var scoped = new AccountContext();
         if (accountId is { } pinned)
@@ -416,7 +862,7 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
         var handler = new EnrichCatalogJobHandler(
             db, embeddings, extractor, new NoopEventHub(), configuration,
             new CatalogEnrichmentBudget(db, configuration),
-            NullLogger<EnrichCatalogJobHandler>.Instance);
+            logger ?? NullLogger<EnrichCatalogJobHandler>.Instance);
         var job = new SyncJob
         {
             Id = Guid.NewGuid(),
@@ -434,6 +880,14 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
         job.Status = JobStatus.Succeeded;
         job.CompletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
+    }
+
+    private async Task ExpireRetryGateAsync(Guid titleId)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        await db.TitleAttributes
+            .Where(a => a.TitleId == titleId)
+            .ExecuteUpdateAsync(set => set.SetProperty(a => a.RetryAfter, DateTime.UtcNow.AddSeconds(-1)));
     }
 
     private static IConfiguration Config(int? cap) =>
@@ -645,6 +1099,80 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
             IReadOnlyList<ExtractedTitleAttributes?> result = inputs.Select(_ => (ExtractedTitleAttributes?)null).ToList();
             return Task.FromResult(result);
         }
+    }
+
+    /// <summary>
+    /// An extractor that classifies its failures, as the production adapter does once it implements
+    /// <see cref="IClassifyingAttributeExtractor"/>. <see cref="AttributeFailureClass.None"/> answers.
+    /// Thread-safe, because two runs share one instance in the concurrency test.
+    /// </summary>
+    private sealed class ClassifyingExtractor(
+        string modelId, Func<Guid, AttributeFailureClass> outcome, int version = 1)
+        : ITitleAttributeExtractor, IClassifyingAttributeExtractor
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<Guid> _seen = new();
+
+        public bool IsAvailable => true;
+
+        public string ModelId => modelId;
+
+        public int Version => version;
+
+        public TimeSpan Delay { get; init; } = TimeSpan.Zero;
+
+        public Func<Task>? DuringCall { get; init; }
+
+        public IReadOnlyList<Guid> TitlesSeen => _seen.ToList();
+
+        public async Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default) =>
+            (await ExtractClassifiedAsync(inputs, ct)).Select(o => o.Attributes).ToList();
+
+        public async Task<IReadOnlyList<AttributeExtractionOutcome>> ExtractClassifiedAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
+        {
+            foreach (var input in inputs)
+            {
+                _seen.Enqueue(input.TitleId);
+            }
+
+            if (Delay > TimeSpan.Zero)
+            {
+                await Task.Delay(Delay, ct);
+            }
+
+            if (DuringCall is { } during)
+            {
+                await during();
+            }
+
+            return inputs
+                .Select(i => outcome(i.TitleId) is var failure && failure == AttributeFailureClass.None
+                    ? AttributeExtractionOutcome.Success(new ExtractedTitleAttributes(
+                        0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, "neutral", "contemporary", ["t"], "{}"))
+                    : AttributeExtractionOutcome.Failed(failure))
+                .ToList();
+        }
+    }
+
+    /// <summary>Keeps every formatted log line, so the run log's separate counters can be asserted.</summary>
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<EnrichCatalogJobHandler>
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _lines = new();
+
+        public IReadOnlyList<string> Lines => _lines.ToList();
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) => _lines.Enqueue(formatter(state, exception));
     }
 
     private sealed class NoopEventHub : IPipelineEventHub

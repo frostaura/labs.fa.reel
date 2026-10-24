@@ -494,3 +494,89 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
         return subscription.Id;
     }
 }
+
+/// <summary>
+/// Task 5: the digest's exposure writer records a TYPED why-source per card through
+/// <see cref="Application.Ml.ClosedLoop.ExposureLog"/>. The line is the digest's own reason copy
+/// unless a lens hook was cached for this reader, which is model text served from cache — and
+/// logging that as "Digest" booked model text as deterministic copy.
+/// </summary>
+[Collection("postgres")]
+public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory api) : IClassFixture<ReelApiFactory>
+{
+    [Theory]
+    [InlineData(null, "Digest")]
+    [InlineData("", "Digest")]
+    [InlineData("   ", "Digest")]
+    [InlineData("A heist that plays fair with you.", "Cache")]
+    public void The_why_source_follows_the_line_actually_rendered(string? hook, string expected) =>
+        Assert.Equal(expected, Api.Endpoints.DigestEndpoints.DigestWhySource(hook).Name);
+
+    [Fact]
+    public async Task Reading_the_digest_logs_each_card_with_the_digest_why_source()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await api.CreateSignedInAccountAsync($"digest-exposure-{Guid.NewGuid():N}");
+        var now = DateTime.UtcNow;
+        var titleIds = new List<Guid>();
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            for (var i = 0; i < 2; i++)
+            {
+                var title = new Title
+                {
+                    Id = Guid.NewGuid(),
+                    MediaType = MediaType.Movie,
+                    TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+                    TraktId = Random.Shared.NextInt64(1, long.MaxValue),
+                    TraktSlug = $"digest-exposure-{Guid.NewGuid():N}",
+                    Name = $"Digest Exposure {i} {Guid.NewGuid():N}",
+                    Genres = ["drama"],
+                    CreatedAt = now,
+                };
+                db.Add(title);
+                titleIds.Add(title.Id);
+            }
+
+            db.ModelArtifacts.Add(new ModelArtifact
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Version = 1,
+                Algo = "FastTree",
+                TrainingRunId = Guid.NewGuid(),
+                Status = ArtifactStatus.Active,
+                TrainedAt = now.AddDays(-1),
+                FeatureSchemaJson = JsonSerializer.Serialize(
+                    new { version = FeatureSchema.Version, names = FeatureSchema.AllNames() }),
+            });
+            db.AccountDigests.Add(new AccountDigest
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                WeekStart = DigestWeek.MondayOf(now),
+                GeneratedAt = now,
+                ItemsJson = JsonSerializer.Serialize(new[]
+                {
+                    new DigestItem(titleIds[0], 8.1m, DigestReasons.NewRelease),
+                    new DigestItem(titleIds[1], 7.6m, DigestReasons.NewOnProvider),
+                }),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await client.GetAsync("/api/digest/current");
+        response.EnsureSuccessStatusCode();
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var exposures = await verify.ExposureEvents
+            .Where(e => e.AccountId == accountId && e.Surface == ExposureSurface.Digest)
+            .ToListAsync();
+        Assert.Equal(titleIds.OrderBy(id => id), exposures.Select(e => e.TitleId).OrderBy(id => id));
+        Assert.All(exposures, e => Assert.Equal("Digest", e.WhySource));
+    }
+}

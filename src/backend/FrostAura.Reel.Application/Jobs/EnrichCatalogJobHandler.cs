@@ -2,6 +2,7 @@ using System.Globalization;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
@@ -103,9 +104,12 @@ public class EnrichCatalogJobHandler(
     /// the extractor detects WHY a response was unusable and, for structural failures only,
     /// re-asks once within the same attempt with a materially different prompt (named offending
     /// fields, or a compacted input plus a wider token budget for a truncation). What survives
-    /// that is not a prompt problem. The remaining budget here exists solely for genuinely
-    /// transient transport failures — a 429, a provider outage — where the useful variable is
-    /// elapsed time, and one later run is enough to catch it.
+    /// that is not a prompt problem, and the second run is its one later chance.
+    ///
+    /// Transport failures — a dropped connection, a body read that died after the headers, a 429,
+    /// an outage — do NOT spend this budget at all: they back off by time instead (see
+    /// <see cref="TransportBackoff"/>). Charging them is what left 2,038 titles Failed on a laptop
+    /// host that slept through most of its runs (E-6).
     ///
     /// The budget is spent per (title, extractor model, extractor version), not per account: the
     /// row is global, so an account whose enrich run walks past an exhausted title must not
@@ -113,6 +117,23 @@ public class EnrichCatalogJobHandler(
     /// of which change what the answer would BE — hands a title a fresh budget.
     /// </summary>
     private const int MaxAttributeAttempts = 2;
+
+    /// <summary>
+    /// How long a batch claim holds. Long enough for a slow batch (24 titles at bounded concurrency
+    /// against a reasoning model), short enough that a run killed mid-batch frees its titles within
+    /// the hour without anyone cleaning up.
+    /// </summary>
+    public static readonly TimeSpan ClaimLease = TimeSpan.FromMinutes(30);
+
+    /// <summary>The ceiling on a transport failure's backoff — a title is retried at least daily.</summary>
+    public static readonly TimeSpan MaxTransportBackoff = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The wait after a failed re-extraction of a row that already holds an answer. That row cannot
+    /// be charged against the current model's budget without being demoted, so time bounds its spend
+    /// instead: at most one billed attempt per title per week.
+    /// </summary>
+    public static readonly TimeSpan AnsweredRowRetryDelay = TimeSpan.FromDays(7);
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
@@ -157,43 +178,59 @@ public class EnrichCatalogJobHandler(
     }
 
     /// <summary>
-    /// The order a run works through the catalogue. For an account-scoped run the tiers are, in
-    /// order: titles this account has actually been SHOWN (feed items), titles it has been SCORED
-    /// (the shortlist a build persists), titles in its own LIBRARY (the training rows and loved
-    /// centroids), then everything else in the shared catalogue.
+    /// The order a run works through the catalogue.
     /// <para>
-    /// This is what makes a capped run useful rather than arbitrary. Without it a cap of 200 over a
-    /// 5,000-title catalogue ordered by id would enrich, on average, titles that have nothing to do
-    /// with the account that asked — and the account would wait weeks for the features behind its
-    /// own next feed. It is also what makes the sweep deterministic for a caller that knows what it
-    /// seeded, which is the difference between an assertion about attempt budgets and a count of
-    /// whatever else happened to be in a shared database.
+    /// <b>Never-attributed first, always.</b> A title with no Done attributes at the current prompt
+    /// generation is invisible (or wrong in meaning) to every feature that reads them; a title
+    /// holding an older MODEL's Done answer at the current generation is fully usable.
+    /// After the 2026-10-14 model switch the daily ceiling was spent partly re-attributing 5,199
+    /// titles that already had attributes while ~24k had none (E-8, NEW-3), so re-extraction now
+    /// waits behind the whole never-attributed backlog, on every run, account or global.
     /// </para>
     /// <para>
-    /// A GLOBAL run has no account to prioritise for, and takes the catalogue in SUPPLY order
-    /// instead: highest <c>TmdbVoteCount</c> first, then most recent, with id as the tiebreak that
-    /// keeps it deterministic. It used to be plain id order, which was fine while a global run meant
-    /// the handful of rows a weekly growth sweep had just added, and became wrong the moment the
-    /// catalogue bulk seed made the global backlog tens of thousands of rows deep: a capped run over
-    /// that in id order enriches a uniformly random sample, so the titles an account is actually
-    /// likely to be shown wait behind the ones nobody will ever see. Vote count then recency is the
-    /// same axis the seed walks, and close to the order in which discovery would surface a title.
+    /// Then, for an account-scoped run, the tiers: titles this account has actually been SHOWN (feed
+    /// items), titles it has been SCORED, titles in its own LIBRARY, then its ELIGIBLE POOL (the
+    /// unseen titles its standing conditions admit — what its next feed can draw from), then the
+    /// rest of the shared catalogue. Within a tier, supply order: highest <c>TmdbVoteCount</c>
+    /// first, id as the tiebreak that keeps it deterministic. Tier 3 used to be the whole rest of
+    /// the catalogue ordered by id — a uniformly random sample — which is the same defect the global
+    /// path had already fixed.
+    /// </para>
+    /// <para>
+    /// A GLOBAL run has no account to prioritise for, and takes the catalogue in SUPPLY order:
+    /// highest <c>TmdbVoteCount</c> first, then most recent, then id.
     /// </para>
     /// </summary>
-    private IQueryable<Title> InPriorityOrder(IQueryable<Title> titles, Guid? accountId) =>
-        accountId is { } id
-            ? titles
-                .OrderBy(t =>
-                    db.FeedItems.Any(f => f.AccountId == id && f.TitleId == t.Id) ? 0
-                    : db.TitleScores.Any(s => s.AccountId == id && s.TitleId == t.Id) ? 1
-                    : db.UserRatings.Any(r => r.AccountId == id && r.TitleId == t.Id)
-                        || db.WatchedTitles.Any(w => w.AccountId == id && w.TitleId == t.Id) ? 2
-                    : 3)
-                .ThenBy(t => t.Id)
-            : titles
-                .OrderByDescending(t => t.TmdbVoteCount)
+    private IQueryable<Title> InPriorityOrder(IQueryable<Title> titles, Guid? accountId, int extractorVersion)
+    {
+        // "Attributed" means a Done answer at the CURRENT prompt generation, under any model. An
+        // older model's answer is usable; an older generation's is wrong in meaning (that is what a
+        // version bump says), so it waits in the never-attributed queue rather than behind it.
+        var neverAttributedFirst = titles.OrderBy(t =>
+            db.TitleAttributes.Any(a => a.TitleId == t.Id
+                && a.Status == AttributeExtractionStatus.Done
+                && a.ExtractorVersion >= extractorVersion) ? 1 : 0);
+
+        if (accountId is not { } id)
+        {
+            return neverAttributedFirst
+                .ThenByDescending(t => t.TmdbVoteCount)
                 .ThenByDescending(t => t.Year ?? 0)
                 .ThenBy(t => t.Id);
+        }
+
+        var eligiblePool = new EligibilityQueryBuilder(db).EligibleTitles(id).Select(e => e.Id);
+        return neverAttributedFirst
+            .ThenBy(t =>
+                db.FeedItems.Any(f => f.AccountId == id && f.TitleId == t.Id) ? 0
+                : db.TitleScores.Any(s => s.AccountId == id && s.TitleId == t.Id) ? 1
+                : db.UserRatings.Any(r => r.AccountId == id && r.TitleId == t.Id)
+                    || db.WatchedTitles.Any(w => w.AccountId == id && w.TitleId == t.Id) ? 2
+                : eligiblePool.Contains(t.Id) ? 3
+                : 4)
+            .ThenByDescending(t => t.TmdbVoteCount)
+            .ThenBy(t => t.Id);
+    }
 
     private async Task<int> EmbedAsync(
         SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
@@ -210,7 +247,7 @@ public class EnrichCatalogJobHandler(
             || db.TitleEmbeddings.Any(e => e.TitleId == t.Id
                 && (e.EmbeddingModel != model || e.CreatedAt < t.LastMetadataRefreshAt)));
 
-        var titles = await InPriorityOrder(work, accountId).Take(cap).ToListAsync(ct);
+        var titles = await InPriorityOrder(work, accountId, extractor.Version).Take(cap).ToListAsync(ct);
         var total = titles.Count;
         var processed = 0;
 
@@ -306,24 +343,16 @@ public class EnrichCatalogJobHandler(
     private async Task<int> ExtractAsync(
         SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
     {
-        // Eligible = not already settled BY THE CURRENT MODEL AT THE CURRENT PROMPT VERSION. A row
-        // is settled when it is Done or has exhausted its retries under both. Model-scoping is what
-        // lets a switch from the deterministic stub to the real model re-extract every title instead
-        // of leaving stub data frozen in place; version-scoping is what lets a prompt change do the
-        // same for values whose MEANING moved (see ITitleAttributeExtractor.Version). Note the
-        // ordering of the two effects: an exhausted row with a stale version is eligible again,
-        // which is deliberate — the reason it failed may be the reason the prompt changed.
         var modelId = extractor.ModelId;
         var version = extractor.Version;
-        var pending = hydrated.Where(t => !db.TitleAttributes.Any(a =>
-            a.TitleId == t.Id
-            && a.ExtractorModel == modelId
-            && a.ExtractorVersion >= version
-            && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts)));
+        var runId = job.Id;
 
-        var titles = await InPriorityOrder(pending, accountId).Take(cap).ToListAsync(ct);
+        var titles = await InPriorityOrder(PendingExtraction(hydrated, modelId, version, runId, DateTime.UtcNow), accountId, version)
+            .Take(cap)
+            .ToListAsync(ct);
         var total = titles.Count;
         var processed = 0;
+        var tally = new ExtractionTally();
 
         foreach (var batch in titles.Chunk(AttributeBatch))
         {
@@ -348,56 +377,208 @@ public class EnrichCatalogJobHandler(
                 break;
             }
 
-            var inputs = batch.Select(t => new TitleAttributeInput(
-                t.Id, t.MediaType.ToString(), t.Name, t.Year, t.Overview, t.Genres, t.Keywords)).ToList();
-            var extracted = await extractor.ExtractAsync(inputs, ct);
+            // Claim before spending. Two enrich runs (global and account, or a revived job and its
+            // live original) selected overlapping titles 24 times in ten days; whichever failed last
+            // overwrote the other's Done answer with Failed. The claim makes the batch this run's
+            // alone, and re-checks eligibility under the row lock, so a title another run settled a
+            // moment ago is not bought twice.
+            var claimed = await ClaimAsync(batch.Select(t => t.Id).ToList(), runId, modelId, version, ct);
+            var work = batch.Where(t => claimed.Contains(t.Id)).ToList();
+            tally.SkippedClaimed += batch.Length - work.Count;
 
-            var batchIds = batch.Select(b => b.Id).ToList();
-            var existing = await db.TitleAttributes
-                .Where(a => batchIds.Contains(a.TitleId))
-                .ToDictionaryAsync(a => a.TitleId, ct);
-
-            for (var i = 0; i < batch.Length; i++)
+            if (work.Count > 0)
             {
-                var row = existing.GetValueOrDefault(batch[i].Id);
-                if (row is null)
+                try
                 {
-                    row = new TitleAttributes { TitleId = batch[i].Id };
-                    db.TitleAttributes.Add(row);
+                    var stop = await ExtractBatchAsync(work, modelId, version, tally, ct);
+                    if (stop)
+                    {
+                        processed += batch.Length;
+                        break;
+                    }
                 }
-                else if (row.ExtractorModel != modelId || row.ExtractorVersion < version)
+                finally
                 {
-                    // A different model, or a newer prompt, is starting fresh — don't inherit the
-                    // retries spent answering a different question.
-                    row.AttemptCount = 0;
+                    await ReleaseAsync(work.Select(t => t.Id).ToList(), runId);
                 }
+            }
 
-                row.AttemptCount++;
+            processed += batch.Length;
+            job.ProgressPct = total == 0 ? 100 : Math.Round(50m + (50m * processed / total), 1);
+            job.ProgressMessage = $"Reading the mood · {processed}/{total}";
+            await db.SaveChangesAsync(ct);
 
-                // Stamp model AND version BEFORE the outcome check. The eligibility query above only
-                // counts attempts made at the current model and version, so a failed row that never
-                // recorded one was re-picked on every single run for ever — the retry cap could not
-                // engage and a permanently unextractable title billed indefinitely.
-                row.ExtractorModel = modelId;
-                row.ExtractorVersion = version;
+            Publish(accountId, job);
+        }
 
-                var result = extracted[i];
-                if (result is null)
+        // Separate counters, because "Failed" used to be one number that hid a network outage
+        // inside what read like a model-quality problem.
+        logger.LogInformation(
+            "Attribute extraction for {AccountId} with {Model} v{Version}: {Done} answered, {Transport} transport failure(s) "
+            + "(backed off, not charged), {Parse} parse failure(s), {Unclassified} unclassified failure(s), "
+            + "{Skipped} skipped as claimed by another run.",
+            accountId, modelId, version, tally.Done, tally.Transport, tally.Parse, tally.Unclassified, tally.SkippedClaimed);
+
+        // processed, not total: a run that stopped at a daily ceiling must not report the work it
+        // selected as work it did.
+        return processed;
+    }
+
+    /// <summary>
+    /// Titles this run may extract right now. Eligible = not already settled BY THE CURRENT MODEL AT
+    /// THE CURRENT PROMPT VERSION (Done, or its attempt budget spent under both), not inside a
+    /// failure's time gate, and not held by another live run. Model-scoping is what lets a switch
+    /// from the deterministic stub to the real model re-extract every title; version-scoping is what
+    /// lets a prompt change do the same for values whose MEANING moved (see
+    /// ITitleAttributeExtractor.Version). An exhausted row with a stale version is eligible again,
+    /// deliberately — the reason it failed may be the reason the prompt changed.
+    /// </summary>
+    private IQueryable<Title> PendingExtraction(
+        IQueryable<Title> hydrated, string modelId, int version, Guid runId, DateTime now) =>
+        hydrated.Where(t => !db.TitleAttributes.Any(a =>
+            a.TitleId == t.Id
+            && ((a.ExtractorModel == modelId
+                    && a.ExtractorVersion >= version
+                    && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts))
+                || a.RetryAfter > now
+                || (a.ClaimedUntil > now && a.ClaimedBy != runId))));
+
+    /// <summary>
+    /// Claims <paramref name="titleIds"/> for this run and returns the ones it now holds.
+    /// <para>
+    /// A never-attributed title has no row to claim, so one is created first as an unanswered
+    /// Pending placeholder stamped with the current model and version (so it is neither "stale" to
+    /// the version sweep nor "settled" to selection). Every reader of attributes filters on Done or
+    /// on a non-null tone, so a placeholder is invisible everywhere else. The claim itself is one
+    /// conditional UPDATE: Postgres re-evaluates its predicate against the committed row when two
+    /// runs race for the same title, so exactly one of them wins it.
+    /// </para>
+    /// </summary>
+    private async Task<HashSet<Guid>> ClaimAsync(
+        List<Guid> titleIds, Guid runId, string modelId, int version, CancellationToken ct)
+    {
+        var existing = await db.TitleAttributes
+            .Where(a => titleIds.Contains(a.TitleId))
+            .Select(a => a.TitleId)
+            .ToListAsync(ct);
+        var missing = titleIds.Except(existing).ToList();
+        if (missing.Count > 0)
+        {
+            var placeholders = missing
+                .Select(id => new TitleAttributes
                 {
-                    // The extractor returns null only when it could not get a usable answer — a
-                    // transport failure, or a response missing / mistyping a required scalar. It
-                    // never substitutes a neutral value, so there is nothing to write here and the
-                    // row must NOT be marked Done: a Done row is read as settled judgement for
-                    // ever by every tenant's feature vector.
-                    row.Status = AttributeExtractionStatus.Failed;
-                    logger.LogWarning(
-                        "Attribute extraction produced no usable result for {TitleId} ({Name}) on attempt {Attempt}/{Max} "
-                        + "with {Model} v{Version}; row left {Status} rather than filled with defaults.",
-                        batch[i].Id, batch[i].Name, row.AttemptCount, MaxAttributeAttempts, modelId, version,
-                        AttributeExtractionStatus.Failed);
-                    continue;
+                    TitleId = id,
+                    ExtractorModel = modelId,
+                    ExtractorVersion = version,
+                    Status = AttributeExtractionStatus.Pending,
+                })
+                .ToList();
+            db.TitleAttributes.AddRange(placeholders);
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException)
+            {
+                // A concurrent run created some of the same rows first. They exist now, which is all
+                // the claim below needs; forget ours rather than retrying the insert.
+                foreach (var placeholder in placeholders)
+                {
+                    db.TitleAttributes.Entry(placeholder).State = EntityState.Detached;
                 }
+            }
+        }
 
+        var now = DateTime.UtcNow;
+        var until = now + ClaimLease;
+        await db.TitleAttributes
+            .Where(a => titleIds.Contains(a.TitleId)
+                && (a.ClaimedUntil == null || a.ClaimedUntil <= now || a.ClaimedBy == runId)
+                && !(a.ExtractorModel == modelId
+                    && a.ExtractorVersion >= version
+                    && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts))
+                && (a.RetryAfter == null || a.RetryAfter <= now))
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(a => a.ClaimedBy, runId)
+                .SetProperty(a => a.ClaimedUntil, until), ct);
+
+        return (await db.TitleAttributes
+                .Where(a => titleIds.Contains(a.TitleId) && a.ClaimedBy == runId && a.ClaimedUntil > now)
+                .Select(a => a.TitleId)
+                .ToListAsync(ct))
+            .ToHashSet();
+    }
+
+    /// <summary>
+    /// Hands this run's titles back. Best effort and deliberately not cancellable: a run being shut
+    /// down should still let go of what it held, and if it cannot, the lease expires on its own.
+    /// </summary>
+    private async Task ReleaseAsync(List<Guid> titleIds, Guid runId)
+    {
+        try
+        {
+            await db.TitleAttributes
+                .Where(a => titleIds.Contains(a.TitleId) && a.ClaimedBy == runId)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(a => a.ClaimedBy, (Guid?)null)
+                    .SetProperty(a => a.ClaimedUntil, (DateTime?)null), CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
+        {
+            logger.LogWarning(ex, "Could not release {Count} enrichment claim(s) for run {RunId}; they lapse with the lease.", titleIds.Count, runId);
+        }
+    }
+
+    /// <summary>
+    /// One claimed batch: ask the model, then write each title's outcome. Returns true when the run
+    /// should stop — the whole batch failed in transport, which a later batch in the same minute
+    /// will not fix.
+    /// </summary>
+    private async Task<bool> ExtractBatchAsync(
+        List<Title> work, string modelId, int version, ExtractionTally tally, CancellationToken ct)
+    {
+        var inputs = work.Select(t => new TitleAttributeInput(
+            t.Id, t.MediaType.ToString(), t.Name, t.Year, t.Overview, t.Genres, t.Keywords)).ToList();
+
+        IReadOnlyList<AttributeExtractionOutcome> outcomes;
+        var wholeBatchTransport = false;
+        try
+        {
+            outcomes = await ExtractClassifiedAsync(inputs, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The port allows a throw only for a whole-batch transport failure.
+            logger.LogWarning(ex, "Attribute extraction batch of {Count} failed in transport; backing off and stopping this run.", work.Count);
+            outcomes = work.Select(_ => AttributeExtractionOutcome.Failed(AttributeFailureClass.Transport)).ToList();
+            wholeBatchTransport = true;
+        }
+
+        var batchIds = work.Select(b => b.Id).ToList();
+        var rows = await db.TitleAttributes
+            .Where(a => batchIds.Contains(a.TitleId))
+            .ToDictionaryAsync(a => a.TitleId, ct);
+        var now = DateTime.UtcNow;
+
+        for (var i = 0; i < work.Count; i++)
+        {
+            var title = work[i];
+            var row = rows.GetValueOrDefault(title.Id);
+            if (row is null)
+            {
+                // Claimed rows exist by construction; a row deleted underneath the run is not this
+                // run's to resurrect.
+                continue;
+            }
+
+            // Attempts are counted per (model, version): a different model, or a newer prompt, is
+            // answering a different question and starts with a fresh budget.
+            var sameQuestion = row.ExtractorModel == modelId && row.ExtractorVersion >= version;
+            var attempts = sameQuestion ? row.AttemptCount + 1 : 1;
+            var outcome = outcomes[i];
+
+            if (outcome.Attributes is { } result)
+            {
                 row.Darkness = result.Darkness;
                 row.Pacing = result.Pacing;
                 row.Complexity = result.Complexity;
@@ -410,20 +591,142 @@ public class EnrichCatalogJobHandler(
                 row.Themes = result.Themes.ToArray();
                 row.RawJson = result.RawJson;
                 row.Status = AttributeExtractionStatus.Done;
-                row.ExtractedAt = DateTime.UtcNow;
+                row.ExtractedAt = now;
+                row.ExtractorModel = modelId;
+                row.ExtractorVersion = version;
+                row.AttemptCount = attempts;
+                row.LastAttemptAt = now;
+                row.TransportFailures = 0;
+                row.RetryAfter = null;
+                tally.Done++;
+                continue;
             }
 
-            processed += batch.Length;
-            job.ProgressPct = total == 0 ? 100 : Math.Round(50m + (50m * processed / total), 1);
-            job.ProgressMessage = $"Reading the mood · {processed}/{total}";
-            await db.SaveChangesAsync(ct);
-
-            Publish(accountId, job);
+            await WriteFailureAsync(row, outcome.Failure, attempts, modelId, version, now, tally, ct);
         }
 
-        // processed, not total: a run that stopped at a daily ceiling must not report the work it
-        // selected as work it did.
-        return processed;
+        await db.SaveChangesAsync(ct);
+        return wholeBatchTransport;
+    }
+
+    /// <summary>
+    /// A failure, written so that it can never demote an answer.
+    /// <para>
+    /// The extractor returns no answer only when it could not get a usable one, and never
+    /// substitutes a neutral value — so nothing is written to the attribute columns, ever. What
+    /// changes is bookkeeping, and every status-changing write is a conditional UPDATE in SQL
+    /// (<c>WHERE "Status" &lt;&gt; 'Done' AND "RawJson" IS NULL</c>) rather than a write through the
+    /// entity loaded after the slow model call: 1,077 rows on the founder's catalogue held a complete
+    /// answer under a Failed status because a stale run's failure landed on top of another run's
+    /// success (NEW-1/NEW-2). A row that already holds an answer keeps it and is time-gated instead.
+    /// </para>
+    /// </summary>
+    private async Task WriteFailureAsync(
+        TitleAttributes row, AttributeFailureClass failure, int attempts, string modelId, int version,
+        DateTime now, ExtractionTally tally, CancellationToken ct)
+    {
+        var titleId = row.TitleId;
+        if (failure == AttributeFailureClass.Transport)
+        {
+            tally.Transport++;
+            var failures = row.TransportFailures + 1;
+            var retryAfter = now + TransportBackoff(failures);
+            await db.TitleAttributes
+                .Where(a => a.TitleId == titleId)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(a => a.TransportFailures, a => a.TransportFailures + 1)
+                    .SetProperty(a => a.RetryAfter, retryAfter)
+                    .SetProperty(a => a.LastAttemptAt, now), ct);
+            logger.LogWarning(
+                "Attribute extraction for {TitleId} failed in transport ({Failures} in a row); retrying after {RetryAfter:O}, attempt budget untouched.",
+                titleId, failures, retryAfter);
+            return;
+        }
+
+        if (failure == AttributeFailureClass.Parse)
+        {
+            tally.Parse++;
+        }
+        else
+        {
+            tally.Unclassified++;
+        }
+
+        var demotable = await db.TitleAttributes
+            .Where(a => a.TitleId == titleId
+                && a.Status != AttributeExtractionStatus.Done
+                && a.RawJson == null)
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(a => a.Status, AttributeExtractionStatus.Failed)
+                .SetProperty(a => a.AttemptCount, attempts)
+                // Stamped with the outcome: selection counts only attempts made at the current model
+                // and version, so a failed row that never recorded one was re-picked for ever.
+                .SetProperty(a => a.ExtractorModel, modelId)
+                .SetProperty(a => a.ExtractorVersion, version)
+                .SetProperty(a => a.LastAttemptAt, now)
+                .SetProperty(a => a.RetryAfter, (DateTime?)null), ct);
+
+        if (demotable > 0)
+        {
+            logger.LogWarning(
+                "Attribute extraction produced no usable result for {TitleId} on attempt {Attempt}/{Max} with {Model} v{Version} "
+                + "({Failure}); row left Failed rather than filled with defaults.",
+                titleId, attempts, MaxAttributeAttempts, modelId, version, failure);
+            return;
+        }
+
+        // The row holds an answer — Done under some model, or an older generation's values awaiting
+        // re-extraction. It keeps them, and waits a week before this model is asked again.
+        var retry = now + AnsweredRowRetryDelay;
+        await db.TitleAttributes
+            .Where(a => a.TitleId == titleId)
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(a => a.RetryAfter, retry)
+                .SetProperty(a => a.LastAttemptAt, now), ct);
+        logger.LogWarning(
+            "Re-extraction of {TitleId} with {Model} v{Version} failed ({Failure}); its existing answer is kept, next try after {RetryAfter:O}.",
+            titleId, modelId, version, failure, retry);
+    }
+
+    private async Task<IReadOnlyList<AttributeExtractionOutcome>> ExtractClassifiedAsync(
+        IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct)
+    {
+        if (extractor is IClassifyingAttributeExtractor classifying)
+        {
+            return await classifying.ExtractClassifiedAsync(inputs, ct);
+        }
+
+        var results = await extractor.ExtractAsync(inputs, ct);
+        return results
+            .Select(r => r is null
+                ? AttributeExtractionOutcome.Failed(AttributeFailureClass.Unclassified)
+                : AttributeExtractionOutcome.Success(r))
+            .ToList();
+    }
+
+    /// <summary>
+    /// How long a title waits after its <paramref name="consecutiveFailures"/>-th transport failure in
+    /// a row: 30 minutes, doubling, capped at a day. A sleeping laptop host turned "one later run"
+    /// into another dropped connection; a doubling wait spreads the retries across real time.
+    /// </summary>
+    public static TimeSpan TransportBackoff(int consecutiveFailures)
+    {
+        var exponent = Math.Clamp(consecutiveFailures - 1, 0, 10);
+        var wait = TimeSpan.FromMinutes(30 * Math.Pow(2, exponent));
+        return wait > MaxTransportBackoff ? MaxTransportBackoff : wait;
+    }
+
+    private sealed class ExtractionTally
+    {
+        public int Done { get; set; }
+
+        public int Transport { get; set; }
+
+        public int Parse { get; set; }
+
+        public int Unclassified { get; set; }
+
+        public int SkippedClaimed { get; set; }
     }
 
     /// <summary>Progress SSE, skipped for a global run — there is no account subscribed to it.</summary>

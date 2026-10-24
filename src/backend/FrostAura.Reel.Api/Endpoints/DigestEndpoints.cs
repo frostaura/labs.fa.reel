@@ -53,6 +53,7 @@ public static class DigestEndpoints
                 account.Id, ids, await tasteFacts.CurrentHashAsync(account.Id, nowUtc, ct), ct);
 
             var cards = new List<FeedEndpoints.FeedCard>();
+            var whySources = new List<ExposureWhySource>();
             foreach (var item in digestItems)
             {
                 if (!titles.TryGetValue(item.TitleId, out var title))
@@ -68,6 +69,7 @@ public static class DigestEndpoints
                 // true statements about why the card is here; the hook is simply the one written
                 // for this reader.
                 var whyThis = note?.Hook ?? DigestReasons.CopyFor(item.Reason);
+                whySources.Add(DigestWhySource(note?.Hook));
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
@@ -95,7 +97,7 @@ public static class DigestEndpoints
                         account.Id, ExposureSurface.Digest, feedSnapshotId: null, activeArtifactId, nowUtc,
                         cards.Select((c, i) => new ExposureCard(
                             c.TitleId, i, c.PredictedRating,
-                            WhySentence: c.WhyThis, WhySource: ExposureWhySource.Digest)).ToList(),
+                            WhySentence: c.WhyThis, WhySource: whySources[i])).ToList(),
                         ct);
                 }
             }
@@ -108,4 +110,15 @@ public static class DigestEndpoints
             });
         });
     }
+
+    /// <summary>
+    /// How a digest card's why-line came to be, typed for the exposure log. The line is the lens
+    /// hook when one is cached for this reader — model text, written earlier and served from the
+    /// lens cache, so <see cref="ExposureWhySource.Cache"/> — and otherwise the digest's own fixed
+    /// reason copy, <see cref="ExposureWhySource.Digest"/>. It used to log every card as Digest,
+    /// which booked model-written hooks as deterministic copy and hid them from every accuracy query
+    /// that separates model text from templates.
+    /// </summary>
+    public static ExposureWhySource DigestWhySource(string? hook) =>
+        string.IsNullOrWhiteSpace(hook) ? ExposureWhySource.Digest : ExposureWhySource.Cache;
 }
