@@ -21,10 +21,10 @@ const MOCK_POSTERS: { genre: string; gradient: string; tilt: string }[] = [
  */
 function PosterMockRow() {
   return (
-    // `overflow-hidden` is the backstop, not the fix: below `sm` the two outer posters drop out
-    // (MockPoster's `outer`), which is what brings the row's intrinsic width (~440 px with all
-    // five) under a 320 px phone's column. Without both, the row pushed the column 32 px off the
-    // left edge at 375 px and clipped the pitch sentence ("nk your Trakt profile").
+    // `overflow-hidden` is the backstop, not the fix. Below `sm` the two outer posters drop out
+    // (MockPoster's `outer`) and the inner pair narrows to w-16, which takes the row from ~440 px
+    // (all five) to ~248 px, inside a 320 px phone's column. Before, the row pushed the column
+    // 32 px off the left edge at 375 px and clipped the pitch ("nk your Trakt profile").
     <div className="w-full max-w-3xl mx-auto flex items-end justify-center overflow-hidden pt-2 pb-4" aria-hidden>
       {MOCK_POSTERS.slice(0, 2).map((p, i) => (
         <MockPoster key={p.genre} poster={p} outer={i === 0} />
@@ -57,7 +57,7 @@ function PosterMockRow() {
 function MockPoster({ poster, outer }: { poster: (typeof MOCK_POSTERS)[number]; outer: boolean }) {
   return (
     <div
-      className={`relative w-20 sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden ring-1 ring-fa-edge shadow-fa-glass ${poster.tilt} ${
+      className={`relative w-16 sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden ring-1 ring-fa-edge shadow-fa-glass ${poster.tilt} ${
         outer ? "hidden sm:block" : ""
       }`}
       style={{ backgroundImage: poster.gradient }}
