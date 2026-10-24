@@ -293,20 +293,14 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, abort.Token);
                 await using var body = await response.Content.ReadAsStreamAsync(abort.Token);
                 using var reader = new StreamReader(body, Encoding.UTF8);
-                using var stopReading = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                try
+                // Read until the second batch's six cards are on the wire. The failed batch returned
+                // at once, so its flag was recorded before the first of them went out.
+                while (await reader.ReadLineAsync(abort.Token) is { } line)
                 {
-                    while (await reader.ReadLineAsync(stopReading.Token) is { } line)
+                    if (line.StartsWith("event: candidate", StringComparison.Ordinal) && ++secondAnswered == 6)
                     {
-                        if (line.StartsWith("event: candidate", StringComparison.Ordinal))
-                        {
-                            secondAnswered++;
-                        }
+                        break;
                     }
-                }
-                catch (OperationCanceledException)
-                {
-                    // Ten seconds in: the first two batches have long returned, the third is still out.
                 }
 
                 await abort.CancelAsync();
