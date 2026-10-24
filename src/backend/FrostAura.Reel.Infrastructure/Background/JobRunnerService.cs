@@ -23,12 +23,10 @@ public sealed class JobRunnerService(
     ILogger<JobRunnerService> logger) : BackgroundService
 {
     private const int MaxConcurrentJobs = 4;
-    private const int MaxAttempts = 3;
+    private const int MaxAttempts = JobRunnerLimits.MaxAttempts;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
-    // Comfortably longer than the slowest single external call (a multi-minute watched/shows pull),
-    // so a slow-but-alive ingest is never mistaken for a crash and duplicated.
-    private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(12);
+    private static readonly TimeSpan StaleAfter = JobRunnerLimits.StaleAfter;
 
     private readonly SemaphoreSlim _slots = new(MaxConcurrentJobs, MaxConcurrentJobs);
 
@@ -122,6 +120,11 @@ public sealed class JobRunnerService(
     /// library; with two runner slots the build used to start beside the sync, finish first on
     /// stale data, and the sync's own reconcile build then did the work again. The stale-job
     /// reclaim bounds how long a wedged sync can hold a build back.
+    ///
+    /// <para>The claim also clears the previous attempt's progress. A retry that inherited "100% —
+    /// nothing cross-referenced this run" from the attempt that failed reported a finished job as
+    /// live work for the whole retry (H-1); every attempt starts from no progress and the handler
+    /// writes its own.</para>
     /// </summary>
     internal static FormattableString ClaimNextSql(DateTime now) =>
         $"""
@@ -129,7 +132,9 @@ public sealed class JobRunnerService(
              "Status" = 'Running',
              "StartedAt" = COALESCE("StartedAt", {now}),
              "HeartbeatAt" = {now},
-             "AttemptCount" = "AttemptCount" + 1
+             "AttemptCount" = "AttemptCount" + 1,
+             "ProgressPct" = NULL,
+             "ProgressMessage" = NULL
          WHERE "Id" = (
              SELECT j."Id" FROM "SyncJobs" j
              WHERE j."Status" = 'Pending'
@@ -184,6 +189,13 @@ public sealed class JobRunnerService(
                 // Up to MaxAttempts; the claim path bumps AttemptCount, the cursor preserves progress.
                 job.Status = job.AttemptCount >= MaxAttempts ? JobStatus.Failed : JobStatus.Pending;
                 job.Error = ex.Message;
+                if (job.Status == JobStatus.Pending)
+                {
+                    // Waiting for a retry is not progress: the status API must never show the
+                    // failed attempt's percentage as live work while the job sits in the queue.
+                    job.ProgressPct = null;
+                    job.ProgressMessage = null;
+                }
                 await db.SaveChangesAsync(CancellationToken.None);
 
                 if (job.Status == JobStatus.Failed && job.AccountId is { } failedAccount)
