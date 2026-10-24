@@ -1,0 +1,265 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { JobFailure, SyncJobSummary, SyncStatus } from "../store/api/sync";
+import {
+  ACTIVE_POLL_MS,
+  IDLE_POLL_MS,
+  derivePill,
+  healthIssues,
+  shownActiveJob,
+  statusPollInterval,
+} from "./syncPill";
+
+const NOW = new Date("2026-10-24T12:00:00Z");
+
+function job(overrides: Partial<SyncJobSummary> = {}): SyncJobSummary {
+  return {
+    id: "00000000-0000-0000-0000-0000000000a1",
+    kind: "DeltaSync",
+    sseKind: "delta",
+    visibility: "UserVisible",
+    status: "Running",
+    progressPct: 40,
+    progressMessage: "nothing cross-referenced this run",
+    enqueuedAt: "2026-10-24T11:59:00Z",
+    startedAt: "2026-10-24T11:59:01Z",
+    completedAt: null,
+    attempt: 1,
+    maxAttempts: 3,
+    retrying: false,
+    retryReasonCode: null,
+    ...overrides,
+  };
+}
+
+function failure(overrides: Partial<JobFailure> = {}): JobFailure {
+  return {
+    kind: "CrossReference",
+    sseKind: "xref",
+    visibility: "NamedPass",
+    failedAt: "2026-10-24T11:30:00Z",
+    consecutiveFailures: 1,
+    attempts: 3,
+    reasonCode: "no_answer",
+    ...overrides,
+  };
+}
+
+function status(overrides: Partial<SyncStatus> = {}): SyncStatus {
+  return {
+    contractVersion: 2,
+    pipelineStage: "FeedReady",
+    connectionStatus: "Active",
+    lastDeltaSyncAt: "2026-10-24T11:57:00Z",
+    lastFullReconcileAt: null,
+    activeJob: null,
+    recentJobs: [],
+    outboxPending: 0,
+    outboxDeadLetters: 0,
+    lastListSyncAt: null,
+    outboxLastError: null,
+    retrain: { minNewRatings: 10, newRatingsSinceTrain: 0, hasActiveModel: true, lastTrainedAt: null },
+    lastFailures: [],
+    providerHealth: { state: "Unmonitored", checkedAt: null, breakers: [] },
+    degradedReason: null,
+    notEnoughRatings: null,
+    ...overrides,
+  };
+}
+
+const pill = (s: SyncStatus | undefined, extra: Partial<Parameters<typeof derivePill>[0]> = {}) =>
+  derivePill({ status: s, statusFailed: false, live: null, summary: null, ...extra });
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+afterEach(() => vi.useRealTimers());
+
+describe("health outranks progress", () => {
+  it("shows Reconnect Trakt for a refresh-failed link while an Enrich-era job runs", () => {
+    const view = pill(status({ connectionStatus: "RefreshFailed", activeJob: job({ kind: "FullIngest", sseKind: "ingest" }) }));
+    expect(view).toMatchObject({ mode: "health", tone: "danger", label: "Reconnect Trakt", reconnect: true });
+  });
+
+  it.each(["TraktRevoked", "TraktRefreshFailed"] as const)("offers the reconnect for degradedReason %s", (reason) => {
+    expect(pill(status({ degradedReason: reason }))).toMatchObject({ label: "Reconnect Trakt", reconnect: true });
+  });
+
+  it("shows danger with a reason after 3 failed cross-reference runs", () => {
+    const view = pill(status({ lastFailures: [failure({ consecutiveFailures: 3 })] }))!;
+    expect(view).toMatchObject({ mode: "health", tone: "danger", label: "Cross-reference failed" });
+    expect(view.lines[0]).toBe("The model returned no usable answer. Failed 3 times in a row, last 30m ago.");
+  });
+
+  it("a danger failure outranks a sync the user started", () => {
+    const view = pill(status({ activeJob: job(), lastFailures: [failure({ consecutiveFailures: 4 })] }));
+    expect(view).toMatchObject({ mode: "health", tone: "danger" });
+  });
+
+  it("a single payment refusal is danger at once — no retry fixes it", () => {
+    expect(pill(status({ lastFailures: [failure({ reasonCode: "payment_required" })] }))?.tone).toBe("danger");
+  });
+
+  it("dead-lettered writes are danger with the count", () => {
+    const view = pill(status({ outboxDeadLetters: 2 }))!;
+    expect(view).toMatchObject({ tone: "danger", label: "Trakt writes failed", reconnect: false });
+    expect(view.lines[0]).toBe("2 ratings or list changes couldn't reach Trakt after every retry.");
+  });
+
+  it("a provider that is down is danger, explained by its breaker's code", () => {
+    const view = pill(
+      status({
+        providerHealth: {
+          state: "Down",
+          checkedAt: null,
+          breakers: [{ provider: "OpenRouter", purpose: null, state: "Open", reasonCode: "payment_required", since: "", retryAt: null }],
+        },
+      })
+    )!;
+    expect(view).toMatchObject({ tone: "danger", label: "Model provider down" });
+    expect(view.lines[0]).toBe("The model provider refused payment (402).");
+  });
+
+  it("lists every other issue for the tooltip, dangers first", () => {
+    const view = pill(
+      status({ connectionStatus: "Revoked", outboxDeadLetters: 1, lastFailures: [failure()] })
+    )!;
+    expect(view.issues.map((i) => [i.tone, i.label])).toEqual([
+      ["danger", "Reconnect Trakt"],
+      ["danger", "Trakt writes failed"],
+      ["warn", "Cross-reference failed"],
+    ]);
+  });
+});
+
+describe("progress", () => {
+  it("shows work the user started with fixed copy, never the job's free text", () => {
+    const view = pill(status({ activeJob: job() }))!;
+    expect(view).toMatchObject({ mode: "active", tone: "active", label: "Syncing with Trakt", pct: 40 });
+    expect(JSON.stringify(view)).not.toContain("nothing cross-referenced");
+  });
+
+  it("never shows background upkeep, even if the server sent it", () => {
+    expect(pill(status({ activeJob: job({ visibility: "Background", sseKind: "enrich" }) }))?.mode).toBe("health");
+    expect(shownActiveJob(status({ activeJob: job({ visibility: "SomethingNew" as never }) }))).toBeNull();
+  });
+
+  it("ignores a terminal activeJob", () => {
+    expect(shownActiveJob(status({ activeJob: job({ status: "Failed" }) }))).toBeNull();
+  });
+
+  it("names the cross-reference pass with no percentage and no count", () => {
+    const view = pill(
+      status({ activeJob: job({ kind: "CrossReference", sseKind: "xref", visibility: "NamedPass", progressPct: 100 }) }),
+      { live: { kind: "xref", pct: 29, current: 640, total: 2242 } }
+    )!;
+    expect(view).toMatchObject({ mode: "active", label: "Cross-referencing · first pass", pct: null, count: null });
+  });
+
+  it("a warning outranks the named pass nobody started", () => {
+    const view = pill(
+      status({
+        activeJob: job({ kind: "CrossReference", sseKind: "xref", visibility: "NamedPass" }),
+        lastFailures: [failure({ kind: "BuildFeed", sseKind: "feed", reasonCode: "timed_out" })],
+      })
+    );
+    expect(view).toMatchObject({ mode: "health", tone: "warn", label: "Picks build failed" });
+  });
+
+  it("a warning does not take the pill from a job the user started", () => {
+    const view = pill(status({ activeJob: job(), lastFailures: [failure()] }))!;
+    expect(view.mode).toBe("active");
+    expect(view.issues).toHaveLength(1);
+  });
+
+  it("a retrying job is a warning with its reason and attempt, and no percentage", () => {
+    const view = pill(status({ activeJob: job({ retrying: true, attempt: 2, retryReasonCode: "rate_limited" }) }))!;
+    expect(view).toMatchObject({ mode: "active", tone: "warn", label: "Retrying · Syncing with Trakt", pct: null });
+    expect(view.lines[0]).toBe("A provider is rate-limiting Reel (429). Attempt 2 of 3.");
+  });
+
+  it("a queued job has no percentage", () => {
+    const view = pill(status({ activeJob: job({ status: "Pending", progressPct: 100 }) }))!;
+    expect(view.pct).toBeNull();
+    expect(view.lines[0]).toBe("Queued — starts shortly.");
+  });
+
+  it("applies a live frame only when its kind matches the active job", () => {
+    const active = status({ activeJob: job({ progressPct: 10 }) });
+    expect(pill(active, { live: { kind: "delta", pct: 55, current: 5, total: 9 } })).toMatchObject({
+      pct: 55,
+      count: { current: 5, total: 9 },
+    });
+    expect(pill(active, { live: { kind: "enrich", pct: 90, current: 1, total: 2 } })).toMatchObject({ pct: 10, count: null });
+  });
+
+  it("clamps an out-of-range percentage", () => {
+    expect(pill(status({ activeJob: job({ progressPct: 140 }) }))?.pct).toBe(100);
+  });
+});
+
+describe("idle", () => {
+  it("a late progress frame cannot keep the pill active once the poll says idle (H-17)", () => {
+    const view = pill(status({ activeJob: null }), { live: { kind: "delta", pct: 100, current: null, total: null } })!;
+    expect(view).toMatchObject({ mode: "health", tone: "ok", label: "Up to date · 3m ago" });
+  });
+
+  it("says what the last sync did, when it said", () => {
+    const view = pill(status(), {
+      summary: { ratingsAdded: 3, ratingsChanged: 0, watchedAdded: 0, retrainQueued: false, retrainAt: null, picksChanged: null },
+    });
+    expect(view?.label).toBe("Pulled 3 new ratings from Trakt");
+  });
+
+  it("is honest before the first sync", () => {
+    expect(pill(status({ lastDeltaSyncAt: null }))?.label).toBe("Not synced yet");
+  });
+
+  it("queued write-backs are not a failure", () => {
+    expect(pill(status({ outboxPending: 2 }))).toMatchObject({ tone: "ok", label: "Sending to Trakt…" });
+  });
+
+  it("renders nothing before the first answer, and a warning when the answer failed", () => {
+    expect(pill(undefined)).toBeNull();
+    expect(pill(undefined, { statusFailed: true })).toMatchObject({ tone: "warn", label: "Status unavailable" });
+  });
+
+  it("unmonitored provider health is not reported as a problem — or as healthy", () => {
+    expect(healthIssues(status(), false)).toEqual([]);
+  });
+
+  it("a degraded provider and too few ratings are warnings with specifics", () => {
+    const issues = healthIssues(
+      status({
+        pipelineStage: "NotEnoughRatings",
+        notEnoughRatings: { usableRatings: 4, required: 10 },
+        providerHealth: {
+          state: "Degraded",
+          checkedAt: null,
+          breakers: [{ provider: "OpenRouter", purpose: "ask-rerank", state: "Degraded", reasonCode: "truncation_breaker", since: "", retryAt: null }],
+        },
+      }),
+      false
+    );
+    expect(issues.map((i) => i.detail)).toEqual([
+      "ask-rerank: Model replies keep getting cut off.",
+      "4 of 10 usable ratings — rate a few more and Reel trains your model.",
+    ]);
+  });
+
+  it("tolerates a payload missing the v2 fields", () => {
+    const v1 = { ...status() } as Partial<SyncStatus>;
+    delete v1.lastFailures;
+    delete v1.providerHealth;
+    expect(pill(v1 as SyncStatus)?.tone).toBe("ok");
+  });
+});
+
+describe("poll cadence", () => {
+  it("polls every 5 s only while user-visible work is in flight", () => {
+    expect(statusPollInterval(status({ activeJob: job() }))).toBe(ACTIVE_POLL_MS);
+    expect(statusPollInterval(status({ activeJob: job({ visibility: "NamedPass", sseKind: "xref" }) }))).toBe(IDLE_POLL_MS);
+    expect(statusPollInterval(status())).toBe(IDLE_POLL_MS);
+    expect(statusPollInterval(undefined)).toBe(IDLE_POLL_MS);
+  });
+});

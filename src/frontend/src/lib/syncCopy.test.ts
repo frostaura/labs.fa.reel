@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVE_LABEL_FALLBACK,
+  FAILURE_NOUN_FALLBACK,
   PIPELINE_DEGRADED_FALLBACK,
   PIPELINE_STAGE_FALLBACK,
-  isBackgroundKind,
-  jobKindToSseKind,
+  REASON_FALLBACK,
+  activeJobLabel,
+  failureNoun,
+  isTerminalReason,
   pipelineStageCopy,
+  reasonCopy,
   syncExplainer,
   syncSummaryCopy,
   type SyncSummaryPayload,
@@ -34,43 +39,58 @@ describe("syncExplainer", () => {
     }
   });
 
-  it("maps backend JobKinds to the SSE kind vocabulary (reload-seed path)", () => {
-    expect(jobKindToSseKind("HydrateCatalog")).toBe("hydrate");
-    expect(jobKindToSseKind("FullIngest")).toBe("ingest");
-    expect(jobKindToSseKind("DeltaSync")).toBe("delta");
-    expect(jobKindToSseKind("EnrichCatalog")).toBe("enrich");
-    expect(jobKindToSseKind("Train")).toBe("train");
-    expect(jobKindToSseKind("Evaluate")).toBe("evaluate");
-    expect(jobKindToSseKind("CrossReference")).toBe("xref");
-    // Both of these used to fall through to "Background sync" while the user watched them run.
-    expect(jobKindToSseKind("BuildTasteNarrative")).toBe("narrative");
-    expect(jobKindToSseKind("PersonaliseTitles")).toBe("lens");
-    expect(jobKindToSseKind("SomethingNew")).toBeNull();
-    expect(jobKindToSseKind(null)).toBeNull();
+  it("no longer promises that only a model beating popularity ships", () => {
+    // 0 of 101 evaluations beat popularity and every model shipped anyway.
+    expect(syncExplainer("evaluate").lines.join(" ")).not.toMatch(/only a model that beats/i);
+  });
+});
+
+/**
+ * Every SSE kind the backend's `JobVisibilityPolicy.SseKind` can emit. A kind missing from the copy
+ * tables would put the generic fallback on the header while the user watched a real job.
+ */
+const BACKEND_SSE_KINDS = [
+  "ingest", "delta", "reconcile", "hydrate", "enrich", "train", "evaluate", "feed",
+  "availability", "digest", "narrative", "lens", "seed", "xref",
+];
+
+/** Every code the backend's `JobFailureReason.Classify` can return. */
+const BACKEND_REASON_CODES = [
+  "stalled", "payment_required", "unauthorized", "forbidden", "rate_limited", "no_answer",
+  "budget_spent", "timed_out", "error",
+];
+
+describe("header pill copy", () => {
+  it.each(BACKEND_SSE_KINDS)("has fixed copy for the %s kind", (kind) => {
+    expect(activeJobLabel(kind)).not.toBe(ACTIVE_LABEL_FALLBACK);
+    expect(failureNoun(kind)).not.toBe(FAILURE_NOUN_FALLBACK);
+    expect(syncExplainer(kind).title).not.toBe("Background sync");
   });
 
-  it("seeded kinds round-trip into real explainers", () => {
-    expect(syncExplainer(jobKindToSseKind("HydrateCatalog")).title).toBe("Enriching your library");
-    expect(syncExplainer(jobKindToSseKind("FullIngest")).title).toBe("First sync with Trakt");
-    expect(syncExplainer(jobKindToSseKind("EnrichCatalog")).title).toBe("Reading every title");
-    expect(syncExplainer(jobKindToSseKind("CrossReference")).title).toBe(
-      "Cross-referencing against your history"
-    );
-    // The regression this pair exists to prevent: a real job rendering as the generic fallback.
-    for (const kind of ["BuildTasteNarrative", "PersonaliseTitles", "CrossReference"]) {
-      expect(syncExplainer(jobKindToSseKind(kind)).title).not.toBe("Background sync");
-    }
+  it("names the cross-reference pass with no denominator", () => {
+    expect(activeJobLabel("xref")).toBe("Cross-referencing · first pass");
+    expect(activeJobLabel("xref")).not.toMatch(/\d/);
   });
 
-  it("classifies background polls so they cannot hijack the pill from a primary job", () => {
-    expect(isBackgroundKind("delta")).toBe(true);
-    expect(isBackgroundKind("reconcile")).toBe(true);
-    expect(isBackgroundKind("enrich")).toBe(false);
-    expect(isBackgroundKind("ingest")).toBe(false);
-    expect(isBackgroundKind("train")).toBe(false);
-    // A ten-minute pass owns the pill for its whole run; a delta poll must not take it away.
-    expect(isBackgroundKind("xref")).toBe(false);
-    expect(isBackgroundKind(null)).toBe(false);
+  it("falls back for an unknown or missing kind", () => {
+    expect(activeJobLabel("embeddings-v2")).toBe(ACTIVE_LABEL_FALLBACK);
+    expect(activeJobLabel(null)).toBe(ACTIVE_LABEL_FALLBACK);
+    expect(failureNoun(undefined)).toBe(FAILURE_NOUN_FALLBACK);
+  });
+
+  it.each(BACKEND_REASON_CODES)("has a sentence for the %s reason code", (code) => {
+    expect(reasonCopy(code)).toMatch(/\.$/);
+  });
+
+  it("maps an unknown reason code to the generic line, never to the code itself", () => {
+    expect(reasonCopy("quota_exhausted_v2")).toBe(REASON_FALLBACK);
+    expect(reasonCopy("quota_exhausted_v2")).not.toContain("quota");
+    expect(reasonCopy(null)).toBe(REASON_FALLBACK);
+  });
+
+  it("treats only the credential and payment refusals as terminal", () => {
+    expect(BACKEND_REASON_CODES.filter(isTerminalReason)).toEqual(["payment_required", "unauthorized", "forbidden"]);
+    expect(isTerminalReason(null)).toBe(false);
   });
 });
 
@@ -165,6 +185,7 @@ describe("syncSummaryCopy", () => {
  */
 describe("pipelineStageCopy", () => {
   it.each([
+    ["NotEnoughRatings", "waiting for a few more ratings"],
     ["Linked", "linking your Trakt"],
     ["Ingesting", "pulling your history"],
     ["Extracting", "reading every title"],
@@ -176,7 +197,7 @@ describe("pipelineStageCopy", () => {
   });
 
   it("never returns the enum token itself", () => {
-    const stages = ["Linked", "Ingesting", "Extracting", "Training", "Evaluated", "FeedReady", "Degraded"];
+    const stages = ["Linked", "Ingesting", "Extracting", "Training", "Evaluated", "FeedReady", "Degraded", "NotEnoughRatings"];
     for (const stage of stages) {
       expect(pipelineStageCopy(stage)).not.toContain(stage);
     }
