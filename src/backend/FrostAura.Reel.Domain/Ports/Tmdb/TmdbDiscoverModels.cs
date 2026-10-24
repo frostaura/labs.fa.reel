@@ -6,6 +6,12 @@ public record TmdbWatchProvider(int ProviderId, string Name, string? LogoPath, i
 /// <summary>A TMDB keyword (concept tag) — resolved from free text to drive concept discovery.</summary>
 public record TmdbKeyword(int Id, string Name);
 
+/// <summary>
+/// One /search/keyword call: the matches, and whether TMDB actually answered. <see cref="Answered"/>
+/// is false when the call failed (non-2xx), so an empty <see cref="Results"/> means nothing.
+/// </summary>
+public sealed record TmdbKeywordSearch(IReadOnlyList<TmdbKeyword> Results, bool Answered);
+
 /// <summary>A TMDB person (search/person) — resolves a name to an id for credit lookups.</summary>
 public record TmdbPerson(long Id, string Name, string? KnownForDepartment);
 

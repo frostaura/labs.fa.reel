@@ -7,6 +7,8 @@ using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Tests.Fakes;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -49,7 +51,7 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         await SeedFilterAsync(accountId, FilterKind.MinCrowdRating, "6.0");
         await SeedFilterAsync(accountId, FilterKind.MinYear, "2000");
 
-        var tmdb = new RecordingTmdb();
+        var tmdb = new RecordingTmdbClient();
         tmdb.Keywords["ninja"] = 1001;
         tmdb.Keywords["romance"] = 9840;
         tmdb.Keywords["romantic"] = 9841;
@@ -93,34 +95,37 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         var accountId = await SeedAccountAsync();
 
         // Full pages of eligible new titles: one page holds 20, so want=20 stops after page 1.
-        var tmdb = new RecordingTmdb { PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m) };
+        var tmdb = new RecordingTmdbClient { PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m) };
         var enough = await RunAsync(tmdb, Request(accountId, media: MediaScope.Movies, want: 20));
         Assert.Equal(1, enough.Pages);
-        Assert.Equal(20, enough.EligibleItems.Count);
+        Assert.Equal(20, enough.ProvisionalItems.Count);   // new titles: usable once hydrated, never "eligible" yet
+        Assert.Empty(enough.EligibleItems);
 
         // Both media at once: they page concurrently against TMDB and take turns on the one context.
-        tmdb = new RecordingTmdb
+        tmdb = new RecordingTmdbClient
         {
             PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m),
             DiscoverDelay = _ => TimeSpan.FromMilliseconds(5),
         };
         var bothMedia = await RunAsync(tmdb, Request(accountId, media: MediaScope.Any, want: 30));
         Assert.Equal(4, bothMedia.Pages);
-        Assert.Equal(80, bothMedia.EligibleItems.Count);
+        Assert.Equal(80, bothMedia.ProvisionalItems.Count);
 
         // A short page is the last page there is.
-        tmdb = new RecordingTmdb { PageFactory = (movies, page) => Page(movies, page, page == 1 ? 20 : 7, voteAverage: 7.5m) };
+        tmdb = new RecordingTmdbClient { PageFactory = (movies, page) => Page(movies, page, page == 1 ? 20 : 7, voteAverage: 7.5m) };
         var shortPage = await RunAsync(tmdb, Request(accountId, media: MediaScope.Movies, want: 100));
         Assert.Equal(2, shortPage.Pages);
         Assert.Equal(27, shortPage.Items.Count);
 
         // Nothing eligible (all English-less): three pages and no more.
-        tmdb = new RecordingTmdb { PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m, language: "ja") };
+        tmdb = new RecordingTmdbClient { PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m, language: "ja") };
         var capped = await RunAsync(tmdb, Request(accountId, media: MediaScope.Movies, want: 5));
         Assert.Equal(TmdbDiscoveryArm.MaxPages, capped.Pages);
         Assert.Equal(TmdbDiscoveryArm.MaxPages, tmdb.Discovers.Count);
         Assert.Empty(capped.EligibleItems);
+        Assert.Empty(capped.ProvisionalItems);
         Assert.Equal(0d, capped.EligibleShare);
+        Assert.Equal(0d, capped.UsableShare);
     }
 
     [Fact]
@@ -147,7 +152,7 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         var newGood = Random.Shared.NextInt64(1_000_000_000, long.MaxValue);
         var newLowRated = Random.Shared.NextInt64(1_000_000_000, long.MaxValue);
         var newComedy = Random.Shared.NextInt64(1_000_000_000, long.MaxValue);
-        var tmdb = new RecordingTmdb
+        var tmdb = new RecordingTmdbClient
         {
             PageFactory = (movies, page) => movies && page == 1
                 ?
@@ -166,10 +171,14 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         Assert.Equal(fresh, byId[freshTmdbId].CatalogueTitleId);
         Assert.True(byId[freshTmdbId].Eligible);
         Assert.Null(byId[newGood].CatalogueTitleId);
-        Assert.True(byId[newGood].Eligible);
-        Assert.False(byId[newLowRated].Eligible);          // under the crowd floor
-        Assert.False(byId[newComedy].Eligible);            // excluded genre, read off TMDB's genre ids
-        Assert.Equal(0.4, result.EligibleShare, precision: 3);
+        Assert.Equal(TmdbDiscoveryVerdict.Provisional, byId[newGood].Verdict);   // a list row cannot be fully judged
+        Assert.False(byId[newGood].Eligible);
+        Assert.Equal(TmdbDiscoveryVerdict.Ineligible, byId[newLowRated].Verdict);  // under the crowd floor
+        Assert.Equal(TmdbDiscoveryVerdict.Ineligible, byId[newComedy].Verdict);    // excluded genre, read off TMDB's genre ids
+
+        // The gate's share counts eligible CATALOGUE titles only (1 of 5); provisional ones are a bound.
+        Assert.Equal(0.2, result.EligibleShare, precision: 3);
+        Assert.Equal(0.4, result.UsableShare, precision: 3);
     }
 
     [Fact]
@@ -182,13 +191,13 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
 
         var accountId = await SeedAccountAsync();
 
-        var tmdb = new RecordingTmdb();
+        var tmdb = new RecordingTmdbClient();
         var titled = await RunAsync(tmdb, Request(accountId, message: "Inception"));
         Assert.Equal("Inception", titled.TitleSearched);
         Assert.Equal(2, tmdb.Searches.Count);              // movie and TV
         Assert.All(tmdb.Searches, s => Assert.Equal("Inception", s));
 
-        tmdb = new RecordingTmdb();
+        tmdb = new RecordingTmdbClient();
         var described = await RunAsync(
             tmdb, Request(accountId, message: "none of the above are ninja movies. I want ninja movies", concepts: ["ninja"]));
         Assert.Null(described.TitleSearched);
@@ -204,7 +213,7 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         }
 
         var accountId = await SeedAccountAsync();
-        var tmdb = new RecordingTmdb
+        var tmdb = new RecordingTmdbClient
         {
             PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m),
             DiscoverDelay = page => page >= 2 ? TimeSpan.FromSeconds(30) : TimeSpan.Zero,
@@ -217,14 +226,212 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         Assert.True(result.ElapsedMs < 10_000);
     }
 
+    [Fact]
+    public async Task The_turns_own_rejections_judge_every_result_as_strictly_as_a_standing_exclusion()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+
+        // "Sci-fi shows, no fantasy, no zombies": TV's 10765 is BOTH, so it is not sent as
+        // without_genres (the request asked for sci-fi) — and the judging must still enforce it.
+        long Id() => Random.Shared.NextInt64(1_000_000_000, long.MaxValue);
+        var sciFiOnlyId = Id();
+        var sciFiFantasyId = Id();
+        var zombieId = Id();
+        var sciFiOnly = await SeedTitleAsync(sciFiOnlyId, t => { t.MediaType = MediaType.Show; t.Genres = ["science-fiction"]; });
+        await SeedTitleAsync(sciFiFantasyId, t => { t.MediaType = MediaType.Show; t.Genres = ["science-fiction", "fantasy"]; });
+        await SeedTitleAsync(zombieId, t => { t.MediaType = MediaType.Show; t.Genres = ["science-fiction"]; t.Keywords = ["zombie apocalypse"]; });
+        var newFusedId = Id();
+        var newDramaId = Id();
+
+        TmdbListItem Show(long id, int[] genres) =>
+            new(id, false, $"arm-fixture {id}", null, null, null, 10m, 7.5m, 500, new DateTime(2012, 1, 1, 0, 0, 0, DateTimeKind.Utc), genres, "en");
+
+        var tmdb = new RecordingTmdbClient
+        {
+            PageFactory = (movies, page) => !movies && page == 1
+                ? [Show(sciFiOnlyId, [10765]), Show(sciFiFantasyId, [10765]), Show(zombieId, [10765]), Show(newFusedId, [10765]), Show(newDramaId, [18])]
+                : [],
+        };
+
+        var result = await RunAsync(tmdb, Request(
+            accountId, genres: ["science-fiction"], excludeGenres: ["fantasy"], excludeConcepts: ["zombie"], media: MediaScope.Shows));
+        var byId = result.Items.ToDictionary(i => i.Item.Id);
+
+        var call = Assert.Single(tmdb.Discovers);
+        Assert.DoesNotContain(10765, call.ExcludeGenreIds!);                       // never empties the sci-fi request at TMDB
+        Assert.Equal(TmdbDiscoveryVerdict.Eligible, byId[sciFiOnlyId].Verdict);    // stored as sci-fi alone: survives
+        Assert.Equal(sciFiOnly, byId[sciFiOnlyId].CatalogueTitleId);
+        Assert.Equal(TmdbDiscoveryVerdict.Ineligible, byId[sciFiFantasyId].Verdict); // tagged fantasy: the rejection binds
+        Assert.Equal(TmdbDiscoveryVerdict.Ineligible, byId[zombieId].Verdict);       // keyword label carries "zombie"
+        Assert.Equal(TmdbDiscoveryVerdict.Ineligible, byId[newFusedId].Verdict);     // a new 10765 show reads as fantasy too
+        Assert.Equal(TmdbDiscoveryVerdict.Provisional, byId[newDramaId].Verdict);
+
+        // The same request with no rejections: the fantasy and zombie shows are eligible again, so it
+        // was the turn's rejections, not the fixture, that removed them.
+        tmdb = new RecordingTmdbClient { PageFactory = tmdb.PageFactory };
+        var unrejected = await RunAsync(tmdb, Request(accountId, genres: ["science-fiction"], media: MediaScope.Shows));
+        var again = unrejected.Items.ToDictionary(i => i.Item.Id);
+        Assert.True(again[sciFiFantasyId].Eligible);
+        Assert.True(again[zombieId].Eligible);
+        Assert.True(again[newFusedId].Provisional);
+    }
+
+    [Fact]
+    public async Task A_rejection_tv_cannot_tag_reaches_tv_as_stand_in_keywords()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var tmdb = new RecordingTmdbClient();
+        tmdb.Keywords["romance"] = 9840;
+
+        await RunAsync(tmdb, Request(accountId, excludeGenres: ["romance"]));
+
+        var movie = Assert.Single(tmdb.Discovers, d => d.Movies);
+        var show = Assert.Single(tmdb.Discovers, d => !d.Movies);
+        Assert.Contains(10749, movie.ExcludeGenreIds!);        // movies name romance by genre id
+        Assert.DoesNotContain(9840, movie.ExcludeKeywordIds!);
+        Assert.Contains(9840, show.ExcludeKeywordIds!);        // TV has no romance id: the stand-in carries it
+    }
+
+    [Fact]
+    public async Task A_keyword_lookup_that_fails_never_drops_the_topic_nor_escapes_nor_is_remembered()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        // A socket failure surfaces as HttpRequestException: the arm absorbs it, and with its only
+        // concept unresolved it skips discover rather than return popular, off-topic titles.
+        var tmdb = new RecordingTmdbClient { PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m) };
+        tmdb.Keywords["ninja"] = 1001;
+        tmdb.ThrowingKeywords.Add("ninja");
+        var thrown = await RunAsync(tmdb, Request(accountId, concepts: ["ninja"]), cache: cache);
+        Assert.True(thrown.ConceptsUnresolved);
+        Assert.Empty(tmdb.Discovers);
+        Assert.Empty(thrown.Items);
+
+        // TMDB did not answer (a 5xx / 429): the same, and it is NOT cached — once TMDB recovers, the
+        // very next call resolves "ninja" and discovers on it.
+        tmdb = new RecordingTmdbClient { PageFactory = tmdb.PageFactory };
+        tmdb.Keywords["ninja"] = 1001;
+        tmdb.UnansweredKeywords.Add("ninja");
+        var unanswered = await RunAsync(tmdb, Request(accountId, concepts: ["ninja"]), cache: cache);
+        Assert.True(unanswered.ConceptsUnresolved);
+        Assert.Empty(tmdb.Discovers);
+
+        tmdb.UnansweredKeywords.Clear();
+        var recovered = await RunAsync(tmdb, Request(accountId, concepts: ["ninja"]), cache: cache);
+        Assert.False(recovered.ConceptsUnresolved);
+        Assert.All(tmdb.Discovers, d => Assert.Equal([1001], d.KeywordIds));
+        Assert.NotEmpty(tmdb.Discovers);
+
+        // One concept of two failing keeps the other: the OR-joined topic narrows, it is not dropped.
+        tmdb = new RecordingTmdbClient { PageFactory = tmdb.PageFactory };
+        tmdb.Keywords["samurai"] = 2002;
+        tmdb.Keywords["shinobi"] = 2003;
+        tmdb.UnansweredKeywords.Add("shinobi");
+        var partial = await RunAsync(tmdb, Request(accountId, concepts: ["samurai", "shinobi"]), cache: cache);
+        Assert.False(partial.ConceptsUnresolved);
+        Assert.All(tmdb.Discovers, d => Assert.Equal([2002], d.KeywordIds));
+
+        // TMDB's real answer "no such keyword" IS remembered (for KeywordMissCacheWindow): the second
+        // call asks TMDB nothing about it, and still skips the off-topic discover.
+        tmdb = new RecordingTmdbClient { PageFactory = tmdb.PageFactory };
+        await RunAsync(tmdb, Request(accountId, concepts: ["no-such-keyword"]), cache: cache);
+        await RunAsync(tmdb, Request(accountId, concepts: ["no-such-keyword"]), cache: cache);
+        Assert.Single(tmdb.KeywordSearches, k => k == "no-such-keyword");
+        Assert.Empty(tmdb.Discovers);
+    }
+
+    [Fact]
+    public async Task A_deadline_during_keyword_resolution_leaves_nothing_running_on_the_context()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        // The concept resolves at once and the movie medium needs no stand-in, but TV's "romance"
+        // stand-ins hang: a movie page must not already be running (and judging on the shared
+        // context) when the deadline fires.
+        var tmdb = new RecordingTmdbClient
+        {
+            PageFactory = (movies, page) => Page(movies, page, 20, voteAverage: 7.5m),
+            KeywordDelay = phrase => phrase == "ninja" ? TimeSpan.Zero : TimeSpan.FromSeconds(30),
+        };
+        tmdb.Keywords["ninja"] = 1001;
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var arm = new TmdbDiscoveryArm(tmdb, db, new EligibilityQueryBuilder(db), cache);
+        var result = await arm.DiscoverAsync(Request(accountId, concepts: ["ninja"]), TimeSpan.FromMilliseconds(300), CancellationToken.None);
+
+        Assert.True(result.TimedOut);
+        Assert.Empty(tmdb.Discovers);   // no page was started, so none can outlive the call
+
+        // The caller's context is free at once: a second operation on it does not collide.
+        for (var i = 0; i < 20; i++)
+        {
+            Assert.True(await db.ContentFilters.CountAsync(f => f.AccountId == accountId) >= 1);
+        }
+    }
+
+    [Fact]
+    public async Task A_message_that_exactly_names_a_catalogue_title_is_searched_whatever_its_words()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var titles = new[] { $"Scary Movie {suffix}", $"Monsters, Inc. {suffix}", $"How to Train Your Dragon {suffix}" };
+        foreach (var name in titles)
+        {
+            await SeedTitleAsync(Random.Shared.NextInt64(1_000_000_000, long.MaxValue), t => t.Name = name);
+        }
+
+        foreach (var name in titles)
+        {
+            var tmdb = new RecordingTmdbClient();
+            var result = await RunAsync(tmdb, Request(accountId, message: name.ToUpperInvariant()));
+            Assert.Equal(name.ToUpperInvariant(), result.TitleSearched);
+            Assert.NotEmpty(tmdb.Searches);
+        }
+
+        // The same shapes naming nothing in the catalogue stay descriptions.
+        var unknown = new RecordingTmdbClient();
+        Assert.Null((await RunAsync(unknown, Request(accountId, message: $"scary movie {suffix}x"))).TitleSearched);
+        Assert.Empty(unknown.Searches);
+    }
+
     private static TmdbDiscoveryRequest Request(
         Guid accountId,
         IReadOnlyList<string>? concepts = null,
         MediaScope media = MediaScope.Any,
         YearRange? years = null,
         string? message = null,
-        int want = 40) =>
-        new(accountId, [], concepts ?? [], [], [], media, years, null, message, null, want);
+        int want = 40,
+        IReadOnlyList<string>? genres = null,
+        IReadOnlyList<string>? excludeGenres = null,
+        IReadOnlyList<string>? excludeConcepts = null) =>
+        new(accountId, genres ?? [], concepts ?? [], excludeGenres ?? [], excludeConcepts ?? [], media, years, null, message, null, want);
 
     private static List<TmdbListItem> Page(bool movies, int page, int count, decimal voteAverage, string language = "en") =>
         [.. Enumerable.Range(0, count).Select(i => new TmdbListItem(
@@ -241,11 +448,12 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
             [18],
             language))];
 
-    private async Task<TmdbDiscoveryResult> RunAsync(RecordingTmdb tmdb, TmdbDiscoveryRequest request, TimeSpan? timeout = null)
+    private async Task<TmdbDiscoveryResult> RunAsync(
+        RecordingTmdbClient tmdb, TmdbDiscoveryRequest request, TimeSpan? timeout = null, IMemoryCache? cache = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
-        using var cache = new MemoryCache(new MemoryCacheOptions());
-        var arm = new TmdbDiscoveryArm(tmdb, db, new EligibilityQueryBuilder(db), cache);
+        using var own = new MemoryCache(new MemoryCacheOptions());
+        var arm = new TmdbDiscoveryArm(tmdb, db, new EligibilityQueryBuilder(db), cache ?? own);
         return await arm.DiscoverAsync(request, timeout ?? TimeSpan.FromSeconds(30), CancellationToken.None);
     }
 
@@ -280,7 +488,7 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
         await db.SaveChangesAsync();
     }
 
-    private async Task<Guid> SeedTitleAsync(long tmdbId)
+    private async Task<Guid> SeedTitleAsync(long tmdbId, Action<Title>? shape = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var title = new Title
@@ -299,6 +507,7 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
             Year = 2010,
             CreatedAt = DateTime.UtcNow,
         };
+        shape?.Invoke(title);
         db.Add(title);
         await db.SaveChangesAsync();
         return title.Id;
@@ -319,87 +528,5 @@ public class TmdbDiscoveryArmTests(PostgresFixture fixture, ReelApiFactory api) 
             UpdatedAt = DateTime.UtcNow,
         });
         await db.SaveChangesAsync();
-    }
-
-    /// <summary>A TMDB that records every discover and title search and answers from a page factory.</summary>
-    private sealed class RecordingTmdb : ITmdbClient
-    {
-        public sealed record DiscoverCall(
-            bool Movies, int Page, IReadOnlyList<int> KeywordIds, IReadOnlyList<int>? ExcludeGenreIds,
-            IReadOnlyList<int>? ExcludeKeywordIds, DateTime? After, DateTime? Before, TmdbDiscoverOptions? Options);
-
-        public Dictionary<string, int> Keywords { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-        public List<DiscoverCall> Discovers { get; } = [];
-
-        public List<string> Searches { get; } = [];
-
-        public Func<bool, int, List<TmdbListItem>> PageFactory { get; init; } = (_, _) => [];
-
-        public Func<int, TimeSpan> DiscoverDelay { get; init; } = _ => TimeSpan.Zero;
-
-        public async Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
-            bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
-            string? region, DateTime? releasedAfter, int page,
-            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
-            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null,
-            CancellationToken ct = default)
-        {
-            lock (Discovers)
-            {
-                Discovers.Add(new DiscoverCall(
-                    movies, page, keywordIds, excludeGenreIds, excludeKeywordIds, releasedAfter, releasedBefore, options));
-            }
-
-            var delay = DiscoverDelay(page);
-            if (delay > TimeSpan.Zero)
-            {
-                await Task.Delay(delay, ct);
-            }
-
-            return PageFactory(movies, page);
-        }
-
-        public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<TmdbKeyword>>(
-                Keywords.TryGetValue(query, out var id) ? [new TmdbKeyword(id, query)] : []);
-
-        public Task<IReadOnlyList<TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default)
-        {
-            lock (Searches)
-            {
-                Searches.Add(query);
-            }
-
-            return Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
-        }
-
-        public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) => throw new NotSupportedException();
-
-        public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) => throw new NotSupportedException();
-
-        public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
-            bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default) => throw new NotSupportedException();
-
-        public Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-
-        public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
-            throw new NotSupportedException();
     }
 }

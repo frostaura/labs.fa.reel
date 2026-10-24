@@ -17,9 +17,11 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// every turn:</para>
 /// <list type="bullet">
 /// <item>Text in double quotes is a title, whatever surrounds it: <c>something like "Heat"</c>.</item>
+/// <item>A message that exactly names a catalogue title is a title, unless it is nothing but the
+/// request's own topic words.</item>
 /// <item>Otherwise the whole message must be short (at most <see cref="MaxWords"/> words), carry no
 /// sentence punctuation, and contain none of the words that make a request a description
-/// ("movies", "something", "about", "like", "with", "but", a question word, …).</item>
+/// ("movies", "something", "but", "instead", a question word, …).</item>
 /// </list>
 /// </summary>
 public static partial class TitleShape
@@ -56,28 +58,48 @@ public static partial class TitleShape
         Extract(message, topicWords, namesCatalogueTitle: false);
 
     /// <summary>
-    /// The full rule. After the shape rules, the request's own topic words decide between a topic and
-    /// a title:
-    /// <list type="bullet">
+    /// The full rule, in this order:
+    /// <list type="number">
+    /// <item>a quoted span is a title, whatever surrounds it;</item>
     /// <item>a message that is nothing but its topic words ("ninja", "time loop") is a topic, even if
     /// some film happens to be called "Ninja" — discovery answers it, and a title search would add
     /// whatever is named that, by popularity;</item>
-    /// <item>a message that exactly names a catalogue title (<paramref name="namesCatalogueTitle"/>)
-    /// is a title ("Ninja Assassin");</item>
-    /// <item>otherwise a message whose words are at least <see cref="TopicShare"/> topic words
-    /// ("haunted house horror", "detective hunting a serial killer") is a topic.</item>
+    /// <item>a message that exactly names a catalogue title (<paramref name="namesCatalogueTitle"/>,
+    /// asked of the whole trimmed message, see <see cref="LookupText"/>) is a title, BEFORE the shape
+    /// rules: "How to Train Your Dragon", "Scary Movie", "Monsters, Inc." and "What We Do in the
+    /// Shadows" carry description words or punctuation and would otherwise never be searched;</item>
+    /// <item>otherwise the shape rules (<see cref="Candidate"/>) must pass, and a message whose words
+    /// are at least <see cref="TopicShare"/> topic words ("haunted house horror", "detective hunting
+    /// a serial killer") is a topic.</item>
     /// </list>
     /// </summary>
     public static string? Extract(string? message, IReadOnlyCollection<string> topicWords, bool namesCatalogueTitle)
     {
-        if (Candidate(message) is not { } candidate)
+        if (string.IsNullOrWhiteSpace(message))
         {
             return null;
         }
 
-        if (candidate.Quoted)
+        var quoted = QuotedSpan().Match(message);
+        if (quoted.Success && quoted.Groups["title"].Value.Trim() is { Length: > 0 } inQuotes)
         {
-            return candidate.Text;
+            return inQuotes;
+        }
+
+        var text = message.Trim();
+        if (TopicCoverage(text, topicWords) >= 1d)
+        {
+            return null;
+        }
+
+        if (namesCatalogueTitle && text.Length <= MaxLookupLength)
+        {
+            return text;
+        }
+
+        if (Candidate(message) is not { } candidate)
+        {
+            return null;
         }
 
         var coverage = TopicCoverage(candidate.Text, topicWords);
@@ -89,10 +111,29 @@ public static partial class TitleShape
         return namesCatalogueTitle || coverage < TopicShare ? candidate.Text : null;
     }
 
+    /// <summary>The longest message worth asking the catalogue about: longer than any title it holds.</summary>
+    public const int MaxLookupLength = 120;
+
+    /// <summary>
+    /// The text to ask the catalogue about ("is this exactly a title's name?") — the whole trimmed
+    /// message — or null when no answer could change <see cref="Extract(string?, IReadOnlyCollection{string}, bool)"/>:
+    /// a blank or over-long message, or a quoted span, which is a title regardless.
+    /// </summary>
+    public static string? LookupText(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message) || QuotedSpan().IsMatch(message))
+        {
+            return null;
+        }
+
+        var text = message.Trim();
+        return text.Length <= MaxLookupLength ? text : null;
+    }
+
     /// <summary>
     /// The message after the shape rules alone — quoted span, punctuation, length, description words —
     /// or null. <see cref="TitleCandidate.Quoted"/> marks a span the user put in quotes, which no topic
-    /// rule overrides. Callers use it to decide whether a catalogue lookup is worth making.
+    /// rule overrides.
     /// </summary>
     public static TitleCandidate? Candidate(string? message)
     {

@@ -50,6 +50,35 @@ public class TmdbDiscoveryPlanTests
         Assert.Equal(expected, TitleShape.Extract(message, topic, namesCatalogueTitle));
     }
 
+    // A real catalogue title outranks the shape rules: each of these carries a description word
+    // ("movie", "how", "what"), a comma or a full stop, and each is searched once the catalogue knows
+    // it — and only then.
+    [Theory]
+    [InlineData("How to Train Your Dragon")]
+    [InlineData("What We Do in the Shadows")]
+    [InlineData("Dr. Strangelove")]
+    [InlineData("Crouching Tiger, Hidden Dragon")]
+    [InlineData("Scary Movie")]
+    [InlineData("Need for Speed")]
+    [InlineData("Monsters, Inc.")]
+    [InlineData("A Series of Unfortunate Events")]
+    public void An_exact_catalogue_title_is_searched_before_the_shape_rules_run(string message)
+    {
+        Assert.Equal(message, TitleShape.Extract(message, ["dragon", "speed"], namesCatalogueTitle: true));
+        Assert.Equal(message, TitleShape.LookupText($"  {message} "));
+        Assert.NotEqual(message, TitleShape.Extract(message, [], namesCatalogueTitle: false));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    [InlineData("something like \"Heat\"")]   // quoted: a title whatever the catalogue says
+    public void Lookup_is_skipped_when_no_answer_could_change_the_decision(string? message)
+    {
+        Assert.Null(TitleShape.LookupText(message));
+        Assert.Null(TitleShape.LookupText(new string('x', TitleShape.MaxLookupLength + 1)));
+    }
+
     [Fact]
     public void The_plan_projects_language_floor_votes_years_and_exclusions_per_medium()
     {
