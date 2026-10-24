@@ -53,7 +53,8 @@ public static class EnrichmentScheduler
     /// headroom with a title still missing its vector. Without the check the follow-through pass
     /// queued a global run every 15 minutes after the ceiling was hit, each one opening only to log
     /// "paused for today's token ceiling" (E-15). Callers that do not pass a budget keep the old
-    /// behaviour; every caller should pass one.
+    /// behaviour; every caller should pass one. The feed build and the nightly reconcile do not yet
+    /// (CR-3), and until they do the gate is incomplete for account-scoped runs.
     /// </para>
     /// </summary>
     public static async Task<bool> EnqueueAsync(
@@ -118,25 +119,39 @@ public static class EnrichmentScheduler
     /// The <c>(Status, AttemptCount)</c> predicate makes each row self-terminating — a row already
     /// reset is not re-written on the next pass, so the sweep converges instead of churning.
     /// </para>
-    /// Returns how many rows were reset. <b>Does not save.</b>
+    /// <para>
+    /// <b>Conditional SQL, never a tracked write.</b> The reset is one UPDATE whose predicate —
+    /// "still written by an older version" — is re-checked against the committed row. The sweep used
+    /// to load the rows tracked and save them later through the caller: an enrich run that wrote a
+    /// fresh current-version answer in between was overwritten to Pending, vanished from every
+    /// Done-filtered reader and was billed again (review defect 4). Like every other status-changing
+    /// write on <see cref="TitleAttributes"/>, it can no longer demote a current answer.
+    /// </para>
+    /// Returns how many rows were reset. <b>Writes immediately</b>: the UPDATE is its own statement,
+    /// so a caller's later <c>SaveChanges</c> neither commits nor discards it.
     /// </summary>
     public static async Task<int> RequeueStaleExtractorVersionsAsync(
         IReelDbContext db, int currentVersion, int cap, CancellationToken ct)
     {
-        var stale = await db.TitleAttributes
+        var candidates = await db.TitleAttributes
             .Where(a => a.ExtractorVersion < currentVersion
                 && (a.Status != AttributeExtractionStatus.Pending || a.AttemptCount != 0))
             .OrderBy(a => a.TitleId)
             .Take(cap)
+            .Select(a => a.TitleId)
             .ToListAsync(ct);
-
-        foreach (var row in stale)
+        if (candidates.Count == 0)
         {
-            row.Status = AttributeExtractionStatus.Pending;
-            row.AttemptCount = 0;
+            return 0;
         }
 
-        return stale.Count;
+        return await db.TitleAttributes
+            .Where(a => candidates.Contains(a.TitleId)
+                && a.ExtractorVersion < currentVersion
+                && (a.Status != AttributeExtractionStatus.Pending || a.AttemptCount != 0))
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(a => a.Status, AttributeExtractionStatus.Pending)
+                .SetProperty(a => a.AttemptCount, 0), ct);
     }
 
     /// <summary>

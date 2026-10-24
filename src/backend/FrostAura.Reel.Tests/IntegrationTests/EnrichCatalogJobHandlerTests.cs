@@ -550,6 +550,231 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
     }
 
     /// <summary>
+    /// Review defect 1. <c>JobRunnerService</c> revives a stale Running job by putting the SAME row
+    /// back to Pending, so a revived run and its still-live original share a job id. Claims keyed on
+    /// the job id let each treat the other's titles as its own; claims keyed on the execution do not.
+    /// </summary>
+    [Fact]
+    public async Task A_revived_job_and_its_live_original_never_extract_the_same_title_twice()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(4);
+        var extractor = new ClassifyingExtractor("revived/test-model", _ => AttributeFailureClass.None)
+        {
+            Delay = TimeSpan.FromMilliseconds(300),
+        };
+        var jobId = Guid.NewGuid();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            db.SyncJobs.Add(new SyncJob
+            {
+                Id = jobId,
+                AccountId = accountId,
+                Kind = JobKind.EnrichCatalog,
+                Status = JobStatus.Running,
+                EnqueuedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await Task.WhenAll(
+            RunExistingJobAsync(jobId, accountId, new StubEmbeddingProvider(false), extractor, cap: 4),
+            RunExistingJobAsync(jobId, accountId, new StubEmbeddingProvider(false), extractor, cap: 4));
+
+        Assert.All(titleIds, id => Assert.Equal(1, extractor.TitlesSeen.Count(seen => seen == id)));
+        await using var verify = Fixture.CreateContext(new AccountContext());
+        var rows = await verify.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+        Assert.All(rows, a => Assert.Equal(AttributeExtractionStatus.Done, a.Status));
+        Assert.All(rows, a => Assert.Null(a.ClaimedBy));
+    }
+
+    /// <summary>
+    /// Review defect 2. Embedding must not be ordered by ATTRIBUTE status: an account's own library
+    /// title that is attributed but has no vector goes before a never-attributed stranger, even with
+    /// the extractor switched off.
+    /// </summary>
+    [Fact]
+    public async Task Embedding_takes_the_accounts_library_before_the_never_attributed_backlog()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var library = titleIds[0];
+        Guid stranger;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            db.TitleAttributes.Add(new TitleAttributes
+            {
+                TitleId = library,
+                ExtractorModel = "embed-order/model",
+                ExtractorVersion = 1,
+                Status = AttributeExtractionStatus.Done,
+                RawJson = "{}",
+                ExtractedAt = DateTime.UtcNow,
+            });
+            var s = NewHydratedTitle("Never attributed, far more popular");
+            s.TmdbVoteCount = int.MaxValue;
+            db.Add(s);
+            await db.SaveChangesAsync();
+            stranger = s.Id;
+        }
+
+        try
+        {
+            await RunEnrichAsync(accountId, new StubEmbeddingProvider(true), new UnavailableExtractor(), cap: 1);
+
+            await using var verify = Fixture.CreateContext(new AccountContext());
+            Assert.True(await verify.TitleEmbeddings.AnyAsync(e => e.TitleId == library));
+            Assert.False(await verify.TitleEmbeddings.AnyAsync(e => e.TitleId == stranger));
+        }
+        finally
+        {
+            await using var db = Fixture.CreateContext(new AccountContext());
+            await db.Titles.Where(t => t.Id == stranger)
+                .ExecuteUpdateAsync(set => set.SetProperty(t => t.LastMetadataRefreshAt, (DateTime?)null));
+        }
+    }
+
+    /// <summary>
+    /// Review defect 3. Only a recognisable transport failure is booked as Transport. An extractor
+    /// that throws anything else — here a bug — fails the job, where it is visible, and leaves the
+    /// row exactly as it was: no backoff, no attempt charged, no claim held.
+    /// </summary>
+    [Fact]
+    public async Task An_extractor_bug_fails_the_job_instead_of_backing_off_as_transport()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var extractor = new ThrowingExtractor("bug/test-model", () => new NullReferenceException("a defect, not the network"));
+
+        await Assert.ThrowsAsync<NullReferenceException>(
+            () => RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1));
+
+        Assert.Contains(titleIds[0], extractor.TitlesSeen);
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleIds[0]);
+        Assert.Equal(AttributeExtractionStatus.Pending, row.Status);
+        Assert.Equal(0, row.TransportFailures);
+        Assert.Null(row.RetryAfter);
+        Assert.Equal(0, row.AttemptCount);
+        Assert.Null(row.ClaimedBy);
+    }
+
+    /// <summary>
+    /// The throws that ARE transport — the adapter's typed exception, a network or I/O error, a
+    /// timeout, and an HTTP client timeout (a cancellation nobody asked for) — back off by time and
+    /// charge nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("typed")]
+    [InlineData("http")]
+    [InlineData("io")]
+    [InlineData("timeout")]
+    [InlineData("http-timeout")]
+    public async Task A_whole_batch_transport_throw_backs_off_and_charges_nothing(string kind)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var extractor = new ThrowingExtractor($"transport-{kind}/test-model", () => kind switch
+        {
+            "typed" => new AttributeExtractionTransportException("connection reset"),
+            "http" => new HttpRequestException("connection reset"),
+            "io" => new IOException("body read died after the headers"),
+            "timeout" => new TimeoutException("no response"),
+            _ => new TaskCanceledException("HttpClient.Timeout elapsed"),
+        });
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 1);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var row = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleIds[0]);
+        Assert.Equal(1, row.TransportFailures);
+        Assert.Equal(0, row.AttemptCount);
+        Assert.True(row.RetryAfter > DateTime.UtcNow.AddMinutes(25));
+        Assert.NotEqual(AttributeExtractionStatus.Failed, row.Status);
+    }
+
+    [Fact]
+    public void The_callers_own_cancellation_and_a_defect_are_not_transport()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        Assert.False(EnrichCatalogJobHandler.IsTransportFailure(new OperationCanceledException(), cancelled.Token));
+        Assert.True(EnrichCatalogJobHandler.IsTransportFailure(new OperationCanceledException(), CancellationToken.None));
+        Assert.False(EnrichCatalogJobHandler.IsTransportFailure(new InvalidOperationException(), CancellationToken.None));
+        Assert.False(EnrichCatalogJobHandler.IsTransportFailure(new DbUpdateException(), CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Review D6. A row that holds an answer cannot be charged against its attempt budget without
+    /// being demoted, so it used to be retried once a week for ever. Its failed re-extractions are
+    /// now counted per question (model at prompt version): two, then the current model leaves it
+    /// alone. A new question gets a fresh budget, and an answer clears the count.
+    /// </summary>
+    [Fact]
+    public async Task A_re_extraction_that_keeps_failing_is_billed_twice_per_question_not_weekly_for_ever()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(1);
+        var titleId = titleIds[0];
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), new RenamingExtractor("reattempt/test-model", version: 1), cap: 1);
+
+        async Task<int> FailRepeatedlyAsync(int version)
+        {
+            var failing = new ClassifyingExtractor("reattempt/test-model", _ => AttributeFailureClass.Parse, version: version);
+            for (var week = 0; week < 4; week++)
+            {
+                await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), failing, cap: 1);
+                await ExpireRetryGateAsync(titleId);
+            }
+
+            return failing.TitlesSeen.Count(seen => seen == titleId);
+        }
+
+        Assert.Equal(2, await FailRepeatedlyAsync(version: 2));
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var row = await db.TitleAttributes.AsNoTracking().SingleAsync(a => a.TitleId == titleId);
+            Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+            Assert.Equal(1, row.ExtractorVersion);
+            Assert.Equal(0.5m, row.Darkness);
+            Assert.Equal(2, row.ReattemptFailures);
+            Assert.Equal(EnrichCatalogJobHandler.ReattemptQuestionFor("reattempt/test-model", 2), row.ReattemptQuestion);
+        }
+
+        // A newer prompt asks a different question: a fresh budget of two, no more.
+        Assert.Equal(2, await FailRepeatedlyAsync(version: 3));
+
+        // An answer under yet another question clears the count.
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), new RenamingExtractor("reattempt/test-model", version: 4), cap: 1);
+        await using var verify = Fixture.CreateContext(new AccountContext());
+        var answered = await verify.TitleAttributes.SingleAsync(a => a.TitleId == titleId);
+        Assert.Equal(AttributeExtractionStatus.Done, answered.Status);
+        Assert.Equal(4, answered.ExtractorVersion);
+        Assert.Equal(0, answered.ReattemptFailures);
+        Assert.Null(answered.ReattemptQuestion);
+    }
+
+    /// <summary>
     /// A title held by another live run is skipped, not bought twice; once that run's lease lapses
     /// the title is fair game again.
     /// </summary>
@@ -777,7 +1002,11 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
                 // Two dropped connections and no answer.
                 Row("dropped", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; }),
                 // The same shape, but written by the fixed handler: a genuine failure, not backlog.
-                Row("genuine", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; a.LastAttemptAt = DateTime.UtcNow; }));
+                Row("genuine", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; a.LastAttemptAt = DateTime.UtcNow; }),
+                // A pre-fix demoted answer that a pending enrich job reached BEFORE the repair ran:
+                // the fixed handler's failure path kept its answer and stamped LastAttemptAt. Still
+                // settled — Failed-with-an-answer is a pre-fix shape whoever touched it last.
+                Row("attempted-first", a => { a.Status = AttributeExtractionStatus.Failed; a.ExtractorModel = "repair/later-model"; a.RawJson = "{\"f\":1}"; a.ExtractedAt = eraStart.AddMonths(6); a.LastAttemptAt = DateTime.UtcNow; a.RetryAfter = DateTime.UtcNow.AddDays(7); }));
             await db.SaveChangesAsync();
         }
 
@@ -806,6 +1035,8 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
         Assert.Equal(AttributeExtractionStatus.Failed, first["genuine"].Status);
         Assert.Equal(2, first["genuine"].AttemptCount);
         Assert.Equal(AttributeExtractionStatus.Done, first["era"].Status);
+        Assert.Equal(AttributeExtractionStatus.Done, first["attempted-first"].Status);
+        Assert.Equal("repair/era-model", first["attempted-first"].ExtractorModel);
 
         IReadOnlyList<DataRepairResult> second;
         await using (var db = Fixture.CreateContext(new AccountContext()))
@@ -898,6 +1129,24 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
         job.Status = JobStatus.Succeeded;
         job.CompletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Executes an ALREADY-STORED job row, as a revived job is: <c>JobRunnerService</c> hands
+    /// the same <see cref="SyncJob"/> id to a second execution while the first may still be running.
+    /// </summary>
+    private async Task RunExistingJobAsync(
+        Guid jobId, Guid accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor, int cap)
+    {
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var db = Fixture.CreateContext(scoped);
+        var configuration = Config(cap);
+        var handler = new EnrichCatalogJobHandler(
+            db, embeddings, extractor, new NoopEventHub(), configuration,
+            new CatalogEnrichmentBudget(db, configuration), NullLogger<EnrichCatalogJobHandler>.Instance);
+        var job = await db.SyncJobs.SingleAsync(j => j.Id == jobId);
+        await handler.ExecuteAsync(job, CancellationToken.None);
     }
 
     private async Task ExpireRetryGateAsync(Guid titleId)
@@ -1116,6 +1365,39 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
             TitlesSeen.AddRange(inputs.Select(i => i.TitleId));
             IReadOnlyList<ExtractedTitleAttributes?> result = inputs.Select(_ => (ExtractedTitleAttributes?)null).ToList();
             return Task.FromResult(result);
+        }
+    }
+
+    /// <summary>A configured-off extractor: the embedding phase runs alone.</summary>
+    private sealed class UnavailableExtractor : ITitleAttributeExtractor
+    {
+        public bool IsAvailable => false;
+
+        public string ModelId => "unavailable/test-model";
+
+        public int Version => 1;
+
+        public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default) =>
+            throw new InvalidOperationException("an unavailable extractor is never called");
+    }
+
+    /// <summary>An extractor whose whole batch throws the given exception.</summary>
+    private sealed class ThrowingExtractor(string modelId, Func<Exception> failure) : ITitleAttributeExtractor
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => modelId;
+
+        public int Version => 1;
+
+        public List<Guid> TitlesSeen { get; } = [];
+
+        public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
+        {
+            TitlesSeen.AddRange(inputs.Select(i => i.TitleId));
+            throw failure();
         }
     }
 

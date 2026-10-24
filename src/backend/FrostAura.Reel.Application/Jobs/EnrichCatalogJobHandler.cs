@@ -200,16 +200,26 @@ public class EnrichCatalogJobHandler(
     /// A GLOBAL run has no account to prioritise for, and takes the catalogue in SUPPLY order:
     /// highest <c>TmdbVoteCount</c> first, then most recent, then id.
     /// </para>
+    /// <para>
+    /// <b>The never-attributed key is extraction's alone.</b> Embedding work passes
+    /// <paramref name="attributesFirst"/> false: whether a title has attributes says nothing about
+    /// whether it needs a vector, and keying embedding on it put an account's own library behind
+    /// the whole ~24k never-attributed backlog — even with the extractor switched off (review
+    /// defect 2). Embedding keeps the account tiers first, as before.
+    /// </para>
     /// </summary>
-    private IQueryable<Title> InPriorityOrder(IQueryable<Title> titles, Guid? accountId, int extractorVersion)
+    private IQueryable<Title> InPriorityOrder(
+        IQueryable<Title> titles, Guid? accountId, int extractorVersion, bool attributesFirst)
     {
         // "Attributed" means a Done answer at the CURRENT prompt generation, under any model. An
         // older model's answer is usable; an older generation's is wrong in meaning (that is what a
         // version bump says), so it waits in the never-attributed queue rather than behind it.
-        var neverAttributedFirst = titles.OrderBy(t =>
-            db.TitleAttributes.Any(a => a.TitleId == t.Id
-                && a.Status == AttributeExtractionStatus.Done
-                && a.ExtractorVersion >= extractorVersion) ? 1 : 0);
+        var neverAttributedFirst = attributesFirst
+            ? titles.OrderBy(t =>
+                db.TitleAttributes.Any(a => a.TitleId == t.Id
+                    && a.Status == AttributeExtractionStatus.Done
+                    && a.ExtractorVersion >= extractorVersion) ? 1 : 0)
+            : titles.OrderBy(_ => 0);
 
         if (accountId is not { } id)
         {
@@ -247,7 +257,9 @@ public class EnrichCatalogJobHandler(
             || db.TitleEmbeddings.Any(e => e.TitleId == t.Id
                 && (e.EmbeddingModel != model || e.CreatedAt < t.LastMetadataRefreshAt)));
 
-        var titles = await InPriorityOrder(work, accountId, extractor.Version).Take(cap).ToListAsync(ct);
+        var titles = await InPriorityOrder(work, accountId, extractor.Version, attributesFirst: false)
+            .Take(cap)
+            .ToListAsync(ct);
         var total = titles.Count;
         var processed = 0;
 
@@ -345,9 +357,17 @@ public class EnrichCatalogJobHandler(
     {
         var modelId = extractor.ModelId;
         var version = extractor.Version;
-        var runId = job.Id;
+        var question = ReattemptQuestionFor(modelId, version);
 
-        var titles = await InPriorityOrder(PendingExtraction(hydrated, modelId, version, runId, DateTime.UtcNow), accountId, version)
+        // The claim owner is this EXECUTION, never the job id. JobRunnerService revives a stale
+        // Running job by putting the same row back to Pending, so a revived run and its still-live
+        // original (a laptop that woke after the heartbeat window) share a job id — and a claim keyed
+        // on it let each treat the other's titles as its own and buy them twice (review defect 1).
+        var runId = Guid.NewGuid();
+
+        var titles = await InPriorityOrder(
+                PendingExtraction(hydrated, modelId, version, question, runId, DateTime.UtcNow),
+                accountId, version, attributesFirst: true)
             .Take(cap)
             .ToListAsync(ct);
         var total = titles.Count;
@@ -382,7 +402,7 @@ public class EnrichCatalogJobHandler(
             // overwrote the other's Done answer with Failed. The claim makes the batch this run's
             // alone, and re-checks eligibility under the row lock, so a title another run settled a
             // moment ago is not bought twice.
-            var claimed = await ClaimAsync(batch.Select(t => t.Id).ToList(), runId, modelId, version, ct);
+            var claimed = await ClaimAsync(batch.Select(t => t.Id).ToList(), runId, modelId, version, question, ct);
             var work = batch.Where(t => claimed.Contains(t.Id)).ToList();
             tally.SkippedClaimed += batch.Length - work.Count;
 
@@ -390,7 +410,7 @@ public class EnrichCatalogJobHandler(
             {
                 try
                 {
-                    var stop = await ExtractBatchAsync(work, modelId, version, tally, ct);
+                    var stop = await ExtractBatchAsync(work, modelId, version, question, tally, ct);
                     if (stop)
                     {
                         processed += batch.Length;
@@ -431,63 +451,55 @@ public class EnrichCatalogJobHandler(
     /// from the deterministic stub to the real model re-extract every title; version-scoping is what
     /// lets a prompt change do the same for values whose MEANING moved (see
     /// ITitleAttributeExtractor.Version). An exhausted row with a stale version is eligible again,
-    /// deliberately — the reason it failed may be the reason the prompt changed.
+    /// deliberately — the reason it failed may be the reason the prompt changed. A row holding an
+    /// answer that this question has already failed to re-extract <see cref="MaxAttributeAttempts"/>
+    /// times is settled too: it keeps its answer, and the current model stops billing for it.
     /// </summary>
     private IQueryable<Title> PendingExtraction(
-        IQueryable<Title> hydrated, string modelId, int version, Guid runId, DateTime now) =>
+        IQueryable<Title> hydrated, string modelId, int version, string question, Guid runId, DateTime now) =>
         hydrated.Where(t => !db.TitleAttributes.Any(a =>
             a.TitleId == t.Id
             && ((a.ExtractorModel == modelId
                     && a.ExtractorVersion >= version
                     && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts))
+                || (a.ReattemptQuestion == question && a.ReattemptFailures >= MaxAttributeAttempts)
                 || a.RetryAfter > now
                 || (a.ClaimedUntil > now && a.ClaimedBy != runId))));
+
+    /// <summary>The key a re-extraction failure is counted against: one model at one prompt version.</summary>
+    public static string ReattemptQuestionFor(string modelId, int version) =>
+        string.Create(CultureInfo.InvariantCulture, $"{modelId}@v{version}");
 
     /// <summary>
     /// Claims <paramref name="titleIds"/> for this run and returns the ones it now holds.
     /// <para>
     /// A never-attributed title has no row to claim, so one is created first as an unanswered
     /// Pending placeholder stamped with the current model and version (so it is neither "stale" to
-    /// the version sweep nor "settled" to selection). Every reader of attributes filters on Done or
-    /// on a non-null tone, so a placeholder is invisible everywhere else. The claim itself is one
-    /// conditional UPDATE: Postgres re-evaluates its predicate against the committed row when two
-    /// runs race for the same title, so exactly one of them wins it.
+    /// the version sweep nor "settled" to selection). A placeholder carries no values — no tone, no
+    /// answer — so every attribute reader, whether it filters on Done or on a non-null tone, passes
+    /// over it. The insert is <c>ON CONFLICT DO NOTHING</c>: a row a concurrent run created first is
+    /// simply already there, and the other titles in the batch are still inserted and claimed
+    /// (a failed batch insert used to roll all of them back and count them as "claimed by another
+    /// run"). The claim itself is one conditional UPDATE: Postgres re-evaluates its predicate
+    /// against the committed row when two runs race for the same title, so exactly one of them
+    /// wins it.
     /// </para>
     /// </summary>
     private async Task<HashSet<Guid>> ClaimAsync(
-        List<Guid> titleIds, Guid runId, string modelId, int version, CancellationToken ct)
+        List<Guid> titleIds, Guid runId, string modelId, int version, string question, CancellationToken ct)
     {
-        var existing = await db.TitleAttributes
-            .Where(a => titleIds.Contains(a.TitleId))
-            .Select(a => a.TitleId)
-            .ToListAsync(ct);
-        var missing = titleIds.Except(existing).ToList();
-        if (missing.Count > 0)
-        {
-            var placeholders = missing
-                .Select(id => new TitleAttributes
-                {
-                    TitleId = id,
-                    ExtractorModel = modelId,
-                    ExtractorVersion = version,
-                    Status = AttributeExtractionStatus.Pending,
-                })
-                .ToList();
-            db.TitleAttributes.AddRange(placeholders);
-            try
-            {
-                await db.SaveChangesAsync(ct);
-            }
-            catch (DbUpdateException)
-            {
-                // A concurrent run created some of the same rows first. They exist now, which is all
-                // the claim below needs; forget ours rather than retrying the insert.
-                foreach (var placeholder in placeholders)
-                {
-                    db.TitleAttributes.Entry(placeholder).State = EntityState.Detached;
-                }
-            }
-        }
+        var ids = titleIds.ToArray();
+        var pending = nameof(AttributeExtractionStatus.Pending);
+        await db.Database.ExecuteSqlAsync(
+            $$"""
+            INSERT INTO "TitleAttributes" ("TitleId", "Darkness", "Pacing", "Complexity", "EmotionalIntensity",
+                "Humor", "Optimism", "EnsembleVsSolo", "Themes", "ExtractorModel", "ExtractorVersion", "Status",
+                "AttemptCount", "TransportFailures", "ReattemptFailures")
+            SELECT id, 0, 0, 0, 0, 0, 0, 0, '{}'::text[], {{modelId}}, {{version}}, {{pending}}, 0, 0, 0
+            FROM unnest({{ids}}) AS id
+            ON CONFLICT ("TitleId") DO NOTHING
+            """,
+            ct);
 
         var now = DateTime.UtcNow;
         var until = now + ClaimLease;
@@ -497,6 +509,7 @@ public class EnrichCatalogJobHandler(
                 && !(a.ExtractorModel == modelId
                     && a.ExtractorVersion >= version
                     && (a.Status == AttributeExtractionStatus.Done || a.AttemptCount >= MaxAttributeAttempts))
+                && !(a.ReattemptQuestion == question && a.ReattemptFailures >= MaxAttributeAttempts)
                 && (a.RetryAfter == null || a.RetryAfter <= now))
             .ExecuteUpdateAsync(set => set
                 .SetProperty(a => a.ClaimedBy, runId)
@@ -535,7 +548,7 @@ public class EnrichCatalogJobHandler(
     /// will not fix.
     /// </summary>
     private async Task<bool> ExtractBatchAsync(
-        List<Title> work, string modelId, int version, ExtractionTally tally, CancellationToken ct)
+        List<Title> work, string modelId, int version, string question, ExtractionTally tally, CancellationToken ct)
     {
         var inputs = work.Select(t => new TitleAttributeInput(
             t.Id, t.MediaType.ToString(), t.Name, t.Year, t.Overview, t.Genres, t.Keywords)).ToList();
@@ -546,9 +559,12 @@ public class EnrichCatalogJobHandler(
         {
             outcomes = await ExtractClassifiedAsync(inputs, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (IsTransportFailure(ex, ct))
         {
-            // The port allows a throw only for a whole-batch transport failure.
+            // Only a recognisable transport failure is booked as one. Anything else — a bug, a
+            // mapping error, a database error inside the adapter — propagates and fails the job:
+            // booking every throw as Transport backed the batch off for ever without charging an
+            // attempt, and reported the job as a success (review defect 3).
             logger.LogWarning(ex, "Attribute extraction batch of {Count} failed in transport; backing off and stopping this run.", work.Count);
             outcomes = work.Select(_ => AttributeExtractionOutcome.Failed(AttributeFailureClass.Transport)).ToList();
             wholeBatchTransport = true;
@@ -597,12 +613,14 @@ public class EnrichCatalogJobHandler(
                 row.AttemptCount = attempts;
                 row.LastAttemptAt = now;
                 row.TransportFailures = 0;
+                row.ReattemptFailures = 0;
+                row.ReattemptQuestion = null;
                 row.RetryAfter = null;
                 tally.Done++;
                 continue;
             }
 
-            await WriteFailureAsync(row, outcome.Failure, attempts, modelId, version, now, tally, ct);
+            await WriteFailureAsync(row, outcome.Failure, attempts, modelId, version, question, now, tally, ct);
         }
 
         await db.SaveChangesAsync(ct);
@@ -623,7 +641,7 @@ public class EnrichCatalogJobHandler(
     /// </summary>
     private async Task WriteFailureAsync(
         TitleAttributes row, AttributeFailureClass failure, int attempts, string modelId, int version,
-        DateTime now, ExtractionTally tally, CancellationToken ct)
+        string question, DateTime now, ExtractionTally tally, CancellationToken ct)
     {
         var titleId = row.TitleId;
         if (failure == AttributeFailureClass.Transport)
@@ -676,16 +694,26 @@ public class EnrichCatalogJobHandler(
         }
 
         // The row holds an answer — Done under some model, or an older generation's values awaiting
-        // re-extraction. It keeps them, and waits a week before this model is asked again.
+        // re-extraction. It keeps them, and waits a week before this model is asked again. The
+        // failure is counted against THIS question (model at prompt version): after
+        // MaxAttributeAttempts of them selection leaves the row alone, so a title the current model
+        // can never answer is billed twice, not once a week for ever (review D6). Skipped when the
+        // row has meanwhile been answered by this very question — there is nothing left to retry.
         var retry = now + AnsweredRowRetryDelay;
         await db.TitleAttributes
-            .Where(a => a.TitleId == titleId)
+            .Where(a => a.TitleId == titleId
+                && !(a.Status == AttributeExtractionStatus.Done
+                    && a.ExtractorModel == modelId
+                    && a.ExtractorVersion >= version))
             .ExecuteUpdateAsync(set => set
+                .SetProperty(a => a.ReattemptFailures, a => a.ReattemptQuestion == question ? a.ReattemptFailures + 1 : 1)
+                .SetProperty(a => a.ReattemptQuestion, question)
                 .SetProperty(a => a.RetryAfter, retry)
                 .SetProperty(a => a.LastAttemptAt, now), ct);
         logger.LogWarning(
-            "Re-extraction of {TitleId} with {Model} v{Version} failed ({Failure}); its existing answer is kept, next try after {RetryAfter:O}.",
-            titleId, modelId, version, failure, retry);
+            "Re-extraction of {TitleId} with {Model} v{Version} failed ({Failure}); its existing answer is kept, next try after {RetryAfter:O} "
+            + "unless this question has now failed {Max} time(s).",
+            titleId, modelId, version, failure, retry, MaxAttributeAttempts);
     }
 
     private async Task<IReadOnlyList<AttributeExtractionOutcome>> ExtractClassifiedAsync(
@@ -703,6 +731,22 @@ public class EnrichCatalogJobHandler(
                 : AttributeExtractionOutcome.Success(r))
             .ToList();
     }
+
+    /// <summary>
+    /// Whether a throw from the extractor is a whole-batch TRANSPORT failure: the adapter's typed
+    /// <see cref="AttributeExtractionTransportException"/>, a network or I/O error, a timeout, or an
+    /// HTTP timeout's cancellation (a cancellation the caller did not ask for). The caller's own
+    /// cancellation is not a failure at all and propagates.
+    /// </summary>
+    public static bool IsTransportFailure(Exception ex, CancellationToken ct) => ex switch
+    {
+        AttributeExtractionTransportException => true,
+        HttpRequestException => true,
+        IOException => true,
+        TimeoutException => true,
+        OperationCanceledException => !ct.IsCancellationRequested,
+        _ => false,
+    };
 
     /// <summary>
     /// How long a title waits after its <paramref name="consecutiveFailures"/>-th transport failure in

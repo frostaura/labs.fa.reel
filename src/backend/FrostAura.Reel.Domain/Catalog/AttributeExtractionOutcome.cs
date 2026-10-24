@@ -59,3 +59,15 @@ public interface IClassifyingAttributeExtractor
     Task<IReadOnlyList<AttributeExtractionOutcome>> ExtractClassifiedAsync(
         IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default);
 }
+
+/// <summary>
+/// The one exception an attribute extractor may throw for a WHOLE-BATCH transport failure — the
+/// request never produced a completion. The enrich handler books it, together with
+/// <see cref="System.Net.Http.HttpRequestException"/>, <see cref="System.IO.IOException"/>,
+/// <see cref="TimeoutException"/> and an HTTP timeout's cancellation, as
+/// <see cref="AttributeFailureClass.Transport"/>. Anything else an extractor throws is a defect,
+/// not a network fact: it propagates and fails the job, where it is visible, instead of being
+/// backed off forever under a transport label.
+/// </summary>
+public sealed class AttributeExtractionTransportException(string message, Exception? inner = null)
+    : Exception(message, inner);

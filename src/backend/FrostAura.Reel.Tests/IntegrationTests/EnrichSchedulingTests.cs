@@ -228,6 +228,48 @@ public class EnrichSchedulingTests(PostgresFixture fixture)
         Assert.Equal(0, await EnrichmentScheduler.RequeueStaleExtractorVersionsAsync(db, 1, cap: 10_000, CancellationToken.None));
     }
 
+    /// <summary>
+    /// Review defect 4. The sweep used to load stale rows TRACKED and leave the write to its caller's
+    /// SaveChanges; an enrich run answering one of them at the current version in between was then
+    /// overwritten back to Pending — gone from every Done-filtered reader, and billed again. The
+    /// reset is now one conditional UPDATE, so the caller's later commit carries nothing for it.
+    /// </summary>
+    [Fact]
+    public async Task The_version_sweep_never_demotes_an_answer_written_before_its_caller_commits()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var titleId = (await SeedAttributeRowsAsync(1, version: 1, status: AttributeExtractionStatus.Done, attempts: 1)).Single();
+
+        // The nightly reconcile's shape: sweep on its context, commit that context afterwards.
+        await using var nightly = fixture.CreateContext(new AccountContext());
+        Assert.True(await EnrichmentScheduler.RequeueStaleExtractorVersionsAsync(nightly, 2, cap: 100_000, CancellationToken.None) >= 1);
+
+        // Meanwhile an enrich run answers the title under the running prompt version.
+        await using (var run = fixture.CreateContext(new AccountContext()))
+        {
+            await run.TitleAttributes
+                .Where(a => a.TitleId == titleId)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(a => a.Status, AttributeExtractionStatus.Done)
+                    .SetProperty(a => a.ExtractorVersion, 2)
+                    .SetProperty(a => a.AttemptCount, 1)
+                    .SetProperty(a => a.RawJson, "{\"v\":2}"));
+        }
+
+        await nightly.SaveChangesAsync();
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var row = await verify.TitleAttributes.AsNoTracking().SingleAsync(a => a.TitleId == titleId);
+        Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+        Assert.Equal(2, row.ExtractorVersion);
+        Assert.Equal(1, row.AttemptCount);
+        Assert.Equal("{\"v\": 2}", row.RawJson);
+    }
+
     /// <summary>Rows the version sweep would act on, catalogue-wide — its predicate, restated.</summary>
     private static Task<int> StaleCountAsync(ReelDbContext db) =>
         db.TitleAttributes.CountAsync(a => a.ExtractorVersion < 2

@@ -65,7 +65,24 @@ public class TitleAttributes
     public int TransportFailures { get; set; }
 
     /// <summary>
-    /// The enrich run (its job id) that holds this title for the batch in flight. Two runs never
+    /// Failed re-extractions of a row that already holds an answer, counted for the question named
+    /// in <see cref="ReattemptQuestion"/> only. Such a row cannot be charged against
+    /// <see cref="AttemptCount"/> without being demoted, so this is its attempt budget: once it
+    /// reaches the handler's cap the current model at the current prompt version stops asking, and
+    /// the row keeps its answer. Reset on success.
+    /// </summary>
+    public int ReattemptFailures { get; set; }
+
+    /// <summary>
+    /// The (model, prompt version) <see cref="ReattemptFailures"/> was counted against, as
+    /// <c>model@vN</c>. A different model or a newer prompt is a different question, so it starts
+    /// from zero. Null when no re-extraction has failed since the last answer.
+    /// </summary>
+    public string? ReattemptQuestion { get; set; }
+
+    /// <summary>
+    /// The enrich run that holds this title for the batch in flight — a fresh id per execution, not
+    /// the job id, because a revived job shares its id with the live original. Two runs never
     /// extract the same title at once: a run claims its batch with a conditional update before
     /// calling the model, and skips whatever another live run holds.
     /// </summary>

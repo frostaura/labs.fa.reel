@@ -284,6 +284,12 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("RawJson")
                         .HasColumnType("jsonb");
 
+                    b.Property<int>("ReattemptFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReattemptQuestion")
+                        .HasColumnType("text");
+
                     b.Property<DateTime?>("RetryAfter")
                         .HasColumnType("timestamp with time zone");
 
