@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Globalization;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
@@ -27,12 +29,17 @@ public enum JobRunOutcome
     /// <summary>A resumable job reached its kind's deadline: back in the queue, attempt refunded.</summary>
     Yielded,
 
-    /// <summary>The host is stopping: back in the queue, attempt refunded.</summary>
+    /// <summary>
+    /// The host is stopping and the handler stopped when asked: back in the queue, attempt refunded
+    /// (up to <see cref="JobRunnerOptions.MaxInterruptions"/> times; past that it is a failed attempt).
+    /// </summary>
     Interrupted,
 
     /// <summary>
     /// Another runner owns the row now (this execution's heartbeat went stale and it was
-    /// reclaimed): nothing was written, and the execution stopped at the first heartbeat that saw it.
+    /// reclaimed): nothing was written — neither by the runner nor by the handler's own saves, which
+    /// the row's concurrency tokens refuse — and the execution stopped at the first heartbeat that
+    /// saw it (or was abandoned, if its handler ignored the cancellation).
     /// </summary>
     LeaseLost,
 }
@@ -57,10 +64,20 @@ public enum JobRunOutcome
 /// back of the queue to resume from its checkpoint; a kind that restarts from nothing retries. LLM
 /// kinds are not claimed while the provider-health reader reports their breaker open.</para>
 ///
-/// <para><b>Honest terminal states (J-6, K-12).</b> A handler's cancellation is a failure unless the
-/// host is stopping (or the deadline or a lost lease caused it); <c>CompletedAt</c> is stamped on
-/// every terminal state; every message is built in C# and passed as a parameter; and a stopping host
-/// puts its running jobs back to Pending with the interrupted attempt refunded.</para>
+/// <para><b>Handler writes are fenced too.</b> <c>AttemptCount</c> and <c>Status</c> are concurrency
+/// tokens on <see cref="SyncJob"/>, and the handler gets its row tracked from a fenced read, so its own
+/// cursor and progress saves match no row once the execution has been reclaimed. A refund
+/// (<c>AttemptCount - 1</c>) only ever happens after the execution holding that lease has
+/// returned, so a lease number is never handed out twice while its holder is alive.</para>
+///
+/// <para><b>Honest terminal states (J-6, K-12).</b> A handler that returns has finished — and is
+/// completed, whatever its token says — unless its kind is declared to return early at a
+/// checkpoint when cancelled; a handler that throws has failed unless the host is stopping, the
+/// deadline fired or the lease was lost. Deadlines are hard: a handler that ignores its token past
+/// <see cref="JobRunnerOptions.OverrunGrace"/> is abandoned with its attempt written off.
+/// <c>CompletedAt</c> is stamped on every terminal state; every message is built in C# and passed as
+/// a parameter; and a stopping host puts its running jobs back to Pending with the interrupted
+/// attempt refunded, a bounded number of times.</para>
 /// </summary>
 public sealed class JobRunnerService(
     IServiceScopeFactory scopeFactory,
@@ -72,6 +89,9 @@ public sealed class JobRunnerService(
     private const long ClaimLockKey = 0x5245_454C_4A4F_4253; // "REELJOBS"
 
     private const int MaxErrorLength = 4000;
+
+    /// <summary>Time past the shutdown grace for abandoned executions to write their outcome.</summary>
+    private static readonly TimeSpan DrainMargin = TimeSpan.FromSeconds(5);
 
     private readonly ConcurrentDictionary<Guid, LiveJob> _live = new();
     private int _generalBusy;
@@ -198,7 +218,13 @@ public sealed class JobRunnerService(
     /// transaction-scoped advisory lock so two claims (two replicas) cannot both see a capped kind
     /// as free.
     /// </summary>
-    internal async Task<ClaimedJob?> ClaimNextAsync(IReadOnlyCollection<string> kinds, CancellationToken ct)
+    /// <param name="kinds">The kinds this caller may run.</param>
+    /// <param name="onlyId">
+    /// Restricts the claim to one row. For tests on a shared database, which must run the real claim
+    /// (cap, progress reset, attempt cap, claim lock) on their own job without taking another test's.
+    /// </param>
+    /// <param name="ct">Cancellation.</param>
+    internal async Task<ClaimedJob?> ClaimNextAsync(IReadOnlyCollection<string> kinds, CancellationToken ct, Guid? onlyId = null)
     {
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
@@ -206,7 +232,7 @@ public sealed class JobRunnerService(
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock({ClaimLockKey})", ct);
         var rows = await db.Database
-            .SqlQuery<ClaimRow>(ClaimNextSql(DateTime.UtcNow, kinds, options))
+            .SqlQuery<ClaimRow>(ClaimNextSql(DateTime.UtcNow, kinds, options, onlyId))
             .ToListAsync(ct);
         await tx.CommitAsync(ct);
 
@@ -236,7 +262,7 @@ public sealed class JobRunnerService(
     /// The claim also clears the previous attempt's progress: a retry that inherited "100%" from the
     /// attempt that failed reported a finished job as live work for the whole retry (H-1).
     /// </summary>
-    internal static FormattableString ClaimNextSql(DateTime now, IReadOnlyCollection<string> kinds, JobRunnerOptions options)
+    internal static FormattableString ClaimNextSql(DateTime now, IReadOnlyCollection<string> kinds, JobRunnerOptions options, Guid? onlyId = null)
     {
         var kindArray = kinds.ToArray();
         var cappedKinds = options.KindCaps.Keys.Select(k => k.ToString()).ToArray();
@@ -256,6 +282,7 @@ public sealed class JobRunnerService(
              WHERE j."Status" = 'Pending'
                AND j."AttemptCount" < {maxAttempts}
                AND j."Kind" = ANY({kindArray})
+               AND ({onlyId}::uuid IS NULL OR j."Id" = {onlyId}::uuid)
                AND NOT EXISTS (
                    SELECT 1 FROM unnest({cappedKinds}::text[], {caps}::integer[]) AS c("Kind", "Cap")
                    WHERE c."Kind" = j."Kind"
@@ -266,7 +293,7 @@ public sealed class JobRunnerService(
                    WHERE d."AccountId" = j."AccountId"
                      AND d."Kind" = 'DeltaSync'
                      AND d."Status" IN ('Pending', 'Running')))
-             ORDER BY j."Priority", j."EnqueuedAt"
+             ORDER BY j."Priority", COALESCE(j."RequeuedAt", j."EnqueuedAt")
              LIMIT 1
              FOR UPDATE SKIP LOCKED)
          RETURNING "Id", "AttemptCount", "Kind"
@@ -328,17 +355,38 @@ public sealed class JobRunnerService(
 
     // ── Executing ────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>What the handler half of an execution reports to the half that settles it.</summary>
+    private sealed class Execution
+    {
+        public Guid? AccountId { get; set; }
+
+        /// <summary>The handler returned as finished and its unsaved changes were flushed through the fence.</summary>
+        public bool Finished { get; set; }
+
+        public Exception? Failure { get; set; }
+    }
+
     /// <summary>
     /// Runs one claimed execution to a terminal write. Internal so the tests can drive the real
     /// execution path on a job they claimed themselves.
+    ///
+    /// <para>The handler runs beside its heartbeat, bounded by a hard limit: its kind's deadline
+    /// plus <see cref="JobRunnerOptions.OverrunGrace"/> (or the grace after a lost lease or a
+    /// stopping host). The beat stops before ANY terminal write, so a tick can never find the row
+    /// already settled by this same execution and report a lease it did not lose.</para>
     /// </summary>
     internal async Task<JobRunOutcome> RunAsync(ClaimedJob claim, CancellationToken stoppingToken)
     {
         var policy = options.PolicyFor(claim.Kind);
+        var clock = Stopwatch.StartNew();
+        var hardLimit = policy.Deadline + options.OverrunGrace;
         using var lease = new CancellationTokenSource();
         using var deadline = new CancellationTokenSource(policy.Deadline);
         using var handlerToken = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, lease.Token, deadline.Token);
         using var beatStop = new CancellationTokenSource();
+        using var abandon = new CancellationTokenSource(hardLimit);
+        using var abandonOnLeaseLoss = lease.Token.Register(() => ShortenTo(abandon, options.OverrunGrace, hardLimit - clock.Elapsed));
+        using var abandonOnStop = stoppingToken.Register(() => ShortenTo(abandon, options.ShutdownGrace, hardLimit - clock.Elapsed));
         using var logScope = logger.BeginScope(new Dictionary<string, object?>
         {
             ["JobId"] = claim.Id,
@@ -346,64 +394,87 @@ public sealed class JobRunnerService(
             ["JobAttempt"] = claim.Attempt,
         });
 
+        var state = new Execution();
         var heartbeat = HeartbeatLoopAsync(claim, lease, beatStop.Token);
+        var execution = ExecuteHandlerAsync(claim, policy, state, handlerToken.Token, lease.Token);
+        bool returned;
         try
         {
-            return await ExecuteClaimAsync(claim, policy, handlerToken.Token, stoppingToken, lease.Token, deadline.Token);
+            returned = await Task.WhenAny(execution, WhenCancelled(abandon.Token)) == execution;
         }
         finally
         {
             await beatStop.CancelAsync();
             await heartbeat;
         }
+
+        return returned
+            ? await SettleAsync(claim, policy, state, stoppingToken, lease.Token, deadline.Token)
+            : await AbandonAsync(claim, policy, state, execution, stoppingToken, lease.Token);
     }
 
-    private async Task<JobRunOutcome> ExecuteClaimAsync(
+    /// <summary>
+    /// The handler half, in its own DI scope, which the task owns: an abandoned execution keeps its
+    /// scope until it finally returns, and everything it then tries to save is fenced. Never throws.
+    /// </summary>
+    private async Task ExecuteHandlerAsync(
+        ClaimedJob claim, JobKindPolicy policy, Execution state, CancellationToken handlerToken, CancellationToken leaseToken)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+
+            // Read through the fence: a row reclaimed before the handler even started is not this
+            // execution's to run. Tracked, so the row's AttemptCount and Status concurrency tokens
+            // fence every save the handler makes of it.
+            var job = await Fenced(db, claim).FirstOrDefaultAsync(handlerToken)
+                ?? throw new InvalidOperationException("The job no longer belongs to this execution.");
+            state.AccountId = job.AccountId;
+            if (job.AccountId is { } owner)
+            {
+                scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(owner);
+            }
+
+            var handler = scope.ServiceProvider.GetServices<IJobHandler>().FirstOrDefault(h => h.Kind == job.Kind)
+                ?? throw new NonRetryableJobException($"No handler registered for job kind {job.Kind}.");
+
+            logger.LogInformation("Job {JobId} ({Kind}, account {AccountId}, attempt {Attempt}) starting.",
+                claim.Id, claim.Kind, job.AccountId, claim.Attempt);
+
+            await handler.ExecuteAsync(job, handlerToken);
+
+            if (leaseToken.IsCancellationRequested
+                || (handlerToken.IsCancellationRequested && policy.StopsEarlyOnCancellation))
+            {
+                // Not this execution's row any more; or a handler that returns at a checkpoint when
+                // its token fires did exactly that, and stopped early rather than finished.
+                return;
+            }
+
+            // A normal return is a finished run, whatever the token says now. Whatever the handler
+            // left unsaved goes in before the job is marked done, through the concurrency tokens.
+            await db.SaveChangesAsync(CancellationToken.None);
+            state.Finished = true;
+        }
+        catch (Exception ex)
+        {
+            state.Failure = ex;
+        }
+    }
+
+    /// <summary>Decides the outcome of an execution whose handler returned (or threw) inside its hard limit.</summary>
+    private async Task<JobRunOutcome> SettleAsync(
         ClaimedJob claim,
         JobKindPolicy policy,
-        CancellationToken handlerToken,
+        Execution state,
         CancellationToken stoppingToken,
         CancellationToken leaseToken,
         CancellationToken deadlineToken)
     {
-        Guid? accountId = null;
-        Exception? failure = null;
-
-        using (var scope = scopeFactory.CreateScope())
+        if (state.Finished)
         {
-            try
-            {
-                var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
-                var job = await db.SyncJobs.FirstAsync(j => j.Id == claim.Id, handlerToken);
-                accountId = job.AccountId;
-                if (job.AccountId is { } owner)
-                {
-                    scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(owner);
-                }
-
-                var handler = scope.ServiceProvider.GetServices<IJobHandler>().FirstOrDefault(h => h.Kind == job.Kind)
-                    ?? throw new NonRetryableJobException($"No handler registered for job kind {job.Kind}.");
-
-                logger.LogInformation("Job {JobId} ({Kind}, account {AccountId}, attempt {Attempt}) starting.",
-                    claim.Id, claim.Kind, job.AccountId, claim.Attempt);
-
-                await handler.ExecuteAsync(job, handlerToken);
-
-                if (!handlerToken.IsCancellationRequested)
-                {
-                    // Whatever the handler left unsaved goes in before the job is marked done — the
-                    // runner's own completion used to carry it in the same SaveChanges.
-                    await db.SaveChangesAsync(CancellationToken.None);
-                    return await CompleteAsync(claim);
-                }
-
-                // The handler noticed the cancellation and returned instead of throwing: it was
-                // interrupted all the same, and the reason decides what happens below.
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
+            return await CompleteAsync(claim);
         }
 
         if (leaseToken.IsCancellationRequested)
@@ -414,15 +485,53 @@ public sealed class JobRunnerService(
 
         if (stoppingToken.IsCancellationRequested)
         {
-            return await RequeueAsync(claim, JobRunOutcome.Interrupted, "host stopping");
+            return await InterruptAsync(claim, state.AccountId);
         }
 
         if (deadlineToken.IsCancellationRequested)
         {
-            return await DeadlineAsync(claim, accountId, policy);
+            return await DeadlineAsync(claim, state.AccountId, policy);
         }
 
-        return await FailAsync(claim, accountId, failure ?? new InvalidOperationException("The handler stopped without finishing."));
+        // Includes a stale save the concurrency tokens refused: the fenced write then finds no row
+        // and reports the lease as lost.
+        return await FailAsync(claim, state.AccountId, state.Failure ?? new InvalidOperationException("The handler stopped without finishing."));
+    }
+
+    /// <summary>
+    /// The handler ignored its cancelled token past the hard limit. It is left running, fenced off:
+    /// the attempt is written off (never refunded — a refund would hand the next claim the same lease
+    /// number the deaf handler still holds), and the slot goes back to the runner.
+    /// </summary>
+    private async Task<JobRunOutcome> AbandonAsync(
+        ClaimedJob claim,
+        JobKindPolicy policy,
+        Execution state,
+        Task execution,
+        CancellationToken stoppingToken,
+        CancellationToken leaseToken)
+    {
+        _ = execution.ContinueWith(
+            _ => logger.LogWarning(
+                "Abandoned execution of job {JobId} ({Kind}) attempt {Attempt} finally returned; anything it saved was fenced.",
+                claim.Id, claim.Kind, claim.Attempt),
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+
+        if (leaseToken.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "Job {JobId} ({Kind}) attempt {Attempt} lost its lease and its handler ignored cancellation; abandoned.",
+                claim.Id, claim.Kind, claim.Attempt);
+            return JobRunOutcome.LeaseLost;
+        }
+
+        var reason = stoppingToken.IsCancellationRequested
+            ? $"Timed out: the handler did not stop within {Seconds(options.ShutdownGrace)} s of the host stopping; abandoned."
+            : $"Timed out: ran past its {Minutes(policy.Deadline)}-minute deadline and ignored cancellation for {Seconds(options.OverrunGrace)} s; abandoned.";
+        logger.LogError("Job {JobId} ({Kind}) attempt {Attempt}: {Reason}", claim.Id, claim.Kind, claim.Attempt, reason);
+        return await FailAsync(claim, state.AccountId, new TimeoutException(reason));
     }
 
     private async Task<JobRunOutcome> CompleteAsync(ClaimedJob claim)
@@ -487,7 +596,7 @@ public sealed class JobRunnerService(
 
     private async Task<JobRunOutcome> DeadlineAsync(ClaimedJob claim, Guid? accountId, JobKindPolicy policy)
     {
-        var minutes = policy.Deadline.TotalMinutes.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        var minutes = Minutes(policy.Deadline);
 
         if (policy.OnDeadline == DeadlineAction.Yield)
         {
@@ -500,7 +609,8 @@ public sealed class JobRunnerService(
                     .SetProperty(j => j.AttemptCount, j => j.AttemptCount - 1)
                     .SetProperty(j => j.DeadlineYields, j => j.DeadlineYields + 1)
                     // To the back of its priority band, so the slice it held goes to someone else.
-                    .SetProperty(j => j.EnqueuedAt, now)
+                    // EnqueuedAt keeps the first enqueue, so queue-wait figures stay honest.
+                    .SetProperty(j => j.RequeuedAt, (DateTime?)now)
                     .SetProperty(j => j.ProgressPct, (decimal?)null)
                     .SetProperty(j => j.ProgressMessage, (string?)null)));
 
@@ -522,22 +632,33 @@ public sealed class JobRunnerService(
             $"Timed out: ran past its {minutes}-minute deadline."));
     }
 
-    /// <summary>Back to Pending with the interrupted attempt refunded — it did not fail, it was stopped.</summary>
-    private async Task<JobRunOutcome> RequeueAsync(ClaimedJob claim, JobRunOutcome outcome, string why)
+    /// <summary>
+    /// The host is stopping and the handler stopped when asked: back to Pending with the attempt
+    /// refunded — it did not fail, it was stopped. Bounded by <see cref="JobRunnerOptions.MaxInterruptions"/>:
+    /// past it the interruption is a failed attempt, so a job that keeps taking its host down
+    /// still reaches its cap.
+    /// </summary>
+    private async Task<JobRunOutcome> InterruptAsync(ClaimedJob claim, Guid? accountId)
     {
-        var rows = await WithContextAsync(db => Fenced(db, claim).ExecuteUpdateAsync(s => s
-            .SetProperty(j => j.Status, JobStatus.Pending)
-            .SetProperty(j => j.AttemptCount, j => j.AttemptCount - 1)
-            .SetProperty(j => j.ProgressPct, (decimal?)null)
-            .SetProperty(j => j.ProgressMessage, (string?)null)));
+        var max = options.MaxInterruptions;
+        var rows = await WithContextAsync(db => Fenced(db, claim)
+            .Where(j => j.Interruptions < max)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, JobStatus.Pending)
+                .SetProperty(j => j.AttemptCount, j => j.AttemptCount - 1)
+                .SetProperty(j => j.Interruptions, j => j.Interruptions + 1)
+                .SetProperty(j => j.ProgressPct, (decimal?)null)
+                .SetProperty(j => j.ProgressMessage, (string?)null)));
 
-        if (rows == 0)
+        if (rows == 1)
         {
-            return LeaseLost(claim);
+            logger.LogInformation("Job {JobId} ({Kind}) requeued: host stopping.", claim.Id, claim.Kind);
+            return JobRunOutcome.Interrupted;
         }
 
-        logger.LogInformation("Job {JobId} ({Kind}) requeued: {Why}.", claim.Id, claim.Kind, why);
-        return outcome;
+        // The refunds are spent (fail below, fenced) or the lease is gone (no row, reported).
+        return await FailAsync(claim, accountId, new InvalidOperationException(
+            $"Interrupted: the host stopped during this job {max.ToString(CultureInfo.InvariantCulture)} times before; this interruption counts as a failed attempt."));
     }
 
     private JobRunOutcome LeaseLost(ClaimedJob claim)
@@ -598,6 +719,35 @@ public sealed class JobRunnerService(
             }
         }
     }
+
+    /// <summary>Brings a pending cancellation forward to <paramref name="grace"/> from now, never later than it already is.</summary>
+    private static void ShortenTo(CancellationTokenSource source, TimeSpan grace, TimeSpan remaining)
+    {
+        if (grace >= remaining)
+        {
+            return;
+        }
+
+        try
+        {
+            source.CancelAfter(grace);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The execution already ended.
+        }
+    }
+
+    private static Task WhenCancelled(CancellationToken token)
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        token.Register(static s => ((TaskCompletionSource)s!).TrySetResult(), signal);
+        return signal.Task;
+    }
+
+    private static string Minutes(TimeSpan span) => span.TotalMinutes.ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string Seconds(TimeSpan span) => span.TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture);
 
     // ── Sweeping ─────────────────────────────────────────────────────────────────────────────
 
@@ -677,7 +827,7 @@ public sealed class JobRunnerService(
     }
 
     internal static string StalledMessage(int maxAttempts) =>
-        $"Stalled with no heartbeat after {maxAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture)} attempts.";
+        $"Stalled with no heartbeat after {maxAttempts.ToString(CultureInfo.InvariantCulture)} attempts.";
 
     /// <summary>
     /// One-off, idempotent repair of rows written before this runner: terminal rows without a
@@ -717,9 +867,11 @@ public sealed class JobRunnerService(
     // ── Lifecycle ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Shutdown: the stopping token has already cancelled every handler, and each execution requeues
-    /// itself. Wait for them up to the grace period, then requeue whatever is still running — the
-    /// fence makes a late write from one of those harmless.
+    /// Shutdown: the stopping token has already cancelled every handler, and each execution settles
+    /// itself — requeued with its attempt refunded if the handler stopped, written off and abandoned
+    /// if it did not within <see cref="JobRunnerOptions.ShutdownGrace"/>. This only waits for that,
+    /// with a margin for the terminal writes; a row still Running after it (the database went away
+    /// mid-write) is left for the stale-job sweep of the next process.
     /// </summary>
     private async Task DrainAsync()
     {
@@ -729,18 +881,12 @@ public sealed class JobRunnerService(
             return;
         }
 
-        await Task.WhenAny(Task.WhenAll(running.Select(l => l.Run)), Task.Delay(options.ShutdownGrace));
-
-        foreach (var live in _live.Values)
+        var all = Task.WhenAll(running.Select(l => l.Run));
+        if (await Task.WhenAny(all, Task.Delay(options.ShutdownGrace + DrainMargin)) != all)
         {
-            try
-            {
-                await RequeueAsync(live.Claim, JobRunOutcome.Interrupted, "host stopped before the handler did");
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Could not requeue job {JobId} at shutdown; the stale-job sweep will.", live.Claim.Id);
-            }
+            logger.LogWarning(
+                "JobRunner stopped with {Count} execution(s) still settling; the stale-job sweep will recover them.",
+                _live.Count);
         }
     }
 

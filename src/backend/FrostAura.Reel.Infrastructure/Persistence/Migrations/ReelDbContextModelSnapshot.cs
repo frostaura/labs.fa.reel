@@ -2187,6 +2187,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<int>("AttemptCount")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("CompletedAt")
@@ -2209,6 +2210,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<DateTime?>("HeartbeatAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("Interruptions")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -2223,10 +2229,14 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal?>("ProgressPct")
                         .HasColumnType("numeric");
 
+                    b.Property<DateTime?>("RequeuedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
+                        .IsConcurrencyToken()
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");

@@ -117,6 +117,95 @@ public class JobRunnerPolicyTests
         Assert.Equal("Stalled with no heartbeat after 3 attempts.", JobRunnerService.StalledMessage(3));
     }
 
+    /// <summary>
+    /// The longest single-attempt success per restarting kind on the live history
+    /// (2026-07-24 to 2026-10-22, <c>Status = 'Succeeded' AND AttemptCount = 1</c>, <c>CompletedAt - StartedAt</c>).
+    /// A Retry deadline below one of these turns a slow success into three restarts and a failure.
+    /// DeltaSync is the exception on purpose: its two runs past 90 minutes (the longest 22 hours)
+    /// are the wedges the deadline exists to end, against 6,066 runs that finished inside it.
+    /// </summary>
+    [Theory]
+    [InlineData(JobKind.BuildFeed, 141.2)]
+    [InlineData(JobKind.Train, 131.5)]
+    [InlineData(JobKind.BuildTasteNarrative, 3.8)]
+    [InlineData(JobKind.Evaluate, 0.1)]
+    [InlineData(JobKind.BuildDigest, 0.1)]
+    [InlineData(JobKind.DeltaSync, 5.2)] // p99; see above
+    public void A_restarting_kinds_deadline_clears_its_longest_healthy_run_on_record(JobKind kind, double longestMinutes)
+    {
+        var policy = Options.PolicyFor(kind);
+        Assert.Equal(DeadlineAction.Retry, policy.OnDeadline);
+        Assert.True(policy.Deadline.TotalMinutes > longestMinutes * 1.05, $"{kind}: {policy.Deadline} against {longestMinutes} min on record");
+    }
+
+    [Theory]
+    [InlineData(JobKind.PersonaliseTitles)] // skips titles already written at the same profile hash
+    [InlineData(JobKind.RefreshAvailability)] // skips titles fetched inside the TTL
+    public void Kinds_that_skip_work_already_done_slice_instead_of_restarting(JobKind kind) =>
+        Assert.Equal(DeadlineAction.Yield, Options.PolicyFor(kind).OnDeadline);
+
+    [Fact]
+    public void Slices_cover_the_longest_resumable_run_on_record()
+    {
+        // Hydration and enrichment: 581 and 589 minutes of slot time on record, in ten-minute slices.
+        var slices = Math.Ceiling(589.3 / Options.PolicyFor(JobKind.EnrichCatalog).Deadline.TotalMinutes);
+        Assert.True(Options.MaxDeadlineYields > slices, $"{Options.MaxDeadlineYields} slices against {slices} needed");
+    }
+
+    [Fact]
+    public void The_hard_limit_ends_a_deaf_handler_long_before_the_stale_sweep_would()
+    {
+        Assert.True(Options.OverrunGrace > TimeSpan.Zero);
+        Assert.True(Options.OverrunGrace < Options.StaleAfter);
+        Assert.True(Options.ShutdownGrace < TimeSpan.FromSeconds(30), "inside the host's own shutdown timeout");
+        Assert.True(Options.MaxInterruptions > 0);
+    }
+
+    /// <summary>
+    /// A handler that reads <c>IsCancellationRequested</c> returns at a checkpoint when its token
+    /// fires, and the runner must not mistake that return for a finished run; every other handler's
+    /// return is treated as finished. The flag is data, so this keeps it equal to the handler sources.
+    /// </summary>
+    [Fact]
+    public void Kinds_declared_to_stop_early_are_exactly_the_handlers_that_return_on_cancellation()
+    {
+        var jobs = HandlerSourceDirectory();
+        var handlers = typeof(IJobHandler).Assembly.GetTypes()
+            .Where(t => t is { IsClass: true, IsAbstract: false } && typeof(IJobHandler).IsAssignableFrom(t))
+            .ToList();
+        Assert.NotEmpty(handlers);
+
+        var stopsEarly = new List<JobKind>();
+        foreach (var handler in handlers)
+        {
+            Assert.EndsWith("JobHandler", handler.Name, StringComparison.Ordinal);
+            var kind = Enum.Parse<JobKind>(handler.Name[..^"JobHandler".Length]);
+            var source = File.ReadAllText(Path.Combine(jobs, handler.Name + ".cs"));
+            if (source.Contains("IsCancellationRequested", StringComparison.Ordinal))
+            {
+                stopsEarly.Add(kind);
+            }
+        }
+
+        Assert.Equal(
+            stopsEarly.Order(),
+            Options.Kinds.Where(k => k.Value.StopsEarlyOnCancellation).Select(k => k.Key).Order());
+    }
+
+    private static string HandlerSourceDirectory()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "backend", "FrostAura.Reel.Application", "Jobs");
+            if (File.Exists(Path.Combine(candidate, "IJobHandler.cs")))
+            {
+                return candidate;
+            }
+        }
+
+        throw new DirectoryNotFoundException("The handler sources were not found above the test output directory.");
+    }
+
     private static ProviderHealthSnapshot Snapshot(ProviderHealthState state, params ProviderBreaker[] breakers) =>
         new(state, DateTime.UtcNow, breakers);
 

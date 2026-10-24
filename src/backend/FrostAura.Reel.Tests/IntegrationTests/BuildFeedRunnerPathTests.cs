@@ -410,35 +410,23 @@ public class BuildFeedRunnerPathTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     /// <summary>
-    /// Runs the job through the REAL runner's execution path (<see cref="JobRunnerService.RunAsync"/>):
-    /// one scope, the account pinned BEFORE the handler is resolved, the handler run on the scope's
-    /// context, then the runner's own fenced completion. Only the claim is issued here, on this one
-    /// row, because the shared test database holds other tests' queued jobs.
+    /// Runs the job through the REAL runner (<see cref="JobRunnerService.ClaimNextAsync"/> then
+    /// <see cref="JobRunnerService.RunAsync"/>): the real claim — claim lock, attempt cap, progress
+    /// reset — narrowed to this one row because the shared test database holds other tests' queued
+    /// jobs; then one scope, the account pinned BEFORE the handler is resolved, the handler run on
+    /// the scope's context, and the runner's own fenced completion.
     /// </summary>
     private Task RunThroughJobRunnerPathAsync(Guid jobId) => RunThroughJobRunnerPathAsync(jobId, null);
 
     private async Task RunThroughJobRunnerPathAsync(Guid jobId, MemoryCache? clusterCache)
     {
-        List<int> attempts;
-        await using (var db = Fixture.CreateContext(new AccountContext()))
-        {
-            attempts = await db.Database
-                .SqlQuery<int>(
-                    $"""
-                     UPDATE "SyncJobs" SET "Status" = 'Running', "StartedAt" = {DateTime.UtcNow},
-                         "HeartbeatAt" = {DateTime.UtcNow}, "AttemptCount" = "AttemptCount" + 1
-                     WHERE "Id" = {jobId}
-                     RETURNING "AttemptCount" AS "Value"
-                     """)
-                .ToListAsync();
-        }
-
-        var attempt = Assert.Single(attempts);
-
         await using var harness = JobRunnerHarness.Create(Fixture.ConnectionString!, JobRunnerOptions.Default, services =>
             services.AddScoped<IJobHandler>(sp => HandlerFor(sp.GetRequiredService<ReelDbContext>(), clusterCache)));
-        var outcome = await harness.Runner.RunAsync(
-            new JobRunnerService.ClaimedJob(jobId, attempt, JobKind.BuildFeed), CancellationToken.None);
+        var claim = await harness.Runner.ClaimNextAsync([nameof(JobKind.BuildFeed)], CancellationToken.None, onlyId: jobId);
+        Assert.NotNull(claim);
+        Assert.Equal(jobId, claim.Id);
+
+        var outcome = await harness.Runner.RunAsync(claim, CancellationToken.None);
         Assert.Equal(JobRunOutcome.Succeeded, outcome);
     }
 

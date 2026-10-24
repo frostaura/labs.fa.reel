@@ -7,6 +7,7 @@ using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Background;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -559,6 +560,336 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
         }
     }
 
+    // ── Review round: fenced handler writes, hard deadlines, bounded refunds ──────────────────
+
+    [Fact]
+    public async Task A_reclaimed_execution_cannot_save_its_checkpoint_or_progress_over_the_live_execution()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // A is a paused replica: its beat never fires, so B reclaims the row and starts attempt 2.
+        // While B is still running, A wakes up and saves its stale cursor and progress the way every
+        // real handler does — through the tracked job on its own context.
+        var releaseA = new TaskCompletionSource();
+        var releaseB = new TaskCompletionSource();
+        var bSaved = new TaskCompletionSource();
+        await using var a = JobRunnerHarness.Create(
+            fixture.ConnectionString,
+            JobRunnerHarness.FastOptions() with { HeartbeatInterval = TimeSpan.FromHours(1) },
+            ContextHandler.For(JobKind.SeedCatalog, async (job, db, _) =>
+            {
+                await releaseA.Task;
+                job.CursorJson = """{"from":"stale-attempt-1"}""";
+                job.ProgressPct = 42;
+                job.ProgressMessage = "stale";
+                await db.SaveChangesAsync(CancellationToken.None);
+            }));
+        await using var b = JobRunnerHarness.Create(
+            fixture.ConnectionString,
+            JobRunnerHarness.FastOptions() with { StaleAfter = TimeSpan.FromSeconds(1) },
+            ContextHandler.For(JobKind.SeedCatalog, async (job, db, _) =>
+            {
+                job.CursorJson = """{"from":"attempt-2"}""";
+                job.ProgressPct = 10;
+                job.ProgressMessage = "live";
+                await db.SaveChangesAsync(CancellationToken.None);
+                bSaved.SetResult();
+                await releaseB.Task;
+            }));
+        var id = await AddJobAsync(JobKind.SeedCatalog);
+
+        var claimA = await a.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claimA);
+        var runA = a.Runner.RunAsync(claimA, CancellationToken.None);
+
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        await b.Runner.SweepAsync(CancellationToken.None);
+        var claimB = await b.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claimB);
+        var runB = b.Runner.RunAsync(claimB, CancellationToken.None);
+        await bSaved.Task.WaitAsync(Patience);
+
+        releaseA.SetResult();
+        Assert.Equal(JobRunOutcome.LeaseLost, await runA.WaitAsync(Patience));
+
+        var live = await ReadAsync(id);
+        Assert.Equal(JobStatus.Running, live.Status);
+        Assert.Equal(2, live.AttemptCount);
+        Assert.Equal("""{"from": "attempt-2"}""", live.CursorJson);
+        Assert.Equal(10, live.ProgressPct);
+        Assert.Equal("live", live.ProgressMessage);
+
+        releaseB.SetResult();
+        Assert.Equal(JobRunOutcome.Succeeded, await runB.WaitAsync(Patience));
+    }
+
+    [Fact]
+    public async Task A_reclaimed_execution_that_finishes_while_its_successor_is_still_running_writes_nothing()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // Guards the lease NUMBER, not only the status: B's row is Running, exactly what A's own
+        // fence would match if it checked status alone.
+        var releaseA = new TaskCompletionSource();
+        var handlerA = new ScriptedHandler(JobKind.SeedCatalog, (_, _, _) => releaseA.Task);
+        var handlerB = ScriptedHandler.Blocks(JobKind.SeedCatalog);
+        await using var a = Harness(JobRunnerHarness.FastOptions() with { HeartbeatInterval = TimeSpan.FromHours(1) }, handlerA);
+        await using var b = Harness(JobRunnerHarness.FastOptions() with { StaleAfter = TimeSpan.FromSeconds(1) }, handlerB);
+        var id = await AddJobAsync(JobKind.SeedCatalog);
+
+        var claimA = await a.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claimA);
+        var runA = a.Runner.RunAsync(claimA, CancellationToken.None);
+
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        await b.Runner.SweepAsync(CancellationToken.None);
+        var claimB = await b.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claimB);
+        using var stopB = new CancellationTokenSource();
+        var runB = b.Runner.RunAsync(claimB, stopB.Token);
+        await WaitUntilAsync(() => Task.FromResult(handlerB.Running == 1), Patience);
+
+        releaseA.SetResult();
+        Assert.Equal(JobRunOutcome.LeaseLost, await runA.WaitAsync(Patience));
+
+        var live = await ReadAsync(id);
+        Assert.Equal(JobStatus.Running, live.Status);
+        Assert.Equal(2, live.AttemptCount);
+        Assert.Null(live.CompletedAt);
+        Assert.Null(live.ProgressPct);
+
+        await stopB.CancelAsync();
+        Assert.Equal(JobRunOutcome.Interrupted, await runB.WaitAsync(Patience));
+    }
+
+    [Fact]
+    public async Task A_restarting_kind_whose_handler_returns_after_its_deadline_has_finished_and_is_completed()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var account = await SeedAccountAsync();
+        // Finishes its work 1.5 s in, never looking at the token that fired at 250 ms.
+        var handler = new ScriptedHandler(JobKind.Train, (_, _, _) => Task.Delay(TimeSpan.FromSeconds(1.5), CancellationToken.None));
+        var options = Deadline(JobKind.Train, TimeSpan.FromMilliseconds(250), DeadlineAction.Retry);
+        await using var harness = Harness(options, handler);
+        var id = await AddJobAsync(JobKind.Train, account.Id);
+
+        var claim = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claim);
+        Assert.Equal(JobRunOutcome.Succeeded, await harness.Runner.RunAsync(claim, CancellationToken.None).WaitAsync(Patience));
+
+        var done = await ReadAsync(id);
+        Assert.Equal(JobStatus.Succeeded, done.Status);
+        Assert.Equal(1, done.AttemptCount);
+        Assert.Null(done.Error);
+        Assert.Equal(1, handler.Executions);
+    }
+
+    [Fact]
+    public async Task A_kind_that_returns_early_at_its_deadline_is_sliced_not_completed()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // The seed walks pages while its token is live and RETURNS when it fires: that return is a
+        // checkpoint, not a finished plan.
+        var handler = new ScriptedHandler(JobKind.SeedCatalog, async (_, execution, ct) =>
+        {
+            while (execution == 1 && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(20, CancellationToken.None);
+            }
+        });
+        var options = Deadline(JobKind.SeedCatalog, TimeSpan.FromMilliseconds(250), DeadlineAction.Yield);
+        Assert.True(options.PolicyFor(JobKind.SeedCatalog).StopsEarlyOnCancellation);
+        await using var harness = Harness(options, handler);
+        var id = await AddJobAsync(JobKind.SeedCatalog);
+
+        var first = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(first);
+        Assert.Equal(JobRunOutcome.Yielded, await harness.Runner.RunAsync(first, CancellationToken.None).WaitAsync(Patience));
+
+        var second = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(second);
+        Assert.Equal(JobRunOutcome.Succeeded, await harness.Runner.RunAsync(second, CancellationToken.None).WaitAsync(Patience));
+
+        var done = await ReadAsync(id);
+        Assert.Equal(1, done.AttemptCount);
+        Assert.Equal(1, done.DeadlineYields);
+        Assert.Equal(2, handler.Executions);
+    }
+
+    [Fact]
+    public async Task A_handler_that_ignores_its_token_is_abandoned_at_the_hard_limit_and_its_late_save_is_fenced()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var account = await SeedAccountAsync();
+        var orphanEnded = new TaskCompletionSource();
+        var options = Deadline(JobKind.Train, TimeSpan.FromMilliseconds(300), DeadlineAction.Retry) with
+        {
+            OverrunGrace = TimeSpan.FromMilliseconds(300),
+        };
+        await using var deaf = JobRunnerHarness.Create(fixture.ConnectionString, options, ContextHandler.For(JobKind.Train, async (job, db, _) =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(4), CancellationToken.None);
+                job.ProgressMessage = "late";
+                job.CursorJson = """{"late":true}""";
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            finally
+            {
+                orphanEnded.SetResult();
+            }
+        }));
+        var id = await AddJobAsync(JobKind.Train, account.Id);
+
+        var claim = await deaf.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claim);
+        var stopwatch = Stopwatch.StartNew();
+        Assert.Equal(JobRunOutcome.Retrying, await deaf.Runner.RunAsync(claim, CancellationToken.None).WaitAsync(Patience));
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2.5), $"the slot was held for {stopwatch.Elapsed}");
+
+        var abandoned = await ReadAsync(id);
+        Assert.Equal(JobStatus.Pending, abandoned.Status);
+        Assert.Equal(1, abandoned.AttemptCount);
+        Assert.StartsWith("Timed out: ran past its", abandoned.Error, StringComparison.Ordinal);
+        Assert.Contains("abandoned", abandoned.Error, StringComparison.Ordinal);
+        Assert.Equal(JobFailureReason.TimedOut, JobFailureReason.Classify(abandoned.Error));
+
+        // Its beat stopped with it: nothing keeps the row looking alive.
+        await Task.Delay(TimeSpan.FromMilliseconds(600));
+        Assert.Equal(abandoned.HeartbeatAt, (await ReadAsync(id)).HeartbeatAt);
+
+        // The next attempt runs while the deaf handler is still going, and the deaf handler's late
+        // save lands on nothing.
+        var next = ScriptedHandler.Blocks(JobKind.Train);
+        await using var successor = Harness(JobRunnerHarness.FastOptions(), next);
+        var claimNext = await successor.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claimNext);
+        Assert.Equal(2, claimNext.Attempt);
+        using var stopNext = new CancellationTokenSource();
+        var runNext = successor.Runner.RunAsync(claimNext, stopNext.Token);
+
+        await orphanEnded.Task.WaitAsync(Patience);
+        var live = await ReadAsync(id);
+        Assert.Equal(JobStatus.Running, live.Status);
+        Assert.Equal(2, live.AttemptCount);
+        Assert.Null(live.ProgressMessage);
+        Assert.Null(live.CursorJson);
+
+        await stopNext.CancelAsync();
+        await runNext.WaitAsync(Patience);
+    }
+
+    [Fact]
+    public async Task A_stopping_host_refunds_an_attempt_a_bounded_number_of_times_then_counts_it_as_a_failure()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var handler = ScriptedHandler.Blocks(JobKind.SeedCatalog);
+        var options = JobRunnerHarness.FastOptions() with { MaxInterruptions = 2 };
+        await using var harness = Harness(options, handler);
+        var id = await AddJobAsync(JobKind.SeedCatalog);
+
+        var outcomes = new List<JobRunOutcome>();
+        for (var restart = 0; restart < 3; restart++)
+        {
+            var claim = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+            Assert.NotNull(claim);
+            using var stopping = new CancellationTokenSource();
+            var run = harness.Runner.RunAsync(claim, stopping.Token);
+            await WaitUntilAsync(() => Task.FromResult(handler.Running == 1), Patience);
+            await stopping.CancelAsync();
+            outcomes.Add(await run.WaitAsync(Patience));
+        }
+
+        Assert.Equal(new[] { JobRunOutcome.Interrupted, JobRunOutcome.Interrupted, JobRunOutcome.Retrying }, outcomes);
+        var row = await ReadAsync(id);
+        Assert.Equal(JobStatus.Pending, row.Status);
+        Assert.Equal(1, row.AttemptCount);
+        Assert.Equal(2, row.Interruptions);
+        Assert.StartsWith("Interrupted:", row.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_run_that_succeeds_never_reports_a_lease_it_did_not_lose()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        // A beat every 5 ms against handlers that finish in ~30 ms: under the old ordering a tick
+        // regularly landed between the terminal write and the beat's stop and cried "reclaimed".
+        var log = new RecordingLogger<JobRunnerService>();
+        var handler = new ScriptedHandler(JobKind.SeedCatalog, (_, _, _) => Task.Delay(30, CancellationToken.None));
+        await using var harness = JobRunnerHarness.Create(
+            fixture.ConnectionString,
+            JobRunnerHarness.FastOptions() with { HeartbeatInterval = TimeSpan.FromMilliseconds(5) },
+            services => services.AddSingleton<IJobHandler>(handler),
+            log);
+
+        for (var i = 0; i < 20; i++)
+        {
+            await AddJobAsync(JobKind.SeedCatalog);
+            var claim = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+            Assert.NotNull(claim);
+            Assert.Equal(JobRunOutcome.Succeeded, await harness.Runner.RunAsync(claim, CancellationToken.None).WaitAsync(Patience));
+        }
+
+        Assert.DoesNotContain(log.Lines, l => l.Level >= LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task A_slice_keeps_the_first_enqueue_time_and_goes_behind_work_queued_before_it()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        var handler = ScriptedHandler.Blocks(JobKind.SeedCatalog);
+        var options = Deadline(JobKind.SeedCatalog, TimeSpan.FromMilliseconds(200), DeadlineAction.Yield);
+        await using var harness = Harness(options, handler);
+        var firstQueued = DateTime.UtcNow.AddSeconds(-10);
+        var sliced = await AddJobAsync(JobKind.SeedCatalog, enqueuedAt: firstQueued);
+        var queuedLater = await AddJobAsync(JobKind.SeedCatalog, enqueuedAt: DateTime.UtcNow.AddSeconds(-5));
+
+        var claim = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(claim);
+        Assert.Equal(sliced, claim.Id);
+        Assert.Equal(JobRunOutcome.Yielded, await harness.Runner.RunAsync(claim, CancellationToken.None).WaitAsync(Patience));
+
+        var row = await ReadAsync(sliced);
+        Assert.Equal(firstQueued, row.EnqueuedAt, TimeSpan.FromMilliseconds(1));
+        Assert.NotNull(row.RequeuedAt);
+        Assert.True(row.StartedAt >= row.EnqueuedAt, "a queue wait must never be negative");
+
+        var next = await harness.Runner.ClaimNextAsync(Enum.GetNames<JobKind>(), CancellationToken.None);
+        Assert.NotNull(next);
+        Assert.Equal(queuedLater, next.Id);
+    }
+
     // ── Plumbing ───────────────────────────────────────────────────────────────────────────────
 
     private JobRunnerHarness Harness(JobRunnerOptions options, params ScriptedHandler[] handlers) =>
@@ -579,7 +910,7 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
     {
         var defaults = JobRunnerHarness.FastOptions();
         var kinds = defaults.Kinds.ToDictionary(k => k.Key, k => k.Value);
-        kinds[kind] = new JobKindPolicy(deadline, action);
+        kinds[kind] = kinds[kind] with { Deadline = deadline, OnDeadline = action };
         return defaults with { Kinds = kinds };
     }
 
@@ -603,7 +934,8 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
         JobStatus status = JobStatus.Pending,
         DateTime? heartbeat = null,
         short priority = 0,
-        decimal? progress = null)
+        decimal? progress = null,
+        DateTime? enqueuedAt = null)
     {
         await using var db = fixture.CreateContext();
         var job = new SyncJob
@@ -613,7 +945,7 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
             Kind = kind,
             Status = status,
             Priority = priority,
-            EnqueuedAt = DateTime.UtcNow,
+            EnqueuedAt = enqueuedAt ?? DateTime.UtcNow,
             StartedAt = status == JobStatus.Running ? heartbeat : null,
             HeartbeatAt = heartbeat,
             AttemptCount = attempts,

@@ -9,6 +9,7 @@ using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 
@@ -40,7 +41,8 @@ internal sealed class JobRunnerHarness : IAsyncDisposable
     public static JobRunnerHarness Create(
         string connectionString,
         JobRunnerOptions options,
-        Action<IServiceCollection>? configure = null)
+        Action<IServiceCollection>? configure = null,
+        ILogger<JobRunnerService>? logger = null)
     {
         var events = new RecordingEventHub();
         var services = new ServiceCollection();
@@ -54,7 +56,7 @@ internal sealed class JobRunnerHarness : IAsyncDisposable
         var runner = new JobRunnerService(
             provider.GetRequiredService<IServiceScopeFactory>(),
             new ConfigurationBuilder().Build(),
-            NullLogger<JobRunnerService>.Instance,
+            logger ?? NullLogger<JobRunnerService>.Instance,
             options);
         return new JobRunnerHarness(provider, runner, events);
     }
@@ -65,6 +67,7 @@ internal sealed class JobRunnerHarness : IAsyncDisposable
         PollInterval = TimeSpan.FromMilliseconds(100),
         HeartbeatInterval = TimeSpan.FromMilliseconds(200),
         ShutdownGrace = TimeSpan.FromSeconds(5),
+        OverrunGrace = TimeSpan.FromSeconds(5),
     };
 
     public async ValueTask DisposeAsync()
@@ -112,6 +115,35 @@ internal sealed class ScriptedHandler(JobKind kind, Func<SyncJob, int, Cancellat
 
     /// <summary>Holds its slot until the token is cancelled, then throws like a well-behaved handler.</summary>
     public static ScriptedHandler Blocks(JobKind kind) => new(kind, (_, _, ct) => Task.Delay(Timeout.Infinite, ct));
+}
+
+/// <summary>
+/// A handler that works on the execution's own scoped context, the way production handlers do —
+/// so its saves of the tracked job go through the same concurrency tokens theirs do.
+/// </summary>
+internal sealed class ContextHandler(JobKind kind, ReelDbContext db, Func<SyncJob, ReelDbContext, CancellationToken, Task> body) : IJobHandler
+{
+    public JobKind Kind => kind;
+
+    public Task ExecuteAsync(SyncJob job, CancellationToken ct) => body(job, db, ct);
+
+    /// <summary>Registers a scoped <see cref="ContextHandler"/> running <paramref name="body"/>.</summary>
+    public static Action<IServiceCollection> For(JobKind kind, Func<SyncJob, ReelDbContext, CancellationToken, Task> body) =>
+        services => services.AddScoped<IJobHandler>(sp => new ContextHandler(kind, sp.GetRequiredService<ReelDbContext>(), body));
+}
+
+/// <summary>Keeps every log line the runner writes, for tests that assert on what it reported.</summary>
+internal sealed class RecordingLogger<T> : ILogger<T>
+{
+    public ConcurrentQueue<(LogLevel Level, string Message)> Lines { get; } = new();
+
+    public IDisposable? BeginScope<TState>(TState state)
+        where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Lines.Enqueue((logLevel, formatter(state, exception)));
 }
 
 internal sealed class RecordingEventHub : IPipelineEventHub

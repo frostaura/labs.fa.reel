@@ -432,6 +432,16 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             // Additive with a database default, so an image from before the column existed keeps
             // inserting jobs (it never names the column) and every existing row reads as 0 slices.
             e.Property(j => j.DeadlineYields).HasDefaultValue(0);
+            e.Property(j => j.Interruptions).HasDefaultValue(0);
+
+            // The execution's lease, enforced on EVERY save of a tracked row and not only on the
+            // runner's own writes: a handler saves its job (cursor, progress) through the context it
+            // was handed, and an execution that was reclaimed while it looked dead must not land
+            // those writes on its successor's row. With these as concurrency tokens the stale save
+            // matches no row and throws DbUpdateConcurrencyException, which rolls back everything
+            // else in that SaveChanges and settles the execution as LeaseLost.
+            e.Property(j => j.AttemptCount).IsConcurrencyToken();
+            e.Property(j => j.Status).IsConcurrencyToken();
 
             // SyncJob is the one account-bearing entity that is NOT IAccountScoped — its AccountId
             // is nullable because a global job (catalog refresh) belongs to no tenant — so the
