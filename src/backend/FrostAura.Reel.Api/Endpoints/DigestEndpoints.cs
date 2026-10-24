@@ -68,8 +68,8 @@ public static class DigestEndpoints
                 // The lens's hook where one exists, and the reason copy where it does not. Both are
                 // true statements about why the card is here; the hook is simply the one written
                 // for this reader.
-                var whyThis = note?.Hook ?? DigestReasons.CopyFor(item.Reason);
-                whySources.Add(DigestWhySource(note?.Hook));
+                var (whyThis, whySource) = DigestWhyLine(note?.Hook, DigestReasons.CopyFor(item.Reason));
+                whySources.Add(whySource);
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
@@ -112,13 +112,15 @@ public static class DigestEndpoints
     }
 
     /// <summary>
-    /// How a digest card's why-line came to be, typed for the exposure log. The line is the lens
-    /// hook when one is cached for this reader — model text, written earlier and served from the
-    /// lens cache, so <see cref="ExposureWhySource.Cache"/> — and otherwise the digest's own fixed
-    /// reason copy, <see cref="ExposureWhySource.Digest"/>. It used to log every card as Digest,
-    /// which booked model-written hooks as deterministic copy and hid them from every accuracy query
-    /// that separates model text from templates.
+    /// A digest card's why-line and how it came to be, decided by ONE predicate so the logged source
+    /// can never disagree with the rendered line. The line is the lens hook when one is cached for
+    /// this reader — model text, written earlier and served from the lens cache, so
+    /// <see cref="ExposureWhySource.Cache"/> — and otherwise the digest's own fixed reason copy,
+    /// <see cref="ExposureWhySource.Digest"/>. An empty or whitespace hook is no hook: it used to
+    /// render as a blank line while being logged as Digest. And the source used to be Digest for
+    /// every card, which booked model-written hooks as deterministic copy and hid them from every
+    /// accuracy query that separates model text from templates.
     /// </summary>
-    public static ExposureWhySource DigestWhySource(string? hook) =>
-        string.IsNullOrWhiteSpace(hook) ? ExposureWhySource.Digest : ExposureWhySource.Cache;
+    public static (string Line, ExposureWhySource Source) DigestWhyLine(string? hook, string copy) =>
+        string.IsNullOrWhiteSpace(hook) ? (copy, ExposureWhySource.Digest) : (hook, ExposureWhySource.Cache);
 }

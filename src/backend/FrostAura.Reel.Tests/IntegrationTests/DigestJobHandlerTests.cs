@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Notifications;
@@ -504,16 +505,31 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
 [Collection("postgres")]
 public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory api) : IClassFixture<ReelApiFactory>
 {
-    [Theory]
-    [InlineData(null, "Digest")]
-    [InlineData("", "Digest")]
-    [InlineData("   ", "Digest")]
-    [InlineData("A heist that plays fair with you.", "Cache")]
-    public void The_why_source_follows_the_line_actually_rendered(string? hook, string expected) =>
-        Assert.Equal(expected, Api.Endpoints.DigestEndpoints.DigestWhySource(hook).Name);
+    private const string Hook = "A heist that plays fair with you.";
 
+    /// <summary>
+    /// One predicate decides both the rendered line and its logged source, so they cannot disagree:
+    /// an empty or whitespace hook is no hook — the card shows the reason copy and logs Digest.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "Reason copy", "Digest")]
+    [InlineData("", "Reason copy", "Digest")]
+    [InlineData("   ", "Reason copy", "Digest")]
+    [InlineData("A heist that plays fair with you.", "A heist that plays fair with you.", "Cache")]
+    public void The_why_source_follows_the_line_actually_rendered(string? hook, string expectedLine, string expectedSource)
+    {
+        var (line, source) = Api.Endpoints.DigestEndpoints.DigestWhyLine(hook, "Reason copy");
+        Assert.Equal(expectedLine, line);
+        Assert.Equal(expectedSource, source.Name);
+    }
+
+    /// <summary>
+    /// End to end through <c>GET /api/digest/current</c>, both branches in one digest: the card with
+    /// a cached lens hook renders the hook and is logged <c>Cache</c>; the card without one renders
+    /// the reason copy and is logged <c>Digest</c>.
+    /// </summary>
     [Fact]
-    public async Task Reading_the_digest_logs_each_card_with_the_digest_why_source()
+    public async Task Reading_the_digest_logs_each_card_with_the_source_of_its_rendered_line()
     {
         if (!fixture.Available)
         {
@@ -566,6 +582,26 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
                     new DigestItem(titleIds[1], 7.6m, DigestReasons.NewOnProvider),
                 }),
             });
+            // A cached lens note for the first title only — any profile hash serves, because the
+            // digest reads a stale note as readily as a fresh one.
+            db.TitleLensCopies.Add(new TitleLensCopy
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleIds[0],
+                ProfileHash = "digest-exposure",
+                PromptVersion = 1,
+                LensJson = JsonSerializer.Serialize(new LensNote(
+                    "A cold, procedural piece that keeps its pressure low and constant.",
+                    Hook,
+                    null,
+                    [],
+                    "tense",
+                    "tonight-alone")),
+                ModelId = "stub/deterministic-v1",
+                Status = LensStatus.Done,
+                GeneratedAt = now,
+            });
             await db.SaveChangesAsync();
         }
 
@@ -575,8 +611,11 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
         await using var verify = fixture.CreateContext(new AccountContext());
         var exposures = await verify.ExposureEvents
             .Where(e => e.AccountId == accountId && e.Surface == ExposureSurface.Digest)
-            .ToListAsync();
-        Assert.Equal(titleIds.OrderBy(id => id), exposures.Select(e => e.TitleId).OrderBy(id => id));
-        Assert.All(exposures, e => Assert.Equal("Digest", e.WhySource));
+            .ToDictionaryAsync(e => e.TitleId);
+        Assert.Equal(titleIds.OrderBy(id => id), exposures.Keys.OrderBy(id => id));
+        Assert.Equal("Cache", exposures[titleIds[0]].WhySource);
+        Assert.Equal(Hook, exposures[titleIds[0]].WhySentence);
+        Assert.Equal("Digest", exposures[titleIds[1]].WhySource);
+        Assert.Equal(DigestReasons.CopyFor(DigestReasons.NewOnProvider), exposures[titleIds[1]].WhySentence);
     }
 }
