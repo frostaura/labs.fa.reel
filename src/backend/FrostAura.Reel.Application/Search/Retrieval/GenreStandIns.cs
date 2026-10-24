@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 
@@ -160,58 +161,68 @@ public static class GenreStandIns
             return t => false;
         }
 
-        var label = Expression.Parameter(typeof(string), "k");
-        var labelMatch = patterns
-            .Select(p => LabelMatch(label, p))
-            .Aggregate(Expression.OrElse);
-        var labelLambda = Expression.Lambda<Func<string, bool>>(labelMatch, label);
-
+        // Exact labels are an array overlap (&&), which Postgres does in C without building a string;
+        // whole-word stems need a regular expression, run once per title over its labels joined by
+        // newlines (Npgsql translates string.Join over the array to array_to_string and Regex.IsMatch
+        // to ~; the pattern means the same to .NET, which the in-memory parity test relies on). A
+        // LIKE per pattern per label made the founder's eligibility count five times slower, and a
+        // regex for the exact labels too would scan every film for the both-media slugs.
         var title = Expression.Parameter(typeof(Title), "t");
         var keywords = Expression.Property(title, nameof(Title.Keywords));
-        var anyKeyword = Expression.Call(AnyMethod, keywords, labelLambda);
+        var exact = patterns.OfType<Exact>().Select(p => p.Text).ToArray();
+        var words = patterns.OfType<Word>().ToList();
+
+        Expression? anyKeyword = null;
+        if (exact.Length > 0)
+        {
+            var k = Expression.Parameter(typeof(string), "k");
+            var contains = Expression.Call(ArrayContainsMethod, Expression.Constant(exact), k);
+            anyKeyword = Expression.Call(AnyMethod, keywords, Expression.Lambda<Func<string, bool>>(contains, k));
+        }
+
+        if (words.Count > 0)
+        {
+            var joined = Expression.Call(JoinMethod, Expression.Constant(LabelSeparator), keywords);
+            var match = Expression.Call(IsMatchMethod, joined, Expression.Constant(WordRegex(words)));
+            anyKeyword = anyKeyword is null ? match : Expression.OrElse(anyKeyword, match);
+        }
 
         // Both media ⇒ no media test at all; one ⇒ an equality on MediaType.
         Expression body = media.Count == 2
-            ? anyKeyword
+            ? anyKeyword!
             : Expression.AndAlso(
                 Expression.Equal(Expression.Property(title, nameof(Title.MediaType)), Expression.Constant(media[0])),
-                anyKeyword);
+                anyKeyword!);
         return Expression.Lambda<Func<Title, bool>>(body, title);
     }
+
+    /// <summary>What the labels are joined with before the slug's expression scans them.</summary>
+    private const string LabelSeparator = "\n";
+
+    private static readonly MethodInfo JoinMethod =
+        typeof(string).GetMethod(nameof(string.Join), [typeof(string), typeof(IEnumerable<string>)])!;
+
+    private static readonly MethodInfo IsMatchMethod =
+        typeof(Regex).GetMethod(nameof(Regex.IsMatch), [typeof(string), typeof(string)])!;
 
     private static readonly MethodInfo AnyMethod = typeof(Enumerable)
         .GetMethods(BindingFlags.Public | BindingFlags.Static)
         .Single(m => m.Name == nameof(Enumerable.Any) && m.GetParameters().Length == 2)
         .MakeGenericMethod(typeof(string));
 
-    private static readonly MethodInfo StartsWithMethod =
-        typeof(string).GetMethod(nameof(string.StartsWith), [typeof(string)])!;
-
-    private static readonly MethodInfo EndsWithMethod =
-        typeof(string).GetMethod(nameof(string.EndsWith), [typeof(string)])!;
-
-    private static readonly MethodInfo ContainsMethod =
-        typeof(string).GetMethod(nameof(string.Contains), [typeof(string)])!;
+    private static readonly MethodInfo ArrayContainsMethod = typeof(Enumerable)
+        .GetMethods(BindingFlags.Public | BindingFlags.Static)
+        .Single(m => m.Name == nameof(Enumerable.Contains) && m.GetParameters().Length == 2)
+        .MakeGenericMethod(typeof(string));
 
     /// <summary>
-    /// One pattern as an expression over the label <paramref name="k"/>. The single-argument string
-    /// overloads are the ones EF translates (to <c>=</c> and <c>LIKE</c>); they are culture-free in
-    /// SQL, and the in-memory twin above uses ordinal comparison to match.
+    /// The whole-word stems as one regular expression over newline-joined labels, valid in both .NET
+    /// and Postgres (ARE) syntax: a stem is bounded by the start, the end, a newline (a label edge) or
+    /// a space (a word edge inside a label).
     /// </summary>
-    private static Expression LabelMatch(ParameterExpression k, Pattern pattern)
-    {
-        var equal = Expression.Equal(k, Expression.Constant(pattern.Text));
-        if (pattern is Exact)
-        {
-            return equal;
-        }
+    public static string WordRegex(IEnumerable<Word> words) =>
+        $"(^|\\n| )({string.Join('|', words.Select(w => Escape(w.Text)))})( |\\n|$)";
 
-        return Expression.OrElse(
-            equal,
-            Expression.OrElse(
-                Expression.Call(k, StartsWithMethod, Expression.Constant(pattern.Text + " ")),
-                Expression.OrElse(
-                    Expression.Call(k, EndsWithMethod, Expression.Constant(" " + pattern.Text)),
-                    Expression.Call(k, ContainsMethod, Expression.Constant(" " + pattern.Text + " ")))));
-    }
+    private static string Escape(string text) =>
+        string.Concat(text.Select(c => "\\.^$|?*+()[]{}".Contains(c, StringComparison.Ordinal) ? $"\\{c}" : c.ToString()));
 }

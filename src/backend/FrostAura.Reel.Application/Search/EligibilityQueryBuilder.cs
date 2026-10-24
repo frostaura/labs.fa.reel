@@ -190,8 +190,8 @@ public class EligibilityQueryBuilder(IReelDbContext db)
             || !db.ContentFilters.Any(f =>
                 f.AccountId == accountId && f.Kind == FilterKind.ExcludeGenre && t.Genres.Contains(f.Value)));
 
-        // The same exclusions, read through the TV (and no-id) taxonomy gaps: an excluded genre TMDB
-        // cannot tag on a medium is recognised there by its stand-in keywords or alias genres
+        // The same genre exclusions, read through the TV (and no-id) taxonomy gaps: an excluded genre
+        // TMDB cannot tag on a medium is recognised there by its stand-in keywords or alias genres
         // (GenreStandIns). Without this "no romance / horror / history" removed 3, 14 and 2 shows
         // from a catalogue of ~10,000 (H-7). One arm per known slug, each gated on an uncorrelated
         // EXISTS that Postgres evaluates once per query, so an account that excludes none of them
