@@ -54,8 +54,9 @@ const NEAR_END_PX = 1200;
  *
  * "Confident" is a claim, and the build is allowed to fall short of it: when nothing clears the 7.5
  * bar it backfills the row from the best of what is left, silently. On live data that is the normal
- * case. So a pick that came in under the bar says so on the card, and a row where every measured
- * pick is a reach says so once above the row — the derivation is in lib/heroConfidence.ts.
+ * case. So a pick that came in under the bar says so on the card — unless every measured pick is a
+ * reach, in which case Home's status line says it once and no card repeats it (FD-15). The
+ * derivation is in lib/heroConfidence.ts.
  */
 export default function RecCardHero({ cards, loadMore, loading, failed, onRetry, rows = 1 }: HeroProps) {
   const [active, setActive] = useState(0);
@@ -85,19 +86,13 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
     return null;
   }
 
-  const reachingNote = heroReachingNote(cards);
+  // The whole row is a reach: Home's status line says so once, so the cards stay quiet.
+  const rowIsReaching = heroReachingNote(cards) !== null;
   const columns = heroColumns(cards.length, rowsInEffect);
   const eagerCount = heroEagerCount(rowsInEffect);
 
   return (
     <section aria-label="Tonight's picks" className="space-y-3">
-      {/* Said once, above the row, in the same register as the feed's degraded-reason copy — the
-          whole headline is a reach and pretending otherwise is the thing that costs trust. */}
-      {reachingNote && (
-        <p className="fa-caption text-fa-warning" data-testid="hero-reaching-note">
-          {reachingNote}
-        </p>
-      )}
       <div ref={scroller} className={heroContainerClass(rows)}
         data-testid="hero-carousel"
         onScroll={(e) => {
@@ -166,7 +161,7 @@ export default function RecCardHero({ cards, loadMore, loading, failed, onRetry,
                 )}
                 {/* Quiet on purpose: an admission, not an alarm. It sits under the why-line so the
                     pick is still the headline and the caveat is attached to it, not to the row. */}
-                {reachingLabel(card) && (
+                {!rowIsReaching && reachingLabel(card) && (
                   <p className="fa-caption text-fa-frost-dim" data-testid="hero-reaching-label">
                     {reachingLabel(card)}
                   </p>

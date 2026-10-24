@@ -58,7 +58,28 @@ async function serveBrightArt(page: Page): Promise<void> {
   await page.route(/image\.tmdb\.org/, (route) => route.fulfill({ status: 200, contentType: "image/png", body }));
 }
 
-async function bootHome(page: Page, count: number, overrides: Record<string, unknown> = {}): Promise<void> {
+/** The founder's own saved conditions on the eval copy: eight genre exclusions and four floors. */
+const REAL_FILTERS = {
+  excludeGenres: ["animation", "anime", "comedy", "documentary", "history", "music", "musical", "romance"],
+  includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+  minPredictedRating: 6, languages: ["en"], minCrowdRating: 6, minYear: 2000, maxYear: null,
+};
+
+/** An account with a track record, so the accuracy segment of the status line is on screen. */
+const ACCURACY = {
+  window: "365d", from: "2025-10-24T00:00:00Z", to: "2026-10-24T00:00:00Z", source: "exposures",
+  headline: { withinOnePoint: 0.26, n: 116, meanAbsoluteError: 1.94, bias: 0.37, correlation: -0.004, meanPredicted: 6.81, meanActual: 5.78 },
+  calibration: [], moments: [],
+  conversion: { shown: 0, saved: 0, watched: 0, rated: 0, shownToSaved: null, savedToWatched: null, shownToRated: null, medianDaysToWatch: null },
+  counterfactual: [], learnedThisWeek: null,
+};
+
+async function bootHome(
+  page: Page,
+  count: number,
+  overrides: Record<string, unknown> = {},
+  chrome: { filters?: unknown; accuracy?: unknown } = {}
+): Promise<void> {
   await stubEventSource(page);
   await page.goto("about:blank");
   await serveBrightArt(page);
@@ -71,6 +92,8 @@ async function bootHome(page: Page, count: number, overrides: Record<string, unk
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", { genres: [] });
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
+  if (chrome.filters) await mockJson(page, "**/api/settings/filters", chrome.filters);
+  if (chrome.accuracy) await mockJson(page, "**/api/accuracy", chrome.accuracy);
   await mockJson(page, "**/api/feed", {
     generatedAt: new Date().toISOString(),
     hero: Array.from({ length: count }, (_, i) => ({ ...heroCard(i + 1), ...overrides })),
@@ -124,7 +147,8 @@ for (const viewport of [
 
     test("every title and badge sits inside its card, and the actions never cover text", async ({ page }) => {
       await bootHome(page, 5);
-      // Scroll each card into view in turn so the off-screen columns are laid out and measured too.
+      // Off-screen columns are measured where they sit: the scroller lays every card out whether or
+      // not it is in view, so its boxes are real without scrolling to it.
       const geometry = await heroGeometry(page);
       expect(geometry).toHaveLength(5);
       for (const [index, card] of geometry.entries()) {
@@ -187,8 +211,29 @@ test.describe("narrow screens", () => {
 async function titleContrast(page: Page, index: number): Promise<number> {
   const card = page.getByTestId("hero-card").nth(index);
   await card.scrollIntoViewIfNeeded();
-  // Off the card so the hover zoom is not in the picture.
+  // Past the eager pair the art is lazy: wait until THIS card's near-white art has decoded, or the
+  // reading could be over the dark placeholder and prove nothing about the panel.
+  await expect
+    .poll(() => card.locator("img").evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
+    .toBe(true);
+  // Off the card so the hover zoom is not in the picture, and the snap scroll settled before the
+  // shot (a screenshot mid-scroll is what detached the element in the one flaky run).
   await page.mouse.move(1, 1);
+  await card.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        let last = el.getBoundingClientRect().x;
+        const tick = () => {
+          const x = el.getBoundingClientRect().x;
+          if (x === last) resolve();
+          else {
+            last = x;
+            requestAnimationFrame(tick);
+          }
+        };
+        requestAnimationFrame(tick);
+      })
+  );
   const title = card.locator("h2");
   const shot = (await title.screenshot({ animations: "disabled" })).toString("base64");
   return page.evaluate(async (data) => {
@@ -234,20 +279,44 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
 }
 
 /**
- * The first pick is above the fold on a cold Home (I-10). This fixture carries the chrome every
- * account has — title, conditions, browse toggles, mood chips — and none of the status bands, which
- * the Home status line (FD-15) collapses; it guards the hero's own share of the budget.
+ * The first pick is above the fold on a cold Home (I-10, O-6): its top edge within 220px at
+ * 1440×900 and 300px at 390×844.
+ *
+ * Measured with the chrome a real account has, because the earlier version of this test passed on
+ * a page with no conditions line at all (the filters were never mocked) and with confident picks
+ * only — the founder's eight exclusions and a reaching row were 10–40px further down (review D2).
+ * So every case here carries the founder's own saved conditions, and the cases vary what the
+ * status line has to say: nothing, the track record only, the reaching admission only, and both.
+ *
+ * The assertion keeps 10px of headroom under the acceptance number, so a slightly longer line or a
+ * different engine's font metrics cannot pass by a fraction of a pixel.
  */
+const HEADROOM_PX = 10;
+const TOP_CASES = [
+  { label: "confident, no track record", overrides: { confidence: "confident", predictedRating: 8.1 }, accuracy: undefined },
+  { label: "confident, with a track record", overrides: { confidence: "confident", predictedRating: 8.1 }, accuracy: ACCURACY },
+  { label: "reaching, no track record", overrides: {}, accuracy: undefined },
+  { label: "reaching, with a track record", overrides: {}, accuracy: ACCURACY },
+] as const;
+
 for (const [viewport, budget] of [
   [{ width: 1440, height: 900 }, 220],
   [{ width: 390, height: 844 }, 300],
 ] as const) {
-  test(`the first hero card starts within ${budget}px of the top at ${viewport.width}×${viewport.height}`, async ({ page }) => {
-    await page.setViewportSize(viewport);
-    // Confident picks: the row-level "nothing cleared your bar" admission is one of the status
-    // lines FD-15 folds into a single line, and is measured with them, not here.
-    await bootHome(page, 5, { confidence: "confident", predictedRating: 8.1 });
-    const top = await page.getByTestId("hero-card").first().evaluate((el) => el.getBoundingClientRect().top);
-    expect(top).toBeLessThanOrEqual(budget);
-  });
+  for (const c of TOP_CASES) {
+    test(`the first hero card starts within ${budget}px of the top at ${viewport.width}×${viewport.height} (${c.label})`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await bootHome(page, 5, c.overrides, { filters: REAL_FILTERS, accuracy: c.accuracy });
+      // The chrome this budget is about is really on the page — the fixture cannot drop it again.
+      await expect(page.getByTestId("conditions-summary")).toBeVisible();
+      await expect(page.getByTestId("browse-filters")).toBeVisible();
+      await expect(page.getByTestId("tonight-mood-chips")).toBeVisible();
+      if (c.accuracy) await expect(page.getByTestId("status-track-record")).toBeVisible();
+      if (!("confidence" in c.overrides)) await expect(page.getByTestId("hero-reaching-note")).toBeVisible();
+      const top = await page.getByTestId("hero-card").first().evaluate((el) => el.getBoundingClientRect().top);
+      expect(top).toBeLessThanOrEqual(budget - HEADROOM_PX);
+      // And nothing above it made the page wider than the phone.
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
+    });
+  }
 }

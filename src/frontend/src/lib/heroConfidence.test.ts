@@ -39,9 +39,7 @@ describe("reachingLabel", () => {
 
 describe("heroReachingNote", () => {
   it("speaks up when every measured pick in the row is a reach", () => {
-    expect(heroReachingNote([reaching, reaching, reaching])).toBe(
-      "Nothing cleared your usual 7.5 bar tonight — these are the best of what's left, ranked honestly.",
-    );
+    expect(heroReachingNote([reaching, reaching, reaching])).toBe("Nothing cleared your usual 7.5 bar tonight");
   });
 
   it("stays quiet when even one pick cleared the bar — that card's own label is enough", () => {

@@ -14,15 +14,17 @@ import { TONIGHT_MOODS, type TonightMood } from "../../lib/tonightMood";
 export default function TonightMoodChips({
   value,
   onChange,
+  className = "",
 }: {
   value: TonightMood | null;
   onChange: (mood: TonightMood | null) => void;
+  className?: string;
 }) {
   return (
     // One scrolling line on a phone (two wrapped lines there pushed the first pick a chip-row
     // further below the fold), wrapping as before from `md`. The note sits outside the scroller so
     // it can never be scrolled out of sight.
-    <div className="space-y-1.5" data-testid="tonight-mood-chips">
+    <div className={`space-y-1.5 ${className}`} data-testid="tonight-mood-chips">
       <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none] md:flex-wrap md:overflow-visible">
         <span className="fa-overline shrink-0 text-fa-frost-dim mr-1">tonight</span>
         {TONIGHT_MOODS.map((mood) => {

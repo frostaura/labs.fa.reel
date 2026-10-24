@@ -41,9 +41,11 @@ export function reachingLabel(card: Pick<FeedCard, "confidence" | "floorUsed">):
 }
 
 /**
- * The row-level band, in the second person the feed's `degradedReason` copy already uses: shown only
- * when EVERY measured pick is a reach, because a row where four cleared the bar and one did not is
- * already answered by that one card's own label.
+ * The row-level admission, in the second person the feed's `degradedReason` copy already uses: shown
+ * only when EVERY measured pick is a reach, because a row where four cleared the bar and one did not
+ * is already answered by that one card's own label. It is a segment of Home's single status line
+ * (FD-15), so it is one short clause, and when it shows the cards drop their own labels — the same
+ * message five times over was the O-6 finding.
  *
  * Cards with no confidence are ignored rather than counted as clearing it — the hero pages on past
  * the snapshot, and an unmeasured card arriving must not quietly retract a true statement about the
@@ -54,5 +56,5 @@ export function heroReachingNote(cards: Pick<FeedCard, "confidence" | "floorUsed
   if (measured.length === 0 || !measured.every(isReaching)) return null;
   const bar = measured.find((c) => c.floorUsed != null)?.floorUsed;
   const barText = bar != null ? ` ${formatBar(bar)}` : "";
-  return `Nothing cleared your usual${barText} bar tonight — these are the best of what's left, ranked honestly.`;
+  return `Nothing cleared your usual${barText} bar tonight`;
 }

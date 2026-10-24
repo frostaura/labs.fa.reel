@@ -8,8 +8,8 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
  * what is left when nothing clears it — silently. Live, that backfill fills the whole row: 31 of 470
  * scored titles reach 7.5 and the founder's hero is network procedurals at 6.6–7.0 under the heading
  * "Tonight's picks". These specs pin that the reach is now visible on the card that is reaching, that
- * a pick which cleared the bar carries no caveat, and that the row-level band appears only when the
- * whole row is a reach.
+ * a pick which cleared the bar carries no caveat, and that when the whole row is a reach it is said
+ * ONCE, on Home's status line, and not again on every card (FD-15, O-6).
  */
 
 const heroCard = (n: number, extra: Record<string, unknown>) => ({
@@ -55,8 +55,11 @@ async function bootHome(page: Page, hero: unknown[]) {
 }
 
 test.describe("hero honesty label", () => {
-  test("a 6.6 pick says it is reaching, and names the bar it fell short of", async ({ page }) => {
-    await bootHome(page, [heroCard(1, { predictedRating: 6.6, confidence: "reaching", floorUsed: 7.5 })]);
+  test("a 6.6 pick beside one that cleared the bar says it is reaching, and names the bar", async ({ page }) => {
+    await bootHome(page, [
+      heroCard(1, { predictedRating: 8.2, confidence: "confident", floorUsed: 7.5 }),
+      heroCard(2, { predictedRating: 6.6, confidence: "reaching", floorUsed: 7.5 }),
+    ]);
 
     await expect(page.getByTestId("hero-reaching-label")).toHaveText(
       "Reaching a bit — nothing cleared my usual 7.5 bar tonight",
@@ -70,7 +73,7 @@ test.describe("hero honesty label", () => {
     await expect(page.getByTestId("hero-reaching-note")).toHaveCount(0);
   });
 
-  test("the whole row reaching is said once, above the row, as well as on each card", async ({ page }) => {
+  test("the whole row reaching is said once, on the status line, and on no card", async ({ page }) => {
     // The live shape: five picks, none of them over the bar, under "Tonight's picks".
     await bootHome(page, [
       heroCard(1, { predictedRating: 6.6, confidence: "reaching", floorUsed: 7.5 }),
@@ -80,10 +83,20 @@ test.describe("hero honesty label", () => {
       heroCard(5, { predictedRating: 7.0, confidence: "reaching", floorUsed: 7.5 }),
     ]);
 
-    await expect(page.getByTestId("hero-reaching-note")).toHaveText(
-      "Nothing cleared your usual 7.5 bar tonight — these are the best of what's left, ranked honestly.",
-    );
-    await expect(page.getByTestId("hero-reaching-label")).toHaveCount(5);
+    await expect(page.getByTestId("hero-reaching-note")).toHaveText("Nothing cleared your usual 7.5 bar tonight");
+    await expect(page.getByTestId("hero-reaching-note")).toHaveCount(1);
+    await expect(page.getByTestId("hero-reaching-label")).toHaveCount(0);
+    // The status line sits above the picks it is about.
+    const note = await page.getByTestId("hero-reaching-note").boundingBox();
+    const card = await page.getByTestId("hero-card").first().boundingBox();
+    expect(note!.y + note!.height).toBeLessThanOrEqual(card!.y);
+  });
+
+  test("a lone reaching pick is the whole row: the status line says it, the card does not repeat it", async ({ page }) => {
+    await bootHome(page, [heroCard(1, { predictedRating: 6.6, confidence: "reaching", floorUsed: 7.5 })]);
+
+    await expect(page.getByTestId("hero-reaching-note")).toHaveText("Nothing cleared your usual 7.5 bar tonight");
+    await expect(page.getByTestId("hero-reaching-label")).toHaveCount(0);
   });
 
   test("one pick over the bar retires the row-level band but not that pick's neighbours' labels", async ({ page }) => {

@@ -165,6 +165,33 @@ test.describe("one row where two rows would be wrong", () => {
     await expect(page.getByTestId("hero-dots").locator("span")).toHaveCount(5);
   });
 
+  test("on a tablet every dot is a real resting place: five cards, five distinct snap positions", async ({ page }) => {
+    // Two cards show at once, which reads as "four positions for five dots" — but the cards snap to
+    // their centres, and a half-width card's centre is reachable for every card, ends included. So
+    // five dots is the honest count, and each one lights at its own position.
+    await page.setViewportSize({ width: 834, height: 1194 });
+    await bootHome(page, FIVE);
+    const carousel = page.getByTestId("hero-carousel");
+    const seen: { left: number; dot: number }[] = [];
+    for (let i = 0; i < FIVE.length; i++) {
+      await heroCard(page, i).evaluate((el) =>
+        el.scrollIntoView({ inline: "center", block: "nearest", behavior: "instant" as ScrollBehavior })
+      );
+      await expect.poll(async () => carousel.evaluate((el) => el.scrollLeft)).toBeGreaterThanOrEqual(0);
+      await page.waitForTimeout(300);
+      seen.push(
+        await page.evaluate(() => ({
+          left: Math.round(document.querySelector('[data-testid="hero-carousel"]')!.scrollLeft),
+          dot: Array.from(document.querySelectorAll('[data-testid="hero-dots"] span')).findIndex((d) =>
+            d.className.includes("w-6")
+          ),
+        }))
+      );
+    }
+    expect(new Set(seen.map((s) => s.left)).size, JSON.stringify(seen)).toBe(5);
+    expect(seen.map((s) => s.dot)).toEqual([0, 1, 2, 3, 4]);
+  });
+
   test("the free tier keeps its three-card single row", async ({ page }) => {
     await bootHome(page, [card(1), card(2), card(3)], "Free");
 

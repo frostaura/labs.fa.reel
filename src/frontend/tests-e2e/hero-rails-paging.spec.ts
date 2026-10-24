@@ -52,6 +52,10 @@ const ROWS = ["2", "3", "4"].map((prefix, i) => ({
 
 interface MoreBody {
   row: string;
+  mediaType?: string;
+  /** Test-side only: where the asking genre rail sat (top, viewport px) when its request arrived. */
+  railTopAtRequest?: number;
+  viewportHeight?: number;
   genre?: string | null;
   excludeTitleIds: string[];
   pageExcludeTitleIds?: string[];
@@ -63,8 +67,20 @@ function railOf(body: MoreBody): string {
   return body.row === "genre" ? `genre:${body.genre}` : body.row;
 }
 
-async function bootHome(page: Page, more: "ok" | "fail"): Promise<MoreBody[]> {
+const DIGEST = range(3).map((n) => card("5", n));
+
+interface BootOptions {
+  /** The snapshot's personalised rows; the default is three full rows of twelve. */
+  rows?: typeof ROWS;
+  /** The weekly digest rail's cards. */
+  digest?: ReturnType<typeof card>[];
+  /** Milliseconds before a failing /feed/more answers, so a request can be caught in flight. */
+  failDelayMs?: number;
+}
+
+async function bootHome(page: Page, more: "ok" | "fail", options: BootOptions = {}): Promise<MoreBody[]> {
   const bodies: MoreBody[] = [];
+  const rows = options.rows ?? ROWS;
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
@@ -73,15 +89,28 @@ async function bootHome(page: Page, more: "ok" | "fail"): Promise<MoreBody[]> {
   });
   await mockJson(page, "**/api/feed/continue-watching", []);
   await mockJson(page, "**/api/feed/genres", { genres: GENRES.map((slug) => ({ slug, label: slug })) });
-  await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
-  await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: HERO, rows: ROWS, lockedRowCount: 0 });
+  await mockJson(page, "**/api/digest/current", {
+    weekStart: options.digest ? "2026-10-19" : null,
+    generatedAt: options.digest ? new Date().toISOString() : null,
+    items: options.digest ?? [],
+  });
+  await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: HERO, rows, lockedRowCount: 0 });
   let page_ = 0;
   await page.route(
     (u) => u.pathname === "/api/feed/more",
     async (route) => {
       const body = route.request().postDataJSON() as MoreBody;
+      if (body.row === "genre") {
+        const where = await page.evaluate((genre) => {
+          const el = document.querySelector(`[data-testid="genre-rail"][data-genre="${genre}"]`);
+          return { top: el ? el.getBoundingClientRect().top : Number.NaN, height: window.innerHeight };
+        }, body.genre);
+        body.railTopAtRequest = where.top;
+        body.viewportHeight = where.height;
+      }
       bodies.push(body);
       if (more === "fail") {
+        if (options.failDelayMs) await new Promise((resolve) => setTimeout(resolve, options.failDelayMs));
         await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
         return;
       }
@@ -121,6 +150,44 @@ test.describe("lazy rails", () => {
     });
   }
 
+  /**
+   * The margin is a promise about distance, not about how many rails a feed has: a rail fetches
+   * when it is within 200px of the viewport and not before. With three full rows above them no
+   * genre rail is that close (the test above); with fewer rows the first genre rails ARE on screen
+   * and must fill, while the ones further down still wait. Every case asserts both halves: each
+   * rail that asked was inside the margin when it asked, and each rail still inside it now has
+   * asked. (A rail that has loaded is taller than its placeholder, so a rail that was inside the
+   * margin when it asked can sit outside it a moment later — hence "when it asked".)
+   */
+  for (const [label, rowCount] of [["no personalised rows", 0], ["one personalised row", 1]] as const) {
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      test(`with ${label} at ${viewport.width}×${viewport.height}, exactly the genre rails near the fold fetch`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const bodies = await bootHome(page, "ok", { rows: ROWS.slice(0, rowCount) });
+        await page.waitForTimeout(3000);
+        const asked = bodies.filter((b) => b.row === "genre");
+        for (const body of asked) {
+          expect(body.railTopAtRequest, `genre:${body.genre} asked from ${body.railTopAtRequest}`).toBeLessThanOrEqual(
+            body.viewportHeight! + 200 + 1
+          );
+        }
+        const fetched = new Set(asked.map((b) => b.genre));
+        const nearNow = await page.evaluate(() =>
+          Array.from(document.querySelectorAll<HTMLElement>('[data-testid="genre-rail"]'))
+            .filter((el) => el.getBoundingClientRect().top <= window.innerHeight + 200)
+            .map((el) => el.dataset.genre!)
+        );
+        // With no rows the first genre rail is on screen and must have filled; with one row none is
+        // within reach, and none asked.
+        if (rowCount === 0) expect(nearNow.length).toBeGreaterThanOrEqual(1);
+        else expect(fetched.size).toBe(0);
+        for (const genre of nearNow) expect(fetched.has(genre), `genre:${genre} is on screen but never asked`).toBe(true);
+        // Never the whole page: the rails further down wait for the user.
+        expect(fetched.size).toBeLessThan(GENRES.length);
+      });
+    }
+  }
+
   test("a genre rail fills once the user scrolls to it", async ({ page }) => {
     const bodies = await bootHome(page, "ok");
     await scrollThrough(page);
@@ -134,7 +201,8 @@ test.describe("lazy rails", () => {
 
 test.describe("page-wide exclusions", () => {
   test("every rail sends what the rest of the page shows, under one page token", async ({ page }) => {
-    const bodies = await bootHome(page, "ok");
+    const bodies = await bootHome(page, "ok", { digest: DIGEST });
+    await expect(page.getByText("New & high for you this week")).toBeVisible();
     await scrollThrough(page);
     await expect.poll(() => bodies.filter((b) => b.row === "genre").length).toBeGreaterThanOrEqual(GENRES.length);
 
@@ -143,14 +211,57 @@ test.describe("page-wide exclusions", () => {
     expect([...tokens][0]).toMatch(/^[A-Za-z0-9]{1,64}$/);
 
     const firstGenre = bodies.find((b) => b.row === "genre")!;
-    // The hero and every seeded row are on the page, so the genre rail excludes all of them...
-    for (const id of [...HERO, ...ROWS.flatMap((r) => r.items)].map((c) => c.titleId)) {
+    // The hero, every seeded row and the weekly digest are on the page, so the genre rail excludes
+    // all of them...
+    for (const id of [...HERO, ...ROWS.flatMap((r) => r.items), ...DIGEST].map((c) => c.titleId)) {
       expect(firstGenre.pageExcludeTitleIds).toContain(id);
     }
     // ...while its own depth stays in excludeTitleIds, and is not double-counted.
     for (const id of firstGenre.excludeTitleIds) {
       expect(firstGenre.pageExcludeTitleIds).not.toContain(id);
     }
+  });
+
+  test("the hero's first top-up already excludes the rows below it", async ({ page }) => {
+    // The hero's seed of five is under the top-up line, so it asks at once — before the rows below
+    // it have run a single effect. The registry is seeded from the snapshot when it is created.
+    const bodies = await bootHome(page, "ok");
+    await expect.poll(() => bodies.filter((b) => b.row === "hero").length).toBeGreaterThanOrEqual(1);
+    const firstHero = bodies.find((b) => b.row === "hero")!;
+    for (const id of ROWS.flatMap((r) => r.items).map((c) => c.titleId)) {
+      expect(firstHero.pageExcludeTitleIds).toContain(id);
+    }
+  });
+});
+
+test.describe("leaving a rail while its request is out", () => {
+  test("navigating away mid-request schedules nothing more", async ({ page }) => {
+    test.setTimeout(30_000);
+    await mockJson(page, "**/api/saved", []);
+    const bodies = await bootHome(page, "fail", { failDelayMs: 800 });
+    // The hero tops up at once and the answer is 800 ms away: leave Home inside that window.
+    await expect.poll(() => bodies.filter((b) => b.row === "hero").length).toBe(1);
+    await page.getByRole("link", { name: /saved/i }).first().click();
+    await expect(page).toHaveURL(/\/saved/);
+    const atExit = bodies.length;
+    // Long enough for the in-flight 503 to land and the 1 s and 2 s retries to have fired.
+    await page.waitForTimeout(5000);
+    expect(bodies.length - atExit, JSON.stringify(bodies.slice(atExit).map(railOf))).toBe(0);
+  });
+
+  test("switching the medium mid-request retires the old hero; only the new one pages", async ({ page }) => {
+    test.setTimeout(30_000);
+    const bodies = await bootHome(page, "fail", { failDelayMs: 800 });
+    await expect.poll(() => bodies.filter((b) => b.row === "hero").length).toBe(1);
+    await page.getByTestId("browse-filters").getByRole("button", { name: "Movies" }).click();
+    await page.waitForTimeout(10_000);
+    const oldHero = bodies.filter((b) => b.row === "hero" && !b.mediaType);
+    const newHero = bodies.filter((b) => b.row === "hero" && b.mediaType === "movie");
+    // The old hero made the one request that was already out, and nothing after it.
+    expect(oldHero).toHaveLength(1);
+    // The new hero is one rail with its own bounded backoff.
+    expect(newHero.length).toBeGreaterThanOrEqual(1);
+    expect(newHero.length).toBeLessThanOrEqual(4);
   });
 });
 

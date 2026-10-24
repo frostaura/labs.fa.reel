@@ -89,10 +89,13 @@ export function PickConditionsSummary({
   className,
   browse,
   onBrowseChange,
+  limit = 6,
 }: {
   className?: string;
   browse?: BrowseFilter | null;
   onBrowseChange?: (next: BrowseFilter) => void;
+  /** Condition chips shown before "+N more" — fewer on a phone, where the row must stay one line. */
+  limit?: number;
 }) {
   const { data: filters } = useGetFiltersQuery();
   // Waits for the real payload rather than rendering against the defaults: `normalizeFilters`
@@ -104,7 +107,7 @@ export function PickConditionsSummary({
       filters={filters}
       browse={browse}
       onBrowseChange={onBrowseChange}
-      limit={6}
+      limit={limit}
       className={className}
     />
   );
