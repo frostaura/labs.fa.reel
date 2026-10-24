@@ -7,7 +7,9 @@ import reducer, {
   ratingsNeededCopy,
   pollAdvance,
   reset,
+  retryStarted,
   stageFromPipeline,
+  stageFromStatus,
   type OnboardingState,
 } from "./onboardingSlice";
 
@@ -133,12 +135,63 @@ describe("onboarding below the training floor (H-5) — a stop that is not a fai
     expect(s.stage).toBe("needsRatings");
   });
 
-  it("the authoritative poll lifts it once the account has rated enough", () => {
-    let s = reducer(initial(), pollAdvance({ pipelineStage: "NotEnoughRatings", degradedReason: "NotEnoughRatings" }));
+  // The payload the server really sends once usable ratings reach the floor and no Train has run
+  // since the park (SyncStatusContractTests: stored Degraded, floor met → Degraded + PipelineFailed,
+  // no counts). It is not a failure, and it is not "Training" either.
+  const FLOOR_MET = { pipelineStage: "Degraded", degradedReason: "PipelineFailed", notEnoughRatings: null, lastFailures: [] };
+
+  it("reaching the floor moves needsRatings to awaitingModel, never to failed", () => {
+    let s = reducer(initial(), pollAdvance({ pipelineStage: "NotEnoughRatings", degradedReason: "NotEnoughRatings", notEnoughRatings: { usableRatings: 9, required: 10 } }));
+    s = reducer(s, pollAdvance(FLOOR_MET));
+    expect(s.stage).toBe("awaitingModel");
+    expect(s.ratingsFloor).toBeNull();
+  });
+
+  it("a fresh page load on that payload is awaitingModel too", () => {
+    expect(reducer(initial(), pollAdvance(FLOOR_MET)).stage).toBe("awaitingModel");
+    // An older backend sends no reason at all for the same state.
+    expect(reducer(initial(), pollAdvance({ pipelineStage: "Degraded" })).stage).toBe("awaitingModel");
+  });
+
+  it("the train the page was waiting for lifts awaitingModel forward", () => {
+    let s = reducer(initial(), pollAdvance(FLOOR_MET));
     s = reducer(s, pollAdvance({ pipelineStage: "Training", degradedReason: null, notEnoughRatings: null }));
     expect(s.stage).toBe("fitting");
-    expect(s.degradedReason).toBeNull();
-    expect(s.ratingsFloor).toBeNull();
+    s = reducer(s, pollAdvance({ pipelineStage: "FeedReady", degradedReason: null, notEnoughRatings: null }));
+    expect(s.stage).toBe("reveal");
+  });
+
+  it("Degraded with a failed Train in lastFailures is a real failure, not a wait", () => {
+    const s = reducer(
+      initial(),
+      pollAdvance({ ...FLOOR_MET, lastFailures: [{ kind: "DeltaSync" }, { kind: "Train" }] }),
+    );
+    expect(s.stage).toBe("failed");
+    // An unrelated failed job does not turn the wait into a failure.
+    expect(reducer(initial(), pollAdvance({ ...FLOOR_MET, lastFailures: [{ kind: "DeltaSync" }] })).stage).toBe("awaitingModel");
+  });
+
+  it("the poll can put the show back below the floor (ratings were removed on Trakt)", () => {
+    let s = reducer(initial(), pollAdvance(FLOOR_MET));
+    s = reducer(s, pollAdvance({ pipelineStage: "NotEnoughRatings", degradedReason: "NotEnoughRatings", notEnoughRatings: { usableRatings: 8, required: 10 } }));
+    expect(s.stage).toBe("needsRatings");
+  });
+
+  it("a revoked link below the floor offers the reconnect: the server's first-ranked reason wins", () => {
+    // ResolveStageAsync computes the floor whatever the link's state, so both arrive together.
+    const s = reducer(
+      initial(),
+      pollAdvance({ pipelineStage: "NotEnoughRatings", degradedReason: "TraktRevoked", notEnoughRatings: { usableRatings: 4, required: 10 } }),
+    );
+    expect(s.stage).toBe("failed");
+    expect(needsReconnect(s.degradedReason)).toBe(true);
+    expect(stageFromStatus({ pipelineStage: "Degraded", degradedReason: "TraktRefreshFailed", notEnoughRatings: { usableRatings: 4, required: 10 } })).toBe("failed");
+  });
+
+  it("dead-lettered writes do not hide the floor: the stage still says NotEnoughRatings", () => {
+    expect(
+      stageFromStatus({ pipelineStage: "NotEnoughRatings", degradedReason: "TraktWritesDeadLettered", notEnoughRatings: { usableRatings: 4, required: 10 } }),
+    ).toBe("needsRatings");
   });
 
   it("a real failure still replaces needsRatings", () => {
@@ -146,6 +199,19 @@ describe("onboarding below the training floor (H-5) — a stop that is not a fai
     s = reducer(s, pollAdvance({ pipelineStage: "Degraded", degradedReason: "TraktRevoked" }));
     expect(s.stage).toBe("failed");
     expect(s.degradedReason).toBe("TraktRevoked");
+  });
+
+  it("a poll-set failure is lifted by the poll once the server moves on (provider back)", () => {
+    let s = reducer(initial(), pollAdvance({ pipelineStage: "Degraded", degradedReason: "ProviderDown" }));
+    expect(s.stage).toBe("failed");
+    s = reducer(s, pollAdvance({ pipelineStage: "Training", degradedReason: null }));
+    expect(s.stage).toBe("fitting");
+  });
+
+  it("a stream failure with its error is not lifted by a status poll that cannot see it", () => {
+    let s = reducer(initial(), ev("failed", { seq: 1, error: "DeltaSync failed after 3 attempts." }));
+    s = reducer(s, pollAdvance({ pipelineStage: "Ingesting", degradedReason: null }));
+    expect(s.stage).toBe("failed");
   });
 
   it("a poll from a backend that predates the v2 fields still advances", () => {
@@ -164,8 +230,9 @@ describe("ratingsNeededCopy", () => {
     expect(ratingsNeededCopy(floor)).toBe(text);
   });
 
-  it("never goes negative when the counts race past the floor", () => {
-    expect(ratingsNeededCopy({ usableRatings: 12, required: 10 })).toBe("12 of 10 ratings — rate 0 more and Reel builds your model.");
+  it("at or past the floor it says that is enough, never 'rate 0 more'", () => {
+    expect(ratingsNeededCopy({ usableRatings: 10, required: 10 })).toBe("10 of 10 ratings — that's enough for Reel to build your model.");
+    expect(ratingsNeededCopy({ usableRatings: 12, required: 10 })).not.toMatch(/rate 0|rate -/);
   });
 
   it("without counts it still says what to do", () => {
@@ -174,8 +241,15 @@ describe("ratingsNeededCopy", () => {
 });
 
 describe("failureCopy — never the blank 'Something went wrong.'", () => {
-  it("a free-text failed event wins", () => {
-    expect(failureCopy("TraktRevoked", "  Sync crashed  ")).toBe("Sync crashed");
+  it("a known reason wins over a job runner's free text", () => {
+    expect(failureCopy("TraktRevoked", "DeltaSync failed after 3 attempts.")).toMatch(/no longer has access to your Trakt account/);
+    expect(failureCopy("ProviderDown", "Train failed")).toMatch(/model service/);
+  });
+
+  it("the free text is the fallback for the generic or missing reason", () => {
+    expect(failureCopy("PipelineFailed", "  Sync crashed  ")).toBe("Sync crashed");
+    expect(failureCopy(null, "Sync crashed")).toBe("Sync crashed");
+    expect(failureCopy("PipelineFailed", "   ")).toMatch(/stopped on Reel's side/);
   });
 
   it.each(["TraktRevoked", "TraktRefreshFailed", "TraktWritesDeadLettered", "ProviderDown", "PipelineFailed", "SomethingNew", null])(
@@ -191,5 +265,28 @@ describe("failureCopy — never the blank 'Something went wrong.'", () => {
     expect(["TraktRevoked", "TraktRefreshFailed", "ProviderDown", "PipelineFailed", null].map(needsReconnect)).toEqual([
       true, true, false, false, false,
     ]);
+  });
+});
+
+describe("retryStarted — an accepted 'Try again'", () => {
+  it("restarts the show but keeps the user and the stream position", () => {
+    let s = reducer(initial(), ev("connected", { seq: 3, traktUser: "deanmar09", avatarUrl: "a.png" }));
+    s = reducer(s, ev("failed", { seq: 4, error: "DeltaSync failed after 3 attempts." }));
+    s = reducer(s, retryStarted());
+    expect(s.stage).toBe("connecting");
+    expect(s.error).toBeNull();
+    expect(s.traktUser).toBe("deanmar09");
+    expect(s.lastSeq).toBe(4);
+    // A replay of the old failed frame after the restart is dropped by seq.
+    s = reducer(s, ev("failed", { seq: 4, error: "DeltaSync failed after 3 attempts." }));
+    expect(s.stage).toBe("connecting");
+  });
+
+  it("an unchanged 'still stopped' status re-applies after the restart", () => {
+    const stopped = { pipelineStage: "Degraded", degradedReason: "PipelineFailed", lastFailures: [{ kind: "Train" }] };
+    let s = reducer(initial(), pollAdvance(stopped));
+    s = reducer(s, retryStarted());
+    s = reducer(s, pollAdvance(stopped));
+    expect(s.stage).toBe("failed");
   });
 });
