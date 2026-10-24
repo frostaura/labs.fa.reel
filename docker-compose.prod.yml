@@ -98,7 +98,7 @@ services:
       # The dump before any pending migration (K-1): the API asks the backup service over the shared
       # backup_requests volume and refuses to migrate without an answer. docs/deployment.md#backups-and-restore.
       BACKUP_REQUEST_DIR: /backup-requests
-      BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS: ${BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS:-900}
+      BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS: ${BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS:-1800}
       BACKUP_PRE_MIGRATION_REQUIRED: ${BACKUP_PRE_MIGRATION_REQUIRED:-true}
       # Catalogue bulk seed (POST /api/dev/seed-catalog) and the daily ceilings that complete it.
       # The two vote floors decide how big the seeded corpus is: measured 2026-09-10 the defaults

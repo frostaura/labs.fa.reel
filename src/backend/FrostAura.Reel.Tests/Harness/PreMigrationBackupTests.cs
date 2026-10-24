@@ -81,13 +81,13 @@ public sealed class PreMigrationBackupTests : IDisposable
     }
 
     [Fact]
-    public void Options_default_to_required_with_a_fifteen_minute_wait_and_no_directory()
+    public void Options_default_to_required_with_a_thirty_minute_wait_and_no_directory()
     {
         var options = ValidatedOptions.From<PreMigrationBackupOptions>(new ConfigurationBuilder().Build());
 
         Assert.Empty(options.Problems);
         Assert.Null(options.RequestDirectory);
-        Assert.Equal(900, options.TimeoutSeconds);
+        Assert.Equal(1800, options.TimeoutSeconds);
         Assert.True(options.Required);
     }
 

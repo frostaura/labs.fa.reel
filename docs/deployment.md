@@ -124,8 +124,9 @@ Every service logs through Docker's `local` driver: 10 files of 50 MB each per c
 **The dump before a migration.** Before `DatabaseInitializer` applies pending migrations, the API writes `<id>.request` to the shared `backup_requests` volume and waits for the backup service's answer:
 
 - `<id>.done` names the dump, and migration proceeds.
-- `<id>.failed`, or no answer within `BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS` (default 900), makes the API refuse to migrate and exit, so the container restarts and asks again. `BACKUP_PRE_MIGRATION_REQUIRED=false` downgrades this to a warning.
+- `<id>.failed`, or no answer within `BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS` (default 1800), makes the API refuse to migrate and exit, so the container restarts and asks again. `BACKUP_PRE_MIGRATION_REQUIRED=false` downgrades this to a warning.
 - Pre-migration dumps are kept in `pre-migration/` (the last 10).
+- The 30-minute default covers the worst case: a request that arrives while the sidecar is mid-way through a nightly or first-start dump waits for that dump and then gets a fresh one of its own. The 930 MB live database is estimated at about 6 minutes per dump, from the drill's 359 MB in 157 s.
 
 A Portainer redeploy recreates only services whose image changed, so a dump taken when the sidecar started would miss exactly the redeploy that carries a migration. Only the process about to migrate knows that it is about to.
 

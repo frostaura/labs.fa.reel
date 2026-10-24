@@ -20,8 +20,11 @@ public sealed class PreMigrationBackupOptions : ValidatedOptions
     /// <summary>The directory shared with the backup sidecar; null when this deployment has none.</summary>
     public string? RequestDirectory { get; private set; }
 
-    /// <summary>How long to wait for the sidecar's answer.</summary>
-    public int TimeoutSeconds { get; private set; } = 900;
+    /// <summary>
+    /// How long to wait for the sidecar's answer. Thirty minutes: a request that lands during a nightly
+    /// or first-start dump waits for it, then for its own — two dumps of the live database.
+    /// </summary>
+    public int TimeoutSeconds { get; private set; } = 1800;
 
     /// <summary>When true, a failed or unanswered request stops the process instead of migrating.</summary>
     public bool Required { get; private set; } = true;
@@ -29,7 +32,7 @@ public sealed class PreMigrationBackupOptions : ValidatedOptions
     protected override void Read(SettingReader reader)
     {
         RequestDirectory = reader.Raw(RequestDirectoryKey);
-        TimeoutSeconds = reader.Int(TimeoutSecondsKey, 900, min: 30, max: 7200);
+        TimeoutSeconds = reader.Int(TimeoutSecondsKey, 1800, min: 30, max: 7200);
         Required = reader.Bool(RequiredKey, true);
     }
 }
