@@ -74,8 +74,12 @@ public partial class ComposeEnvParityTests
         "TestHelpers__ModelStubMode",
     ];
 
-    /// <summary>Keys a descriptor may carry that no Reel code reads (the framework reads them).</summary>
-    private static readonly string[] FrameworkKeys = ["ASPNETCORE_ENVIRONMENT", "ASPNETCORE_URLS"];
+    /// <summary>
+    /// Keys a descriptor may carry that no Reel code reads, because the runtime does: the ASP.NET
+    /// host settings, and the proxy variables .NET's default HttpClient handler honours (WS-7's eval
+    /// stack routes egress through a proxy with them).
+    /// </summary>
+    private static readonly string[] FrameworkKeys = ["ASPNETCORE_ENVIRONMENT", "ASPNETCORE_URLS", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
 
     /// <summary>Section prefixes of literals that look like config keys but are EF/Npgsql annotations.</summary>
     private static readonly string[] NotConfigurationPrefixes = ["Npgsql", "Relational"];
