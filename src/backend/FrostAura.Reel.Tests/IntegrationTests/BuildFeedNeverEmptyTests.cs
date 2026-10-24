@@ -734,6 +734,51 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         }
     }
 
+    [Fact]
+    public async Task The_deploy_purge_replaces_a_legacy_snapshots_stub_lines_that_a_preserve_build_would_keep()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        await RunBuildAsync(accountId);
+
+        // The pre-deploy state: tonight's snapshot carries the stub a failed rerank wrote and the
+        // cache and Preserve path carried for days.
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var snapshot = await ActiveSnapshotAsync(db, accountId);
+            foreach (var item in await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).Take(5).ToListAsync())
+            {
+                item.WhyThisSentence = "A action pick aligned with your taste.";
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        // An ordinary same-day rebuild is Preserve, and its no-op suppression never re-reads a
+        // kept caption — which is exactly why the purge has to force Fresh.
+        await RunBuildAsync(accountId, "delta-sync");
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            Assert.Single(await UntrustedSnapshotSweep.FindAsync(db, CancellationToken.None), f => f.AccountId == accountId);
+        }
+
+        await RunBuildAsync(accountId, FeedBuildPolicy.TrustPurgeReason);
+
+        await using var verify = Fixture.CreateContext(new AccountContext());
+        var rebuilt = await ActiveSnapshotAsync(verify, accountId);
+        var whys = await verify.FeedItems.Where(i => i.FeedSnapshotId == rebuilt.Id).Select(i => i.WhyThisSentence).ToListAsync();
+        Assert.NotEmpty(whys);
+        Assert.DoesNotContain(whys, w => w.Contains("aligned with your taste", StringComparison.Ordinal));
+        Assert.DoesNotContain(await UntrustedSnapshotSweep.FindAsync(verify, CancellationToken.None), f => f.AccountId == accountId);
+    }
+
     /// <summary>Answers every batch with fixed sources — a stand-in for each WS-1 failure shape.</summary>
     private sealed class SourcedAgent(ResultSource fitSource, ResultSource whySource) : ISearchAgent
     {
