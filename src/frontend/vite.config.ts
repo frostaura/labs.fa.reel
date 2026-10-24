@@ -60,7 +60,11 @@ export default defineConfig({
         display: "standalone"
       },
       injectManifest: {
-        globPatterns: ["**/*.{js,css,html,svg,png,ico,webp,woff2}"]
+        globPatterns: ["**/*.{js,css,html,svg,png,ico,webp,woff2}"],
+        // A classic-script worker, built in library mode. The default ("es") makes the plugin pass
+        // rolldown the deprecated `inlineDynamicImports` output option, which is a build warning
+        // on every build; sw.ts has no dynamic imports, so the format changes nothing else.
+        rollupFormat: "iife"
       }
     })
   ],
