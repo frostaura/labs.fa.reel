@@ -8,8 +8,8 @@ namespace FrostAura.Reel.Application.Ranking;
 
 /// <summary>
 /// The single source for "which credited people is the user's taste actually verified on" —
-/// people in a title's credits whom the user has rated at least two titles of (or rated
-/// explicitly), with their empirical-Bayes shrunken average. Shared by the feed builder, the
+/// people in a title's credits whom the user has rated at least two titles of IN THAT CAPACITY (or
+/// rated explicitly), with their empirical-Bayes shrunken average for that capacity. Shared by the feed builder, the
 /// paginator and the title endpoint, so a why-sentence, a rail caption and the tap-through
 /// breakdown can never disagree about who is driving a person-affinity feature.
 /// </summary>
@@ -34,11 +34,11 @@ public static class VerifiedPeople
             .Join(db.Persons, c => c.PersonId, p => p.Id, (c, p) => new { c.TitleId, c.PersonId, c.Role, p.Name })
             .ToListAsync(ct);
         return credits
-            .Where(c => IsVerified(taste, c.PersonId))
+            .Where(c => IsVerified(taste, c.PersonId, c.Role))
             .Select(c => new Entry(
                 c.TitleId, c.PersonId, c.Name, c.Role,
-                Affinity(taste, c.PersonId),
-                PoolSize(taste, c.PersonId)))
+                Affinity(taste, c.PersonId, c.Role),
+                PoolSize(taste, c.PersonId, c.Role)))
             .ToList();
     }
 
@@ -55,12 +55,13 @@ public static class VerifiedPeople
     /// class exists; do not compute an affinity anywhere else.
     ///
     /// <para>
-    /// <b>The pool is role-agnostic and that is deliberate.</b> <c>TasteState.PersonRatings</c> is
-    /// keyed by person, not by (person, role), so an actor-turned-director carries ONE average
-    /// across every credit — exactly what <see cref="FeatureVectorBuilder"/>'s credit features and
-    /// the why-sentences already use. The role on the row says which capacity that person was
-    /// credited in on the user's rated titles, not which capacity the average was measured in.
-    /// A per-role average would be a second, disagreeing number for the same person.
+    /// <b>The pool is per role.</b> It used to be role-agnostic — one average per person across
+    /// every credit — so Christopher Nolan's row as an ACTOR (a cameo) carried the average of the 22
+    /// films he directed, and a "you rate him 8.3" cast clause quoted his directing. Each row now
+    /// averages only the rated titles the person was credited on in that capacity
+    /// (<c>TasteState.PersonRoleRatings</c>), so a director-only person has no cast affinity at all.
+    /// The model's credit FEATURES still read the role-blind pool; aligning them is a feature-schema
+    /// change and a retrain, and is deliberately not made here.
     /// </para>
     /// </summary>
     public static async Task<IReadOnlyList<AccountEntry>> ForAccountAsync(
@@ -86,19 +87,24 @@ public static class VerifiedPeople
             .ToListAsync(ct);
 
         return pairs
-            .Where(c => IsVerified(taste, c.PersonId))
-            .Select(c => new AccountEntry(c.PersonId, c.Role, Affinity(taste, c.PersonId), PoolSize(taste, c.PersonId)))
+            .Where(c => IsVerified(taste, c.PersonId, c.Role))
+            .Select(c => new AccountEntry(
+                c.PersonId, c.Role, Affinity(taste, c.PersonId, c.Role), PoolSize(taste, c.PersonId, c.Role)))
             .ToList();
     }
 
-    private static bool IsVerified(FeatureVectorBuilder.TasteState taste, Guid personId) =>
-        taste.PersonRatings.TryGetValue(personId, out var pool) && pool.Count >= MinRatedTitles;
+    /// <summary>The user's ratings behind (person, role), or null when there are none.</summary>
+    public static IReadOnlyList<short>? PoolFor(FeatureVectorBuilder.TasteState taste, Guid personId, CreditRole role) =>
+        taste.PersonRoleRatings is { } pools && pools.TryGetValue((personId, role), out var pool) ? pool : null;
 
-    private static decimal Affinity(FeatureVectorBuilder.TasteState taste, Guid personId) =>
-        TasteMath.ShrunkenMean(taste.PersonRatings[personId], taste.UserMean);
+    private static bool IsVerified(FeatureVectorBuilder.TasteState taste, Guid personId, CreditRole role) =>
+        PoolFor(taste, personId, role) is { Count: >= MinRatedTitles };
 
-    private static int PoolSize(FeatureVectorBuilder.TasteState taste, Guid personId) =>
-        taste.PersonRatings[personId].Count;
+    private static decimal Affinity(FeatureVectorBuilder.TasteState taste, Guid personId, CreditRole role) =>
+        TasteMath.ShrunkenMean(PoolFor(taste, personId, role)!, taste.UserMean);
+
+    private static int PoolSize(FeatureVectorBuilder.TasteState taste, Guid personId, CreditRole role) =>
+        PoolFor(taste, personId, role)!.Count;
 
     /// <summary>
     /// Per-title, per-role best-affinity person — the exact shape

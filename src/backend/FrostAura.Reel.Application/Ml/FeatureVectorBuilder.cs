@@ -124,7 +124,17 @@ public class FeatureVectorBuilder(IReelDbContext db)
         /// TMDB for the two media in the proportion the user actually rates, instead of a fixed 1:1
         /// intake that produced an all-TV live feed on the founder's account.
         /// </summary>
-        decimal MovieRatedShare);
+        decimal MovieRatedShare,
+        /// <summary>
+        /// The same person pools as <see cref="PersonRatings"/>, split by the CAPACITY the person
+        /// was credited in on each rated title — so a director's twenty-two films never count as
+        /// acting evidence because of one cameo. Read by the serving side (verified people, why
+        /// lines, stored affinities), never by the model features, which still read the role-blind
+        /// <see cref="PersonRatings"/>: changing those is a feature-schema change and a retrain.
+        /// An explicit person rating is a statement about the person, so it seeds every role.
+        /// Null only where a caller built a state by hand; readers treat null as "no pools".
+        /// </summary>
+        IReadOnlyDictionary<(Guid PersonId, CreditRole Role), List<short>>? PersonRoleRatings = null);
 
     public async Task<TasteState> BuildTasteStateAsync(Guid accountId, DateTime asOf, CancellationToken ct)
     {
@@ -202,19 +212,26 @@ public class FeatureVectorBuilder(IReelDbContext db)
         // Person affinities: ratings joined through credits of the rated titles.
         var credits = await db.TitleCredits
             .Where(c => ratedTitleIds.Contains(c.TitleId))
-            .Select(c => new { c.TitleId, c.PersonId })
+            .Select(c => new { c.TitleId, c.PersonId, c.Role })
             .ToListAsync(ct);
         var ratingByTitle = titleRatings
             .GroupBy(r => r.TitleId)
             .ToDictionary(g => g.Key, g => g.Max(r => r.Rating));
         var personRatings = new Dictionary<Guid, List<short>>();
+        // One title can credit the same person twice in one role (two writing credits); the
+        // role-blind pool has always counted each credit, the per-role pool counts each TITLE once.
+        var personRoleTitles = new Dictionary<(Guid PersonId, CreditRole Role), Dictionary<Guid, short>>();
         foreach (var credit in credits)
         {
             if (ratingByTitle.TryGetValue(credit.TitleId, out var rating))
             {
                 (personRatings.TryGetValue(credit.PersonId, out var list) ? list : personRatings[credit.PersonId] = []).Add(rating);
+                var key = (credit.PersonId, credit.Role);
+                (personRoleTitles.TryGetValue(key, out var titles) ? titles : personRoleTitles[key] = [])[credit.TitleId] = rating;
             }
         }
+
+        var personRoleRatings = personRoleTitles.ToDictionary(kv => kv.Key, kv => kv.Value.Values.ToList());
 
         // Explicit person ratings (time-filtered like every other label, so the M2 gate stays
         // leakage-clean) OVERRIDE the derived signal for that person: inject the rating as k
@@ -228,6 +245,10 @@ public class FeatureVectorBuilder(IReelDbContext db)
         foreach (var pr in explicitPersonRatings)
         {
             personRatings[pr.PersonId] = Enumerable.Repeat(pr.Rating, TasteMath.ShrinkageK).ToList();
+            foreach (var role in Enum.GetValues<CreditRole>())
+            {
+                personRoleRatings[(pr.PersonId, role)] = Enumerable.Repeat(pr.Rating, TasteMath.ShrinkageK).ToList();
+            }
         }
 
         // These persons' pools are the explicit rating, NOT a sum of title ratings — so there is no
@@ -400,7 +421,8 @@ public class FeatureVectorBuilder(IReelDbContext db)
             lovedAnchorPool,
             dislikedGenreWeights,
             notInterestedCentroid,
-            movieRatedShare);
+            movieRatedShare,
+            personRoleRatings);
     }
 
     /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
