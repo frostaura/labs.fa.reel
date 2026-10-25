@@ -1,0 +1,4229 @@
+{
+ "summary": {
+  "label": "baseline-99c0761-latency",
+  "engine": "v1",
+  "build": "99c0761",
+  "buildInfo": null,
+  "gitSha": "ba27944",
+  "snapshotId": "reel-2026-10-23",
+  "artifact": {
+   "id": "0536acbf-a642-4a26-a68d-19a0b527c484",
+   "version": 101
+  },
+  "concurrency": 2,
+  "scenarios": 40,
+  "turns": 60,
+  "fingerprint": "e84f9e89e829c196",
+  "staleScenarios": [],
+  "modelKey": "unrecorded",
+  "buildSlotsHeld": false,
+  "wallSeconds": 1235,
+  "costUsd": 0.13126682,
+  "latencyGated": false,
+  "gatesPassed": 4,
+  "gatesFailed": 8
+ },
+ "metrics": {
+  "constraintPrecisionAt8": {
+   "value": 0.4141156462585034,
+   "n": 35
+  },
+  "negationPrecisionAt8": {
+   "value": 0.875,
+   "n": 7
+  },
+  "honestEmptyCompliance": {
+   "value": 0,
+   "n": 4
+  },
+  "referenceAccuracy": {
+   "value": 0,
+   "n": 5
+  },
+  "critiqueCompliance": {
+   "value": 0,
+   "n": 1
+  },
+  "actClassification": {
+   "value": null,
+   "n": 0
+  },
+  "conflictDetection": {
+   "value": 0.6666666666666666,
+   "n": 3
+  },
+  "modeAccuracy": {
+   "value": 0,
+   "n": 8
+  },
+  "noRepeatCompliance": {
+   "value": 1,
+   "n": 6
+  },
+  "groundingViolations": {
+   "value": 54,
+   "n": 60
+  },
+  "echoReplies": {
+   "value": 38,
+   "n": 60
+  },
+  "fallbackRate": {
+   "value": 0.7166666666666667,
+   "n": 60
+  },
+  "exclusionLeaks": {
+   "value": 0,
+   "n": 60
+  },
+  "mediaFilterViolations": {
+   "value": 0,
+   "n": 60
+  },
+  "mediaMismatches": {
+   "value": 34,
+   "n": 60
+  },
+  "mustNotViolations": {
+   "value": 17,
+   "n": 60
+  },
+  "hedgingWhyLines": {
+   "value": 231,
+   "n": 60
+  },
+  "nonLatinWhyLines": {
+   "value": 1,
+   "n": 60
+  },
+  "missedSupply": {
+   "value": 0,
+   "n": 60
+  },
+  "failedTurns": {
+   "value": 0,
+   "n": 60
+  },
+  "failedTurnRate": {
+   "value": 0,
+   "n": 60
+  },
+  "notRunTurns": {
+   "value": 0,
+   "n": 60
+  },
+  "turnLatencyMs": {
+   "p50": 40927,
+   "p95": 53018,
+   "n": 60,
+   "chargedAtCap": 0,
+   "capMs": 300000
+  },
+  "serverLatencyMs": {
+   "p50": 40856,
+   "p95": 52946,
+   "n": 60
+  },
+  "firstCardMs": {
+   "p50": 14778,
+   "p95": 20344,
+   "n": 60,
+   "chargedAtCap": 0,
+   "capMs": 300000
+  },
+  "costPerTurnUsd": {
+   "value": 0.0021877803333333334,
+   "n": 60,
+   "totalUsd": 0.13126682,
+   "unpriced": []
+  },
+  "traktCalls": {
+   "value": 0,
+   "n": 60
+  },
+  "exposuresWritten": {
+   "value": 721,
+   "n": 60
+  }
+ },
+ "gates": [
+  {
+   "metric": "constraintPrecisionAt8",
+   "label": "Constraint precision@8 (facet scenarios)",
+   "op": ">=",
+   "target": 0.9,
+   "value": 0.4141156462585034,
+   "n": 35,
+   "status": "FAIL"
+  },
+  {
+   "metric": "honestEmptyCompliance",
+   "label": "Honest-empty compliance",
+   "op": ">=",
+   "target": 1,
+   "value": 0,
+   "n": 4,
+   "status": "FAIL"
+  },
+  {
+   "metric": "referenceAccuracy",
+   "label": "Reference accuracy",
+   "op": ">=",
+   "target": 0.95,
+   "value": 0,
+   "n": 5,
+   "status": "FAIL"
+  },
+  {
+   "metric": "critiqueCompliance",
+   "label": "Critique compliance",
+   "op": ">=",
+   "target": 0.9,
+   "value": 0,
+   "n": 1,
+   "status": "FAIL"
+  },
+  {
+   "metric": "actClassification",
+   "label": "Act classification",
+   "op": ">=",
+   "target": 0.9,
+   "value": null,
+   "n": 0,
+   "status": "no data"
+  },
+  {
+   "metric": "conflictDetection",
+   "label": "Conflict detection",
+   "op": ">=",
+   "target": 0.9,
+   "value": 0.6666666666666666,
+   "n": 3,
+   "status": "FAIL"
+  },
+  {
+   "metric": "groundingViolations",
+   "label": "Grounding violations",
+   "op": "<=",
+   "target": 0,
+   "value": 54,
+   "n": 60,
+   "status": "FAIL"
+  },
+  {
+   "metric": "echoReplies",
+   "label": "Replies echoing the user's message",
+   "op": "<=",
+   "target": 0,
+   "value": 38,
+   "n": 60,
+   "status": "FAIL"
+  },
+  {
+   "metric": "fallbackRate",
+   "label": "Fallback rate",
+   "op": "<=",
+   "target": 0.01,
+   "value": 0.7166666666666667,
+   "n": 60,
+   "status": "FAIL"
+  },
+  {
+   "metric": "exclusionLeaks",
+   "label": "Standing-exclusion leaks (shown titles outside the eligibility truth)",
+   "op": "<=",
+   "target": 0,
+   "value": 0,
+   "n": 60,
+   "status": "pass"
+  },
+  {
+   "metric": "mediaFilterViolations",
+   "label": "Picks against the request's own media filter",
+   "op": "<=",
+   "target": 0,
+   "value": 0,
+   "n": 60,
+   "status": "pass"
+  },
+  {
+   "metric": "traktCalls",
+   "label": "Trakt calls from the eval stack",
+   "op": "<=",
+   "target": 0,
+   "value": 0,
+   "n": 60,
+   "status": "pass"
+  },
+  {
+   "metric": "turnLatencyMs",
+   "stat": "p50",
+   "label": "Turn latency p50 (ms, concurrency ≤ 2)",
+   "op": "<=",
+   "target": 8000,
+   "latency": true,
+   "value": 40927,
+   "n": 60,
+   "status": "not-gated (build slots not held during the run)"
+  },
+  {
+   "metric": "turnLatencyMs",
+   "stat": "p95",
+   "label": "Turn latency p95 (ms, concurrency ≤ 2)",
+   "op": "<=",
+   "target": 15000,
+   "latency": true,
+   "value": 53018,
+   "n": 60,
+   "status": "not-gated (build slots not held during the run)"
+  },
+  {
+   "metric": "firstCardMs",
+   "stat": "p50",
+   "label": "First card p50 (ms, concurrency ≤ 2)",
+   "op": "<=",
+   "target": 4000,
+   "latency": true,
+   "value": 14778,
+   "n": 60,
+   "status": "not-gated (build slots not held during the run)"
+  },
+  {
+   "metric": "firstCardMs",
+   "stat": "p95",
+   "label": "First card p95 (ms, concurrency ≤ 2)",
+   "op": "<=",
+   "target": 7000,
+   "latency": true,
+   "value": 20344,
+   "n": 60,
+   "status": "not-gated (build slots not held during the run)"
+  },
+  {
+   "metric": "costPerTurnUsd",
+   "label": "Cost per turn (USD)",
+   "op": "<=",
+   "target": 0.005,
+   "value": 0.0021877803333333334,
+   "n": 60,
+   "status": "pass"
+  }
+ ],
+ "byCategory": {
+  "facet": {
+   "turns": 50,
+   "failedChecks": 16,
+   "checks": 24,
+   "fallback": 35
+  },
+  "empty-supply": {
+   "turns": 8,
+   "failedChecks": 12,
+   "checks": 13,
+   "fallback": 6
+  },
+  "critique": {
+   "turns": 6,
+   "failedChecks": 7,
+   "checks": 8,
+   "fallback": 5
+  },
+  "ordinal": {
+   "turns": 18,
+   "failedChecks": 14,
+   "checks": 19,
+   "fallback": 16
+  },
+  "item-question": {
+   "turns": 11,
+   "failedChecks": 12,
+   "checks": 13,
+   "fallback": 9
+  },
+  "negation": {
+   "turns": 5,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 5
+  },
+  "conflict": {
+   "turns": 4,
+   "failedChecks": 5,
+   "checks": 7,
+   "fallback": 2
+  },
+  "title-lookup": {
+   "turns": 2,
+   "failedChecks": 3,
+   "checks": 3,
+   "fallback": 1
+  },
+  "new-topic": {
+   "turns": 5,
+   "failedChecks": 1,
+   "checks": 3,
+   "fallback": 5
+  },
+  "pagination": {
+   "turns": 4,
+   "failedChecks": 1,
+   "checks": 3,
+   "fallback": 4
+  },
+  "media-switch": {
+   "turns": 8,
+   "failedChecks": 3,
+   "checks": 4,
+   "fallback": 5
+  },
+  "chitchat": {
+   "turns": 5,
+   "failedChecks": 3,
+   "checks": 4,
+   "fallback": 4
+  },
+  "multilingual": {
+   "turns": 1,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 1
+  },
+  "mood": {
+   "turns": 6,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 6
+  },
+  "mood-vs-exclusion": {
+   "turns": 3,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 2
+  },
+  "ambiguous": {
+   "turns": 1,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 1
+  },
+  "reference-title": {
+   "turns": 1,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 1
+  },
+  "seen-title": {
+   "turns": 1,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 0
+  },
+  "tv": {
+   "turns": 1,
+   "failedChecks": 0,
+   "checks": 0,
+   "fallback": 0
+  }
+ },
+ "cost": [
+  {
+   "provider": "Tmdb",
+   "model": "",
+   "purpose": "",
+   "calls": 395,
+   "promptTokens": 0,
+   "completionTokens": 0,
+   "tokensUsed": 0,
+   "usd": null
+  },
+  {
+   "provider": "OpenRouter",
+   "model": "openai/gpt-6-luna",
+   "purpose": "search-interpret",
+   "calls": 38,
+   "promptTokens": 24298,
+   "completionTokens": 10295,
+   "tokensUsed": 34593,
+   "usd": 0.0075773
+  },
+  {
+   "provider": "OpenRouter",
+   "model": "openai/text-embedding-3-small",
+   "purpose": "embed",
+   "calls": 127,
+   "promptTokens": 2906,
+   "completionTokens": 0,
+   "tokensUsed": 2906,
+   "usd": 0.000058120000000000006
+  },
+  {
+   "provider": "OpenRouter",
+   "model": "openai/gpt-6-luna",
+   "purpose": "search-agent",
+   "calls": 60,
+   "promptTokens": 60164,
+   "completionTokens": 22001,
+   "tokensUsed": 82165,
+   "usd": 0.0170169
+  },
+  {
+   "provider": "OpenRouter",
+   "model": "openai/gpt-6-luna",
+   "purpose": "rerank-ask",
+   "calls": 221,
+   "promptTokens": 349450,
+   "completionTokens": 143339,
+   "tokensUsed": 492789,
+   "usd": 0.1066145
+  }
+ ],
+ "scenarios": [
+  {
+   "id": "ninja-critique",
+   "set": "open",
+   "categories": [
+    "facet",
+    "empty-supply",
+    "critique",
+    "ordinal",
+    "item-question"
+   ],
+   "conversationId": "f27e00b7-e63f-4fd3-ba7a-dedf82a32a6f",
+   "fingerprint": "0b27368f199096b4",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "ninja movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 24,
+     "checks": {
+      "honestEmpty": false,
+      "mode": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 87,
+      "eligible": 0,
+      "scored": 0,
+      "aboveBar": 0
+     },
+     "offTopic": [
+      "Triple Threat",
+      "Man of Tai Chi",
+      "Blade of the 47 Ronin",
+      "Lady Bloodfight",
+      "Tornado",
+      "Black Lotus",
+      "Weekend in Taipei",
+      "Gunpowder Milkshake"
+     ],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Lady Bloodfight: Jane’s training for a vicious martial-arts tournament gives you the closest match to ninja-style combat, though it isn’t specifically about ninjas.",
+      "Tornado: Kōki’s vengeance quest amid a puppet samurai show gives you sword-fighting flavor, even if it leans western rather than ninja.",
+      "Black Lotus: Your action tastes suit this gritty Amsterdam rescue and one-man war, though its special-forces hero isn't a ninja.",
+      "One Night in Bangkok: Mark Dacascos as a hit man gives you a chance of physical action, but this Bangkok revenge thriller isn’t specifically about ninjas.",
+      "Waist Deep: Your action taste may suit this father’s urgent rescue of his son, though its gang conflict isn’t ninja-focused.",
+      "Hierarchy: You get criminal action as adoptive brothers evade Texas law enforcement and the Russian mafia, though ninjas aren’t part of the premise."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 46931,
+      "firstCardMs": 18657,
+      "serverMs": 46506
+     },
+     "cardsShown": [
+      "Triple Threat",
+      "Man of Tai Chi",
+      "Blade of the 47 Ronin",
+      "Lady Bloodfight",
+      "Tornado",
+      "Black Lotus",
+      "Weekend in Taipei",
+      "Gunpowder Milkshake"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "none of the above are ninja movies. I want ninja movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 10,
+     "checks": {
+      "honestEmpty": false,
+      "mode": false,
+      "critique": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 87,
+      "eligible": 0,
+      "scored": 0,
+      "aboveBar": 0
+     },
+     "offTopic": [
+      "Darc",
+      "Jack Hunter and the Star of Heaven",
+      "Tracker",
+      "Under the Hood",
+      "The Brave One",
+      "Five Fingers",
+      "Kicks",
+      "To End All Wars"
+     ],
+     "repeatsRejected": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Darc: The yakuza setting and gritty action may partly suit you, but this trafficking-crime story isn’t about ninjas.",
+      "Under the Hood: You get comic-book action from Nite Owl’s account of hooded adventurers, but this Watchmen featurette isn’t about ninjas.",
+      "Five Fingers: Your taste for tense action may find Martijn’s abduction and survival struggle compelling, but this hostage thriller isn’t ninja-themed."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 30276,
+      "firstCardMs": 9540,
+      "serverMs": 30063
+     },
+     "cardsShown": [
+      "Darc",
+      "Jack Hunter and the Star of Heaven",
+      "Tracker",
+      "Under the Hood",
+      "The Brave One",
+      "Five Fingers",
+      "Kicks",
+      "To End All Wars"
+     ]
+    },
+    {
+     "turn": 3,
+     "query": "more like the second one you showed me first time round",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 15,
+     "checks": {
+      "reference": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Doctor Who: Time Crash: The TARDIS collision and meeting between Doctors give you a compact sci-fi adventure, though its playful tone may offer less intensity.",
+      "As You Are: You may like the police-investigation framing, but this 1990s teen friendship drama leans into memory over brisk action.",
+      "Same Kind of Different as Me: Greg Kinnear and Djimon Hounsou anchor a heartfelt homelessness-and-marriage drama, though its warm, measured tone may lack your preferred pace.",
+      "A Second Chance: A young gymnast’s push toward the Australian squad brings uplifting adversity, but this family-sports drama may feel gentler than you prefer.",
+      "Lorelei: This lyrical reunion of an ex-con and his high-school girlfriend centers on regret and second chances, less aligned with your action-forward taste."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 55168,
+      "firstCardMs": 22066,
+      "serverMs": 55005
+     },
+     "cardsShown": [
+      "Chosen",
+      "Doctor Who: Twice Upon a Time",
+      "From Time to Time",
+      "Retro Wick: Exploring the Unexpected Success of 'John Wick'",
+      "Doctor Who: Time Crash",
+      "Wolf Creek 2",
+      "As You Are",
+      "Donovan's Echo"
+     ]
+    },
+    {
+     "turn": 4,
+     "query": "wait, is Blade of the 47 Ronin actually a ninja film or a samurai film?",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {
+      "mode": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "21 Bridges: You get a brisk, tense citywide manhunt with Chadwick Boseman, though it won't answer the ronin-versus-ninja question.",
+      "In Full Bloom: The postwar USA-Japan boxing rivalry gives you a Japanese historical setting, though its contemplative ring drama isn't a ninja or samurai film.",
+      "Rakka: For you, Blomkamp’s bleak alien-invasion resistance story brings forceful sci-fi action, but it won’t clarify ninja versus samurai."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 37887,
+      "firstCardMs": 20344,
+      "serverMs": 37847
+     },
+     "cardsShown": [
+      "21 Bridges",
+      "The Kid Who Would Be King",
+      "2048: Nowhere to Run",
+      "In Full Bloom",
+      "Ticker",
+      "The Turbo Charged Prelude for 2 Fast 2 Furious",
+      "Rakka"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "serial-killer-caught",
+   "set": "open",
+   "categories": [
+    "facet",
+    "negation"
+   ],
+   "conversationId": "1c2494d1-603b-4fcf-9ec9-c9298345b9be",
+   "fingerprint": "e92fb9c3fdf750b5",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "dark thriller serial killer but that gets caught at the end",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 8,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 704,
+      "eligible": 92,
+      "scored": 40,
+      "aboveBar": 21
+     },
+     "offTopic": [
+      "Code of a Killer",
+      "Prey",
+      "In the Dark",
+      "The Dark"
+     ],
+     "precision": 0.5,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Code of a Killer"
+     ],
+     "hedgingWhys": [
+      "Prey: A tense, brisk three-part murder investigation offers crime intensity, though Marcus Farrow’s wrongful accusation isn’t your serial-killer premise.",
+      "Dexter: Dexter’s secret life as a serial killer gives you dark crime, but he hunts other killers rather than getting caught."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 49420,
+      "firstCardMs": 18706,
+      "serverMs": 49114
+     },
+     "cardsShown": [
+      "Rellik",
+      "Code of a Killer",
+      "Slasher",
+      "Spree",
+      "Prey",
+      "Dexter",
+      "In the Dark",
+      "The Dark"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "more thriller and less horror. I don't want ghosts I want serial killers",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [
+      "Prodigal Son"
+     ],
+     "supply": {
+      "matching": 704,
+      "eligible": 92,
+      "scored": 40,
+      "aboveBar": 21
+     },
+     "offTopic": [
+      "When Strangers Appear"
+     ],
+     "precision": 0.7142857142857143,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "When Strangers Appear: You get a tense, brisk roadside-diner thriller as a stranger claims murderers are chasing him, though it isn’t specifically about a serial killer.",
+      "Scream: The TV Series: You get a serial-murder mystery in Lakewood, though its teen slasher setup leans more horror than your request.",
+      "Ripper Street: Set amid the Whitechapel Ripper aftermath, this gritty police drama brings serial-murder crimes, but its period setting and series format may be less your speed",
+      "Bates Motel: Norman Bates’s pre-Psycho story offers violent crime and family tension, but its brooding, horror-adjacent tone clashes with your request for less horror."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 35997,
+      "firstCardMs": 16106,
+      "serverMs": 35814
+     },
+     "cardsShown": [
+      "Mr. Mercedes",
+      "Luther",
+      "Prodigal Son",
+      "When Strangers Appear",
+      "Scream: The TV Series",
+      "Ripper Street",
+      "Bates Motel"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "negation-only-horror",
+   "set": "open",
+   "categories": [
+    "negation"
+   ],
+   "conversationId": "56259513-227e-4fe3-8cc2-548346453cdb",
+   "fingerprint": "8d571d065dfef9e5",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "I don't want horror, gore, zombies or vampires",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 6,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "precision": 1,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "NCIS: NCIS blends crime cases with action, espionage, and stolen submarines, but its episodic series format is less your usual choice.",
+      "CSI: Crime Scene Investigation: You get tense forensic case-solving and a strong crime focus, though this long-running series is less aligned with your film-first habits."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 34965,
+      "firstCardMs": 14659,
+      "serverMs": 34917
+     },
+     "cardsShown": [
+      "Torchwood",
+      "NCIS",
+      "CSI: Crime Scene Investigation",
+      "Luther",
+      "Grey's Anatomy",
+      "Hemlock Grove"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "eighties-scifi",
+   "set": "open",
+   "categories": [
+    "conflict",
+    "empty-supply",
+    "facet"
+   ],
+   "conversationId": "44e1b68b-c1fd-491e-b825-8f1b7aa737bd",
+   "fingerprint": "ec3dad12ef96b1cf",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "80s sci-fi movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 16,
+     "checks": {
+      "honestEmpty": false,
+      "mode": false,
+      "conflict": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 87,
+      "eligible": 0,
+      "scored": 0,
+      "aboveBar": 0
+     },
+     "offTopic": [
+      "2081",
+      "Xeno",
+      "Slash/Back",
+      "Code 8 Part II",
+      "Monsters",
+      "Cosmic Chaos",
+      "Doctor Who: The Next Doctor",
+      "Proximity"
+     ],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "2081: Authoritarian weights, masks and earpieces make for an intense dystopian action premise, but this 2009 short isn't an 80s movie.",
+      "Xeno: A crash-landed alien, desert adventure, and government pursuit suit your adventure and sci-fi interests, though it isn't from the 80s.",
+      "Monsters: You get alien-invasion survival and emotional stakes, but this melancholic 2010 film isn’t from the ’80s.",
+      "Cosmic Chaos: You get a Soviet spaceship distress signal and post-apocalyptic survival, but this 2023 sci-fi anthology lacks your requested decade.",
+      "Proximity: An abducted NASA scientist's hunt for proof gives you an alien premise, though its discovery-focused drama may feel less brisk than you prefer.",
+      "2073: Its 2073 police-state setting offers dystopian sci-fi, but the bleak drama is a less action-led match for you and not 80s.",
+      "Summer of 84: Your taste for tense thrillers may suit teens spying on a killer, though this 1984-set story isn’t sci-fi."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 29019,
+      "firstCardMs": 7963,
+      "serverMs": 28988
+     },
+     "cardsShown": [
+      "2081",
+      "Xeno",
+      "Slash/Back",
+      "Code 8 Part II",
+      "Monsters",
+      "Cosmic Chaos",
+      "Doctor Who: The Next Doctor",
+      "Proximity"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "tense-heist",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "372c8117-b164-4834-9d3f-b5a9b45fd155",
+   "fingerprint": "18b396be501c31f4",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "tense heist thrillers",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 24,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 582,
+      "eligible": 57,
+      "scored": 40,
+      "aboveBar": 16
+     },
+     "offTopic": [
+      "Thick as Thieves",
+      "All the Devils Are Here",
+      "Blowback"
+     ],
+     "precision": 0.625,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "All the Devils Are Here: After a heist, four criminals’ paranoid safehouse standoff gives you tense betrayal and crime, though it leans more thriller than action.",
+      "Sharper: You may enjoy the tense theft and tangled betrayals in this New York family drama, though it leans more con game than heist.",
+      "Your Lucky Day: For you, a $156 million lottery dispute turning into a bloody hostage standoff brings brisk crime-action tension, though not a planned heist.",
+      "Breaking: You get a tense bank standoff and strong urgency, though Brian Brown-Easley’s hostage crisis is not a heist.",
+      "Hierarchy: You may like the action as adoptive brothers evade law enforcement and the Russian mafia, but this crime story lacks a clear heist.",
+      "Close: You may enjoy the brisk escape after a kidnapping attempt, though Noomi Rapace’s protector story is not a heist thriller.",
+      "Inside Man: Undercover infiltration of a violent syndicate offers you gritty crime tension, though redemption drama outweighs any heist angle.",
+      "Hostage House: You get armed-robber tension as a realtor and her daughter are held hostage, though the premise is more siege than heist.",
+      "Rev: A grand-theft-auto thief turned informant brings you crime-action momentum, but exotic-car smuggling is less a classic heist.",
+      "Finestkind: You may like the gritty Boston crime pressure, but the brothers’ syndicate deal is drama, not a heist.",
+      "High Ground: You get cartel danger and action in a border-town jail, but the plot centers on a sheriff rather than a heist.",
+      "Triple Threat: For your action side, Tony Jaa and Iko Uwais bring hard-hitting mercenary fights, but the plot centers on protection, not a robbery.",
+      "Pigs: A bloody mystery-briefcase handoff brings you crime-action danger, but its premise is less clearly a heist thriller."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 35891,
+      "firstCardMs": 9180,
+      "serverMs": 35863
+     },
+     "cardsShown": [
+      "Thick as Thieves",
+      "Heist",
+      "High Rollers",
+      "Heist 88",
+      "The Good Thief",
+      "All the Devils Are Here",
+      "Risqué",
+      "Blowback"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "psych-thriller-tell-more",
+   "set": "open",
+   "categories": [
+    "facet",
+    "item-question",
+    "ordinal"
+   ],
+   "conversationId": "8dcb94bd-01a3-44ad-a100-02628b0f63de",
+   "fingerprint": "b977224890443eba",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "a psychological thriller movie",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 6,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 7550,
+      "eligible": 833,
+      "scored": 313,
+      "aboveBar": 117
+     },
+     "offTopic": [
+      "Suspiria",
+      "Hitchcock"
+     ],
+     "precision": 0.6666666666666666,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Spree: A young drifter’s year-long murder spree gives you crime-thriller intensity, though its horror-drama angle may be less appealing."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 46060,
+      "firstCardMs": 16029,
+      "serverMs": 46030
+     },
+     "cardsShown": [
+      "TransSiberian",
+      "The Intruder",
+      "Down",
+      "Suspiria",
+      "Spree",
+      "Hitchcock"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "tell me more about the first one",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 8,
+     "checks": {
+      "mode": false,
+      "reference": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "The Thirteenth Tale: A dark childhood story at an isolated mansion offers you gothic mystery in a film, though its drama focus may be less appealing lately."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 48201,
+      "firstCardMs": 14778,
+      "serverMs": 48145
+     },
+     "cardsShown": [
+      "The Ones Below",
+      "Kiss Me First",
+      "Chosen",
+      "Tell Me a Story",
+      "The Thirteenth Tale",
+      "The Tale",
+      "Z: The Beginning of Everything",
+      "Tell Me You Love Me"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "scooby-doo",
+   "set": "open",
+   "categories": [
+    "title-lookup",
+    "conflict",
+    "empty-supply"
+   ],
+   "conversationId": "9ec6d7ce-d04a-4b9d-85d5-a9f14bd136cd",
+   "fingerprint": "66c435713d81b31d",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "Scooby doo",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 14,
+     "checks": {
+      "honestEmpty": false,
+      "mode": false,
+      "conflict": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 73,
+      "eligible": 0,
+      "scored": 0,
+      "aboveBar": 0
+     },
+     "offTopic": [
+      "Bixler High Private Eye",
+      "Treasure Buddies",
+      "Are You Afraid of the Dark?",
+      "Mostly Ghostly 3: One Night in Doom House",
+      "Medium",
+      "Scorpion",
+      "Doom Patrol",
+      "The Banana Splits Movie"
+     ],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Shetland: Shetland has a close-knit team solving island murders, but its brooding, slow-burn investigations are more serious than your Scooby-Doo request.",
+      "Creepshow: Its horror-comic anthology brings supernatural creatures, though you may find these terrifying tales far less playful than Scooby-Doo."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 46440,
+      "firstCardMs": 18246,
+      "serverMs": 46404
+     },
+     "cardsShown": [
+      "Bixler High Private Eye",
+      "Treasure Buddies",
+      "Are You Afraid of the Dark?",
+      "Mostly Ghostly 3: One Night in Doom House",
+      "Medium",
+      "Scorpion",
+      "Doom Patrol",
+      "The Banana Splits Movie"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "fantasy-then-mind-benders",
+   "set": "open",
+   "categories": [
+    "facet",
+    "new-topic"
+   ],
+   "conversationId": "5641d640-21c0-4d57-b4e0-3ef26a80d47f",
+   "fingerprint": "7a9ab1337d605ee3",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "fantasy or mystery movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Mystery 101: You get a murder case and an amateur sleuth in professor Amy, though this balanced partnership mystery sounds less intense.",
+      "Verity: You get a strong mystery hook as Lowen uncovers disturbing truths in the Crawfords' home, though its thriller focus may feel familiar.",
+      "The Fall: Your adventure-loving side may enjoy the five mythical heroes and blurred reality, though this dreamlike, reflective fantasy is less brisk.",
+      "Legend of the White Dragon: Your fantasy request gets a fugitive hero and mysterious villain, though this superhero-style setup may be less appealing lately.",
+      "Significant Other: You get a tense mystery in the Pacific Northwest, though its alien-horror turn leans more thriller than fantasy.",
+      "Influencers: You may enjoy the murder-and-identity-theft suspense in Southern France, but this is horror-thriller rather than fantasy or mystery."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 28097,
+      "firstCardMs": 15535,
+      "serverMs": 28058
+     },
+     "cardsShown": [
+      "MirrorMask",
+      "Mystery 101",
+      "Nightbooks",
+      "Princess",
+      "Verity",
+      "The Fall",
+      "Dedication",
+      "Street Fighter"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "Ok let's do mind benders instead. dark ones",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [
+      "Mr. Mercedes",
+      "Tell Me a Story",
+      "Chambers",
+      "Persons Unknown",
+      "Creeped Out",
+      "Dig"
+     ],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [
+      "A Dark Song",
+      "The Dark",
+      "Creeped Out"
+     ],
+     "precision": 0.75,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Persons Unknown"
+     ],
+     "hedgingWhys": [
+      "Chambers: You may enjoy the eerie identity puzzle of a teen haunted by visions after a heart transplant, though its series format and mystery lean are less ideal.",
+      "A Dark Song: A dangerous occult ritual brings you brooding mystery and soul-deep stakes, but its slow-burn pace may not deliver the brisk intensity you prefer."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 44176,
+      "firstCardMs": 16597,
+      "serverMs": 44096
+     },
+     "cardsShown": [
+      "A Dark Matter",
+      "Super Dark Times",
+      "Mr. Mercedes",
+      "Tell Me a Story",
+      "Chambers",
+      "A Dark Song",
+      "The Dark",
+      "Persons Unknown"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "cerebral-heist-ordinals",
+   "set": "open",
+   "categories": [
+    "facet",
+    "ordinal",
+    "pagination"
+   ],
+   "conversationId": "8c131616-a9d8-4f99-95e4-a1dfa3515c59",
+   "fingerprint": "057a9274f4336a77",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "a cerebral heist movie with a twist ending",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 24,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 543,
+      "eligible": 40,
+      "scored": 27,
+      "aboveBar": 11
+     },
+     "offTopic": [
+      "Sharper",
+      "No Sudden Move",
+      "Thick as Thieves",
+      "All the Devils Are Here"
+     ],
+     "precision": 0.5,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "No Sudden Move: Soderbergh’s criminals unravel a job gone sideways, offering you clever conspiracy and betrayal, though it’s less clearly a heist.",
+      "Thick as Thieves: A master thief, an impenetrable vault and Fabergé eggs give you a tense, trust-driven heist, though a twist ending isn’t promised.",
+      "High Rollers: A dangerous casino job and rival criminals bring you brisk action, though the rescue stakes suggest less cerebral plotting than you want.",
+      "A Crooked Somebody: You may enjoy the tense kidnapping and a psychic’s deceptive bid for fame, but the plot centers on survival rather than a heist.",
+      "Small Town Crime: Mike Kendall’s murder hunt gives you a gritty mystery to puzzle through, but its redemption story isn’t a heist.",
+      "Blowback: You get a brisk bank-heist betrayal and revenge chase, but its action-first crypto hunt sounds less cerebral than your request.",
+      "Inside Man: An undercover detective infiltrating a violent syndicate offers you tense crime strategy, but not a clear heist or twist ending.",
+      "Risqué: You get a high-stakes heist led by a fired dancer, though its revenge setup sounds more action-driven than cerebral.",
+      "Breaking: John Boyega’s desperate bank hostage standoff offers tense crime drama, but its focus is institutional failure rather than a clever heist.",
+      "Moments: Six: A killer-detective stalemate gives you tense drama, though its serial-murder premise lacks the heist puzzle you requested.",
+      "Late Night Repairs: A mafia hitman’s difficult assignment gives you crime tension, though its premise sounds less like a cerebral heist.",
+      "Violent Ends: You get gritty crime intensity as Lucas is dragged back into his family’s violence, but this is revenge drama, not a cerebral heist."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 41294,
+      "firstCardMs": 15904,
+      "serverMs": 41267
+     },
+     "cardsShown": [
+      "Heist",
+      "Sharper",
+      "The Good Thief",
+      "No Sudden Move",
+      "Thick as Thieves",
+      "All the Devils Are Here",
+      "Heist 88",
+      "The Whip"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "more like the second one",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {
+      "reference": false,
+      "noRepeat": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "repeats": [],
+     "groundingViolations": 3,
+     "groundingDetail": [
+      "stub why on Dolphin Tale 2",
+      "stub why on Donovan's Echo",
+      "stub why on Life-Size 2"
+     ],
+     "hedgingWhys": [
+      "A Second Chance: Its gymnastics-team journey offers you uplifting adventure, but the family drama lacks Doctor Who’s science-fiction element.",
+      "A Second Chance: Rivals!: Maddy's gymnastics coaching brings rivalry and cyberbullying, but this family drama lacks Ghost Ship's supernatural suspense.",
+      "Within the Shadow of the Tree: Dark Dreams: While its fantasy world offers a touch of Aftersun’s imaginative escape, a small character correcting a wizard’s spell lacks your usual intensity."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "3 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 50361,
+      "firstCardMs": 18173,
+      "serverMs": 50301
+     },
+     "cardsShown": [
+      "Doctor Who: Twice Upon a Time",
+      "Dolphin Tale 2",
+      "Donovan's Echo",
+      "Life-Size 2",
+      "Touchback",
+      "A Second Chance",
+      "1 Chance 2 Dance",
+      "A Second Chance: Rivals!"
+     ]
+    },
+    {
+     "turn": 3,
+     "query": "actually go back to cerebral heists with a twist",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [
+      "The Capture",
+      "Collateral",
+      "Ice",
+      "Trackers",
+      "Somewhere Between",
+      "Prey",
+      "Motive"
+     ],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 543,
+      "eligible": 40,
+      "scored": 27,
+      "aboveBar": 11
+     },
+     "offTopic": [
+      "The Capture",
+      "Collateral",
+      "Trackers",
+      "Somewhere Between",
+      "Prey",
+      "Motive"
+     ],
+     "precision": 0.14285714285714285,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Collateral: A murder investigation that unravels political corruption gives you a conspiracy, but its drama-series pace is less heist-focused.",
+      "Trackers: You may enjoy the action-packed South African conspiracy, but smuggled diamonds and rhinos aren’t a cerebral heist.",
+      "Somewhere Between: Laura relives the week before a serial killer strikes, offering a fate-bending twist, but you won’t find a heist in this tense series.",
+      "Motive: You get murder-motive puzzles with Angie Flynn, but this is a police procedural, not a cerebral heist."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 45549,
+      "firstCardMs": 15960,
+      "serverMs": 45498
+     },
+     "cardsShown": [
+      "The Capture",
+      "Collateral",
+      "Ice",
+      "Trackers",
+      "Somewhere Between",
+      "Prey",
+      "Motive"
+     ]
+    },
+    {
+     "turn": 4,
+     "query": "more of those please",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 16,
+     "checks": {
+      "noRepeat": true
+     },
+     "leaks": [],
+     "mediaViolations": [
+      "Tell Me You Love Me",
+      "The Client List",
+      "Good Girls",
+      "666 Park Avenue",
+      "For the People"
+     ],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 543,
+      "eligible": 40,
+      "scored": 27,
+      "aboveBar": 11
+     },
+     "offTopic": [
+      "Chosen",
+      "Dirty Pretty Things",
+      "Love Finds You in Charm",
+      "Tell Me You Love Me",
+      "The Fits",
+      "The Client List",
+      "The Ones Below",
+      "Love Finds You In Sugarcreek"
+     ],
+     "precision": 0,
+     "repeats": [],
+     "groundingViolations": 5,
+     "groundingDetail": [
+      "stub why on Love Finds You in Charm",
+      "stub why on Tell Me You Love Me",
+      "stub why on The Fits",
+      "stub why on The Client List",
+      "stub why on Love Finds You In Sugarcreek"
+     ],
+     "hedgingWhys": [
+      "The Ones Below: A shocking dinner-party accident turns this pregnancy-focused neighbor story into tense domestic dread, though it is more psychological than action-led.",
+      "The Loved Ones: You may respond to the brisk revenge and survival setup, but Lola’s wildly violent prom plot is much darker than your usual action picks.",
+      "Good Girls: Three suburban mothers turn to crime for money and control, but this wry series is less aligned with your film-first, action-leaning taste.",
+      "For the People: You get high-stakes courtroom cases, but this earnest legal-workplace series is a weaker match for your film-first, action-leaning taste."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "5 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 48635,
+      "firstCardMs": 16684,
+      "serverMs": 48535
+     },
+     "cardsShown": [
+      "Chosen",
+      "Dirty Pretty Things",
+      "Love Finds You in Charm",
+      "Tell Me You Love Me",
+      "The Fits",
+      "The Client List",
+      "The Ones Below",
+      "Love Finds You In Sugarcreek"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "space-isolation-chain",
+   "set": "open",
+   "categories": [
+    "facet",
+    "media-switch",
+    "chitchat",
+    "item-question",
+    "ordinal"
+   ],
+   "conversationId": "024f1c6d-dc80-4e5f-a3f1-a1728b0c51c1",
+   "fingerprint": "5e8d36ff4689e269",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "space movies about isolation and silence",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [
+      "Origin",
+      "Dark Matter",
+      "Extant",
+      "The Twilight Zone"
+     ],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 213,
+      "eligible": 12,
+      "scored": 6,
+      "aboveBar": 3
+     },
+     "offTopic": [
+      "Alien: Containment",
+      "Origin",
+      "Rakka",
+      "The Survivalist",
+      "The Twilight Zone"
+     ],
+     "precision": 0.2857142857142857,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Alien: Containment"
+     ],
+     "hedgingWhys": [
+      "Origin: You get deep-space isolation and mounting paranoia aboard a damaged ship, though this tense sci-fi story is a series rather than a film.",
+      "Dark Matter: A memory-wiped crew waking aboard a derelict spaceship gives you space-bound isolation, though the ensemble series is less film-like.",
+      "Rakka: For your sci-fi/action side, alien occupation brings survival stakes, but the bleak, noisy resistance story isn't about solitude in space.",
+      "The Twilight Zone: You may enjoy its varied sci-fi ideas, though this tense anthology explores human nature rather than space isolation."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 43294,
+      "firstCardMs": 17194,
+      "serverMs": 43216
+     },
+     "cardsShown": [
+      "Alien: Containment",
+      "Origin",
+      "Dark Matter",
+      "Extant",
+      "Rakka",
+      "The Survivalist",
+      "The Twilight Zone"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "not that, older",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 20,
+     "checks": {
+      "noRepeat": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 302,
+      "eligible": 39,
+      "scored": 21,
+      "aboveBar": 13
+     },
+     "offTopic": [
+      "We Still Kill the Old Way",
+      "Chosen",
+      "Edie",
+      "12 and Holding",
+      "Anne of Green Gables",
+      "Unforgotten",
+      "Too Late",
+      "Lucky"
+     ],
+     "precision": 0,
+     "repeats": [],
+     "groundingViolations": 6,
+     "groundingDetail": [
+      "stub why on Edie",
+      "stub why on 12 and Holding",
+      "stub why on Anne of Green Gables",
+      "stub why on Unforgotten",
+      "stub why on Too Late",
+      "stub why on Lucky"
+     ],
+     "hedgingWhys": [
+      "Never Grow Old: Outlaws threaten an undertaker’s family in this violent western, offering you crime and action, though 2019 may not feel old enough.",
+      "October Baby: October Baby adds a road trip and self-discovery, but its earnest family drama is less brisk than you tend to enjoy.",
+      "Lucky Them: Ellie’s search for a missing rock star gives you a mystery thread, but this wry 2013 drama is gentler than your usual picks.",
+      "Head Full of Honey: Nick Nolte’s grandfather-and-granddaughter adventure offers you emotional stakes, but its family drama is gentler than your usual picks.",
+      "Old Joy: As the oldest option, this 2006 camping story answers your request, though its contemplative pace may test your taste for brisk action.",
+      "Starlet: Jane’s discovery of hidden money adds a small mystery, but this 2012 friendship drama lacks the intensity you tend to rate highly.",
+      "The Old Oak: Ken Loach's pub-and-refugee drama is older than the newest options, but its social focus may not suit your action-first taste."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "6 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 53360,
+      "firstCardMs": 20807,
+      "serverMs": 53192
+     },
+     "cardsShown": [
+      "We Still Kill the Old Way",
+      "Chosen",
+      "Edie",
+      "12 and Holding",
+      "Anne of Green Gables",
+      "Unforgotten",
+      "Too Late",
+      "Lucky"
+     ]
+    },
+    {
+     "turn": 3,
+     "query": "same but as a series",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 89,
+      "eligible": 27,
+      "scored": 15,
+      "aboveBar": 10
+     },
+     "offTopic": [
+      "American Crime Story",
+      "The Missing",
+      "Channel Zero",
+      "Tales of the City",
+      "The Romanoffs",
+      "Tyler Perry's If Loving You Is Wrong",
+      "Tell Me You Love Me"
+     ],
+     "precision": 0,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "The Missing: For your thriller streak, a child-abduction investigation across two timelines brings gripping tension, but its heavy grief and mystery may not suit your lower-",
+      "Tell Me You Love Me: Its intimate focus on three couples and a shared therapist leans into relationship drama, not your usual brisk action or adventure."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 40927,
+      "firstCardMs": 16757,
+      "serverMs": 40856
+     },
+     "cardsShown": [
+      "American Crime Story",
+      "The Missing",
+      "Channel Zero",
+      "Tales of the City",
+      "The Romanoffs",
+      "Tyler Perry's If Loving You Is Wrong",
+      "Tell Me You Love Me"
+     ]
+    },
+    {
+     "turn": 4,
+     "query": "what did I ask you before?",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 12,
+     "checks": {
+      "mode": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 6,
+     "groundingDetail": [
+      "stub why on Donovan's Echo",
+      "stub why on An Adventure in Space and Time",
+      "stub why on Session 9",
+      "stub why on War of the Worlds",
+      "stub why on Room 8",
+      "stub why on The Vast of Night"
+     ],
+     "hedgingWhys": [
+      "Dead Silence: Jamie investigates his wife's murder and a ventriloquist curse, giving you a brisker film mystery, though horror isn't your mainstay.",
+      "The Whispers: Your sci-fi interest may suit an unseen alien manipulating children, but this mystery is a series rather than a film."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": true,
+     "fallbackDetail": [
+      "6 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 46858,
+      "firstCardMs": 8943,
+      "serverMs": 46645
+     },
+     "cardsShown": [
+      "Donovan's Echo",
+      "An Adventure in Space and Time",
+      "Session 9",
+      "War of the Worlds",
+      "Room 8",
+      "The Vast of Night",
+      "Dead Silence",
+      "The Whispers"
+     ]
+    },
+    {
+     "turn": 5,
+     "query": "why did you pick the first one?",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 6,
+     "checks": {
+      "mode": false,
+      "reference": false
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "And Then There Were None: On an isolated rock, ten guests face murder and mounting tension; you may enjoy the brisk suspense, though mystery is a weaker fit for you.",
+      "Room for Rent: For your thriller tastes, Joyce’s dangerous obsession with a roomer brings a tense, contained film premise, though it lacks action and adventure.",
+      "The Lost Room: You may enjoy a detective probing a portal room and secret conspiracy, but this mystery-heavy series is a weaker match for your film-first taste.",
+      "The Room: The Room brings you a science-fiction hook with wish-granting rooms and grief-driven intensity, though its family drama may be a weaker fit.",
+      "NOS4A2: Vic’s portals and Charlie’s menace offer you supernatural intrigue, though this brooding series is a less natural fit than your film favorites."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 33826,
+      "firstCardMs": 10005,
+      "serverMs": 33584
+     },
+     "cardsShown": [
+      "And Then There Were None",
+      "Room for Rent",
+      "The Lost Room",
+      "The Room",
+      "NOS4A2",
+      "Stranger Things"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "afrikaans-light-friday",
+   "set": "open",
+   "categories": [
+    "multilingual",
+    "mood",
+    "mood-vs-exclusion"
+   ],
+   "conversationId": "cbace2bd-2371-4fc5-97d0-0540d379e4d4",
+   "fingerprint": "b6f8dc17255c14e1",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "Ek soek iets snaaks en liggies vir 'n Vrydagaand, niks hartseer nie",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 15,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "precision": 1,
+     "groundingViolations": 3,
+     "groundingDetail": [
+      "stub why on A Patch of Fog",
+      "stub why on Go!",
+      "stub why on Parked"
+     ],
+     "hedgingWhys": [
+      "Hearts of Christmas: For your lighter mood, Alice’s surprise Christmas party brings festive warmth, though this drama sounds more sentimental than funny.",
+      "Lucky Them: You get wry humor from rock journalist Ellie Klug's search for a vanished musician, though its lost-love thread may feel bittersweet.",
+      "My Dinner with Hervé: A wild LA night with Hervé Villechaize gives you an unusual friendship story, though its life-changing drama may not stay light.",
+      "Friday Night Lights: Though Dillon's football-town story has some hope, its earnest team and family drama isn't especially funny or light for you.",
+      "Low Tide: You'd get tense summer crime, not a light laugh, as teens Alan and Peter find gold coins while robbing beach houses."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "3 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 53018,
+      "firstCardMs": 22467,
+      "serverMs": 52946
+     },
+     "cardsShown": [
+      "A Patch of Fog",
+      "Hearts of Christmas",
+      "Go!",
+      "Parked",
+      "Lucky Them",
+      "Love Finds You in Charm",
+      "My Dinner with Hervé",
+      "Friday Night Lights"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "long-winter-evening",
+   "set": "open",
+   "categories": [
+    "mood"
+   ],
+   "conversationId": "6b96c51c-a77b-424a-9065-99c5de1730c4",
+   "fingerprint": "f3b45a43f80fa4b5",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "I want a film that feels like a long winter evening: slow, deliberate, with a camera that lingers, where the dialogue is sparse and the silences say more than the words",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 14,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "A Quiet Passion: Terence Davies’s portrait of Emily Dickinson offers you an austere, lingering mood, though its literary dialogue may be less sparse than you want.",
+      "Silent Night: A cabin on the 1944 winter front and a Christmas Eve truce could give you a contained, reflective evening, though war drama is a weaker lane for you.",
+      "An Unfinished Life: You may find the Wyoming ranch’s stoic grief and quiet landscapes wintry, though this family drama is more conventional than meditative.",
+      "Snow Queen: You get an isolated hotel under a bitter winter storm, though Gerda’s hopeful fantasy adventure is less spare and still than you requested.",
+      "Freeze Frame: You get tense surveillance and paranoia as Sean Veil films himself for an alibi, but the brisk thriller setup seems less contemplative.",
+      "The Kindness of Strangers: Though its Winter Palace shelter offers a cold-weather setting, the earnest ensemble story is less aligned with your sparse, quiet mood."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 51650,
+      "firstCardMs": 19669,
+      "serverMs": 51617
+     },
+     "cardsShown": [
+      "Certain Women",
+      "Lilting",
+      "Somewhere",
+      "A Quiet Passion",
+      "First Snow",
+      "Winter's Bone",
+      "Silent Night",
+      "An Unfinished Life"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "gritty-crime-chain",
+   "set": "open",
+   "categories": [
+    "facet",
+    "ordinal",
+    "new-topic"
+   ],
+   "conversationId": "79caaf76-2dfc-40d4-9792-170de37c5f09",
+   "fingerprint": "e7d64bfb4e292d3c",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "gritty crime stories set in a big city",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 5472,
+      "eligible": 930,
+      "scored": 343,
+      "aboveBar": 194
+     },
+     "offTopic": [
+      "Mob City"
+     ],
+     "precision": 0.875,
+     "groundingViolations": 5,
+     "groundingDetail": [
+      "stub why on Mob City",
+      "stub why on City on a Hill",
+      "stub why on Bomb City",
+      "stub why on State Property",
+      "stub why on APB"
+     ],
+     "hedgingWhys": [
+      "Major Crimes: You get gritty Los Angeles police work and high-profile cases, though its ensemble-series format is less aligned with your film preference.",
+      "Chicago Justice: Your big-city crime request gets Chicago politics and prosecutions, though this is a procedural series rather than a brisk action film.",
+      "New Blood: You get crime and corporate corruption, but this investigator-focused series sounds less gritty and urgent than your film-first taste."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "5 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 43462,
+      "firstCardMs": 15419,
+      "serverMs": 43352
+     },
+     "cardsShown": [
+      "Brooklyn's Finest",
+      "Mob City",
+      "City on a Hill",
+      "Bomb City",
+      "The Chicago Code",
+      "Major Crimes",
+      "State Property",
+      "APB"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "more like the second one",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {
+      "reference": false,
+      "noRepeat": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "repeats": [],
+     "groundingViolations": 3,
+     "groundingDetail": [
+      "stub why on Dolphin Tale 2",
+      "stub why on Donovan's Echo",
+      "stub why on Life-Size 2"
+     ],
+     "hedgingWhys": [
+      "A Second Chance: Its gymnastics-team journey offers you uplifting adventure, but the family drama lacks Doctor Who’s science-fiction element.",
+      "A Second Chance: Rivals!: Maddy's gymnastics coaching brings rivalry and cyberbullying, but this family drama lacks Ghost Ship's supernatural suspense.",
+      "Within the Shadow of the Tree: Dark Dreams: While its fantasy world offers a touch of Aftersun’s imaginative escape, a small character correcting a wizard’s spell lacks your usual intensity."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "3 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 18745,
+      "firstCardMs": 13253,
+      "serverMs": 18698
+     },
+     "cardsShown": [
+      "Doctor Who: Twice Upon a Time",
+      "Dolphin Tale 2",
+      "Donovan's Echo",
+      "Life-Size 2",
+      "Touchback",
+      "A Second Chance",
+      "1 Chance 2 Dance",
+      "A Second Chance: Rivals!"
+     ]
+    },
+    {
+     "turn": 3,
+     "query": "and something older",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 17,
+     "checks": {
+      "noRepeat": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "repeats": [],
+     "groundingViolations": 4,
+     "groundingDetail": [
+      "stub why on Edie",
+      "stub why on Adoration",
+      "stub why on The Living and the Dead",
+      "stub why on Chosen"
+     ],
+     "hedgingWhys": [
+      "Never Grow Old: For you, the outlaw takeover, escalating deaths, and threatened family bring tense frontier violence, though this 2019 western is not especially old.",
+      "12 and Holding: This 2006 coming-of-age drama gives you an older pick, though its focus on three children’s self-discovery may feel less brisk than your favorites.",
+      "Starlet: This 2012 film offers the older date you want and a hidden-money discovery, though you may find its unlikely friendship more gentle than thrilling.",
+      "Lucky Them: A 2013 search for a missing rock star offers you a mystery thread, though the wry, reflective drama may feel too gentle.",
+      "Outside In: For an older pick, you get a 2018 film about an ex-con and an intense small-town bond, though its drama-first pace may feel subdued."
+     ],
+     "nonLatinWhys": [
+      "The Old Oak: Ken Loach’s 2023 pub drama centers on community tensions around Syrian refugees, but its contemporary social focus is a poor match for your action-adventure sl倾"
+     ],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "4 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 51289,
+      "firstCardMs": 18546,
+      "serverMs": 51255
+     },
+     "cardsShown": [
+      "We Still Kill the Old Way",
+      "Never Grow Old",
+      "Edie",
+      "Adoration",
+      "The Living and the Dead",
+      "Hideaways",
+      "The Bygone",
+      "Chosen"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "quiet-character-dramas",
+   "set": "open",
+   "categories": [
+    "facet",
+    "mood"
+   ],
+   "conversationId": "c9204d26-df63-4f1c-9169-b3bd87bdfcce",
+   "fingerprint": "afb96d040f77d1d2",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "quiet character dramas",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 8,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 17985,
+      "eligible": 2822,
+      "scored": 854,
+      "aboveBar": 571
+     },
+     "offTopic": [],
+     "precision": 1,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "A Quiet Passion: You get an intimate portrait of Emily Dickinson’s quiet, unrecognized life, though its measured period pace may test your preference for brisk stories.",
+      "Stutterer: A lonely typographer facing his speech impediment offers the intimate, quiet character focus you requested, though the drama may feel subdued.",
+      "Good Girls: You may enjoy the mothers reclaiming agency, but its wry crime caper and brisker ensemble energy aren’t especially quiet.",
+      "Certain Women: Kelly Reichardt's three stories of loneliness and rural life offer quiet character study, but the very slow pace may not suit you.",
+      "The Missing: Your interest in emotional fallout may draw you in, though a child-abduction investigation makes this tense and intense rather than quiet."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 49678,
+      "firstCardMs": 18149,
+      "serverMs": 49639
+     },
+     "cardsShown": [
+      "A Quiet Passion",
+      "Stutterer",
+      "The Quiet",
+      "Broadchurch",
+      "Good Girls",
+      "Certain Women",
+      "Deadwater Fell",
+      "The Missing"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "genuinely-funny",
+   "set": "open",
+   "categories": [
+    "mood-vs-exclusion"
+   ],
+   "conversationId": "6d52a1a5-20d8-4e93-be76-b254e06d81b7",
+   "fingerprint": "506e86513834da67",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "something genuinely funny",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 13,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "precision": 1,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Free Willy: Escape from Pirate's Cove: Kirra’s quest to return a stranded baby orca gives you upbeat adventure, though its earnest family tone isn’t especially funny."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 36842,
+      "firstCardMs": 9681,
+      "serverMs": 36808
+     },
+     "cardsShown": [
+      "The Librarian: Quest for the Spear",
+      "Treasure Buddies",
+      "Kicks",
+      "Where the Wild Things Are",
+      "The Flyboys",
+      "Kumiko, the Treasure Hunter",
+      "Free Willy: Escape from Pirate's Cove",
+      "Tracker"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "heist-2010s-then-comedy",
+   "set": "open",
+   "categories": [
+    "facet",
+    "conflict"
+   ],
+   "conversationId": "e0820f51-568a-467f-b0ef-15aaf89c50d4",
+   "fingerprint": "12bef247de44d99b",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "a tense heist thriller from the 2010s, nothing too long",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 24,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 175,
+      "eligible": 10,
+      "scored": 8,
+      "aboveBar": 6
+     },
+     "offTopic": [
+      "Thick as Thieves",
+      "Blowback",
+      "Heist",
+      "All the Devils Are Here",
+      "Triple Threat",
+      "High Rollers",
+      "Heist 88",
+      "Risqué"
+     ],
+     "precision": 0,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Triple Threat: You get 2019-era mercenary action and brisk fights in Triple Threat, though its protection plot isn't a heist.",
+      "Close: You get a tense 2019 action thriller with Noomi Rapace on the run, but its kidnapping plot isn’t a heist.",
+      "Breaking: A tense bank hostage standoff gives you crime pressure, but Breaking is a 2022 drama, not a 2010s heist.",
+      "Sharper: A theft fuels this tense con thriller, but the 2023 New York family drama isn’t a 2010s heist.",
+      "Rev: You get action around car theft and exotic-car smuggling, but this 2020 informant drama isn’t quite a heist thriller from the 2010s.",
+      "Waist Deep: You get urgent action as a father races to save his son, but the gang-rescue plot is not a heist and dates to 2006.",
+      "The Silent Hour: You may enjoy the brisk apartment-building survival action, but a detective protecting a witness isn’t a heist plot or a 2010s film.",
+      "Inside Man: You get gritty undercover crime and moral compromise, but this 2023 redemption story isn’t a heist or from your requested decade.",
+      "Moments: Six: The serial-killer stalemate brings tension, yet you asked for a heist and this 2022 drama thriller isn't one.",
+      "Absolute Anger: A detective’s grisly murder investigation offers tense crime, but no heist—and it isn’t from the 2010s."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 41144,
+      "firstCardMs": 12379,
+      "serverMs": 41069
+     },
+     "cardsShown": [
+      "Thick as Thieves",
+      "Blowback",
+      "Heist",
+      "All the Devils Are Here",
+      "Triple Threat",
+      "High Rollers",
+      "Heist 88",
+      "Risqué"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "actually something funny instead, a comedy heist",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 9,
+     "checks": {
+      "conflict": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "precision": 1,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Red-Eyed: A heist-gone-wrong gives you crime-film tension, but Cole's preparations to defend himself sound more serious than funny.",
+      "Good Behavior: You follow thief Letty Dobesh as she disrupts a murder-for-hire, but this gritty crime series is more toxic drama than comic heist."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 46115,
+      "firstCardMs": 17180,
+      "serverMs": 46033
+     },
+     "cardsShown": [
+      "Finding Steve McQueen",
+      "Rob the Mob",
+      "Flawless",
+      "Red-Eyed",
+      "Thief",
+      "Inside Men",
+      "Good Behavior",
+      "StartUp"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "ugly",
+   "set": "open",
+   "categories": [
+    "ambiguous"
+   ],
+   "conversationId": "a4cc91c1-0d1a-49e8-b45c-7f87df51ea2d",
+   "fingerprint": "54cb437398abd708",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "ugly",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "A Nasty Piece of Work: You may enjoy the dark, violent contest for a promotion, though its corporate Christmas setting is a less direct take on “ugly.”",
+      "The Neon Demon: For your darker side, Jesse’s beauty-obsessed Los Angeles world turns grotesque, though the dreamlike pace may feel slow to you.",
+      "I Believe in Unicorns: For you, this teen runaway drama has raw emotional awkwardness, but its reflective focus is less brisk than your usual action and adventure.",
+      "Big Eyes: You get deception and marital conflict in Margaret Keane’s story, though this earnest art-world drama lacks your usual action and adventure.",
+      "Nailed It!: You might enjoy the baking disasters as ugly fun, but this reality contest leans on comedy rather than your preferred film thrills."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 53599,
+      "firstCardMs": 18994,
+      "serverMs": 53560
+     },
+     "cardsShown": [
+      "Hard Candy",
+      "Look Away",
+      "A Nasty Piece of Work",
+      "Eye Candy",
+      "The Neon Demon",
+      "I Believe in Unicorns",
+      "Big Eyes",
+      "Stutterer"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "super-mind-bender",
+   "set": "open",
+   "categories": [
+    "facet",
+    "mood"
+   ],
+   "conversationId": "4036e9e9-5b09-478c-85da-d08ae22d4610",
+   "fingerprint": "6bb9a7c7aed20c32",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "not sure what I want but sort of dark thriller. a super-mind-bender",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 7566,
+      "eligible": 833,
+      "scored": 313,
+      "aboveBar": 117
+     },
+     "offTopic": [
+      "Rellik",
+      "A Dark Song",
+      "The Dark",
+      "Creeped Out"
+     ],
+     "precision": 0.42857142857142855,
+     "groundingViolations": 2,
+     "groundingDetail": [
+      "stub why on Rellik",
+      "stub why on Down"
+     ],
+     "hedgingWhys": [
+      "A Dark Song: The perilous occult ritual brings brooding intensity and mystery, but its deliberate pace may not deliver the brisk psychological turns you want.",
+      "Creeped Out: You may enjoy the twisted technology and dark-magic tales, but this kids' anthology is a weaker fit for your film-first thriller mood."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "2 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 45358,
+      "firstCardMs": 14345,
+      "serverMs": 45299
+     },
+     "cardsShown": [
+      "A Dark Matter",
+      "Super Dark Times",
+      "Rellik",
+      "Down",
+      "A Dark Song",
+      "The Dark",
+      "Creeped Out"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "scifi-mystery-tv-older",
+   "set": "open",
+   "categories": [
+    "facet",
+    "media-switch"
+   ],
+   "conversationId": "be0dbc62-3af2-4cb1-b013-2619b4723f84",
+   "fingerprint": "cfb0f63241c37673",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "a slow-burn sci-fi mystery",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 15,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 4780,
+      "eligible": 571,
+      "scored": 256,
+      "aboveBar": 157
+     },
+     "offTopic": [
+      "Half Light",
+      "Caveat"
+     ],
+     "precision": 0.75,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Monolith: A career-desperate journalist chasing an alien conspiracy gives you tense sci-fi mystery, though its podcast investigation may feel more moody than brisk.",
+      "Double Blind: You get sci-fi and escalating tension from the fatal sleep-trial side effect, though its trapped-survivor panic sounds brisk rather than slow-burn.",
+      "Mystery 101: Amy's professor-and-detective murder investigation gives you a mystery, but its lighter crime-procedural tone lacks sci-fi and slow-burn tension.",
+      "Mouth Of Salt: You may appreciate the quiet-beach detective case and family secrets, but this mystery-drama lacks the sci-fi you requested."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 28765,
+      "firstCardMs": 9008,
+      "serverMs": 28726
+     },
+     "cardsShown": [
+      "The Vast of Night",
+      "UFO",
+      "Monolith",
+      "Iron Lung",
+      "Half Light",
+      "Space Mom",
+      "Caveat",
+      "Double Blind"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "actually TV",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 12,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 1784,
+      "eligible": 387,
+      "scored": 165,
+      "aboveBar": 116
+     },
+     "offTopic": [],
+     "precision": 1,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Project Blue Book: For your sci-fi interest, 1950s Air Force UFO investigations offer intrigue, though the historical mystery may feel measured."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 36974,
+      "firstCardMs": 7362,
+      "serverMs": 36912
+     },
+     "cardsShown": [
+      "Fringe",
+      "Reverie",
+      "Stranger Things",
+      "Threshold",
+      "Taken",
+      "The Twilight Zone",
+      "Masters of Science Fiction",
+      "Swamp Thing"
+     ]
+    },
+    {
+     "turn": 3,
+     "query": "older stuff is fine",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 15,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 6,
+     "groundingDetail": [
+      "stub why on 5ive Days to Midnight",
+      "stub why on FlashForward",
+      "stub why on Travelers",
+      "stub why on Life on Mars",
+      "stub why on The Terror",
+      "stub why on Continuum"
+     ],
+     "hedgingWhys": [
+      "Terra Nova: You may enjoy the prehistoric survival adventure and time-travel premise, though its earnest family focus and series format are less aligned with your usuals.",
+      "The Twilight Zone: Forest Whitaker hosts brooding standalone tales of strange phenomena, but the anthology's moral puzzles lean more toward mystery than your preferred action.",
+      "Requiem: You get a Welsh disappearance and unsettling family secrets, but this mystery-led drama may feel too slow and introspective for your action-forward taste."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": true,
+     "fallbackDetail": [
+      "6 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 40168,
+      "firstCardMs": 9435,
+      "serverMs": 40122
+     },
+     "cardsShown": [
+      "Life on Mars",
+      "5ive Days to Midnight",
+      "FlashForward",
+      "Travelers",
+      "Life on Mars",
+      "The Terror",
+      "Continuum",
+      "Terra Nova"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "john-wick-funnier",
+   "set": "open",
+   "categories": [
+    "mood-vs-exclusion",
+    "reference-title"
+   ],
+   "conversationId": "8fc6f561-4224-4e10-b5da-e6d2dbc14507",
+   "fingerprint": "65b7e14998b87137",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "like John Wick but funnier",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 6,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "precision": 1,
+     "groundingViolations": 2,
+     "groundingDetail": [
+      "stub why on The American",
+      "stub why on The Player"
+     ],
+     "hedgingWhys": [
+      "Eliminators: Scott Adkins’s hunted former agent faces a dangerous assassin, giving you punchy action, though the tone sounds more grim than funny.",
+      "Standoff: You get a tight protection-and-revenge siege with Thomas Jane facing an assassin, though its desperate tone isn’t especially funny.",
+      "Criminal: For your action-and-crime tastes, Costner’s memory-loaded ex-con brings a brisk sci-fi mission, but the tone is tense rather than funny."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "2 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 48339,
+      "firstCardMs": 18117,
+      "serverMs": 48283
+     },
+     "cardsShown": [
+      "Eliminators",
+      "The American",
+      "The Player",
+      "Sniper: Ultimate Kill",
+      "Standoff",
+      "Criminal"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "rainy-sunday-no-superheroes",
+   "set": "open",
+   "categories": [
+    "mood",
+    "negation"
+   ],
+   "conversationId": "5ab5ef57-66e6-437b-b726-7e21841f57a3",
+   "fingerprint": "fd9ce61f8717ce47",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "a feel-good movie for a rainy Sunday",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 14,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Swallows and Amazons"
+     ],
+     "hedgingWhys": [
+      "A Dog's Journey: Its warm, hopeful dog-and-family story could brighten a rainy day, but grief and reincarnation make this more emotionally intense than breezy.",
+      "A Shine of Rainbows: You may enjoy Tomás’s island adventures and the seal pup, though Alec’s rejection makes this family drama less purely feel-good.",
+      "Lucky: Harry Dean Stanton’s 90-year-old atheist brings gentle self-discovery, but its contemplative pace may not give you the lift you want.",
+      "Tideland: Terry Gilliam’s tale of a neglected girl surviving in a decaying estate is bleak and unsettling, not a cozy escape for you."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": true,
+     "fallbackDetail": [
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 38329,
+      "firstCardMs": 10510,
+      "serverMs": 38286
+     },
+     "cardsShown": [
+      "Treasure Buddies",
+      "Flicka: Country Pride",
+      "Swallows and Amazons",
+      "Benji",
+      "Lassie",
+      "The Good Witch's Family",
+      "Free Willy: Escape from Pirate's Cove",
+      "A Dog's Journey"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "no superheroes please",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 16,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [
+      "Sanctuary",
+      "NOS4A2",
+      "Heroes",
+      "Marvel's Runaways",
+      "Doom Patrol",
+      "Heroes Reborn",
+      "The Gifted",
+      "Watchmen",
+      "Titans",
+      "Powers",
+      "Supergirl",
+      "Batwoman"
+     ],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [
+      "Special",
+      "Heroes",
+      "Death of a Superhero",
+      "Marvel's Runaways",
+      "Doom Patrol",
+      "Heroes Reborn",
+      "The Gifted",
+      "Watchmen",
+      "Titans",
+      "Powers",
+      "Marvel One-Shot: Item 47",
+      "Supergirl",
+      "Batwoman"
+     ],
+     "precision": 0.375,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Boy Wonder: Sean’s gritty hunt for his mother’s killer offers crime, revenge, and brisk action, though his vigilante crusade may feel too superhero-adjacent for you."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 44257,
+      "firstCardMs": 17741,
+      "serverMs": 44205
+     },
+     "cardsShown": [
+      "Sanctuary",
+      "NOS4A2",
+      "Boy Wonder",
+      "Special",
+      "Heroes",
+      "Death of a Superhero",
+      "Marvel's Runaways",
+      "Doom Patrol"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "heist-more-heart",
+   "set": "open",
+   "categories": [
+    "facet",
+    "critique"
+   ],
+   "conversationId": "137b6c55-6f6a-4be3-89ef-b4d7d41eb687",
+   "fingerprint": "58f75dd94f0953e8",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "heist movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 24,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 543,
+      "eligible": 40,
+      "scored": 27,
+      "aboveBar": 11
+     },
+     "offTopic": [
+      "Thick as Thieves",
+      "Rob the Mob",
+      "The Crew"
+     ],
+     "precision": 0.625,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Rev: You get brisk action around exotic-car thefts, but this informant story centers on busting a smuggling ring, not a heist.",
+      "Finestkind: Boston brothers get pulled into an organized-crime deal, but this family drama is less directly about a heist.",
+      "Inside Man: Your crime-thriller streak may suit this undercover descent into a violent syndicate, but it lacks the requested heist premise.",
+      "Small Town Crime: You get gritty crime and a brisk murder hunt with John Hawkes, but this is a redemption thriller, not a heist.",
+      "The Jolly Robbery: This Christmas Eve burglary premise gives you a crime angle, but the sugary-snack setup sounds lighter and less action-driven than you prefer.",
+      "Red Right Hand: You get gritty crime action as Cash fights to protect his family, though this small-town revenge plot isn’t a heist.",
+      "Late Night Repairs: You get a mafia hitman facing a difficult target, but this is a low-predicted thriller rather than a heist movie."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 41469,
+      "firstCardMs": 14965,
+      "serverMs": 41443
+     },
+     "cardsShown": [
+      "Heist",
+      "Heist 88",
+      "Thick as Thieves",
+      "Finding Steve McQueen",
+      "Rob the Mob",
+      "The Crew",
+      "Risqué",
+      "The Good Thief"
+     ]
+    },
+    {
+     "turn": 2,
+     "query": "not that, something with more heart",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 14,
+     "checks": {
+      "noRepeat": true
+     },
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 582,
+      "eligible": 57,
+      "scored": 40,
+      "aboveBar": 16
+     },
+     "offTopic": [
+      "Short Term 12",
+      "Stronger",
+      "Heavyweight",
+      "A Question of Faith",
+      "12 and Holding",
+      "The Air I Breathe",
+      "Fathers and Daughters",
+      "Lilting"
+     ],
+     "precision": 0,
+     "repeats": [],
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on 12 and Holding"
+     ],
+     "hedgingWhys": [
+      "Fathers and Daughters: Russell Crowe’s widowed father and Amanda Seyfried’s search for connection bring family heart, though the melancholic drama may feel slow to you.",
+      "Somewhere: Elle Fanning’s father-daughter visit gives you a tender core, but Sofia Coppola’s contemplative pace may feel too slow.",
+      "Broken: You may value the fierce family emotions and Tim Roth, but its gritty tragedies and mental-illness themes lean bleak rather than heartwarming.",
+      "Dare Me: You get friendship at the center, but cheerleading rivalry and a murder mystery make this bleak series less heart-forward."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 43104,
+      "firstCardMs": 12711,
+      "serverMs": 43038
+     },
+     "cardsShown": [
+      "Short Term 12",
+      "Stronger",
+      "Heavyweight",
+      "A Question of Faith",
+      "12 and Holding",
+      "The Air I Breathe",
+      "Fathers and Daughters",
+      "Lilting"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "samurai-films",
+   "set": "open",
+   "categories": [
+    "facet",
+    "empty-supply"
+   ],
+   "conversationId": "134053e7-cf4a-4148-8e93-c4678cadce9b",
+   "fingerprint": "1af5fd2338ac8a70",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "samurai films",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 8,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 76,
+      "eligible": 1,
+      "scored": 1,
+      "aboveBar": 0
+     },
+     "offTopic": [
+      "Kumiko, the Treasure Hunter",
+      "Seraphim Falls",
+      "Rescue Dawn",
+      "Tracker",
+      "Jack Hunter and the Star of Heaven",
+      "To End All Wars",
+      "The Librarian: Quest for the Spear",
+      "Shanghai"
+     ],
+     "precision": 0,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Kumiko, the Treasure Hunter"
+     ],
+     "hedgingWhys": [
+      "Seraphim Falls: A relentless pursuit across harsh landscapes gives Seraphim Falls the action drive you enjoy, but its Civil War-era Western is not samurai cinema.",
+      "Tracker: A cat-and-mouse manhunt through New Zealand brings the pursuit and action you enjoy, but its Boer War setting isn’t samurai.",
+      "To End All Wars: You might connect with the intense wartime action, but this Burma POW story isn't about samurai.",
+      "Shanghai: Your interest in historical intrigue may suit occupied Shanghai, though this mystery is not a samurai film."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": true,
+     "fallbackDetail": [
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 29301,
+      "firstCardMs": 10425,
+      "serverMs": 29247
+     },
+     "cardsShown": [
+      "Kumiko, the Treasure Hunter",
+      "Seraphim Falls",
+      "Rescue Dawn",
+      "Tracker",
+      "Jack Hunter and the Star of Heaven",
+      "To End All Wars",
+      "The Librarian: Quest for the Spear",
+      "Shanghai"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "time-loop",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "a5fcc4ff-23cd-40a3-9e29-251590206b64",
+   "fingerprint": "f47c7c5bfa8f34bb",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "time loop movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 67,
+      "eligible": 5,
+      "scored": 5,
+      "aboveBar": 3
+     },
+     "offTopic": [
+      "Doctor Who: Time Crash",
+      "Doctor Who: Twice Upon a Time",
+      "Parallels",
+      "From Time to Time"
+     ],
+     "precision": 0.42857142857142855,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Black Mirror: Bandersnatch: You get tense sci-fi and multiple endings as a replay hook, though Bandersnatch isn’t a literal time-loop story.",
+      "Doctor Who: Twice Upon a Time: The Doctors meet across incarnations in this sci-fi adventure, though you get time travel rather than a repeating loop.",
+      "From Time to Time: Your adventure side may enjoy Tolly crossing between two centuries, but this dreamlike ghost story is not a time loop."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 34041,
+      "firstCardMs": 13410,
+      "serverMs": 33943
+     },
+     "cardsShown": [
+      "Time Trap",
+      "Haunter",
+      "Doctor Who: Time Crash",
+      "Black Mirror: Bandersnatch",
+      "Doctor Who: Twice Upon a Time",
+      "Parallels",
+      "From Time to Time"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "survival-at-sea",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "8add70ab-3b17-4e5e-8a29-4e89a924a1a2",
+   "fingerprint": "a83169657f22d893",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "survival at sea",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 72,
+      "eligible": 3,
+      "scored": 3,
+      "aboveBar": 3
+     },
+     "offTopic": [
+      "Against the Sun",
+      "Black Sails",
+      "Treasure Island",
+      "The Last Ship",
+      "Sanctum",
+      "Sea Patrol"
+     ],
+     "precision": 0.25,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Black Sails: Pirate survival, power struggles, and brisk sea adventures suit your action-adventure taste, though its serialized drama may be less appealing.",
+      "Sanctum: You get tense survival action as Frank’s cave team faces a flash flood, though the claustrophobic setting isn’t at sea.",
+      "Sea Patrol: Aboard HMAS Hammersley, you get naval action and adventure, but crew-life drama offers less direct survival peril.",
+      "Master and Commander: The Far Side of the World: You may enjoy Russell Crowe’s naval chase and sweeping ocean adventure, but this is more warship pursuit than survival at sea.",
+      "Lost: On a secretive island, you get crash-survival action and drama, but the mystery-heavy long series is a weaker fit.",
+      "Deadliest Catch: For your sea-survival request, freezing temperatures and forty-foot waves deliver real peril, but this is a reality series, not a film."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 45454,
+      "firstCardMs": 16656,
+      "serverMs": 45396
+     },
+     "cardsShown": [
+      "Against the Sun",
+      "All Is Lost",
+      "Below",
+      "Black Sails",
+      "Treasure Island",
+      "The Last Ship",
+      "Sanctum",
+      "Sea Patrol"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "the-matrix",
+   "set": "open",
+   "categories": [
+    "title-lookup",
+    "seen-title"
+   ],
+   "conversationId": "b3413555-8014-415f-9784-513d5dc5f3e0",
+   "fingerprint": "76a85cf38cc845d4",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "the matrix",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 15,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "The Debt: Helen Mirren's former Mossad agent returns to a tangled Nazi-war-criminal case, offering you espionage tension, though its drama-heavy focus may land less well.",
+      "Red-Eyed: A heist gone wrong turns into a homecoming defense, giving you crime and danger, though its thriller focus is less tailored to your top genres.",
+      "2149: The Aftermath: Its oppressive tech-driven future echoes The Matrix’s dystopian sci-fi, but the lonely, slow search for connection may feel short on action for you.",
+      "Retro Wick: Exploring the Unexpected Success of 'John Wick': You may enjoy this look at John Wick’s kinetic action craft, though it’s a retrospective rather than a Matrix-like sci-fi story."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 39997,
+      "firstCardMs": 10895,
+      "serverMs": 39905
+     },
+     "cardsShown": [
+      "Impostor",
+      "Cypher",
+      "2048: Nowhere to Run",
+      "The Escape",
+      "Stargate: The Ark of Truth",
+      "The Mandela Effect",
+      "The Final Cut",
+      "Body of Lies"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "ninja-tv",
+   "set": "open",
+   "categories": [
+    "facet",
+    "empty-supply"
+   ],
+   "conversationId": "bd658a6f-0d74-438a-a163-c32547f6ae30",
+   "fingerprint": "43304e622513a0b8",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "ninja shows",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 12,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 23,
+      "eligible": 1,
+      "scored": 1,
+      "aboveBar": 1
+     },
+     "offTopic": [
+      "Warrior",
+      "Nikita",
+      "Painkiller Jane",
+      "Kamen Rider: Dragon Knight",
+      "Breakout Kings",
+      "Knightfall",
+      "Blade: The Series"
+     ],
+     "precision": 0.125,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Star Trek: Short Treks"
+     ],
+     "hedgingWhys": [
+      "American Ninja Warrior: You get ninja-themed obstacle-course spectacle and brisk competition, though the reality format is less aligned with your film-first action taste.",
+      "Kamen Rider: Dragon Knight: You get martial-arts-flavored hero battles in this Kamen Rider adaptation, though its family-oriented superhero fantasy is not specifically ninja-led.",
+      "Mutant X: Mutants with powers from genetic experiments give you action-adventure and fantasy, though the show isn’t about ninjas."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 40011,
+      "firstCardMs": 16477,
+      "serverMs": 39919
+     },
+     "cardsShown": [
+      "Warrior",
+      "American Ninja Warrior",
+      "Nikita",
+      "Painkiller Jane",
+      "Kamen Rider: Dragon Knight",
+      "Breakout Kings",
+      "Knightfall",
+      "Blade: The Series"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-zombie",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "491a1f69-afaf-4429-a306-0e3e30e6c61d",
+   "fingerprint": "bd721959ba6c82c6",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "zombie movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 12,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 305,
+      "eligible": 16,
+      "scored": 12,
+      "aboveBar": 5
+     },
+     "offTopic": [
+      "The Crazies",
+      "Carriers"
+     ],
+     "precision": 0.75,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Carriers: Your zombie request gets adjacent virus-apocalypse tension as four friends race toward a refuge, though the infected aren’t zombies.",
+      "Feast: You get a brisk trapped-in-a-tavern monster siege, but its flesh-hungry creatures aren't zombies and the playful horror may lean too comic.",
+      "Terrifier: This is a brutal Halloween-night serial-killer story, not a zombie film, and its extreme violence is a poor match for your request."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 41842,
+      "firstCardMs": 15079,
+      "serverMs": 41787
+     },
+     "cardsShown": [
+      "The Driver",
+      "Cargo",
+      "Planet Terror",
+      "The Crazies",
+      "The Returned",
+      "The Battery",
+      "Carriers",
+      "The Dark"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-superhero",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "ca36ee4a-2cc8-4f85-8d76-7217818205d0",
+   "fingerprint": "228ddc5bdd3a7af6",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "superhero movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 15,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 650,
+      "eligible": 22,
+      "scored": 13,
+      "aboveBar": 7
+     },
+     "offTopic": [
+      "Boy Wonder",
+      "Mortal",
+      "Kin"
+     ],
+     "precision": 0.625,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Under the Hood: For your superhero request, this Watchmen tie-in traces the origins of hooded adventurers, though it may offer less action than you prefer.",
+      "Kin: A boy's alien weapon sparks a brisk brotherhood-and-pursuit adventure, though this is sci-fi action rather than a superhero movie.",
+      "Final Score: You may like the fast stadium rescue led by an ex-soldier, though this terrorism thriller lacks superhero elements.",
+      "Stone Cold Fox: Fox’s brisk revenge-and-rescue story suits your action taste, but it isn’t a superhero movie."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 30408,
+      "firstCardMs": 10496,
+      "serverMs": 30317
+     },
+     "cardsShown": [
+      "Code 8 Part II",
+      "Shadow Master",
+      "Boy Wonder",
+      "Under the Hood",
+      "Mortal",
+      "Legend of the White Dragon",
+      "Death of a Superhero",
+      "Kin"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-spy-tv",
+   "set": "open",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "conversationId": "8687e713-901d-4fbd-9755-232725ad74be",
+   "fingerprint": "34916ffc44f202eb",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "spy series",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 107,
+      "eligible": 45,
+      "scored": 28,
+      "aboveBar": 16
+     },
+     "offTopic": [
+      "Intelligence"
+     ],
+     "precision": 0.875,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "The Enemy Within: Erica Shepherd’s hunt for a dangerous fugitive brings you tense CIA intrigue, though the crime-drama emphasis may be less your sweet spot.",
+      "The Spy: Eli Cohen's perilous years undercover in Syria gives you intense spy drama, but its measured true-story pace may feel less brisk.",
+      "Traitors: You may like Feef's undercover mission in 1945 London, though its war-and-drama focus is less aligned with your recent preferences.",
+      "London Spy: You get an MI6-linked disappearance mystery and Ben Whishaw, but its romance-led drama may feel less brisk than you prefer."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 33263,
+      "firstCardMs": 8268,
+      "serverMs": 33218
+     },
+     "cardsShown": [
+      "Spooks",
+      "Berlin Station",
+      "Tom Clancy's Jack Ryan",
+      "Intelligence",
+      "The Enemy Within",
+      "The Company",
+      "Burn Notice",
+      "The Spy"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-cyberpunk",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "d2c788c6-6745-47ca-b735-4011dc9000b3",
+   "fingerprint": "11a541b811363751",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "cyberpunk films",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 7,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 106,
+      "eligible": 3,
+      "scored": 3,
+      "aboveBar": 2
+     },
+     "offTopic": [
+      "Cypher",
+      "The Final Cut",
+      "Code 46",
+      "2149: The Aftermath",
+      "Cyberbully"
+     ],
+     "precision": 0.2857142857142857,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on Repo Men"
+     ],
+     "hedgingWhys": [
+      "The Final Cut: You may enjoy this near-future world of memory implants and identity ethics, though its brooding mystery is slower than your usual picks.",
+      "2149: The Aftermath: You get an oppressive tech-isolated future in 2149, but its brooding search for human contact sounds slower than your usual picks."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": true,
+     "fallbackDetail": [
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 25568,
+      "firstCardMs": 7385,
+      "serverMs": 25515
+     },
+     "cardsShown": [
+      "2048: Nowhere to Run",
+      "Cypher",
+      "The Final Cut",
+      "Code 46",
+      "Repo Men",
+      "2149: The Aftermath",
+      "Cyberbully"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-ai-robot",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "04495284-5fb2-4b77-9fe2-2b95bb558089",
+   "fingerprint": "d4f69bfda83ea303",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "films about artificial intelligence",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 6,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 372,
+      "eligible": 10,
+      "scored": 4,
+      "aboveBar": 2
+     },
+     "offTopic": [
+      "Alien: Specimen",
+      "Rakka",
+      "Repo Men",
+      "Light of My Life",
+      "Parallels"
+     ],
+     "precision": 0.16666666666666666,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Impostor: Impostor gives you brisk sci-fi paranoia and action, but its clone-and-alien threat isn’t an AI story.",
+      "Rakka: You may like Rakka’s relentless alien-resistance action, but its technologically superior invaders aren’t artificial intelligence.",
+      "Light of My Life: Casey Affleck's father shields his daughter in a dangerous post-pandemic world, but you get slow survival drama rather than AI.",
+      "Parallels: You get an MMA fighter’s parallel-world adventure, but that premise is especially close to your declined Parallel and lacks AI."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 39416,
+      "firstCardMs": 14625,
+      "serverMs": 39332
+     },
+     "cardsShown": [
+      "Alien: Specimen",
+      "Impostor",
+      "Rakka",
+      "Repo Men",
+      "Light of My Life",
+      "Parallels"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-boxing",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "f9bf2793-e74e-4990-a6e9-f27851a77e52",
+   "fingerprint": "37518eee0c9f7183",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "boxing movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 14,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 136,
+      "eligible": 13,
+      "scored": 10,
+      "aboveBar": 7
+     },
+     "offTopic": [
+      "Bad Ass 2: Bad Asses",
+      "In Full Bloom"
+     ],
+     "precision": 0.75,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Chuck: Chuck follows heavyweight boxer Chuck Wepner’s life, giving you a direct boxing story, though its drama-first approach may be less brisk.",
+      "In Full Bloom: Set after WWII, In Full Bloom pairs American and Japanese fighters in a Yakuza-arranged bout, though its contemplative pace may test you.",
+      "Never Back Down: No Surrender: You may enjoy Case Walker’s fast-paced comeback and combat training, but this is an MMA movie rather than a boxing story.",
+      "Man of Tai Chi: Keanu Reeves directs this Beijing martial-arts drama, but you’re after boxing rather than Tai Chi."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 36430,
+      "firstCardMs": 9420,
+      "serverMs": 36374
+     },
+     "cardsShown": [
+      "Jawbone",
+      "A Prayer Before Dawn",
+      "Girlfight",
+      "Chuck",
+      "Bad Ass 2: Bad Asses",
+      "Ali",
+      "In Full Bloom",
+      "Heavyweight"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-noir",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "47301743-cfc5-4c74-aad2-8fcb7948aeaa",
+   "fingerprint": "56119f8be6b14b57",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "neo-noir films",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 11,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 341,
+      "eligible": 21,
+      "scored": 10,
+      "aboveBar": 7
+     },
+     "offTopic": [
+      "The Good Thief",
+      "We Own the Night",
+      "Dark Blue",
+      "Red-Eyed",
+      "Flawless",
+      "First Snow",
+      "The Limits of Control"
+     ],
+     "precision": 0.125,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Flawless: A London diamond heist brings you crime intrigue and a period setting, but this tense caper is more measured than action-packed.",
+      "First Snow: Guy Pearce’s paranoid spiral after a psychic’s warning offers you brooding noir atmosphere, though its slow pace may test your preference for brisk stories.",
+      "The Limits of Control: Jarmusch’s hidden-objective journey across Spain offers noir mystery, though its dreamlike, very slow pace may test your appetite for brisk intensity.",
+      "Spree: A drifter’s year-long murder spree has a dark crime edge, but you may find its horror focus less satisfying than noir action."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 41675,
+      "firstCardMs": 10274,
+      "serverMs": 41597
+     },
+     "cardsShown": [
+      "21 Bridges",
+      "The Good Thief",
+      "We Own the Night",
+      "Dark Blue",
+      "Red-Eyed",
+      "Flawless",
+      "First Snow",
+      "The Limits of Control"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-mafia",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "385deca0-9e8b-4603-be35-f19ca7360c0b",
+   "fingerprint": "cd132bad7d12429b",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "mafia movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 13,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 591,
+      "eligible": 37,
+      "scored": 21,
+      "aboveBar": 9
+     },
+     "offTopic": [
+      "State Property",
+      "Illegal Tender"
+     ],
+     "precision": 0.75,
+     "groundingViolations": 1,
+     "groundingDetail": [
+      "stub why on The Kitchen"
+     ],
+     "hedgingWhys": [
+      "Finding Steve McQueen: You may enjoy the brisk, true-story heist, but this wry 1972 bank caper centers on thieves rather than mafia."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply",
+      "1 stub why-lines"
+     ],
+     "latency": {
+      "totalMs": 40881,
+      "firstCardMs": 14303,
+      "serverMs": 40793
+     },
+     "cardsShown": [
+      "We Own the Night",
+      "State Property",
+      "Mob Town",
+      "The Kitchen",
+      "Rob the Mob",
+      "Road to Perdition",
+      "Gangster No. 1",
+      "Illegal Tender"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-shark",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "e11361c9-9023-485b-a7ec-7f79530a8fcb",
+   "fingerprint": "a401acda434aeaad",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "shark movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 6,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 154,
+      "eligible": 5,
+      "scored": 4,
+      "aboveBar": 0
+     },
+     "offTopic": [
+      "Sanctum",
+      "All Is Lost",
+      "Below",
+      "The Hunter",
+      "Free Willy: Escape from Pirate's Cove",
+      "Tracker"
+     ],
+     "precision": 0,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Sanctum: You get tense underwater survival as Frank’s cave team fights a flash flood, though the danger is not sharks.",
+      "Below: A WWII submarine brings claustrophobic sea tension, but you get supernatural paranoia rather than an actual shark threat.",
+      "Free Willy: Escape from Pirate's Cove: Free Willy has a stranded orca and a seaside setting, but its earnest family adventure lacks shark danger."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 35189,
+      "firstCardMs": 9919,
+      "serverMs": 34997
+     },
+     "cardsShown": [
+      "Sanctum",
+      "All Is Lost",
+      "Below",
+      "The Hunter",
+      "Free Willy: Escape from Pirate's Cove",
+      "Tracker"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-dinosaur",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "e3f22ddd-770d-4ba3-92c8-3472ee11d0ee",
+   "fingerprint": "115bdb77ea7f5c0e",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "dinosaur movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 8,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 112,
+      "eligible": 4,
+      "scored": 3,
+      "aboveBar": 3
+     },
+     "offTopic": [
+      "Discovering Dinotopia",
+      "Basilisk: The Serpent King",
+      "Where the Wild Things Are",
+      "Monsters",
+      "Centurion",
+      "Under the Hood"
+     ],
+     "precision": 0.25,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 26228,
+      "firstCardMs": 9298,
+      "serverMs": 26091
+     },
+     "cardsShown": [
+      "The Lost World",
+      "The Adventures of Jurassic Pet",
+      "Discovering Dinotopia",
+      "Basilisk: The Serpent King",
+      "Where the Wild Things Are",
+      "Monsters",
+      "Centurion",
+      "Under the Hood"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-martial-arts",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "91fc6edf-2c44-43b2-b8f8-bba687a93681",
+   "fingerprint": "b487c382e58042a6",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "martial arts movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 14,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 550,
+      "eligible": 16,
+      "scored": 12,
+      "aboveBar": 4
+     },
+     "offTopic": [
+      "Female Fight Squad",
+      "A Prayer Before Dawn",
+      "Girlfight"
+     ],
+     "precision": 0.625,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Darc: Darc gives you gritty yakuza action and a brisk crime-thriller setup, though martial arts aren’t its main focus.",
+      "Bad Ass 2: Bad Asses: Danny Trejo trains young boxers and pursues justice with Danny Glover, giving you fistfights and brisk action but more boxing than martial arts.",
+      "Kicks: Your adventure streak may enjoy Brandon’s Bay Area sneaker-retrieval mission, but this gritty coming-of-age crime drama isn’t martial arts.",
+      "Peaceful Warrior: Though Nick Nolte mentors a gymnast, your martial-arts request may feel unmet by this earnest personal-growth drama."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 36668,
+      "firstCardMs": 9613,
+      "serverMs": 36606
+     },
+     "cardsShown": [
+      "Lady Bloodfight",
+      "Never Back Down 2: The Beatdown",
+      "Skin Trade",
+      "Never Back Down: No Surrender",
+      "Man of Tai Chi",
+      "Female Fight Squad",
+      "A Prayer Before Dawn",
+      "Girlfight"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-submarine",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "1c9cc041-316c-4e7b-9c53-8c7358a1657a",
+   "fingerprint": "5eecd41e62abe310",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "submarine movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 9,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 60,
+      "eligible": 3,
+      "scored": 3,
+      "aboveBar": 1
+     },
+     "offTopic": [
+      "Sanctum",
+      "All Is Lost",
+      "Body of Lies",
+      "Master and Commander: The Far Side of the World",
+      "Creep",
+      "Turks & Caicos"
+     ],
+     "precision": 0.25,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Below: You get a World War II submarine, trapped crew and tense claustrophobic paranoia, though its supernatural mystery may be less to your taste.",
+      "On the Beach: For your submarine request, this has a surviving American sub amid nuclear fallout, though its bleak, slow drama may feel heavy.",
+      "Master and Commander: The Far Side of the World: You may enjoy its naval action and ocean-spanning pursuit, but Russell Crowe’s ship is a British warship, not a submarine."
+     ],
+     "nonLatinWhys": [],
+     "echo": false,
+     "fallback": false,
+     "fallbackDetail": [],
+     "latency": {
+      "totalMs": 36377,
+      "firstCardMs": 8972,
+      "serverMs": 36270
+     },
+     "cardsShown": [
+      "Below",
+      "On the Beach",
+      "Sanctum",
+      "All Is Lost",
+      "Body of Lies",
+      "Master and Commander: The Far Side of the World",
+      "Creep",
+      "Turks & Caicos"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  },
+  {
+   "id": "facet-con-artist",
+   "set": "open",
+   "categories": [
+    "facet"
+   ],
+   "conversationId": "6699ea10-f5bb-43e7-9df3-af3e0a2d0da7",
+   "fingerprint": "425cb582951fd2b4",
+   "stale": false,
+   "turns": [
+    {
+     "turn": 1,
+     "query": "con artist movies",
+     "status": 200,
+     "failed": false,
+     "notRun": false,
+     "picks": 9,
+     "checks": {},
+     "leaks": [],
+     "mediaViolations": [],
+     "mediaFilterViolations": [],
+     "mustNotViolations": [],
+     "supply": {
+      "matching": 81,
+      "eligible": 3,
+      "scored": 1,
+      "aboveBar": 1
+     },
+     "offTopic": [
+      "Counterfeiters",
+      "Flawless",
+      "Rob the Mob",
+      "The Good Thief",
+      "Thick as Thieves",
+      "Finding Steve McQueen",
+      "Red-Eyed"
+     ],
+     "precision": 0.125,
+     "groundingViolations": 0,
+     "groundingDetail": [],
+     "hedgingWhys": [
+      "Red-Eyed: A botched heist and Cole's return home bring crime-thriller tension you may enjoy, but the premise isn't focused on a con."
+     ],
+     "nonLatinWhys": [],
+     "echo": true,
+     "fallback": true,
+     "fallbackDetail": [
+      "stub reply"
+     ],
+     "latency": {
+      "totalMs": 40031,
+      "firstCardMs": 16845,
+      "serverMs": 39963
+     },
+     "cardsShown": [
+      "The Good Liar",
+      "Counterfeiters",
+      "Flawless",
+      "Rob the Mob",
+      "The Good Thief",
+      "Thick as Thieves",
+      "Finding Steve McQueen",
+      "Red-Eyed"
+     ]
+    }
+   ],
+   "missingTurns": 0
+  }
+ ]
+}

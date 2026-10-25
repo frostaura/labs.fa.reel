@@ -1,0 +1,239 @@
+{
+  "note": "Absolute gates are program §4.12; regression tolerances are the gate policy in docs/ask-reel-eval.md. Pre-registered 2026-10-24 before the 99c0761 baseline ran; every change made after any baseline data existed is listed in `amendments` with its reason. Change them only by a reviewed commit, never to make a run pass.",
+  "gates": [
+    {
+      "metric": "constraintPrecisionAt8",
+      "label": "Constraint precision@8 (facet scenarios)",
+      "op": ">=",
+      "target": 0.9
+    },
+    {
+      "metric": "honestEmptyCompliance",
+      "label": "Honest-empty compliance",
+      "op": ">=",
+      "target": 1.0
+    },
+    {
+      "metric": "referenceAccuracy",
+      "label": "Reference accuracy",
+      "op": ">=",
+      "target": 0.95
+    },
+    {
+      "metric": "critiqueCompliance",
+      "label": "Critique compliance",
+      "op": ">=",
+      "target": 0.9
+    },
+    {
+      "metric": "actClassification",
+      "label": "Act classification",
+      "op": ">=",
+      "target": 0.9
+    },
+    {
+      "metric": "conflictDetection",
+      "label": "Conflict detection",
+      "op": ">=",
+      "target": 0.9
+    },
+    {
+      "metric": "groundingViolations",
+      "label": "Grounding violations",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "echoReplies",
+      "label": "Replies echoing the user's message",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "fallbackRate",
+      "label": "Fallback rate",
+      "op": "<=",
+      "target": 0.01
+    },
+    {
+      "metric": "exclusionLeaks",
+      "label": "Standing-exclusion leaks (shown titles outside the eligibility truth)",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "mediaFilterViolations",
+      "label": "Picks against the request's own media filter",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "traktCalls",
+      "label": "Trakt calls from the eval stack",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "turnLatencyMs",
+      "stat": "p50",
+      "label": "Turn latency p50 (ms, concurrency ≤ 2)",
+      "op": "<=",
+      "target": 8000,
+      "latency": true
+    },
+    {
+      "metric": "turnLatencyMs",
+      "stat": "p95",
+      "label": "Turn latency p95 (ms, concurrency ≤ 2)",
+      "op": "<=",
+      "target": 15000,
+      "latency": true
+    },
+    {
+      "metric": "firstCardMs",
+      "stat": "p50",
+      "label": "First card p50 (ms, concurrency ≤ 2)",
+      "op": "<=",
+      "target": 4000,
+      "latency": true
+    },
+    {
+      "metric": "firstCardMs",
+      "stat": "p95",
+      "label": "First card p95 (ms, concurrency ≤ 2)",
+      "op": "<=",
+      "target": 7000,
+      "latency": true
+    },
+    {
+      "metric": "costPerTurnUsd",
+      "label": "Cost per turn (USD)",
+      "op": "<=",
+      "target": 0.005
+    }
+  ],
+  "regression": [
+    {
+      "metric": "constraintPrecisionAt8",
+      "higherIsBetter": true,
+      "tolerance": 0.02
+    },
+    {
+      "metric": "honestEmptyCompliance",
+      "higherIsBetter": true,
+      "tolerance": 0
+    },
+    {
+      "metric": "referenceAccuracy",
+      "higherIsBetter": true,
+      "tolerance": 0.02
+    },
+    {
+      "metric": "critiqueCompliance",
+      "higherIsBetter": true,
+      "tolerance": 0.03
+    },
+    {
+      "metric": "actClassification",
+      "higherIsBetter": true,
+      "tolerance": 0.03
+    },
+    {
+      "metric": "conflictDetection",
+      "higherIsBetter": true,
+      "tolerance": 0.03
+    },
+    {
+      "metric": "groundingViolations",
+      "higherIsBetter": false,
+      "tolerance": 0,
+      "paired": true
+    },
+    {
+      "metric": "echoReplies",
+      "higherIsBetter": false,
+      "tolerance": 0,
+      "paired": true
+    },
+    {
+      "metric": "fallbackRate",
+      "higherIsBetter": false,
+      "tolerance": 0.01
+    },
+    {
+      "metric": "exclusionLeaks",
+      "higherIsBetter": false,
+      "tolerance": 0,
+      "paired": true
+    },
+    {
+      "metric": "mediaFilterViolations",
+      "higherIsBetter": false,
+      "tolerance": 0,
+      "paired": true
+    },
+    {
+      "metric": "newlyFailedTurns",
+      "higherIsBetter": false,
+      "tolerance": 0.01
+    },
+    {
+      "metric": "traktCalls",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "turnLatencyMs",
+      "stat": "p50",
+      "higherIsBetter": false,
+      "tolerance": 0.15,
+      "relative": true,
+      "latency": true
+    },
+    {
+      "metric": "turnLatencyMs",
+      "stat": "p95",
+      "higherIsBetter": false,
+      "tolerance": 0.2,
+      "relative": true,
+      "latency": true
+    },
+    {
+      "metric": "firstCardMs",
+      "stat": "p95",
+      "higherIsBetter": false,
+      "tolerance": 0.2,
+      "relative": true,
+      "latency": true
+    },
+    {
+      "metric": "costPerTurnUsd",
+      "higherIsBetter": false,
+      "tolerance": 0.2,
+      "relative": true
+    }
+  ],
+  "amendments": [
+    {
+      "commit": "284ff9b",
+      "when": "2026-10-24T17:01Z",
+      "dataSeen": "first aborted baseline attempt",
+      "change": "fallback: a WhySource counts only when it is a typed fallback (Fallback, Stub), not any non-model source",
+      "reason": "v1 stores WhySource=Generic on the captionless filmography list by design, and Templater on outside-request cards whose caption is the deterministic statement of the exclusion they trip (all 36 Templater cards in the 99c0761 open recording are outsideRequest=true). Neither is a failed model call. Effect on the open baseline: fallback rate 0.677 → 0.623."
+    },
+    {
+      "commit": "7e3eb1f",
+      "when": "2026-10-24T18:40Z",
+      "dataSeen": "the 99c0761 open recording (run ended 18:36Z)",
+      "change": "(1) wrong-media picks moved out of exclusionLeaks into mediaMismatches; (2) a reply names a title only with the title's own capitalisation and not made of common words alone",
+      "reason": "(1) a wrong-media pick answers the user's words, not a standing exclusion — conflating them made the leak count mostly media (leaks 160 → 66); (2) prose such as 'the other one' matched the films The Other / In and Out (grounding 120 → 118)."
+    },
+    {
+      "commit": "review-fixes",
+      "when": "2026-10-24 (after both P0 reviews)",
+      "dataSeen": "all three 99c0761 recordings",
+      "change": "(a) Templater counts as a fallback on an in-request pick; (b) honest-empty requires a turn that ran and reported NoneFound; (c) unrun turns are scored as failed turns with failed checks, and a failed turn scores precision 0; (d) act is no data for an engine that emits none (v1) instead of being inferred from turn position; (e) failed and unrun turns are charged the client cap in latency; (f) latency gates also require every build slot held for the run; (g) mediaFilterViolations (picks against the request's own media filter) is gated; (h) compare refuses runs with different scenario fingerprints, turn counts, snapshot or artifact, compares counts paired over turns that ran in both runs, charges newly failed turns, and treats a metric the baseline measured but the run did not as a regression; (i) hedging covers the 'though … less / rather than' family and non-Latin script in English copy is counted",
+      "reason": "Independent reviewers showed compare passing a run with scenarios removed (leaks 66 → 0), a 500 passing honest-empty, crashes raising act and lowering grounding/echo, timeouts improving p95, and v1's act 0.864 being a property of turn position. Each change makes failing worse, never better; none of them was chosen to move a baseline number."
+    }
+  ]
+}

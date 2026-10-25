@@ -1,0 +1,3102 @@
+{
+ "set": "open",
+ "snapshotId": "reel-2026-10-23",
+ "artifactId": "0536acbf-a642-4a26-a68d-19a0b527c484",
+ "authored": "2026-10-24",
+ "scenarios": [
+  {
+   "id": "ninja-critique",
+   "categories": [
+    "facet",
+    "empty-supply",
+    "critique",
+    "ordinal",
+    "item-question"
+   ],
+   "turns": [
+    {
+     "query": "ninja movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "ninja",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "none of the above are ninja movies. I want ninja movies",
+     "expect": {
+      "act": "CritiqueSet",
+      "concept": "ninja",
+      "rejectTurns": [
+       1
+      ],
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "more like the second one you showed me first time round",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 2
+       }
+      ]
+     }
+    },
+    {
+     "query": "wait, is Blade of the 47 Ronin actually a ninja film or a samurai film?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "movie"
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "71e62b72-8fe5-4f93-ab45-6d81d9b25566",
+    "alsoProbe": "e9a489ff-bc86-4195-bcc3-186d381bae15"
+   }
+  },
+  {
+   "id": "serial-killer-caught",
+   "categories": [
+    "facet",
+    "negation"
+   ],
+   "turns": [
+    {
+     "query": "dark thriller serial killer but that gets caught at the end",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "serial-killer"
+     }
+    },
+    {
+     "query": "more thriller and less horror. I don't want ghosts I want serial killers",
+     "expect": {
+      "act": "Refine",
+      "concept": "serial-killer",
+      "mustNot": [
+       "ghost"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "89ae2ffd-229a-432e-86e8-414237ea694e"
+   }
+  },
+  {
+   "id": "negation-only-horror",
+   "categories": [
+    "negation"
+   ],
+   "turns": [
+    {
+     "query": "I don't want horror, gore, zombies or vampires",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-horror",
+       "zombie",
+       "vampire"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "9f4015ee-8d15-41be-93d3-c7db63caf8fc"
+   }
+  },
+  {
+   "id": "eighties-scifi",
+   "categories": [
+    "conflict",
+    "empty-supply",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "80s sci-fi movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "scifi-1980s",
+      "conflict": true,
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "23f4c16d-91a8-4e95-8d8e-499f09483754"
+   }
+  },
+  {
+   "id": "tense-heist",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "tense heist thrillers",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "heist"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "8e8e9285-642e-44fe-814d-fe2c18c91794"
+   }
+  },
+  {
+   "id": "psych-thriller-tell-more",
+   "categories": [
+    "facet",
+    "item-question",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "a psychological thriller movie",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-thriller",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "tell me more about the first one",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 1
+       }
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "63d8b6e2-19ba-404d-8dbb-3a8e4bad326b"
+   }
+  },
+  {
+   "id": "scooby-doo",
+   "categories": [
+    "title-lookup",
+    "conflict",
+    "empty-supply"
+   ],
+   "turns": [
+    {
+     "query": "Scooby doo",
+     "expect": {
+      "concept": "title-scooby",
+      "conflict": true
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "0920762f-36a6-439a-b81d-7035ce41b172"
+   }
+  },
+  {
+   "id": "fantasy-then-mind-benders",
+   "categories": [
+    "facet",
+    "new-topic"
+   ],
+   "turns": [
+    {
+     "query": "fantasy or mystery movies",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "Ok let's do mind benders instead. dark ones",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-fantasy"
+      ],
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "d5f2d087-6816-4ca2-a69f-111a78bdef03"
+   }
+  },
+  {
+   "id": "cerebral-heist-ordinals",
+   "categories": [
+    "facet",
+    "ordinal",
+    "pagination"
+   ],
+   "turns": [
+    {
+     "query": "a cerebral heist movie with a twist ending",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "heist",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "more like the second one",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 2
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    },
+    {
+     "query": "actually go back to cerebral heists with a twist",
+     "expect": {
+      "act": "Refine",
+      "concept": "heist",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "more of those please",
+     "expect": {
+      "act": "Refine",
+      "concept": "heist",
+      "noRepeatTurns": [
+       1,
+       2,
+       3
+      ],
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "d2d19346-e902-4da9-8925-62e3c53a072e"
+   }
+  },
+  {
+   "id": "space-isolation-chain",
+   "categories": [
+    "facet",
+    "media-switch",
+    "chitchat",
+    "item-question",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "space movies about isolation and silence",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "space",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "not that, older",
+     "expect": {
+      "act": "Refine",
+      "concept": "space",
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    },
+    {
+     "query": "same but as a series",
+     "expect": {
+      "act": "Refine",
+      "concept": "space",
+      "media": "Show"
+     }
+    },
+    {
+     "query": "what did I ask you before?",
+     "expect": {
+      "act": "Chitchat",
+      "mode": "Answer"
+     }
+    },
+    {
+     "query": "why did you pick the first one?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 3,
+        "rank": 1
+       }
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "653b9121-9283-4358-8a37-4da5baf2c87f"
+   }
+  },
+  {
+   "id": "afrikaans-light-friday",
+   "categories": [
+    "multilingual",
+    "mood",
+    "mood-vs-exclusion"
+   ],
+   "turns": [
+    {
+     "query": "Ek soek iets snaaks en liggies vir 'n Vrydagaand, niks hartseer nie",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "903b45ff-213b-4ceb-8f84-bde370dcd830"
+   }
+  },
+  {
+   "id": "long-winter-evening",
+   "categories": [
+    "mood"
+   ],
+   "turns": [
+    {
+     "query": "I want a film that feels like a long winter evening: slow, deliberate, with a camera that lingers, where the dialogue is sparse and the silences say more than the words",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "f360044c-7420-47c9-b429-23fd3942fb6b"
+   }
+  },
+  {
+   "id": "gritty-crime-chain",
+   "categories": [
+    "facet",
+    "ordinal",
+    "new-topic"
+   ],
+   "turns": [
+    {
+     "query": "gritty crime stories set in a big city",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-crime"
+     }
+    },
+    {
+     "query": "more like the second one",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 2
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    },
+    {
+     "query": "and something older",
+     "expect": {
+      "act": "Refine",
+      "noRepeatTurns": [
+       1,
+       2
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "9d3fe396-fe65-426e-9e78-a19c8a7fb81a"
+   }
+  },
+  {
+   "id": "quiet-character-dramas",
+   "categories": [
+    "facet",
+    "mood"
+   ],
+   "turns": [
+    {
+     "query": "quiet character dramas",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-drama"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "76294786-1888-4605-85ba-37a83d0cb3f7"
+   }
+  },
+  {
+   "id": "genuinely-funny",
+   "categories": [
+    "mood-vs-exclusion"
+   ],
+   "turns": [
+    {
+     "query": "something genuinely funny",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "43c185fc-2a42-4acf-8eff-1dba7fe43080"
+   }
+  },
+  {
+   "id": "heist-2010s-then-comedy",
+   "categories": [
+    "facet",
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "a tense heist thriller from the 2010s, nothing too long",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "heist-2010s",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "actually something funny instead, a comedy heist",
+     "expect": {
+      "act": "Refine",
+      "conflict": true,
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "86c4837f-c14e-4887-98af-52eaf9038264"
+   }
+  },
+  {
+   "id": "ugly",
+   "categories": [
+    "ambiguous"
+   ],
+   "turns": [
+    {
+     "query": "ugly",
+     "expect": {
+      "mode": "Any"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "6650ef14-329a-4a75-a94e-a7d13e36daeb"
+   }
+  },
+  {
+   "id": "super-mind-bender",
+   "categories": [
+    "facet",
+    "mood"
+   ],
+   "turns": [
+    {
+     "query": "not sure what I want but sort of dark thriller. a super-mind-bender",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-thriller"
+     }
+    }
+   ],
+   "seed": {
+    "source": "live-turn",
+    "conversationId": "e8c83b5f-913a-416c-9ae9-d8d4486a2c34"
+   }
+  },
+  {
+   "id": "scifi-mystery-tv-older",
+   "categories": [
+    "facet",
+    "media-switch"
+   ],
+   "turns": [
+    {
+     "query": "a slow-burn sci-fi mystery",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-scifi"
+     }
+    },
+    {
+     "query": "actually TV",
+     "expect": {
+      "act": "Refine",
+      "concept": "genre-scifi",
+      "media": "Show"
+     }
+    },
+    {
+     "query": "older stuff is fine",
+     "expect": {
+      "act": "Refine",
+      "media": "Show"
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "A",
+    "conversationId": "f57425e3-aa34-4cfc-8be2-3eaadf0c2a8f"
+   }
+  },
+  {
+   "id": "john-wick-funnier",
+   "categories": [
+    "mood-vs-exclusion",
+    "reference-title"
+   ],
+   "turns": [
+    {
+     "query": "like John Wick but funnier",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "A",
+    "conversationId": "e1e3fc53-c3e9-4af7-bd65-1ff4e86a863e"
+   }
+  },
+  {
+   "id": "rainy-sunday-no-superheroes",
+   "categories": [
+    "mood",
+    "negation"
+   ],
+   "turns": [
+    {
+     "query": "a feel-good movie for a rainy Sunday",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "no superheroes please",
+     "expect": {
+      "act": "Refine",
+      "mustNot": [
+       "superhero",
+       "genre-comedy"
+      ],
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "A",
+    "conversationId": "478ba812-1590-4479-8698-e0dd8b501514"
+   }
+  },
+  {
+   "id": "heist-more-heart",
+   "categories": [
+    "facet",
+    "critique"
+   ],
+   "turns": [
+    {
+     "query": "heist movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "heist",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "not that, something with more heart",
+     "expect": {
+      "act": "CritiqueItem",
+      "concept": "heist",
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "A",
+    "conversationId": "32de176b-9848-48fd-a5e7-9a6bbae56510"
+   }
+  },
+  {
+   "id": "samurai-films",
+   "categories": [
+    "facet",
+    "empty-supply"
+   ],
+   "turns": [
+    {
+     "query": "samurai films",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "samurai",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "A",
+    "conversationId": "cf232f34-1970-49f2-af3a-055495a0a683"
+   }
+  },
+  {
+   "id": "time-loop",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "time loop movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "time-loop",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "C",
+    "conversationId": "ef0877bb-e62b-4f0b-9b64-9a6f41e0775b"
+   }
+  },
+  {
+   "id": "survival-at-sea",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "survival at sea",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "survival-at-sea"
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "C",
+    "conversationId": "c377a74a-1fdb-4d16-bbf0-0823ab39f865"
+   }
+  },
+  {
+   "id": "the-matrix",
+   "categories": [
+    "title-lookup",
+    "seen-title"
+   ],
+   "turns": [
+    {
+     "query": "the matrix",
+     "expect": {
+      "mode": "Any"
+     }
+    }
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "G",
+    "conversationId": "16209414-d1de-4c11-9093-10c7dd12d228"
+   }
+  },
+  {
+   "id": "ninja-tv",
+   "categories": [
+    "facet",
+    "empty-supply"
+   ],
+   "turns": [
+    {
+     "query": "ninja shows",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "ninja",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "assessment-probe",
+    "lane": "G",
+    "conversationId": "dde6aef7-92c1-4dec-9d4f-6c26c786117e"
+   }
+  },
+  {
+   "id": "facet-zombie",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "zombie movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "zombie",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-superhero",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "superhero movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "superhero",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-spy-tv",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "spy series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "spy",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-cyberpunk",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "cyberpunk films",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "cyberpunk",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-ai-robot",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "films about artificial intelligence",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "ai-robot",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-boxing",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "boxing movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "boxing",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-noir",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "neo-noir films",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "noir",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-mafia",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "mafia movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "mafia",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-shark",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "shark movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "shark",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-dinosaur",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "dinosaur movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "dinosaur",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-martial-arts",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "martial arts movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "martial-arts",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-submarine",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "submarine movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "submarine",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-con-artist",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "con artist movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "con-artist",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-witch",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "witch horror",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "witch"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-werewolf-tv",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "werewolf series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "werewolf",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-chess",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "movies about chess",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "chess",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-conspiracy-tv",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "conspiracy thriller series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "conspiracy",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-cult",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "movies about cults",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "cult",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-pandemic-tv",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "pandemic shows",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "pandemic",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-cartel",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "drug cartel movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "cartel",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-treasure-hunt",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "treasure hunt adventures",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "treasure-hunt"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-slasher",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "slasher movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "slasher",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-found-footage",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "found footage horror",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "found-footage",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-disaster",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "natural disaster movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "disaster",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-alien",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "alien invasion movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "alien",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-genre-western",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "westerns",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-western",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-mountaineering",
+   "categories": [
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "mountain climbing movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "mountaineering",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-serial-killer-tv",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "serial killer series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "serial-killer",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "facet-genre-scifi-tv",
+   "categories": [
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "sci-fi series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-scifi",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: facets"
+   }
+  },
+  {
+   "id": "empty-kaiju",
+   "categories": [
+    "empty-supply",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "kaiju movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "kaiju",
+      "media": "Movie"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "movie"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: empty supply"
+   }
+  },
+  {
+   "id": "empty-dragon",
+   "categories": [
+    "empty-supply",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "dragon movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "dragon",
+      "media": "Movie"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "movie"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: empty supply"
+   }
+  },
+  {
+   "id": "empty-buddy-cop",
+   "categories": [
+    "empty-supply",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "buddy cop movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "buddy-cop",
+      "media": "Movie"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "movie"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: empty supply"
+   }
+  },
+  {
+   "id": "empty-chess-tv",
+   "categories": [
+    "empty-supply",
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "chess series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "chess",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: empty supply"
+   }
+  },
+  {
+   "id": "conflict-romcom",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "romantic comedies",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "genre-romance",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-anime",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "anime",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "genre-anime",
+      "mustNot": [
+       "genre-animation"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-space-docs",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "documentaries about space",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "genre-documentary"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-animated-kids",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "animated movies for kids",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "genre-animation"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-korean-thrillers",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "korean thrillers",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "korean"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-french-films",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "french films",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "french"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-standup",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "stand-up comedy specials",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "stand-up",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-low-rated",
+   "categories": [
+    "conflict"
+   ],
+   "turns": [
+    {
+     "query": "so-bad-it's-good movies rated under 5",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "low-rated"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-sitcoms-tv",
+   "categories": [
+    "conflict",
+    "tv",
+    "tv-exclusion"
+   ],
+   "turns": [
+    {
+     "query": "sitcoms",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "genre-comedy"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "conflict-nature-docuseries-tv",
+   "categories": [
+    "conflict",
+    "tv",
+    "tv-exclusion"
+   ],
+   "turns": [
+    {
+     "query": "nature documentary series",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": true,
+      "concept": "genre-documentary"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: conflicts"
+   }
+  },
+  {
+   "id": "no-conflict-control",
+   "categories": [
+    "conflict",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "tense heist movies from the last ten years",
+     "expect": {
+      "act": "NewRequest",
+      "conflict": false,
+      "concept": "heist",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "conflict control"
+   }
+  },
+  {
+   "id": "neg-action-no-superheroes",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "action movies but nothing with superheroes",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-action",
+      "mustNot": [
+       "superhero"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-scifi-no-aliens",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "sci-fi without aliens",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-scifi",
+      "mustNot": [
+       "alien"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-horror-no-zombies-vampires",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "horror but no zombies or vampires",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-horror",
+      "mustNot": [
+       "zombie",
+       "vampire"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-crime-no-mafia",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "crime dramas, no mafia stuff",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-crime",
+      "mustNot": [
+       "mafia"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-war-not-wwii",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "war movies but not World War II",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-war",
+      "mustNot": [
+       "world-war-ii"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-space-no-aliens",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "space movies with no aliens",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "space",
+      "mustNot": [
+       "alien"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-singular-zombie",
+   "categories": [
+    "negation",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "horror, no zombie",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-horror",
+      "mustNot": [
+       "zombie"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: negations"
+   }
+  },
+  {
+   "id": "neg-followup-no-superheroes",
+   "categories": [
+    "negation",
+    "refine"
+   ],
+   "turns": [
+    {
+     "query": "big action movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-action",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "no superheroes please",
+     "expect": {
+      "act": "Refine",
+      "concept": "genre-action",
+      "mustNot": [
+       "superhero"
+      ],
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "and nothing with aliens either",
+     "expect": {
+      "act": "Refine",
+      "concept": "genre-action",
+      "mustNot": [
+       "superhero",
+       "alien"
+      ],
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "negations across turns"
+   }
+  },
+  {
+   "id": "ord-third-one",
+   "categories": [
+    "ordinal",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "spy thrillers",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "spy"
+     }
+    },
+    {
+     "query": "more like the third one",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 3
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: ordinals"
+   }
+  },
+  {
+   "id": "ord-first-one",
+   "categories": [
+    "ordinal",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "time travel movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "time-travel"
+     }
+    },
+    {
+     "query": "something like the first one but darker",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 1
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: ordinals"
+   }
+  },
+  {
+   "id": "ord-last-tv",
+   "categories": [
+    "ordinal",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "crime series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-crime"
+     }
+    },
+    {
+     "query": "like the second one but shorter",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 2
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: ordinals"
+   }
+  },
+  {
+   "id": "ord-across-turns",
+   "categories": [
+    "ordinal",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "hitman movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "hitman",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "now spy movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "spy",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "go back to the hitman ones — more like the first of those",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 1
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "ordinals across turns"
+   }
+  },
+  {
+   "id": "crit-not-scary",
+   "categories": [
+    "critique",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "horror movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-horror"
+     }
+    },
+    {
+     "query": "none of these are scary enough",
+     "expect": {
+      "act": "CritiqueSet",
+      "rejectTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: critiques"
+   }
+  },
+  {
+   "id": "crit-not-heists",
+   "categories": [
+    "critique",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "heist movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "heist"
+     }
+    },
+    {
+     "query": "none of these are actually heists",
+     "expect": {
+      "act": "CritiqueSet",
+      "concept": "heist",
+      "rejectTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: critiques"
+   }
+  },
+  {
+   "id": "crit-not-spy",
+   "categories": [
+    "critique",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "spy movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "spy"
+     }
+    },
+    {
+     "query": "none of those are spy films, I want spies",
+     "expect": {
+      "act": "CritiqueSet",
+      "concept": "spy",
+      "rejectTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: critiques"
+   }
+  },
+  {
+   "id": "crit-more-heart-scifi",
+   "categories": [
+    "critique",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "sci-fi movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-scifi"
+     }
+    },
+    {
+     "query": "more heart, less action",
+     "expect": {
+      "act": "CritiqueItem",
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: critiques"
+   }
+  },
+  {
+   "id": "crit-zombie-not",
+   "categories": [
+    "critique",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "zombie movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "zombie"
+     }
+    },
+    {
+     "query": "half of these have no zombies in them",
+     "expect": {
+      "act": "CritiqueSet",
+      "concept": "zombie",
+      "rejectTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: critiques"
+   }
+  },
+  {
+   "id": "iq-runtime",
+   "categories": [
+    "item-question",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "submarine movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "submarine"
+     }
+    },
+    {
+     "query": "how long is the second one?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 2
+       }
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: item questions"
+   }
+  },
+  {
+   "id": "iq-series-or-movie",
+   "categories": [
+    "item-question",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "time travel stories",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "time-travel"
+     }
+    },
+    {
+     "query": "is the third one a series or a movie?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 3
+       }
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: item questions"
+   }
+  },
+  {
+   "id": "iq-scary",
+   "categories": [
+    "item-question",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "witch movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "witch"
+     }
+    },
+    {
+     "query": "is the first one actually scary?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 1
+       }
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: item questions"
+   }
+  },
+  {
+   "id": "iq-why-picked",
+   "categories": [
+    "item-question",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "hacker thrillers",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "hacker"
+     }
+    },
+    {
+     "query": "why did you pick the second one?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 2
+       }
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: item questions"
+   }
+  },
+  {
+   "id": "iq-named-show",
+   "categories": [
+    "item-question",
+    "title-lookup",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "what is Better Call Saul about?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "item question by name"
+   }
+  },
+  {
+   "id": "people-villeneuve",
+   "categories": [
+    "people"
+   ],
+   "turns": [
+    {
+     "query": "Denis Villeneuve films",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "person-villeneuve",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: people"
+   }
+  },
+  {
+   "id": "people-ridley-scott",
+   "categories": [
+    "people"
+   ],
+   "turns": [
+    {
+     "query": "films directed by Ridley Scott",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "person-ridley-scott",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: people"
+   }
+  },
+  {
+   "id": "people-statham",
+   "categories": [
+    "people"
+   ],
+   "turns": [
+    {
+     "query": "Jason Statham action movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "person-statham",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: people"
+   }
+  },
+  {
+   "id": "people-pedro-pascal",
+   "categories": [
+    "people",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "shows with Pedro Pascal",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "person-pedro-pascal",
+      "media": "Show"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: people"
+   }
+  },
+  {
+   "id": "people-theron",
+   "categories": [
+    "people"
+   ],
+   "turns": [
+    {
+     "query": "Charlize Theron movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "person-theron",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: people"
+   }
+  },
+  {
+   "id": "lookup-three-billboards",
+   "categories": [
+    "title-lookup"
+   ],
+   "turns": [
+    {
+     "query": "Three Billboards Outside Ebbing, Missouri",
+     "expect": {
+      "mode": "Any"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "title lookup, eligible title"
+   }
+  },
+  {
+   "id": "lookup-like-hurt-locker",
+   "categories": [
+    "reference-title",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "something like The Hurt Locker",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-war",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "reference title"
+   }
+  },
+  {
+   "id": "lookup-black-mirror",
+   "categories": [
+    "title-lookup",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "Black Mirror",
+     "expect": {
+      "mode": "Any"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "title lookup, eligible show"
+   }
+  },
+  {
+   "id": "media-switch-roundtrip",
+   "categories": [
+    "media-switch",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "space movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "space",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "now TV shows like that",
+     "expect": {
+      "act": "Refine",
+      "concept": "space",
+      "media": "Show"
+     }
+    },
+    {
+     "query": "back to movies",
+     "expect": {
+      "act": "Refine",
+      "concept": "space",
+      "media": "Movie",
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: media switches"
+   }
+  },
+  {
+   "id": "media-switch-filter",
+   "categories": [
+    "media-switch",
+    "facet",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "vampire stories",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "vampire"
+     }
+    },
+    {
+     "query": "only series",
+     "expect": {
+      "act": "Refine",
+      "concept": "vampire",
+      "media": "Show"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "media switch by words"
+   }
+  },
+  {
+   "id": "mood-cozy",
+   "categories": [
+    "mood-vs-exclusion",
+    "mood"
+   ],
+   "turns": [
+    {
+     "query": "a cozy feel-good movie",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-comedy",
+       "genre-animation"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: mood vs exclusions"
+   }
+  },
+  {
+   "id": "mood-cry",
+   "categories": [
+    "mood-vs-exclusion",
+    "mood"
+   ],
+   "turns": [
+    {
+     "query": "something to cry to",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-romance"
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: mood vs exclusions"
+   }
+  },
+  {
+   "id": "mood-laugh-tv",
+   "categories": [
+    "mood-vs-exclusion",
+    "mood",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "something to make me laugh",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: mood vs exclusions"
+   }
+  },
+  {
+   "id": "mood-background-tv",
+   "categories": [
+    "mood-vs-exclusion",
+    "mood",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "something easy to have on in the background",
+     "expect": {
+      "act": "NewRequest",
+      "mustNot": [
+       "genre-comedy",
+       "genre-reality"
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: mood vs exclusions"
+   }
+  },
+  {
+   "id": "tvx-history",
+   "categories": [
+    "tv-exclusion",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "history series",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Show",
+      "mustNot": [
+       "genre-history"
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: TV exclusions"
+   }
+  },
+  {
+   "id": "tvx-anime",
+   "categories": [
+    "tv-exclusion",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "anime series",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Show",
+      "mustNot": [
+       "genre-anime",
+       "genre-animation"
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: TV exclusions"
+   }
+  },
+  {
+   "id": "tvx-music",
+   "categories": [
+    "tv-exclusion",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "music shows",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Show",
+      "mustNot": [
+       "genre-music"
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: TV exclusions"
+   }
+  },
+  {
+   "id": "tvx-war",
+   "categories": [
+    "tv-exclusion",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "war drama series",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Show",
+      "concept": "genre-war"
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: TV exclusions"
+   }
+  },
+  {
+   "id": "tvx-teen-comedy",
+   "categories": [
+    "tv-exclusion",
+    "tv"
+   ],
+   "turns": [
+    {
+     "query": "teen comedy series",
+     "expect": {
+      "act": "NewRequest",
+      "media": "Show",
+      "mustNot": [
+       "genre-comedy"
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "§4.12 coverage: TV exclusions"
+   }
+  },
+  {
+   "id": "chit-capabilities",
+   "categories": [
+    "chitchat"
+   ],
+   "turns": [
+    {
+     "query": "what can you do?",
+     "expect": {
+      "act": "Chitchat",
+      "mode": "Answer"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "chitchat"
+   }
+  },
+  {
+   "id": "chit-thanks",
+   "categories": [
+    "chitchat",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "werewolf movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "werewolf",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "thanks, that's perfect",
+     "expect": {
+      "act": "Chitchat",
+      "mode": "Answer"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "chitchat after picks"
+   }
+  },
+  {
+   "id": "refine-recent",
+   "categories": [
+    "facet",
+    "refine"
+   ],
+   "turns": [
+    {
+     "query": "kidnapping thrillers",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "kidnapping",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "only ones from the last five years",
+     "expect": {
+      "act": "Refine",
+      "concept": "kidnapping",
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "refinement"
+   }
+  },
+  {
+   "id": "pagination-more",
+   "categories": [
+    "facet",
+    "pagination"
+   ],
+   "turns": [
+    {
+     "query": "martial arts movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "martial-arts",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "show me more",
+     "expect": {
+      "act": "Refine",
+      "concept": "martial-arts",
+      "noRepeatTurns": [
+       1
+      ],
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "pagination"
+   }
+  },
+  {
+   "id": "refine-shorter",
+   "categories": [
+    "facet",
+    "refine"
+   ],
+   "turns": [
+    {
+     "query": "courtroom dramas",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "courtroom"
+     }
+    },
+    {
+     "query": "under two hours please",
+     "expect": {
+      "act": "Refine",
+      "concept": "courtroom"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "refinement"
+   }
+  },
+  {
+   "id": "tv-question",
+   "categories": [
+    "item-question",
+    "tv",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "sci-fi series",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "genre-scifi",
+      "media": "Show"
+     }
+    },
+    {
+     "query": "how many seasons does the first one have?",
+     "expect": {
+      "act": "ItemQuestion",
+      "mode": "Answer",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 1
+       }
+      ]
+     }
+    }
+   ],
+   "mediaTypes": [
+    "tv"
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "TV item question"
+   }
+  },
+  {
+   "id": "people-ordinal",
+   "categories": [
+    "people",
+    "ordinal"
+   ],
+   "turns": [
+    {
+     "query": "Liam Neeson movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "person-liam-neeson",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "more like the third one",
+     "expect": {
+      "act": "Refine",
+      "references": [
+       {
+        "turn": 1,
+        "rank": 3
+       }
+      ],
+      "noRepeatTurns": [
+       1
+      ]
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "people then ordinal"
+   }
+  },
+  {
+   "id": "chitchat-midstream",
+   "categories": [
+    "chitchat",
+    "pagination",
+    "facet"
+   ],
+   "turns": [
+    {
+     "query": "dinosaur movies",
+     "expect": {
+      "act": "NewRequest",
+      "concept": "dinosaur",
+      "media": "Movie"
+     }
+    },
+    {
+     "query": "lol",
+     "expect": {
+      "act": "Chitchat",
+      "mode": "Answer"
+     }
+    },
+    {
+     "query": "more of those",
+     "expect": {
+      "act": "Refine",
+      "concept": "dinosaur",
+      "noRepeatTurns": [
+       1
+      ],
+      "media": "Movie"
+     }
+    }
+   ],
+   "seed": {
+    "source": "program",
+    "ref": "chitchat mid-stream"
+   }
+  }
+ ]
+}

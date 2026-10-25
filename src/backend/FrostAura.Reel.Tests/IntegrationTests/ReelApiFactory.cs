@@ -258,6 +258,11 @@ public sealed class ReelApiFactory : WebApplicationFactory<Program>
         }
 
         var connectionString = configuration.GetConnectionString("Postgres");
+        if (PostgresFixtureGate.LiveTargetRefusal(connectionString) is { } refusal)
+        {
+            throw new InvalidOperationException(refusal);
+        }
+
         if (string.IsNullOrWhiteSpace(TestConnectionString) || connectionString != TestConnectionString)
         {
             throw new InvalidOperationException(

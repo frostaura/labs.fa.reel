@@ -1,0 +1,100 @@
+{
+  "note": "Surface-harness gates (WS-7 tasks 8 and 10), registered 2026-10-24 after the 99c0761 surface baseline existed (the P0 review found the harness had no gate or compare at all). Absolute targets are task 8's goals and are the G1 bar, not a per-merge bar; the regression tolerances block a merge. Rates are per suggestion card, because the cards a build serves differ run to run. Change them only by a reviewed commit, never to make a run pass.",
+  "gates": [
+    {
+      "metric": "exclusionLeaks",
+      "label": "Exclusion leaks on suggestion surfaces",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "stubRate",
+      "label": "Stub why-lines (share of suggestion cards)",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "crossRailRepeats",
+      "label": "Cross-rail repeats on the feed page",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "hedgingWhyLines",
+      "label": "Why-lines hedging against their own pick",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "nonLatinWhyLines",
+      "label": "Non-Latin script in English why-lines",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "lookupFootprint",
+      "label": "Watched or rated titles on Saved and the Watch-tonight pin",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "httpErrors",
+      "label": "Surfaces answering with an HTTP error",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "traktCalls",
+      "label": "Trakt calls from the eval stack",
+      "op": "<=",
+      "target": 0
+    }
+  ],
+  "regression": [
+    {
+      "metric": "leakRate",
+      "higherIsBetter": false,
+      "tolerance": 0.005
+    },
+    {
+      "metric": "stubRate",
+      "higherIsBetter": false,
+      "tolerance": 0.01
+    },
+    {
+      "metric": "hedgeRate",
+      "higherIsBetter": false,
+      "tolerance": 0.01
+    },
+    {
+      "metric": "nonLatinWhyLines",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "crossRailRepeats",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "evidenceShare",
+      "higherIsBetter": true,
+      "tolerance": 0.03
+    },
+    {
+      "metric": "lookupFootprint",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "httpErrors",
+      "higherIsBetter": false,
+      "tolerance": 0
+    },
+    {
+      "metric": "traktCalls",
+      "higherIsBetter": false,
+      "tolerance": 0
+    }
+  ]
+}

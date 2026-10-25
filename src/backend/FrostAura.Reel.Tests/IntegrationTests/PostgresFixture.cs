@@ -36,6 +36,13 @@ public sealed class PostgresFixture : IAsyncLifetime
                 return;
         }
 
+        // Never connect to the live Postgres or the live database — not even to skip. This is checked
+        // before the gate's silence applies, because the very next statement drops the database.
+        if (PostgresFixtureGate.LiveTargetRefusal(ConnectionString) is { } refusal)
+        {
+            throw new InvalidOperationException(refusal);
+        }
+
         try
         {
             await using var db = CreateContext(new AccountContext());

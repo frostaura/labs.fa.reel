@@ -1,0 +1,7 @@
+{
+  "note": "USD per million tokens, used to turn the ExternalApiUsages ledger delta into cost. Source: program §4.11 / §7 (Luna). A model missing here is reported as unpriced, never as free.",
+  "models": {
+    "openai/gpt-6-luna": { "inputPerMillion": 0.10, "outputPerMillion": 0.50 },
+    "openai/text-embedding-3-small": { "inputPerMillion": 0.02, "outputPerMillion": 0 }
+  }
+}
