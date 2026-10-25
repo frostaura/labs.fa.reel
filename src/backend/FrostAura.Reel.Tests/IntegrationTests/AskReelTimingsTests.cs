@@ -65,7 +65,15 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
         // The END-OF-TURN LOG is where all eight stages live, because it is written after the last
         // of them finishes.
         var line = Assert.Single(log.Lines, l => l.Contains("returned.", StringComparison.Ordinal));
-        Assert.All(AskStageTimings.Order, stage => Assert.Contains($"{stage}=", line, StringComparison.Ordinal));
+        Assert.All(AskStageTimings.Sequential, stage => Assert.Contains($"{stage}=", line, StringComparison.Ordinal));
+
+        // The breakdowns that ran (R1-07): the TMDB arm, the kNN arm, the first judge batch and the
+        // first card. The facet arm needs a retriever this fixture does not wire, so it is ABSENT —
+        // a stage that did not run is never reported as zero.
+        Assert.All(
+            new[] { AskStageTimings.DiscoverTmdb, AskStageTimings.DiscoverKnn, AskStageTimings.RerankFirstBatch, AskStageTimings.FirstCard },
+            stage => Assert.Contains($"{stage}=", line, StringComparison.Ordinal));
+        Assert.DoesNotContain($"{AskStageTimings.DiscoverFacet}=", line, StringComparison.Ordinal);
 
         var done = Assert.Single(events, e => e.Event == "done");
         var timings = done.Data.GetProperty("timingsMs");
@@ -78,14 +86,24 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
         // rounding. Every other stage is present, once, in pipeline order; discovery and eligibility
         // run once per relaxation level and still report a single accumulated total.
         Assert.Equal(
-            AskStageTimings.Order.Where(stage => stage != AskStageTimings.Emit).ToList(),
+            AskStageTimings.Sequential.Where(stage => stage != AskStageTimings.Emit).ToList(),
+            recorded.Keys.Where(AskStageTimings.Sequential.Contains).ToList());
+        Assert.Equal(
+            AskStageTimings.Order.Where(recorded.ContainsKey).ToList(),
             recorded.Keys.ToList());
 
         Assert.All(recorded, kv => Assert.True(kv.Value >= 0, $"{kv.Key} recorded a negative duration."));
 
-        // The stages are sequential and disjoint, so their sum cannot exceed the turn. A generous
-        // slack absorbs the wall-clock overhead of the assertions themselves plus timer resolution.
-        var sum = recorded.Values.Sum();
+        // A breakdown never exceeds the stage it breaks down, and the first card comes after the
+        // first judge batch returned.
+        Assert.True(recorded[AskStageTimings.DiscoverTmdb] <= recorded[AskStageTimings.Discover] + 1);
+        Assert.True(recorded[AskStageTimings.DiscoverKnn] <= recorded[AskStageTimings.Discover] + 1);
+        Assert.True(recorded[AskStageTimings.RerankFirstBatch] <= recorded[AskStageTimings.Rerank] + 1);
+        Assert.True(recorded[AskStageTimings.FirstCard] <= sw.Elapsed.TotalMilliseconds + 1);
+
+        // The pipeline's stages are sequential and disjoint, so their sum cannot exceed the turn. A
+        // generous slack absorbs the wall-clock overhead of the assertions plus timer resolution.
+        var sum = recorded.Where(kv => AskStageTimings.Sequential.Contains(kv.Key)).Sum(kv => kv.Value);
         Assert.True(
             sum <= sw.Elapsed.TotalMilliseconds + 50,
             $"stages sum to {sum}ms but the whole turn took {sw.Elapsed.TotalMilliseconds:F0}ms — "
@@ -93,9 +111,9 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
     }
 
     /// <summary>
-    /// The probe. With no embedding provider the turn takes the lexical branch, which sits BEFORE
-    /// the agent call — so there is nothing to interpret, discover, embed, score, rerank or blend,
-    /// and the record says exactly that.
+    /// The probe. With no embedding provider the turn takes the keyless branch, which sits BEFORE
+    /// the agent call — it searches the catalogue and scores what it found, and there is nothing to
+    /// interpret, embed, rerank or blend, so the record says exactly that (R1-10).
     /// </summary>
     [Fact]
     public async Task The_lexical_fallback_records_only_the_work_it_actually_did()
@@ -115,12 +133,13 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
             "something brooding", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None, debug: true);
 
         Assert.Contains(events, e => e.Event == "done");
-        var line = Assert.Single(log.Lines, l => l.Contains("lexical fallback", StringComparison.Ordinal));
+        var line = Assert.Single(log.Lines, l => l.Contains("keyless lexical answer", StringComparison.Ordinal));
 
-        Assert.Contains($"{AskStageTimings.Emit}=", line, StringComparison.Ordinal);
+        Assert.Contains($"{AskStageTimings.Discover}=", line, StringComparison.Ordinal);
+        Assert.Contains($"{AskStageTimings.Score}=", line, StringComparison.Ordinal);
         Assert.All(
-            AskStageTimings.Order.Where(stage => stage != AskStageTimings.Emit),
-            stage => Assert.DoesNotContain($"{stage}=", line, StringComparison.Ordinal));
+            AskStageTimings.Order.Where(stage => stage != AskStageTimings.Discover && stage != AskStageTimings.Score),
+            stage => Assert.DoesNotContain($" {stage}=", " " + line, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -344,8 +363,9 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
 
     private sealed class ScriptedTmdbClient(IReadOnlyList<TmdbListItem> rows) : ITmdbClient
     {
+        // TMDB knows every concept the fixture asks about, so the discovery arm pulls (R1-52).
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
+            Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(9_000_000 + ((query.GetHashCode(StringComparison.Ordinal) & 0x7fffffff) % 1_000_000), query)]);
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,

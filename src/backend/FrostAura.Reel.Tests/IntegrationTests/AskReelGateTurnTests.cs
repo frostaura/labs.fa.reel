@@ -21,6 +21,7 @@ using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -174,7 +175,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             Assert.Equal(JsonValueKind.Null, card.GetProperty("fit").ValueKind);
             Assert.Equal(JsonValueKind.Null, card.GetProperty("satisfies").ValueKind);
         });
-        Assert.Equal(["judge:2/2"], done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
+        Assert.Equal(["judge:2/2", "judge-missing:8/8"], done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
         Assert.Equal("8 not checked against what you asked — shown below", done.GetProperty("reason").GetString());
 
         var reply = Assert.Single(events, e => e.Event == "assistant-message").Data.GetProperty("text").GetString()!;
@@ -183,7 +184,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Contains("8 titles I couldn't check against your request are below", reply, StringComparison.Ordinal);
 
         Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
-        Assert.Equal("judge:2/2", outcome.DegradedFlags);
+        Assert.Equal("judge:2/2,judge-missing:8/8", outcome.DegradedFlags);
         Assert.Equal(8, outcome.Cards.Count);
         Assert.All(outcome.Cards, c =>
         {
@@ -235,6 +236,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         });
         Assert.Empty(done.GetProperty("unchecked").EnumerateArray());
         Assert.Equal("3 picks for you · 4 more not checked against what you asked", done.GetProperty("reason").GetString());
+        // R1-01: every title without a verdict counts, not only a batch that answered for none.
+        Assert.Contains("judge-missing:4/7", done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
         Assert.Equal(7, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.Pick));
     }
 
@@ -431,7 +434,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         clock.Stop();
 
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), $"the turn waited {clock.Elapsed} on a silent judge.");
-        Assert.Equal("judge:2/2", outcome.DegradedFlags);
+        Assert.Equal("judge:2/2,judge-missing:7/7", outcome.DegradedFlags);
         Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
         Assert.Equal(7, Assert.Single(events, e => e.Event == "done").Data.GetProperty("unchecked").GetArrayLength());
     }
@@ -601,6 +604,468 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
                 r.GetProperty("why").GetString()));
     }
 
+    // ── Round 1 (R1-01, R1-02, R1-04, R1-09, R1-10) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// R1-01: a card nobody judged is never presented as a match the bar held back. Under a bar no
+    /// card clears, the judged matches go to the floor tray and are named under the bar; the cards
+    /// the judge skipped — a skipped entry in an answered batch and a whole failed batch alike — go
+    /// to the unchecked tray, are counted as unchecked, and raise the missing-verdict flag.
+    /// </summary>
+    [Fact]
+    public async Task An_unjudged_card_under_the_bar_is_unchecked_never_held_back_as_a_match()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await SeedScoresAsync(accountId, [], 0m);
+        await SetRatingFloorAsync(accountId, "9.9");
+        // Two judged matches and three titles the judge skips (a fallback entry in an answered batch).
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 1400, ("Yes", 2), ("Fail", 3)));
+        var agent = new VerdictAgent();
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit);
+
+        var outcome = await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        var held = Names(done.GetProperty("belowFloor"));
+        var notChecked = Names(done.GetProperty("unchecked"));
+        Assert.Equal(2, held.Count);
+        Assert.All(held, n => Assert.StartsWith("Gate Yes", n, StringComparison.Ordinal));
+        Assert.All(done.GetProperty("belowFloor").EnumerateArray(), c => Assert.Equal("yes", c.GetProperty("satisfies").GetString()));
+        Assert.Equal(3, notChecked.Count);
+        Assert.All(notChecked, n => Assert.StartsWith("Gate Fail", n, StringComparison.Ordinal));
+        Assert.Equal(
+            "3 not checked against what you asked — shown below · 2 held back by your 9.9 bar — shown below",
+            done.GetProperty("reason").GetString());
+        // Which batch the skipped titles fall in follows the similarity order; the missing count does not.
+        Assert.Contains("judge-missing:3/5", done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
+
+        Assert.Contains("Under your 9.9 bar: Gate Yes", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.Contains("3 titles I couldn't check against your request are below", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Gate Fail", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.Equal(2, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.BelowFloor && c.Satisfies == "yes"));
+        Assert.Equal(3, outcome.Cards.Count(c => c.Tier == SearchTurnCardTier.Unchecked && c.Satisfies is null));
+        // Stored in the order the screen renders the trays: the floor tray, then the unchecked tray.
+        Assert.Equal(
+            [SearchTurnCardTier.BelowFloor, SearchTurnCardTier.BelowFloor, SearchTurnCardTier.Unchecked, SearchTurnCardTier.Unchecked, SearchTurnCardTier.Unchecked],
+            outcome.Cards.OrderBy(c => c.Rank).Select(c => c.Tier));
+    }
+
+    /// <summary>
+    /// R1-01's other half: on a turn that found no match, the partial matches are the closest thing
+    /// it did find, so the reply names them — the samurai turn's "Blade of the 47 Ronin" sat in the
+    /// near-miss tray of a reply that never said so.
+    /// </summary>
+    [Theory]
+    [InlineData(1, "Close, but not quite: Gate Partial {0} — tucked away below.")]
+    [InlineData(2, "Close, but not quite: Gate Partial {0} and Gate Partial {1} — tucked away below.")]
+    [InlineData(5, "Close, but not quite: Gate Partial {0}, Gate Partial {1}, Gate Partial {2} and 2 more — tucked away below.")]
+    public async Task A_none_found_reply_names_its_near_misses(int partials, string expected)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var first = TmdbIdFirst + 1500 + (partials * 10);
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(first, ("Partial", partials), ("No", 2)));
+        var (service, events) = BuildService(accountId, tmdb, new VerdictAgent(), out var emit);
+
+        var outcome = await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        var tray = Names(done.GetProperty("nearMiss"));
+        Assert.Equal(partials, tray.Count);
+        Assert.Contains(string.Format(System.Globalization.CultureInfo.InvariantCulture, expected, [.. tray.Select(n => n["Gate Partial ".Length..])]),
+            outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// R1-02: the supply counts, and the reply names, the topic the USER said — not the union of the
+    /// model's keywords under its first one's name. The ninja follow-up came back as
+    /// [ninja, martial arts, ninja warrior]; the old reply counted all three and called them "ninja
+    /// movies". Varied by where the user's word is: this message, an earlier ask (a follow-up that
+    /// names no topic), or nowhere — and then every keyword counted is named.
+    /// </summary>
+    [Theory]
+    [InlineData("none of the above are {0} movies. I want {0} movies", false, 2, "{0} titles")]
+    [InlineData("more like that please", true, 2, "{0} titles")]
+    [InlineData("something else entirely", false, 6, "{0}, {1} arts or {0} warrior titles")]
+    public async Task The_supply_counts_and_names_the_topic_the_user_said(
+        string messageShape, bool askedEarlier, int matching, string topicShape)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var ninja = $"ninjaq{Guid.NewGuid():N}"[..14];
+        var martial = $"martq{Guid.NewGuid():N}"[..13];
+        var accountId = await SeedAccountAsync();
+        for (var i = 0; i < 2; i++)
+        {
+            await SeedTopicalTitleAsync(ninja);
+        }
+
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        for (var i = 0; i < 4; i++)
+        {
+            await SeedTopicalTitleAsync($"{martial} arts");
+        }
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 1600 + (matching * 3) + (askedEarlier ? 1 : 0), ("No", 3)));
+        var agent = new VerdictAgent(keywords: [ninja, $"{martial} arts", $"{ninja} warrior"]);
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit, withRetrieval: true);
+        IReadOnlyList<ChatTurn> history = askedEarlier
+            ? [new ChatTurn("user", $"{ninja} movies"), new ChatTurn("assistant", "Nothing new.")]
+            : [];
+
+        var outcome = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(
+                string.Format(System.Globalization.CultureInfo.InvariantCulture, messageShape, ninja), history, [], [], "US", [],
+                ApiUsagePurpose.RerankAsk),
+            emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Equal(matching, done.GetProperty("supply").GetProperty("matchingInCatalogue").GetInt32());
+        var topic = string.Format(System.Globalization.CultureInfo.InvariantCulture, topicShape, ninja, martial);
+        Assert.Contains($"{matching} {topic} in the catalogue", outcome.AssistantText, StringComparison.Ordinal);
+        if (matching == 2)
+        {
+            Assert.DoesNotContain(martial, outcome.AssistantText, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// R1-04: a pointer with nothing on screen to point at is asked back — no model call, no judge
+    /// call, no search — and a pointer some answer CAN satisfy is left to the model. Varied over no
+    /// answers at all, an answer too short for the ordinal, and an answer long enough.
+    /// </summary>
+    [Theory]
+    [InlineData("more like the second one you showed me first time round", 0, true, "nothing on screen yet for “the second one”")]
+    [InlineData("is the third one violent?", 2, true, "at most 2 titles at a time, so there’s no third one")]
+    [InlineData("more like the second one", 3, false, null)]
+    public async Task A_pointer_with_nothing_to_point_at_is_asked_back_without_a_search(
+        string message, int presentedCards, bool clarifies, string? replyPart)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 1700 + presentedCards, ("Yes", 2)));
+        var agent = new VerdictAgent();
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit);
+        var presented = Enumerable.Range(1, presentedCards)
+            .Select(rank => new PresentedCard(1, rank, Guid.NewGuid(), $"Shown {rank}", 2012, MediaType.Movie))
+            .ToList();
+
+        var outcome = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(message, [], [], presented, "US", [], ApiUsagePurpose.RerankAsk),
+            emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        if (clarifies)
+        {
+            Assert.Equal(SearchTurnMode.Clarify, done.GetProperty("mode").GetString());
+            Assert.Equal(SearchTurnMode.Clarify, outcome.Mode);
+            Assert.Equal(0, agent.Interprets);
+            Assert.Empty(agent.Judged);
+            Assert.Empty(outcome.Cards);
+            Assert.Null(outcome.IntentJson);
+            Assert.Contains(replyPart!, outcome.AssistantText, StringComparison.Ordinal);
+            Assert.DoesNotContain("movies tagged", outcome.AssistantText, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(1, agent.Interprets);
+            Assert.Equal(SearchTurnMode.Picks, outcome.Mode);
+        }
+    }
+
+    /// <summary>
+    /// R1-09: the turn records the effort its calls are SENT at, read from the purpose catalog — not
+    /// a hard-coded "provider-default". Both at none is "none"; a judge configured differently is
+    /// written as plan/judge.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "none")]
+    [InlineData("low", "none/low")]
+    [InlineData("omit", "none/provider-default")]
+    public async Task A_turn_records_the_effort_its_calls_are_sent_at(string? judgeEffort, string recorded)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var settings = new Dictionary<string, string?>();
+        if (judgeEffort is not null)
+        {
+            settings["LLM_RERANK_ASK_EFFORT"] = judgeEffort;
+        }
+
+        var catalog = new Application.Llm.LlmPurposeCatalog(
+            new ConfigurationBuilder().AddInMemoryCollection(settings).Build());
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 1800 + recorded.Length, ("Yes", 2)));
+        var (service, _) = BuildService(accountId, tmdb, new VerdictAgent(), out var emit, purposes: catalog);
+
+        var outcome = await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        Assert.Equal(recorded, outcome.ReasoningEffort);
+    }
+
+    /// <summary>
+    /// R1-10: a keyless install answers with keyword matches as UNCHECKED — never as picks — inside
+    /// the media the message names and the account's conditions, with the bar visible and counted,
+    /// honest copy, the no-model flag and its stage timings. The old path streamed American Ninja
+    /// Warrior (a reality series) into the grid for "ninja movies", with no reply, flag or timings.
+    /// </summary>
+    [Theory]
+    [InlineData("{0} movies", "9.9", 2, 2)]
+    [InlineData("{0} shows", "0", 1, 0)]
+    [InlineData("{0}", "9.9", 3, 3)]
+    public async Task A_keyless_turn_shows_keyword_matches_as_unchecked(string messageShape, string floor, int shown, int underBar)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var word = $"keylessq{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await SeedScoresAsync(accountId, [], 0m);
+        if (floor != "0")
+        {
+            await SetRatingFloorAsync(accountId, floor);
+        }
+
+        await SeedTopicalTitleAsync("unrelated", t => t.Name = $"{word} one");
+        await SeedTopicalTitleAsync("unrelated", t => t.Name = $"{word} two");
+        await SeedTopicalTitleAsync("unrelated", t => { t.Name = $"{word} the series"; t.MediaType = MediaType.Show; });
+        var agent = new VerdictAgent();
+        var (service, events) = BuildService(
+            accountId, new ScriptedTmdbClient([]), agent, out var emit, embeddings: new UnavailableEmbeddingProvider());
+
+        var outcome = await service.StreamAsync(
+            string.Format(System.Globalization.CultureInfo.InvariantCulture, messageShape, word), [], [], "US", [],
+            ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Empty(done.GetProperty("results").EnumerateArray());
+        Assert.DoesNotContain(events, e => e.Event == "candidate");
+        Assert.Equal(shown, done.GetProperty("unchecked").GetArrayLength());
+        Assert.Equal(["no-model"], done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
+        Assert.True(Assert.Single(events, e => e.Event == "assistant-message").Data.GetProperty("degraded").GetBoolean());
+        Assert.StartsWith("Ask Reel has no language model connected right now", outcome.AssistantText, StringComparison.Ordinal);
+        if (underBar > 0)
+        {
+            Assert.Contains($"{underBar} of them score under your {floor} bar.", outcome.AssistantText, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain("under your", outcome.AssistantText, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(0, agent.Interprets);
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+        Assert.Equal(SearchTurnDegraded.NoModel, outcome.DegradedFlags);
+        Assert.Null(outcome.ReasoningEffort);
+        Assert.All(outcome.Cards, c => Assert.Equal(SearchTurnCardTier.Unchecked, c.Tier));
+        using var timings = JsonDocument.Parse(outcome.StageTimingsJson!);
+        Assert.True(timings.RootElement.TryGetProperty(AskStageTimings.Discover, out _));
+        Assert.True(timings.RootElement.TryGetProperty(AskStageTimings.Score, out _));
+    }
+
+    /// <summary>
+    /// R1-07: a request with a hard concept never widens past it — one discovery pass, no
+    /// popularity last resort — so a topic with nothing eligible answers none-found without judging
+    /// filler. A request with no concept (a mood) still widens.
+    /// </summary>
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 3)]
+    public async Task A_concept_request_never_widens_past_its_topic(bool withConcept, int discoverPasses)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var tmdb = new CountingTmdbClient();
+        var agent = new VerdictAgent(keywords: withConcept ? ["futuristic"] : []);
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit);
+
+        var outcome = await service.StreamAsync(
+            withConcept ? "something futuristic" : "something brooding", [], [], "US", [], ApiUsagePurpose.RerankAsk,
+            emit, CancellationToken.None);
+
+        Assert.Equal(discoverPasses, tmdb.DiscoverPasses);
+        if (withConcept)
+        {
+            Assert.Empty(agent.Judged);
+            Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+            Assert.Equal(0, outcome.Relaxation);
+        }
+    }
+
+    /// <summary>
+    /// R1-52: Ask discovers through WS-3's TMDB arm — the account's standing conditions go WITH the
+    /// fetch (language, crowd floor, year window, vote floor, interactive priority), the user's own
+    /// rejections ride as exclusions, and the message is searched as a title only when it is shaped
+    /// like one. The old pull sent none of the conditions and searched every sentence as a title.
+    /// </summary>
+    [Theory]
+    [InlineData("something futuristic", false)]
+    [InlineData("Blade Runner", true)]
+    public async Task Ask_discovers_through_the_standing_aware_tmdb_arm(string message, bool titleSearched)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await AddFilterAsync(accountId, FilterKind.Language, "en");
+        await AddFilterAsync(accountId, FilterKind.MinCrowdRating, "6.5");
+        await AddFilterAsync(accountId, FilterKind.MinYear, "1990");
+        var tmdb = new CountingTmdbClient();
+        var agent = new VerdictAgent(keywords: ["futuristic"], requestedExclusions: ["zombies"]);
+        var (service, _) = BuildService(accountId, tmdb, agent, out var emit);
+
+        await service.StreamAsync(message, [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var options = Assert.Single(tmdb.MovieOptions);
+        Assert.Equal("en", options.OriginalLanguage);
+        Assert.Equal(6.5m, options.MinVoteAverage);
+        Assert.Equal(TmdbDiscoveryArm.DefaultMinVoteCount, options.MinVoteCount);
+        Assert.Equal(new DateTime(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc), tmdb.ReleasedAfter);
+        Assert.Equal(titleSearched, tmdb.TitleSearches.Count > 0);
+        Assert.Contains("zombies", tmdb.KeywordSearches);
+    }
+
+    /// <summary>A TMDB client with nothing to give, recording what each call asked for.</summary>
+    private sealed class CountingTmdbClient : ITmdbClient
+    {
+        private readonly object _gate = new();
+        private int _passes;
+
+        public int DiscoverPasses => Volatile.Read(ref _passes);
+
+        public List<TmdbDiscoverOptions> MovieOptions { get; } = [];
+
+        public DateTime? ReleasedAfter { get; private set; }
+
+        public List<string> TitleSearches { get; } = [];
+
+        public List<string> KeywordSearches { get; } = [];
+
+        public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default)
+        {
+            lock (_gate)
+            {
+                KeywordSearches.Add(query);
+            }
+
+            return Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(424_242, query)]);
+        }
+
+        public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
+            bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,
+            string? region, DateTime? releasedAfter, int page,
+            IReadOnlyList<int>? excludeGenreIds = null, IReadOnlyList<int>? excludeKeywordIds = null,
+            DateTime? releasedBefore = null, int? maxRuntimeMinutes = null, TmdbDiscoverOptions? options = null,
+            CancellationToken ct = default)
+        {
+            if (movies && page == 1)
+            {
+                Interlocked.Increment(ref _passes);
+                lock (_gate)
+                {
+                    if (options is not null)
+                    {
+                        MovieOptions.Add(options);
+                    }
+
+                    ReleasedAfter = releasedAfter;
+                }
+            }
+
+            return Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+        }
+
+        public Task<IReadOnlyList<TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default)
+        {
+            lock (_gate)
+            {
+                TitleSearches.Add(query);
+            }
+
+            return Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+        }
+
+        public Task<TmdbPerson?> SearchPersonAsync(string name, CancellationToken ct = default) =>
+            Task.FromResult<TmdbPerson?>(null);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<TmdbTitleDetails?>(null);
+
+        public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<TmdbTitleDetails?>(null);
+
+        public Task<TmdbDiscoverPage> DiscoverSeedPageAsync(bool movies, int year, int minVoteCount, int page, CancellationToken ct = default) =>
+            Task.FromResult(new TmdbDiscoverPage([], page, 0, 0));
+
+        public Task<IReadOnlyList<TmdbListItem>> DiscoverAsync(
+            bool movies, int? genreId, string? region, DateTime? releasedAfter, int page, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetTrendingAsync(bool movies, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetRecommendationsAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
+
+        public Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<TmdbWatchProvider>>([]);
+    }
+
+    private sealed class UnavailableEmbeddingProvider : IEmbeddingProvider
+    {
+        public bool IsAvailable => false;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            throw new InvalidOperationException("No embedding provider is configured.");
+    }
+
     // ── fixture ─────────────────────────────────────────────────────────────────────────────
 
     private static List<string> Names(JsonElement cards) =>
@@ -653,7 +1118,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
     private (LiveSearchExpansionService Service, List<(string Event, JsonElement Data)> Events) BuildService(
         Guid accountId, ITmdbClient tmdb, ISearchAgent agent, out LiveSearchExpansionService.Emit emit,
-        IMemoryCache? cache = null, bool withRetrieval = false, AskReelJudge? judge = null)
+        IMemoryCache? cache = null, bool withRetrieval = false, AskReelJudge? judge = null,
+        IEmbeddingProvider? embeddings = null, Application.Llm.ILlmPurposeCatalog? purposes = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -672,7 +1138,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             scoped,
             agent,
             tmdb,
-            new UnitEmbeddingProvider(),
+            embeddings ?? new UnitEmbeddingProvider(),
             eligibility,
             new CandidateGenerator(db, tmdb, eligibility, NullLogger<CandidateGenerator>.Instance),
             new TitleHydrator(db, tmdb, NullLogger<TitleHydrator>.Instance),
@@ -689,7 +1155,8 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             NullLogger<LiveSearchExpansionService>.Instance,
             supply is null ? null : new FacetRetriever(db, eligibility, supply),
             supply,
-            judge);
+            judge,
+            purposes: purposes);
 
         var events = new List<(string, JsonElement)>();
         emit = (name, payload) =>
@@ -931,8 +1398,9 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
     private sealed class ScriptedTmdbClient(IReadOnlyList<TmdbListItem> rows) : ITmdbClient
     {
+        // TMDB knows every concept the fixture asks about, so the discovery arm pulls (R1-52).
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
+            Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(9_000_000 + ((query.GetHashCode(StringComparison.Ordinal) & 0x7fffffff) % 1_000_000), query)]);
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,

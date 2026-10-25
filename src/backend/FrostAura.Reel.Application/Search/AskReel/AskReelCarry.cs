@@ -47,6 +47,28 @@ public static class AskReelCarry
         return AskReelIntentSanitizer.Words(message).Any(MediaWords.Contains) ? current : carried;
     }
 
+    /// <summary>
+    /// The media a message names in its own words, for a turn no model read: movies when it says
+    /// only movie words, shows when it says only show words, nothing when it says both or neither.
+    /// </summary>
+    public static IReadOnlyList<MediaType> MediaNamed(string? message)
+    {
+        var words = AskReelIntentSanitizer.Words(message);
+        var movie = words.Any(MovieWords.Contains);
+        var show = words.Any(ShowWords.Contains);
+        return movie == show ? [] : movie ? [MediaType.Movie] : [MediaType.Show];
+    }
+
+    private static readonly IReadOnlySet<string> MovieWords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "movie", "movies", "film", "films", "flick", "flicks", "cinema",
+    };
+
+    private static readonly IReadOnlySet<string> ShowWords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "tv", "show", "shows", "series", "season", "seasons", "episode", "episodes", "miniseries", "sitcom", "sitcoms",
+    };
+
     /// <summary>The previous reading, from the stored JSON of the last turn that had one; null when unreadable.</summary>
     public static SearchIntent? Parse(string? intentJson)
     {

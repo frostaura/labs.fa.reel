@@ -145,9 +145,19 @@ public static class SearchTurnMode
     /// </summary>
     public const string NoneFound = "NoneFound";
 
+    /// <summary>
+    /// The turn asked the user what they meant instead of searching — today only when a pointer
+    /// ("the second one") has nothing on screen to point at. Zero cards by definition. An image that
+    /// predates the value reads it as <see cref="Picks"/> with no cards, which renders as an empty
+    /// answer rather than failing the read.
+    /// </summary>
+    public const string Clarify = "Clarify";
+
     /// <summary>The stored mode, or <see cref="Picks"/> for null and anything unknown.</summary>
     public static string Parse(string? stored) =>
-        string.Equals(stored, NoneFound, StringComparison.Ordinal) ? NoneFound : Picks;
+        string.Equals(stored, NoneFound, StringComparison.Ordinal) ? NoneFound
+        : string.Equals(stored, Clarify, StringComparison.Ordinal) ? Clarify
+        : Picks;
 }
 
 /// <summary>
@@ -165,21 +175,41 @@ public static class SearchTurnDegraded
     /// </summary>
     public const string JudgePrefix = "judge:";
 
+    /// <summary>
+    /// The prefix of the missing-verdict flag, written as <c>judge-missing:{missing}/{judged}</c> —
+    /// how many of the titles sent to the judge came back with no request verdict, out of how many
+    /// were sent. A batch can answer for five titles and silently skip the sixth; <see cref="JudgePrefix"/>
+    /// counts only batches that answered for none, so this is the flag that says a turn was partly
+    /// unchecked (R1-01).
+    /// </summary>
+    public const string JudgeMissingPrefix = "judge-missing:";
+
+    /// <summary>
+    /// No language model was available for the turn at all — a keyless install. Nothing read the
+    /// request and nothing checked a card against it; both halves of the turn are degraded.
+    /// </summary>
+    public const string NoModel = "no-model";
+
     /// <summary>The value of <see cref="SearchTurn.ReasoningEffort"/> when no effort parameter was sent.</summary>
     public const string ProviderDefaultEffort = "provider-default";
 
     /// <summary>Whether the stored flags say the PLAN failed — the case history must never read back.</summary>
     public static bool PlanFailed(string? flags) =>
-        Tokens(flags).Contains(Plan, StringComparer.Ordinal);
+        Tokens(flags).Any(t => t == Plan || t == NoModel);
 
     /// <summary>
-    /// Whether the stored flags say at least one judge batch produced no model verdict — the turn's
-    /// cards were not all checked against the request, and the screen says so.
+    /// Whether the stored flags say at least one card sent to the judge came back without a verdict —
+    /// a whole failed batch, one skipped entry, or no model at all. The turn's cards were not all
+    /// checked against the request, and the screen says so.
     /// </summary>
     public static bool JudgeFailed(string? flags) =>
-        Tokens(flags).Any(t => t.StartsWith(JudgePrefix, StringComparison.Ordinal)
-            && t.Length > JudgePrefix.Length
-            && !t.AsSpan(JudgePrefix.Length).StartsWith("0/", StringComparison.Ordinal));
+        Tokens(flags).Any(t => t == NoModel || Counted(t, JudgePrefix) || Counted(t, JudgeMissingPrefix));
+
+    /// <summary>A <c>prefix{n}/{m}</c> token whose n is not zero.</summary>
+    private static bool Counted(string token, string prefix) =>
+        token.StartsWith(prefix, StringComparison.Ordinal)
+        && token.Length > prefix.Length
+        && !token.AsSpan(prefix.Length).StartsWith("0/", StringComparison.Ordinal);
 
     private static string[] Tokens(string? flags) =>
         flags is { Length: > 0 }

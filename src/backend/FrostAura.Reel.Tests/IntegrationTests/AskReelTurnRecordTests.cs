@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Lens;
@@ -108,7 +109,9 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
             Assert.Equal(SearchTurnStatus.Completed, turn.Status);
             Assert.Equal(SearchTurnMode.Picks, turn.Mode);
             Assert.Null(turn.DegradedFlags);
-            Assert.Equal(SearchTurnDegraded.ProviderDefaultEffort, turn.ReasoningEffort);
+            // R1-09: the effort the purpose catalog sends at — "none" for both the plan and the judge —
+            // never a hard-coded "provider-default".
+            Assert.Equal(Application.Llm.ReasoningEfforts.None, turn.ReasoningEffort);
             using var timings = JsonDocument.Parse(turn.StageTimingsJson!);
             Assert.True(timings.RootElement.TryGetProperty("interpret", out _));
             Assert.True(timings.RootElement.TryGetProperty("rerank", out _));
@@ -219,7 +222,8 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
                         else if (eventName == "candidate")
                         {
                             shownBeforeAbort.Add(data.RootElement.GetProperty("name").GetString()!);
-                            if (shownBeforeAbort.Count == 6)
+                            // The first judge batch is four titles; the next ones are held back.
+                            if (shownBeforeAbort.Count == AskReelJudge.FirstBatchSize)
                             {
                                 break;
                             }
@@ -230,7 +234,7 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
                 await abort.CancelAsync();
             }
 
-            Assert.Equal(6, shownBeforeAbort.Count);
+            Assert.Equal(AskReelJudge.FirstBatchSize, shownBeforeAbort.Count);
             var failed = await EventuallyAsync(async () =>
             {
                 await using var db = Scoped(accountId);
@@ -315,9 +319,11 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
             Assert.NotNull(failed);
             Assert.Equal(SearchTurnFailure.ClientAborted, failed!.FailureCode);
             Assert.Equal(6, secondAnswered);
-            Assert.Equal("judge:1/3", failed.DegradedFlags);
+            // The failed batch was the first (four titles): one batch of three, and its four titles
+            // counted missing out of the sixteen judged (R1-01).
+            Assert.Equal("judge:1/3,judge-missing:4/16", failed.DegradedFlags);
             Assert.Equal(SearchTurnMode.Picks, failed.Mode);
-            Assert.Equal(SearchTurnDegraded.ProviderDefaultEffort, failed.ReasoningEffort);
+            Assert.Equal(Application.Llm.ReasoningEfforts.None, failed.ReasoningEffort);
             using var timings = JsonDocument.Parse(failed.StageTimingsJson!);
             Assert.True(timings.RootElement.TryGetProperty("interpret", out _));
             using var models = JsonDocument.Parse(failed.ModelIds!);
@@ -326,8 +332,11 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
     }
 
     /// <summary>
-    /// D8: the model's handles are cut to the last answers that put PICKS on screen. Three tray-only
-    /// answers in a row used to push the last real answer out of "the second one".
+    /// D8: three tray-only answers in a row used to push the last real answer out of "the second one";
+    /// answers with picks and tray-only answers are now cut to the last three of each, separately.
+    /// R1-04: a tray-only answer gets handles of its own — its tray cards, in the order the screen
+    /// renders them — because they are the only thing it showed, and "the second one you showed me"
+    /// after a none-found answer means one of them.
     /// </summary>
     [Fact]
     public async Task Tray_only_answers_never_push_real_picks_out_of_the_handles()
@@ -348,7 +357,20 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
             await AskAsync(client, new { query = "more like the second one", conversationId, clientTurnId = Guid.NewGuid() });
 
             var call = agent.Calls[^1];
-            Assert.Equal(picks.Select((n, i) => $"T1.{i + 1} {n} (2015)"), call.Shown);
+            Assert.Equal(picks.Select((n, i) => $"T1.{i + 1} {n} (2015)"), call.Shown.Where(l => l.StartsWith("T1.", StringComparison.Ordinal)));
+
+            // Newest answer first; each tray-only answer's two tray cards as .1 and .2, in rank order.
+            var trayLines = call.Shown.Where(l => !l.StartsWith("T1.", StringComparison.Ordinal)).ToList();
+            Assert.Equal(6, trayLines.Count);
+            for (var answer = 4; answer >= 2; answer--)
+            {
+                var ofAnswer = trayLines.Where(l => l.StartsWith($"T{answer}.", StringComparison.Ordinal)).ToList();
+                Assert.Equal(2, ofAnswer.Count);
+                Assert.StartsWith($"T{answer}.1 Handles {answer - 1}.0 ", ofAnswer[0], StringComparison.Ordinal);
+                Assert.StartsWith($"T{answer}.2 Handles {answer - 1}.1 ", ofAnswer[1], StringComparison.Ordinal);
+            }
+
+            Assert.Equal("T4.1", call.Shown[0][..4]);
         }
     }
 
@@ -694,8 +716,9 @@ public class AskReelTurnRecordTests(PostgresFixture fixture, ReelApiFactory api)
 
     private sealed class ScriptedTmdbClient(IReadOnlyList<TmdbListItem> rows) : ITmdbClient
     {
+        // TMDB knows every concept the fixture asks about, so the discovery arm pulls (R1-52).
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
+            Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(9_000_000 + ((query.GetHashCode(StringComparison.Ordinal) & 0x7fffffff) % 1_000_000), query)]);
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,

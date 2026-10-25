@@ -47,6 +47,33 @@ public class NoneFoundCopyTests
     }
 
     /// <summary>
+    /// R1-01: the samurai turn's only find was judged a PARTIAL match and sat in the near-miss tray of
+    /// a reply that never named it. The near misses are named, three at most, the rest counted; with
+    /// no names to hand the reply still counts them.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "Blade of the 47 Ronin" }, 1, "Close, but not quite: Blade of the 47 Ronin — tucked away below.")]
+    [InlineData(new[] { "A", "B" }, 2, "Close, but not quite: A and B — tucked away below.")]
+    [InlineData(new[] { "A", "B", "C", "D" }, 4, "Close, but not quite: A, B, C and 1 more — tucked away below.")]
+    [InlineData(new string[0], 3, "3 close-but-not-quite titles are tucked away below.")]
+    public void Near_misses_are_named_in_a_none_found_reply(string[] names, int count, string sentence)
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 1, BelowFloor = 1 }, "samurai", MediaScope.Movies, [], count, 6m, NearMissNames: names));
+
+        Assert.EndsWith(sentence, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_long_list_under_the_bar_is_never_joined_twice()
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 5, BelowFloor = 5 }, "samurai", MediaScope.Movies, ["A", "B", "C", "D", "E"], 0, 6m));
+
+        Assert.Contains("Under your 6.0 bar: A, B, C and 2 more — shown below.", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Acceptance D5: the live samurai reply said "There are no samurai movies left for you" above a
     /// tray holding one. With titles under the bar, the honest sentence is that none clears it.
     /// </summary>

@@ -44,6 +44,16 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
     /// <summary>Titles per judge call.</summary>
     public const int BatchSize = 6;
 
+    /// <summary>
+    /// Titles in the FIRST judge call — the top of the pool in fused order. Smaller than
+    /// <see cref="BatchSize"/> on purpose: the first card cannot reach the screen before the first
+    /// batch returns, and a judge's latency is dominated by the completion it writes, roughly one
+    /// verdict per title. Sixteen titles still fit the three concurrent calls (4 + 6 + 6), so the
+    /// split costs no extra call and no extra round trip — it only lets the likeliest matches answer
+    /// first (R1-07, §4.11's first-card budget).
+    /// </summary>
+    public const int FirstBatchSize = 4;
+
     /// <summary>Judge calls in flight at once for one turn.</summary>
     public const int MaxConcurrent = 3;
 
@@ -58,16 +68,60 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
     /// <param name="Inputs">The titles in this batch, in pool order.</param>
     /// <param name="Results">The verdict per title, keyed by title id.</param>
     /// <param name="Failed">True when no title in the batch carries a model fit: the batch produced nothing usable.</param>
-    public sealed record Batch(int Index, IReadOnlyList<RerankInput> Inputs, IReadOnlyDictionary<Guid, RerankResult> Results, bool Failed);
+    /// <param name="Missing">
+    /// How many titles in the batch came back without a request verdict (<see cref="Ruled"/> false) —
+    /// every one of them when <paramref name="Failed"/>, and possibly some when it is not: a model that
+    /// answers for five titles and skips the sixth is a partly failed batch, not a clean one (R1-01).
+    /// </param>
+    public sealed record Batch(
+        int Index, IReadOnlyList<RerankInput> Inputs, IReadOnlyDictionary<Guid, RerankResult> Results, bool Failed, int Missing = 0);
 
     /// <summary>What judging did overall.</summary>
     /// <param name="Batches">How many batches ran.</param>
     /// <param name="FailedBatches">How many of them produced no model verdict at all.</param>
     /// <param name="Results">Every verdict, by title.</param>
-    public sealed record Summary(int Batches, int FailedBatches, IReadOnlyDictionary<Guid, RerankResult> Results)
+    /// <param name="Judged">How many titles were sent to the judge.</param>
+    /// <param name="Missing">How many of those came back without a request verdict, failed batches included.</param>
+    public sealed record Summary(
+        int Batches, int FailedBatches, IReadOnlyDictionary<Guid, RerankResult> Results, int Judged = 0, int Missing = 0)
     {
         /// <summary>Whether the model ruled on at least one title.</summary>
         public bool JudgedAny => Results.Values.Any(r => r.FitSource == ResultSource.Llm);
+    }
+
+    /// <summary>
+    /// Whether a verdict is the model's ruling on the REQUEST: a model-sourced fit AND a
+    /// <c>satisfies</c> value. A fallback entry (a skipped or malformed title, a failed batch) and a
+    /// model entry that omitted <c>satisfies</c> are both unjudged — the gate cannot place either.
+    /// </summary>
+    public static bool Ruled(RerankResult? verdict) =>
+        verdict is { FitSource: ResultSource.Llm, Satisfies: not null };
+
+    /// <summary>
+    /// The pool cut into judge calls: <see cref="FirstBatchSize"/> titles first, then
+    /// <see cref="BatchSize"/> at a time, in pool order. Internal so the split is pinned by tests.
+    /// </summary>
+    internal static List<List<RerankInput>> Split(IReadOnlyList<RerankInput> judged)
+    {
+        var batches = new List<List<RerankInput>>();
+        var offset = 0;
+        while (offset < judged.Count)
+        {
+            var size = batches.Count == 0 ? FirstBatchSize : BatchSize;
+            batches.Add(judged.Skip(offset).Take(size).ToList());
+            offset += size;
+        }
+
+        return batches;
+    }
+
+    /// <summary>How many judge calls a pool of <paramref name="count"/> titles takes.</summary>
+    public static int BatchCount(int count)
+    {
+        var judged = Math.Min(count, MaxJudged);
+        return judged <= 0 ? 0
+            : judged <= FirstBatchSize ? 1
+            : 1 + ((judged - FirstBatchSize + BatchSize - 1) / BatchSize);
     }
 
     /// <summary>The judge's deadline; a test may shorten it. Never longer than <see cref="Deadline"/> in production.</summary>
@@ -94,11 +148,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
         }
 
         var qnorm = NormalizeQuery(query);
-        var batches = new List<List<RerankInput>>();
-        for (var offset = 0; offset < judged.Count; offset += BatchSize)
-        {
-            batches.Add(judged.Skip(offset).Take(BatchSize).ToList());
-        }
+        var batches = Split(judged);
 
         var deadlineAt = DateTime.UtcNow + StageDeadline;
         using var gate = new SemaphoreSlim(MaxConcurrent, MaxConcurrent);
@@ -110,6 +160,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
 
         var all = new Dictionary<Guid, RerankResult>();
         var failed = 0;
+        var missing = 0;
         try
         {
             while (pending.Count > 0)
@@ -121,6 +172,8 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
                 {
                     failed++;
                 }
+
+                missing += batch.Missing;
 
                 foreach (var (id, result) in batch.Results)
                 {
@@ -149,7 +202,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
             }
         }
 
-        return new Summary(batches.Count, failed, all);
+        return new Summary(batches.Count, failed, all, judged.Count, missing);
     }
 
     private async Task<Batch> RunBatchAsync(
@@ -192,7 +245,7 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
                     logger.LogWarning(
                         "Ask Reel judge batch {Batch} skipped: the judging deadline passed; its {Count} titles are unjudged.",
                         index, uncached.Count);
-                    return new Batch(index, inputs, results, NoModelVerdict(inputs, results));
+                    return Of(index, inputs, results);
                 }
 
                 using var loop = new LlmBudgetLoop(
@@ -223,11 +276,17 @@ public sealed class AskReelJudge(ISearchAgent agent, IMemoryCache cache, ILogger
             }
         }
 
-        return new Batch(index, inputs, results, NoModelVerdict(inputs, results));
+        return Of(index, inputs, results);
     }
 
-    private static bool NoModelVerdict(IReadOnlyList<RerankInput> inputs, IReadOnlyDictionary<Guid, RerankResult> results) =>
-        !inputs.Any(i => results.TryGetValue(i.TitleId, out var r) && r.FitSource == ResultSource.Llm);
+    /// <summary>A batch's outcome: failed when the model ruled on none of it, missing counted title by title.</summary>
+    private static Batch Of(int index, IReadOnlyList<RerankInput> inputs, IReadOnlyDictionary<Guid, RerankResult> results) =>
+        new(
+            index,
+            inputs,
+            results,
+            Failed: !inputs.Any(i => results.TryGetValue(i.TitleId, out var r) && r.FitSource == ResultSource.Llm),
+            Missing: inputs.Count(i => !Ruled(results.GetValueOrDefault(i.TitleId))));
 
     /// <summary>The query as cached: lower-cased, whitespace collapsed.</summary>
     internal static string NormalizeQuery(string query) =>

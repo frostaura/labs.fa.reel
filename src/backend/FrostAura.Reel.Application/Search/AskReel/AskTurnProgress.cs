@@ -19,6 +19,9 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// </summary>
 public sealed class AskTurnProgress
 {
+    /// <summary>The flags that carry a running count and are replaced, not appended, as it grows.</summary>
+    private static readonly string[] CountedPrefixes = [SearchTurnDegraded.JudgePrefix, SearchTurnDegraded.JudgeMissingPrefix];
+
     private readonly object _gate = new();
     private readonly List<LiveSearchExpansionService.TurnCard> _cards = [];
     private readonly HashSet<Guid> _cardIds = [];
@@ -133,7 +136,7 @@ public sealed class AskTurnProgress
     /// The turn's record-keeping, attached once at the start of the pipeline so an abort can persist
     /// the timings so far and the models in play.
     /// </summary>
-    public void Attach(AskStageTimings timings, string modelIdsJson, string effort)
+    public void Attach(AskStageTimings timings, string modelIdsJson, string? effort)
     {
         lock (_gate)
         {
@@ -144,17 +147,18 @@ public sealed class AskTurnProgress
     }
 
     /// <summary>
-    /// Records a degraded flag as it is raised. A flag already recorded is ignored; a judge flag
-    /// (<c>judge:n/m</c>) replaces the previous judge flag, so the count only ever grows in place.
+    /// Records a degraded flag as it is raised. A flag already recorded is ignored; a counted flag
+    /// (<c>judge:n/m</c>, <c>judge-missing:n/m</c>) replaces the previous flag of its own kind, so each
+    /// count only ever grows in place.
     /// </summary>
     public void Degrade(string flag)
     {
         ArgumentNullException.ThrowIfNull(flag);
         lock (_gate)
         {
-            if (flag.StartsWith(SearchTurnDegraded.JudgePrefix, StringComparison.Ordinal))
+            foreach (var prefix in CountedPrefixes.Where(p => flag.StartsWith(p, StringComparison.Ordinal)))
             {
-                _flags.RemoveAll(f => f.StartsWith(SearchTurnDegraded.JudgePrefix, StringComparison.Ordinal));
+                _flags.RemoveAll(f => f.StartsWith(prefix, StringComparison.Ordinal));
             }
 
             if (!_flags.Contains(flag, StringComparer.Ordinal))

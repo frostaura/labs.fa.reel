@@ -16,15 +16,21 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// <item><c>partial</c> → the collapsed "Close, but not …" tray (FD-2b), never a pick, never logged;</item>
 /// <item><c>no</c> → dropped: not shown, not stored, not logged;</item>
 /// <item>no verdict (a failed batch, the deterministic stub, a model that omitted the field) →
-/// UNJUDGED. It is never treated as <c>no</c> — a failure is not evidence against a title — and never
-/// promoted to <c>yes</c>. Where it lands depends on the rest of the turn (§4.8, §4.10): below every
-/// judged pick when at least one card was judged a match, and in the "not checked against your
-/// request" tray when none was — sixteen unjudged cards under the model's "here are some ninja films"
-/// is exactly the failure this gate exists for (B-1).</item>
+/// UNJUDGED, whatever its score. It is never treated as <c>no</c> — a failure is not evidence against
+/// a title — and never promoted to <c>yes</c>. Where it lands depends on the rest of the turn (§4.8,
+/// §4.10): below every judged pick when at least one card was judged a match and it clears the bar,
+/// and in the "not checked against your request" tray otherwise — sixteen unjudged cards under the
+/// model's "here are some ninja films" is exactly the failure this gate exists for (B-1).</item>
 /// </list>
 ///
-/// <para><b>The floor never relaxes</b> (C-7, N+2), and it is tested before the verdict. A card
-/// under the account's For-you bar goes to the tray in every case, whatever is left in the grid —
+/// <para><b>An unjudged card is never placed under the bar</b> (R1-01). The floor tray is read, by the
+/// reply and by the reason line, as "matches your bar held back", and an unjudged card is not a match
+/// anybody found: the samurai turn put two unchecked non-samurai films there and told the user "2 held
+/// back by your 6.0 bar". The tray is for judged matches only; the unchecked tray says what is true of
+/// the rest.</para>
+///
+/// <para><b>The floor never relaxes</b> (C-7, N+2). A judged match under the account's For-you bar
+/// goes to the tray in every case, whatever is left in the grid —
 /// an empty grid with an honest account of why beats a bar that quietly stops meaning anything. A
 /// card with NO prediction while a bar is set is held back with them (§4.8: "unscored cards with no
 /// on-demand score are never picks"): the bar is the user's own rule, and a missing score is not a
@@ -40,8 +46,8 @@ public static class AskReelGate
         Pick,
 
         /// <summary>
-        /// No verdict, clearing the floor. The grid after every judged pick when the turn has one;
-        /// the <see cref="SearchTurnCardTier.Unchecked"/> tray when it has none
+        /// No verdict, whatever the score. The grid after every judged pick when the turn has one and
+        /// the card clears the bar; the <see cref="SearchTurnCardTier.Unchecked"/> tray otherwise
         /// (see <see cref="UnjudgedTier"/>).
         /// </summary>
         Unjudged,
@@ -49,7 +55,7 @@ public static class AskReelGate
         /// <summary>A <c>partial</c>: the collapsed near-miss tray.</summary>
         NearMiss,
 
-        /// <summary>Held back by the For-you bar — under it, or unscored while one is set: the floor tray.</summary>
+        /// <summary>A judged match held back by the For-you bar — under it, or unscored while one is set: the floor tray.</summary>
         BelowFloor,
 
         /// <summary>A <c>no</c>: gone.</summary>
@@ -57,26 +63,29 @@ public static class AskReelGate
     }
 
     /// <summary>
-    /// Where one card goes. The bar is tested first for every verdict but <c>no</c> and
-    /// <c>partial</c>, which already keep a card out of the grid; the caller scores the null cards
-    /// once more before asking, so "unscored" means "no score could be made", not "not yet asked".
+    /// Where one card goes. Only a judged <c>yes</c> meets the bar here: <c>no</c> and <c>partial</c>
+    /// already keep a card out of the grid, and a card with no verdict is <see cref="Placement.Unjudged"/>
+    /// whatever its score (R1-01), its grid-or-tray decision taken by <see cref="UnjudgedTier"/> once
+    /// the turn is judged. The caller scores the null cards once more before asking, so "unscored"
+    /// means "no score could be made", not "not yet asked".
     /// </summary>
     public static Placement Place(Satisfies? satisfies, decimal? predicted, decimal floor) => satisfies switch
     {
         Satisfies.No => Placement.Dropped,
         Satisfies.Partial => Placement.NearMiss,
-        _ when !Clears(predicted, floor) => Placement.BelowFloor,
+        Satisfies.Yes when !Clears(predicted, floor) => Placement.BelowFloor,
         Satisfies.Yes => Placement.Pick,
         _ => Placement.Unjudged,
     };
 
     /// <summary>
     /// The stored tier of an <see cref="Placement.Unjudged"/> card, decided once the whole turn is
-    /// judged: the grid (below the judged picks) when at least one card was judged a match, the
-    /// unchecked tray when none was.
+    /// judged: the grid (below the judged picks) when at least one card was judged a match AND the card
+    /// clears the account's bar, the unchecked tray otherwise. The bar binds an unjudged card exactly as
+    /// it binds a judged one — it just never sends it to the floor tray, which holds matches.
     /// </summary>
-    public static string UnjudgedTier(int judgedPicks) =>
-        judgedPicks > 0 ? SearchTurnCardTier.Pick : SearchTurnCardTier.Unchecked;
+    public static string UnjudgedTier(int judgedPicks, bool clearsFloor = true) =>
+        judgedPicks > 0 && clearsFloor ? SearchTurnCardTier.Pick : SearchTurnCardTier.Unchecked;
 
     /// <summary>The stored tier for a placement; null for <see cref="Placement.Dropped"/>.</summary>
     public static string? TierOf(Placement placement) => placement switch

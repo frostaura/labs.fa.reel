@@ -368,8 +368,10 @@ public class AskReelRerankContextTests(PostgresFixture fixture) : EmbeddedCatalo
                 40m, 6.5m, 900, new DateTime(2017, 10, 6, 0, 0, 0, DateTimeKind.Utc), [878], "en"))
             .ToList();
 
+        // TMDB knows every concept the fixture asks about, so the discovery arm pulls (R1-52).
+
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
+            Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(9_000_000 + ((query.GetHashCode(StringComparison.Ordinal) & 0x7fffffff) % 1_000_000), query)]);
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,

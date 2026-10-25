@@ -6,12 +6,15 @@ using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Filters;
+using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Search;
+using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Mvc.Testing.Handlers;
@@ -354,6 +357,100 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// R1-11: the resume says "since" only of cards the account acted on AFTER the answer was given.
+    /// A person query shows seen titles, so a resumed answer can lose cards rated years before it;
+    /// the server counts those apart (<c>removedEarlier</c>), by the rating's own date, a watch Reel
+    /// synced before the answer, or a save made before it. Varied across the interaction kinds,
+    /// because each carries its time in a different column.
+    /// </summary>
+    [Theory]
+    [InlineData("rating", -730, 1)]
+    [InlineData("rating", 5, 0)]
+    [InlineData("watch", -30, 1)]
+    [InlineData("watch", 5, 0)]
+    [InlineData("save", -1, 1)]
+    [InlineData("save", 5, 0)]
+    public async Task A_resume_counts_cards_acted_on_before_the_answer_apart(string kind, int offsetMinutes, int earlier)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await SignInAsync(api, $"tray-earlier-{Guid.NewGuid():N}");
+        using (client)
+        {
+            var conversationId = await SeedTurnWithTrayAsync(accountId, picks: 3, tray: 1);
+            DateTime answeredAt;
+            Guid pickTitleId;
+            await using (var db = Fixture.CreateContext(new AccountContext()))
+            {
+                var turn = await db.SearchTurns.IgnoreQueryFilters()
+                    .FirstAsync(t => t.ConversationId == conversationId && t.Role == "assistant");
+                answeredAt = turn.CreatedAt;
+                pickTitleId = await db.SearchTurnCards.IgnoreQueryFilters()
+                    .Where(c => c.TurnId == turn.Id && !c.BelowFloor)
+                    .OrderBy(c => c.Rank)
+                    .Select(c => c.TitleId)
+                    .FirstAsync();
+            }
+
+            var at = answeredAt.AddMinutes(offsetMinutes);
+            await using (var db = Fixture.CreateContext(new AccountContext()))
+            {
+                switch (kind)
+                {
+                    case "rating":
+                        db.UserRatings.Add(new UserRating
+                        {
+                            Id = Guid.NewGuid(),
+                            AccountId = accountId,
+                            TitleId = pickTitleId,
+                            SubjectType = RatingSubjectType.Movie,
+                            Rating = 8,
+                            RatedAt = at,
+                            FirstRatedAt = at,
+                        });
+                        break;
+                    case "watch":
+                        db.WatchedTitles.Add(new WatchedTitle
+                        {
+                            Id = Guid.NewGuid(),
+                            AccountId = accountId,
+                            TitleId = pickTitleId,
+                            Plays = 1,
+                            IsFullyWatched = true,
+                            LastWatchedAt = at,
+                            FirstSyncedAt = at,
+                            UpdatedAt = at,
+                        });
+                        break;
+                    default:
+                        db.UserTitleReactions.Add(new UserTitleReaction
+                        {
+                            Id = Guid.NewGuid(),
+                            AccountId = accountId,
+                            TitleId = pickTitleId,
+                            Kind = ReactionKind.SaveForLater,
+                            CreatedAt = at,
+                        });
+                        break;
+                }
+
+                await db.SaveChangesAsync();
+            }
+
+            using var response = await client.GetAsync($"/api/search/conversations/{conversationId}");
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var root = payload.RootElement;
+
+            Assert.Equal(1, root.GetProperty("removed").GetInt32());
+            Assert.Equal(earlier, root.GetProperty("removedEarlier").GetInt32());
+            Assert.DoesNotContain(pickTitleId, TitleIds(root, "cards"));
+        }
+    }
+
     // ── The exposure log did not move ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -403,6 +500,90 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// R1-12, decided: a pick streamed onto the screen is an exposure even when the client stops the
+    /// turn before <c>done</c>. The aborted turn's picks were already persisted as shown (B-3); now
+    /// they are logged too — Pick tier only, keyed on the turn, with the typed why-source they were
+    /// stored with — so "Salting the Battlefield", on screen and missing from the log, cannot recur.
+    /// </summary>
+    [Fact]
+    public async Task An_aborted_turn_logs_the_picks_it_had_shown_as_exposures()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        using var factory = WithScriptedCatalogueAndModel(holdLaterBatches: true);
+        var (accountId, client) = await SignInAsync(factory, $"tray-abort-exposure-{Guid.NewGuid():N}");
+        using (client)
+        {
+            await MarkExistingTitlesSeenAsync(accountId);
+            await SeedActiveArtifactAsync(accountId);
+            var clientTurnId = Guid.NewGuid();
+            var shownBeforeAbort = 0;
+            using (var abort = new CancellationTokenSource())
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/api/search/ask")
+                {
+                    Content = JsonContent.Create(new { query = "a brooding futuristic thriller", clientTurnId }),
+                };
+                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, abort.Token);
+                await using var body = await response.Content.ReadAsStreamAsync(abort.Token);
+                using var reader = new StreamReader(body);
+                while (await reader.ReadLineAsync(abort.Token) is { } line)
+                {
+                    if (line.StartsWith("event: candidate", StringComparison.Ordinal)
+                        && ++shownBeforeAbort == Application.Search.AskReel.AskReelJudge.FirstBatchSize)
+                    {
+                        break;
+                    }
+                }
+
+                await abort.CancelAsync();
+            }
+
+            Domain.Search.SearchTurn? turn = null;
+            List<ExposureEvent> exposures = [];
+            for (var attempt = 0; attempt < 150; attempt++)
+            {
+                await using var db = ScopedContext(accountId);
+                turn = await db.SearchTurns.FirstOrDefaultAsync(t => t.ClientTurnId == clientTurnId && t.Status == SearchTurnStatus.Failed);
+                if (turn is not null)
+                {
+                    var turnId = turn.Id;
+                    exposures = await db.ExposureEvents.Where(e => e.SourceTurnId == turnId).OrderBy(e => e.Rank).ToListAsync();
+                    if (exposures.Count > 0)
+                    {
+                        break;
+                    }
+                }
+
+                await Task.Delay(100);
+            }
+
+            Assert.NotNull(turn);
+            Assert.Equal(SearchTurnFailure.ClientAborted, turn!.FailureCode);
+            await using (var db = ScopedContext(accountId))
+            {
+                var turnId = turn.Id;
+                var picks = await db.SearchTurnCards
+                    .Where(c => c.TurnId == turnId && c.Tier == SearchTurnCardTier.Pick)
+                    .OrderBy(c => c.Rank)
+                    .ToListAsync();
+                Assert.Equal(Application.Search.AskReel.AskReelJudge.FirstBatchSize, picks.Count);
+                Assert.Equal(picks.Select(c => c.TitleId), exposures.Select(e => e.TitleId));
+                Assert.Equal(picks.Select(c => c.Rank), exposures.Select(e => e.Rank));
+                Assert.All(exposures, e =>
+                {
+                    Assert.Equal(ExposureSurface.AskReel, e.Surface);
+                    Assert.Equal("Llm", e.WhySource);
+                    Assert.Equal("Fits the request.", e.WhySentence);
+                });
+            }
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -412,7 +593,7 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
     /// real scoring path — feature vectors, the residual head, the calibrator, the dislike demotion
     /// — and dictates only the number the model would have produced.
     /// </summary>
-    private WebApplicationFactory<Program> WithScriptedCatalogueAndModel() =>
+    private WebApplicationFactory<Program> WithScriptedCatalogueAndModel(bool holdLaterBatches = false) =>
         api.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
         {
             services.RemoveAll<ITmdbClient>();
@@ -420,7 +601,48 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
                 new ScriptedDiscoveryTmdbClient(Discoverable(ScriptedTmdbIdFirst, ScriptedTmdbIdCount)));
             services.RemoveAll<IModelEngine>();
             services.AddSingleton<IModelEngine>(new SplitScoreModelEngine(BelowCount));
+            // A judge that rules every card a match: since R1-01 only a judged match can sit under the
+            // bar in the floor tray (an unchecked card goes to its own tray), so the floor tray these
+            // tests are about needs verdicts, not the stub's fallbacks.
+            services.RemoveAll<ISearchAgent>();
+            services.AddSingleton<ISearchAgent>(new MatchingJudgeAgent(holdLaterBatches));
         }));
+
+    /// <summary>
+    /// Reads every request as a brooding futuristic thriller and judges every title a match with a
+    /// model-sourced verdict — the shape a working model gives, so the gate places by the bar alone.
+    /// </summary>
+    private sealed class MatchingJudgeAgent(bool holdLaterBatches) : ISearchAgent
+    {
+        private int _batches;
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "matching-judge";
+
+        public Task<AgentReply> InterpretAsync(
+            IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
+            CancellationToken ct = default, string? standingFilters = null)
+        {
+            var intent = new SearchIntent(["thriller"], ["futuristic"], [], "brooding futuristic thriller", null, null);
+            return Task.FromResult(new AgentReply("Brooding futuristic thrillers, coming up.", intent, intent));
+        }
+
+        public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
+            string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
+        {
+            // Optionally only the first call answers at once; the rest wait until the turn is gone, so
+            // a client can stop it with exactly one batch of picks on screen.
+            if (Interlocked.Increment(ref _batches) > 1 && holdLaterBatches)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+
+            return [.. titles.Select(t =>
+                new RerankResult(t.TitleId, 0.8d, ResultSource.Llm, "Fits the request.", ResultSource.Llm, Satisfies.Yes))];
+        }
+    }
 
     /// <summary>
     /// A seeded account plus a client already carrying its session cookie, against whichever host
@@ -768,8 +990,9 @@ public class AskReelTrayTests(PostgresFixture fixture, ReelApiFactory api)
     /// </summary>
     private sealed class ScriptedDiscoveryTmdbClient(IReadOnlyList<TmdbListItem> rows) : ITmdbClient
     {
+        // TMDB knows every concept the fixture asks about, so the discovery arm pulls (R1-52).
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<TmdbKeyword>>([]);
+            Task.FromResult<IReadOnlyList<TmdbKeyword>>([new TmdbKeyword(9_000_000 + ((query.GetHashCode(StringComparison.Ordinal) & 0x7fffffff) % 1_000_000), query)]);
 
         public Task<IReadOnlyList<TmdbListItem>> DiscoverByConceptAsync(
             bool movies, IReadOnlyList<int> genreIds, IReadOnlyList<int> keywordIds,

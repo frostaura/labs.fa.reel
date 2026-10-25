@@ -25,6 +25,9 @@ public static class NoneFoundCopy
     /// <summary>How many under-bar titles the sentence names.</summary>
     public const int MaxUnderBarNamed = 3;
 
+    /// <summary>How many near-miss titles the sentence names.</summary>
+    public const int MaxNearMissNamed = 3;
+
     /// <summary>The facts a none-found reply is built from.</summary>
     /// <param name="Supply">The supply report for the request's hard constraints, or null when the request named no concept.</param>
     /// <param name="ConceptWords">The user's words for the topic ("ninja"), or null.</param>
@@ -43,6 +46,11 @@ public static class NoneFoundCopy
     /// Names of judged matches the bar held back because the account's model has no score for them —
     /// not "under" the bar, so not named as under it.
     /// </param>
+    /// <param name="NearMissNames">
+    /// Names of the partial matches in the near-miss tray, in tray order. On a turn that found no
+    /// match they are the closest thing it did find, so the reply names them rather than counting
+    /// them (R1-01: "Blade of the 47 Ronin" sat in the tray of a samurai turn whose reply never said so).
+    /// </param>
     public sealed record Facts(
         SupplyReport? Supply,
         string? ConceptWords,
@@ -53,7 +61,8 @@ public static class NoneFoundCopy
         int Unchecked = 0,
         bool JudgedAny = true,
         int ShownHere = 0,
-        IReadOnlyList<string>? UnscoredHeld = null);
+        IReadOnlyList<string>? UnscoredHeld = null,
+        IReadOnlyList<string>? NearMissNames = null);
 
     /// <summary>The lead a reply gets when it would otherwise repeat the previous answer word for word.</summary>
     public const string AgainLead = "Looking again turned up nothing new.";
@@ -134,8 +143,7 @@ public static class NoneFoundCopy
         if (facts.UnderBar.Count > 0)
         {
             var named = facts.UnderBar.Take(MaxUnderBarNamed).ToList();
-            var more = facts.UnderBar.Count - named.Count;
-            var list = Joined(named) + (more > 0 ? FormattableString.Invariant($" and {more} more") : string.Empty);
+            var list = JoinedWithMore(named, facts.UnderBar.Count - named.Count);
             sentences.Add(FormattableString.Invariant(
                 $"Under your {AskReelReason.FormatFloor(facts.Floor)} bar: {list} — shown below."));
         }
@@ -148,8 +156,7 @@ public static class NoneFoundCopy
         if (facts.UnscoredHeld is { Count: > 0 } held)
         {
             var named = held.Take(MaxUnderBarNamed).ToList();
-            var more = held.Count - named.Count;
-            var list = Joined(named) + (more > 0 ? FormattableString.Invariant($" and {more} more") : string.Empty);
+            var list = JoinedWithMore(named, held.Count - named.Count);
             sentences.Add(FormattableString.Invariant(
                 $"{list} {(held.Count == 1 ? "has" : "have")} no score from your model yet, so your {AskReelReason.FormatFloor(facts.Floor)} bar holds {(held.Count == 1 ? "it" : "them")} back — shown below."));
         }
@@ -175,7 +182,13 @@ public static class NoneFoundCopy
                 $"{facts.Unchecked} {(facts.Unchecked == 1 ? "title" : "titles")} I couldn't check against your request {Are(facts.Unchecked)} below, marked as unchecked."));
         }
 
-        if (facts.NearMisses > 0)
+        if (facts.NearMissNames is { Count: > 0 } close)
+        {
+            var named = close.Take(MaxNearMissNamed).ToList();
+            var list = JoinedWithMore(named, Math.Max(facts.NearMisses, close.Count) - named.Count);
+            sentences.Add($"Close, but not quite: {list} — tucked away below.");
+        }
+        else if (facts.NearMisses > 0)
         {
             sentences.Add(FormattableString.Invariant(
                 $"{facts.NearMisses} close-but-not-quite {(facts.NearMisses == 1 ? "title is" : "titles are")} tucked away below."));
@@ -245,6 +258,12 @@ public static class NoneFoundCopy
 
     private static string Capitalised(string s) =>
         s.Length == 0 ? s : string.Concat(char.ToUpperInvariant(s[0]).ToString(), s.AsSpan(1));
+
+    /// <summary>"A, B, C and 2 more" — never "A, B and C and 2 more"; just <see cref="Joined"/> when none are left over.</summary>
+    private static string JoinedWithMore(IReadOnlyList<string> named, int more) =>
+        more > 0
+            ? FormattableString.Invariant($"{string.Join(", ", named)} and {more} more")
+            : Joined(named);
 
     private static string Joined(IReadOnlyList<string> values) =>
         values.Count switch
