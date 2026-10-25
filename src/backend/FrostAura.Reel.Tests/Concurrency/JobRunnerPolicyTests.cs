@@ -15,6 +15,8 @@ public class JobRunnerPolicyTests
 {
     private static readonly JobRunnerOptions Options = JobRunnerOptions.Default;
 
+    private static readonly DateTime Now = new(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+
     [Fact]
     public void Every_job_kind_has_an_explicit_deadline_policy()
     {
@@ -75,7 +77,7 @@ public class JobRunnerPolicyTests
     [Fact]
     public void A_provider_that_is_down_pauses_every_llm_kind_and_nothing_else()
     {
-        var paused = JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Down), Options);
+        var paused = JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Down), Options, Now);
         Assert.Equal(Options.LlmKinds.Keys.Select(k => k.ToString()).Order(), paused.Order());
     }
 
@@ -83,7 +85,7 @@ public class JobRunnerPolicyTests
     public void A_provider_wide_open_breaker_pauses_every_llm_kind()
     {
         var paused = JobRunnerService.PausedKinds(
-            Snapshot(ProviderHealthState.Degraded, Breaker(purpose: null, ProviderBreakerState.Open)), Options);
+            Snapshot(ProviderHealthState.Degraded, Breaker(purpose: null, ProviderBreakerState.Open)), Options, Now);
         Assert.Equal(Options.LlmKinds.Count, paused.Count);
     }
 
@@ -91,7 +93,7 @@ public class JobRunnerPolicyTests
     public void An_open_breaker_on_one_purpose_pauses_only_the_kinds_that_spend_under_it()
     {
         var paused = JobRunnerService.PausedKinds(
-            Snapshot(ProviderHealthState.Degraded, Breaker(ApiUsagePurpose.CrossReference, ProviderBreakerState.Open)), Options);
+            Snapshot(ProviderHealthState.Degraded, Breaker(ApiUsagePurpose.CrossReference, ProviderBreakerState.Open)), Options, Now);
         Assert.Equal([nameof(JobKind.CrossReference)], paused);
     }
 
@@ -99,13 +101,61 @@ public class JobRunnerPolicyTests
     public void A_degraded_but_closed_breaker_an_unmonitored_reader_or_a_trakt_breaker_pauses_nothing()
     {
         Assert.Empty(JobRunnerService.PausedKinds(
-            Snapshot(ProviderHealthState.Degraded, Breaker(ApiUsagePurpose.Lens, ProviderBreakerState.Degraded)), Options));
-        Assert.Empty(JobRunnerService.PausedKinds(ProviderHealthSnapshot.Unmonitored, Options));
-        Assert.Empty(JobRunnerService.PausedKinds(null, Options));
+            Snapshot(ProviderHealthState.Degraded, Breaker(ApiUsagePurpose.Lens, ProviderBreakerState.Degraded)), Options, Now));
+        Assert.Empty(JobRunnerService.PausedKinds(ProviderHealthSnapshot.Unmonitored, Options, Now));
+        Assert.Empty(JobRunnerService.PausedKinds(null, Options, Now));
         Assert.Empty(JobRunnerService.PausedKinds(
             Snapshot(ProviderHealthState.Degraded,
-                new ProviderBreaker(ApiProvider.Trakt, null, ProviderBreakerState.Open, "unauthorized", DateTime.UtcNow, null)),
-            Options));
+                new ProviderBreaker(ApiProvider.Trakt, null, ProviderBreakerState.Open, "unauthorized", Now, null)),
+            Options,
+            Now));
+    }
+
+    [Fact]
+    public void A_half_open_provider_breaker_lets_llm_kinds_be_claimed_so_the_first_call_can_probe()
+    {
+        // Past its RetryAt the provider-health service admits one probe; background work is often
+        // the only caller. Pausing here kept the LLM queues shut until something else probed.
+        var halfOpen = Breaker(purpose: null, ProviderBreakerState.Open, retryAt: Now.AddSeconds(-1));
+        Assert.Empty(JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Down, halfOpen), Options, Now));
+
+        // The same breaker one second earlier is still open, and pauses every LLM kind.
+        var open = Breaker(purpose: null, ProviderBreakerState.Open, retryAt: Now.AddSeconds(1));
+        Assert.Equal(Options.LlmKinds.Count, JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Down, open), Options, Now).Count);
+    }
+
+    [Fact]
+    public void A_purpose_breaker_past_its_retry_time_pauses_nothing_and_one_before_it_pauses_its_kinds()
+    {
+        var expired = Breaker(ApiUsagePurpose.Lens, ProviderBreakerState.Open, retryAt: Now);
+        Assert.Empty(JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Degraded, expired), Options, Now));
+
+        var live = Breaker(ApiUsagePurpose.Lens, ProviderBreakerState.Open, retryAt: Now.AddMinutes(5));
+        Assert.Equal([nameof(JobKind.PersonaliseTitles)], JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Degraded, live), Options, Now));
+    }
+
+    [Fact]
+    public void A_down_reading_that_names_no_provider_breaker_still_pauses_every_llm_kind()
+    {
+        // A reader that cannot say when to retry gets the conservative reading, even beside an
+        // expired purpose breaker that would otherwise let its kind through.
+        var expired = Breaker(ApiUsagePurpose.CrossReference, ProviderBreakerState.Open, retryAt: Now.AddMinutes(-1));
+        Assert.Equal(Options.LlmKinds.Count, JobRunnerService.PausedKinds(Snapshot(ProviderHealthState.Down, expired), Options, Now).Count);
+    }
+
+    [Fact]
+    public void A_non_retryable_failure_is_recognised_however_it_is_wrapped_and_nothing_else_is()
+    {
+        var typed = new NonRetryableJobException("402 (Payment Required)");
+        Assert.True(JobRunnerService.IsNonRetryable(typed));
+        Assert.True(JobRunnerService.IsNonRetryable(new InvalidOperationException("outer", typed)));
+        Assert.True(JobRunnerService.IsNonRetryable(new AggregateException(new TimeoutException(), typed)));
+        Assert.True(JobRunnerService.IsNonRetryable(
+            new InvalidOperationException("outer", new AggregateException(new InvalidOperationException("mid", typed)))));
+
+        Assert.False(JobRunnerService.IsNonRetryable(new InvalidOperationException("402 (Payment Required)")));
+        Assert.False(JobRunnerService.IsNonRetryable(new AggregateException(new TimeoutException(), new HttpRequestException("503"))));
+        Assert.False(JobRunnerService.IsNonRetryable(new TaskCanceledException()));
     }
 
     [Fact]
@@ -209,6 +259,6 @@ public class JobRunnerPolicyTests
     private static ProviderHealthSnapshot Snapshot(ProviderHealthState state, params ProviderBreaker[] breakers) =>
         new(state, DateTime.UtcNow, breakers);
 
-    private static ProviderBreaker Breaker(string? purpose, ProviderBreakerState state) =>
-        new(ApiProvider.OpenRouter, purpose, state, "payment_required", DateTime.UtcNow, null);
+    private static ProviderBreaker Breaker(string? purpose, ProviderBreakerState state, DateTime? retryAt = null) =>
+        new(ApiProvider.OpenRouter, purpose, state, "payment_required", Now.AddMinutes(-20), retryAt);
 }

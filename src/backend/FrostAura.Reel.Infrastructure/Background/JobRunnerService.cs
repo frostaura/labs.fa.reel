@@ -309,7 +309,10 @@ public sealed class JobRunnerService(
     {
         using var scope = scopeFactory.CreateScope();
         var reader = scope.ServiceProvider.GetService<IProviderHealthReader>();
-        var paused = PausedKinds(reader?.Current(), options);
+        var health = reader?.Current();
+
+        // Half-open is judged on the reader's own clock: its RetryAt and CheckedAt come from it.
+        var paused = PausedKinds(health, options, health?.CheckedAt ?? DateTime.UtcNow);
 
         var signature = string.Join(",", paused.Order(StringComparer.Ordinal));
         if (!string.Equals(signature, _lastPaused, StringComparison.Ordinal))
@@ -329,7 +332,16 @@ public sealed class JobRunnerService(
         return paused;
     }
 
-    internal static HashSet<string> PausedKinds(ProviderHealthSnapshot? health, JobRunnerOptions options)
+    /// <remarks>
+    /// A breaker whose <c>RetryAt</c> has passed is half-open, not open: the provider-health service
+    /// admits exactly one probe call, and background work is often the only caller there is. Pausing
+    /// on it kept every LLM kind off the queue until something else happened to probe — for the
+    /// cross-reference and lens queues, possibly until the process restarted. So a half-open breaker
+    /// lets its kinds be claimed, and the first call of the first job is the probe. A "Down" reading
+    /// that names no provider-wide breaker (a reader that cannot say when to retry) still pauses.
+    /// Nothing here touches a job row: a paused kind is simply not claimed, so no attempt is spent.
+    /// </remarks>
+    internal static HashSet<string> PausedKinds(ProviderHealthSnapshot? health, JobRunnerOptions options, DateTime now)
     {
         var paused = new HashSet<string>(StringComparer.Ordinal);
         if (health is null)
@@ -337,13 +349,16 @@ public sealed class JobRunnerService(
             return paused;
         }
 
+        var openRouter = health.Breakers.Where(b => b.Provider == ApiProvider.OpenRouter).ToList();
+        var open = openRouter
+            .Where(b => b.State == ProviderBreakerState.Open && (b.RetryAt is null || b.RetryAt > now))
+            .ToList();
+        var downWithoutABreaker = health.State == ProviderHealthState.Down && !openRouter.Any(b => b.Purpose is null);
+
         foreach (var (kind, purposes) in options.LlmKinds)
         {
-            var off = health.State == ProviderHealthState.Down
-                || health.Breakers.Any(b =>
-                    b.State == ProviderBreakerState.Open
-                    && b.Provider == ApiProvider.OpenRouter
-                    && (b.Purpose is null || purposes.Contains(b.Purpose, StringComparer.Ordinal)));
+            var off = downWithoutABreaker
+                || open.Any(b => b.Purpose is null || purposes.Contains(b.Purpose, StringComparer.Ordinal));
             if (off)
             {
                 paused.Add(kind.ToString());
@@ -364,6 +379,9 @@ public sealed class JobRunnerService(
         public bool Finished { get; set; }
 
         public Exception? Failure { get; set; }
+
+        /// <summary>The failure is deterministic (typed by the handler): fail now, keep the remaining attempts unspent.</summary>
+        public bool NonRetryable { get; set; }
     }
 
     /// <summary>
@@ -420,15 +438,20 @@ public sealed class JobRunnerService(
     private async Task ExecuteHandlerAsync(
         ClaimedJob claim, JobKindPolicy policy, Execution state, CancellationToken handlerToken, CancellationToken leaseToken)
     {
+        // Declared outside the try: the failure path reads what the handler did to its tracked row,
+        // so the scope is disposed only after the catch has run.
+        IServiceScope? scope = null;
+        ReelDbContext? db = null;
+        SyncJob? job = null;
         try
         {
-            using var scope = scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            scope = scopeFactory.CreateScope();
+            db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
 
             // Read through the fence: a row reclaimed before the handler even started is not this
             // execution's to run. Tracked, so the row's AttemptCount and Status concurrency tokens
             // fence every save the handler makes of it.
-            var job = await Fenced(db, claim).FirstOrDefaultAsync(handlerToken)
+            job = await Fenced(db, claim).FirstOrDefaultAsync(handlerToken)
                 ?? throw new InvalidOperationException("The job no longer belongs to this execution.");
             state.AccountId = job.AccountId;
             if (job.AccountId is { } owner)
@@ -453,14 +476,114 @@ public sealed class JobRunnerService(
             }
 
             // A normal return is a finished run, whatever the token says now. Whatever the handler
-            // left unsaved goes in before the job is marked done, through the concurrency tokens.
+            // left unsaved goes in before the job is marked done, through the concurrency tokens —
+            // except the runner's own columns, which a handler never moves.
+            KeepRunnerColumns(db, job, claim);
             await db.SaveChangesAsync(CancellationToken.None);
             state.Finished = true;
         }
         catch (Exception ex)
         {
             state.Failure = ex;
+            state.NonRetryable = IsNonRetryable(ex) || SpentItsOwnAttempts(db, job);
         }
+        finally
+        {
+            scope?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Whether a failure is typed as deterministic: a <see cref="NonRetryableJobException"/> anywhere
+    /// in the chain, so a handler (or a helper it calls) may wrap it, or let it surface inside an
+    /// <see cref="AggregateException"/>, without the runner retrying the same answer.
+    /// </summary>
+    internal static bool IsNonRetryable(Exception failure)
+    {
+        var pending = new Stack<Exception>();
+        pending.Push(failure);
+        var seen = 0;
+        while (pending.Count > 0 && seen++ < 64)
+        {
+            var current = pending.Pop();
+            if (current is NonRetryableJobException)
+            {
+                return true;
+            }
+
+            if (current is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.InnerExceptions)
+                {
+                    pending.Push(inner);
+                }
+            }
+            else if (current.InnerException is { } inner)
+            {
+                pending.Push(inner);
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The older way a handler asked not to be retried: raising its own tracked row's
+    /// <c>AttemptCount</c> to the cap and throwing. That write was never saved (the handler threw, so
+    /// nothing flushed it), so the runner retried the deterministic failure anyway (WS-1 CR-5).
+    /// The runner owns <c>AttemptCount</c>; it reads the request off the tracked entry instead and
+    /// honours it as a non-retryable failure, with no attempt spent beyond the one that ran.
+    /// </summary>
+    private bool SpentItsOwnAttempts(ReelDbContext? db, SyncJob? job)
+    {
+        if (db is null || job is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var attempts = db.Entry(job).Property(j => j.AttemptCount);
+            if (!attempts.IsModified || attempts.CurrentValue <= attempts.OriginalValue)
+            {
+                return false;
+            }
+
+            logger.LogWarning(
+                "Job {JobId} ({Kind}) raised its own AttemptCount to {Attempts}; treated as a non-retryable failure. "
+                + "Handlers should throw NonRetryableJobException instead.",
+                job.Id, job.Kind, attempts.CurrentValue);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            // The entry is no longer tracked (the handler detached or cleared it): nothing to read.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// <c>AttemptCount</c> and <c>Status</c> belong to the runner: a handler's change to either is
+    /// undone before the finishing flush. Saving them would move the row off this execution's fence,
+    /// so the completion that follows would find no row and report a lease it never lost.
+    /// </summary>
+    private void KeepRunnerColumns(ReelDbContext db, SyncJob job, ClaimedJob claim)
+    {
+        var entry = db.Entry(job);
+        var attempts = entry.Property(j => j.AttemptCount);
+        var status = entry.Property(j => j.Status);
+        if (!attempts.IsModified && !status.IsModified)
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "Job {JobId} ({Kind}) changed runner-owned columns (AttemptCount {Attempts}, Status {Status}); kept the runner's values.",
+            claim.Id, claim.Kind, attempts.CurrentValue, status.CurrentValue);
+        attempts.CurrentValue = attempts.OriginalValue;
+        attempts.IsModified = false;
+        status.CurrentValue = status.OriginalValue;
+        status.IsModified = false;
     }
 
     /// <summary>Decides the outcome of an execution whose handler returned (or threw) inside its hard limit.</summary>
@@ -495,7 +618,11 @@ public sealed class JobRunnerService(
 
         // Includes a stale save the concurrency tokens refused: the fenced write then finds no row
         // and reports the lease as lost.
-        return await FailAsync(claim, state.AccountId, state.Failure ?? new InvalidOperationException("The handler stopped without finishing."));
+        return await FailAsync(
+            claim,
+            state.AccountId,
+            state.Failure ?? new InvalidOperationException("The handler stopped without finishing."),
+            state.NonRetryable);
     }
 
     /// <summary>
@@ -553,9 +680,12 @@ public sealed class JobRunnerService(
         return JobRunOutcome.Succeeded;
     }
 
-    private async Task<JobRunOutcome> FailAsync(ClaimedJob claim, Guid? accountId, Exception failure)
+    private async Task<JobRunOutcome> FailAsync(ClaimedJob claim, Guid? accountId, Exception failure, bool nonRetryable = false)
     {
-        var permanent = failure is NonRetryableJobException || claim.Attempt >= options.MaxAttempts;
+        // A typed deterministic failure is dead-lettered on this attempt: Failed with CompletedAt,
+        // AttemptCount left at the attempt that ran. Retrying would only buy the same answer again.
+        nonRetryable = nonRetryable || IsNonRetryable(failure);
+        var permanent = nonRetryable || claim.Attempt >= options.MaxAttempts;
         var error = Truncate(failure.Message);
         var now = DateTime.UtcNow;
 
@@ -579,7 +709,8 @@ public sealed class JobRunnerService(
         }
 
         logger.LogError(failure, "Job {JobId} ({Kind}) failed on attempt {Attempt} of {Max}; {Next}.",
-            claim.Id, claim.Kind, claim.Attempt, options.MaxAttempts, permanent ? "failed for good" : "queued to retry");
+            claim.Id, claim.Kind, claim.Attempt, options.MaxAttempts,
+            nonRetryable ? "not retryable, failed for good" : permanent ? "failed for good" : "queued to retry");
 
         if (permanent && accountId is { } owner)
         {
@@ -587,7 +718,9 @@ public sealed class JobRunnerService(
             scope.ServiceProvider.GetRequiredService<IPipelineEventHub>().Publish(
                 owner, PipelineEventTypes.Failed, new Dictionary<string, object?>
                 {
-                    ["error"] = $"{claim.Kind} failed after {claim.Attempt} attempts.",
+                    ["error"] = nonRetryable && claim.Attempt < options.MaxAttempts
+                        ? $"{claim.Kind} failed and will not be retried."
+                        : $"{claim.Kind} failed after {claim.Attempt} attempts.",
                 });
         }
 
