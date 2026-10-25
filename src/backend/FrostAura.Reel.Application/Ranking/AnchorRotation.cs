@@ -53,14 +53,62 @@ public static class AnchorRotation
     /// <param name="allTimeOrder">The strict rating-first loved order — the last-resort backfill.</param>
     /// <param name="previousAnchors">Anchors the previous build used; avoided while alternatives exist.</param>
     /// <param name="rotationOffset">See <see cref="OffsetFor"/>.</param>
+    /// <param name="count">How many anchors to return.</param>
+    /// <param name="topTier">
+    /// The titles rated 9–10. When given, every pass reads them FIRST — the drift pick included,
+    /// which only takes its slot first when it is itself top-tier — and the 8s fill only what the
+    /// top tier cannot. An 8 the user liked is weaker evidence of what they love than a 10, and the
+    /// founder's rows were anchored on two 8s while 18 tens and 208 nines sat unused. Rotation and
+    /// hold-back apply within each tier exactly as before, so the rows still turn over daily.
+    /// Null keeps the single-tier behaviour.
+    /// </param>
     public static List<Guid> Select(
         Guid? driftPick,
         IReadOnlyList<Guid> anchorPool,
         IReadOnlyList<Guid> allTimeOrder,
         IReadOnlySet<Guid> previousAnchors,
         int rotationOffset,
-        int count)
+        int count,
+        IReadOnlySet<Guid>? topTier = null)
     {
+        if (topTier is { Count: > 0 })
+        {
+            // Two tiers, the top read first through the SAME rules: a tier-restricted drift pick,
+            // pool and backfill each, then the rest. Recursion with topTier = null is the
+            // single-tier rule, so the tiers cannot drift into two different definitions of it.
+            bool Top(Guid id) => topTier.Contains(id);
+            var chosenTop = Select(
+                driftPick is { } d && Top(d) ? d : null,
+                [.. anchorPool.Where(Top)],
+                [.. allTimeOrder.Where(Top)],
+                previousAnchors,
+                rotationOffset,
+                count);
+
+            // The top tier first; a held-back top-tier anchor is only a last resort, behind every
+            // fresh 8 — "different across days" outranks "rated 9+".
+            var fresh = chosenTop.Where(id => !previousAnchors.Contains(id)).ToList();
+            if (fresh.Count >= count)
+            {
+                return fresh;
+            }
+
+            var rest = Select(
+                driftPick is { } d2 && !Top(d2) ? d2 : null,
+                [.. anchorPool.Where(id => !Top(id))],
+                [.. allTimeOrder.Where(id => !Top(id))],
+                previousAnchors,
+                rotationOffset,
+                count);
+            return fresh
+                .Concat(rest.Where(id => !previousAnchors.Contains(id)))
+                .Concat(chosenTop.Where(previousAnchors.Contains))
+                .Concat(rest.Where(previousAnchors.Contains))
+                .Distinct()
+                .Take(count)
+                .ToList();
+        }
+
         var chosen = new List<Guid>(count);
         var taken = new HashSet<Guid>();
 

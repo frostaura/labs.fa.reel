@@ -85,4 +85,17 @@ public class FeedBuildPolicyTests
             FeedBuildMode.Preserve,
             FeedBuildPolicy.Decide(Noon.AddMinutes(-5), Artifact, Artifact, "not interested", Noon));
     }
+
+    [Fact]
+    public void The_deploy_purge_forces_fresh_without_counting_as_a_user_request()
+    {
+        // Fresh, or the no-op suppression would keep tonight's refused captions until midnight...
+        Assert.Equal(
+            FeedBuildMode.Fresh,
+            FeedBuildPolicy.Decide(Noon.AddMinutes(-5), Artifact, Artifact, FeedBuildPolicy.TrustPurgeReason, Noon));
+
+        // ... but not user-forced, so the anchors rotate on the daily hold-back, not away from the
+        // page the user is looking at.
+        Assert.False(FeedBuildPolicy.IsUserForced(FeedBuildPolicy.TrustPurgeReason));
+    }
 }

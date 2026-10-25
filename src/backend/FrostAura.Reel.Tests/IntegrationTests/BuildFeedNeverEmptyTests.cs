@@ -20,6 +20,7 @@ using FrostAura.Reel.Infrastructure.Ml;
 using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -51,6 +52,13 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalogTestBase(fixture)
 {
+    /// <summary>
+    /// The plot direction this test instance's loved titles and candidates share. Drawn from the top
+    /// of the 1536 axes, which the per-title fixtures elsewhere in the collection (axis 0…N) never
+    /// reach, so an anchor's 50-neighbour radius here is made of this test's own titles.
+    /// </summary>
+    private readonly int _sharedAxis = Random.Shared.Next(900, 1536);
+
     /// <summary>Above anything the seeded model can predict — so the strict floor admits nothing.</summary>
     private const decimal UnreachableFloor = 9.9m;
 
@@ -475,10 +483,15 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
 
         Assert.NotEmpty(items);
         Assert.True(agent.RerankCalls > 0, "the build should have consulted the agent");
-        Assert.All(items, i =>
+        Assert.All(items, i => Assert.DoesNotContain("bounce off", i.WhyThisSentence, StringComparison.OrdinalIgnoreCase));
+
+        // The refused line is a failed model pass: an anchored card falls back to its templated
+        // evidence line, every other card shows no line rather than soft templater copy.
+        Assert.All(items.Where(i => i.AnchorTitleId != null), i => Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence)));
+        Assert.All(items.Where(i => i.AnchorTitleId == null), i =>
         {
-            Assert.DoesNotContain("bounce off", i.WhyThisSentence, StringComparison.OrdinalIgnoreCase);
-            Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence), "every card still carries a why");
+            Assert.Equal("Fallback", i.WhySource);
+            Assert.Equal(string.Empty, i.WhyThisSentence);
         });
     }
 
@@ -621,6 +634,258 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         };
     }
 
+    [Fact]
+    public async Task A_failed_rerank_never_reaches_a_card_the_fit_cache_or_the_log_as_model_output()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Every batch fails the way a truncated completion does: WS-1's agent hands back its stub —
+        // fit = predicted/10 and "A {genre} pick aligned with your taste." — labelled Fallback.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        using var fitCache = new MemoryCache(new MemoryCacheOptions());
+        var agent = new SourcedAgent(ResultSource.Fallback, ResultSource.Fallback);
+
+        await RunBuildAsync(accountId, agent: agent, fitCache: fitCache);
+
+        Assert.True(agent.RerankCalls > 0); // the passes ran — the guard below is not vacuous
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
+        Assert.NotEmpty(items);
+        Assert.All(items, i => Assert.DoesNotContain("aligned with your taste", i.WhyThisSentence));
+        Assert.All(items, i => Assert.DoesNotMatch("^A [aeiou]", i.WhyThisSentence));
+
+        // Nothing was cached: a fallback replayed for six hours is how one truncated batch became
+        // 281 Cache-sourced stub exposures.
+        Assert.All(items, i => Assert.False(fitCache.TryGetValue(
+            FeedPaginator.FitKey(accountId, i.TitleId, FeedPaginator.RowKeyFor(i.Row, i.AnchorTitleId)), out _)));
+
+        var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
+        Assert.NotEmpty(exposures);
+        Assert.DoesNotContain(exposures, e => e.WhySource is "Llm" or "Cache" or "Unknown");
+        Assert.Contains(exposures, e => e.WhySource == "Fallback");
+        Assert.All(exposures, e => Assert.Null(e.LlmFit));
+        Assert.All(exposures, e => Assert.NotNull(e.BaseScore)); // the build knows its breakdown
+
+        // A failed pass shows the templated ANCHORED line or nothing — and the snapshot stores which.
+        Assert.All(items, i => Assert.False(string.IsNullOrWhiteSpace(i.WhySource)));
+        Assert.All(items.Where(i => i.AnchorTitleId == null && i.WhySource == "Fallback"), i => Assert.Equal(string.Empty, i.WhyThisSentence));
+        Assert.All(items.Where(i => i.AnchorTitleId != null), i => Assert.False(string.IsNullOrWhiteSpace(i.WhyThisSentence)));
+
+        // The model was handed each anchored card's checked link, naming the anchor by title.
+        var anchoredInputs = agent.Inputs.Where(x => x.Anchor is not null).ToList();
+        Assert.NotEmpty(anchoredInputs);
+        Assert.All(anchoredInputs, x => Assert.Contains(
+            x.Input.Context!.TopContributions,
+            c => c.Contains(x.Anchor!, StringComparison.Ordinal) && !c.Contains("anchor", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task A_voice_guard_rejection_keeps_the_models_fit_and_drops_only_its_sentence()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The judged fit is real; only the sentence was replaced (WhySource=Fallback). The fit may
+        // be logged and cached; the sentence may not be shown.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        var agent = new SourcedAgent(ResultSource.Llm, ResultSource.Fallback);
+
+        await RunBuildAsync(accountId, agent: agent);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var exposures = await db.ExposureEvents.Where(e => e.AccountId == accountId).ToListAsync();
+        Assert.Contains(exposures, e => e.LlmFit == 0.77m);
+        Assert.DoesNotContain(exposures, e => e.WhySource is "Llm" or "Cache" or "Unknown");
+        Assert.All(exposures, e => Assert.DoesNotContain(SourcedAgent.Sentence, e.WhySentence ?? string.Empty));
+    }
+
+    [Fact]
+    public async Task Every_anchored_card_is_inside_its_anchors_radius_with_shared_evidence_and_anchors_are_nines_and_tens()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12); // ratings cycle 8, 9, 10
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var snapshot = await ActiveSnapshotAsync(db, accountId);
+        var anchored = await db.FeedItems
+            .Where(i => i.FeedSnapshotId == snapshot.Id && i.Row == FeedRowKind.BecauseYouLoved)
+            .ToListAsync();
+        Assert.NotEmpty(anchored);
+
+        var evidence = await AnchorRowGate.EvidenceAsync(
+            db, anchored.Select(i => (i.AnchorTitleId!.Value, i.TitleId)).ToList(), CancellationToken.None);
+        Assert.All(anchored, i => Assert.NotEmpty(evidence[(i.AnchorTitleId!.Value, i.TitleId)]));
+
+        // The admitting evidence is STORED on the row — it is what the chips render and what the
+        // deploy purge reads — and equals what the gate found; every row stores its why-source.
+        Assert.All(anchored, i => Assert.Equal(
+            evidence[(i.AnchorTitleId!.Value, i.TitleId)], AnchorRowGate.Deserialize(i.EvidenceJson)));
+        Assert.All(
+            await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync(),
+            i => Assert.NotEqual(WhySourceKind.Unknown, ExposureWhySource.Parse(i.WhySource).Kind));
+
+        foreach (var rail in anchored.GroupBy(i => i.AnchorTitleId!.Value))
+        {
+            var admissions = await AnchorRowGate.AdmitAsync(
+                db, cache: null, rail.Key, rail.Select(i => i.TitleId).ToList(), CancellationToken.None);
+            Assert.All(rail, i => Assert.True(admissions[i.TitleId].Admitted));
+
+            var anchorRating = await db.UserRatings
+                .Where(r => r.AccountId == accountId && r.TitleId == rail.Key)
+                .Select(r => r.Rating)
+                .SingleAsync();
+            Assert.True(anchorRating >= 9, $"anchor rated {anchorRating}");
+        }
+    }
+
+    [Fact]
+    public async Task The_deploy_purge_replaces_a_legacy_snapshots_stub_lines_that_a_preserve_build_would_keep()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        await RunBuildAsync(accountId);
+
+        // The pre-deploy state: tonight's snapshot carries the stub a failed rerank wrote and the
+        // cache and Preserve path carried for days.
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            var snapshot = await ActiveSnapshotAsync(db, accountId);
+            foreach (var item in await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).Take(5).ToListAsync())
+            {
+                item.WhyThisSentence = "A action pick aligned with your taste.";
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        // An ordinary same-day rebuild is Preserve, and its no-op suppression never re-reads a
+        // kept caption — which is exactly why the purge has to force Fresh.
+        await RunBuildAsync(accountId, "delta-sync");
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            Assert.Single(await UntrustedSnapshotSweep.FindAsync(db, CancellationToken.None), f => f.AccountId == accountId);
+        }
+
+        await RunBuildAsync(accountId, FeedBuildPolicy.TrustPurgeReason);
+
+        await using var verify = Fixture.CreateContext(new AccountContext());
+        var rebuilt = await ActiveSnapshotAsync(verify, accountId);
+        var whys = await verify.FeedItems.Where(i => i.FeedSnapshotId == rebuilt.Id).Select(i => i.WhyThisSentence).ToListAsync();
+        Assert.NotEmpty(whys);
+        Assert.DoesNotContain(whys, w => w.Contains("aligned with your taste", StringComparison.Ordinal));
+        Assert.DoesNotContain(await UntrustedSnapshotSweep.FindAsync(verify, CancellationToken.None), f => f.AccountId == accountId);
+    }
+
+    [Fact]
+    public async Task An_anchor_whose_neighbourhood_cannot_fill_a_rail_is_passed_over_for_the_next()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Six fresh 10s at the head of the loved pool, each alone in its own direction of the plot
+        // space: nothing eligible sits inside their radius, so no honest rail can be dealt on them.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        var orphans = new List<Guid>();
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            for (var i = 0; i < 6; i++)
+            {
+                var orphan = NewTitle($"orphan {i}", popularity: 1.2m, "drama");
+                orphan.Keywords = [$"orphan-{i}"];
+                db.Add(orphan);
+                db.TitleEmbeddings.Add(NewEmbedding(orphan.Id, 600 + (_sharedAxis % 290) + i));
+                db.UserRatings.Add(new UserRating
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    TitleId = orphan.Id,
+                    SubjectType = RatingSubjectType.Movie,
+                    Rating = 10,
+                    RatedAt = DateTime.UtcNow.AddDays(-1),
+                });
+                orphans.Add(orphan.Id);
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+
+        await RunBuildAsync(accountId);
+
+        var anchors = await AnchorsOfActiveSnapshotAsync(accountId);
+        Assert.NotEmpty(anchors);
+        Assert.Empty(anchors.Intersect(orphans));
+    }
+
+    /// <summary>Answers every batch with fixed sources — a stand-in for each WS-1 failure shape.</summary>
+    private sealed class SourcedAgent(ResultSource fitSource, ResultSource whySource) : ISearchAgent
+    {
+        public const string Sentence = "This is the line the source says may not be shown";
+
+        public int RerankCalls;
+
+        /// <summary>Every (anchor name, candidate) pair the build handed the model.</summary>
+        public System.Collections.Concurrent.ConcurrentBag<(string? Anchor, RerankInput Input)> Inputs { get; } = [];
+
+        public bool IsAvailable => true;
+
+        public string ModelId => "sourced-agent";
+
+        public Task<AgentReply> InterpretAsync(IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles, CancellationToken ct = default, string? standingFilters = null) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
+            IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref RerankCalls);
+            foreach (var title in titles)
+            {
+                Inputs.Add((anchorName, title));
+            }
+
+            return Task.FromResult<IReadOnlyList<RerankResult>>(titles
+                .Select(t => fitSource == ResultSource.Fallback
+                    ? new RerankResult(
+                        t.TitleId, (double)(t.Predicted ?? 6m) / 10d, ResultSource.Fallback,
+                        $"A {t.Genres.FirstOrDefault() ?? "drama"} pick aligned with your taste.", ResultSource.Fallback)
+                    : new RerankResult(t.TitleId, 0.77d, fitSource, $"{Sentence} {t.TitleId:N}", whySource))
+                .ToList());
+        }
+    }
+
     /// <summary>Counts rerank calls and answers a distinct, guard-passing second-person line per title.</summary>
     private sealed class CannedWhyAgent : ISearchAgent
     {
@@ -707,7 +972,8 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         }
     }
 
-    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null, ISearchAgent? agent = null)
+    private async Task RunBuildAsync(
+        Guid accountId, string? triggerReason = null, ISearchAgent? agent = null, IMemoryCache? fitCache = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var featureBuilder = new FeatureVectorBuilder(db);
@@ -742,7 +1008,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
                 featureBuilder,
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             new PersonalisationContext(db, new DislikeSignal(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))),
-            new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            fitCache ?? new Microsoft.Extensions.Caching.Memory.MemoryCache(
                 new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
             new NoopEventHub(),
             new ExposureLog(db, NullLogger<ExposureLog>.Instance),
@@ -789,6 +1055,11 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         {
             var title = NewTitle($"loved {i}", popularity: 1m + (i * 0.01m), genre);
             db.Add(title);
+            // The loved titles and the candidates share one plot direction and one story keyword,
+            // so a because-you-loved rail has an anchor neighbourhood to draw from AND evidence to
+            // admit it on (AnchorRowGate). The direction is private to this test instance — the
+            // catalogue is shared across the collection.
+            db.TitleEmbeddings.Add(NewEmbedding(title.Id, _sharedAxis));
             db.UserRatings.Add(new UserRating
             {
                 Id = Guid.NewGuid(),
@@ -810,7 +1081,9 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         {
             // Popularity kept low so this seeding never perturbs the popularity head the other
             // integration tests in this shared-catalogue collection assert against.
-            db.Add(NewTitle($"candidate {i}", popularity: 2m + (i * 0.001m), genre));
+            var title = NewTitle($"candidate {i}", popularity: 2m + (i * 0.001m), genre);
+            db.Add(title);
+            db.TitleEmbeddings.Add(NewEmbedding(title.Id, _sharedAxis));
         }
 
         await db.SaveChangesAsync();
@@ -830,6 +1103,7 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         Language = "en", // eligibility defaults to English-only with no language filter configured
         PosterPath = "/p.jpg",
         Genres = [genre], // a shared genre ⇒ genre-Jaccard similarity clears the row threshold
+        Keywords = ["heist"], // shared story evidence for the anchored-row gate
         Year = 2015,
         RuntimeMinutes = 110,
         TraktRating = 7.2m,

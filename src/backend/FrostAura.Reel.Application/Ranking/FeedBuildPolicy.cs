@@ -31,6 +31,16 @@ public static class FeedBuildPolicy
     /// <summary>FilterEndpoints' save path — the user changed what may appear, so re-deal under the new rules.</summary>
     public const string FiltersChangedReason = "content filters changed";
 
+    /// <summary>
+    /// The deploy-time purge (<see cref="UntrustedSnapshotSweep"/>): the Active snapshot carries a
+    /// why-line the guard now refuses (the stub sentence, the retired era template, the a/an
+    /// defect) or an anchored card with nothing shared with its anchor. A Preserve build could keep
+    /// those cards for the rest of the day — the no-op suppression never re-reads a kept caption —
+    /// so this reason forces Fresh. It is NOT user-forced: the anchors rotate on the ordinary daily
+    /// hold-back rather than visibly away from the page the user is looking at.
+    /// </summary>
+    public const string TrustPurgeReason = "trust-purge";
+
     /// <summary>Reasons that mean the USER asked for a different page, not that the data drifted.</summary>
     public static bool IsUserForced(string? triggerReason) =>
         triggerReason is ManualRefreshReason or FiltersChangedReason;
@@ -51,7 +61,8 @@ public static class FeedBuildPolicy
         if (previousGeneratedAtUtc is null
             || previousGeneratedAtUtc.Value.Date != nowUtc.Date
             || previousModelArtifactId != currentModelArtifactId
-            || IsUserForced(triggerReason))
+            || IsUserForced(triggerReason)
+            || triggerReason == TrustPurgeReason)
         {
             return FeedBuildMode.Fresh;
         }

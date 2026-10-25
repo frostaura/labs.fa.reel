@@ -654,15 +654,15 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
-                    b.Property<decimal>("BaseScore")
+                    b.Property<decimal?>("BaseScore")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
-                    b.Property<decimal>("CalibrationDelta")
+                    b.Property<decimal?>("CalibrationDelta")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
-                    b.Property<decimal>("DemotionApplied")
+                    b.Property<decimal?>("DemotionApplied")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
@@ -701,7 +701,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("Rank")
                         .HasColumnType("integer");
 
-                    b.Property<decimal>("ResidualApplied")
+                    b.Property<decimal?>("ResidualApplied")
                         .HasPrecision(6, 3)
                         .HasColumnType("numeric(6,3)");
 
@@ -906,6 +906,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("AnchorTitleId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("EvidenceJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("ExplanationJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -929,6 +932,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("TitleId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("WhySource")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
                     b.Property<string>("WhyThisSentence")
                         .IsRequired()

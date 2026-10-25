@@ -160,7 +160,10 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
         }
 
         // Twice in a row: the second run must supersede the first, not collide with the unique index.
+        // A new rating lands between them — a retrain over unchanged inputs is skipped by design
+        // (see Same_inputs_never_retrain…), and that is not what this test is about.
         await RunTrainAsync(accountId, new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow });
+        await SeedRatingAsync(accountId, await SeedTitleAsync("Trainable late"), 9);
         await RunTrainAsync(accountId, new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow });
 
         await using var db = fixture.CreateContext(new AccountContext());
@@ -174,6 +177,300 @@ public class ModelArtifactLifecycleTests(PostgresFixture fixture)
 
         // And the artifact it left behind is readable — i.e. stamped with the running schema version.
         Assert.NotNull(await db.ModelArtifacts.FirstOrDefaultAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active));
+    }
+
+    [Fact]
+    public async Task Same_inputs_never_retrain_and_the_active_model_is_left_alone()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        var first = await ActiveAsync(accountId);
+        int runsAfterFirst;
+        await using (var count = fixture.CreateContext(new AccountContext()))
+        {
+            runsAfterFirst = await count.TrainingRuns.CountAsync(r => r.AccountId == accountId);
+        }
+
+        // The enrich-chain shape: three more Train jobs, nothing new rated, nothing re-extracted.
+        SyncJob? last = null;
+        for (var i = 0; i < 3; i++)
+        {
+            last = NewTrainJob(accountId);
+            await RunTrainAsync(accountId, last);
+        }
+
+        var active = await ActiveAsync(accountId);
+        Assert.Equal(first.Id, active.Id);
+        Assert.Equal(1, active.Version);
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Equal(1, await db.ModelArtifacts.IgnoreQueryFilters().CountAsync(a => a.AccountId == accountId));
+        // The skip comes before the eval harness, so no ledger row is written for a non-event either.
+        Assert.Equal(runsAfterFirst, await db.TrainingRuns.CountAsync(r => r.AccountId == accountId));
+        Assert.Contains("Nothing new to learn from", last!.ProgressMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_new_rating_always_retrains_even_minutes_later()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        await SeedRatingAsync(accountId, await SeedTitleAsync("Just rated"), 10);
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Fact]
+    public async Task Catalogue_drift_alone_waits_out_the_day_then_retrains_once()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        // An enrich pass re-extracts a rated title: a real input change, but not a new label.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var ratedTitle = await db.UserRatings.Where(r => r.AccountId == accountId).Select(r => r.TitleId).FirstAsync();
+            db.TitleAttributes.Add(new TitleAttributes
+            {
+                TitleId = ratedTitle,
+                Status = AttributeExtractionStatus.Done,
+                ExtractorVersion = 3,
+                ExtractorModel = "test",
+                ExtractedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(1, (await ActiveAsync(accountId)).Version); // debounced: v1 is minutes old
+
+        // Twenty-three hours on it still waits: catalogue drift with no new rating is folded in at
+        // most once a day, because every promotion re-deals the feed with a paid Fresh build.
+        await AgeActiveAsync(accountId, TimeSpan.FromHours(23));
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(1, (await ActiveAsync(accountId)).Version);
+
+        // A day later the same drift is worth one refit.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var artifact = await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+            artifact.TrainedAt = DateTime.UtcNow - TrainJobHandler.DriftDebounce - TimeSpan.FromMinutes(1);
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+
+        // And having absorbed it, the next one has nothing to learn.
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Fact]
+    public async Task Trakt_vote_ticks_and_metadata_refreshes_are_not_new_inputs()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Every Trakt ingest rewrites the vote counts and every metadata refresh stamps a time; the
+        // hash used to include both raw, so a steady account retrained once per sync after the
+        // debounce. Neither is something the model would learn from at that resolution.
+        var accountId = await SeedTrainableAccountAsync();
+        await SetCrowdAsync(accountId, votes: 40_000, rating: 7.81m);
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        await SetCrowdAsync(accountId, votes: 40_012, rating: 7.84m, refreshedAt: DateTime.UtcNow);
+        await AgeActiveAsync(accountId, TrainJobHandler.DriftDebounce + TimeSpan.FromHours(1));
+        var job = NewTrainJob(accountId);
+        await RunTrainAsync(accountId, job);
+
+        Assert.Equal(1, (await ActiveAsync(accountId)).Version);
+        Assert.Contains("Nothing new to learn from", job.ProgressMessage, StringComparison.Ordinal);
+
+        // A real move — the crowd rating shifts a full tenth, the votes double — is an input change.
+        await SetCrowdAsync(accountId, votes: 80_000, rating: 7.95m);
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Theory]
+    [InlineData(null)] // trained before hashes existed
+    [InlineData(1)] // hashed under the earlier formula (raw vote counts, refresh timestamps)
+    public async Task A_model_without_a_current_hash_skips_when_nothing_was_said_since_and_is_stamped(int? earlierFormula)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The deploy that introduced hashes: the Active artifact has none. Reading "no hash" as
+        // "changed" made the first retrain after deploy always train and promote on 0 new ratings,
+        // and force a second paid Fresh build (purge build -> enrich -> Train -> model-trained build).
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        await StripHashesAsync(accountId, earlierFormula);
+
+        var job = NewTrainJob(accountId);
+        await RunTrainAsync(accountId, job);
+
+        var active = await ActiveAsync(accountId);
+        Assert.Equal(1, active.Version);
+        Assert.Contains("Nothing new to learn from", job.ProgressMessage, StringComparison.Ordinal);
+        Assert.NotNull(TrainingInputHash.ReadFrom(active.FeatureSchemaJson)); // stamped for every later check
+        Assert.Contains("\"version\"", active.FeatureSchemaJson, StringComparison.Ordinal); // nothing else lost
+
+        // From then on it is the ordinary hash comparison: a new rating retrains.
+        await SeedRatingAsync(accountId, await SeedTitleAsync("Rated after the deploy"), 9);
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Fact]
+    public async Task A_model_trained_before_input_hashes_retrains_when_the_user_reacted_since()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        await StripHashesAsync(accountId);
+        await AgeActiveAsync(accountId, TimeSpan.FromHours(2));
+
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var titleId = await db.UserRatings.Where(r => r.AccountId == accountId).Select(r => r.TitleId).FirstAsync();
+            db.UserTitleReactions.Add(new UserTitleReaction
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleId,
+                Kind = ReactionKind.NotInterested,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+    }
+
+    [Theory]
+    [InlineData(40_000, 40_012, true)]
+    [InlineData(1_000, 1_040, true)]
+    [InlineData(1_000, 2_000, false)]
+    [InlineData(0, 3, false)]
+    public void Vote_counts_hash_at_the_resolution_the_feature_reads(int before, int after, bool same)
+    {
+        Assert.Equal(same, TrainingInputHash.VotesBucket(before) == TrainingInputHash.VotesBucket(after));
+    }
+
+    [Fact]
+    public async Task An_onboarding_account_is_never_skipped()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedTrainableAccountAsync();
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        // A re-ingest put the account back mid-pipeline: skipping would leave it behind a spinner.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var account = await db.Accounts.SingleAsync(a => a.Id == accountId);
+            account.PipelineStage = PipelineStage.Extracting;
+            await db.SaveChangesAsync();
+        }
+
+        await RunTrainAsync(accountId, NewTrainJob(accountId));
+
+        Assert.Equal(2, (await ActiveAsync(accountId)).Version);
+        await using var verify = fixture.CreateContext(new AccountContext());
+        Assert.Equal(PipelineStage.Evaluated, (await verify.Accounts.SingleAsync(a => a.Id == accountId)).PipelineStage);
+    }
+
+    private static SyncJob NewTrainJob(Guid accountId) =>
+        new() { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.Train, EnqueuedAt = DateTime.UtcNow };
+
+    private async Task<Guid> SeedTrainableAccountAsync()
+    {
+        var accountId = await SeedAccountAsync();
+        for (var i = 0; i < TrainJobHandler.MinTrainingRows + 4; i++)
+        {
+            await SeedRatingAsync(accountId, await SeedTitleAsync($"Hygiene {i}"), (short)(4 + (i % 7)));
+        }
+
+        return accountId;
+    }
+
+    private async Task AgeActiveAsync(Guid accountId, TimeSpan age)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var artifact = await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+        artifact.TrainedAt = DateTime.UtcNow - age;
+        await db.SaveChangesAsync();
+    }
+
+    private async Task StripHashesAsync(Guid accountId, int? keepHashesUnderFormula = null)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var artifact = await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
+        var doc = System.Text.Json.Nodes.JsonNode.Parse(artifact.FeatureSchemaJson)!.AsObject();
+        if (keepHashesUnderFormula is { } formula)
+        {
+            doc["hashVersion"] = formula; // hashes present, but from another formula
+        }
+        else
+        {
+            doc.Remove("hashVersion");
+            doc.Remove("labelHash");
+            doc.Remove("inputHash");
+        }
+
+        artifact.FeatureSchemaJson = doc.ToJsonString();
+        await db.SaveChangesAsync();
+        Assert.Null(TrainingInputHash.ReadFrom(artifact.FeatureSchemaJson));
+    }
+
+    private async Task SetCrowdAsync(Guid accountId, int votes, decimal rating, DateTime? refreshedAt = null)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var ids = await db.UserRatings.Where(r => r.AccountId == accountId).Select(r => r.TitleId).ToListAsync();
+        foreach (var title in await db.Titles.Where(t => ids.Contains(t.Id)).ToListAsync())
+        {
+            title.TraktVotes = votes;
+            title.TraktRating = rating;
+            title.LastMetadataRefreshAt = refreshedAt ?? title.LastMetadataRefreshAt;
+        }
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<ModelArtifact> ActiveAsync(Guid accountId)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        return await db.ModelArtifacts.SingleAsync(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active);
     }
 
     private async Task RunTrainAsync(Guid accountId, SyncJob job)

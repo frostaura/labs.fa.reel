@@ -71,6 +71,30 @@ public class TitleWhyLineTests(PostgresFixture fixture)
         Assert.Null(await TitleEndpoints.SnapshotWhyAsync(db, mine, titleId, CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("A action pick aligned with your taste.")]
+    [InlineData("From the 2010s, a decade you rate highly.")]
+    [InlineData("A adventure for a quiet night.")]
+    [InlineData("Sharp legal drama, though the series format is a weaker fit for you.")]
+    [InlineData("Shares the anchor's gothic dread.")]
+    public async Task A_line_the_feed_refuses_to_show_does_not_reappear_in_the_modal(string refused)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Until the deploy purge rebuilds the snapshot, Home blanks these persisted lines; the modal
+        // opened from that card must not then show the very sentence the card hid. Absent here
+        // means the templater fallback answers instead, exactly as for a blank caption.
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync();
+        await SeedSnapshotAsync(accountId, titleId, SnapshotStatus.Active, refused);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Null(await TitleEndpoints.SnapshotWhyAsync(db, accountId, titleId, CancellationToken.None));
+    }
+
     [Fact]
     public async Task A_blank_persisted_line_reads_as_absent()
     {

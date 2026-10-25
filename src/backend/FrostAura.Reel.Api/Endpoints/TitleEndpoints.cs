@@ -478,7 +478,12 @@ public static class TitleEndpoints
                 db.FeedSnapshots.Where(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active),
                 i => i.FeedSnapshotId, s => s.Id, (i, s) => i.WhyThisSentence)
             .FirstOrDefaultAsync(ct);
-        return string.IsNullOrWhiteSpace(why) ? null : why;
+
+        // The same serve-time gate the feed applies to the same persisted line: a stub, era,
+        // a/an, hedged or "the anchor" sentence the Home card no longer shows must not reappear
+        // in the modal. It is treated exactly like an empty caption — the modal's templater
+        // fallback, built from verified contributions, answers instead.
+        return FeedWhyGuard.IsServable(why) ? why : null;
     }
 
     /// <summary>

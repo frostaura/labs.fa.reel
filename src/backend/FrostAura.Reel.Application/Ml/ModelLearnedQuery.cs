@@ -11,7 +11,6 @@ namespace FrostAura.Reel.Application.Ml;
 /// <param name="NewRatingsSinceLast">Labels this artifact learned from that its predecessor never saw.</param>
 /// <param name="CalibrationBias">Mean(predicted − actual) on the evaluation holdout. + = over-promising.</param>
 /// <param name="CalibrationMae">Mean |predicted − actual| on the holdout — "how wrong am I".</param>
-/// <param name="MaeImprovement">Previous MAE − current MAE. Positive = the model runs closer now.</param>
 /// <param name="Spearman">Rank correlation on the holdout — whether the ORDER is right.</param>
 /// <param name="PicksChanged">Cards on tonight's page the previous snapshot did not show.</param>
 /// </summary>
@@ -20,7 +19,6 @@ public readonly record struct ModelLearned(
     int NewRatingsSinceLast,
     decimal? CalibrationBias,
     decimal? CalibrationMae,
-    decimal? MaeImprovement,
     decimal? Spearman,
     int PicksChanged);
 
@@ -75,7 +73,7 @@ public sealed class ModelLearnedQuery(IReelDbContext db)
             .Where(e => e.AccountId == accountId)
             .OrderByDescending(e => e.ComputedAt)
             .Select(e => new { e.Mae, e.CalibrationBias, e.SpearmanRho })
-            .Take(2)
+            .Take(1)
             .ToListAsync(ct);
         if (evaluations.Count == 0)
         {
@@ -83,14 +81,16 @@ public sealed class ModelLearnedQuery(IReelDbContext db)
         }
 
         var latest = evaluations[0];
-        var improvement = evaluations.Count > 1 ? evaluations[1].Mae - latest.Mae : (decimal?)null;
+        // No "improvement" between runs. Two artifacts' holdout MAEs differ mostly by input drift
+        // and overfitting noise between retrains (D-7), so "runs 0.4 closer on your scores now"
+        // reported noise as learning. The latest run's own numbers stand; a comparison between runs
+        // is not offered until it measures something.
 
         return new ModelLearned(
             TrainedAt: active.TrainedAt,
             NewRatingsSinceLast: newRatings,
             CalibrationBias: latest.CalibrationBias,
             CalibrationMae: latest.Mae,
-            MaeImprovement: improvement,
             Spearman: latest.SpearmanRho,
             PicksChanged: await PicksChangedAsync(accountId, ct));
     }

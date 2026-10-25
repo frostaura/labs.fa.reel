@@ -75,7 +75,7 @@ public class PersonAffinityWriterTests(PostgresFixture fixture)
         // implementation. Shrunken toward the user's own mean, so it sits under the raw 9.0.
         await using var db = fixture.CreateContext(new AccountContext());
         var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
-        var expected = TasteMath.ShrunkenMean(taste.PersonRatings[director], taste.UserMean);
+        var expected = TasteMath.ShrunkenMean(taste.PersonRoleRatings![(director, CreditRole.Director)], taste.UserMean);
         Assert.Equal(Math.Round(expected, 2), Math.Round(row.Affinity, 2));
     }
 
@@ -105,10 +105,76 @@ public class PersonAffinityWriterTests(PostgresFixture fixture)
         Assert.Contains(rows, r => r.Role == CreditRole.Director);
         Assert.Contains(rows, r => r.Role == CreditRole.Writer);
 
-        // Both rows carry the SAME average: TasteState.PersonRatings is keyed by person, not by
-        // (person, role), and the credit features and why-sentences read that same pool. A per-role
-        // average here would be a second, disagreeing number for one person.
+        // Directed and wrote the SAME two titles, so the two per-role pools hold the same ratings
+        // and the averages agree — because the evidence does, not because the pool ignores roles.
         Assert.Equal(rows[0].Affinity, rows[1].Affinity);
+    }
+
+    [Fact]
+    public async Task A_directors_cameo_borrows_nothing_from_their_directing()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // N-11's shape: a director of three films the user loves, credited as an ACTOR on one other
+        // film (a cameo). The cameo is one rated title in the cast role — below the evidence bar —
+        // so there is no cast affinity at all, where the role-blind pool used to hand the cameo the
+        // directing average.
+        var accountId = await SeedAccountAsync();
+        var auteur = await SeedPersonAsync();
+        foreach (var rating in new short[] { 10, 9, 9 })
+        {
+            var directed = await SeedTitleAsync();
+            await CreditAsync(directed, auteur, CreditRole.Director);
+            await RateAsync(accountId, directed, rating);
+        }
+
+        var cameo = await SeedTitleAsync();
+        await CreditAsync(cameo, auteur, CreditRole.Actor);
+        await RateAsync(accountId, cameo, 4);
+
+        await RefreshAsync(accountId);
+
+        var row = Assert.Single(await RowsAsync(accountId, [auteur]));
+        Assert.Equal(CreditRole.Director, row.Role);
+        Assert.Equal(3, row.RatedTitleCount);
+
+        // And a candidate that casts them is not explained by their directing.
+        await using var db = fixture.CreateContext(new AccountContext());
+        var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var candidate = await SeedTitleAsync();
+        await CreditAsync(candidate, auteur, CreditRole.Actor);
+        Assert.Empty(await VerifiedPeople.ForTitlesAsync(db, taste, [candidate], default));
+    }
+
+    [Fact]
+    public async Task Each_role_averages_only_the_titles_credited_in_that_role()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // An actor-turned-director: loved as a director (9, 10), middling as an actor (5, 6).
+        var accountId = await SeedAccountAsync();
+        var person = await SeedPersonAsync();
+        foreach (var (rating, role) in new (short, CreditRole)[]
+                 { (9, CreditRole.Director), (10, CreditRole.Director), (5, CreditRole.Actor), (6, CreditRole.Actor) })
+        {
+            var titleId = await SeedTitleAsync();
+            await CreditAsync(titleId, person, role);
+            await RateAsync(accountId, titleId, rating);
+        }
+
+        await RefreshAsync(accountId);
+
+        var rows = (await RowsAsync(accountId, [person])).ToDictionary(r => r.Role);
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(2, rows[CreditRole.Director].RatedTitleCount);
+        Assert.Equal(2, rows[CreditRole.Actor].RatedTitleCount);
+        Assert.True(rows[CreditRole.Director].Affinity > rows[CreditRole.Actor].Affinity);
     }
 
     [Fact]

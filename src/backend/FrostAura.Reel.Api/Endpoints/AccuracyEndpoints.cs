@@ -106,7 +106,6 @@ public static class AccuracyEndpoints
                         newRatings = l.NewRatingsSinceLast,
                         calibrationBias = l.CalibrationBias,
                         calibrationMae = l.CalibrationMae,
-                        maeImprovement = l.MaeImprovement,
                         spearman = l.Spearman,
                         picksChanged = l.PicksChanged,
                     }

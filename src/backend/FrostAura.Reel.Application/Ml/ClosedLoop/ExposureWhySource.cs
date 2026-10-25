@@ -130,6 +130,19 @@ public readonly struct ExposureWhySource : IEquatable<ExposureWhySource>
         Enum.IsDefined(kind) ? new ExposureWhySource(kind) : Unknown;
 
     /// <summary>
+    /// The exposure source for a value WS-1's agent reported producing: <c>Llm</c> → <see cref="Llm"/>,
+    /// <c>Facet</c> → <see cref="Facet"/>, and <c>Fallback</c> — or any value a later build adds —
+    /// → <see cref="Fallback"/>. Never <see cref="Llm"/> for anything the agent did not mark as its
+    /// own: an unknown provenance is untrusted provenance.
+    /// </summary>
+    public static ExposureWhySource From(Domain.Ports.ResultSource source) => source switch
+    {
+        Domain.Ports.ResultSource.Llm => Llm,
+        Domain.Ports.ResultSource.Facet => Facet,
+        _ => Fallback,
+    };
+
+    /// <summary>
     /// Reads a stored value back. Case-insensitive; null, empty, whitespace and every unrecognised
     /// value map to <see cref="Unknown"/> — never an exception, because the log outlives the code
     /// that wrote it.

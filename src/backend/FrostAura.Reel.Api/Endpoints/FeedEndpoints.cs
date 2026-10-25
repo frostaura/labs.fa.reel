@@ -59,6 +59,12 @@ public static class FeedEndpoints
     /// it as the signal every enriched title has.
     /// </param>
     /// <param name="Texture">The extracted scalars the chips fall back to. See <see cref="CardTexture"/>.</param>
+    /// <param name="Evidence">
+    /// On an ANCHORED row only (because-you-loved, more-like-this): what this card verifiably shares
+    /// with the anchor — a person in the same capacity, a keyword, a theme — strongest first, at most
+    /// three. It is the evidence <see cref="AnchorRowGate"/> admitted the card on, so every anchored
+    /// card carries at least one. Null on every other row.
+    /// </param>
     public record FeedCard(
         Guid TitleId, string MediaType, long? TmdbId, string Name, int? Year, int? RuntimeMinutes,
         string? PosterPath, string? BackdropPath, string[] Genres,
@@ -67,7 +73,8 @@ public static class FeedEndpoints
         // Optional and trailing on purpose: every other producer of this record — the digest, the
         // paginated lane — is serving a non-hero surface and has no bar to report.
         string? Confidence = null, decimal? FloorUsed = null,
-        string? Hook = null, string? LensClause = null, string? Mood = null, CardTexture? Texture = null);
+        string? Hook = null, string? LensClause = null, string? Mood = null, CardTexture? Texture = null,
+        IReadOnlyList<SharedEvidence>? Evidence = null);
 
     public static void MapFeedEndpoints(this IEndpointRouteBuilder app)
     {
@@ -202,18 +209,43 @@ public static class FeedEndpoints
                     var takenWhys = items
                         .Select(x => x.Item.WhyThisSentence)
                         .ToHashSet(StringComparer.Ordinal);
-                    var cursor = 0;
+                    // A refill into an ANCHORED row obeys the same admission rule the build dealt
+                    // that row under — the anchor's neighbour radius plus shared evidence — or the
+                    // seat stays empty. A because-you-loved row with one unexplainable stranger in it
+                    // is the exact failure the gate exists to stop.
+                    var admittedByAnchor = new Dictionary<Guid, IReadOnlyDictionary<Guid, AnchorRowGate.Admission>>();
+                    foreach (var anchorId in removedByRow.Keys
+                                 .Where(k => k.Row == FeedRowKind.BecauseYouLoved && k.AnchorTitleId != null)
+                                 .Select(k => k.AnchorTitleId!.Value)
+                                 .Distinct())
+                    {
+                        admittedByAnchor[anchorId] = await AnchorRowGate.AdmitAsync(
+                            db, cache, anchorId, pool.Select(c => c.Title.Id).ToList(), ct);
+                    }
+
+                    var placed = new HashSet<Guid>();
                     foreach (var ((row, anchorId), lost) in removedByRow)
                     {
                         var nextRank = items
                             .Where(x => x.Item.Row == row && x.Item.AnchorTitleId == anchorId)
                             .Select(x => x.Item.Rank).DefaultIfEmpty(-1).Max() + 1;
-                        for (var k = 0; k < lost && cursor < pool.Count; k++)
+                        var gate = anchorId is { } gatedAnchor ? admittedByAnchor.GetValueOrDefault(gatedAnchor) : null;
+                        var fits = pool
+                            .Where(c => !placed.Contains(c.Title.Id)
+                                && (gate is null || (gate.TryGetValue(c.Title.Id, out var admission) && admission.Admitted)))
+                            .Take(lost)
+                            .ToList();
+                        foreach (var c in fits)
                         {
-                            var c = pool[cursor++];
+                            placed.Add(c.Title.Id);
                             var backfillRank = nextRank++;
-                            var backfillWhy = ExplanationTemplater.BuildDistinctSentence(
-                                backfillContexts[c.Title.Id], takenWhys);
+                            var backfillContext = backfillContexts[c.Title.Id];
+                            if (gate is not null && gate.TryGetValue(c.Title.Id, out var admitted))
+                            {
+                                backfillContext = backfillContext with { AnchorEvidence = admitted.Evidence };
+                            }
+
+                            var backfillWhy = ExplanationTemplater.BuildDistinctSentence(backfillContext, takenWhys);
                             items.Add(new
                             {
                                 Item = new FeedItem
@@ -224,6 +256,9 @@ public static class FeedEndpoints
                                     TitleId = c.Title.Id,
                                     PredictedRating = c.PredictedRating,
                                     WhyThisSentence = backfillWhy,
+                                    EvidenceJson = gate is not null && gate.TryGetValue(c.Title.Id, out var refillAdmission)
+                                        ? AnchorRowGate.Serialize(refillAdmission.Evidence)
+                                        : null,
                                 },
                                 Title = c.Title,
                             });
@@ -234,8 +269,8 @@ public static class FeedEndpoints
                                 WhySentence: backfillWhy,
                                 // A backfill's number comes straight off a persisted TitleScore, so
                                 // its base/residual/calibration decomposition is not recoverable
-                                // here — it was discarded when the score was written. Left at zero
-                                // rather than guessed at; the prediction itself is exact.
+                                // here — it was discarded when the score was written. The breakdown
+                                // is left NULL (unknown), never zero; the prediction itself is exact.
                                 WhySource: ExposureWhySource.Templater,
                                 RowKey: FeedPaginator.RowKeyFor(row, anchorId)));
                         }
@@ -250,6 +285,30 @@ public static class FeedEndpoints
             // (observed three times in one view, 2026-08-10). Runs over display order so the first
             // card shown keeps the sentence. Read-only request — the mutation is never saved.
             ExplanationTemplater.EnforceGenericOnce(items.Select(x => x.Item));
+
+            // The chips on anchored cards: the evidence each card was admitted on, as the build
+            // stored it on the row — no catalogue reads on the Home path, and a chip cannot drift
+            // away from the reason the card was dealt for. Only a row written before the evidence
+            // was stored (a snapshot the deploy purge has not rebuilt yet) is read live.
+            var storedEvidence = new Dictionary<(Guid, Guid), IReadOnlyList<SharedEvidence>>();
+            var legacyAnchored = new List<(Guid AnchorId, Guid TitleId)>();
+            foreach (var x in items.Where(x => x.Item.Row == FeedRowKind.BecauseYouLoved && x.Item.AnchorTitleId != null))
+            {
+                if (AnchorRowGate.Deserialize(x.Item.EvidenceJson) is { } stored)
+                {
+                    storedEvidence[(x.Item.AnchorTitleId!.Value, x.Title.Id)] = stored;
+                }
+                else
+                {
+                    legacyAnchored.Add((x.Item.AnchorTitleId!.Value, x.Title.Id));
+                }
+            }
+
+            var evidence = legacyAnchored.Count == 0
+                ? storedEvidence
+                : (await AnchorRowGate.EvidenceAsync(db, legacyAnchored, ct))
+                    .Concat(storedEvidence)
+                    .ToDictionary(kv => kv.Key, kv => kv.Value);
 
             var nowUtc = DateTime.UtcNow;
 
@@ -302,10 +361,13 @@ public static class FeedEndpoints
                 var isReleased = releaseDate is null || releaseDate <= nowUtc;
                 var (crowd, crowdVotes) = Domain.Catalog.CrowdRating.Resolve(title);
                 var note = lensByTitle.GetValueOrDefault(title.Id)?.Note;
+                // A persisted line is served only if it passes the serve-time guard: the stub
+                // sentence a failed rerank wrote, the retired era template and the a/an defect are
+                // shown as no line at all, until the next build replaces them.
                 return new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
-                    item.PredictedRating, crowd, crowdVotes, item.WhyThisSentence, isReleased,
+                    item.PredictedRating, crowd, crowdVotes, FeedWhyGuard.Servable(item.WhyThisSentence), isReleased,
                     providersByTitle.GetValueOrDefault(title.Id, []),
                     // Rows carry no label: they are selected against the account's own floor, not the
                     // hero bar, so "reaching" would be measuring them against a rule they never had.
@@ -314,7 +376,10 @@ public static class FeedEndpoints
                     note?.Hook,
                     note?.FirstClause(),
                     note?.Mood,
-                    textures.GetValueOrDefault(title.Id));
+                    textures.GetValueOrDefault(title.Id),
+                    item.AnchorTitleId is { } anchorOf
+                        ? evidence.GetValueOrDefault((anchorOf, title.Id)) ?? []
+                        : null);
             }
 
             var hero = items.Where(x => x.Item.Row == FeedRowKind.Hero)
@@ -493,7 +558,6 @@ public static class FeedEndpoints
                 newRatingsSinceLast = result.NewRatingsSinceLast,
                 calibrationBias = result.CalibrationBias,
                 calibrationMae = result.CalibrationMae,
-                maeImprovement = result.MaeImprovement,
                 spearman = result.Spearman,
                 picksChanged = result.PicksChanged,
             });
@@ -592,7 +656,15 @@ public static class FeedEndpoints
             Guid? anchor = Guid.TryParse(body.AnchorTitleId, out var anchorId) ? anchorId : null;
             var limit = Math.Clamp(body.Limit ?? 12, 1, 30);
 
-            var items = await paginator.MoreAsync(account, new MoreFeedRequest(context, anchor, body.Genre, excludeIds, limit, body.MediaType), ct);
+            var pageExcludeIds = (body.PageExcludeTitleIds ?? [])
+                .Select(s => Guid.TryParse(s, out var g) ? g : (Guid?)null)
+                .Where(g => g is not null).Select(g => g!.Value).ToList();
+
+            var items = await paginator.MoreAsync(
+                account,
+                new MoreFeedRequest(
+                    context, anchor, body.Genre, excludeIds, limit, body.MediaType, pageExcludeIds, body.PageToken),
+                ct);
 
             var nowUtc = DateTime.UtcNow;
             var providers = await ProvidersForAsync(db, account.Region, items.Select(i => i.Title.Id).ToList(), nowUtc, ct);
@@ -600,7 +672,8 @@ public static class FeedEndpoints
                 i.Title.Id, i.Title.MediaType.ToString(), i.Title.TmdbId, i.Title.Name, i.Title.Year, i.Title.RuntimeMinutes,
                 i.Title.PosterPath, i.Title.BackdropPath, i.Title.Genres,
                 i.Predicted, Domain.Catalog.CrowdRating.For(i.Title), Domain.Catalog.CrowdRating.VotesFor(i.Title),
-                i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []))).ToList();
+                i.WhyThis, i.IsReleased, providers.GetValueOrDefault(i.Title.Id, []),
+                Evidence: i.Evidence)).ToList();
 
             // Every paginated card is a card the user is about to see and which exists nowhere else
             // in the record — /feed/more scores live and writes only a TitleScore, which keeps no
@@ -633,6 +706,7 @@ public static class FeedEndpoints
                     var verdicts = await crossReference.ForAsync(
                         account.Id, cards.Select(c => c.TitleId).ToList(), ct);
 
+                    var byTitle = items.ToDictionary(i => i.Title.Id);
                     await exposures.RecordAsync(
                         account.Id,
                         SurfaceFor(context),
@@ -647,8 +721,16 @@ public static class FeedEndpoints
                             c.TitleId,
                             i,
                             c.PredictedRating,
+                            // The decomposition and the source are carried from where the card was
+                            // scored and captioned — the paginator — rather than left at zero and
+                            // Unknown, which is what 1,800+ paginated rows used to record.
+                            BaseScore: byTitle[c.TitleId].BaseScore,
+                            CalibrationDelta: byTitle[c.TitleId].CalibrationDelta,
+                            ResidualApplied: byTitle[c.TitleId].ResidualApplied,
+                            DemotionApplied: byTitle[c.TitleId].DemotionApplied,
+                            LlmFit: byTitle[c.TitleId].LlmFit,
                             WhySentence: c.WhyThis,
-                            WhySource: ExposureWhySource.Unknown,
+                            WhySource: byTitle[c.TitleId].WhySource,
                             RowKey: rowKey,
                             PageIndex: pageIndex,
                             XrefVerdict: verdicts.TryGetValue(c.TitleId, out var verdict)
@@ -717,7 +799,24 @@ public static class FeedEndpoints
         });
     }
 
-    public record MoreRequestDto(string Row, string? AnchorTitleId, string? Genre, string[]? ExcludeTitleIds, int? Limit, string? MediaType = null);
+    /// <summary>The <c>POST /api/feed/more</c> body.</summary>
+    /// <param name="Row">The row slug.</param>
+    /// <param name="AnchorTitleId">The row's anchor, for anchored rows.</param>
+    /// <param name="Genre">The genre slug, for a genre rail.</param>
+    /// <param name="ExcludeTitleIds">Titles THIS row has already shown — also the row's paging depth.</param>
+    /// <param name="Limit">Page size, clamped to 1–30.</param>
+    /// <param name="MediaType"><c>movie</c>, <c>show</c> or null.</param>
+    /// <param name="PageExcludeTitleIds">
+    /// Titles already rendered ELSEWHERE on the page (other rails, tonight's picks): excluded from
+    /// this slice but not counted as this row's depth.
+    /// </param>
+    /// <param name="PageToken">
+    /// One opaque nonce (≤ 64 chars) per page view, sent on every rail request of that page, so the
+    /// server can keep concurrent rails from serving the same title twice. Optional.
+    /// </param>
+    public record MoreRequestDto(
+        string Row, string? AnchorTitleId, string? Genre, string[]? ExcludeTitleIds, int? Limit, string? MediaType = null,
+        string[]? PageExcludeTitleIds = null, string? PageToken = null);
 
     /// <summary>
     /// Which exposure surface a paginated row belongs to. A genre rail is its own surface because

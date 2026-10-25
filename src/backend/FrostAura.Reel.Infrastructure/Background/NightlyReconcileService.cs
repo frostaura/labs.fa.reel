@@ -1,5 +1,6 @@
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
@@ -38,6 +39,20 @@ public sealed class NightlyReconcileService(
         // stale across a DEPLOY (it is a compile-time constant), so sweeping here — synchronously,
         // during host start-up — closes the window in which a request could load one.
         await SweepStaleSchemaArtifactsAsync(stoppingToken);
+
+        // Also before the reconcile loop's gate, for the same reason: what makes a snapshot
+        // untrusted only changes across a DEPLOY (a guard or a gate that got stricter), so start-up
+        // is when to look. It has its own switch (UntrustedSnapshotSweep.Enabled), which follows
+        // Background:NightlyReconcile unless set: the purge enqueues PAID builds, and a slot or eval
+        // host started on a copy of an account's data must not spend on it by default.
+        if (UntrustedSnapshotSweep.Enabled(configuration))
+        {
+            await SweepUntrustedSnapshotsAsync(stoppingToken);
+        }
+        else
+        {
+            logger.LogInformation("Untrusted-snapshot purge disabled (Background:TrustPurge / Background:NightlyReconcile).");
+        }
 
         if (!configuration.GetValue("Background:NightlyReconcile", true))
         {
@@ -237,6 +252,44 @@ public sealed class NightlyReconcileService(
             {
                 logger.LogError(ex, "Nightly reconcile pass failed; next run continues the schedule.");
             }
+        }
+    }
+
+    /// <summary>
+    /// The deploy-time purge (<see cref="UntrustedSnapshotSweep"/>): one forced Fresh build per
+    /// account whose Active snapshot carries a refused why-line or an anchored card with no shared
+    /// evidence. Ungated and best-effort, like the schema sweep: a failure here costs a day of
+    /// serve-time-hidden captions, never the host.
+    /// </summary>
+    private async Task SweepUntrustedSnapshotsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            var findings = await UntrustedSnapshotSweep.FindAsync(db, ct);
+            if (findings.Count == 0)
+            {
+                return;
+            }
+
+            var staged = await UntrustedSnapshotSweep.StageRebuildsAsync(db, findings, DateTime.UtcNow, ct);
+            await SaveToleratingUniqueRaceAsync(db, ct);
+            foreach (var finding in findings)
+            {
+                logger.LogWarning(
+                    "Untrusted snapshot for {AccountId}: {Whys} refused why-line(s), {Cards} anchored card(s) with no "
+                    + "stored evidence, {Unattributed} row(s) with no stored why-source, {Fallbacks} fallback caption(s) "
+                    + "— forcing one Fresh build.",
+                    finding.AccountId, finding.RefusedWhys, finding.UnexplainedAnchoredCards,
+                    finding.UnattributedCards, finding.FallbackCaptions);
+            }
+
+            logger.LogWarning("Untrusted-snapshot purge staged {Staged} Fresh build(s).", staged);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Untrusted-snapshot purge failed; refused captions stay hidden at serve time until the next pass.");
         }
     }
 
