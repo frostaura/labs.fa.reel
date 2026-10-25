@@ -70,7 +70,7 @@ export function guardTarget(db, port = PG.port) {
   if (!db) die("no database named");
   if (String(port) === "5433") die("refusing port 5433 — that is the founder's LIVE Postgres");
   if (db === "reel") die("refusing database 'reel' — that is the founder's LIVE database");
-  if (!/^(reel_eval(_.*)?|reel_ws.*|reel_test_.*|reel_baseline.*)$/.test(db)) die(`refusing database '${db}'`);
+  if (!/^(reel_eval(_.*)?|reel_ws.*|reel_test_.*|reel_baseline.*|reel_int_.*)$/.test(db)) die(`refusing database '${db}'`);
 }
 
 function sql(db, query, vars = {}) {

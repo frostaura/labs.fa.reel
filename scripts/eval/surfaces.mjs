@@ -51,7 +51,7 @@ const die = (m) => { console.error(`surfaces: ${m}`); process.exit(2); };
 const PG = { host: process.env.EVAL_PGHOST ?? "127.0.0.1", port: process.env.EVAL_PGPORT ?? "5434", user: process.env.EVAL_PGUSER ?? "reel", password: process.env.EVAL_PGPASSWORD ?? "reel_eval" };
 function guard(db) {
   if (String(PG.port) === "5433") die("refusing port 5433 — the founder's LIVE Postgres");
-  if (!db || db === "reel" || !/^(reel_eval(_.*)?|reel_ws.*|reel_test_.*|reel_baseline.*)$/.test(db)) die(`refusing database '${db}'`);
+  if (!db || db === "reel" || !/^(reel_eval(_.*)?|reel_ws.*|reel_test_.*|reel_baseline.*|reel_int_.*)$/.test(db)) die(`refusing database '${db}'`);
 }
 function sql(db, query, vars = {}) {
   guard(db);

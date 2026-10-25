@@ -67,6 +67,8 @@ services:
       # beginning "Effective LLM ceilings". LLM_XREF_DAILY_CALLS=0 is the cross-reference off switch.
       LLM_XREF_DAILY_CALLS: ${LLM_XREF_DAILY_CALLS:-}
       LLM_XREF_DAILY_TOKENS: ${LLM_XREF_DAILY_TOKENS:-}
+      # model=effort pairs a model is known to reject (comma-separated); learned at runtime when blank.
+      LLM_EFFORT_UNSUPPORTED: ${LLM_EFFORT_UNSUPPORTED:-}
       LLM_RERANK_DAILY_CALLS: ${LLM_RERANK_DAILY_CALLS:-}
       LLM_RERANK_DAILY_TOKENS: ${LLM_RERANK_DAILY_TOKENS:-}
       LLM_LENS_DAILY_CALLS: ${LLM_LENS_DAILY_CALLS:-}
@@ -94,6 +96,10 @@ services:
       Background__CatalogGrowth: ${Background__CatalogGrowth:-true}
       Background__CatalogFollowThrough: ${Background__CatalogFollowThrough:-true}
       Background__LanguageBackfill: ${Background__LanguageBackfill:-true}
+      # WS-4 one-off boot repairs (idempotent; never write to Trakt). WS-5 untrusted-snapshot purge:
+      # blank follows Background__NightlyReconcile; set false on any host started on a copied database.
+      Background__DataRepairs: ${Background__DataRepairs:-true}
+      Background__TrustPurge: ${Background__TrustPurge:-}
       Push__Subject: ${Push__Subject:-https://reel.frostaura.net}
       # The dump before any pending migration (K-1): the API asks the backup service over the shared
       # backup_requests volume and refuses to migrate without an answer. docs/deployment.md#backups-and-restore.

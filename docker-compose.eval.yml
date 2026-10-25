@@ -12,6 +12,13 @@
 # Never point it at the repo `.env`: that file holds the founder's live credentials.
 name: fareel-eval
 
+# Same rotated `local` logging as every other descriptor (J*2); the parity test pins this block.
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "50m"
+    max-file: "10"
+
 services:
   # ADOPTED, not created: the eval Postgres already runs as the standalone container
   # `fareel-eval-postgres` on the external volume `fareel_eval_pgdata`. This definition matches it so the
@@ -38,6 +45,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging: *default-logging
 
   eval-api:
     build:
@@ -64,9 +72,7 @@ services:
       OPENROUTER_API_KEY: ${EVAL_OPENROUTER_API_KEY:?EVAL_OPENROUTER_API_KEY is required (the eval key, not the founder key)}
       OPENROUTER_MODEL: ${EVAL_OPENROUTER_MODEL:-openai/gpt-6-luna}
       OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
-      EMBEDDINGS_PROVIDER: openai
       EMBEDDINGS_MODEL: text-embedding-3-small
-      EMBEDDINGS_DIMENSIONS: "1536"
       EMBEDDINGS_BASE_URL: https://openrouter.ai/api/v1
       EMBEDDINGS_API_KEY: ${EVAL_OPENROUTER_API_KEY}
       REEL_SEARCH_MODEL: ${EVAL_REEL_SEARCH_MODEL:-}
@@ -97,17 +103,64 @@ services:
       # The eval account's Ask and rerank allowances are raised on THIS stack only (WS-7 task 1).
       LLM_RERANK_DAILY_CALLS: ${EVAL_RERANK_DAILY_CALLS:-100000}
       LLM_RERANK_DAILY_TOKENS: ${EVAL_RERANK_DAILY_TOKENS:-200000000}
+      # Every other key the code reads, plumbed with the dev stack's defaults (WS-8 parity rule, K-5): an
+      # absent key silently runs the code default. Eval-specific: no boot repairs and no trust purge (both
+      # would mutate the snapshot or spend on start), and a blank BACKUP_REQUEST_DIR turns the
+      # pre-migration dump handshake off (the eval database is a disposable copy).
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8090}
+      ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
+      BACKUP_PRE_MIGRATION_REQUIRED: ${BACKUP_PRE_MIGRATION_REQUIRED:-true}
+      BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS: ${BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS:-1800}
+      BACKUP_REQUEST_DIR: ""
+      Background__DataRepairs: "false"
+      Background__TrustPurge: "false"
+      CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8090,http://localhost:5173}
+      EMBED_DAILY_TOKENS: ${EMBED_DAILY_TOKENS:-3000000}
+      ENRICH_MAX_TITLES_PER_RUN: ${ENRICH_MAX_TITLES_PER_RUN:-}
+      EXTRACT_DAILY_TOKENS: ${EXTRACT_DAILY_TOKENS:-1500000}
+      GEOIP_DEFAULT_REGION: ${GEOIP_DEFAULT_REGION:-US}
+      HYDRATE_MAX_TITLES_PER_DAY: ${HYDRATE_MAX_TITLES_PER_DAY:-1500}
+      INTERLEAVE_ALPHA: ${INTERLEAVE_ALPHA:-}
+      INTERLEAVE_ENABLED: ${INTERLEAVE_ENABLED:-}
+      INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
+      INTERLEAVE_POLICY_A: ${INTERLEAVE_POLICY_A:-}
+      INTERLEAVE_POLICY_B: ${INTERLEAVE_POLICY_B:-}
+      JWT_ACCESS_TOKEN_EXPIRY_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRY_MINUTES:-15}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-frostaura-reel-app}
+      JWT_ISSUER: ${JWT_ISSUER:-frostaura-reel}
+      JWT_REFRESH_TOKEN_EXPIRY_DAYS: ${JWT_REFRESH_TOKEN_EXPIRY_DAYS:-30}
+      KILL_CRITERION_ITERATIONS: ${KILL_CRITERION_ITERATIONS:-3}
+      LLM_EFFORT_UNSUPPORTED: ${LLM_EFFORT_UNSUPPORTED:-}
+      LLM_LENS_DAILY_CALLS: ${LLM_LENS_DAILY_CALLS:-}
+      LLM_LENS_DAILY_TOKENS: ${LLM_LENS_DAILY_TOKENS:-}
+      LLM_XREF_DAILY_CALLS: ${LLM_XREF_DAILY_CALLS:-}
+      LLM_XREF_DAILY_TOKENS: ${LLM_XREF_DAILY_TOKENS:-}
+      OPENROUTER_MAX_CONCURRENCY: ${OPENROUTER_MAX_CONCURRENCY:-4}
+      Push__Subject: ${Push__Subject:-https://reel.frostaura.net}
+      RESIDUAL_HEAD_ENABLED: ${RESIDUAL_HEAD_ENABLED:-}
+      RESIDUAL_OBSERVE_TRAKT_RATINGS: ${RESIDUAL_OBSERVE_TRAKT_RATINGS:-}
+      RETRAIN_MIN_NEW_RATINGS: ${RETRAIN_MIN_NEW_RATINGS:-10}
+      SEED_MAX_TITLES: ${SEED_MAX_TITLES:-60000}
+      SEED_MOVIE_MIN_VOTES: ${SEED_MOVIE_MIN_VOTES:-500}
+      SEED_PAGES_PER_RUN: ${SEED_PAGES_PER_RUN:-400}
+      SEED_SHOW_MIN_VOTES: ${SEED_SHOW_MIN_VOTES:-200}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      SYNC_DELTA_MINUTES: ${SYNC_DELTA_MINUTES:-15}
+      SYNC_HOT_MINUTES: ${SYNC_HOT_MINUTES:-5}
+      TMDB_RATE_PER_SEC: ${TMDB_RATE_PER_SEC:-40}
+      TRAKT_RATE_BUDGET_PER_5MIN: ${TRAKT_RATE_BUDGET_PER_5MIN:-900}
+      TRAKT_REDIRECT_URI: ${TRAKT_REDIRECT_URI:-http://localhost:5173/auth/trakt/callback}
+      TestHelpers__ModelStubMode: ${TestHelpers__ModelStubMode:-false}
     healthcheck:
       test: [ "CMD-SHELL", "curl --noproxy '*' --fail --silent http://127.0.0.1:5000/health >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 60s
-    logging:
-      driver: local
-      options:
-        max-size: 50m
-        max-file: "10"
+    logging: *default-logging
 
 volumes:
   fareel_eval_pgdata:

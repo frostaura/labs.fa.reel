@@ -69,7 +69,9 @@ public partial class ComposeHardeningTests
             .Where(service => !compose.ServiceBlock(service).Contains("    logging: *default-logging"))
             .ToList();
 
-        Assert.True(compose.Services.Count >= 4, $"{descriptor}: expected the stack's services; found {compose.Services.Count}.");
+        // Non-vacuous: the eval stack is a Postgres and an API; every other descriptor is the full stack.
+        var expected = descriptor == "docker-compose.eval.yml" ? 2 : 4;
+        Assert.True(compose.Services.Count >= expected, $"{descriptor}: expected the stack's services; found {compose.Services.Count}.");
         Assert.True(unrotated.Count == 0, $"{descriptor}: service(s) without rotated logging: {string.Join(", ", unrotated)}");
     }
 

@@ -21,8 +21,8 @@ eval_guard_target() {
   [ "$port" = "5433" ] && eval_die "refusing port 5433 — that is the founder's LIVE Postgres"
   [ "$db" = "reel" ] && eval_die "refusing database 'reel' — that is the founder's LIVE database"
   case "$db" in
-    reel_eval|reel_eval_*|reel_ws*|reel_test_*|reel_baseline*) ;;
-    *) eval_die "refusing database '$db' — eval scripts only touch reel_eval*, reel_ws*, reel_test_* or reel_baseline*" ;;
+    reel_eval|reel_eval_*|reel_ws*|reel_test_*|reel_baseline*|reel_int_*) ;;
+    *) eval_die "refusing database '$db' — eval scripts only touch reel_eval*, reel_ws*, reel_test_*, reel_baseline* or reel_int_* (integrator gate copies)" ;;
   esac
 }
 

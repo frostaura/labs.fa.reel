@@ -35,7 +35,7 @@ public class EffectiveCeilingsTests
 
         Assert.StartsWith(EffectiveCeilings.Prefix, line, StringComparison.Ordinal);
         Assert.Contains("xref calls=80 tokens=1200000", line, StringComparison.Ordinal);
-        Assert.Contains("rerank calls=150 tokens=300000 (background stops at 70%)", line, StringComparison.Ordinal);
+        Assert.Contains("rerank calls=240 tokens=600000 (background stops at 70%)", line, StringComparison.Ordinal);
         Assert.Contains("lens calls=60 tokens=120000", line, StringComparison.Ordinal);
         Assert.Contains("extract tokens=1500000, embed tokens=3000000, hydrate titles=1500", line, StringComparison.Ordinal);
         Assert.Contains("extraction=unset (adapter default)", line, StringComparison.Ordinal);

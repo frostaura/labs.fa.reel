@@ -37,7 +37,7 @@ for (let i = 0; i < argv.length; i++) {
 }
 const die = (m) => { console.error(`ledger: ${m}`); process.exit(2); };
 export const ARCHIVE_DIR = process.env.EVAL_LEDGER_ARCHIVE ?? join(homedir(), "src", "fa.reel-ws", "ledger-archive");
-const EVAL_DB = /^(reel_eval(_.*)?|reel_ws.*|reel_test_.*|reel_baseline.*)$/;
+const EVAL_DB = /^(reel_eval(_.*)?|reel_ws.*|reel_test_.*|reel_baseline.*|reel_int_.*)$/;
 const TEMPLATE = process.env.EVAL_TEMPLATE_DB ?? "reel_eval_template";
 const port = String(args.port ?? process.env.EVAL_PGPORT ?? "5434");
 

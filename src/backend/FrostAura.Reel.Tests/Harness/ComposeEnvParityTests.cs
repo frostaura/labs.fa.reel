@@ -81,6 +81,24 @@ public partial class ComposeEnvParityTests
     /// </summary>
     private static readonly string[] FrameworkKeys = ["ASPNETCORE_ENVIRONMENT", "ASPNETCORE_URLS", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
 
+    /// <summary>
+    /// Upper-snake literals that are FRAGMENTS of a composed key, never a key on their own: WS-1's
+    /// per-purpose options read <c>LLM_&lt;PURPOSE&gt;_&lt;SUFFIX&gt;</c> (prefix + suffix) and the Ask
+    /// budget reads <c>LLM_&lt;KEY&gt;_DAILY_CALLS/TOKENS</c>, so the scan sees the parts. The composed
+    /// keys are optional overrides whose code defaults are the documented behaviour.
+    /// </summary>
+    private static readonly Dictionary<string, string> ComposedKeyFragments = new(StringComparer.Ordinal)
+    {
+        ["MAX_TOKENS"] = "suffix of LLM_<PURPOSE>_MAX_TOKENS (LlmPurposeOptions)",
+        ["MAX_RETRIES"] = "suffix of LLM_<PURPOSE>_MAX_RETRIES (LlmPurposeOptions)",
+        ["ATTEMPT_TIMEOUT_SECONDS"] = "suffix of LLM_<PURPOSE>_ATTEMPT_TIMEOUT_SECONDS (LlmPurposeOptions)",
+        ["TOTAL_TIMEOUT_SECONDS"] = "suffix of LLM_<PURPOSE>_TOTAL_TIMEOUT_SECONDS (LlmPurposeOptions)",
+        ["TOKENS_PER_CANDIDATE"] = "suffix of LLM_<PURPOSE>_TOKENS_PER_CANDIDATE (LlmPurposeOptions)",
+        ["ASK_PLAN"] = "infix of LLM_ASK_PLAN_DAILY_CALLS/TOKENS (AskBudget)",
+        ["ASK_JUDGE"] = "infix of LLM_ASK_JUDGE_DAILY_CALLS/TOKENS (AskBudget)",
+        ["ASK_ANSWER"] = "infix of LLM_ASK_ANSWER_DAILY_CALLS/TOKENS (AskBudget)",
+    };
+
     /// <summary>Section prefixes of literals that look like config keys but are EF/Npgsql annotations.</summary>
     private static readonly string[] NotConfigurationPrefixes = ["Npgsql", "Relational"];
 
@@ -263,8 +281,23 @@ public partial class ComposeEnvParityTests
 
     // ── the scan ────────────────────────────────────────────────────────────────────────────
 
+    [Fact]
+    public void Every_composed_key_fragment_is_still_in_the_code()
+    {
+        // A stale exemption would hide a real key that happens to share the name.
+        var raw = RawCodeReadKeys();
+        Assert.All(ComposedKeyFragments.Keys, fragment => Assert.Contains(fragment, raw));
+    }
+
     /// <summary>Every configuration key the production code reads, in its environment-variable form.</summary>
     internal static IReadOnlySet<string> CodeReadKeys()
+    {
+        var keys = new HashSet<string>(RawCodeReadKeys(), StringComparer.Ordinal);
+        keys.ExceptWith(ComposedKeyFragments.Keys);
+        return keys;
+    }
+
+    private static HashSet<string> RawCodeReadKeys()
     {
         var keys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var text in ProductionSources())
