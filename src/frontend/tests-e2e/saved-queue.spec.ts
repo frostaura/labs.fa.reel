@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { SEIZED_US_PROVIDERS } from "../src/lib/whereToWatch.fixtures";
 
 /**
  * The Saved shelf as a queue: the sort control, the pinned "watch tonight" card and its provider
@@ -153,6 +154,41 @@ test.describe("saved queue", () => {
     await expect(unavailableCard).toContainText("not streaming");
     await expect(unavailableCard).toContainText("saved 120 days ago");
     await expect(unavailableCard).toContainText("on Up Next");
+  });
+
+  test("the pin's provider ladder shows the subscription it names, streams first, and never calls a search direct", async ({ page }) => {
+    // The recorded payload from the eval copy (ireview_surface defect 4): the pin said "on Philo"
+    // above a ladder that showed only Google Play and YouTube rent/buy, because only providers
+    // with a maintained link got a chip (R1-19).
+    await bootSaved(page);
+    await mockSaved(page);
+    await mockJson(page, "**/api/titles/movie/1001/providers", SEIZED_US_PROVIDERS);
+    await page.goto("/saved");
+
+    const ladder = page.getByTestId("watch-tonight").getByTestId("provider-chip");
+    await expect(ladder.first()).toBeVisible();
+    const chips = await ladder.evaluateAll((els) =>
+      els.map((el) => ({
+        name: el.querySelector("p")?.textContent ?? "",
+        tier: el.getAttribute("data-tier"),
+        pill: el.querySelector('[data-testid="provider-link-kind"]')?.textContent ?? "",
+      }))
+    );
+    const names = chips.map((c) => c.name);
+    // Subscription and free-with-ads services the API returned are all on the card, first.
+    for (const name of ["Philo", "Starz", "Tubi TV", "The Roku Channel"]) expect(names, name).toContain(name);
+    expect(names[0]).toBe("Philo");
+    const firstPurchase = chips.findIndex((c) => c.tier !== "stream");
+    expect(chips.slice(0, firstPurchase).every((c) => c.tier === "stream")).toBe(true);
+    expect(chips.slice(firstPurchase).every((c) => c.tier !== "stream")).toBe(true);
+    // Google Play and YouTube are provider SEARCHES, and say so.
+    for (const name of ["Google Play Movies", "YouTube"]) {
+      expect(chips.find((c) => c.name === name)?.pill, name).toBe("search");
+    }
+    expect(chips.some((c) => c.pill === "direct")).toBe(false);
+    // One chip per brand, and the link-less purchase stores folded into one TMDB link.
+    expect(names.filter((n) => n.startsWith("Starz"))).toEqual(["Starz"]);
+    await expect(page.getByTestId("watch-tonight").getByTestId("tmdb-more-link")).toHaveText("More stores via TMDB →");
   });
 
   test("switching the sort re-asks the server and re-orders the queue", async ({ page }) => {

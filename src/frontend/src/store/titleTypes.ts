@@ -97,7 +97,13 @@ export interface ProviderEntry {
   provider: string;
   logoPath: string | null;
   kinds: string[];
-  linkKind: "direct" | "tmdb";
+  /**
+   * What the link does. Today the API sends "direct" for a maintained provider-side SEARCH pattern
+   * and "tmdb" for the TMDB watch page; "search" and "deep" (a real link to the title) are the
+   * honest names the client already understands. `lib/whereToWatch.ts` never labels a search
+   * "direct" whichever of these arrives.
+   */
+  linkKind: "direct" | "search" | "deep" | "tmdb";
   url: string;
   displayPriority: number;
 }

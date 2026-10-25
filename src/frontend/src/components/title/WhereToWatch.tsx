@@ -1,36 +1,28 @@
-import { ExternalLink, Play } from "lucide-react";
+import { ExternalLink, Play, Search } from "lucide-react";
 import { useGetProvidersQuery } from "../../store/api";
 import { logoUrl } from "../../lib/tmdbImages";
-
-/** A single TMDB streaming "kind" → a short human badge. */
-const KIND_LABEL: Record<string, string> = {
-  Flatrate: "Stream",
-  Free: "Free",
-  Ads: "Free (ads)",
-  Rent: "Rent",
-  Buy: "Buy",
-};
+import { LINK_DESCRIPTION, LINK_LABEL, providerLadder, type ProviderLink } from "../../lib/whereToWatch";
 
 /**
- * Spec §8 requires the link type to be *visible*, not merely hoverable: a maintained deep link and
- * a bounce through TMDB are materially different promises, and a `title` tooltip communicates
- * neither on a phone. Both kinds get a chip so the absence of a badge can never be mistaken for the
- * better outcome — the old markup labelled only the TMDB bounce, leaving "direct" indistinguishable
- * from "not yet rendered". The pill wraps under the kinds line on narrow chips rather than
- * squeezing the row.
+ * Spec §8 requires the link type to be *visible*, not merely hoverable: a link to the title, a
+ * search on the provider and a bounce through TMDB are three different promises, and a `title`
+ * tooltip communicates none of them on a phone. Every chip carries its pill, so the absence of a
+ * badge can never be mistaken for the better outcome. Only a real deep link reads "direct" — every
+ * maintained pattern today is a provider-side search, and it says "search" (R1-19).
  */
-function LinkKindPill({ linkKind }: { linkKind: string }) {
-  const direct = linkKind === "direct";
+function LinkKindPill({ link }: { link: ProviderLink }) {
+  const Icon = link === "deep" ? Play : link === "search" ? Search : ExternalLink;
   return (
     <span
       className={`inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px leading-none ${
-        direct
+        link === "deep"
           ? "border-fa-frost/40 bg-fa-frost/10 text-fa-frost-bright"
           : "border-fa-edge bg-fa-glass text-fa-frost-dim"
       }`}
+      data-testid="provider-link-kind"
     >
-      {direct ? <Play className="h-2.5 w-2.5 fill-current" /> : <ExternalLink className="h-2.5 w-2.5" />}
-      {direct ? "direct" : "via TMDB"}
+      <Icon className={`h-2.5 w-2.5 ${link === "deep" ? "fill-current" : ""}`} />
+      {LINK_LABEL[link]}
     </span>
   );
 }
@@ -69,27 +61,26 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
         </p>
       ) : (
         (() => {
-          // Every "via TMDB" chip bounces to the SAME TMDB watch page — a wall of near-identical
-          // chips promising different providers but delivering one URL. Collapse them into a
-          // single trailing row-link; only "direct" providers earn an individual chip.
-          const direct = data.providers.filter((p) => p.linkKind === "direct");
-          const viaTmdb = data.providers.filter((p) => p.linkKind !== "direct");
-          const tmdbUrl = viaTmdb[0]?.url ?? data.tmdbWatchPage;
+          // Streaming (subscription, free, ads) first and always as chips, then rent and buy with a
+          // link of their own; link-less purchase stores collapse into one trailing TMDB link, since
+          // every one of them would bounce to the same page. See lib/whereToWatch.ts.
+          const ladder = providerLadder(data.providers, data.tmdbWatchPage);
           return (
             <div className="flex flex-wrap items-center gap-2" data-testid="provider-list">
-              {direct.map((p) => {
-                const kinds = p.kinds.map((k) => KIND_LABEL[k] ?? k).join(" · ") || "watch";
+              {ladder.chips.map((p) => {
+                const kinds = p.kinds.join(" · ") || "watch";
                 return (
                   <a
                     key={p.provider}
                     href={p.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    title={`${p.provider} · ${kinds} · opens provider`}
-                    aria-label={`${p.provider} — ${kinds} — direct link, opens the provider`}
-                    className="group flex items-center gap-2 rounded-lg border border-fa-edge bg-fa-glass px-2 py-1.5 transition hover:border-fa-frost/40"
+                    title={`${p.provider} · ${kinds} · ${LINK_DESCRIPTION[p.link]}`}
+                    aria-label={`${p.provider} — ${kinds} — ${LINK_DESCRIPTION[p.link]}`}
+                    className="group flex min-h-11 items-center gap-2 rounded-lg border border-fa-edge bg-fa-glass px-2 py-1.5 transition hover:border-fa-frost/40"
                     data-testid="provider-chip"
-                    data-link-kind={p.linkKind}
+                    data-tier={p.tier}
+                    data-link-kind={p.link}
                   >
                     <div className="h-8 w-8 rounded-md overflow-hidden bg-fa-ink-3 shrink-0">
                       {logoUrl(p.logoPath) ? (
@@ -104,22 +95,22 @@ export default function WhereToWatch({ mediaType, tmdbId }: { mediaType: string;
                       <p className="fa-caption text-fa-frost-bright leading-tight">{p.provider}</p>
                       <p className="fa-caption leading-tight flex flex-wrap items-center gap-x-1 gap-y-0.5">
                         <span className="text-fa-frost-dim/70">{kinds}</span>
-                        <LinkKindPill linkKind={p.linkKind} />
+                        <LinkKindPill link={p.link} />
                       </p>
                     </div>
                   </a>
                 );
               })}
-              {viaTmdb.length > 0 && (
+              {ladder.tmdbOnlyCount > 0 && ladder.tmdbUrl && (
                 <a
-                  href={tmdbUrl}
+                  href={ladder.tmdbUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`More watch options for ${viaTmdb.length} more provider${viaTmdb.length === 1 ? "" : "s"} on the TMDB watch page`}
-                  className="fa-caption inline-flex items-center gap-1 rounded-lg border border-fa-edge bg-fa-glass px-3 py-2 text-fa-frost transition hover:border-fa-frost/40 hover:text-fa-frost-bright"
+                  aria-label={`Rent or buy from ${ladder.tmdbOnlyCount} more store${ladder.tmdbOnlyCount === 1 ? "" : "s"} on the TMDB watch page`}
+                  className="fa-caption inline-flex min-h-11 items-center gap-1 rounded-lg border border-fa-edge bg-fa-glass px-3 py-2 text-fa-frost transition hover:border-fa-frost/40 hover:text-fa-frost-bright"
                   data-testid="tmdb-more-link"
                 >
-                  More options via TMDB →
+                  {ladder.chips.length > 0 ? "More stores" : `Rent or buy from ${ladder.tmdbOnlyCount} store${ladder.tmdbOnlyCount === 1 ? "" : "s"}`} via TMDB →
                 </a>
               )}
             </div>
