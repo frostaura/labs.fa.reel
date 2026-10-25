@@ -173,8 +173,12 @@ public partial class MigrationDisciplineTests
         using var db = CreateContext();
         var alter = new AlterColumnOperation
         {
-            Table = "ExposureEvents", Name = "BaseScore", ClrType = typeof(decimal), ColumnType = "numeric(6,3)",
-            IsNullable = false, DefaultValue = 0m,
+            Table = "ExposureEvents",
+            Name = "BaseScore",
+            ClrType = typeof(decimal),
+            ColumnType = "numeric(6,3)",
+            IsNullable = false,
+            DefaultValue = 0m,
         };
         alter.OldColumn.ClrType = typeof(decimal);
         alter.OldColumn.ColumnType = "numeric(6,3)";
