@@ -30,6 +30,9 @@ public static partial class DependencyInjection
         services.AddScoped<Application.Search.Retrieval.ISupplyReporter>(sp =>
             sp.GetRequiredService<Application.Search.Retrieval.SupplyReporter>());
         services.AddScoped<Application.Search.Retrieval.IAskReelRetriever, Application.Search.Retrieval.FacetRetriever>();
+        // The TMDB arm: standing conditions sent WITH the fetch, up to three pages, title search only
+        // for title-shaped messages. Consumed by Ask Reel's TMDB fetch and, later, the hybrid retriever.
+        services.AddScoped<Application.Search.Retrieval.TmdbDiscoveryArm>();
 
         return services;
     }

@@ -191,6 +191,100 @@ public class FilterCostMeterTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Draft_and_persisted_rules_agree_on_genre_stand_ins_and_aliases()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The TV taxonomy-gap arm exists twice (persisted rows, draft rules) like every other arm, so
+        // it is pinned the same way: same rules, both phrasings, identical sets — with a fixture that
+        // exercises every branch (show vs film, word vs substring, alias genre, a slug with no row).
+        var accountId = await SeedAccountAsync();
+        var romanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["office romance"]; });
+        var romanceFilm = await SeedTitleAsync(t => { t.Genres = ["thriller"]; t.Keywords = ["office romance"]; });
+        var bromanceShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["bromance"]; });
+        var horrorShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Keywords = ["folk horror"]; });
+        var animeFilm = await SeedTitleAsync(t => { t.Keywords = ["anime"]; });
+        var childrenShow = await SeedTitleAsync(t => { t.MediaType = MediaType.Show; t.Genres = ["children"]; });
+        var mine = new[] { romanceShow, romanceFilm, bromanceShow, horrorShow, animeFilm, childrenShow };
+
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "romance");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "anime");
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "family");
+
+        HashSet<Guid> persisted;
+        FilterRuleSet drafted;
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            persisted = (await new EligibilityQueryBuilder(db)
+                .EligibleTitles(accountId)
+                .Where(t => mine.Contains(t.Id))
+                .Select(t => t.Id)
+                .ToListAsync()).ToHashSet();
+            drafted = FilterRuleSet.FromRows(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync());
+        }
+
+        var draft = (await EligibleAsync(accountId, drafted, mine)).ToHashSet();
+        Assert.Equal(persisted, draft);
+        Assert.Equal(new HashSet<Guid> { romanceFilm, bromanceShow, horrorShow }, draft);
+
+        // And the meter costs the stand-ins as part of the rule they belong to: relaxing "romance"
+        // returns the romance-keyword show, so its marginal is not zero.
+        await using var scoped = fixture.CreateContext(new AccountContext());
+        var relaxed = (await new EligibilityQueryBuilder(scoped)
+            .EligibleTitles(accountId, drafted.Without(new FilterRule(FilterKind.ExcludeGenre, "romance")))
+            .Where(t => mine.Contains(t.Id))
+            .Select(t => t.Id)
+            .ToListAsync()).ToHashSet();
+        Assert.Contains(romanceShow, relaxed);
+        Assert.DoesNotContain(animeFilm, relaxed);
+    }
+
+    [Fact]
+    public async Task The_meter_reports_the_pool_under_the_shrunk_crowd_floor_without_serving_it()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // FD-7: the badge shows the vote-shrunk score; the floor keeps the raw average until the
+        // founder confirms. Both directions of the change must be visible: a thin high sample drops
+        // out under a floor above the prior, and a thin low sample comes IN under a floor below it.
+        var accountId = await SeedAccountAsync();
+        var thinHigh = await SeedTitleAsync(t => { t.TmdbVoteAverage = 7.5m; t.TmdbVoteCount = 10; });
+        var solidHigh = await SeedTitleAsync(t => { t.TmdbVoteAverage = 7.5m; t.TmdbVoteCount = 9000; });
+        var thinLow = await SeedTitleAsync(t => { t.TmdbVoteAverage = 5.0m; t.TmdbVoteCount = 2; });
+        var traktLed = await SeedTitleAsync(t =>
+        {
+            t.TmdbVoteAverage = 7.6m;
+            t.TmdbVoteCount = 3000;
+            t.TraktRating = 6.4m;
+            t.TraktVotes = 5000;
+        });
+        var unknownVotes = await SeedTitleAsync(t => { t.TmdbVoteAverage = 9.0m; t.TmdbVoteCount = 0; });
+        var mine = new[] { thinHigh, solidHigh, thinLow, traktLed, unknownVotes };
+
+        var seven = FilterRuleSet.Create(null, null, null, null, 7.0m, null, null);
+        Assert.Equal(
+            new HashSet<Guid> { thinHigh, solidHigh, traktLed, unknownVotes },
+            (await EligibleAsync(accountId, seven, mine)).ToHashSet());
+        Assert.Equal(
+            new HashSet<Guid> { solidHigh },
+            (await EligibleShrunkAsync(accountId, seven, mine)).ToHashSet());
+
+        var six = FilterRuleSet.Create(null, null, null, null, 6.0m, null, null);
+        Assert.DoesNotContain(thinLow, await EligibleAsync(accountId, six, mine));
+        Assert.Contains(thinLow, await EligibleShrunkAsync(accountId, six, mine));
+
+        // The meter carries the figure only when there is a floor to re-read.
+        Assert.NotNull((await MeasureAsync(accountId, seven)).EligibleUnderShrunkFloor);
+        Assert.Null((await MeasureAsync(accountId, FilterRuleSet.Create(["comedy"], null, null, null, null, null, null))).EligibleUnderShrunkFloor);
+    }
+
+    [Fact]
     public async Task An_unscoped_context_is_refused_rather_than_answered_for_nobody()
     {
         if (!fixture.Available)
@@ -268,6 +362,17 @@ public class FilterCostMeterTests(PostgresFixture fixture)
         var meter = new FilterCostMeter(
             db, new EligibilityQueryBuilder(db), context, new MemoryCache(new MemoryCacheOptions()));
         return await meter.MeasureAsync(rules);
+    }
+
+    /// <summary>Eligible ids among <paramref name="mine"/> under a draft, the crowd floor read on the shrunk score.</summary>
+    private async Task<IReadOnlyList<Guid>> EligibleShrunkAsync(Guid accountId, FilterRuleSet rules, IReadOnlyCollection<Guid> mine)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        return await new EligibilityQueryBuilder(db)
+            .EligibleTitles(accountId, rules, CrowdFloorMeasure.Shrunk)
+            .Where(t => mine.Contains(t.Id))
+            .Select(t => t.Id)
+            .ToListAsync();
     }
 
     /// <summary>Eligible ids among <paramref name="mine"/> under a DRAFT rule set.</summary>

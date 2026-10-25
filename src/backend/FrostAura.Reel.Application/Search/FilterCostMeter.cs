@@ -29,11 +29,18 @@ public readonly record struct FilterCostSuggestion(string Kind, string Value, in
 /// This is the real supply behind tonight's picks, not a filter-only count: a title already watched
 /// is not coming back whatever the user does to a chip.
 /// </param>
+/// <param name="EligibleUnderShrunkFloor">
+/// What <paramref name="Eligible"/> would be if the crowd floor compared the vote-shrunk badge score
+/// instead of the raw average (founder decision FD-7, pending) — null when the rule set has no crowd
+/// floor. The badge already shows the shrunk score; this is the pool change the switch would make,
+/// shown before anyone makes it.
+/// </param>
 public readonly record struct FilterCostReport(
     int Total,
     int Eligible,
     IReadOnlyList<FilterCostRule> ByRule,
-    IReadOnlyList<FilterCostSuggestion> Suggestions);
+    IReadOnlyList<FilterCostSuggestion> Suggestions,
+    int? EligibleUnderShrunkFloor = null);
 
 /// <summary>
 /// Costs a draft rule set against the real catalogue, so the conditions editor can say what a chip
@@ -121,7 +128,11 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
             .Select(r => new FilterCostSuggestion(r.Kind, r.Value, r.Marginal))
             .ToList();
 
-        var report = new FilterCostReport(total, eligible, byRule, suggestions);
+        int? underShrunkFloor = rules.MinCrowdRating is null
+            ? null
+            : await eligibility.EligibleTitles(accountId, rules, CrowdFloorMeasure.Shrunk).CountAsync(ct);
+
+        var report = new FilterCostReport(total, eligible, byRule, suggestions, underShrunkFloor);
         cache.Set(key, report, CacheWindow);
         return report;
     }

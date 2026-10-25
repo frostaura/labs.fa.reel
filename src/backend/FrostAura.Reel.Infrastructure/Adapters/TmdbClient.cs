@@ -116,24 +116,28 @@ public class TmdbClient(
     public Task<IReadOnlyList<TmdbListItem>> GetSimilarAsync(bool movies, long tmdbId, CancellationToken ct = default) =>
         GetListAsync($"{(movies ? "movie" : "tv")}/{tmdbId}/similar", movies, RatePriority.Reconcile, ct);
 
-    public async Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default)
+    public async Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
+        (await SearchKeywordsCheckedAsync(query, ct)).Results;
+
+    public async Task<TmdbKeywordSearch> SearchKeywordsCheckedAsync(string query, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            return [];
+            return new TmdbKeywordSearch([], Answered: true);
         }
 
         using var response = await SendAsync($"search/keyword?query={Uri.EscapeDataString(query)}", RatePriority.Interactive, ct);
         if (!response.IsSuccessStatusCode)
         {
-            return [];
+            return new TmdbKeywordSearch([], Answered: false);
         }
 
         var dto = await response.Content.ReadFromJsonAsync<KeywordSearchDto>(JsonOptions, ct);
-        return (dto?.Results ?? [])
-            .Where(k => k.Id > 0 && !string.IsNullOrWhiteSpace(k.Name))
-            .Select(k => new TmdbKeyword(k.Id, k.Name!))
-            .ToList();
+        return new TmdbKeywordSearch(
+            [.. (dto?.Results ?? [])
+                .Where(k => k.Id > 0 && !string.IsNullOrWhiteSpace(k.Name))
+                .Select(k => new TmdbKeyword(k.Id, k.Name!))],
+            Answered: true);
     }
 
     public Task<IReadOnlyList<TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default)
@@ -228,7 +232,7 @@ public class TmdbClient(
         // over the most niche unseen titles, not just the popular ones. The feed build overrides it
         // back to 50 through options, so routing supply through here does not quietly widen its
         // quality floor. Genres + keywords OR-joined.
-        var query = $"?sort_by=popularity.desc&include_adult=false&page={page}"
+        var query = $"?sort_by={SortParameter(options?.Sort ?? TmdbDiscoverSort.Popularity, movies)}&include_adult=false&page={page}"
             + $"&vote_count.gte={options?.MinVoteCount ?? DefaultConceptVoteCount}";
         var dateField = movies ? "primary_release_date" : "first_air_date";
         if (genreIds.Count > 0)
@@ -300,6 +304,15 @@ public class TmdbClient(
 
         return GetListAsync(path + query, movies, options?.Priority ?? RatePriority.Interactive, ct);
     }
+
+    /// <summary>TMDB's <c>sort_by</c> value for a sort; the release-date field differs between movie and TV.</summary>
+    private static string SortParameter(TmdbDiscoverSort sort, bool movies) => sort switch
+    {
+        TmdbDiscoverSort.VoteCount => "vote_count.desc",
+        TmdbDiscoverSort.VoteAverage => "vote_average.desc",
+        TmdbDiscoverSort.Newest => movies ? "primary_release_date.desc" : "first_air_date.desc",
+        _ => "popularity.desc",
+    };
 
     public async Task<IReadOnlyList<TmdbWatchProvider>> GetWatchProvidersAsync(long tmdbId, bool movie, string region, CancellationToken ct = default)
     {

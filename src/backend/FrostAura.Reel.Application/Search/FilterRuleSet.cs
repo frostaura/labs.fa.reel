@@ -197,6 +197,21 @@ public sealed record FilterRuleSet
     };
 
     /// <summary>
+    /// This rule set with one turn's own rejections added ("no fantasy", "no zombies") as further
+    /// ExcludeGenre and ExcludeKeyword rules — the conditions one Ask Reel turn is judged by. It can
+    /// only ever narrow: values are normalised as a save would store them, and unlike
+    /// <see cref="Create"/> the IncludeGenre allow-list is left exactly as it is, because dropping an
+    /// allow-listed genre the user just rejected could empty the allow-list, and an empty allow-list
+    /// means "every genre" — a widening.
+    /// </summary>
+    public FilterRuleSet WithExclusions(IEnumerable<string>? genres, IEnumerable<string>? keywords) =>
+        this with
+        {
+            ExcludeGenres = Clean(ExcludeGenres.Concat(genres ?? [])),
+            ExcludeKeywords = Clean(ExcludeKeywords.Concat(keywords ?? [])),
+        };
+
+    /// <summary>
     /// A stable key for this rule set, for the meter's short cache. Order-insensitive per list, so
     /// two drafts that differ only in the order chips were tapped share one cache entry.
     /// </summary>

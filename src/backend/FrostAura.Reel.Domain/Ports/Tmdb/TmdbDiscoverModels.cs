@@ -6,6 +6,12 @@ public record TmdbWatchProvider(int ProviderId, string Name, string? LogoPath, i
 /// <summary>A TMDB keyword (concept tag) — resolved from free text to drive concept discovery.</summary>
 public record TmdbKeyword(int Id, string Name);
 
+/// <summary>
+/// One /search/keyword call: the matches, and whether TMDB actually answered. <see cref="Answered"/>
+/// is false when the call failed (non-2xx), so an empty <see cref="Results"/> means nothing.
+/// </summary>
+public sealed record TmdbKeywordSearch(IReadOnlyList<TmdbKeyword> Results, bool Answered);
+
 /// <summary>A TMDB person (search/person) — resolves a name to an id for credit lookups.</summary>
 public record TmdbPerson(long Id, string Name, string? KnownForDepartment);
 
@@ -72,7 +78,19 @@ public sealed record TmdbDiscoverOptions(
     IReadOnlyList<long>? PeopleIds = null,
     /// <summary>Which shared rate-gate lane the call drains. Interactive by default (Ask Reel);
     /// background supply passes Reconcile so a feed build cannot starve a live search.</summary>
-    RatePriority Priority = RatePriority.Interactive);
+    RatePriority Priority = RatePriority.Interactive,
+    /// <summary>The order TMDB pages in. Popularity by default, which is what every existing caller
+    /// was built against.</summary>
+    TmdbDiscoverSort Sort = TmdbDiscoverSort.Popularity);
+
+/// <summary>The <c>sort_by</c> orders a concept discover can page in (always descending).</summary>
+public enum TmdbDiscoverSort
+{
+    Popularity,
+    VoteCount,
+    VoteAverage,
+    Newest,
+}
 
 /// <summary>
 /// One discover page WITH its pagination envelope — what a bulk walk needs and what

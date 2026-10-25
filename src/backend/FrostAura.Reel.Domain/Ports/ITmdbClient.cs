@@ -64,6 +64,16 @@ public interface ITmdbClient
     /// <summary>Resolve free-text keyword names to TMDB keyword ids (/search/keyword). Interactive priority — drives live Ask Reel.</summary>
     Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default);
 
+    /// <summary>
+    /// <see cref="SearchKeywordsAsync"/> that tells "TMDB answered: no such keyword" from "TMDB did not
+    /// answer" (a 429, a 5xx), which <see cref="SearchKeywordsAsync"/> reports identically as an empty
+    /// list. A caller that caches a miss, or that would drop a topic for want of a keyword id, needs the
+    /// difference: an outage must never be remembered as an answer. The default treats every list as
+    /// an answer, which is what an in-memory fake means; the HTTP adapter overrides it.
+    /// </summary>
+    async Task<TmdbKeywordSearch> SearchKeywordsCheckedAsync(string query, CancellationToken ct = default) =>
+        new(await SearchKeywordsAsync(query, ct), Answered: true);
+
     /// <summary>Free-text title search (/search/movie or /search/tv). Interactive priority.</summary>
     Task<IReadOnlyList<TmdbListItem>> SearchTitlesAsync(bool movies, string query, int page, CancellationToken ct = default);
 
