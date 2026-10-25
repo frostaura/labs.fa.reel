@@ -112,7 +112,14 @@ Compose passes the backend an explicit `environment:` list. A key missing from t
 
 ## Logs
 
-Every service logs through Docker's `local` driver: 10 files of 50 MB each per container, from the shared `x-logging` anchor in each descriptor. The json-file default kept about 30 minutes of the backend's log on the live host (J*2). `ComposeHardeningTests` pins the anchor and its use on every service.
+Every service logs through Docker's `local` driver: 10 files of 100 MB each per container, from the shared `x-logging` anchor in each descriptor. The json-file default kept about 30 minutes of the backend's log on the live host (J*2).
+
+- **Retention.** At least 72 hours per container. The rotation is sized for the 200 KB/min idle-volume ceiling, counted uncompressed: 72 hours needs 844 MB, and 10 x 100 MB holds about 85 hours. The `local` driver also compresses rotated files, so real retention is longer. `ComposeHardeningTests` checks this arithmetic for every deployable descriptor, and checks that every service uses the anchor.
+- **Request ids.** Each proxied request gets the gateway's `$request_id`. It appears as `rid=` in the gateway's access log, as `RequestId` in every JSON log line the API writes for that request, and in the `X-Request-Id` response header. A caller that reaches the API directly may send its own `X-Request-Id`, which is used only if it is a plain token of at most 64 characters. To trace one request:
+
+  ```bash
+  docker logs <backend> 2>&1 | grep '"RequestId":"<id>"'
+  ```
 
 ## Backups and restore
 
@@ -189,8 +196,8 @@ The drill passed. Together with the LAN lockdown, it is a prerequisite for the f
 | --- | --- |
 | `ci-format` | `dotnet format --verify-no-changes` |
 | `ci-build` | `--no-incremental` build with warnings as errors |
-| `ci-test` | Unit tests and the backend coverage ratchet |
-| `ci-integration` | Integration suite. Needs `REEL_TEST_CONNECTION_STRING` pointing at a throwaway database, and fails if no test ran. |
+| `ci-test` | Unit tests and the backend coverage ratchet. Excludes every Postgres test (see `ci-integration`). |
+| `ci-integration` | Integration suite: the `IntegrationTests` namespace plus the Postgres classes outside it, which are listed in `deploy/ci/database-test-classes.txt`. `deploy/ci/test-filter.sh` builds both filters from that list. `CiTestSelectionTests` fails if the list misses a database class, or if any test class runs in both halves or in neither. Needs `REEL_TEST_CONNECTION_STRING` pointing at a throwaway database, and fails if no test ran. |
 | `ci-replay` | WS-7's Ask Reel replay suite (`[Trait("Suite", "Replay")]`). Fails if no test ran. |
 | `ci-openapi` | Regenerates the OpenAPI document and TS types into `.tmp/ci` and diffs them against the committed ones |
 | `ci-audit` | npm audit gate and vulnerable NuGet packages |
@@ -199,7 +206,7 @@ The drill passed. Together with the LAN lockdown, it is a prerequisite for the f
 | `ci-knip` | Unused files, exports and dependencies |
 | `ci-vite-proxy` | The dev server listens on loopback unless `VITE_HOST` opts in, and every proxy entry records its client (`xfwd`), so the API's loopback guard can tell a LAN caller from this machine |
 | `ci-e2e` | Playwright, Chromium and WebKit projects |
-| `ci-trivy` | `trivy fs`: HIGH and CRITICAL vulnerable dependencies and committed secrets |
+| `ci-trivy` | `trivy fs`: HIGH and CRITICAL vulnerable dependencies and committed secrets. Runs Trivy's image, pinned by digest in the Makefile, on Docker, both on a laptop and in the workflow. A `trivy` on PATH is used only if it is the same version. |
 | `ci-compose` / `ci-docker` | Descriptors parse with their required variables and refuse without them (prod without `BACKUP_HOST_DIR`), then the image build and stack smoke as project `reel-ci` |
 
 A missing prerequisite fails its gate with the reason. None of them skip.

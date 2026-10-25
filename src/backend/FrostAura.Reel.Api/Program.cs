@@ -55,6 +55,9 @@ builder.Services.AddSingleton<SettingsUnlockTokenService>();
 builder.Services.AddValidatedOptions<PreMigrationBackupOptions>();
 builder.Services.AddOpenApi();
 
+// X-Request-Id in, X-Request-Id out, and the same value as every log line's RequestId (R1-36).
+builder.Services.AddRequestIds();
+
 if (generatingOpenApiDocument)
 {
     builder.Services.RemoveAll<IHostedService>();
@@ -63,7 +66,8 @@ if (generatingOpenApiDocument)
 var corsOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? "http://localhost:5173")
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
-    policy.WithOrigins(corsOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
+    policy.WithOrigins(corsOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials()
+        .WithExposedHeaders(RequestId.HeaderName)));
 
 var app = builder.Build();
 

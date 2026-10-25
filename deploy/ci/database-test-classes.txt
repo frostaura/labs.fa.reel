@@ -1,0 +1,19 @@
+# Test classes that need Postgres but live OUTSIDE the IntegrationTests namespace (CR-11, R1-34).
+#
+# `make ci-integration` selects the IntegrationTests namespace PLUS these classes, and `make ci-test`
+# excludes exactly the same set (deploy/ci/test-filter.sh builds both filters from this file). Without
+# them CI ran these classes only in the unit pass, where there is no database and every test returned
+# early on `fixture.Available` — green, having executed nothing.
+#
+# Not maintained by memory: Tests/Harness/CiTestSelectionTests finds every database-backed class by
+# reflection and fails if one is missing here, if a line names a class that is not database-backed or
+# already sits under IntegrationTests, or if any test class is selected by both filters or by neither.
+# Moving a class under IntegrationTests (the preferred home) means deleting its line here.
+#
+# One fully-qualified class name per line.
+FrostAura.Reel.Tests.CrossReference.CrossReferenceBacktestTests
+FrostAura.Reel.Tests.CrossReference.CrossReferenceServiceTests
+FrostAura.Reel.Tests.CrossReference.LeakageTests
+FrostAura.Reel.Tests.CrossReference.NeighbourFinderTests
+FrostAura.Reel.Tests.Ingestion.ShowProgressReconcileTests
+FrostAura.Reel.Tests.Sync.OutboxDispatcherHistoryTests

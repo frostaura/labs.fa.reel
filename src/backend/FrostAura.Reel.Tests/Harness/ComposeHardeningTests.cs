@@ -9,8 +9,9 @@ namespace FrostAura.Reel.Tests.Harness;
 /// <item><b>Loopback by default (J-1).</b> The dev gateway published on 0.0.0.0 with the host
 /// firewall off, and the LAN got a Founder session. Every published port binds to a
 /// <c>*_BIND</c> variable whose default is 127.0.0.1.</item>
-/// <item><b>Rotated logs (J*2).</b> The json-file default kept about 30 minutes of the backend's
-/// log. Every service logs through the shared <c>local</c>-driver anchor.</item>
+/// <item><b>Rotated logs (J*2, R1-37).</b> The json-file default kept about 30 minutes of the
+/// backend's log. Every service logs through the shared <c>local</c>-driver anchor, and every
+/// deployable stack's rotation holds at least 72 hours at the idle-volume ceiling.</item>
 /// <item><b>Backups (K-1).</b> There were none. Every deployable descriptor runs the backup
 /// sidecar, and the backend shares the handshake volume it asks for its pre-migration dump on.</item>
 /// </list>
@@ -60,10 +61,7 @@ public partial class ComposeHardeningTests
     {
         var compose = ComposeDescriptor.Load(descriptor);
 
-        Assert.Contains(
-            "x-logging: &default-logging\n  driver: local\n  options:\n    max-size: \"50m\"\n    max-file: \"10\"\n",
-            compose.Text.Replace("\r\n", "\n", StringComparison.Ordinal),
-            StringComparison.Ordinal);
+        Assert.NotNull(LoggingAnchor(compose));
 
         var unrotated = compose.Services
             .Where(service => !compose.ServiceBlock(service).Contains("    logging: *default-logging"))
@@ -74,6 +72,60 @@ public partial class ComposeHardeningTests
         Assert.True(compose.Services.Count >= expected, $"{descriptor}: expected the stack's services; found {compose.Services.Count}.");
         Assert.True(unrotated.Count == 0, $"{descriptor}: service(s) without rotated logging: {string.Join(", ", unrotated)}");
     }
+
+    /// <summary>The program's floor on how far back a diagnosis can look (WS-6 acceptance).</summary>
+    internal const double RetentionHoursFloor = 72;
+
+    /// <summary>
+    /// The per-container log volume the rotation is sized for: the program's idle-volume ceiling, not
+    /// a measurement. Measured 2026-10-25 on slot ws8 (appsettings.json logging: JSON console with
+    /// scopes, Microsoft.* at Warning): 8.6 KB of startup lines, then 0 bytes over 602 s idle. That
+    /// slot ran the job runner but had the eight timed background services off, so the ceiling, not
+    /// the measurement, is what the rotation is sized for.
+    /// </summary>
+    internal const double SizedForKiBPerMinute = 200;
+
+    [Theory]
+    [MemberData(nameof(DeployableDescriptors))]
+    public void Every_deployable_stack_keeps_at_least_72_hours_of_log_at_the_volume_ceiling(string descriptor)
+    {
+        // R1-37. Counted uncompressed, so the `local` driver's compression of rotated files is margin.
+        var (sizeMiB, files) = LoggingAnchor(ComposeDescriptor.Load(descriptor))!.Value;
+        var hours = RetainedHours(sizeMiB, files, SizedForKiBPerMinute);
+
+        Assert.True(
+            hours >= RetentionHoursFloor,
+            $"{descriptor}: {files} x {sizeMiB} MB keeps {hours:F1} h at {SizedForKiBPerMinute} KB/min; at least {RetentionHoursFloor} h is required.");
+    }
+
+    [Fact]
+    public void The_retention_arithmetic_rejects_the_rotation_it_replaced()
+    {
+        // Non-vacuous: the previous 10 x 50 MB held under 42 h at the ceiling.
+        Assert.True(RetainedHours(50, 10, SizedForKiBPerMinute) < RetentionHoursFloor);
+        Assert.Equal(85.3, RetainedHours(100, 10, SizedForKiBPerMinute), precision: 1);
+
+        // And the anchor reader refuses a block it cannot size, rather than passing it.
+        Assert.Null(LoggingAnchor(ComposeDescriptor.Parse("x.yml", "x-logging: &default-logging\n  driver: json-file\n  options:\n    max-size: \"100m\"\n    max-file: \"10\"\nservices:\n")));
+        Assert.Null(LoggingAnchor(ComposeDescriptor.Parse("x.yml", "x-logging: &default-logging\n  driver: local\n  options:\n    max-size: \"1g\"\n    max-file: \"10\"\nservices:\n")));
+        Assert.Equal((100, 10), LoggingAnchor(ComposeDescriptor.Parse("x.yml", "x-logging: &default-logging\n  driver: local\n  options:\n    max-size: \"100m\"\n    max-file: \"10\"\nservices:\n")));
+    }
+
+    /// <summary>Hours of log a <paramref name="files"/> x <paramref name="sizeMiB"/> rotation holds at a steady volume.</summary>
+    internal static double RetainedHours(int sizeMiB, int files, double kiBPerMinute) =>
+        sizeMiB * 1024.0 * files / kiBPerMinute / 60.0;
+
+    /// <summary>The shared anchor's size (MB) and file count, or null when it is not a sizeable <c>local</c>-driver rotation.</summary>
+    private static (int SizeMiB, int Files)? LoggingAnchor(ComposeDescriptor compose)
+    {
+        var match = LoggingAnchorBlock().Match(compose.Text.Replace("\r\n", "\n", StringComparison.Ordinal));
+        return match.Success
+            ? (int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture), int.Parse(match.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture))
+            : null;
+    }
+
+    [GeneratedRegex("^x-logging: &default-logging\n  driver: local\n  options:\n    max-size: \"([0-9]+)m\"\n    max-file: \"([0-9]+)\"\n", RegexOptions.Multiline)]
+    private static partial Regex LoggingAnchorBlock();
 
     [Theory]
     [MemberData(nameof(DeployableDescriptors))]

@@ -152,6 +152,41 @@ public class NginxDescriptorParityTests
     }
 
     [Fact]
+    public void Every_descriptor_stamps_and_logs_one_request_id_per_proxied_request()
+    {
+        // R1-36: the gateway's access-log line and the API's log lines for one request share one id
+        // only if the gateway both forwards its own $request_id and writes it to the log it keeps.
+        var forwards = new Regex(@"proxy_set_header\s+X-Request-Id\s+\$request_id\s*;");
+        var gaps = new List<string>();
+
+        foreach (var descriptor in Descriptors)
+        {
+            var text = ReadDescriptor(descriptor);
+
+            foreach (var location in new[] { "/api/", "/sse/" })
+            {
+                if (LocationBlock(text, location) is { } block && !forwards.IsMatch(block))
+                {
+                    gaps.Add($"{descriptor}: `location {location}` does not forward `X-Request-Id $request_id`");
+                }
+            }
+
+            var format = new Regex(@"log_format\s+main\s+([^;]+);").Match(text);
+            if (!format.Success || !format.Groups[1].Value.Contains("$request_id", StringComparison.Ordinal))
+            {
+                gaps.Add($"{descriptor}: no `log_format main` carrying $request_id");
+            }
+
+            if (!new Regex(@"access_log\s+\S+\s+main\s*;").IsMatch(text))
+            {
+                gaps.Add($"{descriptor}: the access log does not use the `main` format");
+            }
+        }
+
+        Assert.True(gaps.Count == 0, string.Join(Environment.NewLine, gaps));
+    }
+
+    [Fact]
     public void Every_descriptor_proxies_the_readiness_probe()
     {
         var missing = Descriptors

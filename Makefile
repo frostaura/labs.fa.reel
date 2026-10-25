@@ -79,8 +79,8 @@ qa: release-validation
 #   make -k ci                      all of it, reporting every red gate
 #   make ci DOTNET=~/.dotnet/dotnet a dotnet that is not on PATH (this Mac's user-local SDK)
 #
-# Needs: REEL_TEST_CONNECTION_STRING pointing at a THROWAWAY database (the fixture drops it), trivy
-# on PATH, the frontend's node_modules, Playwright's chromium and webkit, and Docker for ci-docker.
+# Needs: REEL_TEST_CONNECTION_STRING pointing at a THROWAWAY database (the fixture drops it), the
+# frontend's node_modules, Playwright's chromium and webkit, and Docker for ci-docker and ci-trivy.
 # A missing prerequisite FAILS its gate with the reason — a gate that skips is a gate that lies.
 
 DOTNET ?= dotnet
@@ -110,16 +110,22 @@ ci-format:
 ci-build:
 	$(DOTNET) build $(SLN) --nologo --no-incremental -p:TreatWarningsAsErrors=true -warnaserror
 
+# The backend suite in two halves that are complements by construction: ci-integration takes the
+# IntegrationTests namespace plus every Postgres class outside it (deploy/ci/database-test-classes.txt),
+# ci-test takes the rest. Tests/Harness/CiTestSelectionTests proves the split against the compiled
+# assembly, so a database test can never again pass in the unit half having executed nothing (CR-11).
 ci-test:
 	rm -rf $(CI_OUT)/backend-coverage
-	$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "FullyQualifiedName!~IntegrationTests" \
+	filter=$$(sh deploy/ci/test-filter.sh unit) || exit 1; \
+	$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "$$filter" \
 		--settings src/backend/coverlet.runsettings --results-directory $(CI_OUT)/backend-coverage
 	python3 deploy/ci/coverage-gate.py cobertura $(CI_OUT)/backend-coverage $(BACKEND_COVERAGE_MIN)
 
 ci-integration:
 	@test -n "$$REEL_TEST_CONNECTION_STRING" || { echo "ci-integration: set REEL_TEST_CONNECTION_STRING to a THROWAWAY database (the fixture drops it)" >&2; exit 1; }
+	filter=$$(sh deploy/ci/test-filter.sh integration) || exit 1; \
 	REEL_REQUIRE_INTEGRATION=1 sh deploy/ci/require-tests.sh \
-		$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
+		$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "$$filter"
 
 # WS-7's deterministic Ask Reel replay suite: the scorer, compare and guard tests over the
 # committed recordings, plus the open scenario set's structural check. Node only — no database,
@@ -174,10 +180,30 @@ ci-e2e:
 
 # Known-vulnerable dependencies and committed secrets across the whole tree. HIGH and CRITICAL with
 # a fix available fail the gate. (Misconfiguration scanning joins once the images run non-root.)
+#
+# One pinned Trivy, here and in ci.yml alike (R1-33): the release's own image by its multi-arch
+# digest, so a re-pointed tag cannot change what runs, and the GitHub runner and a laptop run the
+# same binary. A `trivy` already on PATH is used only when it is exactly this version — a different
+# Trivy reads a different rule set and makes `make ci` and CI two different claims. With neither, the
+# gate fails and says how to get one: a gate that skips is a gate that lies.
+TRIVY_VERSION := 0.58.1
+TRIVY_IMAGE := aquasec/trivy:$(TRIVY_VERSION)@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7
+TRIVY_CACHE ?= $(HOME)/.cache/trivy
+TRIVY_ARGS := fs --quiet --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+	--skip-dirs src/frontend/node_modules --skip-dirs .tmp --skip-dirs .backups .
 ci-trivy:
-	@command -v trivy > /dev/null || { echo "ci-trivy: trivy is not installed (https://trivy.dev; macOS: brew install trivy)" >&2; exit 1; }
-	trivy fs --quiet --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
-		--skip-dirs src/frontend/node_modules --skip-dirs .tmp --skip-dirs .backups .
+	@if command -v trivy > /dev/null && trivy --version 2> /dev/null | grep -qx 'Version: $(TRIVY_VERSION)'; then \
+		echo "ci-trivy: trivy $(TRIVY_VERSION) from PATH"; \
+		trivy $(TRIVY_ARGS); \
+	elif docker info > /dev/null 2>&1; then \
+		echo "ci-trivy: $(TRIVY_IMAGE)"; \
+		mkdir -p "$(TRIVY_CACHE)" && \
+		docker run --rm -v "$(CURDIR):/src:ro" -w /src -v "$(TRIVY_CACHE):/root/.cache/trivy" $(TRIVY_IMAGE) $(TRIVY_ARGS); \
+	else \
+		echo "ci-trivy: needs Docker running (the gate runs $(TRIVY_IMAGE)) or trivy $(TRIVY_VERSION) on PATH." >&2; \
+		echo "ci-trivy: start Docker Desktop, or install exactly v$(TRIVY_VERSION) from https://github.com/aquasecurity/trivy/releases/tag/v$(TRIVY_VERSION)" >&2; \
+		exit 1; \
+	fi
 
 # Every descriptor parses with only its required variables supplied, and not without them.
 ci-compose:
