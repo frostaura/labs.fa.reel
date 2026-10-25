@@ -75,6 +75,28 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // Rollback is schema-only and never touches a row of the append-only exposure log
+            // (program §5.0 rule 8). Once this build has recorded a breakdown as unknown (NULL),
+            // the old NOT NULL cannot be restored without rewriting those rows into the false 0
+            // this migration exists to stop; so the rollback refuses, before it changes anything,
+            // and the way back to a pre-M4 image is the pre-migration dump. A database with no
+            // NULL breakdowns yet (nothing written since the upgrade) still rolls back in place.
+            migrationBuilder.Sql(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM "ExposureEvents"
+                        WHERE "BaseScore" IS NULL OR "CalibrationDelta" IS NULL
+                           OR "ResidualApplied" IS NULL OR "DemotionApplied" IS NULL) THEN
+                        RAISE EXCEPTION USING
+                            MESSAGE = 'M4 cannot be rolled back in place: ExposureEvents holds breakdowns recorded as unknown, and the exposure log is append-only.',
+                            HINT = 'Restore the pre-migration dump instead (program section 5.0 rule 8).';
+                    END IF;
+                END
+                $$;
+                """);
+
             migrationBuilder.DropColumn(
                 name: "EvidenceJson",
                 table: "FeedItems");
@@ -83,75 +105,22 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                 name: "WhySource",
                 table: "FeedItems");
 
-            // Rollback only. NOT NULL cannot be restored over the NULLs this migration's code writes
-            // ("breakdown unknown"), so they go back to the 0 the older image used for the same
-            // meaning — the one place the append-only log is rewritten, and only on the way down.
-            migrationBuilder.Sql(
-                """
-                UPDATE "ExposureEvents"
-                SET "BaseScore" = COALESCE("BaseScore", 0),
-                    "CalibrationDelta" = COALESCE("CalibrationDelta", 0),
-                    "ResidualApplied" = COALESCE("ResidualApplied", 0),
-                    "DemotionApplied" = COALESCE("DemotionApplied", 0)
-                WHERE "BaseScore" IS NULL OR "CalibrationDelta" IS NULL
-                   OR "ResidualApplied" IS NULL OR "DemotionApplied" IS NULL;
-                """);
-
-            migrationBuilder.AlterColumn<decimal>(
-                name: "ResidualApplied",
-                table: "ExposureEvents",
-                type: "numeric(6,3)",
-                precision: 6,
-                scale: 3,
-                nullable: false,
-                defaultValue: 0m,
-                oldClrType: typeof(decimal),
-                oldType: "numeric(6,3)",
-                oldPrecision: 6,
-                oldScale: 3,
-                oldNullable: true);
-
-            migrationBuilder.AlterColumn<decimal>(
-                name: "DemotionApplied",
-                table: "ExposureEvents",
-                type: "numeric(6,3)",
-                precision: 6,
-                scale: 3,
-                nullable: false,
-                defaultValue: 0m,
-                oldClrType: typeof(decimal),
-                oldType: "numeric(6,3)",
-                oldPrecision: 6,
-                oldScale: 3,
-                oldNullable: true);
-
-            migrationBuilder.AlterColumn<decimal>(
-                name: "CalibrationDelta",
-                table: "ExposureEvents",
-                type: "numeric(6,3)",
-                precision: 6,
-                scale: 3,
-                nullable: false,
-                defaultValue: 0m,
-                oldClrType: typeof(decimal),
-                oldType: "numeric(6,3)",
-                oldPrecision: 6,
-                oldScale: 3,
-                oldNullable: true);
-
-            migrationBuilder.AlterColumn<decimal>(
-                name: "BaseScore",
-                table: "ExposureEvents",
-                type: "numeric(6,3)",
-                precision: 6,
-                scale: 3,
-                nullable: false,
-                defaultValue: 0m,
-                oldClrType: typeof(decimal),
-                oldType: "numeric(6,3)",
-                oldPrecision: 6,
-                oldScale: 3,
-                oldNullable: true);
+            // Back to exactly what Phase2ExposureLog created: NOT NULL with no default.
+            foreach (var column in new[] { "ResidualApplied", "DemotionApplied", "CalibrationDelta", "BaseScore" })
+            {
+                migrationBuilder.AlterColumn<decimal>(
+                    name: column,
+                    table: "ExposureEvents",
+                    type: "numeric(6,3)",
+                    precision: 6,
+                    scale: 3,
+                    nullable: false,
+                    oldClrType: typeof(decimal),
+                    oldType: "numeric(6,3)",
+                    oldPrecision: 6,
+                    oldScale: 3,
+                    oldNullable: true);
+            }
         }
     }
 }

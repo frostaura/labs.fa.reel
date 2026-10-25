@@ -96,6 +96,115 @@ public partial class MigrationDisciplineTests
         Assert.NotEmpty(historical);
     }
 
+    /// <summary>
+    /// The exposure log is append-only (FD-18): no migration, in either direction, rewrites or
+    /// deletes its rows. A rollback that "repairs" rows on the way down re-creates the very rows a
+    /// later fix removed, and §5.0 rule 8 already says the way back past a migration that changed
+    /// what a row means is the pre-migration dump. Checked on the SQL the provider actually emits,
+    /// so a generator-written backfill (a default applied to existing NULLs) is caught too.
+    /// </summary>
+    [Fact]
+    public void No_migration_rewrites_the_append_only_exposure_log_in_either_direction()
+    {
+        using var db = CreateContext();
+        var generator = db.GetService<IMigrationsSqlGenerator>();
+        var violations = new List<string>();
+        foreach (var (id, migration) in AllMigrations())
+        {
+            violations.AddRange(ExposureLogRewrites(generator, migration.DownOperations).Select(v => $"{id} Down: {v}"));
+            if (string.CompareOrdinal(id, Baseline) > 0)
+            {
+                violations.AddRange(ExposureLogRewrites(generator, migration.UpOperations).Select(v => $"{id} Up: {v}"));
+            }
+        }
+
+        Assert.True(violations.Count == 0,
+            "Migrations that rewrite the append-only exposure log (restore the dump instead):\n" + string.Join("\n", violations));
+    }
+
+    [Fact]
+    public void The_M4_rollback_refuses_with_the_dump_instruction_and_only_reverts_schema()
+    {
+        var m4 = AllMigrations().Single(m => m.Id == "20261025060004_M4ExposureBreakdownAndFeedProvenance").Migration;
+        var guard = Assert.IsType<SqlOperation>(m4.DownOperations[0]);
+        Assert.Contains("RAISE EXCEPTION", guard.Sql, StringComparison.Ordinal);
+        Assert.Contains("pre-migration dump", guard.Sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"(?i)\b(UPDATE|INSERT|DELETE)\b", guard.Sql);
+
+        // The restored columns are exactly what Phase2ExposureLog created: required, no default.
+        var restored = m4.DownOperations.OfType<AlterColumnOperation>().ToList();
+        Assert.Equal(4, restored.Count);
+        Assert.All(restored, a =>
+        {
+            Assert.Equal("ExposureEvents", a.Table);
+            Assert.False(a.IsNullable);
+            Assert.Null(a.DefaultValue);
+            Assert.Null(a.DefaultValueSql);
+        });
+    }
+
+    public static TheoryData<string, string, bool> ExposureLogSql => new()
+    {
+        { "the old M4 rollback", "UPDATE \"ExposureEvents\" SET \"BaseScore\" = COALESCE(\"BaseScore\", 0) WHERE \"BaseScore\" IS NULL;", true },
+        { "unquoted lower case", "update ExposureEvents set BaseScore = 0;", true },
+        { "a delete", "DELETE FROM \"ExposureEvents\" WHERE \"Surface\" = 'Ask';", true },
+        { "a truncate", "TRUNCATE TABLE \"ExposureEvents\";", true },
+        { "an insert", "INSERT INTO \"ExposureEvents\" (\"Id\") VALUES ('00000000-0000-0000-0000-000000000000');", true },
+        { "another table's backfill", "UPDATE \"FeedItems\" SET \"WhySource\" = 'Unknown' WHERE \"WhySource\" IS NULL;", false },
+        { "an index on the log", "CREATE INDEX \"IX_ExposureEvents_TurnKey\" ON \"ExposureEvents\" (\"TurnKey\");", false },
+        { "reading the log", "DO $$ BEGIN IF EXISTS (SELECT 1 FROM \"ExposureEvents\") THEN RAISE EXCEPTION 'no'; END IF; END $$;", false },
+    };
+
+    [Theory]
+    [MemberData(nameof(ExposureLogSql))]
+    public void The_exposure_log_detector_tells_a_rewrite_from_a_schema_change(string because, string sql, bool rewrite)
+    {
+        using var db = CreateContext();
+        var found = ExposureLogRewrites(db.GetService<IMigrationsSqlGenerator>(), [new SqlOperation { Sql = sql }]);
+        Assert.True(found.Count > 0 == rewrite, $"{because}: expected rewrite={rewrite}, found {found.Count}");
+    }
+
+    [Fact]
+    public void A_generator_written_backfill_of_the_exposure_log_is_caught()
+    {
+        // Required-with-default over a nullable column is how a scaffolded Down backfills NULLs
+        // without any raw SQL in the migration. Whatever the provider emits for it, a default
+        // applied to existing rows is a rewrite, and must not get past the check silently.
+        using var db = CreateContext();
+        var alter = new AlterColumnOperation
+        {
+            Table = "ExposureEvents", Name = "BaseScore", ClrType = typeof(decimal), ColumnType = "numeric(6,3)",
+            IsNullable = false, DefaultValue = 0m,
+        };
+        alter.OldColumn.ClrType = typeof(decimal);
+        alter.OldColumn.ColumnType = "numeric(6,3)";
+        alter.OldColumn.IsNullable = true;
+
+        Assert.NotEmpty(ExposureLogRewrites(db.GetService<IMigrationsSqlGenerator>(), [alter]));
+    }
+
+    /// <summary>Every statement in <paramref name="operations"/> that writes rows of the exposure log.</summary>
+    internal static IReadOnlyList<string> ExposureLogRewrites(IMigrationsSqlGenerator generator, IReadOnlyList<MigrationOperation> operations)
+    {
+        var found = new List<string>();
+
+        // A default applied while tightening a column fills the existing NULL rows: a rewrite,
+        // whether or not the provider spells it as an UPDATE.
+        found.AddRange(operations.OfType<AlterColumnOperation>()
+            .Where(a => string.Equals(a.Table, "ExposureEvents", StringComparison.Ordinal)
+                && a.OldColumn.IsNullable && !a.IsNullable
+                && (a.DefaultValue is not null || a.DefaultValueSql is not null))
+            .Select(a => $"{a.Name} made required with a default (backfills the NULL rows)"));
+
+        found.AddRange(generator.Generate(operations)
+            .Select(c => c.CommandText)
+            .SelectMany(sql => ExposureLogWrite().Matches(sql).Select(m => m.Value.Trim())));
+        return found;
+    }
+
+    [GeneratedRegex(@"\b(UPDATE|INSERT\s+INTO|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+(ONLY\s+)?(""?public""?\.)?""?ExposureEvents""?(?=[\s;(]|$)", RegexOptions.IgnoreCase)]
+    private static partial Regex ExposureLogWrite();
+
     [Fact]
     public void The_model_has_no_change_that_a_migration_does_not_carry()
     {
