@@ -307,8 +307,10 @@ public interface ISearchAgent
 
     /// <summary>
     /// The salt every cache key built from this agent's output must carry: a result-format
-    /// version, the model and the reasoning effort the purpose runs at. A change to any of the three
-    /// changes what a cached verdict means, so it must miss rather than serve.
+    /// version, the model and the reasoning effort the purpose runs at, and (in the production
+    /// adapter) a fingerprint of the prompt and schema. A change to any of them changes what a
+    /// cached verdict means, so it must miss rather than serve. Build the key with
+    /// <see cref="RerankCacheKey.For"/>.
     ///
     /// <para>A default member so every test double keeps compiling; the production adapter
     /// overrides it with the effort it actually sends.</para>
@@ -324,4 +326,51 @@ public interface ISearchAgent
 public static class RerankCacheVersion
 {
     public const string Current = "rr2";
+}
+
+/// <summary>
+/// The one shape a cached re-rank verdict's key takes, so the feed build, the paginator and Ask
+/// Reel's judge cannot each invent a key that forgets a part.
+///
+/// <para><b>What a verdict depends on, and so what the key carries:</b> the agent's
+/// <see cref="ISearchAgent.CacheSalt"/> (result-format version, model, effort and the prompt and
+/// schema fingerprint), the account, the title, the caller's context (the row, or the request in
+/// its conversation), and the CANDIDATE SET the title was judged among. The last is not a
+/// formality: the prompt tells the model to spread its scores across the batch, so a fit is
+/// relative to its companions, and the same title judged among other titles is a different
+/// observation — one the position-debiasing mean is built to combine, not a cache hit to replay.</para>
+///
+/// <para>Only <see cref="RerankResult.Cacheable"/> verdicts may be stored under it; a fallback is
+/// recomputed every time.</para>
+/// </summary>
+public static class RerankCacheKey
+{
+    /// <summary>The key for one title's verdict.</summary>
+    public static string For(
+        string scope, string salt, Guid accountId, Guid titleId, string context, IEnumerable<Guid> candidateSet) =>
+        string.Join(
+            ':',
+            scope,
+            salt,
+            accountId.ToString("N"),
+            titleId.ToString("N"),
+            context,
+            CandidateSet(candidateSet));
+
+    /// <summary>
+    /// A fingerprint of the set of titles judged together — order-insensitive, because the agent
+    /// shuffles the prompt order itself, and duplicate-insensitive. Sixteen hex digits of SHA-256
+    /// over the sorted ids.
+    /// </summary>
+    public static string CandidateSet(IEnumerable<Guid> titleIds)
+    {
+        var ids = titleIds.Distinct().Order().ToArray();
+        var bytes = new byte[ids.Length * 16];
+        for (var i = 0; i < ids.Length; i++)
+        {
+            ids[i].TryWriteBytes(bytes.AsSpan(i * 16, 16));
+        }
+
+        return "c" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes).AsSpan(0, 8));
+    }
 }

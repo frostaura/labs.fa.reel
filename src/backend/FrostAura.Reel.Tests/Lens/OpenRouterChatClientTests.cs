@@ -77,7 +77,7 @@ public class OpenRouterChatClientTests
 
         var judge = catalog.For(ApiUsagePurpose.AskJudge);
         Assert.Equal(ReasoningEfforts.None, judge.ReasoningEffort);
-        Assert.Equal(100 + (111 * 6), judge.MaxTokensFor(6));
+        Assert.Equal(100 + (370 * 6), judge.MaxTokensFor(6));
 
         Assert.Null(catalog.For(ApiUsagePurpose.AskAnswer).ReasoningEffort);
     }

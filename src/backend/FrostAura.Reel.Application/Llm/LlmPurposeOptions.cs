@@ -133,7 +133,12 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
     private static readonly IReadOnlyDictionary<string, Default> Defaults = new Dictionary<string, Default>(StringComparer.Ordinal)
     {
         // ── Ask Reel v1: the conversational interpret and the expansion interpreter ──
-        [ApiUsagePurpose.SearchAgent] = Search(maxTokens: 200, InteractiveAttempt, InteractiveTotal),
+        // The interpret answer is sent under a strict schema since round 1 (it answered in prose
+        // under json_object), and strict mode makes every field required: the nine the model used
+        // to omit now arrive as [] or null, about 60 tokens a turn on top of the measured p99 of
+        // 125. (125 + 60) x 1.5 = 278, rounded up to 300. On the eval slot of 2026-10-25 the mean
+        // was already 133 a call (1,459 over 11) before the schema, so 200 had no margin left.
+        [ApiUsagePurpose.SearchAgent] = Search(maxTokens: 300, InteractiveAttempt, InteractiveTotal),
         [ApiUsagePurpose.SearchInterpret] = Search(maxTokens: 150, InteractiveAttempt, InteractiveTotal),
 
         // ── The re-rank family: an envelope plus a per-title share ──
@@ -148,14 +153,23 @@ public sealed class LlmPurposeCatalog(IConfiguration configuration) : ILlmPurpos
         [ApiUsagePurpose.Rerank] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 356),
         [ApiUsagePurpose.RerankFeed] = Search(maxTokens: 100, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(90), perItem: 356),
         [ApiUsagePurpose.RerankPage] = Search(maxTokens: 100, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), perItem: 356),
-        [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 111),
-        [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 111),
+        // Ask and expand send the SAME prompt with the request check appended and a satisfies
+        // verdict added to every entry, so their per-title tail is the feed's plus that field. The
+        // old 111 came from a 20-call Ask sample that missed the tail the 30-call page re-measure
+        // found, and the round-1 eval truncated 2 of ~20 calls at exactly 100 + 111 x n (544 for 4
+        // titles, 766 for 6) — 10%, against a target under 1%. The 6-title retry then finished
+        // inside 1,532, i.e. under 255 a title: the feed's measured p99 (242 a title) exactly.
+        // Feed p99 per title x 1.5 = 356, plus the satisfies field (~7 tokens p99 x 1.5 = 11,
+        // rounded up): 100 + 370 per title. Re-measure owed at 30 calls on the satisfies schema
+        // once an eval key is approved (WS-1 task 3).
+        [ApiUsagePurpose.RerankAsk] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 370),
+        [ApiUsagePurpose.RerankExpand] = Search(maxTokens: 100, InteractiveAttempt, InteractiveTotal, perItem: 370),
 
         // ── Ask Reel v2 (§4.11 stage budgets). Plan and answer are not measurable until WS-2's
         // prompts exist and keep §4.11-derived ceilings; the judge uses the rerank-ask measurement,
-        // its closest existing shape (a satisfies verdict + fit + why per title). ──
+        // its closest existing shape (a satisfies verdict + fit + why per title), and moves with it. ──
         [ApiUsagePurpose.AskPlan] = Search(maxTokens: 600, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
-        [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 111),
+        [ApiUsagePurpose.AskJudge] = Search(maxTokens: 100, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), perItem: 370),
         [ApiUsagePurpose.AskAnswer] = Search(maxTokens: 300, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(25)),
 
         // ── Background writers ──
