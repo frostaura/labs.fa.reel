@@ -160,14 +160,14 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         Assert.Equal(CrossReferenceJobHandler.CrossReferenceRebuildReason, rebuild.TriggerReason);
         Assert.False(FeedBuildPolicy.IsUserForced(rebuild.TriggerReason));
 
-        // Progress carries the count the pill renders, and the completion frame says what happened.
+        // Progress names the pass and counts what it ruled out — with NO denominator: no total and
+        // no percentage, because a pass that can take four days has no honest fraction.
         var progress = Assert.Single(events.Progress);
         Assert.Equal("xref", progress["kind"]);
         Assert.Equal(candidates.Count, progress["current"]);
-        Assert.Equal(candidates.Count, progress["total"]);
-        Assert.Equal(
-            $"Cross-referencing {candidates.Count} titles · first pass · 0 ruled out so far",
-            progress["message"]);
+        Assert.False(progress.ContainsKey("total"));
+        Assert.False(progress.ContainsKey("pct"));
+        Assert.Equal("Cross-referencing · first pass · 0 ruled out so far", progress["message"]);
 
         var completed = Assert.Single(events.Completed);
         Assert.Equal("xref", completed["kind"]);
@@ -417,7 +417,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
     }
 
     [Fact]
-    public async Task A_preserve_build_queues_the_pass_when_work_is_pending_and_leaves_it_alone_when_it_is_not()
+    public async Task Only_a_fresh_build_queues_the_pass_and_a_preserve_build_never_does()
     {
         if (!Fixture.Available)
         {
@@ -435,21 +435,381 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
         // The run happens and finishes. Nothing is judged yet, so there is still work.
         await CompleteCrossReferenceJobsAsync(accountId);
 
-        // Build two: same day, same artifact, no user-forced reason ⇒ Preserve. The pass is queued
-        // again, because a Preserve build means the PAGE did not move, not that the pool did not.
+        // Build two: same day, same artifact, no user-forced reason ⇒ Preserve. Work IS pending,
+        // and the pass is still NOT queued: every delta poll and every save used to queue one, and
+        // on the live table that was a day of passes each paying for a batch the judge then failed.
+        // The next Fresh build (tomorrow, a new model, a manual refresh) picks the work up.
         await RunBuildAsync(accountId);
-        Assert.True(await CrossReferenceQueuedAsync(accountId));
         await AssertLatestBuildWasNotFreshAsync(accountId);
+        Assert.False(await CrossReferenceQueuedAsync(accountId));
 
-        // Now judge everything at the current fingerprint, and build again. With no unjudged work
-        // the anti-join answers no, and nothing is queued — the brake that stops a background pass
-        // from being a nightly no-op job.
+        // A user-forced build is Fresh, and with work pending it queues.
+        await RunBuildAsync(accountId, FeedBuildPolicy.ManualRefreshReason);
+        Assert.True(await CrossReferenceQueuedAsync(accountId));
+
+        // Now judge everything at the current fingerprint, and force another Fresh build. With no
+        // unjudged work the anti-join answers no, and nothing is queued.
         await CompleteCrossReferenceJobsAsync(accountId);
         await RunAsync(accountId, new StubJudge(), new RecordingEventHub());
         await CompleteCrossReferenceJobsAsync(accountId);
 
-        await RunBuildAsync(accountId);
+        await RunBuildAsync(accountId, FeedBuildPolicy.ManualRefreshReason);
         Assert.False(await CrossReferenceQueuedAsync(accountId));
+    }
+
+    [Theory]
+    [InlineData(FeedBuildOutcome.Fresh, null, true)]
+    [InlineData(FeedBuildOutcome.Fresh, "model-trained", true)]
+    [InlineData(FeedBuildOutcome.Fresh, FeedBuildPolicy.ManualRefreshReason, true)]
+    [InlineData(FeedBuildOutcome.Preserve, null, false)]
+    [InlineData(FeedBuildOutcome.Preserve, "delta-sync", false)]
+    [InlineData(FeedBuildOutcome.NoOp, null, false)]
+    [InlineData(FeedBuildOutcome.Skipped, null, false)]
+    [InlineData(FeedBuildOutcome.Fresh, "saved for later", false)]
+    [InlineData(FeedBuildOutcome.Fresh, "not interested", false)]
+    [InlineData(FeedBuildOutcome.Fresh, CrossReferenceJobHandler.CrossReferenceRebuildReason, false)]
+    public void Should_enqueue_is_fresh_and_not_asked_for_by_a_reaction_or_the_last_pass(
+        FeedBuildOutcome outcome, string? reason, bool expected) =>
+        Assert.Equal(expected, CrossReferenceScheduler.ShouldEnqueue(outcome, reason));
+
+    // ── WS-1 task 4: a failed re-rank never reaches the page as model output ─────────────────
+
+    [Fact]
+    public async Task A_truncating_reranker_writes_no_model_labelled_or_invented_why_into_the_feed()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedBuildableAccountAsync();
+        await SeedCandidatesAsync(accountId, 12, embedded: false, scored: false);
+
+        // The real adapter over a provider that truncates every completion: each batch fails after
+        // the client's one 2x retry and every verdict is a labelled fallback with an EMPTY why.
+        var provider = new TruncatingProvider();
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["OPENROUTER_API_KEY"] = "test-key-not-a-real-one" })
+            .Build();
+        var scopeFactory = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions
+            .BuildServiceProvider(new Microsoft.Extensions.DependencyInjection.ServiceCollection())
+            .GetService(typeof(Microsoft.Extensions.DependencyInjection.IServiceScopeFactory)) as Microsoft.Extensions.DependencyInjection.IServiceScopeFactory;
+        var recorder = new FrostAura.Reel.Infrastructure.Telemetry.ApiUsageRecorder(
+            scopeFactory!, NullLogger<FrostAura.Reel.Infrastructure.Telemetry.ApiUsageRecorder>.Instance);
+        var keyless = new ConfigurationBuilder().Build();
+        var agent = new FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchAgent(
+            new HttpClient(provider) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            new FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchInterpreter(
+                new HttpClient(), recorder, keyless, NullLogger<FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchInterpreter>.Instance),
+            recorder,
+            config,
+            NullLogger<FrostAura.Reel.Infrastructure.Adapters.OpenRouterSearchAgent>.Instance);
+
+        await RunBuildAsync(accountId, agent: agent);
+
+        Assert.True(provider.Calls > 0); // the why pass really did ask
+
+        await using var db = Fixture.CreateContext(Scoped(accountId));
+        var whys = await db.FeedItems.Where(i => i.AccountId == accountId).Select(i => i.WhyThisSentence).ToListAsync();
+        Assert.NotEmpty(whys);
+        Assert.DoesNotContain(whys, w => w.Contains("aligned with your taste", StringComparison.OrdinalIgnoreCase));
+        var sources = await db.ExposureEvents.Where(e => e.AccountId == accountId).Select(e => e.WhySource).ToListAsync();
+        Assert.NotEmpty(sources);
+        Assert.DoesNotContain(ExposureWhySource.Llm.Name, sources);
+    }
+
+    /// <summary>Every completion stops at its ceiling.</summary>
+    private sealed class TruncatingProvider : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++;
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                choices = new[] { new { message = new { content = "{\"results\":[" }, finish_reason = "length" } },
+                usage = new { prompt_tokens = 900, completion_tokens = 900 },
+            });
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
+    // ── Fail fast, never retry the deterministic, and the cross-run breaker ──────────────────
+
+    [Fact]
+    public async Task An_unanswered_first_batch_ends_the_run_and_writes_no_progress()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, (CrossReferenceJobHandler.BatchSize * 2) + 10, embedded: false);
+        var judge = new StubJudge { Fail = true, FailWith = AgentFailureKind.Truncated };
+        var events = new RecordingEventHub();
+
+        var (job, error) = await RunCapturingAsync(accountId, judge, events);
+
+        // One paid batch, not the old three: at the same ceiling every later batch truncates too.
+        Assert.Equal(1, judge.Calls);
+        Assert.NotNull(error);
+        Assert.Equal(JobFailureReason.NoAnswer, JobFailureReason.Classify(error!.Message));
+        Assert.Empty(events.Progress);
+        Assert.Empty(events.Completed);
+        Assert.Null(job.ProgressPct);
+        Assert.Null(job.ProgressMessage);
+    }
+
+    [Theory]
+    [InlineData(AgentFailureKind.Truncated, true)]
+    [InlineData(AgentFailureKind.MalformedAnswer, true)]
+    [InlineData(AgentFailureKind.ProviderError, false)]
+    [InlineData(AgentFailureKind.TimedOut, false)]
+    public async Task A_deterministic_failure_is_not_retried_by_the_runner_and_a_transient_one_is(
+        AgentFailureKind failure, bool spendsTheAttemptCap)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+
+        var (job, error) = await RunCapturingAsync(
+            accountId, new StubJudge { Fail = true, FailWith = failure }, new RecordingEventHub(), attemptCount: 1);
+
+        Assert.NotNull(error);
+        Assert.Equal(spendsTheAttemptCap, job.AttemptCount >= JobRunnerLimits.MaxAttempts);
+    }
+
+    [Fact]
+    public async Task Two_fully_failed_runs_turn_the_purpose_off_for_the_day_and_the_third_sends_nothing()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService();
+        var breaker = new CrossReferenceRunBreaker(health);
+        var judge = new StubJudge { Fail = true, FailWith = AgentFailureKind.Truncated };
+
+        var (_, first) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+        Assert.Null(breaker.OpenBreaker);
+        var (_, second) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+        Assert.NotNull(first);
+        Assert.Contains("Off for the rest of the UTC day", second!.Message, StringComparison.Ordinal);
+
+        // The reason is on the status API's reading, as a purpose breaker until the next UTC midnight.
+        var snapshot = health.Current();
+        Assert.Equal(ProviderHealthState.Degraded, snapshot.State);
+        var open = Assert.Single(snapshot.Breakers);
+        Assert.Equal(ApiUsagePurpose.CrossReference, open.Purpose);
+        Assert.Equal(ProviderBreakerReasons.TruncationBreaker, open.ReasonCode);
+        Assert.Equal(DateTime.UtcNow.Date.AddDays(1), open.RetryAt);
+
+        // The third run is paused before it judges anything, and the scheduler queues nothing.
+        var (paused, third) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+        Assert.Null(third);
+        Assert.Equal(2, judge.Calls);
+        Assert.Equal("Cross-reference paused: off for the rest of today after repeated unanswered runs", paused.ProgressMessage);
+        Assert.False(await SchedulerFiresAsync(accountId, breaker: breaker, outcome: FeedBuildOutcome.Fresh));
+    }
+
+    [Fact]
+    public async Task An_answered_batch_resets_the_cross_run_count()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var breaker = new CrossReferenceRunBreaker(new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService());
+
+        await RunCapturingAsync(accountId, new StubJudge { Fail = true, FailWith = AgentFailureKind.Truncated }, new RecordingEventHub(), breaker: breaker);
+        await RunCapturingAsync(accountId, new StubJudge(), new RecordingEventHub(), breaker: breaker);
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        await RunCapturingAsync(accountId, new StubJudge { Fail = true, FailWith = AgentFailureKind.Truncated }, new RecordingEventHub(), breaker: breaker);
+
+        Assert.Null(breaker.OpenBreaker);
+    }
+
+    [Fact]
+    public async Task A_refused_run_lands_on_the_job_as_the_refusal_it_was()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService();
+        var breaker = new CrossReferenceRunBreaker(health);
+        // The adapter's client opens the provider breaker on the 402; the stub stands in for both.
+        var judge = new StubJudge
+        {
+            Fail = true,
+            FailWith = AgentFailureKind.ProviderRefused,
+            Hook = _ =>
+            {
+                health.ReportRefused(ApiProvider.OpenRouter, 402);
+                return Task.CompletedTask;
+            },
+        };
+
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+
+        Assert.Equal(JobFailureReason.PaymentRequired, JobFailureReason.Classify(error!.Message));
+        Assert.True(job.AttemptCount >= JobRunnerLimits.MaxAttempts);
+        // A refusal is not evidence about the model: the cross-run count did not move.
+        health.ReportAnswered(ApiProvider.OpenRouter);
+        Assert.Null(breaker.OpenBreaker);
+    }
+
+    [Theory]
+    [InlineData(AgentFailureKind.ProviderError)]
+    [InlineData(AgentFailureKind.TimedOut)]
+    public async Task Two_runs_lost_to_transient_failures_never_trip_the_cross_run_breaker(AgentFailureKind transient)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // A 5xx or a timeout says nothing about whether the NEXT identical run will truncate. Two of
+        // them — the runner's own retry is the second — used to turn the purpose off for the day.
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var breaker = new CrossReferenceRunBreaker(new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService());
+        var judge = new StubJudge { Fail = true, FailWith = transient };
+
+        var (firstJob, first) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+        var (_, second) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker, attemptCount: 2);
+        var (_, third) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker, attemptCount: 3);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotNull(third);
+        Assert.DoesNotContain("Off for the rest of the UTC day", third!.Message, StringComparison.Ordinal);
+        Assert.Null(breaker.OpenBreaker);
+        Assert.Equal(3, judge.Calls);
+        Assert.True(firstJob.AttemptCount < JobRunnerLimits.MaxAttempts); // transient: the runner may retry
+
+        // The same fixture with a deterministic failure trips on the second run — the contrast.
+        var truncating = new StubJudge { Fail = true, FailWith = AgentFailureKind.Truncated };
+        await RunCapturingAsync(accountId, truncating, new RecordingEventHub(), breaker: breaker);
+        await RunCapturingAsync(accountId, truncating, new RecordingEventHub(), breaker: breaker);
+        Assert.NotNull(breaker.OpenBreaker);
+    }
+
+    [Fact]
+    public async Task A_gate_refusal_on_the_first_batch_is_an_ordinary_budget_stop_not_a_failed_job()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // The handler's old pre-check said yes with a few thousand tokens left; the gate refused the
+        // ~24k-token batch, and the run threw "answered none" (no_answer), forced its attempts to
+        // the cap and was queued again by every Fresh build.
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var breaker = new CrossReferenceRunBreaker(new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService());
+        var judge = new StubJudge { Fail = true, FailWith = AgentFailureKind.BudgetSpent };
+
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub(), breaker: breaker);
+
+        Assert.Null(error);
+        Assert.Equal(1, job.AttemptCount);
+        Assert.Equal("stopped at today's cross-reference ceiling before judging anything", job.ProgressMessage);
+        Assert.Null(breaker.OpenBreaker);
+    }
+
+    [Fact]
+    public async Task A_day_without_a_batchs_worth_of_tokens_stops_before_calling_and_the_scheduler_queues_nothing()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Vary the fixture: the ledger, not the judge, is what says no here. Headroom under one
+        // batch's worst case is a spent day at the gate's own rule.
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        Assert.True(await SchedulerFiresAsync(accountId, outcome: FeedBuildOutcome.Fresh)); // the control
+
+        await using (var ledger = Fixture.CreateContext(new AccountContext()))
+        {
+            ledger.ExternalApiUsages.Add(new ExternalApiUsage
+            {
+                Id = Guid.NewGuid(),
+                Provider = ApiProvider.OpenRouter,
+                Day = DateTime.UtcNow.Date,
+                AccountId = accountId,
+                Model = "test/xref-spent",
+                Purpose = ApiUsagePurpose.CrossReference,
+                CallCount = 10,
+                TokensUsed = CrossReferenceBudget.DefaultDailyTokens - 2_000,
+            });
+            await ledger.SaveChangesAsync();
+        }
+
+        var judge = new StubJudge();
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub());
+
+        Assert.Null(error);
+        Assert.Equal(0, judge.Calls);
+        Assert.Equal("stopped at today's cross-reference ceiling before judging anything", job.ProgressMessage);
+        Assert.False(await SchedulerFiresAsync(accountId, outcome: FeedBuildOutcome.Fresh));
+    }
+
+    [Fact]
+    public async Task A_breaker_that_closes_the_door_mid_run_pauses_the_run_rather_than_failing_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+        var judge = new StubJudge { Fail = true, FailWith = AgentFailureKind.ProviderUnavailable };
+
+        var (job, error) = await RunCapturingAsync(accountId, judge, new RecordingEventHub());
+
+        Assert.Null(error);
+        Assert.Equal(1, job.AttemptCount);
+        Assert.Equal("paused before judging anything: the model provider is not taking calls", job.ProgressMessage);
+    }
+
+    [Fact]
+    public async Task A_run_whose_answers_were_all_unusable_says_so_rather_than_nothing_judgeable()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedCandidatesAsync(accountId, 5, embedded: false);
+
+        var (job, error) = await RunCapturingAsync(accountId, new StubJudge { AnswerWithNothingUsable = true }, new RecordingEventHub());
+
+        Assert.Null(error);
+        Assert.Equal("the judge answered 1 batch(es) but none of its verdicts could be used", job.ProgressMessage);
     }
 
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
@@ -466,9 +826,34 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
             .AddInMemoryCollection(settings.ToDictionary(s => s.Key, s => (string?)s.Value))
             .Build();
 
+    /// <summary>As <see cref="RunAsync"/>, but hands back the job row AND the exception the runner would have caught.</summary>
+    private async Task<(SyncJob Job, Exception? Error)> RunCapturingAsync(
+        Guid accountId, StubJudge judge, RecordingEventHub events, IConfiguration? configuration = null,
+        CrossReferenceRunBreaker? breaker = null, int attemptCount = 1)
+    {
+        var job = new SyncJob
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = JobKind.CrossReference,
+            EnqueuedAt = DateTime.UtcNow,
+            AttemptCount = attemptCount,
+        };
+        try
+        {
+            await RunAsync(accountId, judge, events, configuration, breaker, job);
+            return (job, null);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (job, ex);
+        }
+    }
+
     /// <summary>Runs the handler exactly as the job runner would, and hands back the job row.</summary>
     private async Task<SyncJob> RunAsync(
-        Guid accountId, StubJudge judge, RecordingEventHub events, IConfiguration? configuration = null)
+        Guid accountId, StubJudge judge, RecordingEventHub events, IConfiguration? configuration = null,
+        CrossReferenceRunBreaker? breaker = null, SyncJob? job = null)
     {
         await using var db = Fixture.CreateContext(Scoped(accountId));
         var cache = new MemoryCache(new MemoryCacheOptions());
@@ -486,9 +871,10 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
             judge,
             new FeedRefreshCoordinator(db, NullLogger<FeedRefreshCoordinator>.Instance),
             events,
-            NullLogger<CrossReferenceJobHandler>.Instance);
+            NullLogger<CrossReferenceJobHandler>.Instance,
+            breaker);
 
-        var job = new SyncJob
+        job ??= new SyncJob
         {
             Id = Guid.NewGuid(),
             AccountId = accountId,
@@ -500,7 +886,9 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
     }
 
     /// <summary>Would the enqueue gate fire right now? The same three brakes the build asks through.</summary>
-    private async Task<bool> SchedulerFiresAsync(Guid accountId, string? buildTriggerReason = null)
+    private async Task<bool> SchedulerFiresAsync(
+        Guid accountId, string? buildTriggerReason = null, CrossReferenceRunBreaker? breaker = null,
+        FeedBuildOutcome? outcome = null)
     {
         await using var db = Fixture.CreateContext(Scoped(accountId));
         var scheduler = new CrossReferenceScheduler(
@@ -509,9 +897,10 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
             new CrossReferenceService(db, NullLogger<CrossReferenceService>.Instance),
             new CrossReferenceBudget(db, Config()),
             new StubJudge(),
-            NullLogger<CrossReferenceScheduler>.Instance);
+            NullLogger<CrossReferenceScheduler>.Instance,
+            breaker);
         return await scheduler.EnqueueIfWorkPendingAsync(
-            accountId, await ProfileHashAsync(accountId), DateTime.UtcNow, CancellationToken.None, buildTriggerReason);
+            accountId, await ProfileHashAsync(accountId), DateTime.UtcNow, CancellationToken.None, buildTriggerReason, outcome);
     }
 
     private async Task<string> ProfileHashAsync(Guid accountId)
@@ -779,7 +1168,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
     }
 
     /// <summary>Runs the real feed build, with the cross-reference scheduler wired in as DI supplies it.</summary>
-    private async Task RunBuildAsync(Guid accountId)
+    private async Task RunBuildAsync(Guid accountId, string? triggerReason = null, ISearchAgent? agent = null)
     {
         await using var db = Fixture.CreateContext(Scoped(accountId));
         var cache = new MemoryCache(new MemoryCacheOptions());
@@ -800,7 +1189,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
                 db, features, new FastTreeModelEngine(), cache, NullLogger<OnlineResidualModel>.Instance),
             new RatingCalibrationService(db, cache),
             dislikes,
-            new UnavailableSearchAgent(),
+            agent ?? new UnavailableSearchAgent(),
             new TasteFactsBuilder(db, dislikes, features, cache),
             new PersonalisationContext(db, dislikes),
             cache,
@@ -822,6 +1211,7 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
                 AccountId = accountId,
                 Kind = JobKind.BuildFeed,
                 EnqueuedAt = DateTime.UtcNow,
+                TriggerReason = triggerReason,
             },
             CancellationToken.None);
     }
@@ -838,6 +1228,9 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
 
         public bool Fail { get; init; }
 
+        /// <summary>Why a failing batch failed, as the real adapter reports it (null: an older double that does not say).</summary>
+        public AgentFailureKind? FailWith { get; init; }
+
         /// <summary>Set to bill one ledger call per batch, the way the real adapter's finally does.</summary>
         public Guid? LedgerAccountId { get; init; }
 
@@ -845,6 +1238,9 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
 
         /// <summary>Runs after the call is counted, so a test can move the world mid-run.</summary>
         public Func<int, Task>? Hook { get; init; }
+
+        /// <summary>Answer every batch, but with no usable entry — every one rejected by the adapter's validation.</summary>
+        public bool AnswerWithNothingUsable { get; init; }
 
         public bool IsAvailable => true;
 
@@ -891,7 +1287,12 @@ public class CrossReferenceJobTests(PostgresFixture fixture) : EmbeddedCatalogTe
             {
                 // No rows, not Failed rows — absence is what the resume anti-join reads as "still
                 // to do".
-                return new CrossReferenceBatchResult([], Succeeded: false, null, null, 0);
+                return new CrossReferenceBatchResult([], Succeeded: false, null, null, 0, FailWith);
+            }
+
+            if (AnswerWithNothingUsable)
+            {
+                return new CrossReferenceBatchResult([], Succeeded: true, 100, 20, candidates.Count);
             }
 
             var entries = candidates

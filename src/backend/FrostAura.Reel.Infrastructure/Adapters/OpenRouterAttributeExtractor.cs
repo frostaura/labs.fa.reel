@@ -1,13 +1,11 @@
-using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Infrastructure.Llm;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -39,9 +37,25 @@ public class OpenRouterAttributeExtractor(
     ILogger<OpenRouterAttributeExtractor> logger,
     // Optional by design: the typed HttpClient is transient and is constructed inside a scope in
     // every real code path, but the adapter must still be `new`-able in tests without a scope.
-    IAccountContext? accountContext = null)
+    IAccountContext? accountContext = null,
+    ILlmPurposeCatalog? purposes = null,
+    ModelCapabilities? capabilities = null,
+    IProviderHealth? health = null,
+    ILlmCallGate? gate = null)
     : ITitleAttributeExtractor
 {
+    /// <summary>
+    /// The shared transport — and for extraction a TRANSPORT-ONLY move (WS-1 task 2, FD-1 default).
+    /// The purpose's options send no reasoning parameter, no transient retry and no 2× length retry;
+    /// every request body is byte-identical to the pre-migration adapter's (pinned by
+    /// <c>ExtractionRequestPinTests</c>), and the cache key — <see cref="ModelId"/> and
+    /// <see cref="Version"/> — does not move, so nothing is re-extracted. What it gains is
+    /// transport: a dropped body after a 200 is retried once, a 401/402/403 opens the provider
+    /// breaker, and the per-purpose timeouts replace the 10-second resilience defaults.
+    /// </summary>
+    private readonly OpenRouterChatClient _chat = new(
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
@@ -83,23 +97,17 @@ public class OpenRouterAttributeExtractor(
 
     private const int CompactResponseTokenBudget = 900;
 
-    /// <summary>
-    /// Strict <c>json_schema</c> is what actually enforces "every scalar present, numeric, 0–1"
-    /// — prose instructions do not. Not every model or provider route accepts it, so the first
-    /// rejection downgrades this instance to <c>json_object</c> for the rest of its life and the
-    /// parser stays the backstop. Written once from a request thread, read from many.
-    /// </summary>
-    private volatile bool _strictSchemaSupported = true;
-
     private string? ApiKey => configuration["OPENROUTER_API_KEY"] is { Length: > 0 } key ? key : null;
 
     private bool StubMode => ApiKey is null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
     public bool IsAvailable => ApiKey is not null || configuration.GetValue("TestHelpers:ModelStubMode", false);
 
+    // The catalog's extraction rule is this property's old body verbatim (a blank OPENROUTER_MODEL
+    // is used as-is) and takes no per-purpose override: the model is half the extraction key.
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
-        : configuration["OPENROUTER_MODEL"] ?? "openai/gpt-6-luna";
+        : _chat.Options(ApiUsagePurpose.ExtractAttributes).Model;
 
     /// <summary>
     /// The prompt generation stamped on every row this adapter writes. Bump it whenever a change
@@ -223,103 +231,51 @@ public class OpenRouterAttributeExtractor(
     private async Task<AttemptOutcome> AttemptAsync(
         TitleAttributeInput input, string? repairHint, bool compact, CancellationToken ct)
     {
-        var strict = _strictSchemaSupported;
-
-        // Recorded in a finally, AFTER the response: the counts live in the response body, so the
-        // old record-then-send ordering could never see them. The finally keeps every HTTP attempt
-        // counted — including the ones that fail before a body exists, which then read as
-        // "unknown tokens" rather than "free".
-        OpenRouterUsage? usage = null;
-        try
-        {
-            using var request = BuildRequest(input, repairHint, compact, strict);
-            using var response = await httpClient.SendAsync(request, ct);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                if (strict && IsStrictSchemaRejection(response.StatusCode, body))
-                {
-                    // Graceful fallback: this model/route does not do structured outputs. Drop to
-                    // json_object permanently for this instance and re-issue immediately — the
-                    // recursive call has strict=false, so it cannot loop back into this branch.
-                    _strictSchemaSupported = false;
-                    logger.LogWarning(
-                        "OpenRouter rejected strict json_schema for {Model} (HTTP {Status}); falling back to json_object "
-                        + "for the remainder of this process. Field validation now rests entirely on the parser.",
-                        ModelId, (int)response.StatusCode);
-                    return await AttemptAsync(input, repairHint, compact, ct);
-                }
-
-                logger.LogWarning(
-                    "Attribute extraction HTTP {Status} for {Title} ({TitleId}).",
-                    (int)response.StatusCode, input.Name, input.TitleId);
-                return AttemptOutcome.Failed(ExtractionFailure.Transport, [$"HTTP {(int)response.StatusCode}"]);
-            }
-
-            var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
-            usage = dto?.Usage;
-            var choice = dto?.Choices?.FirstOrDefault();
-            var content = choice?.Message?.Content;
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                return AttemptOutcome.Failed(ExtractionFailure.Empty, ["empty completion"]);
-            }
-
-            // A "length" finish means the object was cut at a token boundary. Even when the
-            // fragment happens to parse, its trailing fields are missing rather than answered.
-            if (string.Equals(choice?.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
-            {
-                return AttemptOutcome.Failed(ExtractionFailure.Truncated, ["completion hit the token limit"]);
-            }
-
-            var (attributes, problems) = Parse(content);
-            return attributes is null
-                ? AttemptOutcome.Failed(ExtractionFailure.Malformed, problems)
-                : new AttemptOutcome(attributes, ExtractionFailure.None, problems);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Attribute extraction failed for {Title} ({TitleId}).", input.Name, input.TitleId);
-            return AttemptOutcome.Failed(ExtractionFailure.Transport, [ex.GetType().Name]);
-        }
-        finally
-        {
-            usageRecorder.Record(
-                ApiProvider.OpenRouter,
-                ApiUsagePurpose.ExtractAttributes,
-                ModelId,
-                accountContext?.AccountId,
-                usage?.PromptTokens,
-                usage?.CompletionTokens);
-        }
-    }
-
-    private HttpRequestMessage BuildRequest(TitleAttributeInput input, string? repairHint, bool compact, bool strict)
-    {
-        var messages = new List<object>
-        {
-            new { role = "system", content = SystemPrompt },
-            new { role = "user", content = UserPrompt(input, compact) },
-        };
+        List<LlmMessage> messages = [LlmMessage.System(SystemPrompt), LlmMessage.User(UserPrompt(input, compact))];
         if (repairHint is not null)
         {
-            messages.Add(new { role = "system", content = repairHint });
+            messages.Add(LlmMessage.System(repairHint));
         }
 
-        var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
+        // The schema form always; the client sends it while the model accepts strict mode and
+        // falls back to json_object (byte-identical to this adapter's old fallback) after a
+        // rejection. The ceiling is passed explicitly so no purpose setting can move it.
+        var result = await _chat.CompleteAsync(
+            new LlmChatRequest(
+                ApiUsagePurpose.ExtractAttributes,
+                messages,
+                ResponseFormat(strict: true),
+                MaxTokens: compact ? CompactResponseTokenBudget : ResponseTokenBudget),
+            ct);
+
+        // Empty is checked BEFORE length, exactly as before: an empty cut-off is an empty answer.
+        var answered = result.Failure is null or LlmCallFailure.Truncated or LlmCallFailure.EmptyAnswer;
+        if (answered && string.IsNullOrWhiteSpace(result.Content))
         {
-            Content = JsonContent.Create(new
-            {
-                model = ModelId,
-                temperature = 0,
-                max_tokens = compact ? CompactResponseTokenBudget : ResponseTokenBudget,
-                response_format = ResponseFormat(strict),
-                messages = messages.ToArray(),
-            }, options: JsonOptions),
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
-        return request;
+            return AttemptOutcome.Failed(ExtractionFailure.Empty, ["empty completion"]);
+        }
+
+        if (result.Failure == LlmCallFailure.Truncated)
+        {
+            // A "length" finish means the object was cut at a token boundary. Even when the
+            // fragment happens to parse, its trailing fields are missing rather than answered.
+            return AttemptOutcome.Failed(ExtractionFailure.Truncated, ["completion hit the token limit"]);
+        }
+
+        if (result.Failure is { } failure)
+        {
+            logger.LogWarning(
+                "Attribute extraction {Failure} (HTTP {Status}) for {Title} ({TitleId}).",
+                failure, result.HttpStatus, input.Name, input.TitleId);
+            return AttemptOutcome.Failed(
+                ExtractionFailure.Transport,
+                [result.HttpStatus is { } status ? $"HTTP {status}" : failure.ToString()]);
+        }
+
+        var (attributes, problems) = Parse(result.Content!);
+        return attributes is null
+            ? AttemptOutcome.Failed(ExtractionFailure.Malformed, problems)
+            : new AttemptOutcome(attributes, ExtractionFailure.None, problems);
     }
 
     /// <summary>
@@ -368,23 +324,6 @@ public class OpenRouterAttributeExtractor(
                 },
             },
         };
-    }
-
-    /// <summary>
-    /// Providers that do not implement structured outputs reject the request outright rather than
-    /// degrading. Match narrowly — a 400 about anything else must stay a plain transport failure.
-    /// </summary>
-    private static bool IsStrictSchemaRejection(HttpStatusCode status, string body)
-    {
-        if (status is not (HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity
-            or HttpStatusCode.NotImplemented or HttpStatusCode.NotFound))
-        {
-            return false;
-        }
-
-        return body.Contains("json_schema", StringComparison.OrdinalIgnoreCase)
-            || body.Contains("response_format", StringComparison.OrdinalIgnoreCase)
-            || body.Contains("structured output", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -630,10 +569,4 @@ public class OpenRouterAttributeExtractor(
         public static AttemptOutcome Failed(ExtractionFailure failure, IReadOnlyList<string> problems) =>
             new(null, failure, problems);
     }
-
-    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
-
-    private sealed record ChatChoice(ChatMessage? Message, [property: JsonPropertyName("finish_reason")] string? FinishReason);
-
-    private sealed record ChatMessage(string? Content);
 }

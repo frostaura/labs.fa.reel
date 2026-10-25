@@ -64,10 +64,13 @@ public sealed class TasteNarrativeService(
         var current = await context.CurrentAsync(accountId, ct);
         var built = await facts.BuildAsync(accountId, taste, now, ct);
 
+        // Current means the same fingerprint, prompt generation AND model-and-effort: a narrative
+        // written by another model or at another effort is rewritten once, carrying the edit.
         if (!force
             && current is not null
             && current.ProfileHash == built.ProfileHash
-            && current.PromptVersion == writer.NarrativePromptVersion)
+            && current.PromptVersion == writer.NarrativePromptVersion
+            && current.ModelId == writer.NarrativeCacheSalt)
         {
             return new Result(NarrativeOutcome.UpToDate, current);
         }
@@ -109,7 +112,8 @@ public sealed class TasteNarrativeService(
             EditedAt = force ? null : current?.EditedAt,
             FactsJson = JsonSerializer.Serialize(built.Facts, JsonOptions),
             RatingsCount = built.Facts.RatingsCount,
-            ModelId = draft.ModelId,
+            // The model AND the effort that actually wrote it (read after the call; see the check above).
+            ModelId = writer.NarrativeCacheSalt,
             PromptVersion = writer.NarrativePromptVersion,
             PromptTokens = draft.PromptTokens,
             CompletionTokens = draft.CompletionTokens,

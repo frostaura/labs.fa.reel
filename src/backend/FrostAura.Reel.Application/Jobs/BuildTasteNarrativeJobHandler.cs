@@ -24,7 +24,9 @@ public sealed class BuildTasteNarrativeJobHandler(
     IReelDbContext db,
     FeatureVectorBuilder featureBuilder,
     TasteNarrativeService narratives,
-    ILogger<BuildTasteNarrativeJobHandler> logger) : IJobHandler
+    ILogger<BuildTasteNarrativeJobHandler> logger,
+    // Optional so a hand-built handler (a test) needs no breaker; DI always supplies it.
+    Llm.IProviderHealth? health = null) : IJobHandler
 {
     /// <summary>Set on the job's cursor by the regenerate action, which spends even when up to date.</summary>
     public const string ForceCursor = """{"Force":true}""";
@@ -36,6 +38,27 @@ public sealed class BuildTasteNarrativeJobHandler(
         var accountId = job.AccountId ?? throw new InvalidOperationException("BuildTasteNarrative requires an account.");
         var force = job.CursorJson is { Length: > 0 } cursor
             && cursor.Contains("\"Force\":true", StringComparison.OrdinalIgnoreCase);
+
+        if (health?.OpenBreakerFor(Domain.Sync.ApiProvider.OpenRouter, Domain.Sync.ApiUsagePurpose.TasteNarrative) is { } open)
+        {
+            if (force)
+            {
+                // The user pressed "regenerate". Finishing this as a quiet success would consume
+                // their request and show nothing for it; failing it says so, with the refusal's
+                // status line first so the status API names the cause (payment_required, …). The
+                // regenerate endpoint refuses up front while the breaker is open — this is the job
+                // that was already queued when it opened.
+                throw new InvalidOperationException(
+                    $"{RefusalStatusLine(open.ReasonCode)}The taste profile was not rewritten: "
+                    + $"{Llm.ProviderBreakerReasons.Describe(open.ReasonCode)}. Ask again once it is back.");
+            }
+
+            // Paused, not failed — see PersonaliseTitlesJobHandler. Nothing is lost: the next build
+            // that sees the fingerprint move queues it again, and so does the weekly pass.
+            job.ProgressMessage = $"Taste profile paused: {Llm.ProviderBreakerReasons.Describe(open.ReasonCode)}";
+            await db.SaveChangesAsync(ct);
+            return;
+        }
 
         job.ProgressMessage = "Reading your ratings";
         await db.SaveChangesAsync(ct);
@@ -57,4 +80,13 @@ public sealed class BuildTasteNarrativeJobHandler(
         logger.LogInformation(
             "Taste narrative job for {AccountId} finished: {Outcome}.", accountId, result.Outcome);
     }
+
+    /// <summary>The status line the job-failure classifier reads a refusal from, or nothing for a non-refusal breaker.</summary>
+    private static string RefusalStatusLine(string reasonCode) => reasonCode switch
+    {
+        Llm.ProviderBreakerReasons.Unauthorized => "HTTP 401 Unauthorized — ",
+        Llm.ProviderBreakerReasons.PaymentRequired => "HTTP 402 Payment Required — ",
+        Llm.ProviderBreakerReasons.Forbidden => "HTTP 403 Forbidden — ",
+        _ => string.Empty,
+    };
 }

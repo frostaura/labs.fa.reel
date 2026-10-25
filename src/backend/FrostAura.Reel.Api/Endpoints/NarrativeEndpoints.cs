@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Lens;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
@@ -113,11 +114,26 @@ public static class NarrativeEndpoints
         // what clears the user's edit, because asking for a rewrite is asking to see what the
         // product would say without it.
         group.MapPost("/regenerate", async (
-            IReelDbContext db, IAccountContext accountContext, ILensWriter writer, CancellationToken ct) =>
+            IReelDbContext db, IAccountContext accountContext, ILensWriter writer, IProviderHealth health, CancellationToken ct) =>
         {
             if (!writer.IsAvailable)
             {
                 return Results.BadRequest(new { error = "No writer is configured, so a profile cannot be written." });
+            }
+
+            // Refused up front while the provider breaker holds calls back: a queued job would
+            // either pause (consuming the request silently) or fail on claim. Saying so now, with
+            // the breaker's own code and retry time, is the honest answer to "regenerate".
+            if (health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.TasteNarrative) is { } open)
+            {
+                return Results.Json(
+                    new
+                    {
+                        error = $"The taste profile cannot be rewritten right now: {ProviderBreakerReasons.Describe(open.ReasonCode)}.",
+                        reason = open.ReasonCode,
+                        retryAt = open.RetryAt,
+                    },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
             var accountId = accountContext.AccountId!.Value;

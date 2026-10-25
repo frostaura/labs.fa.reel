@@ -1,6 +1,9 @@
 using FrostAura.Reel.Application.Jobs;
+using FrostAura.Reel.Application.Llm;
+using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Infrastructure.Adapters;
+using FrostAura.Reel.Infrastructure.Llm;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -28,66 +31,28 @@ public static partial class DependencyInjection
             client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
         }).AddStandardResilienceHandler();
 
-        services.AddHttpClient<ITitleAttributeExtractor, OpenRouterAttributeExtractor>(client =>
-        {
-            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
-            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
-            client.Timeout = TimeSpan.FromSeconds(60); // chat completions run longer than embeddings
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-        }).AddStandardResilienceHandler();
+        // ── The LLM platform (WS-1) ────────────────────────────────────────────────────────
+        // Per-purpose bounds, the per-model capability table, the provider breakers (which are
+        // also the status API's provider-health reading — registered here, ahead of the jobs
+        // partial's TryAdd fallback, so it wins), and the reserve-before-call budget gate. All
+        // singletons: each holds process-wide state that every adapter instance must share.
+        services.AddSingleton<ILlmPurposeCatalog, LlmPurposeCatalog>();
+        services.AddSingleton(sp => new ModelCapabilities(sp.GetRequiredService<IConfiguration>()));
+        services.AddSingleton<ProviderHealthService>();
+        services.AddSingleton<IProviderHealth>(sp => sp.GetRequiredService<ProviderHealthService>());
+        services.AddSingleton<IProviderHealthReader>(sp => sp.GetRequiredService<ProviderHealthService>());
+        services.AddSingleton<ILlmCallGate, LlmCallGate>();
 
-        services.AddHttpClient<ISearchQueryInterpreter, OpenRouterSearchInterpreter>(client =>
-        {
-            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
-            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
-            client.Timeout = TimeSpan.FromSeconds(60);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-        }).AddStandardResilienceHandler();
-
-        services.AddHttpClient<ISearchAgent, OpenRouterSearchAgent>(client =>
-        {
-            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
-            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
-            client.Timeout = TimeSpan.FromSeconds(60);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-        }).AddStandardResilienceHandler(o =>
-        {
-            // The ONE client a user sits and waits on, so the budget is stated rather than
-            // defaulted. The default is 3 attempts at 10s inside 30s total; here a slow-but-alive
-            // completion was being killed at 10s and then bought twice more, tripling the spend on
-            // a turn that was going to succeed. ONE retry, because a chat completion that failed
-            // has already been paid for and an identical re-ask is a second bill, not a cheaper
-            // one. 25s per attempt is above the observed p99 for these two calls; 55s total leaves
-            // room for exactly one retry and still lands inside the client's own 60s cap.
-            // CircuitBreaker sampling must stay >= 2x the attempt timeout or the validator throws
-            // at startup.
-            o.Retry.MaxRetryAttempts = 1;
-            o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(25);
-            o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(55);
-            o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(50);
-        });
-
-        // The cross-reference judge runs a 60-title batch against a strict schema — the longest
-        // single chat call in the product at 20-35s observed, so it gets the lens writer's ceiling
-        // rather than the 60s the smaller calls use.
-        services.AddHttpClient<Domain.Ports.ICrossReferenceJudge, OpenRouterCrossReferenceJudge>(client =>
-        {
-            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
-            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
-            client.Timeout = TimeSpan.FromSeconds(90);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-        }).AddStandardResilienceHandler();
-
-        // The lens writer runs longer than the other chat calls: a narrative is ~10 sentences and a
-        // lens is five to ten times a why-line's output tokens, so the transport cap has to sit
-        // above the callers' own budgets rather than pre-empting them.
-        services.AddHttpClient<Domain.Lens.ILensWriter, OpenRouterLensWriter>(client =>
-        {
-            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
-            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
-            client.Timeout = TimeSpan.FromSeconds(90);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-        }).AddStandardResilienceHandler();
+        // Every chat adapter goes through OpenRouterChatClient, which owns retries and the per-purpose
+        // attempt/total timeouts. So these typed clients deliberately carry NO standard resilience
+        // handler: its 10-second attempt timeout killed slow-but-alive completions and its retries
+        // bought them again (K-2), and two retry layers would multiply. The HttpClient timeout is
+        // only a backstop above the longest purpose's total budget.
+        AddOpenRouterChatClient<ITitleAttributeExtractor, OpenRouterAttributeExtractor>(services, configuration);
+        AddOpenRouterChatClient<ISearchQueryInterpreter, OpenRouterSearchInterpreter>(services, configuration);
+        AddOpenRouterChatClient<ISearchAgent, OpenRouterSearchAgent>(services, configuration);
+        AddOpenRouterChatClient<Domain.Ports.ICrossReferenceJudge, OpenRouterCrossReferenceJudge>(services, configuration);
+        AddOpenRouterChatClient<Domain.Lens.ILensWriter, OpenRouterLensWriter>(services, configuration);
 
         // ── "Through your lens" ────────────────────────────────────────────────────────────
         services.AddScoped<Application.Lens.LensBudget>();
@@ -111,6 +76,8 @@ public static partial class DependencyInjection
         // The enqueue gate the feed build asks before queuing a pass. Scoped so the job it adds
         // lands on the BUILD's tracked context and commits with the build's own writes.
         services.AddScoped<Application.CrossReference.CrossReferenceScheduler>();
+        // The cross-run breaker: process-wide, because the runs it counts are separate scopes.
+        services.AddSingleton<Application.CrossReference.CrossReferenceRunBreaker>();
         // The read side of the same table, shared by the feed build and both read-path serves so
         // the three cannot disagree about which prompt generation or which fingerprint is current.
         services.AddScoped<Application.CrossReference.CrossReferenceFactors>();
@@ -126,4 +93,18 @@ public static partial class DependencyInjection
 
         return services;
     }
+
+    /// <summary>The transport backstop for every chat adapter: above the longest purpose's total budget.</summary>
+    private static readonly TimeSpan ChatTransportBackstop = TimeSpan.FromMinutes(5);
+
+    private static void AddOpenRouterChatClient<TClient, TImplementation>(IServiceCollection services, IConfiguration configuration)
+        where TClient : class
+        where TImplementation : class, TClient =>
+        services.AddHttpClient<TClient, TImplementation>(client =>
+        {
+            var baseUrl = configuration["OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1";
+            client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+            client.Timeout = ChatTransportBackstop;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
+        });
 }

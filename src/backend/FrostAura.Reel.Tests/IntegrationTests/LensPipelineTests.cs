@@ -2,6 +2,7 @@ using System.Text.Json;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
+using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -34,6 +35,104 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 [Collection("postgres")]
 public class LensPipelineTests(PostgresFixture fixture)
 {
+    [Fact]
+    public async Task Behind_an_open_provider_breaker_the_lens_and_narrative_jobs_pause_without_spending()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // WS-1 task 2/6: "LLM job kinds paused". The breaker is the provider's (a 402); both jobs
+        // stop before reading anything, say why, and finish rather than fail — the status API
+        // already carries the breaker, and a red job per build would be the same news twice.
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService();
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        await using var db = fixture.CreateContext(new AccountContext());
+        var lens = new PersonaliseTitlesJobHandler(db, null!, null!, null!, NullLogger<PersonaliseTitlesJobHandler>.Instance, health);
+        var narrative = new BuildTasteNarrativeJobHandler(db, null!, null!, NullLogger<BuildTasteNarrativeJobHandler>.Instance, health);
+        var lensJob = new SyncJob { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Kind = JobKind.PersonaliseTitles };
+        var narrativeJob = new SyncJob { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Kind = JobKind.BuildTasteNarrative };
+
+        await lens.ExecuteAsync(lensJob, CancellationToken.None);
+        await narrative.ExecuteAsync(narrativeJob, CancellationToken.None);
+
+        // Plain words, not the status API's code: a user reads this line in the pill.
+        Assert.Equal("Lens paused: the model provider account is out of credit", lensJob.ProgressMessage);
+        Assert.Equal("Taste profile paused: the model provider account is out of credit", narrativeJob.ProgressMessage);
+    }
+
+    [Theory]
+    [InlineData(402, JobFailureReason.PaymentRequired)]
+    [InlineData(401, JobFailureReason.Unauthorized)]
+    public async Task A_forced_regenerate_behind_an_open_breaker_fails_visibly_instead_of_being_consumed(
+        int status, string reason)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The user pressed "regenerate" and the job was already queued when the breaker opened. A
+        // quiet "paused" success consumed their request with nothing to show for it; the job now
+        // fails, naming the refusal, so the status API and the pill say what happened.
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService();
+        health.ReportRefused(ApiProvider.OpenRouter, status);
+        await using var db = fixture.CreateContext(new AccountContext());
+        var narrative = new BuildTasteNarrativeJobHandler(db, null!, null!, NullLogger<BuildTasteNarrativeJobHandler>.Instance, health);
+        var forced = new SyncJob
+        {
+            Id = Guid.NewGuid(),
+            AccountId = Guid.NewGuid(),
+            Kind = JobKind.BuildTasteNarrative,
+            CursorJson = BuildTasteNarrativeJobHandler.ForceCursor,
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => narrative.ExecuteAsync(forced, CancellationToken.None));
+        Assert.Equal(reason, JobFailureReason.Classify(error.Message));
+        Assert.Contains("not rewritten", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Past_the_cool_off_a_background_job_goes_ahead_and_becomes_the_probe()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The breaker is half-open: no probe is out, so the job is NOT paused — it proceeds, and its
+        // first call would take the probe slot. Paused-for-ever was the reviewers' "background work
+        // never half-opens the breaker".
+        var clock = new ManualClock();
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService(clock: clock);
+        health.ReportRefused(ApiProvider.OpenRouter, 402);
+        clock.Advance(FrostAura.Reel.Infrastructure.Llm.ProviderHealthService.CoolOff + TimeSpan.FromSeconds(1));
+
+        var accountId = await SeedAccountAsync();
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var handler = new BuildTasteNarrativeJobHandler(
+            db, deps.Features, deps.Narratives, NullLogger<BuildTasteNarrativeJobHandler>.Instance, health);
+        var job = new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.BuildTasteNarrative, EnqueuedAt = DateTime.UtcNow };
+        db.SyncJobs.Add(job);
+        await db.SaveChangesAsync();
+
+        await handler.ExecuteAsync(job, CancellationToken.None);
+
+        Assert.StartsWith("Taste profile rewritten", job.ProgressMessage, StringComparison.Ordinal);
+        await CompleteAsync(db, job);
+    }
+
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset _now = new(2026, 10, 24, 12, 0, 0, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>Stub mode on, and no key — the same configuration a keyless install runs.</summary>
@@ -446,6 +545,100 @@ public class LensPipelineTests(PostgresFixture fixture)
         var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
         Assert.Equal(LensStatus.Rejected, row.Status);
         Assert.Equal(LensRejectionReasons.UserReportedSpoiler, row.RejectionReason);
+    }
+
+    // ── Model and effort are part of the key (WS-1 task 1) ─────────────────────────────────
+
+    [Fact]
+    public async Task A_note_from_another_model_or_effort_is_stale_and_is_rewritten_in_place()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var built = await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default);
+        await deps.Lens.ResolveOrGenerateAsync(accountId, titleId, taste, built.ProfileHash, default);
+
+        // The same (hash, prompt) written by a different model-and-effort — what every pre-WS-1
+        // row looks like (model id only, no effort).
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        var currentSalt = deps.Lens.CacheSalt;
+        row.ModelId = "openai/gpt-6-luna";
+        await db.SaveChangesAsync();
+
+        var resolved = await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default);
+        Assert.Equal(LensSource.Stale, resolved.Source);
+        Assert.NotNull(resolved.Note); // old prose beats none while it is rewritten
+
+        var outcome = await deps.Lens.GenerateForJobAsync(accountId, taste, built.ProfileHash, [titleId], default);
+        Assert.Equal(1, outcome.Written);
+
+        var rows = await db.TitleLensCopies.Where(c => c.AccountId == accountId && c.TitleId == titleId).ToListAsync();
+        var only = Assert.Single(rows); // rewritten in place: the unique key is (hash, prompt)
+        Assert.Equal(currentSalt, only.ModelId);
+        Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default)).Source);
+    }
+
+    [Fact]
+    public async Task A_spoiler_report_stands_whatever_model_asks_again()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Soldado", 2018);
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var built = await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default);
+        await deps.Lens.ResolveOrGenerateAsync(accountId, titleId, taste, built.ProfileHash, default);
+        await deps.Lens.ReportSpoiledAsync(accountId, titleId, default);
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        row.ModelId = "openai/some-older-model";
+        await db.SaveChangesAsync();
+
+        var outcome = await deps.Lens.GenerateForJobAsync(accountId, taste, built.ProfileHash, [titleId], default);
+
+        Assert.Equal(0, outcome.Written);
+        var after = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        Assert.Equal(LensRejectionReasons.UserReportedSpoiler, after.RejectionReason);
+    }
+
+    [Fact]
+    public async Task A_narrative_from_another_model_or_effort_is_rewritten_once_and_keeps_the_edit()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        await RunNarrativeAsync(db, deps, accountId);
+        await deps.Narratives.SaveEditAsync(accountId, "My own words.", DateTime.UtcNow, default);
+
+        var current = await db.AccountTasteNarratives.Where(n => n.AccountId == accountId).OrderByDescending(n => n.Version).FirstAsync();
+        current.ModelId = "openai/gpt-6-luna";
+        await db.SaveChangesAsync();
+
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var rewritten = await deps.Narratives.WriteAsync(accountId, taste, DateTime.UtcNow, force: false, default);
+        Assert.Equal(NarrativeOutcome.Written, rewritten.Outcome);
+        Assert.Equal("My own words.", rewritten.Narrative!.EditedText);
+
+        var again = await deps.Narratives.WriteAsync(accountId, taste, DateTime.UtcNow, force: false, default);
+        Assert.Equal(NarrativeOutcome.UpToDate, again.Outcome);
     }
 
     // ── Tenancy ─────────────────────────────────────────────────────────────────────────────

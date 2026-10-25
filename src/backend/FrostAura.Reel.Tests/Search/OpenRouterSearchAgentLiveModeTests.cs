@@ -73,7 +73,7 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
-    public async Task A_third_person_why_is_replaced_with_the_stub_sentence_keeping_the_fit()
+    public async Task A_third_person_why_is_dropped_keeping_the_model_fit()
     {
         // Two leaking sentences ("their", "the user's") and one clean second-person line.
         var payload = $$"""
@@ -87,12 +87,19 @@ public class OpenRouterSearchAgentLiveModeTests
 
         var results = await agent.RerankBatchAsync(Titles(), "something tense", "likes thrillers");
 
-        // The model's fit survives; only the leaking sentence is swapped for the stub's line.
+        // The model's fit survives; the leaking sentence is DROPPED, and nothing is invented in its
+        // place — the consumer shows its own deterministic line, labelled as what it is.
         Assert.Equal(0.91d, results[0].Fit, 3);
-        Assert.Equal("A thriller pick aligned with your taste.", results[0].Why);
+        Assert.Equal(ResultSource.Llm, results[0].FitSource);
+        Assert.Equal(string.Empty, results[0].Why);
+        Assert.Equal(ResultSource.Fallback, results[0].WhySource);
+        Assert.Null(results[0].ModelWhy);
+        Assert.Equal(0.91d, results[0].ModelFit);
         Assert.Equal(0.42d, results[1].Fit, 3);
-        Assert.Equal("A drama pick aligned with your taste.", results[1].Why);
+        Assert.Equal(string.Empty, results[1].Why);
         Assert.Equal("A tense pick that fits your taste", results[2].Why);
+        Assert.Equal(ResultSource.Llm, results[2].WhySource);
+        Assert.DoesNotContain(results, r => r.Why.Contains("aligned with your taste", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -134,7 +141,7 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
-    public async Task A_because_you_loved_opener_is_replaced_with_the_stub_sentence_keeping_the_fit()
+    public async Task A_because_you_loved_opener_is_dropped_keeping_the_model_fit()
     {
         // The exact vague template the founder rejected — the model must not smuggle it back in.
         var payload = $$"""
@@ -148,7 +155,8 @@ public class OpenRouterSearchAgentLiveModeTests
         var results = await agent.RerankBatchAsync(Titles(), "q", "taste", anchorName: "Hokum");
 
         Assert.Equal(0.91d, results[0].Fit, 3); // fit survives; only the sentence is discarded
-        Assert.Equal("A thriller pick aligned with your taste.", results[0].Why);
+        Assert.Equal(string.Empty, results[0].Why);
+        Assert.Equal(ResultSource.Fallback, results[0].WhySource);
         Assert.Equal("Shares Hokum's slow-burn small-town dread", results[2].Why);
     }
 
@@ -339,26 +347,32 @@ public class OpenRouterSearchAgentLiveModeTests
     // ── Ceilings ────────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Interpret_sends_max_tokens_400()
+    public async Task Interpret_sends_its_measured_ceiling()
     {
+        // WS-1 task 3: p99 completion at effort none (125) x 1.5, rounded up — 200, where the
+        // mini-era 400 was spent on hidden reasoning by a reasoning model.
         var handler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
 
         await Agent(handler).InterpretAsync([], "80s sci-fi movies", "likes sci-fi", []);
 
-        Assert.Equal(400, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal(200, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal("none", EffortOf(handler.Bodies[0]));
     }
 
-    [Fact]
-    public async Task Rerank_sends_max_tokens_900()
+    [Theory]
+    [InlineData(ApiUsagePurpose.RerankFeed, 100 + (356 * 3))]
+    [InlineData(ApiUsagePurpose.RerankPage, 100 + (356 * 3))]
+    [InlineData(ApiUsagePurpose.RerankAsk, 100 + (111 * 3))]
+    public async Task Rerank_sends_an_envelope_plus_a_measured_per_title_share(string purpose, int expected)
     {
-        // Deliberately a DIFFERENT number from interpret's: a single shared constant would have
-        // passed a test that asserted only "max_tokens is present", while starving one of the two
-        // callers. The re-rank answer is per-title and an order of magnitude wider.
+        // Deliberately per title: the re-rank answer is one entry per title, and a flat ceiling
+        // sized for 9 either starves a 9-title batch at p99 (the old 900 against a measured 1,194)
+        // or over-provisions a 3-title one.
         var handler = new CannedHandler(Ok("""{"results":[]}"""));
 
-        await Agent(handler).RerankBatchAsync(Titles(), "q", "taste");
+        await Agent(handler).RerankBatchAsync(Titles(), "q", "taste", anchorName: null, purpose);
 
-        Assert.Equal(900, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal(expected, MaxTokensOf(handler.Bodies[0]));
     }
 
     [Fact]
@@ -405,13 +419,14 @@ public class OpenRouterSearchAgentLiveModeTests
         // answers 400 naming response_format; the adapter retires strict mode for the PROCESS and
         // re-sends as json_object. Per-INSTANCE would be useless — the adapter rides a transient
         // typed HttpClient and is rebuilt every scope, so it would re-pay the rejected request on
-        // literally every call.
+        // literally every call. The memory is the DI-singleton capability table, keyed by MODEL.
         var handler = new CannedHandler(
             new CannedResponse(HttpStatusCode.BadRequest, """{"error":{"message":"response_format json_schema is not supported"}}"""),
             Ok($$"""{"results":[{"titleId":"{{TitleA}}","fit":0.42,"why":"still answered"}]}"""));
         var recorder = Recorder();
+        var capabilities = new FrostAura.Reel.Infrastructure.Llm.ModelCapabilities();
 
-        var results = await Agent(handler, recorder).RerankBatchAsync(
+        var results = await Agent(handler, recorder, capabilities).RerankBatchAsync(
             Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
 
         Assert.Equal(2, handler.Bodies.Count);
@@ -424,15 +439,22 @@ public class OpenRouterSearchAgentLiveModeTests
         // while the ledger is written by the caller: a record moved inside ChatAsync would bill the
         // downgrade twice, and a record keyed off the wrong variable would bill it to the wrong
         // surface. Both buckets are asserted, because one absorbing the other is the failure that
-        // leaves every per-surface cost figure wrong without looking wrong.
+        // leaves every per-surface cost figure wrong without looking wrong. The rejected request
+        // IS on the ledger: it was an HTTP attempt, and every attempt is a call.
         var feedHandler = new CannedHandler(Ok("""{"results":[]}"""));
-        await Agent(feedHandler, recorder).RerankBatchAsync(
+        await Agent(feedHandler, recorder, capabilities).RerankBatchAsync(
             Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
 
         Assert.Single(feedHandler.Bodies);
         Assert.Equal("json_object", ResponseFormatTypeOf(feedHandler.Bodies[0]));
         Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankFeed).Calls);
-        Assert.Equal(1, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankAsk).Calls);
+        Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.RerankAsk).Calls);
+
+        // And a hand-built adapter with NO shared table (a test, a fresh process) probes again —
+        // one rejection never leaks into an unrelated instance's state.
+        var isolated = new CannedHandler(Ok("""{"results":[]}"""));
+        await Agent(isolated, Recorder()).RerankBatchAsync(Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankFeed);
+        Assert.Equal("json_schema", ResponseFormatTypeOf(isolated.Bodies[0]));
     }
 
     [Theory]
@@ -485,16 +507,35 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Fact]
-    public void The_stub_fit_survives_the_one_hash_Math_Abs_cannot_negate()
+    public async Task A_failed_batch_without_predictions_keeps_its_input_order_and_the_same_order_every_time()
     {
-        // Math.Abs(int.MinValue) throws OverflowException. String hash codes are randomised per
-        // process, so the name that lands there is unpredictable rather than impossible — and the
-        // throw would come from inside the batch loop that exists to survive a bad response,
-        // costing every OTHER title in the batch its fit.
-        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MinValue), 0d, 0.999d);
-        Assert.InRange(OpenRouterSearchAgent.StableFit(int.MaxValue), 0d, 0.999d);
-        Assert.InRange(OpenRouterSearchAgent.StableFit(-1), 0d, 0.999d);
+        // The fallback fit used to hash the title NAME — and string hashes are randomised per
+        // process, so "keeps retrieval order" was false and the order changed on every restart.
+        // Names are chosen so alphabetical, reverse and input order all differ.
+        List<RerankInput> unpredicted =
+        [
+            new(TitleB, "Zulu", 1990, "movie", ["drama"], "One.", null),
+            new(TitleA, "Mike", 1991, "movie", ["drama"], "Two.", null),
+            new(TitleC, "Alpha", 1992, "movie", ["drama"], "Three.", null),
+        ];
+
+        var first = await Agent(new CannedHandler(new CannedResponse(HttpStatusCode.BadRequest, "{}")))
+            .RerankBatchAsync(unpredicted, "q", "taste");
+        var second = await Agent(new CannedHandler(new CannedResponse(HttpStatusCode.BadRequest, "{}")))
+            .RerankBatchAsync(unpredicted, "q", "taste");
+
+        Assert.All(first, r => Assert.Equal(ResultSource.Fallback, r.FitSource));
+        Assert.Equal(unpredicted.Select(t => t.TitleId), first.OrderByDescending(r => r.Fit).Select(r => r.TitleId));
+        Assert.Equal(first.Select(r => r.Fit), second.Select(r => r.Fit));
+        Assert.All(first, r => Assert.InRange(r.Fit, 0d, 0.5d));
     }
+
+    [Theory]
+    [InlineData(-5)]
+    [InlineData(0)]
+    [InlineData(int.MaxValue)]
+    public void The_position_fit_is_total_and_bounded(int index) =>
+        Assert.InRange(OpenRouterSearchAgent.PositionFit(index), 0d, 0.5d);
 
     // ── Degraded turns: retry once, never echo, say so (WS-1 task 1a) ─────────────────────
 
@@ -548,8 +589,8 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Theory]
-    [InlineData("length", 800)]
-    [InlineData("empty", 400)]
+    [InlineData("length", 400)]
+    [InlineData("empty", 200)]
     public async Task Only_a_truncated_attempt_retries_at_twice_the_ceiling(string firstFailure, int retryBudget)
     {
         // At temperature 0 a ceiling that truncated once truncates again; any other failure has
@@ -563,7 +604,7 @@ public class OpenRouterSearchAgentLiveModeTests
         var reply = await Agent(handler, recorder).InterpretAsync([], "ninja movies", "likes action", []);
 
         Assert.False(reply.Degraded);
-        Assert.Equal([400, retryBudget], handler.Bodies.Select(MaxTokensOf));
+        Assert.Equal([200, retryBudget], handler.Bodies.Select(MaxTokensOf));
         // Both attempts are on the ledger: the failed one was billed too.
         Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.SearchAgent).Calls);
     }
@@ -775,6 +816,10 @@ public class OpenRouterSearchAgentLiveModeTests
     private static OpenRouterSearchAgent Agent(CannedHandler handler, ApiUsageRecorder recorder) =>
         Agent(handler, new HeuristicInterpreter(), recorder);
 
+    private static OpenRouterSearchAgent Agent(
+        CannedHandler handler, ApiUsageRecorder recorder, FrostAura.Reel.Infrastructure.Llm.ModelCapabilities capabilities) =>
+        Agent(handler, new HeuristicInterpreter(), recorder, capabilities);
+
     private static OpenRouterSearchAgent Agent(CannedHandler handler, HeuristicInterpreter interpreter) =>
         Agent(handler, interpreter, Recorder());
 
@@ -785,7 +830,8 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     private static OpenRouterSearchAgent Agent(
-        CannedHandler handler, HeuristicInterpreter interpreter, ApiUsageRecorder recorder)
+        CannedHandler handler, HeuristicInterpreter interpreter, ApiUsageRecorder recorder,
+        FrostAura.Reel.Infrastructure.Llm.ModelCapabilities? capabilities = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -796,7 +842,13 @@ public class OpenRouterSearchAgentLiveModeTests
             .Build();
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterSearchAgent(
-            client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance);
+            client, interpreter, recorder, config, NullLogger<OpenRouterSearchAgent>.Instance, capabilities: capabilities);
+    }
+
+    private static string? EffortOf(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.TryGetProperty("reasoning", out var r) ? r.GetProperty("effort").GetString() : null;
     }
 
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);

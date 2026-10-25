@@ -1,14 +1,12 @@
 using System.Globalization;
-using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Sync;
+using FrostAura.Reel.Infrastructure.Llm;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -46,9 +44,20 @@ public class OpenRouterLensWriter(
     // Optional by design, mirroring the other OpenRouter adapters: the typed HttpClient is
     // transient and is always constructed inside a scope in production, but the adapter must stay
     // `new`-able in a test with no scope.
-    IAccountContext? accountContext = null)
+    IAccountContext? accountContext = null,
+    ILlmPurposeCatalog? purposes = null,
+    ModelCapabilities? capabilities = null,
+    IProviderHealth? health = null,
+    ILlmCallGate? gate = null)
     : ILensWriter
 {
+    /// <summary>
+    /// The shared transport. The narrative (900), lens (700) and audit (300) ceilings are the
+    /// <c>taste-narrative</c>, <c>lens</c> and <c>lens-audit</c> purpose options now.
+    /// </summary>
+    private readonly OpenRouterChatClient _chat = new(
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
@@ -107,22 +116,11 @@ public class OpenRouterLensWriter(
 
     private const int MaxSentences = 10;
 
-    /// <summary>Roughly 10 sentences of prose plus JSON overhead, with room to spare.</summary>
-    private const int NarrativeTokenBudget = 900;
-
-    /// <summary>A full lens object is ~220 tokens; this is generous enough that a normal answer never truncates.</summary>
-    private const int LensTokenBudget = 700;
-
-    private const int AuditTokenBudget = 300;
-
     private const int MaxOverviewChars = 1200;
 
     private const int MaxKeywords = 20;
 
     private const int MaxCast = 3;
-
-    /// <summary>See <see cref="OpenRouterAttributeExtractor"/>: written once, read from many.</summary>
-    private volatile bool _strictSchemaSupported = true;
 
     private string? ApiKey => configuration["OPENROUTER_API_KEY"] is { Length: > 0 } key ? key : null;
 
@@ -132,7 +130,13 @@ public class OpenRouterLensWriter(
 
     public string ModelId => StubMode
         ? "stub/deterministic-v1"
-        : configuration["OPENROUTER_MODEL"] is { Length: > 0 } m ? m : "openai/gpt-6-luna";
+        : _chat.Options(ApiUsagePurpose.Lens).Model;
+
+    /// <summary>The lens purpose's model and the effort actually sent — see <see cref="ILensWriter.LensCacheSalt"/>.</summary>
+    public string LensCacheSalt => StubMode ? ModelId : _chat.CacheSalt(ApiUsagePurpose.Lens);
+
+    /// <summary>The taste-narrative purpose's model and the effort actually sent.</summary>
+    public string NarrativeCacheSalt => StubMode ? ModelId : _chat.CacheSalt(ApiUsagePurpose.TasteNarrative);
 
     public int LensPromptVersion => CurrentLensPromptVersion;
 
@@ -148,7 +152,7 @@ public class OpenRouterLensWriter(
         }
 
         var user = NarrativePrompt(facts);
-        var first = await ChatAsync(NarrativeSystemPrompt, user, null, NarrativeTokenBudget,
+        var first = await ChatAsync(NarrativeSystemPrompt, user, null,
             NarrativeSchema(), ApiUsagePurpose.TasteNarrative, ct);
         if (ParseNarrative(first.Content) is { } sentences)
         {
@@ -168,7 +172,6 @@ public class OpenRouterLensWriter(
             user,
             $"Your previous answer was rejected. Return ONLY {{\"sentences\":[...]}} with between "
                 + $"{MinSentences} and {MaxSentences} complete second-person sentences and nothing else.",
-            NarrativeTokenBudget,
             NarrativeSchema(),
             ApiUsagePurpose.TasteNarrative,
             ct);
@@ -252,7 +255,7 @@ public class OpenRouterLensWriter(
     {
         var user = LensPrompt(title, persona);
         var first = await ChatAsync(
-            LensSystemPrompt, user, null, LensTokenBudget, LensSchema(), ApiUsagePurpose.Lens, ct);
+            LensSystemPrompt, user, null, LensSchema(), ApiUsagePurpose.Lens, ct);
         var (note, problems) = ParseLens(first.Content);
         if (note is not null)
         {
@@ -273,7 +276,6 @@ public class OpenRouterLensWriter(
             "Your previous answer was rejected because of these fields: " + string.Join("; ", problems)
                 + ". Answer again with every key present, the character limits respected, mood and "
                 + "whenToWatch copied verbatim from the allowed lists, and no numbers anywhere in the prose.",
-            LensTokenBudget,
             LensSchema(),
             ApiUsagePurpose.Lens,
             ct);
@@ -450,7 +452,7 @@ public class OpenRouterLensWriter(
             .Append("NOTE\n").Append(JsonSerializer.Serialize(note, JsonOptions))
             .ToString();
         var response = await ChatAsync(
-            AuditSystemPrompt, user, null, AuditTokenBudget, AuditSchema(), ApiUsagePurpose.LensAudit, ct);
+            AuditSystemPrompt, user, null, AuditSchema(), ApiUsagePurpose.LensAudit, ct);
         if (string.IsNullOrWhiteSpace(response.Content))
         {
             return null;
@@ -495,94 +497,23 @@ public class OpenRouterLensWriter(
     private sealed record ChatOutcome(string? Content, OpenRouterUsage? Usage);
 
     private async Task<ChatOutcome> ChatAsync(
-        string system, string user, string? repairHint, int maxTokens, object schema, string purpose, CancellationToken ct)
+        string system, string user, string? repairHint, object schema, string purpose, CancellationToken ct)
     {
-        var strict = _strictSchemaSupported;
-        OpenRouterUsage? usage = null;
-        try
+        List<LlmMessage> messages = [LlmMessage.System(system), LlmMessage.User(user)];
+        if (repairHint is not null)
         {
-            var messages = new List<object>
-            {
-                new { role = "system", content = system },
-                new { role = "user", content = user },
-            };
-            if (repairHint is not null)
-            {
-                messages.Add(new { role = "system", content = repairHint });
-            }
-
-            using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
-            {
-                Content = JsonContent.Create(new
-                {
-                    model = ModelId,
-                    temperature = 0,
-                    max_tokens = maxTokens,
-                    response_format = strict ? schema : new { type = "json_object" },
-                    messages = messages.ToArray(),
-                }, options: JsonOptions),
-            };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ApiKey);
-
-            using var response = await httpClient.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                if (strict && IsStrictSchemaRejection(response.StatusCode, body))
-                {
-                    _strictSchemaSupported = false;
-                    logger.LogWarning(
-                        "OpenRouter rejected strict json_schema for {Model} (HTTP {Status}); falling back to "
-                        + "json_object for the remainder of this process. Field validation now rests on the parser.",
-                        ModelId, (int)response.StatusCode);
-                    return await ChatAsync(system, user, repairHint, maxTokens, schema, purpose, ct);
-                }
-
-                logger.LogWarning("Lens writer HTTP {Status} for purpose {Purpose}.", (int)response.StatusCode, purpose);
-                return new ChatOutcome(null, null);
-            }
-
-            var dto = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOptions, ct);
-            usage = dto?.Usage;
-            var choice = dto?.Choices?.FirstOrDefault();
-
-            // A "length" finish means the object was cut at a token boundary. Even where the
-            // fragment parses, its trailing fields are missing rather than answered.
-            if (string.Equals(choice?.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
-            {
-                logger.LogWarning("Lens writer completion hit the token limit for purpose {Purpose}.", purpose);
-                return new ChatOutcome(null, usage);
-            }
-
-            return new ChatOutcome(choice?.Message?.Content, usage);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Lens writer call failed for purpose {Purpose}.", purpose);
-            return new ChatOutcome(null, usage);
-        }
-        finally
-        {
-            // Recorded in a finally, AFTER the response: the counts live in the response body. Every
-            // HTTP attempt is counted, including one that fails before a body exists — which then
-            // reads as "unknown tokens" rather than "free".
-            usageRecorder.Record(
-                ApiProvider.OpenRouter, purpose, ModelId, accountContext?.AccountId,
-                usage?.PromptTokens, usage?.CompletionTokens);
-        }
-    }
-
-    private static bool IsStrictSchemaRejection(HttpStatusCode status, string body)
-    {
-        if (status is not (HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity
-            or HttpStatusCode.NotImplemented or HttpStatusCode.NotFound))
-        {
-            return false;
+            messages.Add(LlmMessage.System(repairHint));
         }
 
-        return body.Contains("json_schema", StringComparison.OrdinalIgnoreCase)
-            || body.Contains("response_format", StringComparison.OrdinalIgnoreCase)
-            || body.Contains("structured output", StringComparison.OrdinalIgnoreCase);
+        var result = await _chat.CompleteAsync(new LlmChatRequest(purpose, messages, schema), ct);
+        if (!result.Succeeded)
+        {
+            logger.LogWarning("Lens writer produced nothing for purpose {Purpose} ({Failure}).", purpose, result.Failure);
+        }
+
+        return new ChatOutcome(
+            result.Succeeded ? result.Content : null,
+            new OpenRouterUsage(result.PromptTokens, result.CompletionTokens, null));
     }
 
     // ── Schemas ────────────────────────────────────────────────────────────────────────────
@@ -684,7 +615,7 @@ public class OpenRouterLensWriter(
 
     // ── Prompts ────────────────────────────────────────────────────────────────────────────
 
-    private static readonly string NarrativeSystemPrompt =
+    internal static readonly string NarrativeSystemPrompt =
         "You write a short, precise description of ONE person's film and television taste, addressed "
         + "directly to them as \"you\".\n"
         + "Return ONLY {\"sentences\": [...]} with between " + MinSentences + " and " + MaxSentences
@@ -1211,13 +1142,6 @@ public class OpenRouterLensWriter(
             mood,
             when);
     }
-
-    private sealed record ChatResponse(ChatChoice[]? Choices, OpenRouterUsage? Usage);
-
-    private sealed record ChatChoice(
-        ChatMessage? Message, [property: JsonPropertyName("finish_reason")] string? FinishReason);
-
-    private sealed record ChatMessage(string? Content);
 }
 
 /// <summary>Small helpers that keep the invariant-culture formatting off the prompt-building line.</summary>

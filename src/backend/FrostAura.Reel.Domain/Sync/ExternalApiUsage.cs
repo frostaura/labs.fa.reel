@@ -62,6 +62,34 @@ public static class ApiUsagePurpose
     /// </summary>
     public static readonly string[] RerankFamily = [Rerank, RerankFeed, RerankPage, RerankAsk, RerankExpand];
 
+    /// <summary>
+    /// Ask Reel v2's planning call — one per turn (plus at most one retry) that turns the message
+    /// into an act, a state delta and tool requests. Its own per-account ceiling, never the re-rank
+    /// family's: a conversation must not be able to starve the feed's curation, and the feed must
+    /// not be able to starve a conversation.
+    /// </summary>
+    public const string AskPlan = "ask-plan";
+
+    /// <summary>Ask Reel v2's request judge — up to three concurrent batches per turn. Its own ceiling.</summary>
+    public const string AskJudge = "ask-judge";
+
+    /// <summary>Ask Reel v2's answer to a question about a title (ItemQuestion turns only). Its own ceiling.</summary>
+    public const string AskAnswer = "ask-answer";
+
+    /// <summary>The three Ask Reel v2 purposes, each budgeted separately.</summary>
+    public static readonly string[] AskFamily = [AskPlan, AskJudge, AskAnswer];
+
+    /// <summary>
+    /// The prefix every direct measurement probe bills under (<c>probe-ask-plan</c>,
+    /// <c>probe-rerank-feed</c> …). A probe is a measurement of a purpose, never a use of it, so it
+    /// must not count against — or be confused with — the purpose's own ceiling or its acceptance
+    /// counts. The same separation <see cref="LensAudit"/> has from <see cref="Lens"/>.
+    /// </summary>
+    public const string ProbePrefix = "probe-";
+
+    /// <summary>The probe purpose that measures <paramref name="purpose"/>.</summary>
+    public static string Probe(string purpose) => ProbePrefix + purpose;
+
     public const string Embed = "embed";
 
     /// <summary>Writing an account's second-person taste narrative. Weekly, one call per account.</summary>

@@ -72,6 +72,19 @@ public enum AgentFailureKind
 
     /// <summary>No model is configured (a keyless install); nothing was called.</summary>
     NoModel,
+
+    /// <summary>
+    /// The purpose's daily allowance could not admit the call, so nothing was sent. Budget is
+    /// reserved BEFORE a call, which is why this is a refusal rather than an overshoot.
+    /// </summary>
+    BudgetSpent,
+
+    /// <summary>
+    /// The provider breaker is open (a recent 401/402/403, or the purpose is off for the day), so
+    /// nothing was sent. Distinct from <see cref="ProviderRefused"/>, which is the call that
+    /// tripped it.
+    /// </summary>
+    ProviderUnavailable,
 }
 
 /// <summary>
@@ -219,6 +232,25 @@ public sealed record RerankResult(
         : this(titleId, fit, ResultSource.Llm, why, ResultSource.Llm)
     {
     }
+
+    /// <summary>
+    /// The fit, only where the MODEL gave it; null on every fallback. The target shape of
+    /// <see cref="Fit"/> itself (task 4) — available now so a consumer can migrate to it before the
+    /// flip, and never mistake a fallback's ranking value for a judgement.
+    /// </summary>
+    public double? ModelFit => FitSource == ResultSource.Llm ? Fit : null;
+
+    /// <summary>
+    /// The why-line, only where the MODEL wrote it and it survived the voice guard; null otherwise.
+    /// A fallback's <see cref="Why"/> is empty by construction — no sentence is ever invented.
+    /// </summary>
+    public string? ModelWhy => WhySource == ResultSource.Llm && Why is { Length: > 0 } ? Why : null;
+
+    /// <summary>
+    /// Whether this verdict may be cached, debiased, preserved into a snapshot or logged as model
+    /// output: only a verdict whose fit came from the model. A fallback is recomputed every time.
+    /// </summary>
+    public bool Cacheable => FitSource == ResultSource.Llm;
 }
 
 /// <summary>
@@ -272,4 +304,24 @@ public interface ISearchAgent
     Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
         IReadOnlyList<RerankInput> titles, string query, Lens.LensPersona persona, string? anchorName = null,
         string usagePurpose = Sync.ApiUsagePurpose.Rerank, CancellationToken ct = default);
+
+    /// <summary>
+    /// The salt every cache key built from this agent's output must carry: a result-format
+    /// version, the model and the reasoning effort the purpose runs at. A change to any of the three
+    /// changes what a cached verdict means, so it must miss rather than serve.
+    ///
+    /// <para>A default member so every test double keeps compiling; the production adapter
+    /// overrides it with the effort it actually sends.</para>
+    /// </summary>
+    string CacheSalt(string usagePurpose) => string.Concat(RerankCacheVersion.Current, ":", ModelId);
+}
+
+/// <summary>
+/// The version every re-rank result cache key carries. Bumped to 2 when fallback verdicts stopped
+/// carrying an invented sentence and a predicted-rating fit: an entry written under 1 may hold the
+/// old "A {genre} pick aligned with your taste." stub, and must never be served again.
+/// </summary>
+public static class RerankCacheVersion
+{
+    public const string Current = "rr2";
 }

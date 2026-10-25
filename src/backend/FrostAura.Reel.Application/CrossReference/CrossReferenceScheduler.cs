@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.CrossReference;
+using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
@@ -10,13 +11,20 @@ using Microsoft.Extensions.Logging;
 namespace FrostAura.Reel.Application.CrossReference;
 
 /// <summary>
-/// The one place a <see cref="JobKind.CrossReference"/> run is queued from — the feed build, on
-/// both its Fresh and its Preserve exit.
+/// The one place a <see cref="JobKind.CrossReference"/> run is queued from — the feed build, and
+/// only after a Fresh build (see <see cref="ShouldEnqueue"/>).
 ///
 /// <para><b>Three brakes, and not one of them is a clock.</b> A run is queued only when nothing is
 /// already in flight for the account, the day's ceiling still has headroom, and the pool actually
 /// contains a title with no verdict at the current (fingerprint, prompt version). A timer would
 /// answer none of those questions and would spend money on the nights there is nothing to do.</para>
+///
+/// <para><b>Only a Fresh build queues it (WS-1 task 6).</b> A Preserve build, a no-op build and a
+/// build a reaction asked for ("saved for later", "not interested", …) never do — see
+/// <see cref="ShouldEnqueue"/>. Every one of those used to queue a pass, and on the live job table a
+/// day of saves and delta polls was a day of passes, each paying for a batch the judge then failed.
+/// The daily Fresh build (a new UTC day, a new model, a manual refresh or a filter change) is the
+/// pass's natural cadence: the pool it judges moves over days, not minutes.</para>
 ///
 /// <para><b>It queues from the feed build rather than from delta sync</b> because delta sync never
 /// computes the taste fingerprint, and the fingerprint is what the verdict key is built on. The
@@ -33,8 +41,35 @@ public sealed class CrossReferenceScheduler(
     CrossReferenceService verdicts,
     CrossReferenceBudget budget,
     ICrossReferenceJudge judge,
-    ILogger<CrossReferenceScheduler> logger)
+    ILogger<CrossReferenceScheduler> logger,
+    // Optional so a hand-built scheduler (a test) needs no breaker; DI always supplies it.
+    CrossReferenceRunBreaker? breaker = null)
 {
+    /// <summary>
+    /// The builds a reaction asked for — they vacate one slot inside tonight's page and say nothing
+    /// new about the pool. Written out because the reasons are literals at their call sites
+    /// (ReactionEndpoints); a reason added there without being added here is QUEUED, which is the
+    /// safe direction for a missing entry.
+    /// </summary>
+    public static readonly IReadOnlySet<string> ReactionRebuildReasons = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "saved for later",
+        "not interested",
+        "dropped",
+        "reaction revoked",
+    };
+
+    /// <summary>
+    /// Whether a build that ended as <paramref name="outcome"/>, asked for by
+    /// <paramref name="triggerReason"/>, may queue a pass at all: a Fresh build that neither a
+    /// reaction nor the last pass itself asked for. Preserve, no-op, skipped and save builds never
+    /// do. The cheap, pure half of the decision — the brakes below are the expensive half.
+    /// </summary>
+    public static bool ShouldEnqueue(FeedBuildOutcome outcome, string? triggerReason) =>
+        outcome == FeedBuildOutcome.Fresh
+        && triggerReason != Jobs.CrossReferenceJobHandler.CrossReferenceRebuildReason
+        && (triggerReason is null || !ReactionRebuildReasons.Contains(triggerReason));
+
     /// <summary>
     /// The smallest unjudged set worth a run, once the account has a first pass at this key. A
     /// batch is sixty; ten is a sixth of one call's capacity and a few builds' worth of new titles.
@@ -53,8 +88,43 @@ public sealed class CrossReferenceScheduler(
     /// iff a job was added to the tracked context.
     /// </summary>
     public async Task<bool> EnqueueIfWorkPendingAsync(
-        Guid accountId, string profileHash, DateTime now, CancellationToken ct, string? buildTriggerReason = null)
+        Guid accountId, string profileHash, DateTime now, CancellationToken ct, string? buildTriggerReason = null,
+        FeedBuildOutcome? buildOutcome = null)
     {
+        // Brake −1: only a Fresh build that no reaction asked for. The build hands its outcome in;
+        // until its call site does, the outcome is read off the build's own stat row, which the
+        // build adds to the tracked context before it asks (it commits both together). No row and
+        // no outcome means a caller outside the feed build — it is trusted as before.
+        var outcome = buildOutcome ?? db.FeedBuildStats.Local
+            .Where(s => s.AccountId == accountId)
+            .OrderByDescending(s => s.BuiltAt)
+            .Select(s => (FeedBuildOutcome?)s.Mode)
+            .FirstOrDefault();
+        if (outcome is { } o && !ShouldEnqueue(o, buildTriggerReason))
+        {
+            logger.LogInformation(
+                "Cross-reference not queued for {AccountId}: a {Outcome} build ({Reason}) never queues a pass.",
+                accountId, o, buildTriggerReason ?? "no reason");
+            return false;
+        }
+
+        if (outcome is null && buildTriggerReason is not null && ReactionRebuildReasons.Contains(buildTriggerReason))
+        {
+            logger.LogInformation(
+                "Cross-reference not queued for {AccountId}: a build a reaction asked for ({Reason}) never queues a pass.",
+                accountId, buildTriggerReason);
+            return false;
+        }
+
+        // Brake −½: the breaker. Off for the day after repeated all-failed runs, or the provider is
+        // refusing every call; a run queued now would claim a slot to send nothing.
+        if (breaker?.OpenBreaker is { } open)
+        {
+            logger.LogInformation(
+                "Cross-reference not queued for {AccountId}: its breaker is open ({Reason}).", accountId, open.ReasonCode);
+            return false;
+        }
+
         // Brake 0: the build this is running after was itself asked for by a finished pass. The
         // titles that build brought in wait for the next build the account earns on its own —
         // otherwise pass → rebuild → pass is a loop with no natural end, because every rebuild
@@ -98,8 +168,11 @@ public sealed class CrossReferenceScheduler(
 
         // Brake 2: the daily ceiling. A run queued with no allowance would claim a runner slot, hold
         // the process-wide gate, and stop on its first batch — the ceiling is cheaper to read here.
+        // Read at the gate's own rule for a full batch: a day with headroom for a few hundred
+        // tokens is a spent day for a sixty-candidate batch, and a run queued into it would claim a
+        // slot only to stop before its first call.
         var allowance = await budget.AllowanceAsync(accountId, ct);
-        if (!allowance.HasHeadroom)
+        if (!allowance.AdmitsBatch(Jobs.CrossReferenceJobHandler.BatchSize))
         {
             logger.LogInformation(
                 "Cross-reference not queued for {AccountId}: today's ceiling is spent ({Allowance}).",
