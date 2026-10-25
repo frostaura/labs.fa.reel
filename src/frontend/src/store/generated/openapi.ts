@@ -248,6 +248,15 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
+                    content: {
+                        "application/json": components["schemas"]["SyncStatusResponse"];
+                    };
+                };
+                /** @description Unauthorized */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
                     content?: never;
                 };
             };
@@ -2395,13 +2404,19 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @enum {unknown} */
+        ApiProvider: "Trakt" | "Tmdb" | "OpenRouter";
         CallbackRequest: {
             code: string;
             state: string;
         };
+        /** @enum {unknown} */
+        ConnectionStatus: "Active" | "RefreshFailed" | "Revoked";
         CreateTagRequest: {
             text: string;
         };
+        /** @enum {unknown} */
+        DegradedReason: "TraktRevoked" | "TraktRefreshFailed" | "TraktWritesDeadLettered" | "NotEnoughRatings" | "ProviderDown" | "PipelineFailed" | null;
         FiltersPayload: {
             excludeGenres: string[];
             includeGenres: string[];
@@ -2428,6 +2443,24 @@ export interface components {
             /** @default true */
             dryRun: boolean;
         };
+        JobFailure: {
+            kind: components["schemas"]["JobKind"];
+            sseKind: string;
+            visibility: components["schemas"]["JobVisibility"];
+            /** Format: date-time */
+            failedAt: string;
+            /** Format: int32 */
+            consecutiveFailures: number | string;
+            /** Format: int32 */
+            attempts: number | string;
+            reasonCode: string;
+        };
+        /** @enum {unknown} */
+        JobKind: "FullIngest" | "DeltaSync" | "FullReconcile" | "HydrateCatalog" | "EnrichCatalog" | "Train" | "Evaluate" | "BuildFeed" | "RefreshAvailability" | "BuildDigest" | "BuildTasteNarrative" | "PersonaliseTitles" | "SeedCatalog" | "CrossReference";
+        /** @enum {unknown} */
+        JobStatus: "Pending" | "Running" | "Succeeded" | "Failed" | "Cancelled";
+        /** @enum {unknown} */
+        JobVisibility: "Background" | "UserVisible" | "NamedPass";
         MoreRequestDto: {
             row: string;
             anchorTitleId: null | string;
@@ -2451,14 +2484,51 @@ export interface components {
         PinVerifyRequest: {
             pin: string;
         };
+        /** @enum {unknown} */
+        PipelineStage: "Linked" | "Ingesting" | "Extracting" | "Training" | "Evaluated" | "FeedReady" | "Degraded" | "NotEnoughRatings";
+        ProviderBreaker: {
+            provider: components["schemas"]["ApiProvider"];
+            purpose: null | string;
+            state: components["schemas"]["ProviderBreakerState"];
+            reasonCode: string;
+            /** Format: date-time */
+            since: string;
+            /** Format: date-time */
+            retryAt: null | string;
+        };
+        /** @enum {unknown} */
+        ProviderBreakerState: "Open" | "Degraded";
+        ProviderHealthSnapshot: {
+            state: components["schemas"]["ProviderHealthState"];
+            /** Format: date-time */
+            checkedAt: null | string;
+            breakers: components["schemas"]["ProviderBreaker"][];
+        };
+        /** @enum {unknown} */
+        ProviderHealthState: "Unmonitored" | "Healthy" | "Degraded" | "Down";
         RateRequest: {
             /** Format: int16 */
             rating: number | string;
             /** @default true */
             markWatched: boolean;
         };
+        RatingsFloor: {
+            /** Format: int32 */
+            usableRatings: number | string;
+            /** Format: int32 */
+            required: number | string;
+        };
         ReactionRequest: {
             reason: null | string;
+        };
+        RetrainProgress: {
+            /** Format: int32 */
+            minNewRatings: number | string;
+            /** Format: int32 */
+            newRatingsSinceTrain: number | string;
+            hasActiveModel: boolean;
+            /** Format: date-time */
+            lastTrainedAt: null | string;
         };
         SubscribeKeys: {
             p256dh: string;
@@ -2467,6 +2537,53 @@ export interface components {
         SubscribeRequest: {
             endpoint: string;
             keys: components["schemas"]["SubscribeKeys"];
+        };
+        SyncJobSummary: {
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["JobKind"];
+            sseKind: string;
+            visibility: components["schemas"]["JobVisibility"];
+            status: components["schemas"]["JobStatus"];
+            /** Format: double */
+            progressPct: null | number | string;
+            progressMessage: null | string;
+            /** Format: date-time */
+            enqueuedAt: string;
+            /** Format: date-time */
+            startedAt: null | string;
+            /** Format: date-time */
+            completedAt: null | string;
+            /** Format: int32 */
+            attempt: number | string;
+            /** Format: int32 */
+            maxAttempts: number | string;
+            retrying: boolean;
+            retryReasonCode: null | string;
+        };
+        SyncStatusResponse: {
+            /** Format: int32 */
+            contractVersion: number | string;
+            pipelineStage: components["schemas"]["PipelineStage"];
+            retrain: components["schemas"]["RetrainProgress"];
+            connectionStatus: components["schemas"]["ConnectionStatus"];
+            /** Format: date-time */
+            lastDeltaSyncAt: null | string;
+            /** Format: date-time */
+            lastFullReconcileAt: null | string;
+            activeJob: null | components["schemas"]["SyncJobSummary"];
+            recentJobs: components["schemas"]["SyncJobSummary"][];
+            /** Format: int32 */
+            outboxPending: number | string;
+            /** Format: int32 */
+            outboxDeadLetters: number | string;
+            /** Format: date-time */
+            lastListSyncAt: null | string;
+            outboxLastError: null | string;
+            lastFailures: components["schemas"]["JobFailure"][];
+            providerHealth: components["schemas"]["ProviderHealthSnapshot"];
+            degradedReason: null | components["schemas"]["DegradedReason"];
+            notEnoughRatings: null | components["schemas"]["RatingsFloor"];
         };
         UnsubscribeRequest: {
             endpoint: string;

@@ -14,26 +14,42 @@ export interface SyncSummary {
   picksChanged: number | null;
 }
 
-/** Lightweight live-sync state for the header pill, fed by the steady-state SSE stream. */
-export interface SyncUiState {
-  active: boolean;
-  label: string | null;
-  pct: number | null;
-  /** Job kind ("hydrate", "delta", …) — drives the pill's contextual tooltip copy. */
+/** The latest live `job-progress` frame. Numbers only — its free-text message is never kept. */
+export interface LiveProgress {
+  /** SSE short kind ("delta", "xref", …); applied only while it matches `activeJob.sseKind`. */
   kind: string | null;
-  /** Raw item counts when the live phase has them (e.g. next-episode enrichment) — powers the "x / y". */
+  pct: number | null;
   current: number | null;
   total: number | null;
-  /**
-   * The last completed sync's outcome, kept after the job goes idle so the pill can say what the
-   * sync actually did instead of reverting to "Synced 2m ago". Cleared when the next job starts.
-   */
-  summary: SyncSummary | null;
 }
 
-const initialState: SyncUiState = {
-  active: false, label: null, pct: null, kind: null, current: null, total: null, summary: null,
-};
+/**
+ * Live-sync state for the header pill. The status API is the authority on WHETHER something is
+ * running; this slice only carries what the poll cannot: the live frame between polls, and what
+ * the last sync did.
+ */
+export interface SyncUiState {
+  /**
+   * True while the status API reports user-visible work in flight (a job the user started or is
+   * waiting on). Set from the poll on every response, never from a live frame, so it cannot
+   * outlive the job (H-17).
+   */
+  active: boolean;
+  live: LiveProgress | null;
+  /**
+   * The last completed sync's outcome, kept after the job goes idle so the pill can say what the
+   * sync actually did instead of reverting to a timestamp. Cleared when the next job starts.
+   */
+  summary: SyncSummary | null;
+  /**
+   * When `summary` arrived (epoch ms). The sentence is undated, so the pill shows it only while it
+   * is recent (`SUMMARY_FRESH_MS` in lib/syncPill.ts); a long-lived tab otherwise said "Already up
+   * to date" for days on the strength of one background sync.
+   */
+  summaryAt: number | null;
+}
+
+const initialState: SyncUiState = { active: false, live: null, summary: null, summaryAt: null };
 
 export const syncSlice = createSlice({
   name: "syncUi",
@@ -42,26 +58,43 @@ export const syncSlice = createSlice({
     syncProgress(
       state,
       action: PayloadAction<{
-        label: string;
-        pct: number | null;
         kind: string | null;
+        pct: number | null;
         current?: number | null;
         total?: number | null;
       }>
     ) {
-      state.active = true;
-      state.label = action.payload.label;
-      state.pct = action.payload.pct;
-      state.kind = action.payload.kind;
-      state.current = action.payload.current ?? null;
-      state.total = action.payload.total ?? null;
-      // A new job is running, so last sync's outcome is history — leaving it up would report a
-      // result while a fresh sync is mid-flight.
-      state.summary = null;
+      state.live = {
+        kind: action.payload.kind,
+        pct: action.payload.pct,
+        current: action.payload.current ?? null,
+        total: action.payload.total ?? null,
+      };
     },
-    /** A delta/reconcile finished and said what it did. Survives the job going idle. */
-    syncCompleted(state, action: PayloadAction<SyncSummary>) {
-      state.summary = action.payload;
+    /**
+     * The status poll answered. `jobChanged` is true when the active job's id differs from the
+     * previous answer's (including going idle): any live frame then belongs to a previous run, so
+     * it is dropped rather than shown against the new one.
+     */
+    activeJobObserved(state, action: PayloadAction<{ userVisible: boolean; jobChanged: boolean }>) {
+      state.active = action.payload.userVisible;
+      if (action.payload.jobChanged) state.live = null;
+      // A new job the user is watching makes the last sync's outcome history — leaving it up would
+      // report a result while a fresh sync runs. Background frames never clear it.
+      if (action.payload.jobChanged && action.payload.userVisible) {
+        state.summary = null;
+        state.summaryAt = null;
+      }
+    },
+    /** A delta/reconcile finished and said what it did. Survives the job going idle; dated. */
+    syncCompleted: {
+      reducer(state, action: PayloadAction<SyncSummary, string, { at: number }>) {
+        state.summary = action.payload;
+        state.summaryAt = action.meta.at;
+      },
+      prepare(summary: SyncSummary, at: number = Date.now()) {
+        return { payload: summary, meta: { at } };
+      },
     },
     /**
      * The rebuild that sync triggered has landed and knows how much of the page moved. Fills the
@@ -72,13 +105,8 @@ export const syncSlice = createSlice({
         state.summary.picksChanged = action.payload.picksChanged;
       }
     },
-    syncIdle(state) {
-      // Deliberately NOT a reset to initialState: the pill goes idle the moment the job finishes,
-      // and the whole point of the post-sync moment is that its sentence outlives the spinner.
-      return { ...initialState, summary: state.summary };
-    },
   },
 });
 
-export const { syncProgress, syncCompleted, picksChangedReported, syncIdle } = syncSlice.actions;
+export const { syncProgress, activeJobObserved, syncCompleted, picksChangedReported } = syncSlice.actions;
 export default syncSlice.reducer;

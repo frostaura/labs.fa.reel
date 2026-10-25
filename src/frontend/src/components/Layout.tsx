@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { LogOut, Settings as SettingsIcon, FlaskConical, Home, Bookmark, Fingerprint, Users, Target } from "lucide-react";
-import { useGetSessionQuery, useLogoutMutation, api } from "../store/api";
-import { useDispatch } from "react-redux";
-import type { AppDispatch } from "../store";
+import { useGetSessionQuery, useLogoutMutation } from "../store/api";
 import SyncStatusPill from "./SyncStatusPill";
 import SearchBox from "./search/SearchBox";
 import MobileTabBar from "./MobileTabBar";
 import Footer from "./Footer";
 import RealtimeSync from "./RealtimeSync";
 import VerdictToast from "./VerdictToast";
+import ErrorBoundary from "./ErrorBoundary";
+import OfflineBanner from "./OfflineBanner";
+import UpdatePrompt from "./UpdatePrompt";
+import { markSignOutPending } from "../lib/signOut";
 import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
@@ -31,12 +33,19 @@ const NAV_TABS = [
   { to: "/dna", label: "Taste DNA", Icon: Fingerprint },
 ] as const;
 
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center py-24" data-testid="page-fallback">
+      <div className="text-2xl font-light text-fa-frost animate-pulse">Reel</div>
+    </div>
+  );
+}
+
 export default function Layout() {
   const { data: session } = useGetSessionQuery();
   const [logout] = useLogoutMutation();
   const navigate = useNavigate();
   const location = useLocation();
-  const dispatch = useDispatch<AppDispatch>();
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   // A navigation (tapping a typeahead result or Ask Reel) closes the mobile search panel.
@@ -55,7 +64,11 @@ export default function Layout() {
 
   const handleSignOut = async () => {
     await logout().unwrap().catch(() => undefined);
-    dispatch(api.util.resetApiState());
+    // The cleanup runs on the landing page, once this shell and its pages have unmounted
+    // (components/SignOutCleanup.tsx): clearing here would reset the cache under live subscribers,
+    // and every one of them would refetch. Everything this browser holds for the account goes, not
+    // just the RTK cache: the slices, the reel.* keys and the worker's offline API cache (I-11).
+    markSignOutPending();
     navigate("/");
   };
 
@@ -126,13 +139,24 @@ export default function Layout() {
           </div>
         )}
       </header>
-      <main className="flex-1 mx-auto w-full max-w-7xl px-4 sm:px-6 py-6 pb-24 md:pb-6">
-        <Outlet />
+      <OfflineBanner />
+      {/* At least a viewport tall (less the 3.5rem header), so the footer never sits in the first
+          screen while a page is still loading and then jumps away (G-14, I-5). */}
+      <main className="flex-1 mx-auto w-full max-w-7xl px-4 sm:px-6 py-6 pb-24 md:pb-6 min-h-[calc(100dvh-3.5rem)]">
+        {/* The boundary and the suspense both sit INSIDE the shell: a page that throws, or whose
+            chunk is still loading, replaces only itself — the header, nav and pill stay (I-4).
+            Navigating elsewhere clears a caught error. */}
+        <ErrorBoundary scope="route" resetKey={location.pathname}>
+          <Suspense fallback={<PageFallback />}>
+            <Outlet />
+          </Suspense>
+        </ErrorBoundary>
       </main>
       <Footer />
       {/* Mounted once, driven by the store: every rating path raises the after-rating moment and
           none of them has to know this component exists. */}
       <VerdictToast />
+      <UpdatePrompt />
       <MobileTabBar searchOpen={mobileSearchOpen} onToggleSearch={() => setMobileSearchOpen((v) => !v)} />
     </div>
   );

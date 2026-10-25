@@ -1,149 +1,189 @@
 import { useSelector } from "react-redux";
 import type { RootState } from "../store";
 import { relTime } from "../lib/format";
-import { syncExplainer, syncSummaryCopy } from "../lib/syncCopy";
-import { useGetSyncStatusQuery } from "../store/api";
+import { derivePill, type PillTone, type PillView } from "../lib/syncPill";
+import { rememberOauthState } from "../lib/traktOauth";
+import { useGetSyncStatusQuery, useStartTraktAuthMutation, type SyncStatus } from "../store/api";
+import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 
+const DOT: Record<PillTone, string> = {
+  ok: "bg-fa-success",
+  active: "bg-fa-frost",
+  warn: "bg-fa-warning",
+  danger: "bg-fa-danger",
+};
+
+const LABEL_TONE: Record<PillTone, string> = {
+  ok: "text-fa-frost-dim",
+  active: "text-fa-frost",
+  warn: "text-fa-warning",
+  danger: "text-fa-danger",
+};
+
 /**
- * Header sync surface. During an active job it shows a live, determinate progress bar (what's
- * syncing / where / out-of-what). When idle it stays visible as a health chip — last library +
- * list sync times, queued/failed write-backs, and connection issues — so a problem is legible at
- * a glance instead of hiding behind a silent spinner. Hover reveals the detail (and any error).
+ * Header status. Every word comes from `derivePill` (lib/syncPill.ts), which is where the rules
+ * live: health outranks progress, only work the user started or is waiting on shows as progress,
+ * the cross-reference pass is shown by name with no denominator, and a failing or retrying job is
+ * a warning with its reason — never a cheerful "100%".
+ *
+ * The visible pill is the tooltip trigger; a separate visually-hidden `role="status"` region
+ * carries the label so a screen reader hears state changes without the percentage chatter.
  */
 export default function SyncStatusPill() {
   const sync = useSelector((s: RootState) => s.syncUi);
-  const { data: status } = useGetSyncStatusQuery();
+  // Subscribes without its own interval: RealtimeSync owns the cadence for every subscriber.
+  const { data: status, isError } = useGetSyncStatusQuery();
+  const view = derivePill({
+    status,
+    statusFailed: isError,
+    live: sync.live,
+    summary: sync.summary,
+    summaryAt: sync.summaryAt,
+  });
 
-  // ── Active job: live progress ────────────────────────────────────────────────────────────
-  if (sync.active) {
-    const explainer = syncExplainer(sync.kind);
-    const pct = sync.pct;
-    const hasCount = sync.current != null && sync.total != null;
-    return (
-      <TooltipProvider delayDuration={150}>
-        <Tooltip>
-          <TooltipTrigger asChild>
+  return (
+    <>
+      <span role="status" aria-live="polite" aria-atomic="true" className="sr-only" data-testid="sync-announce">
+        {view ? `Sync status: ${view.label}` : ""}
+      </span>
+      {view && <PillBody view={view} status={status} />}
+    </>
+  );
+}
+
+function ReconnectTraktButton({ label }: { label: string }) {
+  const [startTraktAuth, { isLoading, isError }] = useStartTraktAuthMutation();
+
+  const reconnect = async () => {
+    try {
+      const { authorizeUrl, state } = await startTraktAuth().unwrap();
+      rememberOauthState(state);
+      window.location.assign(authorizeUrl);
+    } catch {
+      // isError renders the failure inline below; nothing awaits this handler.
+    }
+  };
+
+  return (
+    <Button
+      type="button"
+      variant="destructive"
+      size="sm"
+      onClick={reconnect}
+      disabled={isLoading}
+      data-testid="sync-reconnect"
+      className="rounded-full px-3 py-1 fa-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-danger/60"
+    >
+      <span className="h-1.5 w-1.5 rounded-full shrink-0 bg-fa-danger" aria-hidden />
+      <span data-testid="sync-health-label" className="truncate max-w-[10rem]">
+        {isLoading ? "Opening Trakt…" : isError ? "Couldn't reach Trakt — retry" : label}
+      </span>
+    </Button>
+  );
+}
+
+function PillBody({ view, status }: { view: PillView; status: SyncStatus | undefined }) {
+  const trigger =
+    view.mode === "active" ? (
+      <span
+        tabIndex={0}
+        data-testid="sync-pill"
+        data-tone={view.tone}
+        className="inline-flex flex-col gap-1 rounded-2xl border border-fa-edge bg-fa-glass px-3 py-1.5 cursor-default focus-visible:outline-none focus-visible:border-fa-frost/40 min-w-[9rem] max-w-[16rem]"
+      >
+        <span className={`inline-flex items-center gap-2 fa-caption ${LABEL_TONE[view.tone]}`}>
+          <span
+            className={`fa-status-orb shrink-0 ${view.tone === "warn" ? "fa-status-failed" : "fa-status-running"}`}
+            aria-hidden
+          />
+          <span className="truncate" data-testid="sync-pill-label">{view.label}</span>
+          {view.pct != null && (
+            <span className="tabular-nums ml-auto shrink-0 text-fa-frost">{Math.round(view.pct)}%</span>
+          )}
+        </span>
+        {view.pct != null && (
+          <span className="block h-1 rounded-full bg-fa-ink-3 overflow-hidden" aria-hidden>
             <span
-              tabIndex={0}
-              data-testid="sync-pill"
-              className="inline-flex flex-col gap-1 rounded-2xl border border-fa-edge bg-fa-glass px-3 py-1.5 cursor-default focus:outline-none focus:border-fa-frost/40 min-w-[9rem] max-w-[16rem]"
-            >
-              <span className="inline-flex items-center gap-2 fa-caption text-fa-frost-dim">
-                <span className="fa-status-orb fa-status-running shrink-0" />
-                <span className="truncate">{sync.label ?? "Syncing"}</span>
-                {pct != null && (
-                  <span className="tabular-nums ml-auto shrink-0 text-fa-frost">{Math.round(pct)}%</span>
-                )}
-              </span>
-              {pct != null && (
-                <span className="block h-1 rounded-full bg-fa-ink-3 overflow-hidden" aria-hidden>
-                  <span
-                    className="block h-full rounded-full bg-gradient-to-r from-fa-frost to-fa-frost-bright transition-[width] duration-500 ease-out"
-                    style={{ width: `${Math.max(4, Math.min(100, pct))}%` }}
-                  />
-                </span>
-              )}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" align="end" className="max-w-64 px-3 py-2.5">
-            <p className="fa-section-title mb-1.5">{explainer.title}</p>
-            {hasCount && (
-              <p className="fa-caption text-fa-frost mb-1.5 tabular-nums">
-                {sync.current!.toLocaleString()} / {sync.total!.toLocaleString()}
-              </p>
-            )}
+              className="block h-full rounded-full bg-gradient-to-r from-fa-frost to-fa-frost-bright transition-[width] duration-500 ease-out"
+              style={{ width: `${Math.max(4, view.pct)}%` }}
+            />
+          </span>
+        )}
+      </span>
+    ) : view.reconnect ? (
+      <ReconnectTraktButton label={view.label} />
+    ) : (
+      <span
+        tabIndex={0}
+        data-testid="sync-health"
+        data-health={view.tone}
+        className="inline-flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-3 py-1 fa-caption cursor-default focus-visible:outline-none focus-visible:border-fa-frost/40"
+      >
+        <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${DOT[view.tone]}`} aria-hidden />
+        <span
+          data-testid="sync-health-label"
+          className={`truncate ${LABEL_TONE[view.tone]} ${
+            // A problem is worth the header space on a phone; an all-clear is a dot.
+            view.tone === "ok" ? "hidden sm:inline max-w-[22rem]" : "max-w-[10rem]"
+          }`}
+        >
+          {view.label}
+        </span>
+      </span>
+    );
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+        <TooltipContent side="bottom" align="end" className="max-w-72 px-3 py-2.5" data-testid="sync-tooltip">
+          <p className="fa-section-title mb-1.5">{view.title}</p>
+          {view.count && (
+            <p className="fa-caption text-fa-frost mb-1.5 tabular-nums">
+              {view.count.current.toLocaleString("en-US")} / {view.count.total.toLocaleString("en-US")}
+            </p>
+          )}
+          {view.lines.length > 0 && (
             <ul className="space-y-1">
-              {explainer.lines.map((line) => (
-                <li key={line} className="fa-caption text-fa-frost-dim flex gap-1.5">
+              {view.lines.map((line, index) => (
+                <li key={`${index}:${line}`} className="fa-caption text-fa-frost-dim flex gap-1.5">
                   <span aria-hidden className="text-fa-frost/50">·</span>
                   {line}
                 </li>
               ))}
             </ul>
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    );
-  }
-
-  // ── Idle: persistent health chip ─────────────────────────────────────────────────────────
-  if (!status) return null;
-
-  // What the last sync actually did, if it said. Outlives the spinner on purpose: the founder's
-  // complaint was that the sync "happens instantly and nothing changes", and a chip that reverts to
-  // "Synced 2m ago" the moment the job ends is exactly that experience.
-  const summary = syncSummaryCopy(sync.summary);
-
-  const connectionBad = status.connectionStatus !== "Active";
-  const deadLetters = status.outboxDeadLetters > 0;
-  const queued = status.outboxPending > 0;
-  const health: "ok" | "warn" | "error" =
-    connectionBad || deadLetters ? "error" : queued ? "warn" : "ok";
-
-  const dot =
-    health === "error" ? "bg-fa-danger" : health === "warn" ? "bg-amber-400" : "bg-fa-success";
-  const label =
-    health === "error"
-      ? connectionBad
-        ? "Reconnect Trakt"
-        : "List sync failed"
-      : health === "warn"
-        ? "List syncing…"
-        : (summary ?? `Synced ${relTime(status.lastDeltaSyncAt)}`);
-
-  return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            tabIndex={0}
-            data-testid="sync-health"
-            data-health={health}
-            className="inline-flex items-center gap-2 rounded-full border border-fa-edge bg-fa-glass px-3 py-1 fa-caption text-fa-frost-dim cursor-default focus:outline-none focus:border-fa-frost/40"
-          >
-            <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${dot}`} aria-hidden />
-            <span
-              data-testid="sync-health-label"
-              className={`hidden sm:inline truncate ${summary && health === "ok" ? "max-w-[22rem] text-fa-frost" : "max-w-[10rem]"}`}
-            >
-              {label}
-            </span>
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" align="end" className="max-w-72 px-3 py-2.5">
-          <p className="fa-section-title mb-1.5">
-            {health === "error" ? "Sync needs attention" : health === "warn" ? "Sync in progress" : "Everything's synced"}
-          </p>
-          <dl className="space-y-1 fa-caption">
-            <div className="flex justify-between gap-4">
-              <dt className="text-fa-frost-dim">Library</dt>
-              <dd className="text-fa-frost tabular-nums">{relTime(status.lastDeltaSyncAt)}</dd>
-            </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-fa-frost-dim">Trakt list</dt>
-              <dd className="text-fa-frost tabular-nums">
-                {queued || deadLetters ? (
-                  <span className={deadLetters ? "text-fa-danger" : "text-amber-400"}>
-                    {status.outboxPending > 0 && `${status.outboxPending} queued`}
-                    {deadLetters && `${status.outboxPending > 0 ? " · " : ""}${status.outboxDeadLetters} failed`}
-                  </span>
-                ) : (
-                  `updated ${relTime(status.lastListSyncAt)}`
-                )}
-              </dd>
-            </div>
-            {connectionBad && (
+          )}
+          {/* Everything else that needs attention, so a warning never hides behind the headline. */}
+          {view.issues.length > 1 && (
+            <ul className="mt-2 pt-2 border-t border-fa-edge/50 space-y-1" data-testid="sync-issues">
+              {/* Two issues can share a label (two unknown job kinds both read "A background job
+                  failed"), so the key carries the position too. */}
+              {view.issues.slice(1).map((issue, index) => (
+                <li key={`${index}:${issue.label}`} className="fa-caption flex flex-col">
+                  <span className={issue.tone === "danger" ? "text-fa-danger" : "text-fa-warning"}>{issue.label}</span>
+                  <span className="text-fa-frost-dim">{issue.detail}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {status && (
+            <dl className="mt-2 pt-2 border-t border-fa-edge/50 space-y-1 fa-caption">
               <div className="flex justify-between gap-4">
-                <dt className="text-fa-frost-dim">Connection</dt>
-                <dd className="text-fa-danger">{status.connectionStatus} — re-link needed</dd>
+                <dt className="text-fa-frost-dim">Library</dt>
+                <dd className="text-fa-frost tabular-nums">{relTime(status.lastDeltaSyncAt)}</dd>
               </div>
-            )}
-          </dl>
-          {status.outboxLastError && (health === "error" || health === "warn") && (
-            <p className="fa-caption text-fa-frost-dim mt-2 pt-2 border-t border-fa-edge/50">
-              <span className="text-fa-frost/60">Last error:</span> {status.outboxLastError}
-            </p>
+              <div className="flex justify-between gap-4">
+                <dt className="text-fa-frost-dim">Trakt list</dt>
+                <dd className="text-fa-frost tabular-nums">
+                  {status.outboxDeadLetters > 0
+                    ? <span className="text-fa-danger">{status.outboxDeadLetters.toLocaleString("en-US")} failed</span>
+                    : status.outboxPending > 0
+                      ? `${status.outboxPending.toLocaleString("en-US")} queued`
+                      : `updated ${relTime(status.lastListSyncAt)}`}
+                </dd>
+              </div>
+            </dl>
           )}
         </TooltipContent>
       </Tooltip>

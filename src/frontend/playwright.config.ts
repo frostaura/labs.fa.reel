@@ -24,6 +24,8 @@ const port = Number(process.env.PW_PORT ?? 5173);
 
 export default defineConfig({
   testDir: "./tests-e2e",
+  // Production-build specs run under playwright.preview.config.ts.
+  testIgnore: "**/*.preview.spec.ts",
   fullyParallel: false,
   workers: 1,
   retries: 0,

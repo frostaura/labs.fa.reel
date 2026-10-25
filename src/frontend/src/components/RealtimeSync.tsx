@@ -1,70 +1,101 @@
 import { useEffect, useRef } from "react";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { api, useGetSyncStatusQuery } from "../store/api";
-import { picksChangedReported, syncCompleted, syncIdle, syncProgress } from "../store/syncSlice";
+import { activeJobObserved, picksChangedReported, syncCompleted, syncProgress } from "../store/syncSlice";
 import { scoresRecalibrated, type ScoreChange } from "../store/scoreOverridesSlice";
-import { jobKindToSseKind, isBackgroundKind } from "../lib/syncCopy";
+import { isUserVisibleWorkInFlight, shownActiveJob, statusPollInterval } from "../lib/syncPill";
+import { useDocumentVisible } from "../lib/useDocumentVisible";
+import { createInvalidationGate } from "../lib/invalidationGate";
 import type { AppDispatch } from "../store";
+
+const selectSyncStatus = api.endpoints.getSyncStatus.select();
+
+type Tag = Parameters<typeof api.util.invalidateTags>[0][number];
 
 /**
  * Headless steady-state SSE consumer mounted once in the app shell (fa.foresight's
  * realtimeSync pattern). Two inputs keep the header pill honest:
- *   1. Seed — /api/sync/status (polled every 5s, and on tag invalidation), so a reload
- *      mid-job shows the pill immediately and it self-corrects to the authoritative
- *      active job — the endpoint prefers a primary pipeline job over a background poll.
- *   2. Live — `job-progress` events update it in place between polls; `job-completed`
- *      invalidates the Sync tag so the refetch confirms idle (or the next active job).
- *
- * A background Trakt poll (delta/reconcile) fires every few minutes and must NOT hijack the
- * pill from a primary job (onboarding, enrichment, training) the user is waiting on — so its
- * live events are ignored while a primary job is active. `onerror` is a no-op: EventSource
- * auto-reconnects and the poll is the fallback.
+ *   1. Authority — /api/sync/status. Whether anything is running, and what, is read from every
+ *      poll answer; a live frame can never keep the pill "active" after the poll says idle (H-17).
+ *      Polled every 5 s only while work the user started is in flight, otherwise every 60 s, and
+ *      not at all while the tab is hidden (H-16, I-12).
+ *   2. Live — `job-progress` frames carry numbers between polls; the pill applies one only while
+ *      its kind matches the active job's `sseKind`. `job-completed` and `failed` invalidate the
+ *      Sync tag so the next answer confirms idle, the next job, or the failure.
+ * Every frame-driven invalidation goes through an invalidation gate: while the tab is hidden the
+ * tags are held, and applied once when it is shown, so a hidden tab sends no requests however busy
+ * the stream is (lib/invalidationGate.ts).
+ * `onerror` is a no-op: EventSource auto-reconnects and the poll is the fallback.
  */
 export default function RealtimeSync() {
   const dispatch = useDispatch<AppDispatch>();
-  const { data: status } = useGetSyncStatusQuery(undefined, { pollingInterval: 5000 });
+  const visible = useDocumentVisible();
+  // The cadence follows the latest answer, read from the cache so the hook can depend on it. RTK
+  // runs the lowest interval across subscribers; this is the only one in the shell that sets one.
+  const cached = useSelector(selectSyncStatus).data;
+  const interval = statusPollInterval(cached);
+  const { data: status, fulfilledTimeStamp, refetch } = useGetSyncStatusQuery(undefined, {
+    // 0 stops polling outright while hidden; skipPollingIfUnfocused alone still lets the poll that
+    // was already scheduled fire after the tab goes away.
+    pollingInterval: visible ? interval : 0,
+    skipPollingIfUnfocused: true,
+  });
 
-  // Tracks whether the authoritative active job is a primary pipeline job, so the SSE handler
-  // can drop background-poll events that would otherwise clobber its progress.
-  const primaryActiveRef = useRef(false);
-  // The last active model-lab job (Train/Evaluate), so its completion can refresh the Lab
-  // ledger. Those two handlers publish no `job-completed` SSE frame (the others do), so the
-  // only completion signal that exists today is the polled status flipping to idle.
-  const labJobActiveRef = useRef(false);
-
+  // Coming back to a tab whose answer is older than the current cadence: ask now rather than wait
+  // a whole interval with a stale pill. Re-running on an interval change is harmless — the answer
+  // that changed the interval is never stale.
   useEffect(() => {
-    if (!status) return;
-    const job = status.activeJob;
-    if (job && (job.status === "Running" || job.status === "Pending")) {
-      const kind = jobKindToSseKind(job.kind);
-      primaryActiveRef.current = !isBackgroundKind(kind);
-      labJobActiveRef.current = job.kind === "Train" || job.kind === "Evaluate";
-      dispatch(syncProgress({ label: job.progressMessage ?? "Syncing", pct: job.progressPct, kind }));
-    } else {
-      primaryActiveRef.current = false;
-      if (labJobActiveRef.current) {
-        // A train/evaluate run just finished: pull the fresh iteration into the Lab ledger
-        // without waiting for its 10s metric poll (or a reload).
-        labJobActiveRef.current = false;
-        dispatch(api.util.invalidateTags(["Lab"]));
-      }
-      dispatch(syncIdle());
+    if (visible && fulfilledTimeStamp !== undefined && Date.now() - fulfilledTimeStamp >= interval) refetch();
+  }, [visible, interval, fulfilledTimeStamp, refetch]);
+
+  // The last train/evaluate run seen in flight, so its completion can refresh the Lab ledger.
+  // Those two handlers publish no `job-completed` frame, so the only completion signal that exists
+  // today is the polled status moving on.
+  const labJobActiveRef = useRef(false);
+  const lastJobIdRef = useRef<string | null>(null);
+  const job = shownActiveJob(status);
+  const jobId = job?.id ?? null;
+  const userVisible = isUserVisibleWorkInFlight(status);
+  // Lab work is background after onboarding, so it is looked for among the recent jobs too.
+  const labJobInFlight = [status?.activeJob, ...(status?.recentJobs ?? [])].some(
+    (j) => (j?.kind === "Train" || j?.kind === "Evaluate") && (j.status === "Pending" || j.status === "Running")
+  );
+
+  // Keyed on primitives, not on the status object: structural sharing hands back the same object
+  // for an identical answer, and an effect keyed on it never re-ran to clear a stale frame (H-17).
+  useEffect(() => {
+    if (status === undefined) return;
+    const jobChanged = lastJobIdRef.current !== jobId;
+    lastJobIdRef.current = jobId;
+    dispatch(activeJobObserved({ userVisible, jobChanged }));
+
+    if (labJobActiveRef.current && !labJobInFlight) {
+      // A train/evaluate run just finished: pull the fresh iteration into the Lab ledger without
+      // waiting for its 10s metric poll (or a reload).
+      dispatch(api.util.invalidateTags(["Lab"]));
     }
-  }, [status, dispatch]);
+    labJobActiveRef.current = labJobInFlight;
+  }, [status, jobId, labJobInFlight, userVisible, dispatch]);
 
   useEffect(() => {
     const source = new EventSource("/sse/pipeline");
+    const gate = createInvalidationGate<Tag>(
+      () => document.visibilityState === "hidden",
+      (tags) => dispatch(api.util.invalidateTags(tags))
+    );
+    const invalidate = (...tags: Tag[]) => gate.invalidate(tags);
+    const onVisibility = () => gate.flush();
+    document.addEventListener("visibilitychange", onVisibility);
 
     source.addEventListener("job-progress", (ev) => {
       try {
         const data = JSON.parse((ev as MessageEvent).data);
+        // Numbers only. The frame's free-text `message` is never shown — the pill applies this
+        // frame only while its kind matches the active job's, so a background poll's frame can no
+        // longer overwrite the job the user is watching.
         const kind = typeof data.kind === "string" ? data.kind : null;
-        // A background poll must not overwrite a primary job's live progress.
-        if (isBackgroundKind(kind) && primaryActiveRef.current) return;
-        if (!isBackgroundKind(kind)) primaryActiveRef.current = true;
         dispatch(
           syncProgress({
-            label: String(data.message ?? data.kind ?? "Syncing"),
             pct: typeof data.pct === "number" ? data.pct : null,
             kind,
             current: typeof data.current === "number" ? data.current : null,
@@ -79,14 +110,14 @@ export default function RealtimeSync() {
     source.addEventListener("job-completed", (ev) => {
       // The status refetch (Sync tag) decides whether the pill clears or hands over to
       // the next active job.
-      dispatch(api.util.invalidateTags(["Sync", "Feed", "TasteDna"]));
+      invalidate("Sync", "Feed", "TasteDna");
       // A finished train/evaluate run also stales the model-lab ledger. Today those handlers
       // publish no job-completed frame (the poll-transition above covers them); this listens
       // anyway so a backend that starts emitting them gets the instant refresh for free.
       try {
         const data = JSON.parse((ev as MessageEvent).data);
         if (data?.kind === "train" || data?.kind === "evaluate") {
-          dispatch(api.util.invalidateTags(["Lab"]));
+          invalidate("Lab");
         }
 
         // A finished cross-reference pass changes the band's numbers and the track record's online
@@ -94,7 +125,7 @@ export default function RealtimeSync() {
         // frame rather than polled: the pass runs for minutes and then lands all at once, so a poll
         // fast enough to catch it would spend the whole pass asking a question with no new answer.
         if (data?.kind === "xref") {
-          dispatch(api.util.invalidateTags(["CrossReference", "Accuracy"]));
+          invalidate("CrossReference", "Accuracy");
         }
 
         // The post-sync moment. A delta/reconcile now says what it actually did — new ratings,
@@ -124,7 +155,7 @@ export default function RealtimeSync() {
     // generatedAt. Invalidating Feed refetches it; the generatedAt-keyed rows in Home then remount
     // and reseed with the new, still-eligible picks — so fresh recommendations lazy-load in live.
     source.addEventListener("feed-ready", (ev) => {
-      dispatch(api.util.invalidateTags(["Feed", "TasteDna"]));
+      invalidate("Feed", "TasteDna");
       // The rebuild the last sync enqueued has landed and knows how much of the page moved — the
       // one number the sync itself could not report, because it must never block on the build.
       try {
@@ -171,13 +202,26 @@ export default function RealtimeSync() {
       }
     });
 
-    // Floor against a feed-ready frame missed while the stream was down: the hub keeps no replay
-    // buffer, so on every (re)connect refetch the feed to reconcile whatever changed in the gap.
-    source.addEventListener("open", () => {
-      dispatch(api.util.invalidateTags(["Feed", "Sync"]));
+    // A job ran out of attempts. The frame's text is free text and stays off the screen; the
+    // refetch brings the failure in as `lastFailures`, with a stable reason code.
+    source.addEventListener("failed", () => {
+      invalidate("Sync");
     });
 
-    return () => source.close();
+    // Floor against a feed-ready frame missed while the stream was down: the hub keeps no replay
+    // buffer, so on every RE-connect refetch the feed to reconcile whatever changed in the gap. The
+    // first open is skipped — the page has only just fetched both, and refetching them again was
+    // a duplicate request on every cold load (I-12).
+    let opened = false;
+    source.addEventListener("open", () => {
+      if (opened) invalidate("Feed", "Sync");
+      opened = true;
+    });
+
+    return () => {
+      source.close();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [dispatch]);
 
   return null;

@@ -1,8 +1,11 @@
 /**
- * Contextual copy for the header sync pill's tooltip — what the background job is actually
- * doing for the user, per job kind. Kinds arrive on `job-progress` / `job-completed` SSE
- * events; unknown kinds fall back to the generic explainer, so new pipeline jobs are safe
- * to ship backend-first.
+ * Fixed copy for the header sync pill, per job kind. Kinds are the short SSE names the status API
+ * carries on every job (`sseKind`, computed by the backend's `JobVisibilityPolicy`); unknown kinds
+ * fall back to generic copy, so new pipeline jobs are safe to ship backend-first.
+ *
+ * Nothing in this file quotes a handler's free-text `progressMessage` or an exception string: the
+ * pill once printed "nothing cross-referenced this run 100%" as live progress for a job that was
+ * failing (H-1, I-1). Every word on the header comes from the tables below.
  */
 export interface SyncExplainer {
   title: string;
@@ -59,7 +62,9 @@ const EXPLAINERS: Record<string, SyncExplainer> = {
     title: "Checking the model",
     lines: [
       "Scoring this model against a popularity baseline",
-      "Only a model that beats it ships to your feed",
+      // The old second line promised "only a model that beats it ships to your feed". None of
+      // 101 evaluations beat popularity and every model shipped anyway, so the line was a lie.
+      "The result lands in the model lab, win or lose",
     ],
   },
   feed: {
@@ -83,6 +88,18 @@ const EXPLAINERS: Record<string, SyncExplainer> = {
       "Written for the hero and the leaders of each row",
     ],
   },
+  availability: {
+    title: "Refreshing where to watch",
+    lines: ["Checking which services carry the titles on your page"],
+  },
+  digest: {
+    title: "Writing your weekly digest",
+    lines: ["Collecting the week's picks into one message"],
+  },
+  seed: {
+    title: "Seeding the catalogue",
+    lines: ["Adding titles Reel can recommend from"],
+  },
   xref: {
     title: "Cross-referencing against your history",
     lines: [
@@ -100,46 +117,6 @@ const FALLBACK: SyncExplainer = {
 
 export function syncExplainer(kind: string | null | undefined): SyncExplainer {
   return (kind && EXPLAINERS[kind]) || FALLBACK;
-}
-
-/**
- * Backend JobKind (sync/status payload) → the short SSE kind vocabulary above. Lets a page
- * reload seed the pill from the authoritative status endpoint, not just live events.
- */
-const JOB_KIND_TO_SSE: Record<string, string> = {
-  FullIngest: "ingest",
-  DeltaSync: "delta",
-  FullReconcile: "reconcile",
-  HydrateCatalog: "hydrate",
-  EnrichCatalog: "enrich",
-  Train: "train",
-  Evaluate: "evaluate",
-  BuildFeed: "feed",
-  // These two shipped without a mapping and fell back to "Background sync" — a job the user is
-  // watching, described as nothing in particular.
-  BuildTasteNarrative: "narrative",
-  PersonaliseTitles: "lens",
-  CrossReference: "xref",
-};
-
-export function jobKindToSseKind(jobKind: string | null | undefined): string | null {
-  return (jobKind && JOB_KIND_TO_SSE[jobKind]) || null;
-}
-
-/**
- * Background Trakt polls (delta/reconcile) fire every few minutes and must not hijack the pill
- * from a primary pipeline job (onboarding, enrichment, training) that the user is waiting on.
- *
- * `xref` is deliberately NOT in here. A cross-reference pass can legitimately own the pill for ten
- * minutes, counting titles as it goes, and that is the founder's stated preference: a five-second
- * delta poll stealing the pill from it would report the least interesting thing on screen. Mirrors
- * `IsBackground` in `src/backend/FrostAura.Reel.Api/Endpoints/SyncEndpoints.cs`; change one, change
- * the other.
- */
-const BACKGROUND_KINDS = new Set(["delta", "reconcile"]);
-
-export function isBackgroundKind(sseKind: string | null | undefined): boolean {
-  return sseKind != null && BACKGROUND_KINDS.has(sseKind);
 }
 
 /** The `job-completed` payload for a delta/reconcile. Mirrors the backend's `SyncSummary`. */
@@ -220,15 +197,18 @@ function utcHourMinute(iso: string): string {
  * home screen. Each phrase is a verb clause in the second person, so it reads as the tail of a
  * sentence rather than a label.
  *
- * `Degraded` is the hard-failure parking state (revoked token, dead-lettered writes) and is the
- * one stage with a REASON worth quoting: pass the persisted one (`outboxLastError` on
- * `/api/sync/status`) and it is shown verbatim instead of the generic line. Callers that do not
- * hold it get honest generic copy — never a blank, and never the enum.
+ * `Degraded` is the hard-failure parking state. Status v2 says WHY with a stable `degradedReason`
+ * code, and the clause is keyed on it: a revoked Trakt link, dead-lettered writes, a model provider
+ * that is down and a failed pipeline are different problems, and naming the Trakt link for all of
+ * them sent the user to fix the wrong thing. No reason, or one this build does not know, reads as
+ * the neutral fallback — never the code, and never free text (the persisted error strings stay off
+ * the screen).
  *
  * An unknown stage falls back to the generic clause, so a new backend stage ships safely ahead of
  * the frontend that names it.
  */
 const PIPELINE_STAGE_COPY: Record<string, string> = {
+  NotEnoughRatings: "waiting for a few more ratings",
   Linked: "linking your Trakt",
   Ingesting: "pulling your history",
   Extracting: "reading every title",
@@ -237,19 +217,139 @@ const PIPELINE_STAGE_COPY: Record<string, string> = {
   FeedReady: "putting tonight's picks together",
 };
 
-/** The generic clause for an unknown stage, and for Degraded with no persisted reason. */
+/** The generic clause for an unknown stage. */
 export const PIPELINE_STAGE_FALLBACK = "getting your library ready";
 
-/** What Degraded says when nothing was persisted to explain it. */
-export const PIPELINE_DEGRADED_FALLBACK = "your Trakt link needs attention";
+/** `degradedReason` → the Degraded clause. */
+const DEGRADED_REASON_COPY: Record<string, string> = {
+  TraktRevoked: "your Trakt link needs reconnecting",
+  TraktRefreshFailed: "your Trakt link needs reconnecting",
+  TraktWritesDeadLettered: "some changes couldn't reach Trakt",
+  NotEnoughRatings: "waiting for a few more ratings",
+  ProviderDown: "the model provider is down",
+  PipelineFailed: "a step failed and stopped your picks updating",
+};
+
+/** What Degraded says with no reason, or one this build does not know. */
+export const PIPELINE_DEGRADED_FALLBACK = "something needs a look — the sync status in the header says what";
 
 export function pipelineStageCopy(
   stage: string | null | undefined,
   degradedReason?: string | null
 ): string {
   if (stage === "Degraded") {
-    return degradedReason?.trim() || PIPELINE_DEGRADED_FALLBACK;
+    return (degradedReason && DEGRADED_REASON_COPY[degradedReason]) || PIPELINE_DEGRADED_FALLBACK;
   }
 
   return (stage && PIPELINE_STAGE_COPY[stage]) || PIPELINE_STAGE_FALLBACK;
+}
+
+// ── Header pill copy ─────────────────────────────────────────────────────────────────────────
+
+/** The pill's label while a job of this kind is the status API's `activeJob`. */
+const ACTIVE_LABELS: Record<string, string> = {
+  ingest: "Importing your Trakt history",
+  delta: "Syncing with Trakt",
+  reconcile: "Reconciling with Trakt",
+  hydrate: "Enriching your library",
+  enrich: "Reading every title",
+  train: "Training your model",
+  evaluate: "Checking your model",
+  feed: "Building your picks",
+  narrative: "Rewriting your taste profile",
+  lens: "Writing title notes",
+  availability: "Refreshing where to watch",
+  digest: "Writing your digest",
+  seed: "Seeding the catalogue",
+  // The named pass: shown by name, never with a denominator — it has none worth trusting.
+  xref: "Cross-referencing · first pass",
+};
+
+export const ACTIVE_LABEL_FALLBACK = "Updating Reel";
+
+export function activeJobLabel(sseKind: string | null | undefined): string {
+  return (sseKind && ACTIVE_LABELS[sseKind]) || ACTIVE_LABEL_FALLBACK;
+}
+
+/** What a failed run of this kind is called: "{noun} failed". */
+const FAILURE_NOUNS: Record<string, string> = {
+  ingest: "Trakt import",
+  delta: "Trakt sync",
+  reconcile: "Trakt reconcile",
+  hydrate: "Library enrichment",
+  enrich: "Title reading",
+  train: "Model training",
+  evaluate: "Model check",
+  feed: "Picks build",
+  narrative: "Taste profile",
+  lens: "Title notes",
+  availability: "Where-to-watch refresh",
+  digest: "Weekly digest",
+  seed: "Catalogue seed",
+  xref: "Cross-reference",
+};
+
+export const FAILURE_NOUN_FALLBACK = "A background job";
+
+export function failureNoun(sseKind: string | null | undefined): string {
+  return (sseKind && FAILURE_NOUNS[sseKind]) || FAILURE_NOUN_FALLBACK;
+}
+
+/**
+ * Stable reason codes → a sentence. Covers the backend's `JobFailureReason` codes and the provider
+ * breaker codes; an unknown code reads as the generic line, never as the code itself.
+ */
+const REASON_COPY: Record<string, string> = {
+  stalled: "It stopped responding and was abandoned.",
+  payment_required: "The model provider refused payment (402).",
+  unauthorized: "A provider rejected Reel's credentials (401).",
+  forbidden: "A provider refused access (403).",
+  rate_limited: "A provider is rate-limiting Reel (429).",
+  no_answer: "The model returned no usable answer.",
+  budget_spent: "Today's call budget is spent.",
+  timed_out: "It timed out.",
+  truncation_breaker: "Model replies keep getting cut off.",
+  error: "It hit an unexpected error.",
+};
+
+export const REASON_FALLBACK = REASON_COPY.error;
+
+export function reasonCopy(code: string | null | undefined): string {
+  return (code && REASON_COPY[code]) || REASON_FALLBACK;
+}
+
+/** Reason codes that no retry will fix — they need a person, so they read as danger at once. */
+const TERMINAL_REASONS = new Set(["payment_required", "unauthorized", "forbidden"]);
+
+export function isTerminalReason(code: string | null | undefined): boolean {
+  return code != null && TERMINAL_REASONS.has(code);
+}
+
+/**
+ * Model-call purposes (`ExternalApiPurpose` in Domain/Sync/ExternalApiUsage.cs) → what the user
+ * would call that feature. The provider-health tooltip names the affected feature with these; a
+ * purpose this build does not know, or a whole-provider breaker, reads as the fallback — never as
+ * the identifier.
+ */
+const PURPOSE_COPY: Record<string, string> = {
+  "extract-attributes": "Reading new titles",
+  "search-interpret": "Ask Reel",
+  "search-agent": "Ask Reel",
+  rerank: "Ranking your picks",
+  "rerank-feed": "Ranking your picks",
+  "rerank-page": "Ranking your picks",
+  "rerank-ask": "Ask Reel",
+  "rerank-expand": "Ask Reel",
+  embed: "Search",
+  "taste-narrative": "Your taste story",
+  lens: "Lenses",
+  "lens-audit": "Lenses",
+  "cross-reference": "Cross-referencing",
+  "cross-reference-eval": "Cross-referencing",
+};
+
+export const PURPOSE_FALLBACK = "Some model features";
+
+export function purposeCopy(purpose: string | null | undefined): string {
+  return (purpose && PURPOSE_COPY[purpose]) || PURPOSE_FALLBACK;
 }

@@ -11,12 +11,44 @@ import { NavigationRoute, registerRoute } from "workbox-routing";
 import { CacheFirst, NetworkFirst } from "workbox-strategies";
 import { ExpirationPlugin } from "workbox-expiration";
 import { CacheableResponsePlugin } from "workbox-cacheable-response";
+import { API_CACHE, SIGNED_OUT, SKIP_WAITING } from "./lib/swContract";
+import { PROMPT_AWARE_MARKER, createSignOutGuard, markFromCache, shouldTakeOverOnInstall } from "./lib/swApiCache";
 
 declare let self: ServiceWorkerGlobalScope;
 
-// `registerType: "autoUpdate"` semantics — a new worker takes over immediately, exactly as the
-// generated worker did (generateSW emitted these two calls for us before).
-self.skipWaiting();
+// `registerType: "prompt"` semantics. A new worker WAITS: taking over the moment a deploy installed
+// it deleted the previous build's precached chunks out from under every open tab, and the next lazy
+// route in those tabs went blank (I-3). The page shows "New version — reload" (lib/pwaUpdate.ts)
+// and, on the user's go-ahead, posts SKIP_WAITING. A first install has no previous build to protect,
+// so `clientsClaim` still lets it control the page at once.
+//
+// The one exception is the first deploy of this prompt: tabs on the previous build never post
+// SKIP_WAITING, so the new worker takes over once, as the old one always did (lib/swApiCache.ts).
+const signOutGuard = createSignOutGuard();
+
+self.addEventListener("message", (event) => {
+  const type = (event.data as { type?: string } | null)?.type;
+  if (type === SKIP_WAITING) void self.skipWaiting();
+  // Sign-out (lib/signOut.ts): forget the account's API answers, including any still in flight.
+  if (type === SIGNED_OUT) {
+    signOutGuard.signedOut();
+    event.waitUntil(caches.delete(API_CACHE));
+  }
+});
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    (async () => {
+      const takeOver = shouldTakeOverOnInstall({
+        hasActiveWorker: self.registration.active != null,
+        promptAwareMarker: await caches.has(PROMPT_AWARE_MARKER),
+      });
+      if (takeOver) await self.skipWaiting();
+    })()
+  );
+});
+self.addEventListener("activate", (event) => {
+  event.waitUntil(caches.open(PROMPT_AWARE_MARKER).then(() => undefined));
+});
 clientsClaim();
 
 precacheAndRoute(self.__WB_MANIFEST);
@@ -45,6 +77,12 @@ registerRoute(
 // entitlement with no visual difference from live data. An offline fallback should be recent
 // enough to be recognisably yours and short enough that anything genuinely stale simply fails
 // and surfaces as an error the UI can report.
+//
+// A response answered FROM the cache is marked (`X-Reel-From-Cache: 1`), so the app can say "offline —
+// showing what Reel saved at 4:17 PM" instead of presenting an hour-old answer as live (I-11). The
+// server's own `Date` header travels with it and says when it was saved. Sign-out deletes this cache
+// (lib/signOut.ts posts SIGNED_OUT; the guard refuses answers to requests already in flight), so a
+// second account on the same device never falls back to the first one's data.
 registerRoute(
   ({ url, request }) =>
     request.method === "GET" &&
@@ -52,11 +90,16 @@ registerRoute(
     !url.pathname.startsWith("/api/auth/") &&
     !url.pathname.includes("/stream"),
   new NetworkFirst({
-    cacheName: "reel-api",
+    cacheName: API_CACHE,
     networkTimeoutSeconds: 8,
     plugins: [
       new ExpirationPlugin({ maxEntries: 300, maxAgeSeconds: 60 * 60 }),
-      new CacheableResponsePlugin({ statuses: [0, 200] })
+      new CacheableResponsePlugin({ statuses: [0, 200] }),
+      {
+        requestWillFetch: async (param) => signOutGuard.requestWillFetch(param),
+        cacheWillUpdate: async (param) => signOutGuard.cacheWillUpdate(param),
+        cachedResponseWillBeUsed: async ({ cachedResponse }) => (await markFromCache(cachedResponse)) ?? undefined
+      }
     ]
   })
 );

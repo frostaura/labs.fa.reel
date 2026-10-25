@@ -12,16 +12,55 @@ export const SESSION_FOUNDER = {
   pinConfigured: false,
 };
 
-export const EMPTY_SYNC = {
-  pipelineStage: "Ingesting",
-  connectionStatus: "Active",
-  lastDeltaSyncAt: null,
-  lastFullReconcileAt: null,
-  activeJob: null,
-  recentJobs: [],
-  outboxPending: 0,
-  outboxDeadLetters: 0,
-};
+/**
+ * A complete `/api/sync/status` v2 payload (Application/Pipeline/SyncStatusContract.cs), idle and
+ * healthy unless overridden. Prefer this over hand-built partial payloads: a fixture missing the v2
+ * fields exercises a shape the backend no longer sends.
+ */
+export function syncStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    contractVersion: 2,
+    pipelineStage: "FeedReady",
+    connectionStatus: "Active",
+    lastDeltaSyncAt: null,
+    lastFullReconcileAt: null,
+    activeJob: null,
+    recentJobs: [],
+    outboxPending: 0,
+    outboxDeadLetters: 0,
+    lastListSyncAt: null,
+    outboxLastError: null,
+    retrain: { minNewRatings: 10, newRatingsSinceTrain: 0, hasActiveModel: true, lastTrainedAt: null },
+    lastFailures: [],
+    providerHealth: { state: "Unmonitored", checkedAt: null, breakers: [] },
+    degradedReason: null,
+    notEnoughRatings: null,
+    ...overrides,
+  };
+}
+
+/** One job as `activeJob` / `recentJobs` carry it — a user-started Trakt sync unless overridden. */
+export function syncJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "00000000-0000-0000-0000-00000000a001",
+    kind: "DeltaSync",
+    sseKind: "delta",
+    visibility: "UserVisible",
+    status: "Running",
+    progressPct: 20,
+    progressMessage: null,
+    enqueuedAt: "2026-10-24T10:00:00Z",
+    startedAt: "2026-10-24T10:00:01Z",
+    completedAt: null,
+    attempt: 1,
+    maxAttempts: 3,
+    retrying: false,
+    retryReasonCode: null,
+    ...overrides,
+  };
+}
+
+export const EMPTY_SYNC = syncStatus({ pipelineStage: "Ingesting" });
 
 /**
  * Mocks a GET-ish endpoint with a JSON body.

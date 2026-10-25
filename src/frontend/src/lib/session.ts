@@ -16,19 +16,44 @@
 let refreshInFlight: Promise<Response> | null = null;
 
 /**
- * Rotates the session via `/auth/refresh`, collapsing concurrent callers onto one request.
- * Resolves true when the caller may retry, false when the session is genuinely gone (or the
- * network is): a rejected refresh is a failed refresh, never a thrown error at the call site,
- * because every caller's only sensible response to either is "give up on this attempt".
+ * What a refresh attempt established about the session:
+ * - `refreshed` — new cookies are set; the caller may retry.
+ * - `rejected` — the server refused the refresh token (401/403): the session is genuinely gone.
+ * - `unavailable` — the refresh never got an answer on its merits (5xx, 429, a dropped connection).
+ *   This says nothing about the session. An expired access cookie is rejected statelessly, but the
+ *   refresh needs the database, so a Postgres restart turns every reload into a 401 followed by an
+ *   `unavailable` refresh — treating that as signed out bounced the user to the landing page (H-15).
  */
-export async function ensureFreshSession(): Promise<boolean> {
+export type RefreshOutcome =
+  | { outcome: "refreshed" }
+  | { outcome: "rejected"; status: number }
+  | { outcome: "unavailable"; status: number | null };
+
+/** The statuses that mean "this refresh token is no good", as opposed to "the server is not well". */
+const REJECTED = new Set([401, 403]);
+
+/** Rotates the session via `/auth/refresh`, collapsing concurrent callers onto one request. */
+export async function refreshSession(): Promise<RefreshOutcome> {
   refreshInFlight ??= fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
   try {
     const refresh = await refreshInFlight.finally(() => {
       refreshInFlight = null;
     });
-    return refresh.ok;
+    if (refresh.ok) return { outcome: "refreshed" };
+    return REJECTED.has(refresh.status)
+      ? { outcome: "rejected", status: refresh.status }
+      : { outcome: "unavailable", status: refresh.status };
   } catch {
-    return false;
+    return { outcome: "unavailable", status: null };
   }
+}
+
+/**
+ * True when the caller may retry. For callers whose only response to a failed refresh is "give up
+ * on this attempt" (the Ask Reel stream); anything that decides whether the user is signed out
+ * reads {@link refreshSession} instead, because "the session is gone" and "the server did not
+ * answer" are different outcomes there.
+ */
+export async function ensureFreshSession(): Promise<boolean> {
+  return (await refreshSession()).outcome === "refreshed";
 }

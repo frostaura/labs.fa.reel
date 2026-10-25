@@ -1,7 +1,11 @@
 import { clearHasSession, markHasSession } from "../../lib/sessionFlag";
 import { api } from "./base";
 
-/** Pipeline stages as reported by the backend (Account.PipelineStage). */
+/**
+ * Pipeline stages as reported by the backend (Account.PipelineStage). Values are appended without
+ * notice (status contract v2 added `NotEnoughRatings`), so every reader maps one it does not know
+ * to its own fallback rather than switching exhaustively.
+ */
 export type PipelineStage =
   | "Linked"
   | "Ingesting"
@@ -9,7 +13,8 @@ export type PipelineStage =
   | "Training"
   | "Evaluated"
   | "FeedReady"
-  | "Degraded";
+  | "Degraded"
+  | "NotEnoughRatings";
 
 export type Tier = "Free" | "Paid" | "Founder";
 
