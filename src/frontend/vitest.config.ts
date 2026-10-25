@@ -4,7 +4,7 @@ import path from "node:path";
 // Standalone Vitest config so the app's Vite/PWA plugin chain does not load during tests.
 export default defineConfig({
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
   test: {
     environment: "node",
@@ -12,7 +12,8 @@ export default defineConfig({
     // a backing file. Tests stub storage where they need it, so the experiment is switched off —
     // code under test then sees no localStorage, exactly as in a browser that blocks it.
     execArgv: ["--no-experimental-webstorage"],
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // scripts/** holds the e2e harness (tripwire attribution); its logic is unit tested too.
+    include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.test.ts"],
     coverage: {
       provider: "v8",
       // Emit coverage-summary.json for the CI threshold gate, plus human-readable output.

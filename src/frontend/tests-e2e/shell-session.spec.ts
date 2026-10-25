@@ -79,6 +79,11 @@ test.describe("session", () => {
     await mockJson(page, "**/api/auth/me", {}, 401);
     await page.goto("/saved");
     await expect(page).toHaveURL(/\/$/);
+    // The URL changes before the landing chunk has loaded. Ending the test there left a module
+    // request in flight while the context closed, and under load that teardown overran the test
+    // timeout (R1-22). The test ends on the rendered landing page.
+    await expect(page.getByRole("heading", { level: 1, name: "Reel" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Trakt/ })).toBeEnabled();
   });
 
   // H-15 again, one hop later: the expired access cookie is refused statelessly, but the refresh
@@ -171,6 +176,8 @@ test.describe("error boundaries", () => {
     await bootQuiet(page);
     await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
     await mockJson(page, "**/api/saved", { ...SAVED_A, items: [] });
+    // The failed import is reported before the reload; this spec asserts the reload, not the report.
+    await page.route("**/api/client-errors", (route) => route.fulfill({ status: 204, body: "" }));
     await page.goto("/home");
     await expect(page.getByRole("link", { name: "Reel home" })).toBeVisible();
 

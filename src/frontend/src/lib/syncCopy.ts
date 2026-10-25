@@ -296,6 +296,25 @@ export function failureNoun(sseKind: string | null | undefined): string {
 }
 
 /**
+ * What still stands after a failed run of this kind, where the page goes on showing that kind's
+ * earlier results. Home's cross-reference band keeps counting titles judged by earlier passes while
+ * the latest pass fails; without this line the pill's "Cross-reference failed" and the band's
+ * "Cross-referenced 452 titles" read as a contradiction (R1-20). Kinds with nothing left standing
+ * have no line.
+ */
+const FAILURE_AFTERMATH: Record<string, string> = {
+  xref: "Titles earlier passes judged keep their verdicts.",
+  feed: "Your current picks stay up until a rebuild succeeds.",
+  narrative: "Your last taste profile stays up.",
+  availability: "Where-to-watch shows the last good answer.",
+  digest: "Last week's digest stays up.",
+};
+
+export function failureAftermath(sseKind: string | null | undefined): string | null {
+  return (sseKind && FAILURE_AFTERMATH[sseKind]) || null;
+}
+
+/**
  * Stable reason codes → a sentence. Covers the backend's `JobFailureReason` codes and the provider
  * breaker codes; an unknown code reads as the generic line, never as the code itself.
  */

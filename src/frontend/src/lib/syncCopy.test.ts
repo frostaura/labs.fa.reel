@@ -7,6 +7,7 @@ import {
   PIPELINE_STAGE_FALLBACK,
   REASON_FALLBACK,
   activeJobLabel,
+  failureAftermath,
   failureNoun,
   isTerminalReason,
   pipelineStageCopy,
@@ -255,5 +256,18 @@ describe("purposeCopy", () => {
     expect(purposeCopy("some-future-purpose")).toBe(PURPOSE_FALLBACK);
     expect(purposeCopy(null)).toBe(PURPOSE_FALLBACK);
     expect(purposeCopy(undefined)).toBe(PURPOSE_FALLBACK);
+  });
+});
+
+describe("failureAftermath", () => {
+  it("names what still stands for kinds whose earlier results stay on the page", () => {
+    expect(failureAftermath("xref")).toBe("Titles earlier passes judged keep their verdicts.");
+    expect(failureAftermath("feed")).toBe("Your current picks stay up until a rebuild succeeds.");
+  });
+
+  it("says nothing for a kind with no earlier result on show, or one this build does not know", () => {
+    expect(failureAftermath("delta")).toBeNull();
+    expect(failureAftermath("some-future-kind")).toBeNull();
+    expect(failureAftermath(null)).toBeNull();
   });
 });
