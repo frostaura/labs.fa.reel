@@ -101,6 +101,69 @@ public class RetrievalContractTests
             HardConstraintFilter.EvidenceFor(title, hard));
     }
 
+    [Theory]
+    [InlineData("3 Ninjas", "ninja", true)]
+    [InlineData("3 Ninjas: High Noon at Mega Mountain", "ninja", true)]
+    [InlineData("Alien vs. Ninja", "ninja", true)]
+    [InlineData("Batman Ninja vs. Yakuza League", "ninja", true)]
+    [InlineData("NINJA ASSASSIN", "ninja", true)]
+    [InlineData("Ninja's Creed", "ninja", true)]
+    [InlineData("Ninjababy", "ninja", false)]
+    [InlineData("The Lego Ninjago Movie", "ninja", false)]
+    [InlineData("Shinobi: Heart Under Blade", "shinobi", true)]
+    [InlineData("The Witches", "witch", true)]
+    [InlineData("Switchblade", "witch", false)]
+    [InlineData("Lost at Sea Again", "lost at sea", true)]
+    [InlineData("Lost at Seaside", "lost at sea", false)]
+    [InlineData("Rocky 2.0", "2.0", true)]
+    [InlineData("Rocky 210", "2.0", false)]
+    [InlineData("", "ninja", false)]
+    public void The_name_arm_matches_a_label_as_a_whole_word_optionally_plural(string name, string label, bool expected) =>
+        Assert.Equal(expected, HardConstraintFilter.NameMatches(name, label));
+
+    [Theory]
+    [InlineData("heist", "heist", true)]
+    [InlineData("bank heist", "heist", true)]
+    [InlineData("heists", "heist", true)]
+    [InlineData("atheist", "heist", false)]
+    [InlineData("female ninja", "ninja", true)]
+    [InlineData("time traveler", "time travel", true)]
+    [InlineData("overtime travel", "time travel", false)]
+    [InlineData("the 1.5 rule", "1.5", true)]
+    [InlineData("the 105 rule", "1.5", false)]
+    public void The_keyword_arm_matches_a_label_from_a_word_start(string keyword, string label, bool expected) =>
+        Assert.Equal(expected, HardConstraintFilter.KeywordMatches(keyword, label));
+
+    [Fact]
+    public void The_keyword_arm_pattern_is_word_start_bounded_and_literal()
+    {
+        Assert.Equal(@"\mheist", HardConstraintFilter.KeywordPattern("heist"));
+        Assert.Equal(@"\mc\+\+", HardConstraintFilter.KeywordPattern("c++"));
+    }
+
+    [Fact]
+    public void The_name_arm_pattern_matches_the_label_literally_in_postgres()
+    {
+        Assert.Equal(@"\mninja(e?s)?\M", HardConstraintFilter.NamePattern("ninja"));
+        Assert.Equal(@"\mlost at sea(e?s)?\M", HardConstraintFilter.NamePattern("lost at sea"));
+        // Every ARE metacharacter is escaped; letters and digits never are (a backslash before one
+        // would start an ARE escape such as \d).
+        Assert.Equal(@"\mc\+\+ \(2\.0\) \[a\|b\] \{x\} \^\$\?\*\\(e?s)?\M", HardConstraintFilter.NamePattern(@"c++ (2.0) [a|b] {x} ^$?*\"));
+        Assert.Equal(@"\mdéjà vu(e?s)?\M", HardConstraintFilter.NamePattern("déjà vu"));
+    }
+
+    [Fact]
+    public void Evidence_names_a_label_found_only_in_the_title_name()
+    {
+        var hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", ["ninja", "shinobi"], [])] };
+
+        Assert.Equal(["name:ninja"], HardConstraintFilter.EvidenceFor(new Title { Name = "3 Ninjas Kick Back", Keywords = ["martial arts"] }, hard));
+        Assert.Equal(
+            ["keyword:ninja", "name:ninja"],
+            HardConstraintFilter.EvidenceFor(new Title { Name = "Ninja Scroll", Keywords = ["ninja", "anime"] }, hard));
+        Assert.Empty(HardConstraintFilter.EvidenceFor(new Title { Name = "Ninjababy", Keywords = ["pregnancy"] }, hard));
+    }
+
     [Fact]
     public void A_concept_without_labels_matches_on_the_users_own_words()
     {
@@ -115,6 +178,20 @@ public class RetrievalContractTests
 
         Assert.Equal(2, report.ClearingFloor);
         Assert.Equal(report.MatchingInCatalogue, report.AlreadySeen + report.SavedOrDismissed + report.ExcludedByConditions + report.Eligible);
+        // Nothing shown: everything clearing the bar is still on offer.
+        Assert.Equal(0, report.AlreadyShown);
+        Assert.Equal(2, report.Offerable);
+    }
+
+    [Fact]
+    public void Already_shown_titles_are_cut_from_the_offerable_supply_and_nothing_else()
+    {
+        var report = new SupplyReport(20, 6, 2, 7, 5, 1, 2, [], 3, 50, 6.0m, KnockoutsMeasured: true, AlreadyShown: 2);
+
+        Assert.Equal(5, report.Eligible);
+        Assert.Equal(2, report.ClearingFloor);
+        Assert.Equal(0, report.Offerable);
+        Assert.Equal(report.ClearingFloor, report.AlreadyShown + report.Offerable);
     }
 
     [Theory]

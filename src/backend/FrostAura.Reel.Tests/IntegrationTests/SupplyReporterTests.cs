@@ -235,8 +235,13 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         var undated = await SeedTitleAsync(topic, t => { t.Year = null; t.ReleasedAt = null; t.FirstAiredAt = null; });
         var longOne = await SeedTitleAsync(topic, t => t.RuntimeMinutes = 150);
         var noRuntime = await SeedTitleAsync(topic, t => t.RuntimeMinutes = null);
+        var plural = await SeedTitleAsync(topic, t => t.Keywords = [$"{topic}s"]);
 
-        Assert.Equal(7, (await ReportAsync(accountId, Concept(topic))).MatchingInCatalogue);
+        // A label inside another word is not the topic: "heist" once matched the keyword "atheist".
+        await SeedTitleAsync(topic, t => t.Keywords = [$"a{topic}"]);
+        await SeedTitleAsync(topic, t => t.Keywords = [$"the a{topic} debate"]);
+
+        Assert.Equal(8, (await ReportAsync(accountId, Concept(topic))).MatchingInCatalogue);
 
         // Two concepts AND together.
         var twoConcepts = HardConstraints.None with
@@ -246,7 +251,7 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         Assert.Equal(1, (await ReportAsync(accountId, twoConcepts)).MatchingInCatalogue);
 
         // Media scope.
-        Assert.Equal(6, (await ReportAsync(accountId, Concept(topic) with { Media = MediaScope.Movies })).MatchingInCatalogue);
+        Assert.Equal(7, (await ReportAsync(accountId, Concept(topic) with { Media = MediaScope.Movies })).MatchingInCatalogue);
         Assert.Equal(1, (await ReportAsync(accountId, Concept(topic) with { Media = MediaScope.Shows })).MatchingInCatalogue);
 
         // An inclusive year window lets the undated title through, as the standing year rule does.
@@ -255,10 +260,10 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
 
         // A runtime ceiling needs a known runtime.
         var shortOnes = Concept(topic) with { MaxRuntimeMinutes = 120 };
-        Assert.Equal(5, (await ReportAsync(accountId, shortOnes)).MatchingInCatalogue);
+        Assert.Equal(6, (await ReportAsync(accountId, shortOnes)).MatchingInCatalogue);
 
         // A concept whose labels are empty falls back to the user's words.
-        Assert.Equal(7, (await ReportAsync(accountId, HardConstraints.None with
+        Assert.Equal(8, (await ReportAsync(accountId, HardConstraints.None with
         {
             Concepts = [new ConceptTerm(topic, [], [])],
         })).MatchingInCatalogue);
@@ -268,10 +273,140 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         {
             Concepts = [new ConceptTerm(topic, [topic], []), new ConceptTerm(genre, [], [genre])],
         };
-        Assert.Equal(7, (await ReportAsync(accountId, WithGenre("drama"))).MatchingInCatalogue);
+        Assert.Equal(8, (await ReportAsync(accountId, WithGenre("drama"))).MatchingInCatalogue);
         Assert.Equal(0, (await ReportAsync(accountId, WithGenre("horror"))).MatchingInCatalogue);
 
-        _ = (contained, both, show, nineties, undated, longOne, noRuntime);
+        _ = (contained, both, show, nineties, undated, longOne, noRuntime, plural);
+    }
+
+    [Fact]
+    public async Task A_title_carrying_the_topic_only_in_its_name_counts_as_a_whole_word()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The founder's ninja report missed "3 Ninjas", "Alien vs. Ninja" and "Batman Ninja vs.
+        // Yakuza League": TMDB tags none of them "ninja". These fixtures carry the topic only in the
+        // name, in each of the shapes those titles take, plus the near-misses the arm must refuse.
+        var topic = UniqueTopic();
+        var accountId = await SeedAccountAsync();
+        var untagged = new[] { "unrelated" };
+        var plural = await SeedTitleAsync(topic, t => { t.Name = $"3 {topic}s"; t.Keywords = untagged; });
+        var trailing = await SeedTitleAsync(topic, t => { t.Name = $"Alien vs. {topic.ToUpperInvariant()}"; t.Keywords = untagged; });
+        var middle = await SeedTitleAsync(topic, t => { t.Name = $"Batman {topic} vs. Yakuza League"; t.Keywords = untagged; });
+        var seenByName = await SeedTitleAsync(topic, t => { t.Name = $"{topic}s Kick Back"; t.Keywords = untagged; });
+        await SeedWatchAsync(accountId, seenByName);
+        var both = await SeedTitleAsync(topic, t => t.Name = $"{topic} Scroll");
+        var keywordOnly = await SeedTitleAsync(topic);
+        await SeedTitleAsync(topic, t => { t.Name = $"{topic}baby"; t.Keywords = untagged; });
+        await SeedTitleAsync(topic, t => { t.Name = $"The Lego {topic}go Movie"; t.Keywords = untagged; });
+        await SeedTitleAsync(topic, t => { t.Name = $"x{topic}"; t.Keywords = untagged; });
+        var showByName = await SeedTitleAsync(topic, t => { t.Name = $"American {topic} Warrior"; t.Keywords = untagged; t.MediaType = MediaType.Show; });
+        await SeedTitleAsync(topic, t => { t.Name = $"Cumbia {topic}"; t.Keywords = untagged; t.TmdbVoteCount = 12; });
+
+        var report = await ReportAsync(accountId, Concept(topic));
+
+        // plural, trailing, middle, seenByName, both, keywordOnly, showByName — "both" once.
+        Assert.Equal(7, report.MatchingInCatalogue);
+        Assert.Equal(1, report.AlreadySeen);
+        Assert.Equal(6, report.Eligible);
+        Assert.Equal(1, report.LowVoteMatches);
+        Assert.Equal(6, (await ReportAsync(accountId, Concept(topic) with { Media = MediaScope.Movies })).MatchingInCatalogue);
+
+        // The predicate path a broad request takes counts the same titles.
+        Assert.Equal(Shape(report), Shape(await ReportAsync(accountId, Concept(topic), idNarrowingLimit: 0)));
+
+        // A label with regex metacharacters is matched literally, never as a pattern.
+        var dotted = $"{topic}.v2";
+        var literal = await SeedTitleAsync(topic, t => { t.Name = $"Return of {dotted}"; t.Keywords = untagged; });
+        await SeedTitleAsync(topic, t => { t.Name = $"Return of {topic}xv2"; t.Keywords = untagged; });
+        Assert.Equal(1, (await ReportAsync(accountId, HardConstraints.None with
+        {
+            Concepts = [new ConceptTerm(dotted, [dotted], [])],
+        })).MatchingInCatalogue);
+
+        // The retriever serves the name-only titles, each with evidence naming the label.
+        var result = await RetrieveAsync(new RetrievalQuery(accountId, Concept(topic), SoftPreferences.None, [], Want: 20));
+        var evidence = result.Candidates.ToDictionary(c => c.TitleId, c => c.Evidence);
+        Assert.Equal([$"name:{topic}"], evidence[plural]);
+        Assert.Equal([$"name:{topic}"], evidence[trailing]);
+        Assert.Equal([$"name:{topic}"], evidence[middle]);
+        Assert.Equal([$"keyword:{topic}", $"name:{topic}"], evidence[both]);
+        Assert.Equal([$"keyword:{topic}"], evidence[keywordOnly]);
+        Assert.False(evidence.ContainsKey(seenByName));
+        _ = (showByName, literal);
+    }
+
+    [Fact]
+    public async Task Titles_already_shown_here_are_cut_from_the_offerable_supply_and_from_every_knockout()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var topic = UniqueTopic();
+        var accountId = await SeedAccountAsync();
+        await SeedFilterAsync(accountId, FilterKind.ExcludeGenre, "comedy");
+        await SeedFilterAsync(accountId, FilterKind.MinPredictedRating, "6.0");
+        var artifact = await SeedArtifactAsync(accountId, ArtifactStatus.Active, version: 1);
+
+        var shownClears = await SeedTitleAsync(topic);
+        var freshClears = await SeedTitleAsync(topic);
+        var shownUnder = await SeedTitleAsync(topic);
+        var shownUnscored = await SeedTitleAsync(topic);
+        var shownSeen = await SeedTitleAsync(topic);
+        var shownComedy = await SeedTitleAsync(topic, t => t.Genres = ["comedy"]);
+        var freshComedy = await SeedTitleAsync(topic, t => t.Genres = ["comedy"]);
+        var shownOffTopic = await SeedTitleAsync(UniqueTopic());
+        await SeedScoreAsync(accountId, shownClears, artifact, 7.0m);
+        await SeedScoreAsync(accountId, freshClears, artifact, 6.5m);
+        await SeedScoreAsync(accountId, shownUnder, artifact, 5.0m);
+        await SeedScoreAsync(accountId, shownOffTopic, artifact, 9.0m);
+        await SeedWatchAsync(accountId, shownSeen);
+        Guid[] shown = [shownClears, shownUnder, shownUnscored, shownSeen, shownComedy, shownOffTopic];
+
+        var none = await ReportAsync(accountId, Concept(topic));
+        var report = await ReportAsync(accountId, Concept(topic), shown: shown);
+
+        // Only a shown title that was offerable supply (eligible, scored, clearing the bar) is cut;
+        // shown titles under the bar, unscored, seen or off-topic stay in their own buckets.
+        Assert.Equal(0, none.AlreadyShown);
+        Assert.Equal(2, none.Offerable);
+        Assert.Equal(1, report.AlreadyShown);
+        Assert.Equal(1, report.Offerable);
+        Assert.Equal(none.ClearingFloor, report.ClearingFloor);
+        Assert.Equal(
+            (none.MatchingInCatalogue, none.AlreadySeen, none.Eligible, none.BelowFloor, none.Unscored),
+            (report.MatchingInCatalogue, report.AlreadySeen, report.Eligible, report.BelowFloor, report.Unscored));
+
+        // Relaxing "comedy" would unlock two comedies, but one was already shown: it unlocks one.
+        Assert.Equal(2, Single(none, FilterKind.ExcludeGenre).WouldUnlock);
+        var comedy = Single(report, FilterKind.ExcludeGenre);
+        Assert.Equal(1, comedy.WouldUnlock);
+        Assert.Equal([freshComedy], comedy.Sample.Select(s => s.TitleId));
+
+        // The predicate path counts the same.
+        var byPredicate = await ReportAsync(accountId, Concept(topic), idNarrowingLimit: 0, shown: shown);
+        Assert.Equal((Shape(report), report.AlreadyShown), (Shape(byPredicate), byPredicate.AlreadyShown));
+
+        // With no bar set, every scored eligible title is offerable, so a shown one is cut.
+        var noBar = await SeedAccountAsync();
+        var noBarArtifact = await SeedArtifactAsync(noBar, ArtifactStatus.Active, version: 1);
+        var low = await SeedTitleAsync(topic, t => t.Keywords = [$"{topic} nobar"]);
+        await SeedScoreAsync(noBar, low, noBarArtifact, 2.0m);
+        var noBarConcept = HardConstraints.None with { Concepts = [new ConceptTerm(topic, [$"{topic} nobar"], [])] };
+        var noBarReport = await ReportAsync(noBar, noBarConcept, shown: [low]);
+        Assert.Equal((1, 1, 0), (noBarReport.ClearingFloor, noBarReport.AlreadyShown, noBarReport.Offerable));
+
+        // The no-shown overload on the port reports nothing shown.
+        await using var db = fixture.CreateContext(new AccountContext());
+        ISupplyReporter port = new SupplyReporter(db, new EligibilityQueryBuilder(db));
+        Assert.Equal(0, (await port.ReportAsync(accountId, Concept(topic), CancellationToken.None)).AlreadyShown);
+        Assert.Equal(1, (await port.ReportAsync(accountId, Concept(topic), shown, CancellationToken.None)).AlreadyShown);
+        _ = freshClears;
     }
 
     [Fact]
@@ -441,11 +576,12 @@ public class SupplyReporterTests(PostgresFixture fixture, ReelApiFactory api) : 
         Guid accountId,
         HardConstraints hard,
         int minVotes = CrowdVotes.MinRelaxVotes,
-        int idNarrowingLimit = SupplyReporter.IdNarrowingLimit)
+        int idNarrowingLimit = SupplyReporter.IdNarrowingLimit,
+        IReadOnlyCollection<Guid>? shown = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         return await new SupplyReporter(db, new EligibilityQueryBuilder(db))
-            .ReportAsync(accountId, hard, minVotes, idNarrowingLimit, CancellationToken.None);
+            .ReportAsync(accountId, hard, minVotes, idNarrowingLimit, shown ?? [], CancellationToken.None);
     }
 
     private async Task<RetrievalResult> RetrieveAsync(RetrievalQuery query)

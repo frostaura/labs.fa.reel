@@ -23,6 +23,10 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// request". The knockouts drop one rule VALUE at a time, as <see cref="FilterCostMeter"/> does,
 /// because a chip relaxes one value, not a whole kind.</para>
 ///
+/// <para>A title this conversation has already shown is still eligible, but it is not offered again:
+/// it is counted once in <see cref="SupplyReport.AlreadyShown"/> (a slice of the titles clearing the
+/// bar) and left out of every knockout's unlock count.</para>
+///
 /// <para>Two locks hold here. "Already seen" is a bucket, never a relaxation: the knockouts are
 /// computed only over titles with no interaction footprint. And nothing here serves a title — the
 /// relaxed rule sets are questions about the catalogue, never permission to show anything.</para>
@@ -43,20 +47,32 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
 
     /// <inheritdoc />
     public Task<SupplyReport> ReportAsync(Guid accountId, HardConstraints hard, CancellationToken ct) =>
-        ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, ct);
+        ReportAsync(accountId, hard, [], ct);
+
+    /// <inheritdoc />
+    public Task<SupplyReport> ReportAsync(
+        Guid accountId, HardConstraints hard, IReadOnlyCollection<Guid> alreadyShown, CancellationToken ct) =>
+        ReportAsync(accountId, hard, CrowdVotes.MinRelaxVotes, IdNarrowingLimit, alreadyShown, ct);
 
     /// <summary>The report counted with an explicit vote floor (<c>0</c> counts every title).</summary>
     public Task<SupplyReport> ReportAsync(Guid accountId, HardConstraints hard, int minVotes, CancellationToken ct) =>
-        ReportAsync(accountId, hard, minVotes, IdNarrowingLimit, ct);
+        ReportAsync(accountId, hard, minVotes, IdNarrowingLimit, [], ct);
 
     /// <summary>
     /// The report with an explicit id-narrowing limit, so tests can drive the predicate path (limit
     /// 0) on a small fixture and prove both paths count the same titles.
     /// </summary>
     internal async Task<SupplyReport> ReportAsync(
-        Guid accountId, HardConstraints hard, int minVotes, int idNarrowingLimit, CancellationToken ct)
+        Guid accountId,
+        HardConstraints hard,
+        int minVotes,
+        int idNarrowingLimit,
+        IReadOnlyCollection<Guid> alreadyShown,
+        CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(alreadyShown);
         minVotes = Math.Max(0, minVotes);
+        var shown = alreadyShown.ToHashSet();
 
         // The topic is resolved ONCE, to ids, and later counts narrow by primary key. Keyword
         // containment cannot use an index (yet), so re-evaluating it inside each of a dozen counts
@@ -112,7 +128,7 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
             .ToListAsync(ct);
         var floor = PredictedFloor(rows);
 
-        var (belowFloor, unscored) = await SplitByScoreAsync(accountId, eligibleIds, floor, ct);
+        var (belowFloor, unscored, shownClearing) = await SplitByScoreAsync(accountId, eligibleIds, floor, shown, ct);
 
         // Relaxations are measured whenever the population is small enough to be cheap, and always
         // when the supply is thin — the case a relaxation offer exists for. A broad request with
@@ -120,7 +136,7 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
         var clearing = eligibleIds.Count - belowFloor - unscored;
         var measureKnockouts = narrowById || clearing < ThinSupply;
         var knockouts = measureKnockouts
-            ? await KnockoutsAsync(accountId, rows, eligibleIds, ceiling, Population, ct)
+            ? await KnockoutsAsync(accountId, rows, eligibleIds, shown, ceiling, Population, ct)
             : [];
 
         return new SupplyReport(
@@ -135,7 +151,8 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
             LowVoteMatches: topical.Count - matching,
             MinVotes: minVotes,
             PredictedFloor: floor,
-            KnockoutsMeasured: measureKnockouts);
+            KnockoutsMeasured: measureKnockouts,
+            AlreadyShown: shownClearing);
     }
 
     /// <summary>
@@ -157,13 +174,15 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
     /// show comes from the active model, and a stale one would put a title on the wrong side of the
     /// bar. The bar is compared at badge precision (one decimal, away from zero), as
     /// <see cref="AskReel.AskReelGate.Clears"/> compares it, so "N under your 6.0 bar" is true of the badges.
+    /// The third count is how many of those clearing the bar are in <paramref name="shown"/>: a shown
+    /// title under the bar or unscored stays in its own bucket, because it was never offerable supply.
     /// </summary>
-    private async Task<(int BelowFloor, int Unscored)> SplitByScoreAsync(
-        Guid accountId, IReadOnlySet<Guid> eligibleIds, decimal? floor, CancellationToken ct)
+    private async Task<(int BelowFloor, int Unscored, int ShownClearing)> SplitByScoreAsync(
+        Guid accountId, IReadOnlySet<Guid> eligibleIds, decimal? floor, IReadOnlySet<Guid> shown, CancellationToken ct)
     {
         if (eligibleIds.Count == 0)
         {
-            return (0, 0);
+            return (0, 0, 0);
         }
 
         var artifactId = await db.ModelArtifacts
@@ -173,7 +192,7 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
             .FirstOrDefaultAsync(ct);
         if (artifactId is not { } activeId)
         {
-            return (0, eligibleIds.Count);
+            return (0, eligibleIds.Count, 0);
         }
 
         var ids = eligibleIds.ToList();
@@ -185,16 +204,18 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
             .GroupBy(s => s.TitleId)
             .ToDictionary(g => g.Key, g => g.First().PredictedRating);
 
-        var below = floor is { } bar
-            ? scored.Values.Count(p => decimal.Round(p, 1, MidpointRounding.AwayFromZero) < bar)
-            : 0;
-        return (below, eligibleIds.Count - scored.Count);
+        bool Clears(decimal predicted) =>
+            floor is not { } bar || decimal.Round(predicted, 1, MidpointRounding.AwayFromZero) >= bar;
+        var below = scored.Values.Count(p => !Clears(p));
+        var shownClearing = scored.Count(s => shown.Contains(s.Key) && Clears(s.Value));
+        return (below, eligibleIds.Count - scored.Count, shownClearing);
     }
 
     private async Task<IReadOnlyList<ConditionKnockout>> KnockoutsAsync(
         Guid accountId,
         IReadOnlyList<ContentFilter> rows,
         IReadOnlySet<Guid> eligibleIds,
+        IReadOnlySet<Guid> shown,
         string? ceiling,
         Func<IQueryable<Title>, IQueryable<Title>> population,
         CancellationToken ct)
@@ -226,6 +247,8 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
                     })
                     .ToListAsync(ct))
                 .Where(t => EligibilityQueryBuilder.PassesMaturity(t, ceiling))
+                // A title this conversation already showed is not something a relaxation would offer.
+                .Where(t => !shown.Contains(t.Id))
                 .ToList();
             if (unlocked.Count == 0)
             {
