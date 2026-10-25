@@ -69,8 +69,10 @@ public sealed class CatalogFollowThroughService(
                 var budget = scope.ServiceProvider.GetRequiredService<CatalogHydrationBudget>();
                 var extractor = scope.ServiceProvider.GetRequiredService<ITitleAttributeExtractor>();
 
+                var enrichmentBudget = scope.ServiceProvider.GetRequiredService<CatalogEnrichmentBudget>();
+
                 var result = await CatalogFollowThroughScheduler.RunAsync(
-                    db, budget, extractor.Version, DateTime.UtcNow, stoppingToken);
+                    db, budget, extractor.Version, DateTime.UtcNow, stoppingToken, enrichmentBudget);
 
                 if (result.QueuedHydration || result.QueuedEnrichment)
                 {

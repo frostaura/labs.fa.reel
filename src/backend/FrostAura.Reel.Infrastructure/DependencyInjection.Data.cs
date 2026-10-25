@@ -65,6 +65,8 @@ public static partial class DependencyInjection
         services.AddHostedService<TokenRefreshService>();
         services.AddHostedService<TraktOutboxDispatcherService>();
         services.AddHostedService<WeeklyDigestService>();
+        // WS-4's one-off repairs, run on every boot (idempotent and self-terminating).
+        services.AddHostedService<DataRepairStartupService>();
 
         return services;
     }

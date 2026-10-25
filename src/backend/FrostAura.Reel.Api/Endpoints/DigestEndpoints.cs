@@ -53,6 +53,7 @@ public static class DigestEndpoints
                 account.Id, ids, await tasteFacts.CurrentHashAsync(account.Id, nowUtc, ct), ct);
 
             var cards = new List<FeedEndpoints.FeedCard>();
+            var whySources = new List<ExposureWhySource>();
             foreach (var item in digestItems)
             {
                 if (!titles.TryGetValue(item.TitleId, out var title))
@@ -67,7 +68,8 @@ public static class DigestEndpoints
                 // The lens's hook where one exists, and the reason copy where it does not. Both are
                 // true statements about why the card is here; the hook is simply the one written
                 // for this reader.
-                var whyThis = note?.Hook ?? DigestReasons.CopyFor(item.Reason);
+                var (whyThis, whySource) = DigestWhyLine(note?.Hook, DigestReasons.CopyFor(item.Reason));
+                whySources.Add(whySource);
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
                     title.PosterPath, title.BackdropPath, title.Genres,
@@ -95,7 +97,7 @@ public static class DigestEndpoints
                         account.Id, ExposureSurface.Digest, feedSnapshotId: null, activeArtifactId, nowUtc,
                         cards.Select((c, i) => new ExposureCard(
                             c.TitleId, i, c.PredictedRating,
-                            WhySentence: c.WhyThis, WhySource: ExposureWhySource.Digest)).ToList(),
+                            WhySentence: c.WhyThis, WhySource: whySources[i])).ToList(),
                         ct);
                 }
             }
@@ -108,4 +110,17 @@ public static class DigestEndpoints
             });
         });
     }
+
+    /// <summary>
+    /// A digest card's why-line and how it came to be, decided by ONE predicate so the logged source
+    /// can never disagree with the rendered line. The line is the lens hook when one is cached for
+    /// this reader — model text, written earlier and served from the lens cache, so
+    /// <see cref="ExposureWhySource.Cache"/> — and otherwise the digest's own fixed reason copy,
+    /// <see cref="ExposureWhySource.Digest"/>. An empty or whitespace hook is no hook: it used to
+    /// render as a blank line while being logged as Digest. And the source used to be Digest for
+    /// every card, which booked model-written hooks as deterministic copy and hid them from every
+    /// accuracy query that separates model text from templates.
+    /// </summary>
+    public static (string Line, ExposureWhySource Source) DigestWhyLine(string? hook, string copy) =>
+        string.IsNullOrWhiteSpace(hook) ? (copy, ExposureWhySource.Digest) : (hook, ExposureWhySource.Cache);
 }

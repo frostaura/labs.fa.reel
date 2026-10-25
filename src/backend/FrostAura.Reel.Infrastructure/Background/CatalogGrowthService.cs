@@ -115,7 +115,8 @@ public sealed class CatalogGrowthService(
                     // partial unique index cannot dedup global jobs — the scheduler's explicit
                     // in-flight check is the only dedup, exactly as that index's comment says.
                     var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
-                    if (await EnrichmentScheduler.EnqueueAsync(db, null, DateTime.UtcNow, stoppingToken))
+                    var enrichmentBudget = scope.ServiceProvider.GetRequiredService<CatalogEnrichmentBudget>();
+                    if (await EnrichmentScheduler.EnqueueAsync(db, null, DateTime.UtcNow, stoppingToken, enrichmentBudget))
                     {
                         await db.SaveChangesAsync(stoppingToken);
                         logger.LogInformation("Catalog growth: queued a global enrich run for the {Added} new title(s).", added);

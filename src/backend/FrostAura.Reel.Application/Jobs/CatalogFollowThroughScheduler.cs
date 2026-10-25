@@ -90,7 +90,8 @@ public static class CatalogFollowThroughScheduler
         CatalogHydrationBudget hydration,
         int extractorVersion,
         DateTime now,
-        CancellationToken ct)
+        CancellationToken ct,
+        CatalogEnrichmentBudget? enrichmentBudget = null)
     {
         var backlog = await PendingHydration(db).CountAsync(ct);
         var allowance = await hydration.AllowanceAsync(now, ct);
@@ -102,7 +103,7 @@ public static class CatalogFollowThroughScheduler
         var queuedEnrichment = false;
         if (enrichment.MissingEmbedding > 0 || enrichment.MissingAttributes > 0 || enrichment.StaleExtractorVersion > 0)
         {
-            queuedEnrichment = await EnrichmentScheduler.EnqueueAsync(db, null, now, ct);
+            queuedEnrichment = await EnrichmentScheduler.EnqueueAsync(db, null, now, ct, enrichmentBudget);
             if (queuedEnrichment)
             {
                 await db.SaveChangesAsync(ct);

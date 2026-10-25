@@ -47,10 +47,24 @@ public static class EnrichmentScheduler
     /// index keys as distinct, so the partial index does <b>not</b> dedup global jobs; for those the
     /// check below is the only dedup there is, exactly as the index's own comment states.
     /// </para>
+    /// <para>
+    /// <b>Nothing is queued while the day's ceiling is spent.</b> With a <paramref name="budget"/>,
+    /// a run is queued only if it could buy something today: extraction headroom, or embedding
+    /// headroom with a title still missing its vector. Without the check the follow-through pass
+    /// queued a global run every 15 minutes after the ceiling was hit, each one opening only to log
+    /// "paused for today's token ceiling" (E-15). Callers that do not pass a budget keep the old
+    /// behaviour; every caller should pass one. The feed build and the nightly reconcile do not yet
+    /// (CR-3), and until they do the gate is incomplete for account-scoped runs.
+    /// </para>
     /// </summary>
     public static async Task<bool> EnqueueAsync(
-        IReelDbContext db, Guid? accountId, DateTime now, CancellationToken ct)
+        IReelDbContext db, Guid? accountId, DateTime now, CancellationToken ct, CatalogEnrichmentBudget? budget = null)
     {
+        if (budget is not null && !await CanSpendTodayAsync(db, budget, now, ct))
+        {
+            return false;
+        }
+
         var inFlight = db.SyncJobs.Where(j =>
             j.Kind == JobKind.EnrichCatalog
             && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running));
@@ -78,6 +92,23 @@ public static class EnrichmentScheduler
     }
 
     /// <summary>
+    /// Whether an enrich run queued now could spend anything today: extraction has headroom, or
+    /// embedding has headroom and some hydrated title still lacks a vector.
+    /// </summary>
+    public static async Task<bool> CanSpendTodayAsync(
+        IReelDbContext db, CatalogEnrichmentBudget budget, DateTime now, CancellationToken ct)
+    {
+        if ((await budget.ExtractAllowanceAsync(now, ct)).HasHeadroom)
+        {
+            return true;
+        }
+
+        return (await budget.EmbedAllowanceAsync(now, ct)).HasHeadroom
+            && await db.Titles.AnyAsync(
+                t => t.LastMetadataRefreshAt != null && !db.TitleEmbeddings.Any(e => e.TitleId == t.Id), ct);
+    }
+
+    /// <summary>
     /// The <c>ExtractorVersion</c> invalidation sweep — the attribute-side analogue of the
     /// <c>FeatureSchema</c> artifact sweep. Rows written by an older prompt generation are put back
     /// to Pending with a fresh attempt budget so the handler re-extracts them.
@@ -88,25 +119,39 @@ public static class EnrichmentScheduler
     /// The <c>(Status, AttemptCount)</c> predicate makes each row self-terminating — a row already
     /// reset is not re-written on the next pass, so the sweep converges instead of churning.
     /// </para>
-    /// Returns how many rows were reset. <b>Does not save.</b>
+    /// <para>
+    /// <b>Conditional SQL, never a tracked write.</b> The reset is one UPDATE whose predicate —
+    /// "still written by an older version" — is re-checked against the committed row. The sweep used
+    /// to load the rows tracked and save them later through the caller: an enrich run that wrote a
+    /// fresh current-version answer in between was overwritten to Pending, vanished from every
+    /// Done-filtered reader and was billed again (review defect 4). Like every other status-changing
+    /// write on <see cref="TitleAttributes"/>, it can no longer demote a current answer.
+    /// </para>
+    /// Returns how many rows were reset. <b>Writes immediately</b>: the UPDATE is its own statement,
+    /// so a caller's later <c>SaveChanges</c> neither commits nor discards it.
     /// </summary>
     public static async Task<int> RequeueStaleExtractorVersionsAsync(
         IReelDbContext db, int currentVersion, int cap, CancellationToken ct)
     {
-        var stale = await db.TitleAttributes
+        var candidates = await db.TitleAttributes
             .Where(a => a.ExtractorVersion < currentVersion
                 && (a.Status != AttributeExtractionStatus.Pending || a.AttemptCount != 0))
             .OrderBy(a => a.TitleId)
             .Take(cap)
+            .Select(a => a.TitleId)
             .ToListAsync(ct);
-
-        foreach (var row in stale)
+        if (candidates.Count == 0)
         {
-            row.Status = AttributeExtractionStatus.Pending;
-            row.AttemptCount = 0;
+            return 0;
         }
 
-        return stale.Count;
+        return await db.TitleAttributes
+            .Where(a => candidates.Contains(a.TitleId)
+                && a.ExtractorVersion < currentVersion
+                && (a.Status != AttributeExtractionStatus.Pending || a.AttemptCount != 0))
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(a => a.Status, AttributeExtractionStatus.Pending)
+                .SetProperty(a => a.AttemptCount, 0), ct);
     }
 
     /// <summary>

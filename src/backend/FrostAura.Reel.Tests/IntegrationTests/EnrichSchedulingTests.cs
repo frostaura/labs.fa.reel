@@ -18,6 +18,7 @@ using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Tests.Fakes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -109,6 +110,44 @@ public class EnrichSchedulingTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// E-15: after the day's extraction ceiling was hit, the follow-through pass still queued a
+    /// global run every 15 minutes, each opening only to log "paused for today's token ceiling". With
+    /// a budget, nothing is queued unless the run could buy something today — extraction headroom,
+    /// or embedding headroom with a title still missing its vector. Each case differs by one
+    /// setting.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, false)]
+    [InlineData(2_000_000_000, 0, true)]
+    [InlineData(0, 2_000_000_000, true)]
+    public async Task Nothing_is_queued_while_the_days_ceiling_is_spent(int extractTokens, int embedTokens, bool expectQueued)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        // A hydrated title with no vector, so embedding headroom is worth a run when it exists.
+        await SeedHydratedTitlesAsync(1);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [CatalogEnrichmentBudget.ExtractTokensKey] = extractTokens.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                [CatalogEnrichmentBudget.EmbedTokensKey] = embedTokens.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            })
+            .Build();
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var queued = await EnrichmentScheduler.EnqueueAsync(
+            db, accountId, DateTime.UtcNow, CancellationToken.None, new CatalogEnrichmentBudget(db, configuration));
+        await db.SaveChangesAsync();
+
+        Assert.Equal(expectQueued, queued);
+        Assert.Equal(expectQueued, await EnrichPendingAsync(db, accountId));
+    }
+
+    /// <summary>
     /// The GLOBAL job the weekly catalogue-growth sweep queues. Postgres treats NULL index keys as
     /// distinct, so the partial unique index on <c>(AccountId, Kind)</c> — the guard every other job
     /// kind leans on — cannot dedup these at all. The scheduler's explicit check is the only thing
@@ -187,6 +226,48 @@ public class EnrichSchedulingTests(PostgresFixture fixture)
 
         // And a row already at the running version is never touched, whatever its status.
         Assert.Equal(0, await EnrichmentScheduler.RequeueStaleExtractorVersionsAsync(db, 1, cap: 10_000, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Review defect 4. The sweep used to load stale rows TRACKED and leave the write to its caller's
+    /// SaveChanges; an enrich run answering one of them at the current version in between was then
+    /// overwritten back to Pending — gone from every Done-filtered reader, and billed again. The
+    /// reset is now one conditional UPDATE, so the caller's later commit carries nothing for it.
+    /// </summary>
+    [Fact]
+    public async Task The_version_sweep_never_demotes_an_answer_written_before_its_caller_commits()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var titleId = (await SeedAttributeRowsAsync(1, version: 1, status: AttributeExtractionStatus.Done, attempts: 1)).Single();
+
+        // The nightly reconcile's shape: sweep on its context, commit that context afterwards.
+        await using var nightly = fixture.CreateContext(new AccountContext());
+        Assert.True(await EnrichmentScheduler.RequeueStaleExtractorVersionsAsync(nightly, 2, cap: 100_000, CancellationToken.None) >= 1);
+
+        // Meanwhile an enrich run answers the title under the running prompt version.
+        await using (var run = fixture.CreateContext(new AccountContext()))
+        {
+            await run.TitleAttributes
+                .Where(a => a.TitleId == titleId)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(a => a.Status, AttributeExtractionStatus.Done)
+                    .SetProperty(a => a.ExtractorVersion, 2)
+                    .SetProperty(a => a.AttemptCount, 1)
+                    .SetProperty(a => a.RawJson, "{\"v\":2}"));
+        }
+
+        await nightly.SaveChangesAsync();
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var row = await verify.TitleAttributes.AsNoTracking().SingleAsync(a => a.TitleId == titleId);
+        Assert.Equal(AttributeExtractionStatus.Done, row.Status);
+        Assert.Equal(2, row.ExtractorVersion);
+        Assert.Equal(1, row.AttemptCount);
+        Assert.Equal("{\"v\": 2}", row.RawJson);
     }
 
     /// <summary>Rows the version sweep would act on, catalogue-wide — its predicate, restated.</summary>
