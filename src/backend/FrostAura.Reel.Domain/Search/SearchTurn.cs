@@ -128,6 +128,66 @@ public static class SearchTurnKind
 }
 
 /// <summary>
+/// The closed vocabulary for <see cref="SearchTurn.Mode"/>: what kind of answer a turn gave.
+///
+/// <para>Persisted as a string, and read through <see cref="Parse"/>, which maps null and any value
+/// this build does not know to <see cref="Picks"/> — the only mode that existed before the column
+/// did, and the one a rolled-back image has to fall back to without failing a read.</para>
+/// </summary>
+public static class SearchTurnMode
+{
+    /// <summary>The turn answered with cards that match the request.</summary>
+    public const string Picks = "Picks";
+
+    /// <summary>
+    /// Nothing left matches the request under the account's conditions, and the reply says so with
+    /// the supply counts behind it. Zero picks by definition.
+    /// </summary>
+    public const string NoneFound = "NoneFound";
+
+    /// <summary>The stored mode, or <see cref="Picks"/> for null and anything unknown.</summary>
+    public static string Parse(string? stored) =>
+        string.Equals(stored, NoneFound, StringComparison.Ordinal) ? NoneFound : Picks;
+}
+
+/// <summary>
+/// The tokens of <see cref="SearchTurn.DegradedFlags"/>. A flag names a part of the turn that did not
+/// run as designed; the turn still answered, honestly labelled.
+/// </summary>
+public static class SearchTurnDegraded
+{
+    /// <summary>Every model attempt to read the request failed; the reply is the degraded copy.</summary>
+    public const string Plan = "plan";
+
+    /// <summary>
+    /// The prefix of the judge flag, written as <c>judge:{failed}/{total}</c> — how many judge
+    /// batches produced no model verdict, out of how many ran.
+    /// </summary>
+    public const string JudgePrefix = "judge:";
+
+    /// <summary>The value of <see cref="SearchTurn.ReasoningEffort"/> when no effort parameter was sent.</summary>
+    public const string ProviderDefaultEffort = "provider-default";
+
+    /// <summary>Whether the stored flags say the PLAN failed — the case history must never read back.</summary>
+    public static bool PlanFailed(string? flags) =>
+        Tokens(flags).Contains(Plan, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Whether the stored flags say at least one judge batch produced no model verdict — the turn's
+    /// cards were not all checked against the request, and the screen says so.
+    /// </summary>
+    public static bool JudgeFailed(string? flags) =>
+        Tokens(flags).Any(t => t.StartsWith(JudgePrefix, StringComparison.Ordinal)
+            && t.Length > JudgePrefix.Length
+            && !t.AsSpan(JudgePrefix.Length).StartsWith("0/", StringComparison.Ordinal));
+
+    private static string[] Tokens(string? flags) =>
+        flags is { Length: > 0 }
+            ? flags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : [];
+}
+
+/// <summary>
 /// One turn in a persisted <see cref="SearchConversation"/> — a user message or Reel's reply.
 ///
 /// <para><b>Two rows per exchange, and the assistant row is the answer row.</b> It owns
@@ -254,8 +314,40 @@ public class SearchTurn : IAccountScoped
     /// <summary>Wall-clock milliseconds from request to <c>done</c>.</summary>
     public int? LatencyMs { get; set; }
 
-    /// <summary>The per-stage millisecond breakdown as stored JSON (jsonb).</summary>
+    /// <summary>
+    /// The per-stage millisecond breakdown as stored JSON (jsonb) — every stage the turn actually
+    /// ran, keyed by stage name. Written on every assistant row that reached the pipeline, completed
+    /// or not; a stage that never ran is absent rather than zero.
+    /// </summary>
     public string? StageTimingsJson { get; set; }
+
+    /// <summary>
+    /// What kind of answer this turn gave: one of <see cref="SearchTurnMode"/>. Null on every row
+    /// written before the mode existed, which reads as <see cref="SearchTurnMode.Picks"/> — that is
+    /// what every one of them was. Assistant rows only.
+    /// </summary>
+    public string? Mode { get; set; }
+
+    /// <summary>
+    /// Which parts of the turn did NOT run as designed, as a comma-separated list of
+    /// <see cref="SearchTurnDegraded"/> tokens (<c>plan</c>, <c>judge:2/3</c>). Null on a turn where
+    /// everything ran. A degraded turn is a real record of a real answer — it is never cached, never
+    /// read back as history, and is shown to the user as degraded.
+    /// </summary>
+    public string? DegradedFlags { get; set; }
+
+    /// <summary>
+    /// The models behind the turn, by role, as stored JSON (jsonb): <c>{"plan": …, "judge": …,
+    /// "embedding": …}</c>. <see cref="ModelId"/> is kept beside it for the readers that predate it.
+    /// </summary>
+    public string? ModelIds { get; set; }
+
+    /// <summary>
+    /// The reasoning effort the turn's model calls were made at, as the adapter reports it;
+    /// <see cref="SearchTurnDegraded.ProviderDefaultEffort"/> where the request carried no effort
+    /// parameter at all, which is a fact about the request rather than a guess about the model.
+    /// </summary>
+    public string? ReasoningEffort { get; set; }
 
     /// <summary>When the turn reached <see cref="SearchTurnStatus.Completed"/> or <c>Failed</c>.</summary>
     public DateTime? CompletedAt { get; set; }

@@ -22,5 +22,5 @@ namespace FrostAura.Reel.Application.Search;
 public static class AskReelPromptVersion
 {
     /// <summary>The current Ask Reel prompt generation. Bump on any prompt edit — see the type doc.</summary>
-    public const string Current = "askreel-2026-09-11";
+    public const string Current = "askreel-2026-10-24";
 }

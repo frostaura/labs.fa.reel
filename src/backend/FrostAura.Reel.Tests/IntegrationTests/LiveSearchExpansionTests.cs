@@ -55,12 +55,15 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         await service.StreamAsync("shark horror", region: "US", emit, CancellationToken.None);
 
-        // Event sequence: at least one phase, candidates streamed, and a terminal done.
+        // Event sequence: at least one phase and a terminal done. The stub judge rules on nothing, so
+        // no card is a judged match and the turn's cards arrive in the "not checked" tray of a
+        // none-found answer (§4.8) rather than as streamed picks — discovery is what is under test.
         Assert.Contains(events, e => e.Event == "phase");
-        Assert.Contains(events, e => e.Event == "candidate");
         var done = Assert.Single(events, e => e.Event == "done");
+        Assert.Equal("NoneFound", done.Data.GetProperty("mode").GetString());
 
         var names = done.Data.GetProperty("results").EnumerateArray()
+            .Concat(done.Data.GetProperty("unchecked").EnumerateArray())
             .Select(r => r.GetProperty("name").GetString())
             .ToList();
         Assert.Contains("Jaws 2", names);
@@ -244,10 +247,9 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
                 r.GetProperty("why").GetString());
         }
 
-        // The reason is a CLAUSE LIST now, not a sentence with optional tails — see AskReelReason for
-        // why (the old nesting made the rating-floor clause unreachable in one of its two branches).
+        // The reason is a CLAUSE LIST in the user's words — see AskReelReason for why.
         Assert.Equal(
-            "5 picks matched everything you asked · 7 closest-but-outside shown separately",
+            "5 picks match what you asked · 7 close but outside what you asked, shown separately",
             done.Data.GetProperty("reason").GetString());
 
         // Nothing vanishes unexplained: everything streamed is either kept or in the tray.
@@ -283,7 +285,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+            Task.FromResult<IReadOnlyList<RerankResult>>(
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     /// <summary>A canned agent that resolves a turn straight to a vibe intent (genres + keywords, no person).</summary>
@@ -301,7 +304,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+            Task.FromResult<IReadOnlyList<RerankResult>>(
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     /// <summary>Seeds a global, English, UNSEEN title that already carries a normalized embedding.</summary>
@@ -361,7 +365,8 @@ public class LiveSearchExpansionTests(PostgresFixture fixture) : EmbeddedCatalog
 
         public Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null, string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<RerankResult>>([]);
+            Task.FromResult<IReadOnlyList<RerankResult>>(
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     private (LiveSearchExpansionService Service, List<(string Event, JsonElement Data)> Events) BuildService(

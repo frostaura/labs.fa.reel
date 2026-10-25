@@ -1,0 +1,200 @@
+using FrostAura.Reel.Domain.Search;
+
+namespace FrostAura.Reel.Application.Search.AskReel;
+
+/// <summary>
+/// What a turn has put on the wire so far — held OUTSIDE the pipeline so it survives the pipeline
+/// being cancelled.
+///
+/// <para><b>Why it exists.</b> A follow-up typed over a live turn aborts it, and an aborted turn
+/// used to be recorded as <c>Failed/client_aborted</c> with no text and no cards — while the user had
+/// been looking at its cards for fifty seconds (A-6, B-3). "None of the above" then pointed at
+/// nothing: the next turn's history held no reply and its no-repeat set held none of those titles,
+/// so two of them came straight back. The endpoint owns one of these per turn, the service writes to
+/// it at the moment each frame goes out, and on a cancellation the endpoint persists what it holds:
+/// the reply that was shown and every card that was shown, as a replayable record.</para>
+///
+/// <para>Thread-safe: the service writes from the turn's own flow while the heartbeat reads the last
+/// phase from a timer.</para>
+/// </summary>
+public sealed class AskTurnProgress
+{
+    private readonly object _gate = new();
+    private readonly List<LiveSearchExpansionService.TurnCard> _cards = [];
+    private readonly HashSet<Guid> _cardIds = [];
+    private readonly List<string> _flags = [];
+    private string? _assistantText;
+    private bool _degraded;
+    private object? _lastPhase;
+    private AskStageTimings? _timings;
+    private string? _modelIdsJson;
+    private string? _effort;
+
+    /// <summary>The reply the user was shown, once it was shown.</summary>
+    public string? AssistantText
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _assistantText;
+            }
+        }
+    }
+
+    /// <summary>Whether the reply that was shown is the degraded copy.</summary>
+    public bool Degraded
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _degraded;
+            }
+        }
+    }
+
+    /// <summary>The last <c>phase</c> payload, for the heartbeat to repeat. Null before the first.</summary>
+    public object? LastPhase
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _lastPhase;
+            }
+        }
+    }
+
+    /// <summary>Every card shown so far, in the order shown, with ranks 0..n-1.</summary>
+    public IReadOnlyList<LiveSearchExpansionService.TurnCard> Cards
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _cards];
+            }
+        }
+    }
+
+    /// <summary>
+    /// The turn's degraded flags so far (<c>plan</c>, <c>judge:n/m</c>), comma-joined as stored; null
+    /// when nothing degraded. An aborted turn records these exactly as a finished one would (D9).
+    /// </summary>
+    public string? DegradedFlags
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _flags.Count == 0 ? null : string.Join(',', _flags);
+            }
+        }
+    }
+
+    /// <summary>The stage timings up to now, as stored JSON; null before the pipeline attached them.</summary>
+    public string? StageTimingsJson
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _timings is null ? null : System.Text.Json.JsonSerializer.Serialize(_timings.Snapshot());
+            }
+        }
+    }
+
+    /// <summary>The models behind the turn, as stored JSON; null before the pipeline attached them.</summary>
+    public string? ModelIdsJson
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _modelIdsJson;
+            }
+        }
+    }
+
+    /// <summary>The reasoning effort the turn ran at; null before the pipeline attached it.</summary>
+    public string? ReasoningEffort
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _effort;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The turn's record-keeping, attached once at the start of the pipeline so an abort can persist
+    /// the timings so far and the models in play.
+    /// </summary>
+    public void Attach(AskStageTimings timings, string modelIdsJson, string effort)
+    {
+        lock (_gate)
+        {
+            _timings = timings;
+            _modelIdsJson = modelIdsJson;
+            _effort = effort;
+        }
+    }
+
+    /// <summary>
+    /// Records a degraded flag as it is raised. A flag already recorded is ignored; a judge flag
+    /// (<c>judge:n/m</c>) replaces the previous judge flag, so the count only ever grows in place.
+    /// </summary>
+    public void Degrade(string flag)
+    {
+        ArgumentNullException.ThrowIfNull(flag);
+        lock (_gate)
+        {
+            if (flag.StartsWith(SearchTurnDegraded.JudgePrefix, StringComparison.Ordinal))
+            {
+                _flags.RemoveAll(f => f.StartsWith(SearchTurnDegraded.JudgePrefix, StringComparison.Ordinal));
+            }
+
+            if (!_flags.Contains(flag, StringComparer.Ordinal))
+            {
+                _flags.Add(flag);
+            }
+        }
+    }
+
+    /// <summary>Records the reply as it goes out.</summary>
+    public void Replied(string? text, bool degraded)
+    {
+        lock (_gate)
+        {
+            _assistantText = text;
+            _degraded = degraded;
+        }
+    }
+
+    /// <summary>Records a phase as it goes out.</summary>
+    public void Phase(object payload)
+    {
+        lock (_gate)
+        {
+            _lastPhase = payload;
+        }
+    }
+
+    /// <summary>
+    /// Records a card as it goes out. The rank is assigned here, in emission order, so a partial
+    /// record's ranks are exactly the order the user saw. A title already recorded is ignored.
+    /// </summary>
+    public void Shown(LiveSearchExpansionService.TurnCard card)
+    {
+        lock (_gate)
+        {
+            if (_cardIds.Add(card.TitleId))
+            {
+                _cards.Add(card with { Rank = _cards.Count });
+            }
+        }
+    }
+}

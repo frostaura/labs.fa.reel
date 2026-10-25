@@ -83,7 +83,7 @@ public class AskReelConversationIsolationTests(PostgresFixture fixture, ReelApiF
                 clientTurnId = Guid.NewGuid(),
             });
             var threadA = ConversationId(opener);
-            Assert.Equal(HistoryShapedSearchAgent.UnshapedReply, AssistantText(opener));
+            Assert.False(await StoredShowsOnlyAsync(accountId, threadA));
 
             // Thread A, turn 2 — the same sentence the fresh thread will ask. History shapes it,
             // which is correct and is the entry that used to leak.
@@ -93,7 +93,7 @@ public class AskReelConversationIsolationTests(PostgresFixture fixture, ReelApiF
                 conversationId = threadA,
                 clientTurnId = Guid.NewGuid(),
             });
-            Assert.Equal(HistoryShapedSearchAgent.ShowsReply, AssistantText(shaped));
+            Assert.True(await StoredShowsOnlyAsync(accountId, threadA));
 
             // + New. Same account, same sentence, no history.
             var fresh = await AskAsync(client, new
@@ -104,11 +104,14 @@ public class AskReelConversationIsolationTests(PostgresFixture fixture, ReelApiF
             var threadB = ConversationId(fresh);
             Assert.NotEqual(threadA, threadB);
 
-            // On the wire — the sentence the person actually reads.
-            Assert.Equal(HistoryShapedSearchAgent.UnshapedReply, AssistantText(fresh));
+            // The interpretation the fresh thread ran under is the UNSHAPED one. Read off the record
+            // rather than the reply: no turn in this class finds a card, so every reply is the
+            // deterministic none-found account (which no model wrote) — and the intent is what a
+            // leaked interpretation would have changed.
+            Assert.False(await StoredShowsOnlyAsync(accountId, threadB));
 
-            // And in the record, which is what a reload and every downstream read see.
-            Assert.Equal(HistoryShapedSearchAgent.UnshapedReply, await StoredReplyAsync(accountId, threadB));
+            // The reply the person reads is the one the record keeps.
+            Assert.Equal(AssistantText(fresh), await StoredReplyAsync(accountId, threadB));
 
             // Three distinct contexts, three interpretations: nothing was served from another
             // thread's entry.
@@ -218,6 +221,22 @@ public class AskReelConversationIsolationTests(PostgresFixture fixture, ReelApiF
         }
 
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Whether the conversation's newest answered turn ran under a shows-only interpretation.</summary>
+    private async Task<bool> StoredShowsOnlyAsync(Guid accountId, Guid conversationId)
+    {
+        var scope = new AccountContext();
+        scope.SetAccount(accountId);
+        await using var db = Fixture.CreateContext(scope);
+        var json = await db.SearchTurns
+            .Where(t => t.ConversationId == conversationId && t.Role == "assistant")
+            .OrderByDescending(t => t.Sequence)
+            .Select(t => t.IntentJson)
+            .FirstAsync();
+        Assert.NotNull(json);
+        using var intent = JsonDocument.Parse(json);
+        return intent.RootElement.GetProperty("MediaTypes").GetArrayLength() > 0;
     }
 
     /// <summary>The assistant text the conversation's single answered turn actually stored.</summary>

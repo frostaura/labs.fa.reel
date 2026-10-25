@@ -1974,6 +1974,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("DegradedFlags")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
                     b.Property<int?>("DiscoveredCount")
                         .HasColumnType("integer");
 
@@ -1999,12 +2003,19 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<string>("Mode")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
                     b.Property<Guid?>("ModelArtifactId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("ModelId")
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
+
+                    b.Property<string>("ModelIds")
+                        .HasColumnType("jsonb");
 
                     b.Property<string>("PromptVersion")
                         .HasMaxLength(32)
@@ -2013,6 +2024,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("Reason")
                         .HasMaxLength(1024)
                         .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("ReasoningEffort")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
                     b.Property<int?>("Relaxation")
                         .HasColumnType("integer");
@@ -2077,6 +2092,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("FitSource")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
                     b.Property<decimal?>("LlmFit")
                         .HasPrecision(4, 3)
                         .HasColumnType("numeric(4,3)");
@@ -2091,8 +2110,16 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<int>("Rank")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Satisfies")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
                     b.Property<double?>("Similarity")
                         .HasColumnType("double precision");
+
+                    b.Property<string>("Tier")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
 
                     b.Property<Guid>("TitleId")
                         .HasColumnType("uuid");
@@ -2115,6 +2142,8 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AccountId");
+
+                    b.HasIndex("ConversationId", "TitleId");
 
                     b.HasIndex("ConversationId", "TmdbId");
 

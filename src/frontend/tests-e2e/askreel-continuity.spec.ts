@@ -1053,7 +1053,7 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     // answer this page is EXTENDING are untouched: the server already floored and committed them,
     // and the client's bar is bounded to the ids it has not ranked.
     await expect(gridNames(page)).toHaveText([...STORED_ORDER, "Over Bar"]);
-    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 held back by your 6.0 bar");
 
     await page.getByTestId("askreel-stop").click();
 
@@ -1066,7 +1066,7 @@ test.describe("Ask Reel — a stopped page leaves nothing under the bar in the g
     // …and they are accounted for rather than vanished. The label counts the tray's own contents,
     // so it is a number the reader can open it and verify.
     const tray = page.getByTestId("askreel-below-floor");
-    await expect(tray.locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
+    await expect(tray.locator("summary")).toHaveText("Show the 2 held back by your 6.0 bar");
     await tray.locator("summary").click();
     // `p.truncate` and not a text match: each card's why-line repeats its name, so a text lookup
     // matches twice and passes (or fails) for reasons that have nothing to do with the tray.
@@ -1132,7 +1132,7 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     // …and the fence reads exactly as it did before the reload, counting its own contents against
     // the bar out of the account's own conditions.
     const tray = page.getByTestId("askreel-below-floor");
-    await expect(tray.locator("summary")).toHaveText("Show the 3 under your 6.0 bar");
+    await expect(tray.locator("summary")).toHaveText("Show the 3 held back by your 6.0 bar");
     await tray.locator("summary").click();
     // `p.truncate`, not a text match: each card's why-line repeats its name.
     await expect(tray.locator("a > p.truncate")).toHaveText(["Under Bar", "Way Under", "Barely Under"]);
@@ -1180,7 +1180,7 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     );
     // Both lists are on screen, which is the reason the note cannot name just one of them.
     await expect(gridNames(page)).toHaveText(STORED_ORDER);
-    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 under your 6.0 bar");
+    await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 held back by your 6.0 bar");
   });
 
   test("one removal is singular, and still about the answer", async ({ page }) => {

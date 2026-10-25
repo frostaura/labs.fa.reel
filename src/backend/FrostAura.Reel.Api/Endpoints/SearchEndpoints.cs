@@ -1,6 +1,7 @@
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
@@ -356,34 +357,13 @@ public static class SearchEndpoints
             // ── 4. Everything the model reads, derived from rows ────────────────────────────
             // Read BEFORE this turn's own rows are written, so the history the model sees is the
             // conversation up to now and the question is not handed to it twice.
-            var history = new List<Domain.Ports.ChatTurn>();
-            var shown = new List<long>();
+            var shown = new List<Guid>();
             string? lastUserText = null;
             var nextSequence = 0;
             if (conversation is not null)
             {
-                history = (await db.SearchTurns
-                        .Where(t => t.ConversationId == conversation.Id
-                            && t.Status == Domain.Search.SearchTurnStatus.Completed
-                            && t.Text != string.Empty)
-                        .OrderByDescending(t => t.Sequence)
-                        .Take(AskHistoryTurns)
-                        .Select(t => new { t.Role, t.Text })
-                        .ToListAsync(ct))
-                    .AsEnumerable()
-                    .Reverse()
-                    // Whitelisted rather than passed through. The role reaches the provider's
-                    // messages array, and "system" there is a different instruction set — a client
-                    // used to be able to post its own `role` and have it forwarded verbatim. B1
-                    // closed that by deriving history from rows this endpoint writes, so today the
-                    // only values in the column are "user" and "assistant"; this keeps the
-                    // guarantee LOCAL to the place the prompt is built, instead of resting on a
-                    // write three hundred lines away and a column with no check constraint.
-                    .Select(t => new Domain.Ports.ChatTurn(t.Role == "assistant" ? "assistant" : "user", t.Text))
-                    .ToList();
-
                 // The no-repeat set: what this conversation has actually shown, from the server's
-                // own record of it. One indexed read on (ConversationId, TmdbId).
+                // own record of it. One indexed read on (ConversationId, TitleId).
                 //
                 // DELIBERATELY UNFILTERED BY BelowFloor. The tray is on the glass — under the "Show
                 // the N under your bar" fence, one tap away — so a title that appeared there has
@@ -392,8 +372,8 @@ public static class SearchEndpoints
                 // this query could not contain it and the smoke run watched 13 of one turn's 14
                 // tray titles come back as the next turn's top picks.
                 shown = await db.SearchTurnCards
-                    .Where(c => c.ConversationId == conversation.Id && c.TmdbId != null)
-                    .Select(c => c.TmdbId!.Value)
+                    .Where(c => c.ConversationId == conversation.Id)
+                    .Select(c => c.TitleId)
                     .Distinct()
                     .ToListAsync(ct);
 
@@ -438,6 +418,9 @@ public static class SearchEndpoints
                 : Domain.Search.SearchTurnKind.Derive(lastUserText, message);
 
             // ── 5. The rows, before the stream ──────────────────────────────────────────────
+            // Everything at or after this sequence is this turn's own; the history and the presented
+            // handles, read once the stream is open, stop short of it.
+            var priorSequences = nextSequence;
             var now = DateTime.UtcNow;
             if (conversation is null)
             {
@@ -504,23 +487,38 @@ public static class SearchEndpoints
             // is a torn frame, which a client parser reports as corrupt JSON somewhere unrelated.
             using var writeLock = new SemaphoreSlim(1, 1);
             var eventId = 0;
+            var lastFrameAt = System.Diagnostics.Stopwatch.StartNew();
+            var doneSent = false;
             LiveSearchExpansionService.Emit emit = async (eventName, payload) =>
             {
                 var json = System.Text.Json.JsonSerializer.Serialize(payload, jsonOptions);
-                var id = Interlocked.Increment(ref eventId);
                 await writeLock.WaitAsync(ct);
                 try
                 {
+                    // `done` is the terminal frame. A heartbeat racing the end of the turn must not
+                    // follow it: a `phase` after `done` would put a finished answer back into
+                    // "streaming" on the client.
+                    if (doneSent && eventName == "phase")
+                    {
+                        return;
+                    }
+
+                    doneSent |= eventName == "done";
+                    var id = Interlocked.Increment(ref eventId);
                     // Never id: 0 — a client echoing that as Last-Event-ID would reset its cursor
                     // to the start of the stream. The counter is per-turn and starts at 1.
                     await http.Response.WriteAsync($"id: {id}\nevent: {eventName}\ndata: {json}\n\n", ct);
                     await http.Response.Body.FlushAsync(ct);
+                    lastFrameAt.Restart();
                 }
                 finally
                 {
                     writeLock.Release();
                 }
             };
+
+            // What the turn has put on the wire, held here so a cancellation can persist it (B-3).
+            var progress = new AskTurnProgress();
 
             await emit("conversation", new
             {
@@ -531,28 +529,55 @@ public static class SearchEndpoints
 
             using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var keepalive = KeepAliveAsync(http, writeLock, keepaliveCts.Token);
+            var heartbeat = HeartbeatAsync(progress, emit, lastFrameAt, keepaliveCts.Token);
 
             var startedAt = System.Diagnostics.Stopwatch.StartNew();
             LiveSearchExpansionService.TurnOutcome outcome;
             try
             {
+                // Read AFTER the turn's row exists and the stream is open, so a client that walks
+                // away during them still leaves a recorded turn (a cold host spends real time
+                // compiling these queries), and bounded by sequence so this turn's own rows are
+                // never read back to it.
+                var presented = await PresentedAsync(db, conversation.Id, priorSequences, ct);
+                var history = await HistoryAsync(db, conversation.Id, priorSequences, ct);
+                var priorIntent = await PriorIntentAsync(db, conversation.Id, priorSequences, ct);
                 outcome = await expansion.StreamAsync(
-                    message, history, shown, profile?.Region, mediaFilter, emit, ct, debug, assistantTurn.Id);
+                    new LiveSearchExpansionService.AskTurnInput(
+                        message, history, shown, presented, profile?.Region, mediaFilter,
+                        Domain.Sync.ApiUsagePurpose.RerankAsk, debug, assistantTurn.Id, progress, priorIntent),
+                    emit,
+                    ct);
             }
             catch (OperationCanceledException)
             {
-                // The client navigated away mid-stream. Normal teardown for the response, and a
-                // recorded failure for the row: a turn nobody waited for is still a turn that
-                // happened, and the transcript has to be able to say so.
+                // The client navigated away mid-stream — most often because the user typed a
+                // follow-up over a live turn. Normal teardown for the response, and a recorded
+                // failure for the row that keeps WHAT WAS SHOWN: the reply and every card already
+                // on screen are persisted, so the next turn's history and no-repeat set contain them
+                // and "none of the above" points at the cards it means (A-6, B-3).
+                // The record keeps what a finished turn keeps — every degraded flag raised so far
+                // (a failed judge batch included), the timings to the moment of the abort, the
+                // models in play — so an interrupted turn is as diagnosable as a finished one (D9).
+                var shownCards = progress.Cards;
                 outcome = LiveSearchExpansionService.TurnOutcome.Crashed(
-                    assistantText: null,
+                    progress.AssistantText,
                     "the answer was interrupted",
-                    Domain.Search.SearchTurnFailure.ClientAborted);
+                    Domain.Search.SearchTurnFailure.ClientAborted,
+                    cards: shownCards,
+                    degradedFlags: progress.DegradedFlags) with
+                {
+                    StageTimingsJson = progress.StageTimingsJson,
+                    ModelIdsJson = progress.ModelIdsJson,
+                    ReasoningEffort = progress.ReasoningEffort,
+                    Mode = shownCards.Count > 0 ? Domain.Search.SearchTurnMode.Picks : null,
+                };
             }
             finally
             {
                 await keepaliveCts.CancelAsync();
                 await keepalive;
+                await heartbeat;
             }
 
             // ── 7. Persist, on a scope of its own ───────────────────────────────────────────
@@ -645,6 +670,9 @@ public static class SearchEndpoints
                             cards = Array.Empty<object>(),
                             // Present-but-empty, so a poller renders one shape on both status codes.
                             belowFloor = Array.Empty<object>(),
+                            nearMiss = Array.Empty<object>(),
+                            @unchecked = Array.Empty<object>(),
+                            mode = (string?)null,
                         },
                         statusCode: StatusCodes.Status202Accepted);
                 }
@@ -665,6 +693,9 @@ public static class SearchEndpoints
                 // A client that lost the stream lost the tray with it. Reconnecting has to restore
                 // the whole answer, not the half of it that cleared the bar.
                 belowFloor = replay.BelowFloor,
+                nearMiss = replay.NearMiss ?? [],
+                @unchecked = replay.Unchecked ?? [],
+                mode = replay.Mode,
                 removed = replay.Removed,
             });
         });
@@ -974,6 +1005,12 @@ public static class SearchEndpoints
                 // outlive the failure it described — a stale cause is worse than no cause, because
                 // it reads as the current one.
                 failureCode = t.Status == Domain.Search.SearchTurnStatus.Failed ? t.FailureCode : null,
+                // Whether this row's reply is the degraded copy — a turn whose reading failed — so a
+                // resumed thread can show it as degraded rather than as an ordinary answer.
+                degraded = Domain.Search.SearchTurnDegraded.PlanFailed(t.DegradedFlags),
+                // Whether a judge batch failed, so the screen can say some cards went unchecked.
+                judgeDegraded = Domain.Search.SearchTurnDegraded.JudgeFailed(t.DegradedFlags),
+                mode = t.Role == "assistant" ? Domain.Search.SearchTurnMode.Parse(t.Mode) : null,
             }),
             cards = replay.Cards,
             // The tray, restored as a tray. It is never merged into `cards` — these cards did not
@@ -982,6 +1019,9 @@ public static class SearchEndpoints
             // no-repeat set. A resume that dropped it would show a thread whose "Show the N under
             // your bar" fence had silently emptied.
             belowFloor = replay.BelowFloor,
+            nearMiss = replay.NearMiss ?? [],
+            @unchecked = replay.Unchecked ?? [],
+            mode = replay.Mode,
             reason = replay.Reason,
             // The collision notice the answer was produced under, restored with the answer. Null on
             // a thread that had no collision, which is most of them. Without it a resumed screen
@@ -1028,9 +1068,13 @@ public static class SearchEndpoints
     /// beside <paramref name="Reason"/> and for the same reason: both are what the user was TOLD,
     /// and both would be wrong if re-derived from conditions that have since changed.
     /// </param>
+    /// <param name="NearMiss">The stored near-miss tray, on the same terms as the floor tray.</param>
+    /// <param name="Mode">The newest turn's mode — <c>Picks</c> or <c>NoneFound</c>.</param>
+    /// <param name="Unchecked">The stored "not checked against your request" tray, on the same terms.</param>
     private sealed record ReplayedTurns(
         IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason,
-        object? Conflict = null);
+        object? Conflict = null, IReadOnlyList<object>? NearMiss = null, string? Mode = null,
+        IReadOnlyList<object>? Unchecked = null);
 
     /// <summary>
     /// THE read projection. Every route that hands a stored turn back to a client goes through
@@ -1071,8 +1115,10 @@ public static class SearchEndpoints
     {
         if (turns.Count == 0)
         {
-            return new ReplayedTurns([], [], 0, null);
+            return new ReplayedTurns([], [], 0, null, NearMiss: []);
         }
+
+        var mode = Domain.Search.SearchTurnMode.Parse(turns[^1].Mode);
 
         var sequenceByTurn = turns.ToDictionary(t => t.Id, t => t.Sequence);
         var turnIds = sequenceByTurn.Keys.ToList();
@@ -1084,7 +1130,7 @@ public static class SearchEndpoints
             .ToList();
         if (stored.Count == 0)
         {
-            return new ReplayedTurns([], [], 0, turns[^1].Reason, ConflictOf(turns[^1].ConflictJson));
+            return new ReplayedTurns([], [], 0, turns[^1].Reason, ConflictOf(turns[^1].ConflictJson), [], mode);
         }
 
         var titleIds = stored.Select(c => c.TitleId).Distinct().ToList();
@@ -1146,11 +1192,19 @@ public static class SearchEndpoints
                     predictedRating = rescored.TryGetValue(c.TitleId, out var fresh) ? fresh : c.PredictedRating,
                     crowdRating = CrowdRating.For(title),
                     crowdVotes = CrowdRating.VotesFor(title),
-                    fit = c.LlmFit is { } llmFit ? (double?)llmFit : null,
-                    why = c.Why,
+                    // A fit is shown only where the model produced it. Rows older than FitSource carry
+                    // no source and are shown as they were; a Fallback-sourced fit never is.
+                    fit = c.LlmFit is { } llmFit && c.FitSource != Domain.Ports.ResultSource.Fallback.ToString()
+                        ? (double?)llmFit
+                        : null,
+                    // The deterministic stub's sentence was stored as model output on thousands of
+                    // historical rows (B-6). Rows are never edited (FD-18); the replay simply stops
+                    // showing a sentence the model never wrote.
+                    why = LegacyStubWhy(c.Why) ? null : c.Why,
                     seen = seen.Contains(c.TitleId),
                     blend = (double?)c.Blend,
                     outsideRequest = c.OutsideRequest,
+                    satisfies = c.Satisfies,
                 };
             }
         }
@@ -1158,13 +1212,31 @@ public static class SearchEndpoints
         // Partitioned AFTER the sort and AFTER the eligibility re-filter, so both lists carry one
         // ordering and one guard. `removed` deliberately spans both: it is the count of cards that
         // left the answer, and the tray is part of the answer.
+        // By TIER, read through SearchTurnCardTier.Of so a row older than the column is read from
+        // its BelowFloor flag and an unknown tier is never promoted into the grid.
         return new ReplayedTurns(
-            survivors.Where(c => !c.BelowFloor).Select(Project).ToList(),
-            survivors.Where(c => c.BelowFloor).Select(Project).ToList(),
+            survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.Pick)
+                .Select(Project).ToList(),
+            survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.BelowFloor)
+                .Select(Project).ToList(),
             removed,
             turns[^1].Reason,
-            ConflictOf(turns[^1].ConflictJson));
+            ConflictOf(turns[^1].ConflictJson),
+            survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.NearMiss)
+                .Select(Project).ToList(),
+            mode,
+            survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.Unchecked)
+                .Select(Project).ToList());
     }
+
+    /// <summary>
+    /// The deterministic stub's why-line — "A action pick aligned with your taste." — as it was stored,
+    /// labelled model output, before the typed sources existed.
+    /// </summary>
+    private static bool LegacyStubWhy(string? why) =>
+        why is { Length: > 0 }
+        && why.StartsWith("A", StringComparison.Ordinal)
+        && why.EndsWith(" pick aligned with your taste.", StringComparison.Ordinal);
 
     /// <summary>
     /// The idempotent retry's answer: the stored turn, on the wire, in the same SSE grammar a live
@@ -1207,6 +1279,206 @@ public static class SearchEndpoints
             return null;
         }
     }
+
+    /// <summary>How many earlier answers' cards the model may refer back to.</summary>
+    private const int PresentedAnswers = 3;
+
+    /// <summary>
+    /// The cards of the conversation's last <see cref="PresentedAnswers"/> answers that put cards on
+    /// screen, each with its handle: the answer's number (1-based over assistant rows in sequence
+    /// order) and the card's on-screen position (its stored rank plus one). Picks and outside cards
+    /// only — the trays sit behind fences and are not "the second one" of anything.
+    ///
+    /// <para>A turn the client aborted counts: its cards were on screen (B-3). A failed turn's
+    /// cards never were, and none are stored.</para>
+    /// </summary>
+    private static async Task<IReadOnlyList<PresentedCard>> PresentedAsync(
+        IReelDbContext db, Guid conversationId, int beforeSequence, CancellationToken ct)
+    {
+        var assistantRows = await db.SearchTurns
+            .Where(t => t.ConversationId == conversationId && t.Role == "assistant" && t.Sequence < beforeSequence)
+            .OrderBy(t => t.Sequence)
+            .Select(t => t.Id)
+            .ToListAsync(ct);
+        if (assistantRows.Count == 0)
+        {
+            return [];
+        }
+
+        var answerNumber = assistantRows.Select((id, index) => (id, index)).ToDictionary(x => x.id, x => x.index + 1);
+
+        // Answers that put PICKS on screen, decided before the cut to the last three: a tray-only
+        // none-found answer is not "the second one" of anything, and three of them in a row used to
+        // push the last real answer out of the model's handles (D8). The tier is read through
+        // SearchTurnCardTier.Of in memory — a row older than the column has no tier to query on.
+        var withCards = (await db.SearchTurnCards
+                .Where(c => c.ConversationId == conversationId)
+                .Select(c => new { c.TurnId, c.Tier, c.BelowFloor })
+                .ToListAsync(ct))
+            .Where(c => Domain.Search.SearchTurnCardTier.Of(
+                new Domain.Search.SearchTurnCard { Tier = c.Tier, BelowFloor = c.BelowFloor }) == Domain.Search.SearchTurnCardTier.Pick)
+            .Select(c => c.TurnId)
+            .Distinct()
+            .ToList();
+        var recent = withCards
+            .Where(answerNumber.ContainsKey)
+            .OrderByDescending(id => answerNumber[id])
+            .Take(PresentedAnswers)
+            .ToList();
+        if (recent.Count == 0)
+        {
+            return [];
+        }
+
+        var cards = await db.SearchTurnCards
+            .Where(c => recent.Contains(c.TurnId))
+            .Join(db.Titles, c => c.TitleId, t => t.Id, (c, t) => new { Card = c, t.Name, t.Year, t.MediaType })
+            .ToListAsync(ct);
+        return cards
+            .Where(x => Domain.Search.SearchTurnCardTier.Of(x.Card) == Domain.Search.SearchTurnCardTier.Pick)
+            .Select(x => new PresentedCard(answerNumber[x.Card.TurnId], x.Card.Rank + 1, x.Card.TitleId, x.Name, x.Year, x.MediaType))
+            .OrderByDescending(p => p.Turn)
+            .ThenBy(p => p.Rank)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The previous answer's reading of the request — the newest assistant row before this turn that
+    /// stored one and whose plan did not fail — for what a follow-up inherits when its own words are
+    /// silent (AskReelCarry). Null on a first turn or an unreadable row.
+    /// </summary>
+    private static async Task<Domain.Ports.SearchIntent?> PriorIntentAsync(
+        IReelDbContext db, Guid conversationId, int beforeSequence, CancellationToken ct)
+    {
+        var rows = await db.SearchTurns
+            .Where(t => t.ConversationId == conversationId
+                && t.Role == "assistant"
+                && t.Sequence < beforeSequence
+                && t.IntentJson != null)
+            .OrderByDescending(t => t.Sequence)
+            .Select(t => new { t.IntentJson, t.DegradedFlags })
+            .Take(AskHistoryTurns)
+            .ToListAsync(ct);
+        var row = rows.FirstOrDefault(r => !Domain.Search.SearchTurnDegraded.PlanFailed(r.DegradedFlags));
+        return row is null ? null : AskReelCarry.Parse(row.IntentJson);
+    }
+
+    /// <summary>
+    /// The transcript the model reads: the last <see cref="AskHistoryTurns"/> rows that said
+    /// something true, oldest first, each assistant line carrying the handles of the cards it showed.
+    ///
+    /// <para><b>What is left out, and why.</b> A degraded reply is never read back (B-5): it is the
+    /// degraded copy, not an answer, and feeding it to the next prompt taught the model that "I
+    /// couldn't think that one through" is a thing it says. Neither is the legacy stub template
+    /// ("Here are some action picks for “…”") that thousands of historical rows still carry — those
+    /// rows are never edited (FD-18), only no longer quoted. A turn the CLIENT ended is read back,
+    /// because its reply and its cards were on screen (B-3); any other failure said nothing.</para>
+    /// </summary>
+    private static async Task<List<Domain.Ports.ChatTurn>> HistoryAsync(
+        IReelDbContext db, Guid conversationId, int beforeSequence, CancellationToken ct)
+    {
+        var rows = (await db.SearchTurns
+                .Where(t => t.ConversationId == conversationId
+                    && t.Sequence < beforeSequence
+                    && t.Text != string.Empty
+                    && (t.Status == Domain.Search.SearchTurnStatus.Completed
+                        || (t.Status == Domain.Search.SearchTurnStatus.Failed
+                            && t.FailureCode == Domain.Search.SearchTurnFailure.ClientAborted)))
+                .OrderByDescending(t => t.Sequence)
+                .Take(AskHistoryTurns * 2)
+                .Select(t => new { t.Id, t.Role, t.Text, t.DegradedFlags, t.Sequence })
+                .ToListAsync(ct))
+            .Where(t => t.Role != "assistant"
+                || (!Domain.Search.SearchTurnDegraded.PlanFailed(t.DegradedFlags) && !LegacyStubReply(t.Text)))
+            .Take(AskHistoryTurns)
+            .Reverse()
+            .ToList();
+        if (rows.Count == 0)
+        {
+            return [];
+        }
+
+        // The handles each answer showed, by answer number — the same numbering PresentedAsync uses.
+        var assistantRows = await db.SearchTurns
+            .Where(t => t.ConversationId == conversationId && t.Role == "assistant" && t.Sequence < beforeSequence)
+            .OrderBy(t => t.Sequence)
+            .Select(t => t.Id)
+            .ToListAsync(ct);
+        var answerNumber = assistantRows.Select((id, index) => (id, index)).ToDictionary(x => x.id, x => x.index + 1);
+        var assistantIds = rows.Where(r => r.Role == "assistant").Select(r => r.Id).ToList();
+        var shownByTurn = (await db.SearchTurnCards
+                .Where(c => assistantIds.Contains(c.TurnId))
+                .Join(db.Titles, c => c.TitleId, t => t.Id, (c, t) => new { Card = c, t.Name, t.Year, t.MediaType })
+                .ToListAsync(ct))
+            .Where(x => Domain.Search.SearchTurnCardTier.Of(x.Card) == Domain.Search.SearchTurnCardTier.Pick)
+            .GroupBy(x => x.Card.TurnId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(x => new PresentedCard(
+                    answerNumber.GetValueOrDefault(x.Card.TurnId), x.Card.Rank + 1, x.Card.TitleId, x.Name, x.Year, x.MediaType)).ToList());
+
+        // Whitelisted roles: the role reaches the provider's messages array, and "system" there is a
+        // different instruction set. The column holds only "user" and "assistant" today; this keeps
+        // the guarantee local to the place the prompt is built.
+        return rows
+            .Select(t => t.Role == "assistant"
+                ? new Domain.Ports.ChatTurn(
+                    "assistant",
+                    t.Text + (shownByTurn.TryGetValue(t.Id, out var cards) ? AskReelHandles.HistorySuffix(cards) : string.Empty))
+                : new Domain.Ports.ChatTurn("user", t.Text))
+            .ToList();
+    }
+
+    /// <summary>The legacy stub reply — "Here are some X picks for “…”" — as it was stored.</summary>
+    private static bool LegacyStubReply(string text) =>
+        text.StartsWith("Here are some ", StringComparison.Ordinal) && text.Contains(" picks for “", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The `phase` heartbeat (A-6, B-10): whenever the stream has been silent for
+    /// <see cref="HeartbeatAfter"/>, the last phase is sent again, marked <c>heartbeat: true</c> so the
+    /// client re-arms its watchdog without re-sorting anything. The `:keepalive` comment keeps the
+    /// proxies awake; this keeps the CLIENT awake, through the parser that comments never reach.
+    /// </summary>
+    private static async Task HeartbeatAsync(
+        AskTurnProgress progress, LiveSearchExpansionService.Emit emit, System.Diagnostics.Stopwatch lastFrameAt,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                if (lastFrameAt.Elapsed < HeartbeatAfter)
+                {
+                    continue;
+                }
+
+                // The last phase again, verbatim, plus the marker — so a client that renders the
+                // phase's counts renders the same counts, and one that sorts at phase boundaries can
+                // tell this is not one.
+                var beat = new Dictionary<string, object?> { ["stage"] = "searching", ["found"] = 0, ["scored"] = 0 };
+                if (progress.LastPhase is { } last)
+                {
+                    foreach (var property in System.Text.Json.JsonSerializer.SerializeToElement(last).EnumerateObject())
+                    {
+                        beat[property.Name] = property.Value.Clone();
+                    }
+                }
+
+                beat["heartbeat"] = true;
+                await emit("phase", beat);
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException
+                                   or InvalidOperationException)
+        {
+            // The turn ended or the client left — both are how this loop is meant to stop. A
+            // heartbeat that cannot be written must never become the turn's failure.
+        }
+    }
+
+    /// <summary>How long the stream may be silent before the heartbeat speaks. Well inside the 10 s contract.</summary>
+    private static readonly TimeSpan HeartbeatAfter = TimeSpan.FromSeconds(5);
 
     private static async Task<string?> QuestionBehindAsync(
         IReelDbContext db, Domain.Search.SearchTurn turn, CancellationToken ct) =>
@@ -1255,6 +1527,9 @@ public static class SearchEndpoints
             // tray was part of it — an idempotent replay that dropped it would make the second
             // delivery of one turn differ from the first.
             belowFloor = replay.BelowFloor,
+            nearMiss = replay.NearMiss ?? [],
+            @unchecked = replay.Unchecked ?? [],
+            mode = replay.Mode,
             // A failed turn replays as the failure it was. Answering a retry with a cheerful empty
             // result set would tell the client the question succeeded and returned nothing.
             reason = replay.Reason,
@@ -1409,10 +1684,20 @@ public static class SearchEndpoints
             turn.PromptVersion = AskReelPromptVersion.Current;
             turn.LatencyMs = latencyMs;
             turn.CompletedAt = now;
+            // J-13 / M-8: where the turn's seconds went, which models answered and at what effort,
+            // what kind of answer it gave and which parts degraded — on the row, so a degraded turn
+            // is a query rather than a log line that rotated away after thirty minutes.
+            turn.StageTimingsJson = outcome.StageTimingsJson;
+            turn.ModelIds = outcome.ModelIdsJson;
+            turn.ReasoningEffort = outcome.ReasoningEffort;
+            turn.Mode = outcome.Mode;
+            turn.DegradedFlags = outcome.DegradedFlags;
 
-            // A failed turn stores no cards. There is nothing to replay, and a half-answer replayed
-            // as a whole one is the transcript lying about what happened.
-            if (!outcome.Failed && outcome.Cards.Count > 0)
+            // Cards are stored for every turn that SHOWED some — a completed answer, and a turn the
+            // client ended after cards were already on screen (B-3). A crash stores none: its cards,
+            // if any, never reached a `done`, and the client renders the failure instead.
+            if (outcome.Cards.Count > 0
+                && (!outcome.Failed || outcome.FailureCode == Domain.Search.SearchTurnFailure.ClientAborted))
             {
                 db.SearchTurnCards.AddRange(outcome.Cards.Select(card => new Domain.Search.SearchTurnCard
                 {
@@ -1434,6 +1719,9 @@ public static class SearchEndpoints
                     // conversation's no-repeat set; it was not recommended, so it is not in the
                     // exposure log and never replays into `cards`.
                     BelowFloor = card.BelowFloor,
+                    Tier = card.Tier,
+                    Satisfies = card.Satisfies,
+                    FitSource = card.FitSource,
                     CreatedAt = now,
                 }));
 

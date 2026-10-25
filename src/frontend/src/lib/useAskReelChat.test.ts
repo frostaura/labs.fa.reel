@@ -59,6 +59,7 @@ import {
   SKELETON_CAP,
   wasPaged,
   resumedConflict,
+  markLastReplyUnchecked,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -3440,3 +3441,173 @@ describe("chatReducer — a resumed notice pins to the answer, not the failed ta
     expect(state.conflict).toBe("Your conditions permanently exclude comedy and romance.");
   });
 });
+
+describe("chatReducer — trust-v1 (WS-2 P0)", () => {
+  it("a_heartbeat_phase_changes_nothing_and_never_reorders_the_grid", () => {
+    // Fixture variation, one field: the same phase frame with and without `heartbeat`. The real
+    // phase settles the in-flight cards by blend; the heartbeat must leave them exactly as shown.
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "sci-fi", fresh: true });
+    const first = chatReducer(asked, { type: "candidate", data: card(1, { blend: 0.2 }) });
+    const second = chatReducer(first, { type: "candidate", data: card(2, { blend: 0.9 }) });
+    const beat = chatReducer(second, { type: "phase", data: { stage: "ranking", found: 2, scored: 2, heartbeat: true } });
+    expect(beat).toBe(second);
+    const real = chatReducer(second, { type: "phase", data: { stage: "ranking", found: 2, scored: 2 } });
+    expect(real.order).toEqual(["t2", "t1"]);
+  });
+
+  it("a_degraded_reply_is_marked_on_its_bubble", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "no superheroes please", fresh: true });
+    const degraded = chatReducer(asked, {
+      type: "assistant",
+      data: { text: "I couldn't think that one through just now. Try asking again in a moment.", degraded: true },
+    });
+    expect(degraded.turns.at(-1)).toMatchObject({ role: "assistant", degraded: true });
+    const plain = chatReducer(asked, { type: "assistant", data: { text: "Here you go." } });
+    expect(plain.turns.at(-1)?.degraded).toBeUndefined();
+  });
+
+  it("done_carries_the_near_miss_tray_the_mode_and_the_relaxations_and_a_new_answer_replaces_them", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "ninja movies", fresh: true });
+    const noneFound = chatReducer(asked, {
+      type: "done",
+      data: {
+        results: [],
+        reason: "no picks matched what you asked",
+        nearMiss: [card(7, { satisfies: "partial" })],
+        mode: "NoneFound",
+        supply: { knockouts: [{ kind: "Language", value: "en", contentFilterId: null, label: "English only", wouldUnlock: 11 }] },
+      },
+    });
+    expect(noneFound.mode).toBe("NoneFound");
+    expect(noneFound.nearMiss.map((c) => c.titleId)).toEqual(["t7"]);
+    expect(noneFound.knockouts.map((k) => k.label)).toEqual(["English only"]);
+    // The near-miss tray is never the grid.
+    expect(noneFound.order).toEqual([]);
+
+    const next = chatReducer(
+      chatReducer(noneFound, { type: "userTurn", message: "samurai films", fresh: false }),
+      { type: "done", data: { results: [card(1)], reason: "1 pick for you", mode: "Picks" } },
+    );
+    expect(next.mode).toBe("Picks");
+    expect(next.nearMiss).toEqual([]);
+    expect(next.knockouts).toEqual([]);
+  });
+
+  it("a_resume_restores_the_near_miss_tray_the_mode_and_the_degraded_bubble", () => {
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-nf",
+        lastCardsAt: "2026-10-24T09:00:00Z",
+        cards: [],
+        nearMiss: [card(7), { titleId: "broken" } as unknown as AskCard],
+        mode: "NoneFound",
+        turns: [
+          { sequence: 0, role: "user", text: "ninja movies", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "I couldn't think that one through just now.", kind: "ask", status: "Completed", degraded: true },
+        ],
+        reason: "no picks matched what you asked",
+        lastQuery: "ninja movies",
+        shown: [],
+      },
+    });
+    expect(state.mode).toBe("NoneFound");
+    expect(state.nearMiss.map((c) => c.titleId)).toEqual(["t7"]);
+    expect(state.turns.at(-1)).toMatchObject({ role: "assistant", degraded: true });
+  });
+});
+
+describe("chatReducer — WS-2 review round 1", () => {
+  it("a_none_found_answer_with_unchecked_cards_keeps_them_in_their_own_tray_never_the_grid", () => {
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "ninja movies", fresh: true });
+    const replied = chatReducer(asked, { type: "assistant", data: { text: "I couldn't check what I found against what you asked this time." } });
+    const done = chatReducer(replied, {
+      type: "done",
+      data: {
+        results: [],
+        reason: "8 not checked against what you asked — shown below",
+        unchecked: [card(1), card(2)],
+        mode: "NoneFound",
+        degraded: ["judge:2/2"],
+      },
+    });
+    expect(done.unchecked.map((c) => c.titleId)).toEqual(["t1", "t2"]);
+    expect(done.order).toEqual([]);
+    expect(done.mode).toBe("NoneFound");
+    // The failed judge marks the reply the cards belong to.
+    expect(done.turns.at(-1)).toMatchObject({ role: "assistant", unchecked: true });
+
+    // Variation, one field: the same turn with a judge that failed nothing marks nothing.
+    const clean = chatReducer(replied, {
+      type: "done",
+      data: { results: [card(3)], reason: "1 pick for you", mode: "Picks", degraded: ["judge:0/3"] },
+    });
+    expect(clean.turns.at(-1)?.unchecked).toBeUndefined();
+    expect(clean.unchecked).toEqual([]);
+
+    // A new answer replaces the tray.
+    const next = chatReducer(
+      chatReducer(done, { type: "userTurn", message: "samurai films", fresh: false }),
+      { type: "done", data: { results: [card(4)], reason: "1 pick for you", mode: "Picks" } },
+    );
+    expect(next.unchecked).toEqual([]);
+  });
+
+  it("a_malformed_relaxation_offer_is_dropped_and_the_answer_is_kept", () => {
+    // Acceptance D1: the server once wrote `kind` as a number, and the whole done frame was lost.
+    const asked = chatReducer(initialChatState, { type: "userTurn", message: "ninja movies", fresh: true });
+    const done = chatReducer(asked, {
+      type: "done",
+      data: {
+        results: [],
+        reason: "no picks matched what you asked",
+        mode: "NoneFound",
+        supply: {
+          knockouts: [
+            { kind: 5, value: "en", contentFilterId: null, label: "English only", wouldUnlock: 4 } as unknown as AskKnockoutShape,
+            { kind: "MinYear", value: "2000", contentFilterId: null, label: "released 2000 or later", wouldUnlock: 19 },
+          ],
+        },
+      },
+    });
+    expect(done.status).toBe("done");
+    expect(done.knockouts.map((k) => k.label)).toEqual(["released 2000 or later"]);
+  });
+
+  it("a_resume_restores_the_unchecked_tray_and_marks_a_judge_degraded_reply", () => {
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: {
+        id: "conv-unchecked",
+        lastCardsAt: "2026-10-24T09:00:00Z",
+        cards: [],
+        unchecked: [card(9), { titleId: "broken" } as unknown as AskCard],
+        mode: "NoneFound",
+        turns: [
+          { sequence: 0, role: "user", text: "ninja movies", kind: "ask", status: "Completed" },
+          { sequence: 1, role: "assistant", text: "I couldn't check what I found.", kind: "ask", status: "Completed", judgeDegraded: true },
+        ],
+        reason: "1 not checked against what you asked — shown below",
+        lastQuery: "ninja movies",
+        shown: [],
+      },
+    });
+    expect(state.unchecked.map((c) => c.titleId)).toEqual(["t9"]);
+    expect(state.turns.at(-1)).toMatchObject({ role: "assistant", unchecked: true });
+    expect(state.turns.at(-1)?.degraded).toBeUndefined();
+  });
+
+  it("marks_only_the_newest_reply_and_never_one_above_a_newer_question", () => {
+    const turns: ChatTurn[] = [
+      { role: "user", text: "a" },
+      { role: "assistant", text: "b" },
+      { role: "user", text: "c" },
+      { role: "assistant", text: "d" },
+    ];
+    expect(markLastReplyUnchecked(turns).map((t) => t.unchecked ?? false)).toEqual([false, false, false, true]);
+    const awaiting: ChatTurn[] = [...turns, { role: "user", text: "e" }];
+    expect(markLastReplyUnchecked(awaiting)).toBe(awaiting);
+  });
+});
+
+type AskKnockoutShape = { kind: string; value: string; contentFilterId: string | null; label: string; wouldUnlock: number };

@@ -1,5 +1,6 @@
 using System.Reflection;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 
@@ -166,10 +167,16 @@ public class AskReelCacheKeyTests
         new("assistant", "Shows it is."),
     ];
 
+    private static readonly Guid Shown603 = Guid.Parse("00000000-0000-0000-0000-000000000603");
+    private static readonly Guid Shown604 = Guid.Parse("00000000-0000-0000-0000-000000000604");
+    private static readonly Guid Shown605 = Guid.Parse("00000000-0000-0000-0000-000000000605");
+
     private static string Interpret(
-        Guid accountId, string query, IReadOnlyList<ChatTurn> history, IReadOnlyList<long>? shown = null) =>
+        Guid accountId, string query, IReadOnlyList<ChatTurn> history, IReadOnlyList<Guid>? shown = null,
+        IReadOnlyList<PresentedCard>? presented = null) =>
         LiveSearchExpansionService.InterpretKey(
-            accountId, query, standingSummary: null, mediaFilter: [], "openai/gpt-5.4-mini", history, shown ?? []);
+            accountId, query, standingSummary: null, mediaFilter: [], "openai/gpt-5.4-mini", history,
+            presented ?? [], shown ?? []);
 
     [Fact]
     public void The_same_question_in_two_conversations_produces_two_interpret_keys()
@@ -277,10 +284,30 @@ public class AskReelCacheKeyTests
         var nothingShown = Interpret(accountId, "something else like that", [], []);
 
         Assert.Contains("|s=none", nothingShown, StringComparison.Ordinal);
-        Assert.NotEqual(nothingShown, Interpret(accountId, "something else like that", [], [603L]));
+        Assert.NotEqual(nothingShown, Interpret(accountId, "something else like that", [], [Shown603]));
         Assert.NotEqual(
-            Interpret(accountId, "something else like that", [], [603L]),
-            Interpret(accountId, "something else like that", [], [604L]));
+            Interpret(accountId, "something else like that", [], [Shown603]),
+            Interpret(accountId, "something else like that", [], [Shown604]));
+    }
+
+    /// <summary>
+    /// The presented handles are the list "the second one" resolves against, so they are a prompt
+    /// input: the same question over a different second card is a different question (A-4).
+    /// </summary>
+    [Fact]
+    public void The_presented_handles_ride_the_interpret_key()
+    {
+        var accountId = Guid.NewGuid();
+        PresentedCard[] first = [new(2, 1, Shown603, "Ballerina", 2025, MediaType.Movie), new(2, 2, Shown604, "John Wick: Chapter 4", 2023, MediaType.Movie)];
+        PresentedCard[] swapped = [new(2, 1, Shown604, "John Wick: Chapter 4", 2023, MediaType.Movie), new(2, 2, Shown603, "Ballerina", 2025, MediaType.Movie)];
+
+        Assert.Contains("|p=none|", Interpret(accountId, "more like the second one", []), StringComparison.Ordinal);
+        Assert.NotEqual(
+            Interpret(accountId, "more like the second one", [], presented: first),
+            Interpret(accountId, "more like the second one", [], presented: swapped));
+        Assert.Equal(
+            Interpret(accountId, "more like the second one", [], presented: first),
+            Interpret(accountId, "more like the second one", [], presented: [.. first.Reverse()]));
     }
 
     /// <summary>
@@ -294,8 +321,8 @@ public class AskReelCacheKeyTests
         var accountId = Guid.NewGuid();
 
         Assert.Equal(
-            Interpret(accountId, "something else", [], [603L, 604L, 605L]),
-            Interpret(accountId, "something else", [], [605L, 603L, 604L, 603L]));
+            Interpret(accountId, "something else", [], [Shown603, Shown604, Shown605]),
+            Interpret(accountId, "something else", [], [Shown605, Shown603, Shown604, Shown603]));
     }
 
     /// <summary>

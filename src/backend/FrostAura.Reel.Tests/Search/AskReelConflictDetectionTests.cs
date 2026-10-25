@@ -356,6 +356,27 @@ public class AskReelConflictDetectionTests
             qualified);
     }
 
+    /// <summary>
+    /// Acceptance D6: the live "older stuff is fine" reply already said "from 2000 onward", then had
+    /// "titles from 2000 on" appended. A reply that names the bound is not told it twice; the genre
+    /// clause it does not name still lands.
+    /// </summary>
+    [Fact]
+    public void A_reply_that_already_names_the_year_bound_is_not_told_it_again()
+    {
+        var rules = FilterRuleSet.Create(["comedy"], null, null, null, null, 2000, null);
+
+        Assert.Equal(
+            "Older shows it is — from 2000 onward.",
+            AskReelStandingFilters.Qualify("Older shows it is — from 2000 onward.", [], [], yearCollides: true, rules));
+        Assert.Equal(
+            "Older shows it is, from 2000 onward — under your conditions that means no comedy.",
+            AskReelStandingFilters.Qualify("Older shows it is, from 2000 onward.", ["comedy"], [], yearCollides: true, rules));
+        Assert.Equal(
+            "Shows from 20000 leagues — under your conditions that means titles from 2000 on.",
+            AskReelStandingFilters.Qualify("Shows from 20000 leagues.", [], [], yearCollides: true, rules));
+    }
+
     [Fact]
     public void The_clause_lists_an_avoided_word_beside_the_genre()
     {

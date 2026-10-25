@@ -76,7 +76,10 @@ change; matching on it is how a UI ends up rendering a crash message for an hone
 ## The stream
 
 SSE, one frame per event, `id:` line first, blank line last. A `:keepalive` comment frame goes out
-every 10 seconds — it carries no event and a parser must skip it. Ids start at 1; `id: 0` is never
+every 10 seconds — it carries no event and a parser must skip it, but a client's idle watchdog must
+re-arm on its bytes. Whenever the stream has been silent for 5 seconds the server also repeats the
+last `phase` frame with `heartbeat: true`: proof of life through the parser, never a new phase, and
+never a reason to re-sort the cards on screen. No `phase` frame follows `done`. Ids start at 1; `id: 0` is never
 written, because a client echoing it back as `Last-Event-ID` would reset its own cursor.
 
 ```
@@ -92,8 +95,45 @@ data: {"stage":"searching","found":0,"scored":0}
 
 id: 9
 event: done
-data: {"results":[…],"streamed":24,"kept":18,"droppedByFloor":6,"belowFloor":[…],"reason":"…","timingsMs":null,"debug":null}
+data: {"results":[…],"streamed":10,"kept":8,"droppedByFloor":2,"belowFloor":[…],"nearMiss":[…],"unchecked":[],"mode":"Picks","supply":null,"degraded":[],"reason":"…","timingsMs":null,"debug":null}
 ```
+
+**The interim gate (trust-v1, WS-2 task 1).** The top sixteen candidates are judged against the
+REQUEST — at most three batches of six in flight at once — and each card is placed by the judge's
+`satisfies` verdict and the account's For-you bar:
+
+| Verdict | Clears the bar | Goes to | Stored `Tier` | Exposure |
+| --- | --- | --- | --- | --- |
+| `yes` | yes | `results` (a pick), emitted as its batch returns | `Pick` | yes |
+| `yes` or none | no, or no score while a bar is set | `belowFloor`, the "held back by your bar" tray | `BelowFloor` | no |
+| `partial` | either | `nearMiss`, a collapsed "close, but not quite" tray | `NearMiss` | no |
+| `no` | either | nowhere — not shown, not stored | — | no |
+| none (a failed batch, the stub), on a turn with at least one `yes` pick | yes | `results`, after every judged pick, in retrieval order, **no why-line, no fit** | `Pick` | yes, `WhySource=None` |
+| none, on a turn with **no** `yes` pick | yes | `unchecked`, the "not checked against your request" tray; the turn is `NoneFound` | `Unchecked` | no |
+
+The floor **never relaxes**, and a card with no prediction never clears a set bar (§4.8: unscored
+cards are never picks) — the same definition `SupplyReport.ClearingFloor` counts by. Unjudged cards
+never make an answer on their own: sixteen of them under the model's pre-retrieval sentence is the
+original "cards that don't match" failure. Every non-grid tier also stores `BelowFloor = true`, so an
+image older than the tier never promotes it; an unknown tier reads as `NearMiss`.
+
+The judge rules on the request **in its conversation** — the message, the conversation's last two
+user asks, and the resolved reading (media, genres, topic, years, exclusions) — and its verdict cache
+is keyed on that composed text, so a verdict is reused only where the same thing was asked in the
+same context. Judging has a 25 s deadline from the start of the stage; a batch still out by then is a
+failed batch. A fallback verdict is never cached, never shown as model output and
+never logged as `Llm`. The reply (`assistant-message`) goes out **once**, just before the first pick
+— not as the turn's opening frame — and carries `degraded: true` when every attempt to read the
+question failed (its text is then the degraded copy, which quotes nobody).
+
+**`mode: "NoneFound"`** when no card was judged `yes` (unjudged cards then sit in `unchecked`). The reply is then composed deterministically
+from the `supply` report (seen, saved or dismissed, held out by conditions, under the bar, unscored,
+and the drop-one relaxations that would unlock something — "already seen" is never one of them);
+`supply` rides `done` on that turn only and is `null` on every other. `degraded` lists what did not
+run as designed: `plan`, `judge:{failed}/{batches}`. Every enum inside `supply` is written as its
+name (`"kind": "Language"`), never a number. A follow-up that names no media inherits the previous
+reading's single media type. A client-aborted turn stores its degraded flags, stage timings, model ids
+and mode exactly as a finished turn does.
 
 The `conversation` frame is first and always present on a live turn: it is how the client learns
 the conversation id to remember, the turn id to reconnect to, and where in the transcript it sits.
@@ -160,7 +200,7 @@ not the thing another page would be a page *of*.
 | --- | --- |
 | `GET /api/search/conversations?limit=20` | `[{ id, title, turnCount, lastTurnAt, lastCardsAt }]` |
 | `GET /api/search/conversations/{id}` | the resume payload below; `404` if it is not the caller's |
-| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, removed }` — **`202` while `Pending`**, unless the row is stale; see *Stale turns* |
+| `GET /api/search/turns/{id}` | `{ status, reason, conflict, failureCode, cards, belowFloor, nearMiss, unchecked, mode, removed }` — **`202` while `Pending`**, unless the row is stale; see *Stale turns* |
 | `DELETE /api/search/conversations/{id}` | `204`. Cards, turns, conversation. **Never exposures.** |
 | `GET /api/search/conversations/latest` | **deprecated** — the same payload for the newest conversation |
 
@@ -171,9 +211,13 @@ The resume payload:
   "id": "…", "title": "…", "lastCardsAt": null,
   "lastTurnAt": "2026-09-11T00:54:21.301Z",
   "turns":   [{ "id": "…", "sequence": 0, "role": "user", "text": "…",
-                "kind": "ask", "status": "Completed", "failureCode": null }],
+                "kind": "ask", "status": "Completed", "failureCode": null,
+                "degraded": false, "judgeDegraded": false, "mode": null }],
   "cards":       [ /* same card shape as done.results */ ],
   "belowFloor":  [ /* the same card shape again — the tray */ ],
+  "nearMiss":    [ /* the near-miss tray */ ],
+  "unchecked":   [ /* the not-checked tray */ ],
+  "mode":        "Picks",
   "reason":  "…",        // the newest replayed turn's reason, verbatim
   "conflict": {          // the collision notice that turn emitted, or null — see below
     "excludedGenres":   ["comedy"],
@@ -258,17 +302,26 @@ say.
    Sequence)` index is the race backstop.
 2b. **Resolve `pageOf`**, when one was sent — see *Asks and pages*. Its refusals come before the
    idempotency check, so a malformed page costs nothing.
-5. **Derive** history (last 8 completed turns by `Sequence`), `shown` (distinct `TmdbId` over the
-   conversation's cards, **tray included** — see *The tray*) and `kind` (explicit where `pageOf` was
-   sent, compared otherwise), all read *before* this turn's own rows exist.
+5. **Derive** `shown` (distinct **`TitleId`** over the conversation's cards, **tray included** — see
+   *The tray*; TMDB's movie and TV id spaces overlap, so a `TmdbId` key hid unrelated titles) and
+   `kind` (explicit where `pageOf` was sent, compared otherwise), *before* this turn's own rows exist.
+   History and the presented handles are read once the stream is open, bounded by sequence to the
+   rows before this turn: the last 8 turns that said something true — `Completed`, or `Failed` /
+   `client_aborted` (its reply and cards were on screen) — never a degraded reply nor the legacy stub
+   template, each assistant line suffixed `[Shown: T2.1 Ballerina (2025) · …]`. The model is shown
+   the last three answers' cards as handles `T{answer}.{position}`, newest answer first, in screen
+   order — the list "the second one" resolves against.
 6. **Write the rows Pending** — a user row and an assistant row for an `ask`, the assistant row
    alone for a `page` — then the headers, then `conversation`.
 7. **Stream.**
 8. **Persist after `done`**, on a scope of its own, under `CancellationToken.None`, inside a
    try/catch that logs and never throws. The request's context carries the pipeline's catalogue
    upserts and is never saved after the stream.
-9. **Failure** — a crash or an abandoned stream stamps the row `Failed` with a `FailureCode`
-   (`client_aborted` on an abort) and stores no cards. A recoverable record, not an orphan.
+   The row also records `Mode`, `DegradedFlags`, `StageTimingsJson`, `ModelIds` (`plan`, `judge`,
+   `embedding`) and `ReasoningEffort` (`provider-default` while no effort parameter is sent).
+9. **Failure** — a crash stamps the row `Failed` with a `FailureCode` and stores no cards. An
+   abandoned stream (`client_aborted`) stores **what was already on the wire**: the reply and every
+   card emitted, in emission order, so the next turn's history and no-repeat set contain them.
 
 **Before step 1 of anything — boot.** Every row still `Pending` from the previous process is stamped
 `Failed` / `server_restarted` with a `CompletedAt`, before the API serves its first request. It is
@@ -333,7 +386,10 @@ The **order is never re-derived**. Stored rank is the position the answer had.
 ## The tray
 
 A card the account's rating floor pushed under the *"Show the N under your bar"* fence is stored as
-a `SearchTurnCard` with **`BelowFloor = true`**, and the rank counter runs across both blocks — the
+a `SearchTurnCard` with **`Tier = BelowFloor`** and **`BelowFloor = true`**; a near miss is stored
+`Tier = NearMiss` and **also** `BelowFloor = true`, so an image older than the tier column can never
+replay it as a pick. Readers go through `SearchTurnCardTier.Of`: no tier reads from the flag, an
+unknown tier reads as `NearMiss`, never as a pick, and the rank counter runs across both blocks — the
 picks take `0..n-1` and the tray continues at `n`, so the unique `(TurnId, Rank)` holds.
 
 **Why it is stored: the user saw it.** The founder-locked rule is *never show things I've already

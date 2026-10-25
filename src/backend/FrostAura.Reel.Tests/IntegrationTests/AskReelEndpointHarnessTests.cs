@@ -261,18 +261,20 @@ public class AskReelEndpointHarnessTests(PostgresFixture fixture, ReelApiFactory
             Assert.Equal("user", turns[0].GetProperty("role").GetString());
             Assert.Equal(question, turns[0].GetProperty("text").GetString());
             Assert.Equal(0, turns[0].GetProperty("sequence").GetInt32());
-            // Seven fields, and the SET is pinned rather than the count: a client renders the
+            // Nine fields, and the SET is pinned rather than the count: a client renders the
             // transcript off role/text, orders and states it off kind/sequence/status, polls a
             // still-running row through `id`, and tells a turn the user stopped from one that hit a
-            // snag through `failureCode`. Every row carries both of the last two — present-but-null
-            // on a turn that did not fail, so the client has one shape to read.
+            // snag through `failureCode`. `degraded` says the reply is the degraded copy rather than
+            // an answer, and `mode` (null on a user row) says whether the answer was picks or an
+            // honest none-found. Every row carries all of them — present-but-null where they do not
+            // apply, so the client has one shape to read.
             Assert.All(turns, turn => Assert.Equal(
-                ["failureCode", "id", "kind", "role", "sequence", "status", "text"],
+                ["degraded", "failureCode", "id", "judgeDegraded", "kind", "mode", "role", "sequence", "status", "text"],
                 turn.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)));
 
             // The alias answers the same shape as /conversations/{id} — that is what makes it an
             // alias rather than a second projection to keep in step.
-            foreach (var field in new[] { "cards", "reason", "removed", "lastQuery", "mediaTypes", "shown", "lastCardsAt" })
+            foreach (var field in new[] { "cards", "belowFloor", "nearMiss", "mode", "reason", "removed", "lastQuery", "mediaTypes", "shown", "lastCardsAt" })
             {
                 Assert.True(root.TryGetProperty(field, out _), $"the resume payload is missing {field}");
             }

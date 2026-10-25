@@ -125,7 +125,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
         // The concept the agent's answer renders to — computed through the production helper, so a
         // change to how a concept is assembled cannot leave this test asserting a dead string.
         var concept = LiveSearchExpansionService.ConceptText(
-            new AgentReply("Coming up.", agent.LastIntent, agent.LastIntent));
+            new AgentReply("Coming up.", agent.LastIntent, agent.LastIntent), Question, AskReelNegations.None);
 
         Assert.Equal(1, embeddings.TimesAskedFor(concept));
         // And the half that was already fixed stays fixed: no second TMDB pull either.
@@ -164,7 +164,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
         await RunAsync(theirs, cache, agent, tmdb, log, Question, embeddings);
 
         var concept = LiveSearchExpansionService.ConceptText(
-            new AgentReply("Coming up.", agent.LastIntent, agent.LastIntent));
+            new AgentReply("Coming up.", agent.LastIntent, agent.LastIntent), Question, AskReelNegations.None);
 
         Assert.Equal(2, embeddings.TimesAskedFor(concept));
     }
@@ -391,7 +391,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>(
-                titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     /// <summary>
@@ -416,7 +416,7 @@ public class AskReelInterpretCacheTests(PostgresFixture fixture) : EmbeddedCatal
             IReadOnlyList<RerankInput> titles, string query, LensPersona persona, string? anchorName = null,
             string usagePurpose = ApiUsagePurpose.Rerank, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<RerankResult>>(
-                titles.Select(t => new RerankResult(t.TitleId, 0.7d, "Because it fits.")).ToList());
+                titles.Select(t => new RerankResult(t.TitleId, 0.7d, ResultSource.Llm, "Because it fits.", ResultSource.Llm, Satisfies.Yes)).ToList());
     }
 
     /// <summary>

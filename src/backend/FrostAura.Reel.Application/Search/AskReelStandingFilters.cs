@@ -119,9 +119,56 @@ public static class AskReelStandingFilters
     /// <c>minYear: 2000</c>, and the window it hands back is inside the standing one by
     /// construction. EITHER window colliding is a collision — the model's reading is not evidence
     /// that the user did not ask.</para>
+    ///
+    /// <para><paramref name="rawQuery"/> closes A-12's second half: "older stuff is fine" against a
+    /// "2000 onwards" rule names no year at all, so neither reading carries a window to compare — and
+    /// the reply then promised "older shows from 2000 onward". An explicit request for OLDER titles
+    /// ("older", "classic", "vintage", "oldies", "retro") collides with any standing lower bound,
+    /// deterministically, because the bound is exactly what it asks past.</para>
     /// </summary>
-    public static bool YearWindowCollides(FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null) =>
-        WindowCollides(rules, intent) || (requested is not null && WindowCollides(rules, requested));
+    public static bool YearWindowCollides(
+        FilterRuleSet rules, SearchIntent intent, SearchIntent? requested = null, string? rawQuery = null) =>
+        WindowCollides(rules, intent)
+        || (requested is not null && WindowCollides(rules, requested))
+        || (rules.MinYear is not null && AsksForOlder(rawQuery));
+
+    /// <summary>Words that ask for titles older than whatever is on offer.</summary>
+    private static readonly IReadOnlySet<string> OlderCues = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "older", "oldies", "classic", "classics", "vintage", "retro", "oldschool",
+    };
+
+    /// <summary>
+    /// Words that, right before "classic", make it a judgement of quality rather than of age: "a
+    /// modern classic" asks for nothing older (D11).
+    /// </summary>
+    private static readonly IReadOnlySet<string> NotOlderQualifiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "modern", "new", "newer", "recent", "future", "instant", "contemporary",
+    };
+
+    /// <summary>Whether the raw sentence asks for older titles, by a whole word.</summary>
+    internal static bool AsksForOlder(string? rawQuery)
+    {
+        var tokens = Tokens(rawQuery).ToList();
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (!OlderCues.Contains(tokens[i]))
+            {
+                continue;
+            }
+
+            var isClassic = tokens[i].StartsWith("classic", StringComparison.OrdinalIgnoreCase);
+            if (isClassic && i > 0 && NotOlderQualifiers.Contains(tokens[i - 1]))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
 
     private static bool WindowCollides(FilterRuleSet rules, SearchIntent intent) =>
         (rules.MinYear is { } standingMin && intent.MaxYear is { } askedMax && askedMax < standingMin)
@@ -282,7 +329,10 @@ public static class AskReelStandingFilters
             clauses.Add($"no {HumanisedOr(excluded)}");
         }
 
-        if (yearCollides)
+        // A reply that already names the bound ("older shows from 2000 onward") is not told it again:
+        // the live conflict turn read "…from 2000 onward — under your conditions that means titles
+        // from 2000 on."
+        if (yearCollides && !NamesYearBound(reply, rules))
         {
             clauses.Add(rules.MinYear is { } min && rules.MaxYear is { } max
                 ? FormattableString.Invariant($"titles between {min} and {max}")
@@ -306,6 +356,15 @@ public static class AskReelStandingFilters
         }
 
         return $"{stem} — under your conditions that means {string.Join(" and ", clauses)}.";
+    }
+
+    /// <summary>Whether the reply names every standing year bound, as a whole number.</summary>
+    internal static bool NamesYearBound(string reply, FilterRuleSet rules)
+    {
+        var tokens = Tokens(reply).ToHashSet(StringComparer.Ordinal);
+        bool Named(int? year) =>
+            year is not { } y || tokens.Contains(y.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return (rules.MinYear is not null || rules.MaxYear is not null) && Named(rules.MinYear) && Named(rules.MaxYear);
     }
 
     /// <summary>
