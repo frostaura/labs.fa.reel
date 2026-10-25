@@ -18,7 +18,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.9")
+                .HasAnnotation("ProductVersion", "10.0.13")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
@@ -2187,6 +2187,7 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<int>("AttemptCount")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<DateTime?>("CompletedAt")
@@ -2194,6 +2195,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("CursorJson")
                         .HasColumnType("jsonb");
+
+                    b.Property<int>("DeadlineYields")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
 
                     b.Property<DateTime>("EnqueuedAt")
                         .HasColumnType("timestamp with time zone");
@@ -2203,6 +2209,11 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<DateTime?>("HeartbeatAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Interruptions")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
 
                     b.Property<string>("Kind")
                         .IsRequired()
@@ -2218,10 +2229,14 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal?>("ProgressPct")
                         .HasColumnType("numeric");
 
+                    b.Property<DateTime?>("RequeuedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
+                        .IsConcurrencyToken()
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");

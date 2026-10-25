@@ -125,5 +125,27 @@ public class SyncJob
     /// </summary>
     public string? TriggerReason { get; set; }
 
+    /// <summary>
+    /// How many times the runner has ended an attempt at the kind's deadline and put the job back
+    /// in the queue to resume from its checkpoint (a slice, not a failure, so the attempt was
+    /// refunded). Bounded by the runner, so a job that never makes progress cannot slice forever.
+    /// </summary>
+    public int DeadlineYields { get; set; }
+
+    /// <summary>
+    /// How many times a stopping host has put this job back in the queue with its attempt refunded.
+    /// Bounded by the runner like <see cref="DeadlineYields"/>: a job whose run itself keeps taking
+    /// the host down (a health-check restart loop) would otherwise be refunded forever and never
+    /// reach its attempt cap.
+    /// </summary>
+    public int Interruptions { get; set; }
+
+    /// <summary>
+    /// When a deadline slice last sent this job to the back of the queue; null if it never yielded.
+    /// The claim orders by this ahead of <see cref="EnqueuedAt"/>, so <see cref="EnqueuedAt"/> keeps
+    /// meaning "when it was first queued" and a queue-wait figure is never negative.
+    /// </summary>
+    public DateTime? RequeuedAt { get; set; }
+
     public string? Error { get; set; }
 }

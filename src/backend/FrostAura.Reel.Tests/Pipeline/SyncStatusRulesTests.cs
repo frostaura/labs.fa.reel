@@ -63,6 +63,13 @@ public class SyncStatusRulesTests
     }
 
     [Theory]
+    [InlineData(ConnectionStatus.Revoked, PipelineStage.Degraded)]
+    [InlineData(ConnectionStatus.Active, PipelineStage.Degraded)]
+    [InlineData(ConnectionStatus.Revoked, PipelineStage.FeedReady)]
+    public void A_state_written_by_a_newer_build_outranks_every_reason_read_off_its_fallback(ConnectionStatus connection, PipelineStage stage) =>
+        Assert.Equal(DegradedReason.UnrecognisedState, SyncStatusQuery.ResolveDegradedReason(connection, 0, stage, Down, unrecognisedState: true));
+
+    [Theory]
     [InlineData(PipelineStage.FeedReady, ProviderHealthState.Unmonitored)]
     [InlineData(PipelineStage.FeedReady, ProviderHealthState.Healthy)]
     [InlineData(PipelineStage.FeedReady, ProviderHealthState.Degraded)]

@@ -23,6 +23,7 @@ public static partial class DependencyInjection
 
         // ── Pipeline: event hub and the job runner ─────────────────────────────────────────
         services.AddSingleton<IPipelineEventHub, PipelineEventHub>();
+        services.TryAddSingleton(JobRunnerOptions.Default);
         services.AddHostedService<JobRunnerService>();
 
         // ── Status API v2 ───────────────────────────────────────────────────────────────────

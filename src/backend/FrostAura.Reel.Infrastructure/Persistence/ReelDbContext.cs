@@ -123,10 +123,15 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
-        // Enums as strings everywhere: ops-friendly (readable rows, usable in index filters).
+        // Enums as strings everywhere: ops-friendly (readable rows, usable in index filters). The
+        // converter is the tolerant one: a value this image does not know — written by a newer
+        // image before a rollback — reads as the enum's declared fallback instead of throwing on
+        // every row that carries it (program §5.0 rule 8; see PersistedEnumFallbacks).
         foreach (var enumType in typeof(Account).Assembly.GetTypes().Where(t => t.IsEnum))
         {
-            configurationBuilder.Properties(enumType).HaveConversion<string>().HaveMaxLength(32);
+            configurationBuilder.Properties(enumType)
+                .HaveConversion(typeof(TolerantEnumConverter<>).MakeGenericType(enumType))
+                .HaveMaxLength(32);
         }
 
         // Npgsql rejects non-UTC DateTimes for timestamptz; external date-only payloads arrive
@@ -423,6 +428,20 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.HasIndex(j => new { j.AccountId, j.Kind }).IsUnique().HasFilter("\"Status\" IN ('Pending', 'Running')");
             e.HasIndex(j => new { j.Status, j.Priority, j.EnqueuedAt });
             e.Property(j => j.CursorJson).HasColumnType("jsonb");
+
+            // Additive with a database default, so an image from before the column existed keeps
+            // inserting jobs (it never names the column) and every existing row reads as 0 slices.
+            e.Property(j => j.DeadlineYields).HasDefaultValue(0);
+            e.Property(j => j.Interruptions).HasDefaultValue(0);
+
+            // The execution's lease, enforced on EVERY save of a tracked row and not only on the
+            // runner's own writes: a handler saves its job (cursor, progress) through the context it
+            // was handed, and an execution that was reclaimed while it looked dead must not land
+            // those writes on its successor's row. With these as concurrency tokens the stale save
+            // matches no row and throws DbUpdateConcurrencyException, which rolls back everything
+            // else in that SaveChanges and settles the execution as LeaseLost.
+            e.Property(j => j.AttemptCount).IsConcurrencyToken();
+            e.Property(j => j.Status).IsConcurrencyToken();
 
             // SyncJob is the one account-bearing entity that is NOT IAccountScoped — its AccountId
             // is nullable because a global job (catalog refresh) belongs to no tenant — so the
