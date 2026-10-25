@@ -27,7 +27,7 @@ import {
   PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
   pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
   COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage, showsInlineFailure,
-  questionFor, answerRowIndex,
+  questionFor, answerRowIndex, removedNote,
 } from "../lib/useAskReelChat";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
@@ -113,7 +113,7 @@ function AskReel() {
     turns, status, phase, cards, outsideCards, reason, send, resume, startNew, loadMore, reask,
     retryTurn, stop, setMediaTypes, exhausted, appending, pageable, paged, canRetry, conflict,
     conflictTerms, turnConflict, turnConflictTerms, belowFloor, nearMiss, unchecked, mode, knockouts, droppedByFloor, holdingPrevious,
-    arrived, removed, lastCardsAt,
+    arrived, removed, removedEarlier, lastCardsAt,
     lastTurnAt, resumedTail, answeredQuery, conversationId, errorReason, unsettled, settledAnswer,
     pageQuery, pageRefusal, hasLocalTurn,
   } = useAskReelChat();
@@ -451,10 +451,13 @@ function AskReel() {
               ? `Show the ${heldBack} held back by your ${floorLabel} bar`
               : `Show the ${heldBack} ${plural(heldBack, "pick")} Reel held back`}
           </summary>
-          {/* No claim that these matched: the tray also holds cards the judge never ruled on, and
-              cards with no score while a bar is set (acceptance D5). */}
+          {/* Since R1-01 the tray holds judged matches only — an unchecked card goes to its own tray —
+              so it says they matched. A replayed older answer, or a card the client moved here on a
+              stopped turn, may carry no verdict, and then the tray claims nothing it cannot back. */}
           <p className="fa-caption text-fa-frost-dim/70 mt-1">
-            These scored under your bar, or have no score from your model yet, so they are not in your picks.
+            {belowFloorVisible.length > 0 && belowFloorVisible.every((c) => c.satisfies === "yes")
+              ? "Reel judged these a match for what you asked, but they score under your bar or have no score from your model yet, so they are not in your picks."
+              : "These scored under your bar, or have no score from your model yet, so they are not in your picks."}
           </p>
           {belowFloorVisible.length > 0 && (
             <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
@@ -856,7 +859,8 @@ function AskReel() {
               {/* `’` and not `&apos;`: every other sentence on this page uses the typographic
                   apostrophe, and the escape rendered a straight quote in the middle of a paragraph
                   whose neighbours are curly. */}
-              {removed} {plural(removed, "pick")} {removed === 1 ? "is" : "are"} gone from this answer — you’ve since rated, watched, saved or dismissed {removed === 1 ? "it" : "them"}.
+              {/* R1-11: "since" only of cards acted on after the answer — see removedNote. */}
+              {removedNote(removed, removedEarlier)}
             </p>
           )}
         </div>
@@ -1108,6 +1112,10 @@ function AskReel() {
           {nearMissTray}
           {uncheckedTray}
         </div>
+      ) : (status === "done" || status === "resumed") && mode === "Clarify" && visible.length === 0 ? (
+        // R1-04: the reply asked what "the second one" meant because nothing on screen could be it.
+        // The question is the answer; an empty-results card under it would say a search ran.
+        null
       ) : status === "resumed" && lastCardsAt == null && resumedTail == null && visible.length === 0 && outsideVisible.length === 0 ? (
         // A resumed thread is NOT an empty answer. Restoring a transcript used to land on
         // "No matches for that one" under the user's own question — the page reporting a verdict

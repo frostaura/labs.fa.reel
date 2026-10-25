@@ -1183,6 +1183,30 @@ test.describe("Ask Reel — the tray comes back with the thread", () => {
     await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 2 held back by your 6.0 bar");
   });
 
+  test("removals the account had made before the answer are never called 'since'", async ({ page }) => {
+    // R1-11: a person query shows seen titles, so a resumed answer can lose cards rated years
+    // before it. The server counts those apart (`removedEarlier`); varied over all-earlier and mixed.
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, removed: 2, removedEarlier: 2, belowFloor: [UNDER, WAY_UNDER] },
+    });
+    await expect(page.getByTestId("askreel-removed")).toHaveText(
+      "2 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given.",
+    );
+  });
+
+  test("a mixed set of removals says which part came since", async ({ page }) => {
+    await boot(page, {
+      resume: "stored",
+      storedId: CONVERSATION,
+      payload: { ...RESUME_PAYLOAD, removed: 3, removedEarlier: 1, belowFloor: [UNDER] },
+    });
+    await expect(page.getByTestId("askreel-removed")).toHaveText(
+      "3 picks are gone from this answer — you’d already rated, watched, saved or dismissed 1 of them when it was given, and you’ve acted on 2 since.",
+    );
+  });
+
   test("one removal is singular, and still about the answer", async ({ page }) => {
     // Fixture variation, one field: `removed` 2 → 1. Three agreements have to move together —
     // the noun, the verb and the pronoun — and the sentence is assembled from three separate

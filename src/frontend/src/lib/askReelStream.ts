@@ -567,5 +567,9 @@ export function isKnockout(k: unknown): k is AskKnockout {
  * never checked against the request, and the reply is marked so.
  */
 export function judgeDegraded(flags: readonly string[] | null | undefined): boolean {
-  return (flags ?? []).some((f) => f.startsWith("judge:") && f.length > "judge:".length && !f.startsWith("judge:0/"));
+  // A whole failed batch (`judge:n/m`), titles a batch skipped (`judge-missing:n/m`, R1-01) or no
+  // model at all (`no-model`): any of them leaves cards on screen that nothing checked.
+  const counted = (f: string, prefix: string) =>
+    f.startsWith(prefix) && f.length > prefix.length && !f.startsWith(`${prefix}0/`);
+  return (flags ?? []).some((f) => f === "no-model" || counted(f, "judge:") || counted(f, "judge-missing:"));
 }

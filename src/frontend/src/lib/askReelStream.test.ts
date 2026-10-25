@@ -513,6 +513,12 @@ describe("WS-2 review round 1 — the frames the server really sends", () => {
     [["judge:1/3"], true],
     [["plan", "judge:3/3"], true],
     [["judge:0/3"], false],
+    // R1-01: titles a batch skipped count as unchecked too, and so does a turn with no model at all.
+    [["judge-missing:2/16"], true],
+    [["judge:0/3", "judge-missing:1/16"], true],
+    [["judge-missing:0/16"], false],
+    [["judge-missing:"], false],
+    [["no-model"], true],
     [["plan"], false],
     [[], false],
     [undefined, false],
