@@ -4,8 +4,8 @@
 
 namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 {
-    /// <inheritdoc />
-    public partial class AskReelTrustV1TurnRecord : Migration
+    /// <summary>M1 (WS-2): Ask turn record — SearchTurns.{DegradedFlags,Mode,ModelIds,ReasoningEffort}, SearchTurnCards.{FitSource,Satisfies,Tier}, index (ConversationId, TitleId). Additive (expand-only); integrator re-scaffold of the lane migrations 20261024163303_AskReelTrustV1TurnRecord.</summary>
+    public partial class M1AskTurnRecord : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)

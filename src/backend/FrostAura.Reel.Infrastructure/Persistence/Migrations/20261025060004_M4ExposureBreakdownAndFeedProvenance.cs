@@ -4,8 +4,8 @@
 
 namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 {
-    /// <inheritdoc />
-    public partial class ExposureBreakdownNullable : Migration
+    /// <summary>M4 (WS-5): ExposureEvents breakdown columns become nullable ("unknown" instead of a false 0); FeedItems.{WhySource,EvidenceJson}. Additive (expand-only); integrator re-scaffold of the lane migrations 20261024164312_ExposureBreakdownNullable, 20261024201708_FeedItemProvenanceAndEvidence.</summary>
+    public partial class M4ExposureBreakdownAndFeedProvenance : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -57,11 +57,32 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                 oldType: "numeric(6,3)",
                 oldPrecision: 6,
                 oldScale: 3);
+
+            migrationBuilder.AddColumn<string>(
+                name: "EvidenceJson",
+                table: "FeedItems",
+                type: "jsonb",
+                nullable: true);
+
+            migrationBuilder.AddColumn<string>(
+                name: "WhySource",
+                table: "FeedItems",
+                type: "character varying(32)",
+                maxLength: 32,
+                nullable: true);
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropColumn(
+                name: "EvidenceJson",
+                table: "FeedItems");
+
+            migrationBuilder.DropColumn(
+                name: "WhySource",
+                table: "FeedItems");
+
             // Rollback only. NOT NULL cannot be restored over the NULLs this migration's code writes
             // ("breakdown unknown"), so they go back to the 0 the older image used for the same
             // meaning — the one place the append-only log is rewritten, and only on the way down.
