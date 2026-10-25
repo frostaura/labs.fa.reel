@@ -336,7 +336,7 @@ public class LensGuardTests
     public void A_single_long_sentence_is_trimmed_on_a_word_boundary()
     {
         var note = Note(lens: string.Join(" ", Enumerable.Repeat("word", 80)));
-        var clause = note.FirstClause(60);
+        var clause = note.FirstClause(60)!;
 
         Assert.True(clause.Length <= 61, clause);
         Assert.EndsWith("…", clause, StringComparison.Ordinal);

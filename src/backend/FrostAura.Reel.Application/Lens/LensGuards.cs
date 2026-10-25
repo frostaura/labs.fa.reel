@@ -40,6 +40,13 @@ public static class LensRejectionReasons
     public const string HookVoice = "hook-voice";
 
     /// <summary>
+    /// The hook argues against its own pick (<see cref="SecondPersonVoice.SoundsHedged"/>). The
+    /// hook is the one reason to press play; a reservation belongs in <c>caution</c>, the one field
+    /// written to carry it.
+    /// </summary>
+    public const string HedgedHook = "hedged-hook";
+
+    /// <summary>
     /// A reason plus the token that caused it — "invented-anchor:Frontera". Stored on the row so a
     /// prompt iteration can be read as evidence rather than as a tally: knowing that eleven notes
     /// were refused for an invented anchor is a number, and knowing that nine of them named the
@@ -343,8 +350,25 @@ public static partial class LensGuards
             return LensRejectionReasons.HookVoice;
         }
 
+        // After the voice rules: a hedge is the mildest of these, and a hook that both forgets the
+        // viewer and hedges is filed under the first. The lens BODY is not refused for a hedge — a
+        // premise retold may weigh the pick, and a plot "though" reads exactly like a hedge to a
+        // regex; what captions a card from the body is cut before any hedge by FirstClause.
+        if (SecondPersonVoice.SoundsHedged(note.Hook))
+        {
+            return LensRejectionReasons.HedgedHook;
+        }
+
         return null;
     }
+
+    /// <summary>
+    /// Whether a STORED note may still be rendered. Notes written before the hedge rule carry hooks
+    /// it would now refuse, and the hero renders the hook first; such a note steps off the ladder
+    /// as if it were not there, so the surface falls back to an older note or to its own line
+    /// rather than showing a caption that argues against its pick.
+    /// </summary>
+    public static bool IsServable(LensNote note) => !SecondPersonVoice.SoundsHedged(note.Hook);
 
     /// <summary>
     /// The first banned marketing phrase in a field, normalised for the rejection token — collapsed

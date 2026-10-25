@@ -177,8 +177,12 @@ public sealed class LensService(
             .Where(c => c.AccountId == accountId && titleIds.Contains(c.TitleId)
                 && c.ProfileHash == profileHash && c.PromptVersion == PromptVersion)
             .ToListAsync(ct);
+        // A Done row the read path can no longer render (a hedged hook written before that rule) is
+        // not "known" either: it is rewritten in place, once, under today's guards — otherwise the
+        // title would show no note until the taste fingerprint next moved.
         var known = atKey
-            .Where(c => c.ModelId == salt || c.RejectionReason == LensRejectionReasons.UserReportedSpoiler)
+            .Where(c => (c.ModelId == salt && (c.Status != LensStatus.Done || Deserialise(c) is not null))
+                || c.RejectionReason == LensRejectionReasons.UserReportedSpoiler)
             .Select(c => c.TitleId)
             .ToHashSet();
         var superseded = atKey.Where(c => !known.Contains(c.TitleId)).ToDictionary(c => c.TitleId);
@@ -383,7 +387,11 @@ public sealed class LensService(
     {
         try
         {
-            return JsonSerializer.Deserialize<LensNote>(row.LensJson, JsonOptions);
+            // A note the current guards would refuse (a hedged hook, written before that rule)
+            // reads as no note: the ladder steps past it exactly as it steps past an unreadable one.
+            return JsonSerializer.Deserialize<LensNote>(row.LensJson, JsonOptions) is { } note && LensGuards.IsServable(note)
+                ? note
+                : null;
         }
         catch (JsonException ex)
         {
