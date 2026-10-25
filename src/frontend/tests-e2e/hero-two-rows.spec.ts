@@ -14,8 +14,8 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
  * apart — there is nothing to keep in sync. A JS-synced pair would pass a screenshot and fail the
  * moment someone flicked it, so the scroll assertion below is the load-bearing one.
  *
- * The other half is that nothing regresses for anyone who cannot use two rows: a phone has no room
- * for them, and the free tier is capped at three hero cards server-side with a `/more` that returns
+ * The other half is that nothing regresses for anyone who cannot use two rows: below `lg` the card
+ * stacks (art above text), so a phone or tablet has no room for two rows of them, and the free tier is capped at three hero cards server-side with a `/more` that returns
  * exhausted, so a second row there would be a half-empty grid advertising the cap.
  */
 
@@ -82,7 +82,7 @@ test.describe("two-row hero at desktop width", () => {
 
     // The grid shape itself, so a future refactor that quietly reverts to a flex row fails loudly
     // rather than passing on a coincidence of positions.
-    await expect(page.getByTestId("hero-carousel")).toHaveClass(/md:grid-rows-2/);
+    await expect(page.getByTestId("hero-carousel")).toHaveClass(/lg:grid-rows-2/);
     await expect(page.getByTestId("hero-carousel")).toHaveClass(/grid-flow-col/);
 
     const [one, two, three] = [await box(heroCard(page, 0)), await box(heroCard(page, 1)), await box(heroCard(page, 2))];
@@ -152,6 +152,44 @@ test.describe("one row where two rows would be wrong", () => {
     expect(two.x).toBeGreaterThan(one.x + one.width / 2);
     // One row means one column per card, and the dots follow.
     await expect(page.getByTestId("hero-dots").locator("span")).toHaveCount(5);
+  });
+
+  test("a tablet gets one row of two side-by-side cards, not one card at 92%", async ({ page }) => {
+    await page.setViewportSize({ width: 834, height: 1194 });
+    await bootHome(page, FIVE);
+
+    const [one, two] = [await box(heroCard(page, 0)), await box(heroCard(page, 1))];
+    expect(Math.abs(two.y - one.y)).toBeLessThanOrEqual(1);
+    // Both fully on screen at rest: the tablet uses its width.
+    expect(two.x + two.width).toBeLessThanOrEqual(834);
+    await expect(page.getByTestId("hero-dots").locator("span")).toHaveCount(5);
+  });
+
+  test("on a tablet every dot is a real resting place: five cards, five distinct snap positions", async ({ page }) => {
+    // Two cards show at once, which reads as "four positions for five dots" — but the cards snap to
+    // their centres, and a half-width card's centre is reachable for every card, ends included. So
+    // five dots is the honest count, and each one lights at its own position.
+    await page.setViewportSize({ width: 834, height: 1194 });
+    await bootHome(page, FIVE);
+    const carousel = page.getByTestId("hero-carousel");
+    const seen: { left: number; dot: number }[] = [];
+    for (let i = 0; i < FIVE.length; i++) {
+      await heroCard(page, i).evaluate((el) =>
+        el.scrollIntoView({ inline: "center", block: "nearest", behavior: "instant" as ScrollBehavior })
+      );
+      await expect.poll(async () => carousel.evaluate((el) => el.scrollLeft)).toBeGreaterThanOrEqual(0);
+      await page.waitForTimeout(300);
+      seen.push(
+        await page.evaluate(() => ({
+          left: Math.round(document.querySelector('[data-testid="hero-carousel"]')!.scrollLeft),
+          dot: Array.from(document.querySelectorAll('[data-testid="hero-dots"] span')).findIndex((d) =>
+            d.className.includes("w-6")
+          ),
+        }))
+      );
+    }
+    expect(new Set(seen.map((s) => s.left)).size, JSON.stringify(seen)).toBe(5);
+    expect(seen.map((s) => s.dot)).toEqual([0, 1, 2, 3, 4]);
   });
 
   test("the free tier keeps its three-card single row", async ({ page }) => {

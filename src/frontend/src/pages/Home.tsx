@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useBrowseFilter } from "../lib/useBrowseFilter";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { Lock, Sparkles } from "lucide-react";
 import {
   useGetContinueWatchingQuery,
@@ -9,24 +9,27 @@ import {
   useGetFeedQuery,
   useGetSessionQuery,
 } from "../store/api";
-import { removalsCleared } from "../store/removedTitlesSlice";
+import { removalsCleared, selectRemovedKeys } from "../store/removedTitlesSlice";
 import { scoreOverridesCleared } from "../store/scoreOverridesSlice";
 import InfiniteHero from "../components/rec/InfiniteHero";
 import ModelLearnedBand from "../components/rec/ModelLearnedBand";
 import CrossReferenceBand from "../components/rec/CrossReferenceBand";
 import InfiniteRecRow from "../components/rows/InfiniteRecRow";
-import RecRow from "../components/rows/RecRow";
+import StaticRail from "../components/rows/StaticRail";
 import GenreRow from "../components/rows/GenreRow";
+import RailPageProvider from "../components/rows/RailPageProvider";
 import ContinueWatchingRow from "../components/rows/ContinueWatchingRow";
 import BrowseFilters from "../components/rec/BrowseFilters";
 import RefreshPicksButton from "../components/rec/RefreshPicksButton";
 import PickConditionsButton, { PickConditionsSummary } from "../components/rec/PickConditionsButton";
-import { matchesMedia } from "../lib/browseFilter";
+import { matchesBrowseFilter, matchesMedia } from "../lib/browseFilter";
 import { resolveSeedKey } from "../lib/feedSeed";
 import { formatRankedAt } from "../lib/format";
 import PostWatchStrip from "../components/saved/PostWatchStrip";
-import TrackRecordStrip from "../components/rec/TrackRecordStrip";
 import TonightMoodChips from "../components/rec/TonightMoodChips";
+import HomeStatusLine from "../components/rec/HomeStatusLine";
+import { heroReachingNote } from "../lib/heroConfidence";
+import { MD_BREAKPOINT_PX, useMinWidth } from "../lib/useMinWidth";
 import type { TonightMood } from "../lib/tonightMood";
 import { pipelineStageCopy } from "../lib/syncCopy";
 import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
@@ -38,6 +41,8 @@ export default function Home() {
   const { data: continueWatching } = useGetContinueWatchingQuery();
   const [filter, setFilter] = useBrowseFilter("home");
   const dispatch = useDispatch();
+  const removed = useSelector(selectRemovedKeys);
+  const isMdUp = useMinWidth(MD_BREAKPOINT_PX);
 
   const building = session != null && session.pipelineStage !== "FeedReady" && (feed?.hero.length ?? 0) === 0;
 
@@ -98,64 +103,96 @@ export default function Home() {
   // The weekly digest rail hides itself entirely until Friday's build lands something.
   const digestFiltered = (digest?.items ?? []).filter((c) => matchesMedia(c.mediaType, filter));
 
+  // The hero's row-level admission, from the same cards the hero shows (the snapshot under the
+  // browse filter, less what the user just acted on). Cards paged in later carry no confidence and
+  // never change it — see heroReachingNote.
+  const removedSet = new Set(removed);
+  const reachingNote = heroReachingNote(
+    (feed?.hero ?? []).filter((c) => matchesBrowseFilter(c, filter) && !removedSet.has(c.titleId))
+  );
+
+  // Everything the snapshot puts on the page, registered before any rail's first request so the
+  // hero's first top-up already excludes the rows below it (review D3). Rails register their own
+  // pages as they land; the digest registers through StaticRail when it arrives.
+  const pageSeedIds = [
+    ...(feed?.hero ?? []),
+    ...(feed?.rows ?? []).flatMap((r) => r.items),
+    ...digestFiltered,
+  ].map((c) => c.titleId);
+
   return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
-          {feed?.generatedAt && (
-            <p className="fa-caption text-fa-frost-dim mt-1">
-              ranked for you · {formatRankedAt(feed.generatedAt)}
-            </p>
-          )}
+    // Tighter rhythm on a phone, where every 12px of chrome above the first pick is 12px of pick
+    // below the fold. The budget is the cold-Home acceptance: the first pick's top edge within 220px
+    // at 1440×900 and 300px at 390×844, with the account's real conditions on screen.
+    <div className="space-y-5 md:space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-2 md:gap-3">
+        <div className="min-w-0">
+          {/* The stamp sits beside the heading where it fits (a phone included) and wraps under it
+              where it does not: a line of chrome saved is a line of the first pick above the fold. */}
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h1 className="text-2xl font-light text-fa-frost-bright">Tonight&apos;s picks</h1>
+            {feed?.generatedAt && (
+              <p className="fa-caption text-fa-frost-dim">
+                ranked for you · {formatRankedAt(feed.generatedAt)}
+              </p>
+            )}
+          </div>
           {/* Everything actually in force, under the title: the saved conditions AND the browse
               toggles. Without this the feed silently obeys settings made on another screen — a
               standing "no documentary" is invisible exactly where its effect is — and the browse
               toggles were doubly invisible, since the summary used to omit them entirely while they
               were halving the feed. */}
-          <PickConditionsSummary className="mt-2" browse={filter} onBrowseChange={setFilter} />
+          {/* Two chips and a count on a phone, so the row stays one line; the button beside the
+              controls carries the full count and opens every chip. */}
+          <PickConditionsSummary
+            className="mt-2"
+            browse={filter}
+            onBrowseChange={setFilter}
+            limit={isMdUp ? 6 : 2}
+          />
         </div>
         {!building && (
-          // Wraps: at phone width the two browse segments plus the refresh button overran the
-          // viewport, and the overflow made the whole page scroll sideways.
-          <div className="flex flex-wrap items-center gap-2">
-            <PickConditionsButton
-              onSaved={() => {
-                setAdoptOnNext(true);
-                setConditionsVersion((v) => v + 1);
-              }}
-            />
+          // One scrolling line on a phone, wrapping from `md`. Wrapped on a phone the controls took
+          // two lines (the browse segments alone are 44px tall there) and put the first pick below
+          // the fold; letting them scroll keeps conditions, refresh and the media toggle on screen
+          // with the availability toggle peeking in from the edge. Nothing is ever wider than the
+          // viewport, so the page itself never scrolls sideways.
+          <div className="-mx-1 flex w-full items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none] md:mx-0 md:w-auto md:flex-wrap md:overflow-visible md:px-0">
+            <div className="shrink-0">
+              <PickConditionsButton
+                onSaved={() => {
+                  setAdoptOnNext(true);
+                  setConditionsVersion((v) => v + 1);
+                }}
+              />
+            </div>
             {hasFresherPicks && (
               <button
                 type="button"
                 onClick={() => setAdoptedKey(latestKey)}
                 data-testid="adopt-fresh-picks"
                 title="Load the newly generated picks — this resets the rows below"
-                className="fa-overline inline-flex items-center gap-1.5 rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
+                className="fa-overline inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright"
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 New picks ready
               </button>
             )}
-            {/* On a phone the refresh control closes the first line beside the conditions button
-                and the browse segments take their own line; from md the three sit in one row. */}
+            {/* Refresh sits second on a phone so it is never scrolled out of reach, and last from
+                `md`, at the end of the control strip where it has always been. */}
+            <div className="shrink-0 md:order-last">
+              <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
+            </div>
             {(feed?.hero.length ?? 0) > 0 && (
-              <div className="order-3 w-full md:order-none md:w-auto">
+              <div className="shrink-0">
                 <BrowseFilters value={filter} onChange={setFilter} />
               </div>
             )}
-            <div className="order-2 ml-auto md:order-none md:ml-0">
-              <RefreshPicksButton onRequested={() => setAdoptOnNext(true)} />
-            </div>
           </div>
         )}
       </div>
 
       <PostWatchStrip />
-
-      {/* The product's own error rate, on its front page. Hides itself when there is no number
-          yet — an absence of evidence is not a bad score. */}
-      <TrackRecordStrip />
 
       {isLoading || building ? (
         <div className="space-y-8">
@@ -188,10 +225,21 @@ export default function Home() {
               take it with it. Below the model band because a retrain is the larger event. */}
           <CrossReferenceBand />
 
-          {/* Above the hero, because it is a question about tonight rather than about the model. */}
-          <TonightMoodChips value={mood} onChange={setMood} />
-
-          <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
+          {/* One registry of titles on screen per page view (F+3): every rail sends what the
+              others already show, so a title never repeats across rails. Keyed like the rows it
+              wraps — a re-seed or a medium switch is a new page view. */}
+          <RailPageProvider key={`page:${filter.media}:${resetKey}`} seedTitleIds={pageSeedIds}>
+          {/* The mood chips (a question about tonight) and the status line (what is true about
+              tonight's picks) sit tight above the picks they are about. From `lg` they share one
+              line; on a phone the status line takes its own, under the chips. The product's own
+              error rate lives in that line now, not in a banner of its own (FD-15). */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
+              <TonightMoodChips className="w-full lg:w-auto" value={mood} onChange={setMood} />
+              <HomeStatusLine reachingNote={reachingNote} className="lg:ml-auto" />
+            </div>
+            <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
+          </div>
 
           <ContinueWatchingRow entries={continueFiltered} />
 
@@ -215,7 +263,7 @@ export default function Home() {
           ))}
 
           {digestFiltered.length > 0 && (
-            <RecRow
+            <StaticRail
               title={<span className="text-fa-frost-bright">New &amp; high for you this week</span>}
               items={digestFiltered}
             />
@@ -224,6 +272,7 @@ export default function Home() {
           {(genres ?? []).map((g) => (
             <GenreRow key={`${g.slug}:${filter.media}:${resetKey}`} slug={g.slug} label={g.label} filter={filter} />
           ))}
+          </RailPageProvider>
 
           {(feed?.lockedRowCount ?? 0) > 0 && (
             <section className="fa-card p-5 flex items-center gap-4">

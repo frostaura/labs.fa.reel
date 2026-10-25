@@ -14,38 +14,45 @@ import { TONIGHT_MOODS, type TonightMood } from "../../lib/tonightMood";
 export default function TonightMoodChips({
   value,
   onChange,
+  className = "",
 }: {
   value: TonightMood | null;
   onChange: (mood: TonightMood | null) => void;
+  className?: string;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2" data-testid="tonight-mood-chips">
-      <span className="fa-overline text-fa-frost-dim mr-1">tonight</span>
-      {TONIGHT_MOODS.map((mood) => {
-        const active = value === mood.id;
-        return (
-          <button
-            key={mood.id}
-            type="button"
-            aria-pressed={active}
-            data-testid={`mood-${mood.id}`}
-            // Tapping the active chip clears it — the way back to the model's own order is the
-            // same gesture that left it, so nothing is a one-way door.
-            onClick={() => onChange(active ? null : mood.id)}
-            className={`fa-overline rounded-full border px-3 py-1.5 transition ${
-              active
-                ? "border-fa-frost/60 bg-fa-glass-strong text-fa-frost-bright"
-                : "border-fa-edge bg-fa-glass text-fa-frost-dim hover:border-fa-frost/40 hover:text-fa-frost"
-            }`}
-          >
-            {mood.label}
-          </button>
-        );
-      })}
+    // One scrolling line on a phone (two wrapped lines there pushed the first pick a chip-row
+    // further below the fold), wrapping as before from `md`. The note sits outside the scroller so
+    // it can never be scrolled out of sight.
+    <div className={`space-y-1.5 ${className}`} data-testid="tonight-mood-chips">
+      <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 [scrollbar-width:none] md:flex-wrap md:overflow-visible">
+        <span className="fa-overline shrink-0 text-fa-frost-dim mr-1">tonight</span>
+        {TONIGHT_MOODS.map((mood) => {
+          const active = value === mood.id;
+          return (
+            <button
+              key={mood.id}
+              type="button"
+              aria-pressed={active}
+              data-testid={`mood-${mood.id}`}
+              // Tapping the active chip clears it — the way back to the model's own order is the
+              // same gesture that left it, so nothing is a one-way door.
+              onClick={() => onChange(active ? null : mood.id)}
+              className={`fa-overline shrink-0 whitespace-nowrap rounded-full border px-3 py-1.5 transition ${
+                active
+                  ? "border-fa-frost/60 bg-fa-glass-strong text-fa-frost-bright"
+                  : "border-fa-edge bg-fa-glass text-fa-frost-dim hover:border-fa-frost/40 hover:text-fa-frost"
+              }`}
+            >
+              {mood.label}
+            </button>
+          );
+        })}
+      </div>
       {value && (
-        <span className="fa-caption text-fa-frost-dim" data-testid="mood-note">
+        <p className="fa-caption text-fa-frost-dim" data-testid="mood-note">
           reordered, not filtered — nothing has been removed
-        </span>
+        </p>
       )}
     </div>
   );

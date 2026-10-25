@@ -12,7 +12,12 @@ interface Props {
   /**
    * Poster scale ("sm", the default) or hero scale ("lg"). The hero is four times the size of a rail
    * card, and a 14px icon tucked into its corner reads as a rendering artefact rather than a control.
-   * Only the metrics change — the same component, the same actions, the same test ids on both.
+   * The same component, the same actions, the same test ids on both.
+   *
+   * Hero scale also changes PLACEMENT below `lg`: the hero card stacks there (art, then text), and
+   * the actions become a visible row under the text instead of an overlay on the art — overlaid,
+   * they sat on top of the meta and hook lines (I-10). From `lg` they are a row across the art's
+   * top-right corner, which the text panel (pinned to the bottom) never reaches.
    */
   size?: "sm" | "lg";
 }
@@ -23,7 +28,7 @@ const LONG_PRESS_MS = 450;
 /**
  * One-tap card actions — "Not for me" and "Save" — overlaid on a recommendation poster, so acting
  * on a pick no longer costs a navigation into the detail modal and back (the top usability finding
- * of the QA pass). Sits top-LEFT: top-right belongs to {@link ScoreBadges}, bottom-left to the
+ * of the QA pass). On rail cards it sits top-LEFT (the hero places it itself — see `size`): top-right belongs to {@link ScoreBadges}, bottom-left to the
  * provider logos.
  *
  * The `ContinueWatchingRow` drop-button pattern: absolutely positioned inside the card's `group`
@@ -88,11 +93,20 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // a transparent 44 x 44 box centred on a pill that stays exactly poster-sized. From `md` up the
   // box collapses back onto the pill (`md:min-h-0 md:min-w-0`) and the overlay is pixel-for-pixel
   // what it has always been on a desktop.
-  const buttonClass =
-    "pointer-events-auto inline-flex min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center " +
-    "rounded-full text-fa-frost-dim transition " +
-    "opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60";
-  const pillClass = `flex items-center justify-center rounded-full bg-fa-ink/70 ${large ? "p-2" : "p-1.5"} backdrop-blur-sm`;
+  //
+  // The hero's row (below `lg`) is not over art, so there is nothing to reveal it against: it is
+  // always visible, every box is a full 44 x 44 target, and the hover-reveal returns at `lg` with
+  // the overlay.
+  const buttonClass = large
+    ? "pointer-events-auto inline-flex min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 items-center justify-center " +
+      "rounded-full text-fa-frost transition " +
+      "lg:text-fa-frost-dim lg:opacity-0 lg:group-hover:opacity-100 lg:focus:opacity-100 lg:focus-visible:opacity-100 lg:[@media(pointer:coarse)]:opacity-60"
+    : "pointer-events-auto inline-flex min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center " +
+      "rounded-full text-fa-frost-dim transition " +
+      "opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60";
+  const pillClass = large
+    ? "flex items-center justify-center rounded-full border border-fa-edge bg-fa-glass p-2.5 lg:border-transparent lg:bg-fa-ink/70 lg:p-2 backdrop-blur-sm"
+    : "flex items-center justify-center rounded-full bg-fa-ink/70 p-1.5 backdrop-blur-sm";
   const iconClass = large ? "h-4 w-4" : "h-3.5 w-3.5";
   const ref = { titleId, mediaType: mediaType.toLowerCase(), tmdbId };
 
@@ -116,11 +130,11 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
 
   return (
     <div
-      className={`absolute flex flex-col ${
+      className={
         large
-          ? "left-1 top-1 gap-0 md:left-3 md:top-3 md:gap-2"
-          : "left-0 top-0 gap-0 md:left-1.5 md:top-1.5 md:gap-1.5"
-      }`}
+          ? "relative flex flex-row gap-2 px-3 pb-3 sm:px-4 lg:absolute lg:right-3 lg:top-3 lg:p-0"
+          : "absolute flex flex-col left-0 top-0 gap-0 md:left-1.5 md:top-1.5 md:gap-1.5"
+      }
       data-testid="card-quick-actions"
     >
       <Popover open={reasonsOpen} onOpenChange={setReasonsOpen}>
@@ -157,7 +171,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             aria-haspopup="menu"
             aria-expanded={reasonsOpen}
             title="Not for me — hold or right-click to say why"
-            className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100" : ""}`}
+            className={`${buttonClass} hover:text-fa-danger ${reasonsOpen ? "opacity-100 lg:opacity-100" : ""}`}
             data-testid="quick-not-interested"
           >
             <span className={pillClass}>
@@ -217,7 +231,7 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             aria-haspopup="menu"
             aria-expanded={rateOpen}
             title="Rate it — you have seen this one"
-            className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100" : ""}`}
+            className={`${buttonClass} hover:text-fa-warning ${rateOpen ? "opacity-100 lg:opacity-100" : ""}`}
             data-testid="quick-rate"
           >
             <span className={pillClass}>

@@ -4,6 +4,7 @@ import { matchesBrowseFilter, type BrowseFilter } from "../../lib/browseFilter";
 import { useInfiniteRow } from "../../lib/useInfiniteRow";
 import { sortForMood, type TonightMood } from "../../lib/tonightMood";
 import RecCardHero from "./RecCardHero";
+import RailRetryTile from "../rows/RailRetryTile";
 import type { HeroRows } from "../../lib/heroLayout";
 
 interface Props {
@@ -30,19 +31,21 @@ export default function InfiniteHero({ seed, filter, mood = null, rows = 1 }: Pr
   // eligible slice thins) — the parent re-keys this component on filter.media, so a switch remounts
   // with a fresh, correct-medium seed. Availability (released/coming) stays a client-side filter.
   const mediaType = filter.media === "all" ? undefined : filter.media;
-  const { items, loadMore, loading, exhausted } = useInfiniteRow({ row: "hero", mediaType }, seed);
+  const { items, loadMore, retry, loading, failed, idle, exhausted } = useInfiniteRow({ row: "hero", mediaType }, seed);
   const hero = sortForMood(items.filter((c) => matchesBrowseFilter(c, filter)), mood);
 
   // Auto-fill an empty filtered view: with the seed being only ~5 hero picks (often all shows), a
   // freshly-selected Movies view can render zero cards. Rather than dead-ending on "Nothing matches",
   // page the next (now media-specific) slice — the exhausted latch stops this once the medium is dry.
+  // `idle` is what keeps a failing /more from turning this into a retry storm (O-7).
   useEffect(() => {
-    if (hero.length === 0 && !loading && !exhausted) {
-      void loadMore();
+    if (idle && hero.length === 0 && !exhausted) {
+      loadMore();
     }
-  }, [hero.length, loading, exhausted, loadMore]);
+  }, [idle, hero.length, exhausted, loadMore]);
 
   if (hero.length === 0) {
+    if (failed) return <RailRetryTile shape="inline" onRetry={retry} />;
     return (
       <p className="fa-body text-fa-frost-dim text-center py-8">
         {exhausted ? "Nothing matches this filter — try widening it." : "Finding more…"}
@@ -50,5 +53,7 @@ export default function InfiniteHero({ seed, filter, mood = null, rows = 1 }: Pr
     );
   }
 
-  return <RecCardHero cards={hero} loadMore={loadMore} loading={loading} rows={rows} />;
+  return (
+    <RecCardHero cards={hero} loadMore={loadMore} loading={loading} failed={failed} onRetry={retry} rows={rows} />
+  );
 }

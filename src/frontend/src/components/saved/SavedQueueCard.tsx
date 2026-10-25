@@ -5,7 +5,7 @@ import PosterImage from "../rec/PosterImage";
 import ScoreBadges from "../rec/ScoreBadges";
 import { logoUrl } from "../../lib/tmdbImages";
 import { formatRuntime } from "../../lib/format";
-import { predictionWithBand, savedAgo } from "../../lib/savedQueue";
+import { listSyncLabel, predictionWithBand, savedAgo } from "../../lib/savedQueue";
 
 interface Props {
   item: SavedQueueItem;
@@ -21,6 +21,7 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
   const location = useLocation();
   const band = predictionWithBand(item.predictedRating, expectedAbsoluteError);
   const runtime = formatRuntime(item.runtimeMinutes);
+  const syncLabel = listSyncLabel(item);
 
   return (
     <Link
@@ -99,17 +100,17 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
             <span title="Not on one of your flatrate services in your region right now.">not streaming</span>
           )}
         </p>
-        {/* Every card states its list status — "on Up Next" once the outbox has written the
-            ManagedListItem to Trakt, "syncing…" while that write is still queued. */}
-        <p className="fa-caption text-fa-frost-dim/70">
+        {/* The list line says "syncing…" only while a write-back is genuinely waiting — see
+            listSyncLabel. With no evidence either way it says nothing rather than guess. */}
+        <p className="fa-caption text-fa-frost-dim/70" data-testid="saved-card-meta">
           {savedAgo(item.daysSaved)}
-          {" · "}
-          {item.onManagedList ? (
-            "on Up Next"
-          ) : (
-            <span title="Queued for the managed Trakt list — Reel writes it back in the background.">
-              syncing…
-            </span>
+          {syncLabel && (
+            <>
+              {" · "}
+              <span title={syncLabel.title} data-testid="saved-list-sync">
+                {syncLabel.text}
+              </span>
+            </>
           )}
         </p>
       </div>

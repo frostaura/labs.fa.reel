@@ -99,6 +99,13 @@ export interface MoreFeedRequest {
   /** Active browse-filter medium ("movie" | "show"); omit for "all". Makes paging media-aware
    * server-side so a Movies lane fills with movies (deepening from TMDB) instead of dead-ending. */
   mediaType?: string;
+  /**
+   * Titles already on the page in OTHER rails or the hero — excluded from this slice but not
+   * counted as this row's depth (WS-5's `/feed/more` contract). Omitted where there is no page.
+   */
+  pageExcludeTitleIds?: string[];
+  /** One opaque nonce (≤ 64 chars) per page view, so concurrent rails cannot serve the same title. */
+  pageToken?: string;
 }
 
 /**

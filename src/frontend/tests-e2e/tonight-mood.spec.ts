@@ -165,7 +165,7 @@ test.describe("tonight-mood chips", () => {
 });
 
 test.describe("lens copy on the cards", () => {
-  test("the hero leads with the hook and the lens clause beneath it", async ({ page }) => {
+  test("the hero leads with the hook, and the lens clause stays in the detail view", async ({ page }) => {
     const lensed = card(9, {
       name: "Lensed",
       texture: { darkness: 0.5, pacing: 0.5, complexity: 0.5, humor: 0.5 },
@@ -175,7 +175,10 @@ test.describe("lens copy on the cards", () => {
     await bootHome(page, [lensed]);
 
     await expect(page.getByTestId("hero-hook")).toContainText("been circling");
-    await expect(page.getByTestId("hero-lens-clause")).toContainText("moral flatness");
+    // The clause was the line that pushed the title out of a phone-sized card (F-4); it belongs to
+    // the detail view, not the card.
+    await expect(page.getByTestId("hero-lens-clause")).toHaveCount(0);
+    await expect(page.getByTestId("hero-card")).not.toContainText("moral flatness");
     // The templated why-line stands down when copy exists — one voice per card.
     await expect(page.getByTestId("hero-why")).toHaveCount(0);
   });

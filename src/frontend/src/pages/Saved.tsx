@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, ListChecks } from "lucide-react";
+import { ExternalLink, ListChecks, RotateCw } from "lucide-react";
 import { useGetSavedQuery, useUnsaveForLaterMutation } from "../store/api";
 import SavedSortControl from "../components/saved/SavedSortControl";
 import SavedQueueCard from "../components/saved/SavedQueueCard";
@@ -15,7 +15,7 @@ import { pinnedPick, queueBelowPin, type SavedSort } from "../lib/savedQueue";
  */
 export default function Saved() {
   const [sort, setSort] = useState<SavedSort>("tonight");
-  const { data, isLoading, refetch } = useGetSavedQuery({ sort });
+  const { data, isLoading, isError, isFetching, refetch } = useGetSavedQuery({ sort });
   const [unsave] = useUnsaveForLaterMutation();
   // "Not tonight" is session-scoped and client-side: it advances to the next candidate and records
   // nothing against the title. Reset whenever the shelf itself changes underneath it.
@@ -90,8 +90,24 @@ export default function Saved() {
         />
       </div>
 
-      {isLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4">
+      {/* Three states, not two (G-15): a failed read used to fall through `data?.items ?? []` into
+          "Nothing in the queue yet", telling someone with 34 saves that they had none. */}
+      {isError && !data ? (
+        <div className="fa-card p-8 text-center space-y-3" role="alert" data-testid="saved-error">
+          <p className="fa-body text-fa-frost">Couldn&apos;t load your queue — nothing has changed on it.</p>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            disabled={isFetching}
+            className="fa-button min-h-11 mx-auto"
+            data-testid="saved-retry"
+          >
+            <RotateCw className="h-4 w-4" />
+            {isFetching ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      ) : isLoading ? (
+        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-4" aria-busy="true" data-testid="saved-loading">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="reel-poster reel-shimmer" />
           ))}
@@ -108,6 +124,17 @@ export default function Saved() {
         </div>
       ) : (
         <>
+          {/* A refresh that failed over a shelf already on screen: keep the shelf, say it may be
+              stale, offer the retry. */}
+          {isError && (
+            <div className="fa-card p-3 flex items-center justify-between gap-3" role="alert" data-testid="saved-stale">
+              <p className="fa-caption text-fa-frost">Couldn&apos;t refresh — this is the queue as it last loaded.</p>
+              <button type="button" onClick={() => void refetch()} disabled={isFetching} className="fa-button min-h-11">
+                <RotateCw className="h-4 w-4" />
+                Retry
+              </button>
+            </div>
+          )}
           {pinned ? (
             <WatchTonightCard
               item={pinned}
