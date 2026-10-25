@@ -1,4 +1,16 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import {
+  FIRST_MODEL_TIMING,
+  NEXT_MODEL_TIMING,
+  RECONNECT_REASONS,
+  isAwaitingModel,
+  type ReadinessInput,
+  type RatingsFloor,
+  type StatusFailure,
+} from "../lib/modelReadiness";
+
+export { FIRST_MODEL_TIMING, ratingsNeededCopy } from "../lib/modelReadiness";
+export type { RatingsFloor, StatusFailure } from "../lib/modelReadiness";
 
 /**
  * The onboarding live build-up state machine.
@@ -25,8 +37,9 @@ export type ShowStage =
  *  - `needsRatings`: the trainer's "too few ratings to fit a model" (fewer than its floor of usable
  *    movie and show ratings). Not a failure. Applies from any stage, like `failed`.
  *  - `awaitingModel`: the same park once the account HAS rated enough. The server still stores the
- *    trainer's Degraded until the next Train runs (the nightly enrichment chains one), and reports it
- *    as `PipelineFailed` with no floor; the poll reads that as "waiting for the model", not a failure.
+ *    trainer's Degraded until the next Train runs (the nightly enrichment chains one). It reports it
+ *    as `AwaitingFirstModel` once CR-6 lands, and as `PipelineFailed` with no floor until then; the
+ *    poll reads both as "waiting for the model", not a failure (lib/modelReadiness.ts decides).
  *  - `failed`: a real stop.
  * The authoritative poll owns every stop it set: it moves the show off them in either direction.
  * Stream frames never lift one, so a late forward frame cannot paper over a stop.
@@ -42,22 +55,8 @@ const STAGE_ORDER: Record<ShowStage, number> = {
   failed: 99,
 };
 
-/** The trainer's floor as the status API reports it (`notEnoughRatings`). */
-export interface RatingsFloor {
-  usableRatings: number;
-  required: number;
-}
-
-/** One entry of the status API's `lastFailures` — only the job kind is read here. */
-export interface StatusFailure {
-  kind: string;
-}
-
 /** The status poll's fields the show reads. Everything past `pipelineStage` is optional (v2). */
-export interface StatusSnapshot {
-  pipelineStage: string;
-  degradedReason?: string | null;
-  notEnoughRatings?: RatingsFloor | null;
+export interface StatusSnapshot extends ReadinessInput {
   lastFailures?: StatusFailure[] | null;
 }
 
@@ -99,6 +98,8 @@ export interface OnboardingState {
   degradedReason: string | null;
   /** Counts behind `needsRatings`; null when the server did not send them. */
   ratingsFloor: RatingsFloor | null;
+  /** The status API's `retrain.hasActiveModel`; null when the server did not send it. */
+  hasActiveModel: boolean | null;
 }
 
 const initialState: OnboardingState = {
@@ -114,6 +115,7 @@ const initialState: OnboardingState = {
   error: null,
   degradedReason: null,
   ratingsFloor: null,
+  hasActiveModel: null,
 };
 
 const MAX_INSIGHTS = 50;
@@ -126,9 +128,6 @@ function advance(state: OnboardingState, target: ShowStage) {
 
 /** The status API's reason code for "below the training floor". */
 const NOT_ENOUGH_RATINGS = "NotEnoughRatings";
-
-/** Reasons whose way forward is signing in with Trakt again. */
-const RECONNECT_REASONS = new Set(["TraktRevoked", "TraktRefreshFailed"]);
 
 /** Stops the poll owns, and so may move the show off. */
 const POLL_STOPS = new Set<ShowStage>(["needsRatings", "awaitingModel", "failed"]);
@@ -153,8 +152,8 @@ export function stageFromPipeline(pipelineStage: string): ShowStage | null {
  *  1. a revoked or failed Trakt link is a failure with a reconnect, even below the floor — the
  *     server computes the floor whatever the link's state, and no rating helps until it is fixed;
  *  2. below the floor (the reason, or counts with no other reason) is `needsRatings`;
- *  3. the trainer's Degraded park with no floor left — enough ratings now, no Train has run since —
- *     is `awaitingModel`, unless a Train itself failed recently, which is a real failure;
+ *  3. the floor-met wait — `AwaitingFirstModel`, or the trainer's Degraded park with no floor left
+ *     and no failed Train — is `awaitingModel`; a Train that failed recently is a real failure;
  *  4. otherwise the stage maps as usual.
  */
 export function stageFromStatus(status: StatusSnapshot): ShowStage | null {
@@ -162,10 +161,7 @@ export function stageFromStatus(status: StatusSnapshot): ShowStage | null {
   const floor = status.notEnoughRatings ?? null;
   if (reason !== null && RECONNECT_REASONS.has(reason)) return "failed";
   if (reason === NOT_ENOUGH_RATINGS || (reason === null && floor !== null)) return "needsRatings";
-  if (status.pipelineStage === "Degraded" && floor === null) {
-    const trainFailed = (status.lastFailures ?? []).some((f) => f.kind === "Train");
-    if (!trainFailed && (reason === null || reason === "PipelineFailed")) return "awaitingModel";
-  }
+  if (isAwaitingModel(status)) return "awaitingModel";
   return stageFromPipeline(status.pipelineStage);
 }
 
@@ -250,6 +246,7 @@ export const onboardingSlice = createSlice({
     pollAdvance(state, action: PayloadAction<StatusSnapshot>) {
       state.degradedReason = action.payload.degradedReason ?? null;
       state.ratingsFloor = action.payload.notEnoughRatings ?? null;
+      state.hasActiveModel = action.payload.retrain?.hasActiveModel ?? null;
       const mapped = stageFromStatus(action.payload);
       if (!mapped) return;
       if (POLL_STOPS.has(state.stage) && state.error === null) {
@@ -277,20 +274,10 @@ export const onboardingSlice = createSlice({
 export const { eventReceived, pollAdvance, markStalled, reset, retryStarted } = onboardingSlice.actions;
 export default onboardingSlice.reducer;
 
-/** "4 of 10 ratings — rate a few": what the show says below the training floor. */
-export function ratingsNeededCopy(floor: RatingsFloor | null): string {
-  if (!floor) return "Reel needs a few more of your ratings before it can build your model — rate a few.";
-  const { usableRatings: have, required: need } = floor;
-  const short = Math.max(0, need - have);
-  if (short === 0) return `${have} of ${need} ratings — that's enough for Reel to build your model.`;
-  return `${have} of ${need} ratings — rate ${short === 1 ? "one more" : `${short} more`} and Reel builds your model.`;
+/** When the parked account's model gets built: its first, or the next build of the one it has. */
+export function awaitingModelTiming(hasActiveModel: boolean | null): string {
+  return hasActiveModel ? NEXT_MODEL_TIMING : FIRST_MODEL_TIMING;
 }
-
-/**
- * When the model gets built, said as it is: a new account's first Train is chained by the nightly
- * enrichment pass (rating a title does not queue one), so "tonight" is the honest outer bound.
- */
-export const FIRST_MODEL_TIMING = "Reel builds your first model in tonight's refresh at the latest";
 
 /**
  * Why the show stopped. A known `degradedReason` says it best, so it wins; a stream `failed` frame's

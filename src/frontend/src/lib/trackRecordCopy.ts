@@ -48,6 +48,13 @@ export function sourceNote(payload: AccuracyPayload): string {
   }
 }
 
+/**
+ * The empty page's source line while the account has no model: nothing has been scored, so the
+ * usual "rate titles it has already put a number on" points at numbers that do not exist yet.
+ */
+export const NO_MODEL_SOURCE_NOTE =
+  "Reel puts a number on titles once it has a model; every one it scores that you then rate lands here.";
+
 /** Which way the model is wrong, in words rather than a sign. */
 export function biasNote(bias: number): string {
   return bias > 0 ? "Reel promises more than you give" : "Reel sells titles short";
