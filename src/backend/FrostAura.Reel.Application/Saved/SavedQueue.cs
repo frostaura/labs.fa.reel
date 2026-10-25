@@ -212,20 +212,26 @@ public static class SavedQueue
         var cleared = HeroConfidence.For(predictedRating, bar) == HeroConfidence.Confident;
         var only = candidateCount <= 1;
 
-        var template = (cleared, only) switch
+        // Each template sits inside its own invariant Format call, so the host's culture can never
+        // reach a number in the sentence (and CultureSensitiveFormattingGuardTests can see that).
+        return (cleared, only) switch
         {
-            (true, false) =>
+            (true, false) => string.Format(
+                CultureInfo.InvariantCulture,
                 "Highest-predicted thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
-            (true, true) =>
+                where, predictedRating, band, runtime, budget),
+            (true, true) => string.Format(
+                CultureInfo.InvariantCulture,
                 "The only thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
-            (false, false) =>
-                "Nothing in your queue that's streaming and fits tonight reaches {5:0.0} for you. "
-                + "The closest is {0}: {1:0.0} for you{2}, {3} against your {4}.",
-            (false, true) =>
-                "The only thing in your queue that's {0} and fits tonight is under {5:0.0} for you — "
-                + "{1:0.0}{2}, {3} against your {4}.",
+                where, predictedRating, band, runtime, budget),
+            (false, false) => string.Format(
+                CultureInfo.InvariantCulture,
+                "Nothing in your queue that's streaming and fits tonight reaches {5:0.0} for you. The closest is {0}: {1:0.0} for you{2}, {3} against your {4}.",
+                where, predictedRating, band, runtime, budget, bar),
+            (false, true) => string.Format(
+                CultureInfo.InvariantCulture,
+                "The only thing in your queue that's {0} and fits tonight is under {5:0.0} for you — {1:0.0}{2}, {3} against your {4}.",
+                where, predictedRating, band, runtime, budget, bar),
         };
-
-        return string.Format(CultureInfo.InvariantCulture, template, where, predictedRating, band, runtime, budget, bar);
     }
 }
