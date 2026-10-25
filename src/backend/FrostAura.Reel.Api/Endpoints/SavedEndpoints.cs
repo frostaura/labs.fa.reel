@@ -1,11 +1,16 @@
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Application.Saved;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Feed;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Providers;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
@@ -51,7 +56,8 @@ public static class SavedEndpoints
 
     /// <summary>One card in the queue. Serialised camelCase by the Web JSON defaults, like every other DTO here.</summary>
     /// <param name="PredictedRating">Never null once the backfill has reached this title; see <c>UnscoredRemaining</c>.</param>
-    /// <param name="AvailableNow">On a flatrate provider in the account's region right now.</param>
+    /// <param name="Providers">Up to three services it is streaming on now (<see cref="StreamingNowPolicy"/>), best-known first.</param>
+    /// <param name="AvailableNow">Streaming now in the account's region, per <see cref="StreamingNowPolicy"/>: a subscription or a free offer.</param>
     /// <param name="DaysSaved">Whole days since the save — "saved 41 days ago" is the queue's own nag.</param>
     /// <param name="WatchTonight">True on exactly one card at most: the pinned pick.</param>
     /// <param name="WatchTonightReason">Why that card won, in the user's terms. Null on every other card.</param>
@@ -207,7 +213,15 @@ public static class SavedEndpoints
         // than polling a queue that will never complete.
         var unscoredRemaining = titleIds.Count(id => !scores.ContainsKey(id));
 
-        var providers = await FeedEndpoints.ProvidersForAsync(db, account.Region, titleIds, nowUtc, ct);
+        var offers = await StreamingOffersAsync(db, account.Region, titleIds, nowUtc, ct);
+        var providers = offers.ToDictionary(
+            o => o.Key,
+            o => (IReadOnlyList<FeedEndpoints.CardProvider>)o.Value
+                .DistinctBy(x => x.Name)
+                .OrderBy(x => x.DisplayPriority)
+                .Take(3)
+                .Select(x => new FeedEndpoints.CardProvider(x.Name, x.LogoPath))
+                .ToList());
         var listSync = await SavedListSync.ForAsync(db, accountId, titleIds, ct);
 
         var expectedAbsoluteError = await ExpectedAbsoluteErrorAsync(calibration, accountId, ct);
@@ -222,7 +236,17 @@ public static class SavedEndpoints
             .ToList();
 
         var ordered = SavedQueue.Order(entries, requestedSort);
-        var pinned = SavedQueue.PickWatchTonight(entries, eveningBudget);
+        var candidates = SavedQueue.WatchTonightCandidates(entries, eveningBudget);
+        SavedQueueEntry? pinned = candidates.Count == 0 ? null : candidates[0];
+
+        // The bar the pin is measured against: the hero's own "confident enough to be tonight's
+        // answer" bar, raised by the account's "for you" minimum. The pin is never withheld for being
+        // under it — the client walks this same candidate list on "not tonight" — but its reason says
+        // so rather than reading as a recommendation (R1-18).
+        var bar = HeroConfidence.BarFor(ContentFilterRules.ParseRating(await db.ContentFilters
+            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
+            .Select(f => f.Value)
+            .FirstOrDefaultAsync(ct)));
         var byId = saved.ToDictionary(s => s.Title.Id);
         var connection = await db.TraktConnections.FirstOrDefaultAsync(c => c.AccountId == accountId, ct);
 
@@ -255,11 +279,14 @@ public static class SavedEndpoints
                 isPinned,
                 isPinned
                     ? SavedQueue.WatchTonightReason(
-                        entry.PredictedRating!.Value,
+                        // The number the card shows, so the bar test and the badge cannot disagree.
+                        Math.Round(entry.PredictedRating!.Value, 1),
                         expectedAbsoluteError,
                         entry.RuntimeMinutes!.Value,
                         eveningBudget,
-                        titleProviders.FirstOrDefault()?.Name)
+                        ProviderTheCardShows(offers.GetValueOrDefault(entry.TitleId, []), nowUtc),
+                        bar,
+                        candidates.Count)
                     : null,
                 ListSync: listSync.GetValueOrDefault(entry.TitleId, SavedListSync.OffList));
         }).ToList();
@@ -342,6 +369,59 @@ public static class SavedEndpoints
                 x.PosterPath,
                 Math.Round(x.Predicted!.Value, 1),
                 x.WatchedAt!.Value)).ToList());
+    }
+
+    /// <summary>One streaming-now offer behind a saved card: which service, of what kind, fetched when.</summary>
+    public sealed record StreamingOffer(
+        int TmdbProviderId, string Name, string? LogoPath, int DisplayPriority, AvailabilityKind Kind, DateTime FetchedAt);
+
+    /// <summary>
+    /// Every streaming-now offer for these titles in <paramref name="region"/>, per
+    /// <see cref="StreamingNowPolicy"/> — the one read behind a saved card's logos, its "streaming
+    /// now" line, the Tonight sort and the Watch-tonight reason, so none of them can disagree.
+    /// </summary>
+    public static async Task<Dictionary<Guid, IReadOnlyList<StreamingOffer>>> StreamingOffersAsync(
+        IReelDbContext db, string region, IReadOnlyList<Guid> titleIds, DateTime nowUtc, CancellationToken ct)
+    {
+        if (titleIds.Count == 0)
+        {
+            return [];
+        }
+
+        return (await StreamingNowPolicy.Offers(db.TitleAvailabilities, titleIds, region, nowUtc)
+                .Join(
+                    db.StreamingProviders,
+                    a => a.ProviderId,
+                    p => p.Id,
+                    (a, p) => new { a.TitleId, p.TmdbProviderId, p.Name, p.LogoPath, p.DisplayPriority, a.Kind, a.FetchedAt })
+                .ToListAsync(ct))
+            .GroupBy(x => x.TitleId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<StreamingOffer>)g
+                    .Select(x => new StreamingOffer(x.TmdbProviderId, x.Name, x.LogoPath, x.DisplayPriority, x.Kind, x.FetchedAt))
+                    .ToList());
+    }
+
+    /// <summary>
+    /// The service the Watch-tonight reason may name, or null to name none. It must be one the card's
+    /// where-to-watch ladder will actually render as a chip: an offer the ladder gives a named chip
+    /// (<see cref="ProviderEndpoints.RendersAsChip"/>), from a snapshot the ladder will render as is
+    /// rather than refetch (<see cref="ProviderEndpoints.CacheTtl"/>). A subscription is named before
+    /// a free offer, then the provider's display priority.
+    /// </summary>
+    public static string? ProviderTheCardShows(IReadOnlyList<StreamingOffer> offers, DateTime nowUtc)
+    {
+        var ladderCutoff = nowUtc - ProviderEndpoints.CacheTtl;
+        return offers
+            .Where(o => StreamingNowPolicy.Counts(o.Kind)
+                && o.FetchedAt > ladderCutoff
+                && ProviderEndpoints.RendersAsChip(o.TmdbProviderId))
+            .OrderBy(o => o.Kind == AvailabilityKind.Flatrate ? 0 : 1)
+            .ThenBy(o => o.DisplayPriority)
+            .ThenBy(o => o.Name, StringComparer.Ordinal)
+            .Select(o => o.Name)
+            .FirstOrDefault();
     }
 
     /// <summary>Predicted ratings for these titles under the account's Active artifact only.</summary>

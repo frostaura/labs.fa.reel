@@ -1,4 +1,5 @@
 using System.Globalization;
+using FrostAura.Reel.Domain.Feed;
 
 namespace FrostAura.Reel.Application.Saved;
 
@@ -26,7 +27,7 @@ public enum SavedSort
 /// <param name="TitleId">Tie-breaker of last resort, so every order is total and reproducible.</param>
 /// <param name="PredictedRating">Calibrated predicted rating; null only while the on-demand backfill has not reached this title.</param>
 /// <param name="RuntimeMinutes">Null when the catalogue has no runtime — treated as "unknown", never as "short".</param>
-/// <param name="AvailableNow">On a flatrate provider in the account's region, per the shared availability read.</param>
+/// <param name="AvailableNow">Streaming now in the account's region, per <see cref="Providers.StreamingNowPolicy"/>.</param>
 /// <param name="SavedAt">When the user saved it.</param>
 public readonly record struct SavedQueueEntry(
     Guid TitleId,
@@ -171,13 +172,34 @@ public static class SavedQueue
     /// runtime against the budget, and where it is streaming. The band is not decoration: a "8.4"
     /// with a measured ±1.9 beside it is the honest version of the same promise, and the pinned card
     /// is the loudest promise the product makes.
+    /// <para>
+    /// <b>Three things the line must never claim falsely</b> (review R1-18, WS-4 task 7):
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>That a pick is good when it is under the bar.</b> The pin is the best candidate there
+    /// is, and the client walks the same candidate list on "not tonight", so it is never withheld —
+    /// but a pick under <paramref name="bar"/> (the hero's own "confident enough to be tonight's
+    /// answer" bar, raised by the account's <c>MinPredictedRating</c>) says so in its first words
+    /// instead of reading as a recommendation. A 5.0 under "Highest-predicted thing in your queue"
+    /// was the defect.</item>
+    /// <item><b>A provider the card does not show.</b> <paramref name="providerName"/> is null unless
+    /// the caller has established that the card's where-to-watch renders that provider; without one
+    /// the line says "streaming now" and names nothing.</item>
+    /// <item><b>A choice where there was none.</b> With one candidate, "highest-predicted" compares
+    /// the pick with nothing; it says "the only thing" instead.</item>
+    /// </list>
     /// </summary>
+    /// <param name="predictedRating">The prediction as the card displays it (1dp), so the line, the badge and the bar test agree.</param>
+    /// <param name="bar">The bar a pick must reach to be called the answer: <see cref="HeroConfidence.BarFor"/> of the account's minimum.</param>
+    /// <param name="candidateCount">How many titles could have been pinned, the pick included; at least 1.</param>
     public static string WatchTonightReason(
         decimal predictedRating,
         double? expectedAbsoluteError,
         int runtimeMinutes,
         int eveningBudgetMinutes,
-        string? providerName)
+        string? providerName,
+        decimal bar,
+        int candidateCount)
     {
         var band = expectedAbsoluteError is { } error
             ? string.Format(CultureInfo.InvariantCulture, " (±{0:0.#})", error)
@@ -185,13 +207,25 @@ public static class SavedQueue
         var where = string.IsNullOrWhiteSpace(providerName)
             ? "streaming now"
             : string.Format(CultureInfo.InvariantCulture, "on {0}", providerName);
-        return string.Format(
-            CultureInfo.InvariantCulture,
-            "Highest-predicted thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
-            where,
-            predictedRating,
-            band,
-            FormatRuntime(runtimeMinutes),
-            FormatRuntime(eveningBudgetMinutes));
+        var runtime = FormatRuntime(runtimeMinutes);
+        var budget = FormatRuntime(eveningBudgetMinutes);
+        var cleared = HeroConfidence.For(predictedRating, bar) == HeroConfidence.Confident;
+        var only = candidateCount <= 1;
+
+        var template = (cleared, only) switch
+        {
+            (true, false) =>
+                "Highest-predicted thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
+            (true, true) =>
+                "The only thing in your queue that's {0} and fits tonight — {1:0.0} for you{2}, {3} against your {4}.",
+            (false, false) =>
+                "Nothing in your queue that's streaming and fits tonight reaches {5:0.0} for you. "
+                + "The closest is {0}: {1:0.0} for you{2}, {3} against your {4}.",
+            (false, true) =>
+                "The only thing in your queue that's {0} and fits tonight is under {5:0.0} for you — "
+                + "{1:0.0}{2}, {3} against your {4}.",
+        };
+
+        return string.Format(CultureInfo.InvariantCulture, template, where, predictedRating, band, runtime, budget, bar);
     }
 }

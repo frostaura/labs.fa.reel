@@ -30,6 +30,23 @@ public static class ProviderEndpoints
         [55] = ("Showmax", "https://www.showmax.com/eng/search?q={q}"),
     };
 
+    /// <summary>
+    /// How long the ladder serves a cached snapshot before it refetches from TMDB. A surface that
+    /// wants to name a provider the ladder will show must read rows inside this window: older rows
+    /// are replaced by a refetch the moment the ladder renders, and may no longer hold that provider.
+    /// </summary>
+    public static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// Whether the where-to-watch ladder gives this provider a chip of its own. The ladder
+    /// (<c>WhereToWatch.tsx</c>) renders a named chip only for a provider with a maintained
+    /// provider-side link (<c>linkKind == "direct"</c>); every other provider collapses into one
+    /// "More options via TMDB" link that names nobody. A sentence elsewhere on the card that names a
+    /// provider must name one this returns true for, or it names something the card does not show
+    /// (review R1-18: a Watch-tonight reason said "on Philo" over a ladder of Google Play and YouTube).
+    /// </summary>
+    public static bool RendersAsChip(int tmdbProviderId) => DirectSearchPatterns.ContainsKey(tmdbProviderId);
+
     public static void MapProviderEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGroup("/api/titles/{mediaType}/{tmdbId:long}").RequireAccount().MapGet("/providers", async (
@@ -44,7 +61,7 @@ public static class ProviderEndpoints
             }
 
             var region = account.Region;
-            var cutoff = DateTime.UtcNow.AddHours(-24);
+            var cutoff = DateTime.UtcNow - CacheTtl;
             var cached = await db.TitleAvailabilities
                 .Where(a => a.TitleId == title.Id && a.Region == region && a.FetchedAt > cutoff)
                 .ToListAsync(ct);

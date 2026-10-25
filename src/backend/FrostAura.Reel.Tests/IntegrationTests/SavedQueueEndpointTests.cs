@@ -8,6 +8,7 @@ using FrostAura.Reel.Application.Saved;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
@@ -104,7 +105,7 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
 
         var accountId = await SeedAccountAsync(eveningBudgetMinutes: 120);
         var artifactId = await SeedActiveArtifactAsync(accountId);
-        var providerId = await SeedProviderAsync("Netflix");
+        var (providerId, netflix) = await KnownProviderAsync(8, "Netflix");
 
         // pinned      — 8.5, streams, 100 min → the only honest answer to "what do I put on"
         // tooLong     — 9.5, streams, 175 min → better, does not fit the 2h budget
@@ -112,8 +113,8 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         var pinned = await SeedTitleAsync("pinned", runtimeMinutes: 100);
         var tooLong = await SeedTitleAsync("too-long", runtimeMinutes: 175);
         var notStreaming = await SeedTitleAsync("not-streaming", runtimeMinutes: 95);
-        await SeedAvailabilityAsync(pinned, providerId, "US", Now.AddDays(-1));
-        await SeedAvailabilityAsync(tooLong, providerId, "US", Now.AddDays(-1));
+        await SeedAvailabilityAsync(pinned, providerId, "US", Now.AddHours(-2));
+        await SeedAvailabilityAsync(tooLong, providerId, "US", Now.AddHours(-2));
         await SeedScoresAsync(accountId, artifactId, new()
         {
             [pinned] = 8.5m,
@@ -129,13 +130,13 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         var pin = Assert.Single(tonight.Items, i => i.WatchTonight);
         Assert.Equal(pinned, pin.TitleId);
         Assert.Contains("1h 40m against your 2h", pin.WatchTonightReason!, StringComparison.Ordinal);
-        Assert.Contains("on Netflix", pin.WatchTonightReason!, StringComparison.Ordinal);
+        Assert.Contains($"on {netflix}", pin.WatchTonightReason!, StringComparison.Ordinal);
         // Availability leads the order; the unwatchable 9.9 is last despite being the best number.
         Assert.Equal([tooLong, pinned, notStreaming], tonight.Items.Select(i => i.TitleId).ToArray());
         Assert.True(tonight.Items.Single(i => i.TitleId == pinned).AvailableNow);
         Assert.False(tonight.Items.Single(i => i.TitleId == notStreaming).AvailableNow);
         Assert.False(tonight.Items.Single(i => i.TitleId == tooLong).FitsEveningBudget);
-        Assert.Equal("Netflix", tonight.Items.Single(i => i.TitleId == pinned).Providers.Single().Name);
+        Assert.Equal(netflix, tonight.Items.Single(i => i.TitleId == pinned).Providers.Single().Name);
 
         // A different sort re-orders the SAME set and keeps the pin: the pinned pick is a property
         // of the queue, not of the ordering the user happens to be looking at.
@@ -143,6 +144,166 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         Assert.Equal("predicted", byPredicted.Sort);
         Assert.Equal([notStreaming, tooLong, pinned], byPredicted.Items.Select(i => i.TitleId).ToArray());
         Assert.Equal(pinned, Assert.Single(byPredicted.Items, i => i.WatchTonight).TitleId);
+    }
+
+    /// <summary>
+    /// R1-18, reproduced from the walk: Seized was pinned with "…that's on Philo…" at 5.0 for you
+    /// under a 7.5 bar, over a where-to-watch ladder that showed only Google Play and YouTube (Rent ·
+    /// Buy) — Philo and Starz (subscription) and Tubi (ads) collapse into "More options via TMDB".
+    /// The reason may name only a provider the ladder renders as a chip, and a pick under the bar
+    /// says so first.
+    /// </summary>
+    [Fact]
+    public async Task The_watch_tonight_reason_names_no_provider_the_card_hides_and_owns_up_to_the_bar()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync(eveningBudgetMinutes: 150);
+        await SeedMinPredictedAsync(accountId, "6.0");
+        var artifactId = await SeedActiveArtifactAsync(accountId);
+        var philo = await SeedProviderAsync("Philo");
+        var starz = await SeedProviderAsync("Starz");
+        var tubi = await SeedProviderAsync("Tubi");
+        var (googlePlay, _) = await KnownProviderAsync(3, "Google Play");
+        var (youTube, _) = await KnownProviderAsync(192, "YouTube");
+
+        var seized = await SeedTitleAsync("seized", runtimeMinutes: 109);
+        var other = await SeedTitleAsync("other", runtimeMinutes: 95);
+        var fresh = Now.AddHours(-3);
+        await SeedAvailabilityAsync(seized, philo, "US", fresh);
+        await SeedAvailabilityAsync(seized, starz, "US", fresh);
+        await SeedAvailabilityAsync(seized, tubi, "US", fresh, AvailabilityKind.Ads);
+        await SeedAvailabilityAsync(seized, googlePlay, "US", fresh, AvailabilityKind.Rent);
+        await SeedAvailabilityAsync(seized, youTube, "US", fresh, AvailabilityKind.Buy);
+        await SeedAvailabilityAsync(other, philo, "US", fresh);
+        await SeedScoresAsync(accountId, artifactId, new() { [seized] = 5.04m, [other] = 4.2m }, Now.AddDays(-1));
+        await SaveAllAsync(accountId, [seized, other]);
+
+        var queue = await QueueAsync(accountId);
+
+        var pin = Assert.Single(queue.Items, i => i.WatchTonight);
+        Assert.Equal(seized, pin.TitleId);
+        Assert.Equal(
+            "Nothing in your queue that's streaming and fits tonight reaches 7.5 for you. "
+            + "The closest is streaming now: 5.0 for you, 1h 49m against your 2h 30m.",
+            pin.WatchTonightReason);
+        foreach (var hidden in new[] { "Philo", "Starz", "Tubi", "Google Play", "YouTube" })
+        {
+            Assert.DoesNotContain(hidden, pin.WatchTonightReason!, StringComparison.Ordinal);
+        }
+
+        // Rent and Buy are never "streaming now": the card's own logos are the three streaming offers.
+        Assert.True(pin.AvailableNow);
+        Assert.Equal(["Philo", "Starz", "Tubi"], pin.Providers.Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// One fixture field at a time around a pick the card CAN name: the offer's kind, its age against
+    /// the ladder's cache, whether the ladder gives it a chip, the account's own minimum, and how many
+    /// candidates there were. Each flips exactly the clause it should.
+    /// </summary>
+    [Theory]
+    [InlineData("chip", 8.4, null, 2, "Highest-predicted thing in your queue that's on {N} and fits tonight — 8.4 for you, 1h 49m against your 2h 30m.")]
+    [InlineData("stale-for-the-ladder", 8.4, null, 2, "Highest-predicted thing in your queue that's streaming now and fits tonight — 8.4 for you, 1h 49m against your 2h 30m.")]
+    [InlineData("rent-only-on-the-chip", 8.4, null, 2, "Highest-predicted thing in your queue that's streaming now and fits tonight — 8.4 for you, 1h 49m against your 2h 30m.")]
+    [InlineData("free-on-the-chip", 8.4, null, 2, "Highest-predicted thing in your queue that's on {N} and fits tonight — 8.4 for you, 1h 49m against your 2h 30m.")]
+    [InlineData("chip", 8.1, "8.5", 2, "Nothing in your queue that's streaming and fits tonight reaches 8.5 for you. The closest is on {N}: 8.1 for you, 1h 49m against your 2h 30m.")]
+    [InlineData("chip", 8.4, null, 1, "The only thing in your queue that's on {N} and fits tonight — 8.4 for you, 1h 49m against your 2h 30m.")]
+    public async Task The_reason_flips_only_the_clause_its_fixture_field_controls(
+        string offer, double predicted, string? minPredicted, int candidates, string expected)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync(eveningBudgetMinutes: 150);
+        if (minPredicted is not null)
+        {
+            await SeedMinPredictedAsync(accountId, minPredicted);
+        }
+
+        var artifactId = await SeedActiveArtifactAsync(accountId);
+        var (chip, chipName) = await KnownProviderAsync(8, "Netflix");
+        var philo = await SeedProviderAsync("Philo");
+
+        var pick = await SeedTitleAsync("pick", runtimeMinutes: 109);
+        var scores = new Dictionary<Guid, decimal> { [pick] = (decimal)predicted };
+        var saves = new List<Guid> { pick };
+
+        // Every variant keeps the pick streaming now through Philo, which the ladder never names.
+        await SeedAvailabilityAsync(pick, philo, "US", Now.AddHours(-3));
+        switch (offer)
+        {
+            case "chip":
+                await SeedAvailabilityAsync(pick, chip, "US", Now.AddHours(-3));
+                break;
+            case "stale-for-the-ladder":
+                // Inside the week streaming-now believes, outside the day the ladder renders as is.
+                await SeedAvailabilityAsync(pick, chip, "US", Now.AddHours(-30));
+                break;
+            case "rent-only-on-the-chip":
+                await SeedAvailabilityAsync(pick, chip, "US", Now.AddHours(-3), AvailabilityKind.Rent);
+                break;
+            case "free-on-the-chip":
+                await SeedAvailabilityAsync(pick, chip, "US", Now.AddHours(-3), AvailabilityKind.Free);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(offer), offer, null);
+        }
+
+        for (var i = 1; i < candidates; i++)
+        {
+            var runnerUp = await SeedTitleAsync($"runner-up-{i}", runtimeMinutes: 100);
+            await SeedAvailabilityAsync(runnerUp, philo, "US", Now.AddHours(-3));
+            scores[runnerUp] = 3.0m;
+            saves.Add(runnerUp);
+        }
+
+        await SeedScoresAsync(accountId, artifactId, scores, Now.AddDays(-1));
+        await SaveAllAsync(accountId, saves);
+
+        var pin = Assert.Single((await QueueAsync(accountId)).Items, i => i.WatchTonight);
+
+        Assert.Equal(pick, pin.TitleId);
+        Assert.Equal(expected.Replace("{N}", chipName, StringComparison.Ordinal), pin.WatchTonightReason);
+    }
+
+    /// <summary>
+    /// A title on a free, ad-supported service alone is streaming now (G-2): it leads the Tonight
+    /// sort, can be pinned, and shows its logo — where it used to read as "not streaming".
+    /// </summary>
+    [Fact]
+    public async Task A_free_with_ads_only_title_is_streaming_now()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var artifactId = await SeedActiveArtifactAsync(accountId);
+        var tubi = await SeedProviderAsync("Tubi");
+        var adsOnly = await SeedTitleAsync("ads-only", runtimeMinutes: 90);
+        var rentOnly = await SeedTitleAsync("rent-only", runtimeMinutes: 90);
+        await SeedAvailabilityAsync(adsOnly, tubi, "US", Now.AddDays(-2), AvailabilityKind.Ads);
+        await SeedAvailabilityAsync(rentOnly, tubi, "US", Now.AddDays(-2), AvailabilityKind.Rent);
+        await SeedScoresAsync(accountId, artifactId, new() { [adsOnly] = 7.0m, [rentOnly] = 9.0m }, Now.AddDays(-1));
+        await SaveAllAsync(accountId, [adsOnly, rentOnly]);
+
+        var queue = await QueueAsync(accountId);
+
+        var ads = queue.Items.Single(i => i.TitleId == adsOnly);
+        Assert.True(ads.AvailableNow);
+        Assert.True(ads.WatchTonight);
+        Assert.Equal("Tubi", ads.Providers.Single().Name);
+        var rent = queue.Items.Single(i => i.TitleId == rentOnly);
+        Assert.False(rent.AvailableNow);
+        Assert.Empty(rent.Providers);
+        Assert.Equal([adsOnly, rentOnly], queue.Items.Select(i => i.TitleId).ToArray());
     }
 
     [Fact]
@@ -659,7 +820,59 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         return provider.Id;
     }
 
-    private async Task SeedAvailabilityAsync(Guid titleId, Guid providerId, string region, DateTime fetchedAt)
+    /// <summary>
+    /// A provider with a real TMDB id, created once and shared: the id is unique across the table,
+    /// and the where-to-watch ladder decides on it whether the provider gets a chip. Returns the
+    /// stored name, which an earlier suite may have written.
+    /// </summary>
+    private async Task<(Guid Id, string Name)> KnownProviderAsync(int tmdbProviderId, string name)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        var existing = await db.StreamingProviders.FirstOrDefaultAsync(p => p.TmdbProviderId == tmdbProviderId);
+        if (existing is not null)
+        {
+            return (existing.Id, existing.Name);
+        }
+
+        var provider = new StreamingProvider
+        {
+            Id = Guid.NewGuid(),
+            TmdbProviderId = tmdbProviderId,
+            Name = name,
+            LogoPath = "/logo.jpg",
+            DisplayPriority = 1,
+        };
+        db.Add(provider);
+        try
+        {
+            await db.SaveChangesAsync();
+            return (provider.Id, provider.Name);
+        }
+        catch (DbUpdateException)
+        {
+            // A concurrent suite created it first.
+            await using var reread = fixture.CreateContext(new AccountContext());
+            var winner = await reread.StreamingProviders.SingleAsync(p => p.TmdbProviderId == tmdbProviderId);
+            return (winner.Id, winner.Name);
+        }
+    }
+
+    private async Task SeedMinPredictedAsync(Guid accountId, string value)
+    {
+        await using var db = fixture.CreateContext(Pinned(accountId));
+        db.ContentFilters.Add(new ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = FilterKind.MinPredictedRating,
+            Value = value,
+            CreatedAt = Now,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedAvailabilityAsync(
+        Guid titleId, Guid providerId, string region, DateTime fetchedAt, AvailabilityKind kind = AvailabilityKind.Flatrate)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         db.TitleAvailabilities.Add(new TitleAvailability
@@ -668,7 +881,7 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
             TitleId = titleId,
             Region = region,
             ProviderId = providerId,
-            Kind = AvailabilityKind.Flatrate,
+            Kind = kind,
             FetchedAt = fetchedAt,
         });
         await db.SaveChangesAsync();
