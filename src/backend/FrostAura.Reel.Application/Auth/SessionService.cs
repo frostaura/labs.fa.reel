@@ -5,7 +5,7 @@ using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Auth;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -18,20 +18,23 @@ public record SessionTokens(string AccessToken, string RefreshToken, DateTime Ac
 /// rest). Trakt OAuth is the identity; these tokens are merely the app's session transport
 /// (HttpOnly cookies at the API edge).
 /// </summary>
-public class SessionService(IReelDbContext db, IConfiguration configuration)
+public class SessionService(IReelDbContext db, IOptions<SessionOptions> options)
 {
     private static readonly JsonWebTokenHandler TokenHandler = new();
 
-    private string Issuer => configuration["JWT_ISSUER"] ?? "frostaura-reel";
-    private string Audience => configuration["JWT_AUDIENCE"] ?? "frostaura-reel-app";
-    private int AccessMinutes => int.TryParse(configuration["JWT_ACCESS_TOKEN_EXPIRY_MINUTES"], out var m) ? m : 15;
-    private int RefreshDays => int.TryParse(configuration["JWT_REFRESH_TOKEN_EXPIRY_DAYS"], out var d) ? d : 30;
+    private SessionOptions Settings => options.Value;
+    private string Issuer => Settings.Issuer;
+    private string Audience => Settings.Audience;
+    private int AccessMinutes => Settings.AccessMinutes;
+    private int RefreshDays => Settings.RefreshDays;
 
     private SymmetricSecurityKey SigningKey
     {
         get
         {
-            var secret = configuration["JWT_SECRET"] ?? throw new InvalidOperationException("JWT_SECRET is required.");
+            var secret = Settings.Secret is { Length: > 0 } configured
+                ? configured
+                : throw new InvalidOperationException($"{SessionOptions.SecretKey} is required.");
             return new SymmetricSecurityKey(SHA256.HashData(Encoding.UTF8.GetBytes("reel.jwt.v1:" + secret)));
         }
     }

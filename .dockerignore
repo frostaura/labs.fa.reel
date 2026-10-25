@@ -41,3 +41,6 @@ research/data
 **/*.log
 **/logs
 **/.DS_Store
+
+# Database dumps written by the backup service (docker-compose.yml BACKUP_HOST_DIR default)
+.backups

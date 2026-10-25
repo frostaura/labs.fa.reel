@@ -1,6 +1,8 @@
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace FrostAura.Reel.Tests.Auth;
 
@@ -23,7 +25,7 @@ public class SessionTokenTests
 
         // Token mint/validate never touches persistence; passing null keeps the test honest
         // about that (it would throw loudly if that ever changed).
-        return new SessionService(null!, new ConfigurationBuilder().AddInMemoryCollection(settings).Build());
+        return new SessionService(null!, Options.Create(ValidatedOptions.From<SessionOptions>(new ConfigurationBuilder().AddInMemoryCollection(settings).Build())));
     }
 
     private static Account TestAccount() => new()

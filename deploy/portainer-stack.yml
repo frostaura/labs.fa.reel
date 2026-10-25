@@ -8,7 +8,21 @@
 # TRAKT_CLIENT_ID, TRAKT_CLIENT_SECRET, TMDB_READ_ACCESS_TOKEN, OPENROUTER_API_KEY,
 # APP_PUBLIC_URL (https://reel.frostaura.net), TRAKT_REDIRECT_URI.
 # Optional: EMBEDDINGS_API_KEY (falls back to OPENROUTER_API_KEY — both hit the same gateway).
-# Expose ${GATEWAY_PORT:-8090} via the host Cloudflared tunnel to reel.frostaura.net.
+# Every other backend key has a default here and is documented in .env.example; the LLM ceilings
+# the process actually resolved are printed in one startup log line ("Effective LLM ceilings").
+# Expose ${GATEWAY_PORT:-8090} via the host Cloudflared tunnel to reel.frostaura.net. The port is
+# published on 127.0.0.1 unless GATEWAY_BIND says otherwise (docs/deployment.md#network-exposure).
+# Backups: BACKUP_HOST_DIR is required, an absolute host path (ideally a mount of off-host storage).
+# It is never a volume of this stack (docs/deployment.md#backups-and-restore).
+
+# Every service logs through Docker's `local` driver with rotation (J*2). The json-file default kept
+# about 30 minutes of the backend's log on the live host, which made every after-the-fact diagnosis
+# a guess. 10 x 50 MB per container; the parity test pins this block in every descriptor.
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "50m"
+    max-file: "10"
 
 services:
   postgres:
@@ -20,6 +34,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-reel}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reel} -d ${POSTGRES_DB:-reel}" ]
       interval: 5s
@@ -37,20 +52,69 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_ISSUER: ${JWT_ISSUER:-frostaura-reel}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-frostaura-reel-app}
+      JWT_ACCESS_TOKEN_EXPIRY_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRY_MINUTES:-15}
+      JWT_REFRESH_TOKEN_EXPIRY_DAYS: ${JWT_REFRESH_TOKEN_EXPIRY_DAYS:-30}
       TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID:-}
       TRAKT_CLIENT_SECRET: ${TRAKT_CLIENT_SECRET:-}
       TRAKT_REDIRECT_URI: ${TRAKT_REDIRECT_URI:-}
+      TRAKT_RATE_BUDGET_PER_5MIN: ${TRAKT_RATE_BUDGET_PER_5MIN:-900}
       TMDB_READ_ACCESS_TOKEN: ${TMDB_READ_ACCESS_TOKEN:-}
+      TMDB_RATE_PER_SEC: ${TMDB_RATE_PER_SEC:-40}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-6-luna}
-      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-openai}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_MAX_CONCURRENCY: ${OPENROUTER_MAX_CONCURRENCY:-4}
+      REEL_SEARCH_MODEL: ${REEL_SEARCH_MODEL:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      SYNC_DELTA_MINUTES: ${SYNC_DELTA_MINUTES:-15}
+      SYNC_HOT_MINUTES: ${SYNC_HOT_MINUTES:-5}
+      RETRAIN_MIN_NEW_RATINGS: ${RETRAIN_MIN_NEW_RATINGS:-10}
       EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
-      EMBEDDINGS_DIMENSIONS: ${EMBEDDINGS_DIMENSIONS:-1536}
       EMBEDDINGS_BASE_URL: ${EMBEDDINGS_BASE_URL:-https://openrouter.ai/api/v1}
       EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-$OPENROUTER_API_KEY}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:?APP_PUBLIC_URL is required}
       CORS_ALLOWED_ORIGINS: ${APP_PUBLIC_URL}
       GEOIP_DEFAULT_REGION: ${GEOIP_DEFAULT_REGION:-US}
+      # LLM spend ceilings per account per day (K-5: these never reached the container before).
+      # Blank means "the code default"; the effective numbers are printed in one startup log line
+      # beginning "Effective LLM ceilings". LLM_XREF_DAILY_CALLS=0 is the cross-reference off switch.
+      LLM_XREF_DAILY_CALLS: ${LLM_XREF_DAILY_CALLS:-}
+      LLM_XREF_DAILY_TOKENS: ${LLM_XREF_DAILY_TOKENS:-}
+      LLM_RERANK_DAILY_CALLS: ${LLM_RERANK_DAILY_CALLS:-}
+      LLM_RERANK_DAILY_TOKENS: ${LLM_RERANK_DAILY_TOKENS:-}
+      LLM_LENS_DAILY_CALLS: ${LLM_LENS_DAILY_CALLS:-}
+      LLM_LENS_DAILY_TOKENS: ${LLM_LENS_DAILY_TOKENS:-}
+      # Model and experiment switches (blank = code default; see CLAUDE.md "Runtime flags").
+      CALIBRATOR_MODE: ${CALIBRATOR_MODE:-}
+      RESIDUAL_HEAD_ENABLED: ${RESIDUAL_HEAD_ENABLED:-}
+      RESIDUAL_OBSERVE_TRAKT_RATINGS: ${RESIDUAL_OBSERVE_TRAKT_RATINGS:-}
+      INTERLEAVE_ENABLED: ${INTERLEAVE_ENABLED:-}
+      INTERLEAVE_POLICY_A: ${INTERLEAVE_POLICY_A:-}
+      INTERLEAVE_POLICY_B: ${INTERLEAVE_POLICY_B:-}
+      INTERLEAVE_ALPHA: ${INTERLEAVE_ALPHA:-}
+      INTERLEAVE_MSPRT_TAU: ${INTERLEAVE_MSPRT_TAU:-}
+      KILL_CRITERION_ITERATIONS: ${KILL_CRITERION_ITERATIONS:-3}
+      ASK_RETENTION_DAYS: ${ASK_RETENTION_DAYS:-}
+      ENRICH_MAX_TITLES_PER_RUN: ${ENRICH_MAX_TITLES_PER_RUN:-}
+      # Background loops — each a kill switch. These are read with typed parsing, so a blank value
+      # would fail the read: the defaults are spelled out.
+      Background__JobRunner: ${Background__JobRunner:-true}
+      Background__DeltaPoll: ${Background__DeltaPoll:-true}
+      Background__TokenRefresh: ${Background__TokenRefresh:-true}
+      Background__OutboxDispatcher: ${Background__OutboxDispatcher:-true}
+      Background__NightlyReconcile: ${Background__NightlyReconcile:-true}
+      Background__Digest: ${Background__Digest:-true}
+      Background__CatalogGrowth: ${Background__CatalogGrowth:-true}
+      Background__CatalogFollowThrough: ${Background__CatalogFollowThrough:-true}
+      Background__LanguageBackfill: ${Background__LanguageBackfill:-true}
+      Push__Subject: ${Push__Subject:-https://reel.frostaura.net}
+      # The dump before any pending migration (K-1): the API asks the backup service over the shared
+      # backup_requests volume and refuses to migrate without an answer. docs/deployment.md#backups-and-restore.
+      BACKUP_REQUEST_DIR: /backup-requests
+      BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS: ${BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS:-1800}
+      BACKUP_PRE_MIGRATION_REQUIRED: ${BACKUP_PRE_MIGRATION_REQUIRED:-true}
       # Catalogue bulk seed (POST /api/dev/seed-catalog) and the daily ceilings that complete it.
       # The two vote floors decide how big the seeded corpus is: measured 2026-09-10 the defaults
       # yield ~9,300 titles, and 50/50 yields ~34,800. EXTRACT_DAILY_TOKENS is the only one that
@@ -65,31 +129,83 @@ services:
     # /health/ready, not /health: /health answers "the process is up", which was already true while
     # the database was unreachable or the schema was a migration behind — so the gateway's
     # `condition: service_healthy` was gating on nothing. /health/ready checks both.
-    # start_period is 120s because migrations run BEFORE the listener opens (DatabaseInitializer is
-    # awaited ahead of app.Run()), so a cold host answers nothing at all — connection refused, not
-    # 503 — for as long as the full chain takes against an empty pgvector database. 20s covered a
-    # warm restart and nothing else. Retries stay deliberately generous on top of that.
+    # start_period is 40m because the listener opens only AFTER the pre-migration dump and the
+    # migrations (both awaited ahead of app.Run()), so the backend answers nothing at all while they
+    # run. The dump wait is capped at 30 minutes (BACKUP_PRE_MIGRATION_TIMEOUT_SECONDS, max 1800):
+    # a request can queue behind a nightly dump (about 6 minutes on the live database) and then take
+    # its own. With 120s the backend went unhealthy at about 7 minutes and `up` never started the
+    # gateway. The first passing probe ends the period, so this costs nothing on the happy path.
+    # ComposeHardeningTests pins it against the timeout's maximum.
     healthcheck:
       test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:5000/health/ready >/dev/null || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 120s
+      start_period: 40m
+    volumes:
+      - backup_requests:/backup-requests
     depends_on:
       postgres:
         condition: service_healthy
+      backup:
+        condition: service_started
+    logging: *default-logging
+
+  # Nightly pg_dump -Fc (14 daily + 8 weekly kept) and the dump the backend asks for before it
+  # migrates (K-1). Same image as postgres, so pg_dump always matches the server's major version.
+  # The script is inlined below as a compose config because a Portainer stack cannot mount a repo
+  # file; deploy/backup/reel-backup.sh is the canonical copy and BackupDescriptorParityTests keeps
+  # this one identical to it. Dumps go to BACKUP_HOST_DIR, a required absolute host
+  # path (FD-12): never a volume of this stack, which `down -v` or a stack removal deletes together
+  # with the database it backs up. Restore: docs/deployment.md#backups-and-restore.
+  backup:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    entrypoint: [ "/bin/sh", "/usr/local/bin/reel-backup.sh" ]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-reel}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATABASE: ${POSTGRES_DB:-reel}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-2}
+      BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-14}
+      BACKUP_KEEP_WEEKLY: ${BACKUP_KEEP_WEEKLY:-8}
+      BACKUP_KEEP_PRE_MIGRATION: ${BACKUP_KEEP_PRE_MIGRATION:-10}
+    configs:
+      - source: reel_backup_script
+        target: /usr/local/bin/reel-backup.sh
+    volumes:
+      - ${BACKUP_HOST_DIR:?BACKUP_HOST_DIR must name an absolute host directory for the dumps (FD-12)}:/backups
+      - backup_requests:/backup-requests
+    # Unhealthy when the newest successful dump is older than 26 hours.
+    healthcheck:
+      test: [ "CMD-SHELL", "test -n \"$$(find /backups/last-success -mmin -1560 2>/dev/null)\"" ]
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 10m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
 
   frontend:
     image: ${DOCKERHUB_USERNAME}/reel-frontend:latest
     restart: unless-stopped
     depends_on:
       - backend
+    logging: *default-logging
 
   gateway:
     image: nginx:alpine
     restart: unless-stopped
     ports:
-      - "${GATEWAY_PORT:-8090}:80"
+      # Loopback only by default (J-1). A cloudflared PROCESS on this host reaches it at
+      # 127.0.0.1:GATEWAY_PORT. A cloudflared container, or one on another machine, cannot: no tunnel
+      # joins this stack's network, so set GATEWAY_BIND to the interface it uses. Check the live
+      # tunnel's ingress target before the first rebuild (docs/deployment.md#network-exposure).
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8090}:80"
     configs:
       - source: reel_nginx
         target: /etc/nginx/nginx.conf
@@ -98,6 +214,7 @@ services:
         condition: service_healthy
       frontend:
         condition: service_started
+    logging: *default-logging
 
 # Portainer stacks can't mount repo files, so the gateway config ships inline. `nginx/nginx.conf`
 # is the CANONICAL descriptor and this is a copy of it; the two are held together by
@@ -106,6 +223,167 @@ services:
 # Verify a change to this block with `deploy/probe-gateway.sh`, which runs it against a stub
 # upstream in its own throwaway compose project.
 configs:
+  reel_backup_script:
+    content: |
+      #!/bin/sh
+      # Reel database backups: nightly pg_dump -Fc with 14 daily + 8 weekly kept, plus a dump on
+      # request before the API applies a pending migration. Canonical copy; docker-compose.prod.yml and
+      # deploy/portainer-stack.yml inline it byte for byte (with $$ escaped as $$$$), pinned by
+      # BackupDescriptorParityTests. Runbook: docs/deployment.md#backups-and-restore.
+      #
+      #   reel-backup.sh          run forever (the sidecar)
+      #   reel-backup.sh once     take one daily dump now and exit (drills, manual safety copies)
+      #
+      # Reads the standard libpq variables (PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE).
+      # Every file this script lists is one it named itself (reel-<date>.dump), so ls is safe here.
+      # shellcheck disable=SC2012
+      set -u
+
+      BACKUP_DIR="$${BACKUP_DIR:-/backups}"
+      REQUEST_DIR="$${BACKUP_REQUEST_DIR:-/backup-requests}"
+      HOUR_UTC="$${BACKUP_HOUR_UTC:-2}"
+      KEEP_DAILY="$${BACKUP_KEEP_DAILY:-14}"
+      KEEP_WEEKLY="$${BACKUP_KEEP_WEEKLY:-8}"
+      KEEP_PRE_MIGRATION="$${BACKUP_KEEP_PRE_MIGRATION:-10}"
+      # A scheduled dump never starts in the first GRACE seconds after this service starts: a backend
+      # started with it (a fresh stack, a G0 rebuild) asks for its pre-migration dump within seconds, and
+      # a request queued behind a full first-start dump waited for two dumps instead of one.
+      GRACE="$${BACKUP_FIRST_DUMP_GRACE_SECONDS:-120}"
+      WEEKLY_DAY="$${BACKUP_WEEKLY_DAY:-7}"
+      DB="$${PGDATABASE:-reel}"
+
+      log() { echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) reel-backup: $$*"; }
+
+      # dump <destination file>: pg_dump to a .partial, prove the archive reads back, then rename.
+      dump() {
+        dest="$$1"
+        partial="$$dest.partial"
+        started=$$(date -u +%s)
+        if ! pg_dump -Fc -Z 6 -d "$$DB" -f "$$partial"; then
+          rm -f "$$partial"
+          log "FAILED pg_dump for $$dest"
+          echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) pg_dump failed for $$dest" > "$$BACKUP_DIR/last-failure"
+          return 1
+        fi
+        if ! pg_restore --list "$$partial" > /dev/null; then
+          rm -f "$$partial"
+          log "FAILED archive check for $$dest"
+          echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) archive check failed for $$dest" > "$$BACKUP_DIR/last-failure"
+          return 1
+        fi
+        mv "$$partial" "$$dest"
+        bytes=$$(wc -c < "$$dest" | tr -d ' ')
+        log "wrote $$dest ($$bytes bytes, $$(( $$(date -u +%s) - started ))s)"
+        echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) $$dest $$bytes" > "$$BACKUP_DIR/last-success"
+        return 0
+      }
+
+      # prune <directory> <keep>: newest <keep> dumps survive; names sort by date.
+      prune() {
+        ls -1 "$$1"/reel-*.dump 2> /dev/null | sort -r | tail -n +"$$(( $$2 + 1 ))" | while read -r old; do
+          rm -f "$$old"
+          log "pruned $$old"
+        done
+      }
+
+      # keep_as_daily <verified dump>: today's daily copy (a hard link when the dump is not already it),
+      # the weekly copy when one is due, then retention.
+      keep_as_daily() {
+        today=$$(date -u +%Y-%m-%d)
+        dest="$$BACKUP_DIR/daily/reel-$$today.dump"
+        if [ "$$1" != "$$dest" ] && [ ! -e "$$dest" ]; then
+          ln -f "$$1" "$$dest" 2> /dev/null || cp "$$1" "$$dest"
+          log "kept $$1 as today's daily dump"
+        fi
+        newest_weekly=$$(ls -1 "$$BACKUP_DIR"/weekly/reel-*.dump 2> /dev/null | sort -r | head -n 1)
+        week_ago=$$(date -u -d "@$$(( $$(date -u +%s) - 6 * 86400 ))" +%Y%m%d)
+        if [ "$$(date -u +%u)" = "$$WEEKLY_DAY" ] || [ -z "$$newest_weekly" ] \
+          || [ "$$(basename "$$newest_weekly" .dump | cut -c6- | tr -d '-')" -lt "$$week_ago" ]; then
+          # A hard link costs no space and outlives the daily copy's pruning; cp where links are refused.
+          ln -f "$$dest" "$$BACKUP_DIR/weekly/reel-$$today.dump" 2> /dev/null || cp "$$dest" "$$BACKUP_DIR/weekly/reel-$$today.dump"
+          log "kept weekly copy reel-$$today.dump"
+        fi
+        prune "$$BACKUP_DIR/daily" "$$KEEP_DAILY"
+        prune "$$BACKUP_DIR/weekly" "$$KEEP_WEEKLY"
+      }
+
+      daily() {
+        dest="$$BACKUP_DIR/daily/reel-$$(date -u +%Y-%m-%d).dump"
+        dump "$$dest" || return 1
+        keep_as_daily "$$dest"
+      }
+
+      # answer <request> <suffix> <text>: written atomically, and owned by whoever wrote the request, so
+      # an API running as a non-root user can delete the answer it reads.
+      answer() {
+        file="$$REQUEST_DIR/$$(basename "$$1" .request)$$2"
+        echo "$$3" > "$$file.partial"
+        chown "$$(stat -c %u:%g "$$1" 2> /dev/null || echo 0:0)" "$$file.partial" 2> /dev/null || true
+        mv "$$file.partial" "$$file"
+      }
+
+      # Requests from the API: <id>.request in, <id>.done or <id>.failed out.
+      serve_requests() {
+        for request in "$$REQUEST_DIR"/*.request; do
+          [ -e "$$request" ] || continue
+          id=$$(basename "$$request" .request)
+          dest="$$BACKUP_DIR/pre-migration/reel-$$id.dump"
+          log "pre-migration dump requested: $$id ($$(tr '\n' ' ' < "$$request"))"
+          if dump "$$dest"; then
+            answer "$$request" .done "$$dest"
+            # A full, verified dump: it is also today's daily if today has none, so a fresh stack does
+            # not take a second full dump minutes after this one.
+            keep_as_daily "$$dest"
+          else
+            answer "$$request" .failed "pg_dump failed; see the backup container log"
+          fi
+          rm -f "$$request"
+          prune "$$BACKUP_DIR/pre-migration" "$$KEEP_PRE_MIGRATION"
+        done
+        # Answers nobody collected (a requester that timed out and withdrew) are dropped after a day.
+        find "$$REQUEST_DIR" -maxdepth 1 \( -name '*.done' -o -name '*.failed' -o -name '*.partial' \) -mmin +1440 -delete 2> /dev/null || true
+      }
+
+      wait_for_database() {
+        until pg_isready -q -d "$$DB"; do
+          log "waiting for $$DB"
+          sleep 5
+        done
+      }
+
+      mkdir -p "$$BACKUP_DIR/daily" "$$BACKUP_DIR/weekly" "$$BACKUP_DIR/pre-migration" "$$REQUEST_DIR"
+      # The API may run as a non-root user: it writes requests here and deletes the answers it reads. No
+      # sticky bit: with one, a root-owned answer could not be deleted by the user it answers.
+      chmod 0777 "$$REQUEST_DIR"
+
+      if [ "$${1:-run}" = "once" ]; then
+        wait_for_database
+        daily
+        exit $$?
+      fi
+
+      log "started: daily at $${HOUR_UTC}:00 UTC, keeping $$KEEP_DAILY daily / $$KEEP_WEEKLY weekly / $$KEEP_PRE_MIGRATION pre-migration in $$BACKUP_DIR; requests first for $${GRACE}s"
+      started_at=$$(date -u +%s)
+      wait_for_database
+      while true; do
+        serve_requests
+        today=$$(date -u +%Y-%m-%d)
+        if [ ! -e "$$BACKUP_DIR/daily/reel-$$today.dump" ] && [ $$(( $$(date -u +%s) - started_at )) -ge "$$GRACE" ]; then
+          # A host that was asleep at the hour still gets its dump the moment it wakes; a stack with no
+          # dump at all takes one immediately rather than waiting for tomorrow.
+          if [ "$$(date -u +%H | sed 's/^0//')" -ge "$$HOUR_UTC" ] || [ -z "$$(ls -1 "$$BACKUP_DIR"/daily/reel-*.dump 2> /dev/null)" ]; then
+            wait_for_database
+            daily || log "daily dump failed; retrying in 5 minutes"
+          fi
+        fi
+        # Requests are polled every 5 seconds; the daily check runs once a minute.
+        i=0
+        while [ "$$i" -lt 12 ]; do
+          serve_requests
+          sleep 5
+          i=$$(( i + 1 ))
+        done
+      done
   reel_nginx:
     content: |
       events {}
@@ -160,3 +438,5 @@ configs:
 
 volumes:
   postgres_data:
+  # Handshake files only (<id>.request / .done / .failed); never holds a dump.
+  backup_requests:

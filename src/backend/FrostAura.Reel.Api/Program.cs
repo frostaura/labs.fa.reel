@@ -4,11 +4,13 @@ using FrostAura.Reel.Api;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Middleware;
 using FrostAura.Reel.Api.Security;
+using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Infrastructure;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 // ── Invariant culture, process-wide, before anything else runs ────────────────────────────────
 // Nothing this service formats is localised: prompts sent to OpenRouter, TMDB and Trakt query
@@ -44,10 +46,13 @@ if (generatingOpenApiDocument)
     // Development shell with QA_HELPERS_ENABLED would otherwise add the /api/dev routes to it.
     builder.Environment.EnvironmentName = Environments.Production;
     builder.Configuration["QA_HELPERS_ENABLED"] = "false";
+    // Validated on host start like every other run, and nothing in a generation run signs anything.
+    builder.Configuration["JWT_SECRET"] = "openapi-generation-placeholder-never-used-to-sign";
 }
 
 builder.Services.AddReelInfrastructure(builder.Configuration);
 builder.Services.AddSingleton<SettingsUnlockTokenService>();
+builder.Services.AddValidatedOptions<PreMigrationBackupOptions>();
 builder.Services.AddOpenApi();
 
 if (generatingOpenApiDocument)
@@ -127,6 +132,20 @@ if (generatingOpenApiDocument)
 // container runtime.
 try
 {
+    // Every ValidateOnStart options class, NOW: app.Run() would validate them too, but only after
+    // the dump and the migrations below had already run against the database. A present-but-invalid
+    // setting must stop the process before it changes anything (MOD-2).
+    app.Services.GetService<IStartupValidator>()?.Validate();
+
+    // What this process will actually spend, from the same budget objects the jobs read (K-5).
+    using (var ceilingsScope = app.Services.CreateScope())
+    {
+        app.Logger.LogInformation("{Ceilings}", EffectiveCeilings.Describe(ceilingsScope.ServiceProvider, app.Configuration));
+    }
+
+    // A dump before any pending migration, or no migration (K-1). No-op when nothing is pending.
+    await PreMigrationBackup.EnsureAsync(app.Services);
+
     await DatabaseInitializer.InitializeAsync(app.Services);
 
     // Beside the migration step, and for the same reason it is here rather than in a hosted service:

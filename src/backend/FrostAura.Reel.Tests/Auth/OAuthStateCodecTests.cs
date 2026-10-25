@@ -1,14 +1,16 @@
 using FrostAura.Reel.Application.Auth;
+using FrostAura.Reel.Application.Configuration;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace FrostAura.Reel.Tests.Auth;
 
 public class OAuthStateCodecTests
 {
     private static OAuthStateCodec CreateCodec(string secret = "unit-test-secret-at-least-32-chars!!") =>
-        new(new ConfigurationBuilder()
+        new(Options.Create(ValidatedOptions.From<SessionOptions>(new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["JWT_SECRET"] = secret })
-            .Build());
+            .Build())));
 
     [Fact]
     public void Issued_state_validates()
