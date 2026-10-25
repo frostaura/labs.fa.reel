@@ -1,9 +1,11 @@
 using System.Globalization;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
@@ -21,9 +23,29 @@ namespace FrostAura.Reel.Application.Jobs;
 ///
 /// <para>
 /// Runs after hydration (needs overview/genres/keywords) and before training (which consumes the
-/// results). When neither provider is configured it is a clean no-op that still chains to Train —
-/// the model trains on metadata + affinity features alone, exactly as it does today, and these
-/// features light up the moment the keys land.
+/// results). It chains Train only when Train has something to learn from: this run wrote an
+/// embedding or an attribute answer, the account has no model yet (onboarding — so a keyless install
+/// still trains on metadata and affinity features alone), or a rating has landed since the model
+/// was trained. An enrich that changed nothing used to queue a Train after every feed build that
+/// queued it, which then had to discover for itself that there was nothing to do (R1-48).
+/// </para>
+///
+/// <para>
+/// <b>Stops early, by declaration.</b> The runner's policy declares this kind
+/// <c>StopsEarlyOnCancellation</c>: when the token fires (a deadline slice or a shutdown) the run
+/// returns at its next checkpoint instead of throwing, keeps everything it already paid for, and
+/// does none of a finished run's work — no Train chain, no completion event. The runner then reads
+/// the normal return as a slice, not a success. A batch already answered is persisted with
+/// <see cref="CancellationToken.None"/>: a deadline landing between the model's answer and the write
+/// must not throw away answers that were bought.
+/// </para>
+///
+/// <para>
+/// <b>Paused behind the provider breaker.</b> The runner does not claim this kind while the
+/// OpenRouter breaker is open; a breaker that opens DURING a run (a 401/402/403 on one call) is
+/// checked before every batch, and the batch it opened in has its unexplained no-answers booked as
+/// transport — the refusal is the account's, not the titles' — so they back off by time and never
+/// spend an attempt (R1-47).
 /// </para>
 ///
 /// <para>
@@ -62,7 +84,8 @@ public class EnrichCatalogJobHandler(
     IPipelineEventHub events,
     IConfiguration configuration,
     CatalogEnrichmentBudget budget,
-    ILogger<EnrichCatalogJobHandler> logger) : IJobHandler
+    ILogger<EnrichCatalogJobHandler> logger,
+    IProviderHealth? health = null) : IJobHandler
 {
     public JobKind Kind => JobKind.EnrichCatalog;
 
@@ -147,16 +170,26 @@ public class EnrichCatalogJobHandler(
         // Catalog rows are global, so this work is shared across every tenant.
         var hydrated = db.Titles.Where(t => t.LastMetadataRefreshAt != null);
 
-        var embedded = 0;
-        if (embeddings.IsAvailable)
+        var embedded = PhaseResult.None;
+        if (embeddings.IsAvailable && !ct.IsCancellationRequested)
         {
             embedded = await EmbedAsync(job, accountId, hydrated, cap, ct);
         }
 
-        var extracted = 0;
-        if (extractor.IsAvailable)
+        var extracted = PhaseResult.None;
+        if (extractor.IsAvailable && !ct.IsCancellationRequested)
         {
             extracted = await ExtractAsync(job, accountId, hydrated, cap, ct);
+        }
+
+        if (ct.IsCancellationRequested)
+        {
+            // The declared early stop (JobKindPolicy.StopsEarlyOnCancellation): what was bought is
+            // saved, and nothing a FINISHED run does happens here — the runner resumes this job.
+            logger.LogInformation(
+                "EnrichCatalog for {AccountId} stopped early at a checkpoint: {Embedded} title(s) embedded, {Extracted} attributed so far.",
+                accountId, embedded.Written, extracted.Written);
+            return;
         }
 
         if (!embeddings.IsAvailable && !extractor.IsAvailable)
@@ -168,13 +201,69 @@ public class EnrichCatalogJobHandler(
 
         if (accountId is { } owner)
         {
-            await ChainTrainAsync(owner, ct);
+            if (await TrainSkipReasonAsync(owner, embedded.Written + extracted.Written, ct) is { } skip)
+            {
+                logger.LogInformation("EnrichCatalog for {AccountId} chains no Train: {Reason}.", owner, skip);
+            }
+            else
+            {
+                await ChainTrainAsync(owner, ct);
+            }
+
             events.Publish(owner, PipelineEventTypes.JobCompleted, new Dictionary<string, object?> { ["kind"] = "enrich" });
         }
 
         logger.LogInformation(
             "EnrichCatalog completed for {AccountId}: {Embedded} title(s) embedded, {Extracted} attributed (cap {Cap}).",
-            accountId, embedded, extracted, cap);
+            accountId, embedded.Written, extracted.Written, cap);
+    }
+
+    /// <summary>
+    /// Why this run should NOT chain Train, or null when it should. Train is chained when this run
+    /// wrote anything the model reads, when the account has no usable model yet (the onboarding chain
+    /// ends here, keys or not), or when a rating has landed since the model was trained (a re-ingest
+    /// whose titles were already enriched by other tenants still owes the account its retrain).
+    /// Otherwise there is nothing new for Train to fit, and enqueueing it only made Train discover
+    /// that for itself — after every feed build that queued an enrich (R1-48).
+    /// </summary>
+    private async Task<string?> TrainSkipReasonAsync(Guid accountId, int written, CancellationToken ct)
+    {
+        if (written > 0)
+        {
+            return null;
+        }
+
+        // The schema-compat query filter applies: an artifact trained on a superseded feature schema
+        // reads as "no model", which is exactly when a Train is owed.
+        var trainedAt = await db.ModelArtifacts
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            .OrderByDescending(a => a.Version)
+            .Select(a => (DateTime?)a.TrainedAt)
+            .FirstOrDefaultAsync(ct);
+        if (trainedAt is not { } since)
+        {
+            return null;
+        }
+
+        var newLabels = await db.UserRatings.AnyAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, ct);
+        return newLabels ? null : "this run wrote nothing and no rating has landed since the model was trained";
+    }
+
+    /// <summary>
+    /// The open breaker extraction must wait behind, or null when it may run. Half-open reads as null
+    /// (the provider's own rule), so the run goes ahead and its first call is the probe.
+    /// </summary>
+    private ProviderBreaker? OpenExtractionBreaker() =>
+        health?.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.ExtractAttributes);
+
+    /// <summary>
+    /// One phase's outcome. <see cref="Processed"/> is the progress count (titles walked);
+    /// <see cref="Written"/> is what the model can now read that it could not before — vectors
+    /// written or replaced, attribute answers stored — and is the only number the Train chain reads.
+    /// </summary>
+    private readonly record struct PhaseResult(int Processed, int Written)
+    {
+        public static PhaseResult None => default;
     }
 
     /// <summary>
@@ -242,7 +331,7 @@ public class EnrichCatalogJobHandler(
             .ThenBy(t => t.Id);
     }
 
-    private async Task<int> EmbedAsync(
+    private async Task<PhaseResult> EmbedAsync(
         SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
     {
         // Embed those MISSING a vector, plus those whose model moved or whose metadata was refreshed
@@ -262,6 +351,7 @@ public class EnrichCatalogJobHandler(
             .ToListAsync(ct);
         var total = titles.Count;
         var processed = 0;
+        var written = 0;
 
         foreach (var batch in titles.Chunk(EmbedBatch))
         {
@@ -335,6 +425,8 @@ public class EnrichCatalogJobHandler(
                         row.CreatedAt = DateTime.UtcNow;
                     }
                 }
+
+                written += stale.Count;
             }
 
             processed += batch.Length;
@@ -342,17 +434,19 @@ public class EnrichCatalogJobHandler(
             // Same text on the poll (ProgressMessage) and the live SSE event so the pill never
             // flickers between two phrasings.
             job.ProgressMessage = $"Learning plots · {processed}/{total}";
-            await db.SaveChangesAsync(ct);
+            // Not cancellable: these vectors are already paid for, and a deadline landing between the
+            // provider's answer and this write would otherwise throw them away.
+            await db.SaveChangesAsync(CancellationToken.None);
 
             Publish(accountId, job);
         }
 
         // processed, not total: a run that stopped at a daily ceiling must not report the work it
         // selected as work it did.
-        return processed;
+        return new PhaseResult(processed, written);
     }
 
-    private async Task<int> ExtractAsync(
+    private async Task<PhaseResult> ExtractAsync(
         SyncJob job, Guid? accountId, IQueryable<Title> hydrated, int cap, CancellationToken ct)
     {
         var modelId = extractor.ModelId;
@@ -378,6 +472,20 @@ public class EnrichCatalogJobHandler(
         {
             if (ct.IsCancellationRequested)
             {
+                break;
+            }
+
+            // Behind an open breaker every call is refused before it is sent, and the plain extractor
+            // reports a refusal as "no answer" — which would charge an attempt to every title in every
+            // remaining batch. Pause instead; the titles keep their budgets and their place.
+            if (OpenExtractionBreaker() is { } open)
+            {
+                logger.LogInformation(
+                    "Attribute extraction paused behind the open {Provider} breaker ({Reason}) after {Processed}/{Total} title(s); nothing charged.",
+                    open.Provider, open.ReasonCode, processed, total);
+                job.ProgressMessage = $"Reading the mood · paused: {ProviderBreakerReasons.Describe(open.ReasonCode)}";
+                tally.PausedByBreaker = true;
+                await db.SaveChangesAsync(ct);
                 break;
             }
 
@@ -426,7 +534,9 @@ public class EnrichCatalogJobHandler(
             processed += batch.Length;
             job.ProgressPct = total == 0 ? 100 : Math.Round(50m + (50m * processed / total), 1);
             job.ProgressMessage = $"Reading the mood · {processed}/{total}";
-            await db.SaveChangesAsync(ct);
+            // Not cancellable, like the batch's own writes: an early stop returns at the loop's next
+            // checkpoint with its progress recorded, rather than throwing here.
+            await db.SaveChangesAsync(CancellationToken.None);
 
             Publish(accountId, job);
         }
@@ -436,12 +546,13 @@ public class EnrichCatalogJobHandler(
         logger.LogInformation(
             "Attribute extraction for {AccountId} with {Model} v{Version}: {Done} answered, {Transport} transport failure(s) "
             + "(backed off, not charged), {Parse} parse failure(s), {Unclassified} unclassified failure(s), "
-            + "{Skipped} skipped as claimed by another run.",
-            accountId, modelId, version, tally.Done, tally.Transport, tally.Parse, tally.Unclassified, tally.SkippedClaimed);
+            + "{Skipped} skipped as claimed by another run; paused behind the provider breaker: {Paused}.",
+            accountId, modelId, version, tally.Done, tally.Transport, tally.Parse, tally.Unclassified, tally.SkippedClaimed,
+            tally.PausedByBreaker);
 
         // processed, not total: a run that stopped at a daily ceiling must not report the work it
         // selected as work it did.
-        return processed;
+        return new PhaseResult(processed, tally.Done);
     }
 
     /// <summary>
@@ -570,10 +681,31 @@ public class EnrichCatalogJobHandler(
             wholeBatchTransport = true;
         }
 
+        // The breaker opened during this batch: a call was refused with 401, 402 or 403, and the
+        // calls after it were refused before being sent. An extractor that cannot say why a title
+        // failed reports each of those as a bare "no answer", which would be charged as a parse
+        // failure. The refusal is the key's or the credit's, not the title's, so an unexplained
+        // no-answer in this batch is booked as transport — backed off by time, never charged. A
+        // failure the extractor DID classify keeps its class.
+        if (!wholeBatchTransport
+            && OpenExtractionBreaker() is not null
+            && outcomes.Any(o => o.Failure == AttributeFailureClass.Unclassified))
+        {
+            outcomes = outcomes
+                .Select(o => o.Failure == AttributeFailureClass.Unclassified
+                    ? AttributeExtractionOutcome.Failed(AttributeFailureClass.Transport)
+                    : o)
+                .ToList();
+        }
+
+        // From here on nothing is cancellable: the answers above are already paid for, and a
+        // deadline landing between the model's reply and these writes would otherwise discard them.
+        // The work left is a handful of bounded statements on rows this run holds claims on.
+        var persist = CancellationToken.None;
         var batchIds = work.Select(b => b.Id).ToList();
         var rows = await db.TitleAttributes
             .Where(a => batchIds.Contains(a.TitleId))
-            .ToDictionaryAsync(a => a.TitleId, ct);
+            .ToDictionaryAsync(a => a.TitleId, persist);
         var now = DateTime.UtcNow;
 
         for (var i = 0; i < work.Count; i++)
@@ -620,10 +752,10 @@ public class EnrichCatalogJobHandler(
                 continue;
             }
 
-            await WriteFailureAsync(row, outcome.Failure, attempts, modelId, version, question, now, tally, ct);
+            await WriteFailureAsync(row, outcome.Failure, attempts, modelId, version, question, now, tally, persist);
         }
 
-        await db.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(persist);
         return wholeBatchTransport;
     }
 
@@ -771,6 +903,8 @@ public class EnrichCatalogJobHandler(
         public int Unclassified { get; set; }
 
         public int SkippedClaimed { get; set; }
+
+        public bool PausedByBreaker { get; set; }
     }
 
     /// <summary>Progress SSE, skipped for a global run — there is no account subscribed to it.</summary>
