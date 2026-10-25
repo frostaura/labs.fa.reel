@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import ConditionsEditor from "./ConditionsEditor";
+import { pinFailureText } from "./saveOutcome";
 
 /**
  * Content preferences on the Settings screen: the shared {@link ConditionsEditor} plus the PIN that
@@ -47,7 +48,7 @@ export default function PreferencesSection() {
 
   const [removeOpen, setRemoveOpen] = useState(false);
   const [removePinEntry, setRemovePinEntry] = useState("");
-  const [removeError, setRemoveError] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   const pinConfigured = session?.pinConfigured ?? false;
   const locked = pinConfigured && unlock === null;
@@ -69,8 +70,10 @@ export default function PreferencesSection() {
       // The current PIN comes from the box the user just typed into — deliberately never from
       // the unlock store, which no longer holds the raw PIN at all.
       await setPinMutation({ pin: newPin, currentPin: pinConfigured ? currentPin : undefined }).unwrap();
-    } catch {
-      setPinError(pinConfigured ? "Wrong current PIN." : "Could not set the PIN.");
+    } catch (error: unknown) {
+      // A 423 is the wrong current PIN; a 400 is the server's rule; anything else is a failed
+      // request — which used to read "Wrong current PIN." too, on a 500 or a dropped connection.
+      setPinError(pinFailureText(error, "Wrong current PIN — nothing changed."));
       return;
     }
     // Hold the unlock through the change: `pinConfigured` flips true on the session refetch, and
@@ -88,15 +91,15 @@ export default function PreferencesSection() {
   const confirmRemove = async () => {
     try {
       await removePin({ pin: removePinEntry }).unwrap();
-    } catch {
-      setRemoveError(true);
+    } catch (error: unknown) {
+      setRemoveError(pinFailureText(error, "Wrong PIN — it's still set."));
       return;
     }
     // Nothing is locked any more, so a lingering unlock token is just stale state — drop it.
     clearUnlockToken();
     setRemoveOpen(false);
     setRemovePinEntry("");
-    setRemoveError(false);
+    setRemoveError(null);
     setFlash("PIN removed.");
     window.setTimeout(() => setFlash(null), 2000);
   };
@@ -153,10 +156,11 @@ export default function PreferencesSection() {
               value={newPin}
               onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ""))}
               placeholder={pinConfigured ? "new PIN" : "set PIN"}
+              data-testid="new-pin-input"
               aria-label={pinConfigured ? "New settings PIN" : "Set a settings PIN"}
               className="fa-input w-28 tabular-nums"
             />
-            <button onClick={submitPin} className="fa-button">
+            <button onClick={submitPin} className="fa-button" data-testid="pin-submit">
               {pinConfigured ? "Change PIN" : "Set PIN"}
             </button>
             {pinConfigured && (
@@ -168,7 +172,11 @@ export default function PreferencesSection() {
               </button>
             )}
             {flash && <span className="fa-caption text-fa-success">{flash}</span>}
-            {pinError && <span className="fa-caption text-fa-danger">{pinError}</span>}
+            {pinError && (
+              <span role="alert" className="fa-caption text-fa-danger" data-testid="pin-error">
+                {pinError}
+              </span>
+            )}
           </div>
         </section>
       )}
@@ -181,7 +189,7 @@ export default function PreferencesSection() {
           setRemoveOpen(open);
           if (!open) {
             setRemovePinEntry("");
-            setRemoveError(false);
+            setRemoveError(null);
           }
         }}
       >
@@ -205,7 +213,11 @@ export default function PreferencesSection() {
               className="fa-input w-28 tabular-nums"
               data-testid="remove-pin-input"
             />
-            {removeError && <p className="fa-caption text-fa-danger">Wrong PIN</p>}
+            {removeError && (
+              <p role="alert" className="fa-caption text-fa-danger" data-testid="remove-pin-error">
+                {removeError}
+              </p>
+            )}
           </div>
           <DialogFooter>
             <button onClick={() => setRemoveOpen(false)} className="fa-button-ghost">

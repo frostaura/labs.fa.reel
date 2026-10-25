@@ -5,6 +5,9 @@ import {
   useRegenerateNarrativeMutation,
   useSaveNarrativeMutation,
 } from "../../store/api";
+import LoadFailed from "../settings/LoadFailed";
+import SaveStatus from "../settings/SaveStatus";
+import { saveFailureMessage, type SaveMessage } from "../settings/saveOutcome";
 
 /**
  * What Reel believes about your taste, in words — and your correction to it.
@@ -18,7 +21,7 @@ import {
  * everywhere and survives every rewrite except the one you ask for.
  */
 export default function TasteNarrativePanel() {
-  const { data, isLoading } = useGetNarrativeQuery(undefined, {
+  const { data, isLoading, isError, isFetching, refetch } = useGetNarrativeQuery(undefined, {
     // While a rewrite is queued, poll so the new text arrives without a reload. Stops on its own
     // the moment the job clears.
     pollingInterval: 4000,
@@ -29,6 +32,22 @@ export default function TasteNarrativePanel() {
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  // A failed save or revert keeps the editor open with the user's words in it, and says so. Both
+  // used to close the editor whatever happened, so a correction that never saved was simply lost.
+  const [saveFailure, setSaveFailure] = useState<{ message: SaveMessage; retry: () => void } | null>(null);
+
+  const commit = async (text: string | null) => {
+    setSaveFailure(null);
+    try {
+      await save({ text }).unwrap();
+      setEditing(false);
+    } catch (error: unknown) {
+      const message = saveFailureMessage(error);
+      const what = text === null ? "Couldn't go back to Reel's version" : "Couldn't save your words";
+      const why = message.kind === "rejected" ? `: ${message.text}` : " — nothing changed.";
+      setSaveFailure({ message: { ...message, text: `${what}${why}` }, retry: () => void commit(text) });
+    }
+  };
 
   // Adopt the server's text whenever we are not mid-edit. Guarded on `editing` so a poll landing
   // while the user is typing cannot overwrite what they are writing. Derived during render rather
@@ -42,6 +61,20 @@ export default function TasteNarrativePanel() {
 
   if (isLoading) {
     return <div className="fa-card h-40 reel-shimmer" data-testid="narrative-loading" />;
+  }
+
+  // A failed read is not "no writer configured": without this branch the panel below told a user
+  // whose request merely failed that Reel has no language model.
+  if (isError && !data) {
+    return (
+      <LoadFailed
+        what="what Reel believes about your taste"
+        onRetry={() => void refetch()}
+        retrying={isFetching}
+        variant="inline"
+        testId="narrative-error"
+      />
+    );
   }
 
   // No narrative yet, and no writer configured to produce one. Say so plainly rather than showing
@@ -132,10 +165,7 @@ export default function TasteNarrativePanel() {
               type="button"
               disabled={saving}
               data-testid="narrative-save"
-              onClick={async () => {
-                await save({ text: draft }).unwrap().catch(() => undefined);
-                setEditing(false);
-              }}
+              onClick={() => void commit(draft)}
               className="fa-button border-fa-frost/40 text-fa-frost disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save"}
@@ -145,6 +175,7 @@ export default function TasteNarrativePanel() {
               data-testid="narrative-cancel"
               onClick={() => {
                 setDraft(data.text ?? "");
+                setSaveFailure(null);
                 setEditing(false);
               }}
               className="fa-button-ghost"
@@ -156,16 +187,14 @@ export default function TasteNarrativePanel() {
                 type="button"
                 data-testid="narrative-revert"
                 title="Drop your edits and go back to what Reel wrote"
-                onClick={async () => {
-                  await save({ text: null }).unwrap().catch(() => undefined);
-                  setEditing(false);
-                }}
+                onClick={() => void commit(null)}
                 className="fa-button-ghost inline-flex items-center gap-2"
               >
                 <Undo2 className="h-4 w-4" /> Revert to Reel’s version
               </button>
             )}
           </div>
+          <SaveStatus message={saveFailure?.message ?? null} onRetry={saveFailure?.retry} retrying={saving} testId="narrative-save-status" />
         </div>
       ) : (
         <p className="fa-body text-fa-frost leading-relaxed max-w-3xl" data-testid="narrative-text">

@@ -21,6 +21,7 @@ import ShareCard from "../components/dna/ShareCard";
 import DislikePanel from "../components/dna/DislikePanel";
 import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
 import TastePockets from "../components/dna/TastePockets";
+import LoadFailed from "../components/settings/LoadFailed";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
@@ -43,14 +44,35 @@ function ChartTip({ active, payload, label }: { active?: boolean; payload?: { na
 
 /** The free hook: who you are, in data. Built screenshot-clean — this page is the viral loop. */
 export default function TasteDna() {
-  const { data } = useGetTasteDnaQuery();
+  const { currentData: data, isError, isFetching, refetch } = useGetTasteDnaQuery();
   const { data: session } = useGetSessionQuery();
   const templateRef = useRef<HTMLDivElement>(null);
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
 
+  // Three states before the page, never two: a failed read used to shimmer for ever, which reads as
+  // "still thinking" to someone who will wait for it.
   if (!data) {
-    return <div className="h-72 rounded-2xl reel-shimmer" />;
+    if (isError) {
+      return <LoadFailed what="your taste DNA" onRetry={() => void refetch()} retrying={isFetching} testId="dna-error" />;
+    }
+    return <div className="h-72 rounded-2xl reel-shimmer" data-testid="dna-loading" />;
+  }
+
+  // Nothing rated yet: every chart below would be an empty frame. The one useful thing to say is
+  // where the ratings come from.
+  if (data.ratingsCount === 0) {
+    return (
+      <section className="fa-card px-6 py-8 text-center space-y-3" data-testid="dna-empty">
+        <h1 className="text-2xl font-light text-fa-frost-bright">Your taste DNA</h1>
+        <p className="fa-body text-fa-frost">
+          Nothing to read yet — your taste DNA is built from the titles you&apos;ve rated, and there are none so far.
+        </p>
+        <Link to="/rate" className="fa-button-primary inline-flex" data-testid="dna-empty-rate">
+          Rate a few titles
+        </Link>
+      </section>
+    );
   }
 
   const driftData = data.drift.map((d) => ({ year: d.year, ...d.shares }));

@@ -136,4 +136,109 @@ test.describe("rate picker", () => {
     await expect(page.getByTestId("rate-card")).toHaveCount(1);
     await expect(page.getByTestId("retrain-progress")).toHaveCount(0);
   });
+
+  test("a failed read is an error with a Retry, never an empty grid", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", SYNC(null));
+    let fail = true;
+    await page.route(
+      (u) => u.pathname === "/api/titles/rate-suggestions",
+      (route) =>
+        fail
+          ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([suggestion(1, "watched")]) })
+    );
+    await page.goto("/rate");
+
+    await expect(page.getByTestId("rate-error")).toBeVisible();
+    await expect(page.getByTestId("rate-error")).toContainText("Couldn't load titles to rate");
+    await expect(page.getByTestId("rate-empty")).toHaveCount(0);
+    await expect(page.getByTestId("rate-loading")).toHaveCount(0);
+
+    fail = false;
+    await page.getByTestId("rate-error-retry").click();
+    await expect(page.getByTestId("rate-card")).toHaveCount(1);
+    await expect(page.getByTestId("rate-error")).toHaveCount(0);
+  });
+
+  test("a truly empty pool says so, distinct from a failure", async ({ page }) => {
+    await bootRate(page, []);
+    await expect(page.getByTestId("rate-empty")).toBeVisible();
+    await expect(page.getByTestId("rate-error")).toHaveCount(0);
+    await expect(page.getByTestId("rate-card")).toHaveCount(0);
+  });
+
+  test("while the read is in flight it shows a skeleton, not an empty page", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", SYNC(null));
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await page.route(
+      (u) => u.pathname === "/api/titles/rate-suggestions",
+      async (route) => {
+        await gate;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([suggestion(1, "watched")]) });
+      }
+    );
+    await page.goto("/rate");
+    await expect(page.getByTestId("rate-loading")).toBeVisible();
+    await expect(page.getByTestId("rate-empty")).toHaveCount(0);
+    release();
+    await expect(page.getByTestId("rate-card")).toHaveCount(1);
+  });
+
+  for (const status of [500, 400, 0]) {
+    test(`a rating that fails (${status === 0 ? "network drop" : status}) puts the card back and leaves the retrain counter alone`, async ({ page }) => {
+      await bootRate(page, [suggestion(1, "watched"), suggestion(2, "watched")]);
+      await expect(page.getByTestId("retrain-progress")).toHaveText("7 more ratings and Reel retrains tonight.");
+
+      await page.route(/\/api\/titles\/[Mm]ovie\/2001\/rating$/, (route) =>
+        status === 0
+          ? route.abort("connectionreset")
+          : route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ error: "nope" }) })
+      );
+
+      await page.getByTestId("rate-card").filter({ hasText: "Seen 1" }).click();
+      await page.getByTestId("rate-value").nth(7).click();
+
+      // Only a refusal (4xx) is known not to have landed; a 500 or a drop may have saved it.
+      if (status === 400) {
+        await expect(page.getByTestId("rate-failure-text")).toHaveText("Couldn't save your 8 for Seen 1 — it's back in the grid. Nothing was rated.");
+      } else {
+        await expect(page.getByTestId("rate-failure-text")).toHaveText(
+          "Couldn't confirm your 8 for Seen 1 — it may not have saved, so it's back in the grid. Rate it again."
+        );
+        await expect(page.getByTestId("rate-failure")).not.toContainText("Nothing was rated");
+      }
+      // The card is back, the counter never moved, and nothing claims a rating was made.
+      await expect(page.getByTestId("rate-card")).toHaveCount(2);
+      await expect(page.getByTestId("retrain-progress")).toHaveText("7 more ratings and Reel retrains tonight.");
+      await expect(page.getByTestId("rate-session-count")).toHaveCount(0);
+    });
+  }
+
+  test("a failure, then a success on the same card: only the success counts", async ({ page }) => {
+    await bootRate(page, [suggestion(1, "watched"), suggestion(2, "watched")]);
+    let fail = true;
+    await page.route(/\/api\/titles\/[Mm]ovie\/2001\/rating$/, (route) =>
+      fail
+        ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+        : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userRating: 8 }) })
+    );
+
+    await page.getByTestId("rate-card").filter({ hasText: "Seen 1" }).click();
+    await page.getByTestId("rate-value").nth(7).click();
+    await expect(page.getByTestId("rate-failure")).toBeVisible();
+
+    fail = false;
+    await page.getByTestId("rate-card").filter({ hasText: "Seen 1" }).click();
+    await page.getByTestId("rate-value").nth(7).click();
+
+    await expect(page.getByTestId("rate-failure")).toHaveCount(0);
+    await expect(page.getByTestId("rate-card")).toHaveCount(1);
+    await expect(page.getByTestId("retrain-progress")).toHaveText("6 more ratings and Reel retrains tonight.");
+    await expect(page.getByTestId("rate-session-count")).toHaveText("1 rated in this session");
+  });
 });

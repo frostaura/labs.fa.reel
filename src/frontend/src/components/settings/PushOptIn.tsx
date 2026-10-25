@@ -18,6 +18,9 @@ type PushState = "checking" | "unsupported" | "off" | "on" | "denied" | "busy";
 /** Settings card: opt in/out of the Friday weekly-digest Web Push notification. */
 export default function PushOptIn() {
   const [state, setState] = useState<PushState>("checking");
+  // Why the last toggle did not take, said under the button. A failed enable used to drop silently
+  // back to "Turn on", which reads exactly like never having tapped it.
+  const [failure, setFailure] = useState<string | null>(null);
   const [fetchVapidKey] = useLazyGetVapidPublicKeyQuery();
   const [subscribePush] = useSubscribePushMutation();
   const [unsubscribePush] = useUnsubscribePushMutation();
@@ -52,6 +55,7 @@ export default function PushOptIn() {
   }
 
   const enable = async () => {
+    setFailure(null);
     setState("busy");
     try {
       const permission = await Notification.requestPermission();
@@ -72,11 +76,13 @@ export default function PushOptIn() {
       }).unwrap();
       setState("on");
     } catch {
+      setFailure("Couldn't turn notifications on — they're still off. Try again in a moment.");
       setState("off");
     }
   };
 
   const disable = async () => {
+    setFailure(null);
     setState("busy");
     try {
       const registration = await navigator.serviceWorker.getRegistration();
@@ -91,6 +97,7 @@ export default function PushOptIn() {
       }
       setState("off");
     } catch {
+      setFailure("Couldn't turn notifications off — they're still on. Try again in a moment.");
       setState("on");
     }
   };
@@ -123,6 +130,11 @@ export default function PushOptIn() {
             </>
           )}
         </button>
+      )}
+      {failure && (
+        <p role="alert" className="fa-caption text-fa-danger" data-testid="push-failure">
+          {failure}
+        </p>
       )}
     </section>
   );

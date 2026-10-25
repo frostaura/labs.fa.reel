@@ -152,6 +152,56 @@ test.describe("taste narrative", () => {
     expect(state.puts.join()).toContain("null");
   });
 
+  test("a failed save keeps the editor open with the words, says so, and Retry saves them", async ({ page }) => {
+    await bootDna(page);
+    const puts: string[] = [];
+    let fail = true;
+    await page.route(
+      (u: URL) => u.pathname === "/api/taste/narrative",
+      (route) => {
+        if (route.request().method() !== "PUT") return route.fallback();
+        puts.push(route.request().postData() ?? "");
+        return fail
+          ? route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+          : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...NARRATIVE, text: "Heists only.", isEdited: true }) });
+      },
+    );
+
+    await page.getByTestId("narrative-edit").click();
+    await page.getByTestId("narrative-editor").fill("Heists only.");
+    await page.getByTestId("narrative-save").click();
+
+    const status = page.getByTestId("narrative-save-status");
+    await expect(status).toContainText("Couldn't save your words — nothing changed.");
+    await expect(status).toHaveAttribute("data-tone", "danger");
+    // The correction is not lost: the editor is still open with it.
+    await expect(page.getByTestId("narrative-editor")).toHaveValue("Heists only.");
+
+    fail = false;
+    await page.getByTestId("narrative-save-status-retry").click();
+    await expect(page.getByTestId("narrative-editor")).toHaveCount(0);
+    await expect(page.getByTestId("narrative-save-status")).toHaveCount(0);
+    expect(puts).toHaveLength(2);
+    expect(puts[1]).toContain("Heists only.");
+  });
+
+  test("a failed revert keeps the editor open and says so", async ({ page }) => {
+    const edited = { ...NARRATIVE, isEdited: true, text: "You only watch heists." };
+    await bootDna(page, edited);
+    await page.route(
+      (u: URL) => u.pathname === "/api/taste/narrative",
+      (route) =>
+        route.request().method() === "PUT"
+          ? route.fulfill({ status: 503, contentType: "application/json", body: "{}" })
+          : route.fallback(),
+    );
+
+    await page.getByTestId("narrative-edit").click();
+    await page.getByTestId("narrative-revert").click();
+    await expect(page.getByTestId("narrative-save-status")).toContainText("Couldn't go back to Reel's version — nothing changed.");
+    await expect(page.getByTestId("narrative-editor")).toBeVisible();
+  });
+
   test("regenerate queues a rewrite and warns that it clears the edit", async ({ page }) => {
     await bootDna(page);
 

@@ -179,6 +179,33 @@ export function normalizeFilters(raw: FiltersLike): FiltersPayload {
 }
 
 /**
+ * Whether two rule sets mean the same thing — what decides that the editor's draft is "unsaved".
+ * Order is not meaning: toggling a genre on and off again, or adding two keywords in the other
+ * order, must not leave a draft flagged dirty that would save byte-identical rules. Both sides are
+ * normalised first, so a server payload that predates the crowd/year fields compares equal to the
+ * draft seeded from it.
+ */
+export function sameConditions(a: FiltersLike, b: FiltersLike): boolean {
+  return conditionsKey(a) === conditionsKey(b);
+}
+
+function conditionsKey(raw: FiltersLike): string {
+  const f = normalizeFilters(raw);
+  const set = (values: string[]) => [...new Set(values)].sort();
+  return JSON.stringify([
+    set(f.excludeGenres),
+    set(f.includeGenres),
+    set(f.excludeKeywords),
+    f.maturityCeiling,
+    f.minPredictedRating,
+    set(f.languages),
+    f.minCrowdRating,
+    f.minYear,
+    f.maxYear,
+  ]);
+}
+
+/**
  * A filters payload as it may actually arrive: complete, partial (a server that predates the
  * crowd-rating and year fields), or absent entirely while the query is in flight.
  */

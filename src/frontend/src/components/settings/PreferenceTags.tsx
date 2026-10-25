@@ -5,6 +5,8 @@ import {
   useGetPreferenceTagsQuery,
   useRemovePreferenceTagMutation,
 } from "../../store/api";
+import SaveStatus from "./SaveStatus";
+import { saveFailureMessage, type SaveMessage } from "./saveOutcome";
 
 /**
  * "Things you're into" — positive preference tags (e.g. "magical serial killer mysteries"). The
@@ -15,13 +17,38 @@ export default function PreferenceTags() {
   const [addTag, { isLoading: adding }] = useAddPreferenceTagMutation();
   const [removeTag] = useRemovePreferenceTagMutation();
   const [draft, setDraft] = useState("");
+  // A failed add or remove says so and stays up. The draft used to be cleared BEFORE the request
+  // and the error swallowed, so a tag that never saved simply vanished from the box.
+  const [status, setStatus] = useState<{ message: SaveMessage; retry: (() => void) | null } | null>(null);
 
-  const submit = async (e: React.FormEvent) => {
+  const add = async (text: string) => {
+    setStatus(null);
+    try {
+      await addTag(text).unwrap();
+      // Cleared only once the server has it — and only if the user has not started typing another.
+      setDraft((current) => (current.trim() === text ? "" : current));
+    } catch (error: unknown) {
+      const message = saveFailureMessage(error);
+      const why = message.kind === "rejected" ? `: ${message.text}` : " — nothing changed.";
+      setStatus({ message: { ...message, text: `Couldn't add "${text}"${why}` }, retry: () => void add(text) });
+    }
+  };
+
+  const remove = async (id: string, text: string) => {
+    setStatus(null);
+    try {
+      await removeTag(id).unwrap();
+    } catch (error: unknown) {
+      const message = saveFailureMessage(error);
+      setStatus({ message: { ...message, text: `Couldn't remove "${text}" — it's still on.` }, retry: () => void remove(id, text) });
+    }
+  };
+
+  const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = draft.trim();
     if (text.length < 2) return;
-    setDraft("");
-    await addTag(text).unwrap().catch(() => undefined);
+    void add(text);
   };
 
   return (
@@ -44,7 +71,7 @@ export default function PreferenceTags() {
             >
               {tag.text}
               <button
-                onClick={() => removeTag(tag.id)}
+                onClick={() => void remove(tag.id, tag.text)}
                 className="text-fa-frost-dim hover:text-fa-frost-bright"
                 aria-label={`Remove ${tag.text}`}
                 data-testid="remove-tag"
@@ -74,6 +101,7 @@ export default function PreferenceTags() {
           <Plus className="h-4 w-4" />
         </button>
       </form>
+      <SaveStatus message={status?.message ?? null} onRetry={status?.retry ?? undefined} retrying={adding} testId="tag-save-status" />
     </section>
   );
 }

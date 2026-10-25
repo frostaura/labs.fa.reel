@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import { Target } from "lucide-react";
+import LoadFailed from "../components/settings/LoadFailed";
 import { useGetAccuracyQuery, type AccuracyMoment } from "../store/api";
 import { posterUrl } from "../lib/tmdbImages";
 import { verdictSurface } from "../lib/verdictCopy";
@@ -103,10 +104,55 @@ function MomentCard({ moment }: { moment: AccuracyMoment }) {
  */
 export default function TrackRecord() {
   const [window_, setWindow] = useState<string>("90d");
-  const { data, isLoading } = useGetAccuracyQuery({ window: window_ });
+  // `currentData`, not `data`: `data` keeps the PREVIOUS window's payload while a new window loads
+  // or after it fails, which would print 90-day numbers under an "all time" button.
+  const { currentData: data, isError, isFetching, refetch } = useGetAccuracyQuery({ window: window_ });
 
-  if (isLoading || !data) {
-    return <div className="h-72 rounded-2xl reel-shimmer" data-testid="track-record-loading" />;
+  // The window switch stays on screen through every state: a skeleton or an error that also took
+  // the buttons away would leave no way to step back to the window that did load.
+  const header = (
+    <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
+          <Target className="h-6 w-6 text-fa-frost" /> Reel's track record
+        </h1>
+        <p className="fa-caption text-fa-frost-dim mt-1">
+          How wrong Reel has been about you, and what it is doing about it.
+        </p>
+      </div>
+      <div className="flex items-center gap-1" role="group" aria-label="Time window">
+        {WINDOWS.map((w) => (
+          <button
+            key={w.value}
+            type="button"
+            onClick={() => setWindow(w.value)}
+            aria-pressed={window_ === w.value}
+            className={`fa-caption px-3 py-1.5 rounded-md border transition ${
+              window_ === w.value
+                ? "border-fa-frost/50 bg-fa-glass-strong text-fa-frost-bright"
+                : "border-fa-edge text-fa-frost-dim hover:text-fa-frost"
+            }`}
+          >
+            {w.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  // Three states before the page. A failed read used to shimmer for ever (`isLoading || !data`
+  // stays true on an error), so "the honest number" page was the one that never admitted a failure.
+  if (!data) {
+    return (
+      <div className="space-y-6">
+        {header}
+        {isError ? (
+          <LoadFailed what="the track record" onRetry={() => void refetch()} retrying={isFetching} testId="track-record-error" />
+        ) : (
+          <div className="h-72 rounded-2xl reel-shimmer" data-testid="track-record-loading" />
+        )}
+      </div>
+    );
   }
 
   const empty = data.headline.n === 0;
@@ -121,33 +167,7 @@ export default function TrackRecord() {
 
   return (
     <div className="space-y-6" data-testid="track-record">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-2xl font-light text-fa-frost-bright flex items-center gap-2">
-            <Target className="h-6 w-6 text-fa-frost" /> Reel's track record
-          </h1>
-          <p className="fa-caption text-fa-frost-dim mt-1">
-            How wrong Reel has been about you, and what it is doing about it.
-          </p>
-        </div>
-        <div className="flex items-center gap-1" role="group" aria-label="Time window">
-          {WINDOWS.map((w) => (
-            <button
-              key={w.value}
-              type="button"
-              onClick={() => setWindow(w.value)}
-              aria-pressed={window_ === w.value}
-              className={`fa-caption px-3 py-1.5 rounded-md border transition ${
-                window_ === w.value
-                  ? "border-fa-frost/50 bg-fa-glass-strong text-fa-frost-bright"
-                  : "border-fa-edge text-fa-frost-dim hover:text-fa-frost"
-              }`}
-            >
-              {w.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {header}
 
       {/* Headline — the one sentence the page exists to say. */}
       <section className="fa-card p-5" data-testid="headline">
@@ -158,6 +178,14 @@ export default function TrackRecord() {
         <p className="fa-caption text-fa-frost-dim mt-2" data-testid="source-note">
           {sourceNote(data)}
         </p>
+        {/* The empty state's way forward. The page fills as you rate titles Reel had already scored
+            for you; /rate offers what you've watched and never rated (plus popular titles), so the
+            button says that rather than promising a list of scored titles it does not show. */}
+        {empty && (
+          <Link to="/rate" className="fa-button-primary inline-flex mt-3" data-testid="track-record-empty-rate">
+            Rate what you&apos;ve watched
+          </Link>
+        )}
 
         {!empty && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">

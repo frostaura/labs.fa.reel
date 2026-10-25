@@ -1,12 +1,42 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { useDispatch, useSelector } from "react-redux";
 import { BarChart3, CalendarRange, Clapperboard, Sparkles, Tags, UserRound } from "lucide-react";
-import { api, useGetSessionQuery, useGetSyncStatusQuery, useUpdateSettingsMutation } from "../store/api";
+import {
+  api,
+  useGetSessionQuery,
+  useGetSyncStatusQuery,
+  useStartTraktAuthMutation,
+  useTriggerSyncMutation,
+  useUpdateSettingsMutation,
+  type SyncStatus,
+} from "../store/api";
 import { useOnboardingStream } from "../lib/onboardingStream";
+import { rememberOauthState } from "../lib/traktOauth";
 import { useCountUp } from "../lib/useCountUp";
-import { pollAdvance, type IngestKind, type Insight } from "../store/onboardingSlice";
+import {
+  FIRST_MODEL_TIMING,
+  failureCopy,
+  needsReconnect,
+  pollAdvance,
+  ratingsNeededCopy,
+  retryStarted,
+  type IngestKind,
+  type Insight,
+  type StatusSnapshot,
+} from "../store/onboardingSlice";
+import { saveFailureMessage } from "../components/settings/saveOutcome";
 import type { AppDispatch, RootState } from "../store";
+
+/**
+ * The status API v2 fields this page reads. `SyncStatus` (store/api/sync.ts, WS-9's) does not
+ * declare them yet; until it does they are read as optional here, and an older backend that omits
+ * them simply never reaches the needs-ratings or awaiting-model branches.
+ */
+type StatusWithReason = SyncStatus & Omit<StatusSnapshot, "pipelineStage">;
+
+/** What the last "Try again" came to, said under the failure card. */
+type RetryNote = { kind: "refused"; text: string } | { kind: "queued" };
 
 const COUNTER_LABELS: Record<IngestKind, string> = {
   movies: "Movies",
@@ -21,7 +51,9 @@ const STAGE_COPY: Record<string, string> = {
   profiling: "Reading your taste…",
   fitting: "Teaching your model…",
   reveal: "Your taste DNA is ready.",
-  failed: "Something went wrong.",
+  needsRatings: "Almost there — Reel needs a few more of your ratings.",
+  awaitingModel: "You've rated enough — your model is next.",
+  failed: "Building your profile stopped.",
 };
 
 const INSIGHT_ICONS: Record<Insight["kind"], typeof Sparkles> = {
@@ -53,18 +85,75 @@ export default function Onboarding() {
   const onboarding = useSelector((s: RootState) => s.onboarding);
   const { data: session } = useGetSessionQuery();
   const [updateSettings] = useUpdateSettingsMutation();
+  const [triggerSync, { isLoading: retrying }] = useTriggerSyncMutation();
+  const [startTraktAuth, { isLoading: reconnecting, isError: reconnectFailed }] = useStartTraktAuthMutation();
   const [melting, setMelting] = useState(false);
+  const [retryNote, setRetryNote] = useState<RetryNote | null>(null);
+  // A note about the last retry is stale once the show has got anywhere: drop it then (derived
+  // during render, so it never paints over a later, unrelated stop). `connecting` is the restart
+  // itself, so it keeps the note.
+  if (retryNote && onboarding.stage !== "failed" && onboarding.stage !== "connecting") {
+    setRetryNote(null);
+  }
 
+  // `needsRatings` and `awaitingModel` keep the stream and the poll alive: rating enough titles
+  // elsewhere, or the nightly train, moves the show on, and the poll is what notices.
   const streaming = onboarding.stage !== "reveal" && onboarding.stage !== "failed";
-  useOnboardingStream(streaming);
+  // After an accepted "Try again" the page keeps watching even if the server still reports the stop,
+  // so the run it queued can lift the show when it gets further.
+  const watching = streaming || retryNote?.kind === "queued";
+  useOnboardingStream(watching);
 
-  // Authoritative fallback: the status poll can advance a stalled show (poll wins).
-  const { data: syncStatus } = useGetSyncStatusQuery(undefined, {
-    pollingInterval: streaming ? 15_000 : 0,
-  });
+  // Authoritative fallback: the status poll can advance a stalled show (poll wins). Keyed on the
+  // response's timestamp, not its object: RTK hands back the SAME object for an unchanged payload,
+  // and "still stopped, exactly as before" must re-apply after the show was restarted locally.
+  const {
+    data: syncStatus,
+    fulfilledTimeStamp,
+    refetch: refetchStatus,
+  } = useGetSyncStatusQuery(undefined, { pollingInterval: watching ? 15_000 : 0 });
   useEffect(() => {
-    if (syncStatus) dispatch(pollAdvance({ pipelineStage: syncStatus.pipelineStage }));
-  }, [syncStatus, dispatch]);
+    if (!syncStatus) return;
+    const status = syncStatus as StatusWithReason;
+    dispatch(
+      pollAdvance({
+        pipelineStage: status.pipelineStage,
+        degradedReason: status.degradedReason ?? null,
+        notEnoughRatings: status.notEnoughRatings ?? null,
+        lastFailures: status.lastFailures ?? null,
+      })
+    );
+  }, [syncStatus, fulfilledTimeStamp, dispatch]);
+
+  // "Try again" asks the server for a sync. Only an accepted request restarts the show — a refused
+  // one keeps the stop on screen and says so, rather than faking progress — and the restarted show
+  // is then put wherever the server's next status says it is.
+  const retry = async () => {
+    setRetryNote(null);
+    try {
+      await triggerSync().unwrap();
+    } catch (error: unknown) {
+      const reason = saveFailureMessage(error);
+      setRetryNote({
+        kind: "refused",
+        text: reason.kind === "rejected" ? `Couldn't start a sync: ${reason.text}` : "Couldn't start a sync — nothing changed. Try again in a moment.",
+      });
+      return;
+    }
+    setRetryNote({ kind: "queued" });
+    dispatch(retryStarted());
+    void refetchStatus();
+  };
+
+  const reconnect = async () => {
+    try {
+      const { authorizeUrl, state } = await startTraktAuth().unwrap();
+      rememberOauthState(state);
+      window.location.assign(authorizeUrl);
+    } catch {
+      // `reconnectFailed` renders the message below.
+    }
+  };
 
   // Prefetch the feed the moment the reveal is reachable — entry must feel instant.
   useEffect(() => {
@@ -86,9 +175,11 @@ export default function Onboarding() {
       <div className={`w-full max-w-2xl space-y-8 ${melting ? "reel-melt" : ""}`}>
         <div className="text-center space-y-2">
           <div className="text-3xl font-light tracking-wide text-fa-frost-bright">Reel</div>
+          {/* The display name, as everywhere else in the app — the slug ("deanmar09") is an
+              identifier, not a greeting. The slug is the last resort for a profile with no name. */}
           {session && (
-            <p className="fa-caption text-fa-frost-dim">
-              Hello, {onboarding.traktUser ?? session.traktSlug}
+            <p className="fa-caption text-fa-frost-dim" data-testid="onboarding-greeting">
+              Hello, {session.displayName?.trim() || onboarding.traktUser || session.traktSlug}
             </p>
           )}
           <p className="fa-body text-fa-frost" data-testid="stage-copy">
@@ -153,12 +244,65 @@ export default function Onboarding() {
           </div>
         )}
 
+        {onboarding.stage === "needsRatings" && (
+          <div className="fa-card border-fa-frost/30 px-6 py-5 text-center space-y-3 reel-rise" data-testid="needs-ratings">
+            <p className="fa-body text-fa-frost-bright" data-testid="needs-ratings-copy">
+              {ratingsNeededCopy(onboarding.ratingsFloor)}
+            </p>
+            <p className="fa-caption text-fa-frost-dim">
+              Your model learns from what you&apos;ve rated, and titles you&apos;ve watched and never scored are the
+              quickest to rate. Once there are enough, {FIRST_MODEL_TIMING} — this page moves on by
+              itself when it&apos;s ready.
+            </p>
+            <Link to="/rate" className="fa-button-primary inline-flex" data-testid="needs-ratings-rate">
+              Rate a few titles
+            </Link>
+          </div>
+        )}
+
+        {onboarding.stage === "awaitingModel" && (
+          <div className="fa-card border-fa-frost/30 px-6 py-5 text-center space-y-3 reel-rise" data-testid="awaiting-model">
+            <p className="fa-body text-fa-frost-bright" data-testid="awaiting-model-copy">
+              {FIRST_MODEL_TIMING}.
+            </p>
+            <p className="fa-caption text-fa-frost-dim">
+              Nothing to do but wait — this page moves on by itself when the model is ready, so you can close it and
+              come back. More ratings make the first model sharper.
+            </p>
+            <Link to="/rate" className="fa-button inline-flex" data-testid="awaiting-model-rate">
+              Rate more while you wait
+            </Link>
+          </div>
+        )}
+
         {onboarding.stage === "failed" && (
-          <div className="fa-card border-fa-danger/40 px-6 py-4 text-center space-y-3">
-            <p className="fa-body text-fa-danger">{onboarding.error}</p>
-            <button onClick={() => window.location.reload()} className="fa-button">
-              Retry sync
-            </button>
+          <div role="alert" className="fa-card border-fa-danger/40 px-6 py-4 text-center space-y-3" data-testid="onboarding-failed">
+            <p className="fa-body text-fa-danger" data-testid="onboarding-failed-reason">
+              {failureCopy(onboarding.degradedReason, onboarding.error)}
+            </p>
+            {needsReconnect(onboarding.degradedReason) ? (
+              <button onClick={reconnect} disabled={reconnecting} className="fa-button-primary" data-testid="onboarding-reconnect">
+                {reconnecting ? "Opening Trakt…" : "Reconnect Trakt"}
+              </button>
+            ) : (
+              <button onClick={retry} disabled={retrying} className="fa-button" data-testid="onboarding-retry">
+                {retrying ? "Starting…" : "Try again"}
+              </button>
+            )}
+            {reconnectFailed && (
+              <p className="fa-caption text-fa-danger">Couldn&apos;t reach Trakt. Try again in a moment.</p>
+            )}
+            {retryNote?.kind === "refused" && (
+              <p className="fa-caption text-fa-danger" data-testid="onboarding-retry-refused">
+                {retryNote.text}
+              </p>
+            )}
+            {retryNote?.kind === "queued" && (
+              <p className="fa-caption text-fa-frost-dim" data-testid="onboarding-retry-queued">
+                Reel queued a fresh sync, but the server still reports this stop. Nothing is lost — this page moves on
+                by itself if the sync gets further.
+              </p>
+            )}
           </div>
         )}
       </div>
