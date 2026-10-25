@@ -70,7 +70,9 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
-    host: "0.0.0.0",
+    // Loopback by default (WS-8 J-1): a LAN request through this proxy would otherwise reach the
+    // API's loopback-only dev surface. VITE_HOST=0.0.0.0 is the explicit phone-QA opt-in.
+    host: process.env.VITE_HOST ?? "127.0.0.1",
     watch: { usePolling: true, interval: 500 },
     proxy: {
       "/api": {
@@ -79,11 +81,15 @@ export default defineConfig({
         // backend's 127.0.0.1 bind. 5054 = the API's launchSettings port, so a bare `npm run dev`
         // just works. Override with VITE_API_TARGET for non-local backends.
         target: process.env.VITE_API_TARGET ?? "http://127.0.0.1:5054",
-        changeOrigin: true
+        changeOrigin: true,
+        // Records the browser's address in X-Forwarded-For so the API's LoopbackGuard can see a
+        // LAN caller behind this proxy. A security setting, not a convenience (make ci-vite-proxy).
+        xfwd: true
       },
       "/sse": {
         target: process.env.VITE_API_TARGET ?? "http://127.0.0.1:5054",
-        changeOrigin: true
+        changeOrigin: true,
+        xfwd: true
       }
     }
   },

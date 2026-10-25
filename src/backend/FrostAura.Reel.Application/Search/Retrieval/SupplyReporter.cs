@@ -156,7 +156,7 @@ public sealed class SupplyReporter(IReelDbContext db, EligibilityQueryBuilder el
     /// active artifact is unscored even if an older artifact once scored it — the number a card would
     /// show comes from the active model, and a stale one would put a title on the wrong side of the
     /// bar. The bar is compared at badge precision (one decimal, away from zero), as
-    /// <see cref="AskReelFloor"/> compares it, so "N under your 6.0 bar" is true of the badges.
+    /// <see cref="AskReel.AskReelGate.Clears"/> compares it, so "N under your 6.0 bar" is true of the badges.
     /// </summary>
     private async Task<(int BelowFloor, int Unscored)> SplitByScoreAsync(
         Guid accountId, IReadOnlySet<Guid> eligibleIds, decimal? floor, CancellationToken ct)

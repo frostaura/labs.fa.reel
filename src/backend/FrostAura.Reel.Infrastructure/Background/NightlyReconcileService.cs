@@ -417,9 +417,10 @@ public sealed class NightlyReconcileService(
 
             var now = DateTime.UtcNow;
             var enqueued = 0;
+            var enrichmentBudget = scope.ServiceProvider.GetRequiredService<CatalogEnrichmentBudget>();
             foreach (var accountId in accountIds)
             {
-                if (await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct))
+                if (await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct, enrichmentBudget))
                 {
                     enqueued++;
                 }

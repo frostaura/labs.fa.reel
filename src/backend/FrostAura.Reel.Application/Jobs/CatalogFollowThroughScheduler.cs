@@ -31,7 +31,7 @@ public sealed record CatalogFollowThrough(
 /// <b>Drain before you buy.</b> The global hydration job runs at
 /// <see cref="EnrichmentScheduler.Priority"/> — the same rung as enrichment and ABOVE the seed's own
 /// priority 4 — because finishing supply already acquired is worth more than acquiring more of it.
-/// The seed still makes progress: the runner has four worker slots and hydration is bounded by a
+/// The seed still makes progress: the runner has three general worker slots (plus two reserved) and hydration is bounded by a
 /// daily ceiling it reaches long before the day ends.
 /// </para>
 ///

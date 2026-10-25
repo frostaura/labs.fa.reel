@@ -82,7 +82,7 @@ public class SyncStatusContractTests(PostgresFixture fixture, ReelApiFactory api
             Assert.Equal(3, active.GetProperty("maxAttempts").GetInt32());
 
             var health = root.GetProperty("providerHealth");
-            Assert.Equal("Unmonitored", health.GetProperty("state").GetString());
+            Assert.Equal("Healthy", health.GetProperty("state").GetString());
             Assert.Equal(0, health.GetProperty("breakers").GetArrayLength());
         }
     }

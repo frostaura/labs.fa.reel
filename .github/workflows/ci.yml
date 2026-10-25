@@ -47,6 +47,11 @@ jobs:
       - name: Unit tests + coverage ratchet
         run: make ci-test
 
+      - name: Setup Node.js (replay suite)
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
       - name: Ask Reel replay suite (recorded plans and verdicts, zero paid calls)
         run: make ci-replay
 

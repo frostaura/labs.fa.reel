@@ -121,11 +121,12 @@ ci-integration:
 	REEL_REQUIRE_INTEGRATION=1 sh deploy/ci/require-tests.sh \
 		$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "FullyQualifiedName~IntegrationTests"
 
-# WS-7's deterministic Ask Reel replay suite: recorded plans and verdicts, zero paid calls. Its
-# tests carry [Trait("Suite", "Replay")]. Red until that suite exists — by design.
+# WS-7's deterministic Ask Reel replay suite: the scorer, compare and guard tests over the
+# committed recordings, plus the open scenario set's structural check. Node only — no database,
+# no API and zero paid calls (about a second).
 ci-replay:
-	sh deploy/ci/require-tests.sh \
-		$(DOTNET) test $(TEST_PROJECT) --nologo -v q --filter "Suite=Replay"
+	node --test 'scripts/eval/*.test.mjs'
+	node scripts/eval/askreel.mjs check
 
 # The OpenAPI contract: regenerate the document from the build (no running API) into a scratch
 # directory and compare it, and the TypeScript generated from it, with what is committed. A diff

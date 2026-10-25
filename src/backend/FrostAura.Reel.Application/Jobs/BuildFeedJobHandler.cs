@@ -74,7 +74,11 @@ public class BuildFeedJobHandler(
     // Optional on exactly the same terms as the scheduler above. A null reader means every factor
     // is 1.0, which is the feed as it ordered before any of this existed — the documented fallback
     // for a provider outage, an empty verdict table and a hand-built test handler alike.
-    CrossReference.CrossReferenceFactors? crossReferenceFactors = null) : IJobHandler
+    CrossReference.CrossReferenceFactors? crossReferenceFactors = null,
+    // Optional on the same terms: a null budget means the enrichment enqueue is not gated on
+    // today's extraction spend, which is what the hand-built test handlers were written against.
+    // DI always supplies it (WS-4 CR-3: the enqueue gate is only complete when every caller passes it).
+    CatalogEnrichmentBudget? enrichmentBudget = null) : IJobHandler
 {
     // First-pass pool is now a hybrid union (~1200): a popularity coverage slice plus a personalized
     // ANN slice, deduped. The old pure-popularity pool never scored a title the user would love that
@@ -391,15 +395,13 @@ public class BuildFeedJobHandler(
         // the enqueue with the snapshot would starve enrichment precisely on the quiet nights.
         if (poolRefresh.NewlyUpserted > 0)
         {
-            await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct);
+            await EnrichmentScheduler.EnqueueAsync(db, accountId, now, ct, enrichmentBudget);
         }
 
-        // Cross-reference is enqueued on BOTH exits, unlike the narrative below. A Preserve build
-        // means the PAGE did not move, not that the pool did not: catalogue sweeps and enrichment
-        // add eligible, scored, embedded titles all day, and suppressing this with the snapshot
-        // would starve the pass on exactly the quiet days it exists to work through. Its own three
-        // brakes — nothing in flight, headroom left today, and something genuinely unjudged at this
-        // fingerprint — decide whether anything is actually queued.
+        // Cross-reference is offered here on every exit, but the scheduler queues a pass only from
+        // a Fresh build (WS-1 trust-v1): its own brakes — nothing in flight, a batch's worth of
+        // headroom left today, and something genuinely unjudged at this fingerprint — decide
+        // whether anything is actually queued.
         await EnqueueCrossReferenceIfWorkPendingAsync(accountId, profileHash, job.TriggerReason, now, ct);
 
         if (snapshot is null)

@@ -234,8 +234,9 @@ public static class TitleEndpoints
                 status = title.Status,
                 traktRating = title.TraktRating,
                 traktVotes = title.TraktVotes,
-                // The card-consistent community number (TMDB, then Trakt) alongside the raw Trakt
-                // pair the detail page already exposed — the modal renders the same badge as the card.
+                // The card-consistent community number (vote-shrunk, Trakt first at >= 50 votes)
+                // alongside the raw Trakt pair the detail page already exposed — the modal renders
+                // the same badge as the card.
                 crowdRating = CrowdRating.For(title),
                 crowdVotes = CrowdRating.VotesFor(title),
                 posterPath = title.PosterPath,

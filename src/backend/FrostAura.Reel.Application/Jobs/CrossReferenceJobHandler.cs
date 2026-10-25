@@ -119,8 +119,9 @@ public sealed class CrossReferenceJobHandler(
     /// <summary>
     /// The process-wide concurrency gate. ONE cross-reference run at a time across every account.
     ///
-    /// <para>The runner has four worker slots and this job holds one for up to ten minutes. Without
-    /// this, five accounts whose builds finish together would take every slot and the queue — delta
+    /// <para>The runner has three general worker slots (two more are reserved for DeltaSync,
+    /// BuildFeed and Train) and this job holds one for up to ten minutes. Without this, five
+    /// accounts whose builds finish together would take every general slot and the queue — delta
     /// syncs, feed builds, training — would stall behind a background pass nobody is waiting on.
     /// The cost is that a second account's run waits, which is the correct trade: the anti-join
     /// makes waiting free, because whatever it does not judge today it judges tomorrow.</para>
