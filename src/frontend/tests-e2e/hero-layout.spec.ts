@@ -74,14 +74,56 @@ const ACCURACY = {
   counterfactual: [], learnedThisWeek: null,
 };
 
+/** The same account before it has a track record: the status line has no accuracy segment. */
+const NO_ACCURACY = { ...ACCURACY, headline: { ...ACCURACY.headline, n: 0, withinOnePoint: 0 } };
+
+/** A retrain the account has not dismissed: the model-learned band is on the page. */
+const LEARNED = {
+  trainedAt: "2026-10-24T03:00:00Z", newRatingsSinceLast: 14, calibrationBias: 0.2, calibrationMae: 1.1,
+  spearman: 0.31, picksChanged: 3,
+};
+
+/** The eval copy's real cross-reference band (ireview_surface defect 3): a landed pass with a coverage line. */
+const XREF = {
+  running: false, judged: 452, total: 452, kept: 257, ruledOut: 0, unsure: 194, noSignal: 1, gating: "demote-only",
+};
+
+interface Chrome {
+  filters?: unknown;
+  accuracy?: unknown;
+  /** Both Home bands on (the real account's state) or both answered 204 (nothing honest to say). */
+  bands?: boolean;
+}
+
+/**
+ * Every `/api` request the Home page makes is answered here. Unmocked requests used to fall through
+ * to the dev proxy and fail — which is exactly how the cross-reference band went missing from the
+ * fixture and the top-edge test passed on a page the founder never sees (R1-17). The catch-all is
+ * registered first so every specific mock below takes precedence over it, and it answers 404 and
+ * records the path, so a new request Home starts making shows up as a failure here rather than as
+ * a silently absent widget.
+ */
+async function answerEveryApiCall(page: Page): Promise<string[]> {
+  const unmocked: string[] = [];
+  await page.route(
+    (u) => u.pathname.startsWith("/api/"),
+    (route) => {
+      unmocked.push(new URL(route.request().url()).pathname);
+      return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+    }
+  );
+  return unmocked;
+}
+
 async function bootHome(
   page: Page,
   count: number,
   overrides: Record<string, unknown> = {},
-  chrome: { filters?: unknown; accuracy?: unknown } = {}
-): Promise<void> {
+  chrome: Chrome = {}
+): Promise<string[]> {
   await stubEventSource(page);
   await page.goto("about:blank");
+  const unmocked = await answerEveryApiCall(page);
   await serveBrightArt(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
@@ -92,8 +134,18 @@ async function bootHome(
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", { genres: [] });
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
-  if (chrome.filters) await mockJson(page, "**/api/settings/filters", chrome.filters);
-  if (chrome.accuracy) await mockJson(page, "**/api/accuracy", chrome.accuracy);
+  await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: null, items: [] });
+  await mockJson(page, "**/api/settings/filters", chrome.filters ?? REAL_FILTERS);
+  await mockJson(page, "**/api/accuracy", chrome.accuracy ?? NO_ACCURACY);
+  for (const [path, body] of [["/api/feed/learned", LEARNED], ["/api/feed/cross-reference", XREF]] as const) {
+    await page.route(
+      (u) => u.pathname === path,
+      (route) =>
+        chrome.bands
+          ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
+          : route.fulfill({ status: 204, body: "" })
+    );
+  }
   await mockJson(page, "**/api/feed", {
     generatedAt: new Date().toISOString(),
     hero: Array.from({ length: count }, (_, i) => ({ ...heroCard(i + 1), ...overrides })),
@@ -102,6 +154,7 @@ async function bootHome(
   });
   await page.goto("/home");
   await expect(page.getByTestId("hero-card")).toHaveCount(count);
+  return unmocked;
 }
 
 type Box = { x: number; y: number; width: number; height: number };
@@ -293,9 +346,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
  */
 const HEADROOM_PX = 10;
 const TOP_CASES = [
-  { label: "confident, no track record", overrides: { confidence: "confident", predictedRating: 8.1 }, accuracy: undefined },
+  { label: "confident, no track record", overrides: { confidence: "confident", predictedRating: 8.1 }, accuracy: NO_ACCURACY },
   { label: "confident, with a track record", overrides: { confidence: "confident", predictedRating: 8.1 }, accuracy: ACCURACY },
-  { label: "reaching, no track record", overrides: {}, accuracy: undefined },
+  { label: "reaching, no track record", overrides: {}, accuracy: NO_ACCURACY },
   { label: "reaching, with a track record", overrides: {}, accuracy: ACCURACY },
 ] as const;
 
@@ -304,19 +357,41 @@ for (const [viewport, budget] of [
   [{ width: 390, height: 844 }, 300],
 ] as const) {
   for (const c of TOP_CASES) {
-    test(`the first hero card starts within ${budget}px of the top at ${viewport.width}×${viewport.height} (${c.label})`, async ({ page }) => {
-      await page.setViewportSize(viewport);
-      await bootHome(page, 5, c.overrides, { filters: REAL_FILTERS, accuracy: c.accuracy });
-      // The chrome this budget is about is really on the page — the fixture cannot drop it again.
-      await expect(page.getByTestId("conditions-summary")).toBeVisible();
-      await expect(page.getByTestId("browse-filters")).toBeVisible();
-      await expect(page.getByTestId("tonight-mood-chips")).toBeVisible();
-      if (c.accuracy) await expect(page.getByTestId("status-track-record")).toBeVisible();
-      if (!("confidence" in c.overrides)) await expect(page.getByTestId("hero-reaching-note")).toBeVisible();
-      const top = await page.getByTestId("hero-card").first().evaluate((el) => el.getBoundingClientRect().top);
-      expect(top).toBeLessThanOrEqual(budget - HEADROOM_PX);
-      // And nothing above it made the page wider than the phone.
-      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
-    });
+    // Both band states for every case: the real account has a retrain to report and a landed
+    // cross-reference pass, and the band above the hero is what put the first pick at 286px and
+    // 416px on real data while this test, which never answered the bands, passed (R1-17).
+    for (const bands of [true, false]) {
+      const label = `${c.label}, ${bands ? "both bands" : "no bands"}`;
+      test(`the first hero card starts within ${budget}px of the top at ${viewport.width}×${viewport.height} (${label})`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const unmocked = await bootHome(page, 5, c.overrides, { filters: REAL_FILTERS, accuracy: c.accuracy, bands });
+        // The chrome this budget is about is really on the page — the fixture cannot drop it again.
+        await expect(page.getByTestId("conditions-summary")).toBeVisible();
+        await expect(page.getByTestId("browse-filters")).toBeVisible();
+        await expect(page.getByTestId("tonight-mood-chips")).toBeVisible();
+        if (c.accuracy === ACCURACY) await expect(page.getByTestId("status-track-record")).toBeVisible();
+        else await expect(page.getByTestId("status-track-record")).toHaveCount(0);
+        if (!("confidence" in c.overrides)) await expect(page.getByTestId("hero-reaching-note")).toBeVisible();
+        const heroCard = page.getByTestId("hero-card").first();
+        if (bands) {
+          // On the page, and below the first pick rather than above it.
+          for (const id of ["model-learned-band", "cross-reference-band"]) {
+            await expect(page.getByTestId(id)).toBeVisible();
+            const bandTop = await page.getByTestId(id).evaluate((el) => el.getBoundingClientRect().top);
+            const heroBottom = await heroCard.evaluate((el) => el.getBoundingClientRect().bottom);
+            expect(bandTop, `${id} sits under the hero`).toBeGreaterThanOrEqual(heroBottom);
+          }
+        } else {
+          await expect(page.getByTestId("model-learned-band")).toHaveCount(0);
+          await expect(page.getByTestId("cross-reference-band")).toHaveCount(0);
+        }
+        const top = await heroCard.evaluate((el) => el.getBoundingClientRect().top);
+        expect(top).toBeLessThanOrEqual(budget - HEADROOM_PX);
+        // And nothing above it made the page wider than the phone.
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
+        // Every request the page made was answered by a fixture above.
+        expect(unmocked).toEqual([]);
+      });
+    }
   }
 }

@@ -216,15 +216,6 @@ export default function Home() {
         </div>
       ) : (
         <>
-          {/* Above the hero, and outside its re-key: the band is news about the MODEL, not about
-              this snapshot, so a row remount must not take it with it. */}
-          <ModelLearnedBand />
-
-          {/* Beside the retrain band and outside the hero's re-key for the same reason: this is
-              news about the deep pass, not about tonight's snapshot, so a row remount must not
-              take it with it. Below the model band because a retrain is the larger event. */}
-          <CrossReferenceBand />
-
           {/* One registry of titles on screen per page view (F+3): every rail sends what the
               others already show, so a title never repeats across rails. Keyed like the rows it
               wraps — a re-seed or a medium switch is a new page view. */}
@@ -239,6 +230,18 @@ export default function Home() {
               <HomeStatusLine reachingNote={reachingNote} className="lg:ml-auto" />
             </div>
             <InfiniteHero key={`hero:${filter.media}:${resetKey}`} seed={feed?.hero ?? []} filter={filter} mood={mood} rows={heroRows} />
+          </div>
+
+          {/* The two bands are news about the MODEL and the deep pass, not about tonight's picks,
+              so they sit BELOW the hero (FD-15): above it they put the first pick at 286px on a
+              desktop and 416px on a phone, against budgets of 220 and 300 (R1-17). The retrain band
+              leads because a retrain is the larger event. A re-key remounts them with the rails,
+              which is harmless: both read a cached query, and a dismissal lives in storage.
+              `empty:hidden` because with nothing honest to say both render nothing, and an empty
+              wrapper would still take the page's rhythm gap. */}
+          <div className="space-y-3 empty:hidden" data-testid="home-bands">
+            <ModelLearnedBand />
+            <CrossReferenceBand />
           </div>
 
           <ContinueWatchingRow entries={continueFiltered} />
