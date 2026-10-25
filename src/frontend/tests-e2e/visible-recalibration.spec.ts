@@ -239,7 +239,6 @@ test.describe("visible recalibration", () => {
       newRatingsSinceLast: 14,
       calibrationBias: 0.2,
       calibrationMae: 1.1,
-      maeImprovement: 0.4,
       spearman: 0.31,
       picksChanged: 3,
     });
@@ -253,7 +252,7 @@ test.describe("visible recalibration", () => {
     await page.goto("/home");
 
     const band = page.getByTestId("model-learned-band");
-    await expect(band).toHaveText("Learned from 14 new ratings — runs 0.4 closer on your scores now. 3 picks changed.");
+    await expect(band).toHaveText("Learned from 14 new ratings. 3 picks changed.");
 
     await page.getByTestId("dismiss-model-learned").click();
     await expect(band).toHaveCount(0);
