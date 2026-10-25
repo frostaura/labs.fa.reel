@@ -51,6 +51,9 @@ const SYNC_RUNNING_XREF = {
   ...SYNC_IDLE,
   activeJob: {
     kind: "CrossReference",
+    // Status contract v2 (WS-6): the pass is a named pass, which the pill shows by name only.
+    sseKind: "xref",
+    visibility: "NamedPass",
     status: "Running",
     progressPct: 12,
     progressMessage: "Cross-referencing 2,242 titles · round 1 of 3 · 0 ruled out so far",
@@ -209,29 +212,22 @@ const ACCURACY_WITH_XREF = {
 };
 
 test.describe("cross-reference pass", () => {
-  test("the pill counts current / total for the whole pass and hands back on completion", async ({ page }) => {
-    // Seeded from the status poll first — a reload mid-pass must show the pill, and the JobKind →
-    // SSE-kind mapping is what makes that render as the cross-reference explainer rather than the
-    // generic "Background sync" fallback.
+  test("the pill names the pass from the status poll and hands back on completion", async ({ page }) => {
+    // Seeded from the status poll — a reload mid-pass must show the pill. Since pill v2 (WS-9,
+    // H-1/O+1) the named pass reads by name only: no percentage, no count and never the handler's
+    // free text, because nobody started it and a ten-minute bar reads as a stall. The count lives on
+    // the band below (next test). shell-status.spec.ts pins the no-number rule itself.
     const setStatus = await bootHome(page, SYNC_RUNNING_XREF);
 
     const pill = page.getByTestId("sync-pill");
-    await expect(pill).toContainText("0 ruled out so far");
+    await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
 
     await emit(page, "job-progress", XREF_PROGRESS);
-
-    await expect(pill).toContainText("Cross-referencing 2,242 titles · round 1 of 3 · 640 ruled out so far");
-    await expect(pill).toContainText("29%");
-
-    // The count lives in the tooltip, which is what makes a ten-minute job legible: a percentage
-    // says "still going", a count says how far through the pool it is.
-    await pill.focus();
-    const tooltip = page.getByRole("tooltip");
-    await expect(tooltip).toContainText("Cross-referencing against your history");
-    await expect(tooltip).toContainText("640 / 2,242");
+    await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
+    await expect(pill).not.toContainText("ruled out so far");
 
     // The pass finishes. The status poll is authoritative and now reports no active job, so the
-    // pill hands back to the idle health chip rather than sticking at 29% for ever.
+    // pill hands back to the idle health chip rather than sticking for ever.
     setStatus(SYNC_IDLE);
     await emit(page, "job-completed", {
       kind: "xref",
@@ -249,11 +245,10 @@ test.describe("cross-reference pass", () => {
   });
 
   test("a Trakt poll cannot steal the pill from a run in progress", async ({ page }) => {
-    await bootHome(page);
+    await bootHome(page, SYNC_RUNNING_XREF);
     await emit(page, "job-progress", XREF_PROGRESS);
 
-    const pill = page.getByTestId("sync-pill");
-    await expect(pill).toContainText("Cross-referencing 2,242 titles");
+    await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
 
     // A delta sync fires every few minutes and would otherwise overwrite a ten-minute pass with a
     // five-second one — the founder's stated preference, asserted rather than left as an accident.
@@ -263,7 +258,7 @@ test.describe("cross-reference pass", () => {
       message: "Syncing with Trakt",
     });
 
-    await expect(pill).toContainText("Cross-referencing 2,242 titles · round 1 of 3 · 640 ruled out so far");
+    await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
   });
 
   test("the band counts through the pool while the pass runs", async ({ page }) => {

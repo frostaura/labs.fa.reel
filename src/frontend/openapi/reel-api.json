@@ -1456,6 +1456,7 @@
           "NotEnoughRatings",
           "ProviderDown",
           "PipelineFailed",
+          "UnrecognisedState",
           null
         ]
       },
@@ -1696,6 +1697,21 @@
             "format": "int32"
           },
           "mediaType": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageExcludeTitleIds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "pageToken": {
             "type": [
               "null",
               "string"

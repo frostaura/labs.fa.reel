@@ -26,7 +26,10 @@ export type DegradedReason =
   | "TraktWritesDeadLettered"
   | "NotEnoughRatings"
   | "ProviderDown"
-  | "PipelineFailed";
+  | "PipelineFailed"
+  // Status v2 (WS-6): the stored state was written by a newer build this one cannot name. It
+  // raises no issue of its own — no reconnect, no failure copy.
+  | "UnrecognisedState";
 
 export type ProviderHealthState = "Unmonitored" | "Healthy" | "Degraded" | "Down";
 

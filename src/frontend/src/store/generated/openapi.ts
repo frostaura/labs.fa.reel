@@ -2416,7 +2416,7 @@ export interface components {
             text: string;
         };
         /** @enum {unknown} */
-        DegradedReason: "TraktRevoked" | "TraktRefreshFailed" | "TraktWritesDeadLettered" | "NotEnoughRatings" | "ProviderDown" | "PipelineFailed" | null;
+        DegradedReason: "TraktRevoked" | "TraktRefreshFailed" | "TraktWritesDeadLettered" | "NotEnoughRatings" | "ProviderDown" | "PipelineFailed" | "UnrecognisedState" | null;
         FiltersPayload: {
             excludeGenres: string[];
             includeGenres: string[];
@@ -2469,6 +2469,8 @@ export interface components {
             /** Format: int32 */
             limit: null | number | string;
             mediaType?: null | string;
+            pageExcludeTitleIds?: null | string[];
+            pageToken?: null | string;
         };
         NarrativeEdit: {
             text: null | string;
