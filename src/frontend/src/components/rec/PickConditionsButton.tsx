@@ -5,6 +5,7 @@ import ConditionsEditor from "../settings/ConditionsEditor";
 import ConditionSummary from "../settings/ConditionSummary";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
+import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
 import type { BrowseFilter } from "../../lib/browseFilter";
 
 /**
@@ -55,9 +56,8 @@ export default function PickConditionsButton({ onSaved }: { onSaved?: () => void
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto p-0">
         <DialogHeader>
           <DialogTitle>Conditions for tonight&apos;s picks</DialogTitle>
-          <DialogDescription>
-            Airtight — these apply to the hero, every row and all search. Saving re-cuts the feed
-            straight away.
+          <DialogDescription data-testid="conditions-scope">
+            {CONDITIONS_SCOPE_COPY} Saving re-cuts the feed straight away.
           </DialogDescription>
         </DialogHeader>
         <div className="px-6 pb-6">
