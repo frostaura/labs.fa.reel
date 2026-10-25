@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { components } from "../store/generated/openapi";
 import type { JobFailure, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import {
   ACTIVE_POLL_MS,
@@ -370,5 +371,36 @@ describe("aged failures and what still stands (R1-20)", () => {
     const f = failure({ consecutiveFailures: 3, failedAt: "2026-10-20T00:00:00Z" });
     expect(isAgedFailure(f, Date.parse("2026-10-20T12:00:00Z"))).toBe(false);
     expect(isAgedFailure(f, Date.parse("2026-10-21T00:00:01Z"))).toBe(true);
+  });
+});
+
+describe("the server decides what is shown (WS-6 CR: no kind list copied on the frontend)", () => {
+  // Every job kind the backend can send, checked against the generated contract so it cannot drift.
+  // It is the universe the property below quantifies over, not a classification: the header must
+  // treat every kind alike and read only `visibility`.
+  const ALL_KINDS = [
+    "FullIngest", "DeltaSync", "FullReconcile", "HydrateCatalog", "EnrichCatalog", "Train", "Evaluate", "BuildFeed",
+    "RefreshAvailability", "BuildDigest", "BuildTasteNarrative", "PersonaliseTitles", "SeedCatalog", "CrossReference",
+  ] as const;
+  type SameMembers<A, B> = [Exclude<A, B>, Exclude<B, A>] extends [never, never] ? true : never;
+  const covered: SameMembers<(typeof ALL_KINDS)[number], components["schemas"]["JobKind"]> = true;
+
+  it.each(ALL_KINDS)("%s is shown or hidden by its visibility alone", (kind) => {
+    expect(covered).toBe(true);
+    const as = (visibility: SyncJobSummary["visibility"]) =>
+      status({ activeJob: job({ kind, sseKind: "some-kind", visibility }) });
+    expect(shownActiveJob(as("Background"))).toBeNull();
+    expect(shownActiveJob(as("UserVisible"))?.kind).toBe(kind);
+    expect(shownActiveJob(as("NamedPass"))?.kind).toBe(kind);
+    expect(statusPollInterval(as("UserVisible"))).toBe(ACTIVE_POLL_MS);
+    expect(statusPollInterval(as("Background"))).toBe(IDLE_POLL_MS);
+  });
+});
+
+describe("UnrecognisedState (status v2)", () => {
+  it("raises no issue, no reconnect and no failure copy on a Degraded account", () => {
+    const s = status({ pipelineStage: "Degraded", degradedReason: "UnrecognisedState" });
+    expect(healthIssues(s, false)).toEqual([]);
+    expect(pill(s)).toMatchObject({ mode: "health", tone: "ok", reconnect: false, label: "Synced 3m ago" });
   });
 });

@@ -7,6 +7,7 @@ import {
   PIPELINE_STAGE_FALLBACK,
   REASON_FALLBACK,
   activeJobLabel,
+  UNRECOGNISED_STATE_COPY,
   failureAftermath,
   failureNoun,
   isTerminalReason,
@@ -269,5 +270,20 @@ describe("failureAftermath", () => {
     expect(failureAftermath("delta")).toBeNull();
     expect(failureAftermath("some-future-kind")).toBeNull();
     expect(failureAftermath(null)).toBeNull();
+  });
+});
+
+describe("UnrecognisedState (status v2)", () => {
+  it("has its own Degraded clause instead of pointing at a header that raises nothing for it", () => {
+    const clause = pipelineStageCopy("Degraded", "UnrecognisedState");
+    expect(clause).toBe("a newer version of Reel recorded where your setup got to — nothing is lost");
+    expect(clause).not.toBe(PIPELINE_DEGRADED_FALLBACK);
+  });
+
+  it("the onboarding sentence claims no failure and offers no reconnect", () => {
+    expect(UNRECOGNISED_STATE_COPY).toMatch(/^A newer version of Reel/);
+    expect(UNRECOGNISED_STATE_COPY).not.toMatch(/fail|error|stopped|try again/i);
+    expect(UNRECOGNISED_STATE_COPY).toMatch(/nothing to reconnect/);
+    expect(UNRECOGNISED_STATE_COPY).not.toMatch(/UnrecognisedState/);
   });
 });
