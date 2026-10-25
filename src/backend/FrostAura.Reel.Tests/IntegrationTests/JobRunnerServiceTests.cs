@@ -5,6 +5,8 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Background;
+using FrostAura.Reel.Infrastructure.Telemetry;
+using FrostAura.Reel.Tests.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -661,6 +663,71 @@ public sealed class JobRunnerServiceTests(JobRunnerDatabaseFixture fixture)
         Assert.Equal(JobStatus.Succeeded, row.Status);
         Assert.Equal(1, row.AttemptCount);
         Assert.Equal("""{"page": 3}""", row.CursorJson);
+    }
+
+    // ── Metrics (the M5 sink's live half) ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Every_settled_execution_is_counted_by_kind_with_its_reason_code_and_whether_it_retries()
+    {
+        if (!await ResetAsync())
+        {
+            return;
+        }
+
+        using var metrics = new ReelMetrics();
+        using var counters = new MeterRecorder(metrics.Meter);
+        var account = await SeedAccountAsync();
+        var options = Deadline(JobKind.SeedCatalog, TimeSpan.FromMilliseconds(300), DeadlineAction.Yield);
+        var handlers = new IJobHandler[]
+        {
+            new ScriptedHandler(JobKind.CrossReference, (_, _, _) =>
+                throw new NonRetryableJobException("Response status code does not indicate success: 402 (Payment Required).")),
+            new ScriptedHandler(JobKind.BuildFeed, (_, _, _) => throw new TimeoutException("The operation has timed out.")),
+            ScriptedHandler.Succeeds(JobKind.DeltaSync),
+            ScriptedHandler.Blocks(JobKind.SeedCatalog),
+            ScriptedHandler.Blocks(JobKind.Train),
+        };
+        await using var harness = JobRunnerHarness.Create(fixture.ConnectionString, options, services =>
+        {
+            foreach (var handler in handlers)
+            {
+                services.AddSingleton(handler);
+            }
+        }, metrics: metrics);
+
+        var paid = await AddJobAsync(JobKind.CrossReference, account.Id);
+        var slow = await AddJobAsync(JobKind.BuildFeed, account.Id);
+        var sync = await AddJobAsync(JobKind.DeltaSync, account.Id);
+        var sliced = await AddJobAsync(JobKind.SeedCatalog);
+        var stopped = await AddJobAsync(JobKind.Train, account.Id);
+
+        Assert.Equal(JobRunOutcome.Failed, await RunOnceAsync(harness, paid, JobKind.CrossReference));
+        // The sync first: a build is not claimable beside its account's pending sync.
+        Assert.Equal(JobRunOutcome.Succeeded, await RunOnceAsync(harness, sync, JobKind.DeltaSync));
+        Assert.Equal(JobRunOutcome.Retrying, await RunOnceAsync(harness, slow, JobKind.BuildFeed));
+        Assert.Equal(JobRunOutcome.Yielded, await RunOnceAsync(harness, sliced, JobKind.SeedCatalog));
+
+        using (var stopping = new CancellationTokenSource())
+        {
+            var claim = await harness.Runner.ClaimNextAsync([nameof(JobKind.Train)], CancellationToken.None, stopped);
+            var run = harness.Runner.RunAsync(claim!, stopping.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(200));
+            await stopping.CancelAsync();
+            Assert.Equal(JobRunOutcome.Interrupted, await run.WaitAsync(Patience));
+        }
+
+        Assert.Equal(1, counters.Sum("reel.jobs.failed", ("kind", "CrossReference"), ("reason", JobFailureReason.PaymentRequired), ("retrying", false)));
+        Assert.Equal(1, counters.Sum("reel.jobs.failed", ("kind", "BuildFeed"), ("reason", JobFailureReason.TimedOut), ("retrying", true)));
+        Assert.Equal(2, counters.Sum("reel.jobs.failed"));
+        Assert.Equal(1, counters.Sum("reel.jobs.succeeded", ("kind", "DeltaSync")));
+        Assert.Equal(1, counters.Sum("reel.jobs.deadline_yields", ("kind", "SeedCatalog")));
+        Assert.Equal(1, counters.Sum("reel.jobs.interruptions", ("kind", "Train")));
+
+        // The durable half agrees: the M5 columns carry the same slice and refund.
+        Assert.Equal(1, (await ReadAsync(sliced)).DeadlineYields);
+        Assert.NotNull((await ReadAsync(sliced)).RequeuedAt);
+        Assert.Equal(1, (await ReadAsync(stopped)).Interruptions);
     }
 
     [Fact]

@@ -6,6 +6,7 @@ using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Persistence;
+using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -83,7 +84,8 @@ public sealed class JobRunnerService(
     IServiceScopeFactory scopeFactory,
     IConfiguration configuration,
     ILogger<JobRunnerService> logger,
-    JobRunnerOptions options) : BackgroundService
+    JobRunnerOptions options,
+    ReelMetrics? metrics = null) : BackgroundService
 {
     /// <summary>Transaction-scoped advisory lock that serialises claims across replicas, so the per-kind caps are exact.</summary>
     private const long ClaimLockKey = 0x5245_454C_4A4F_4253; // "REELJOBS"
@@ -677,6 +679,7 @@ public sealed class JobRunnerService(
         }
 
         logger.LogInformation("Job {JobId} ({Kind}) succeeded.", claim.Id, claim.Kind);
+        metrics?.JobSucceeded(claim.Kind);
         return JobRunOutcome.Succeeded;
     }
 
@@ -708,6 +711,7 @@ public sealed class JobRunnerService(
             return LeaseLost(claim);
         }
 
+        metrics?.JobFailed(claim.Kind, JobFailureReason.Classify(error), retrying: !permanent);
         logger.LogError(failure, "Job {JobId} ({Kind}) failed on attempt {Attempt} of {Max}; {Next}.",
             claim.Id, claim.Kind, claim.Attempt, options.MaxAttempts,
             nonRetryable ? "not retryable, failed for good" : permanent ? "failed for good" : "queued to retry");
@@ -749,6 +753,7 @@ public sealed class JobRunnerService(
 
             if (rows == 1)
             {
+                metrics?.JobYielded(claim.Kind);
                 logger.LogInformation(
                     "Job {JobId} ({Kind}) reached its {Minutes}-minute deadline; requeued to resume from its checkpoint.",
                     claim.Id, claim.Kind, minutes);
@@ -785,6 +790,7 @@ public sealed class JobRunnerService(
 
         if (rows == 1)
         {
+            metrics?.JobInterrupted(claim.Kind);
             logger.LogInformation("Job {JobId} ({Kind}) requeued: host stopping.", claim.Id, claim.Kind);
             return JobRunOutcome.Interrupted;
         }
