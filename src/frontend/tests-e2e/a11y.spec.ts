@@ -232,7 +232,8 @@ test.describe("keyboard paths", () => {
     await page.keyboard.press(key);
     const skip = page.getByRole("link", { name: "Skip to content" });
     await expect(skip).toBeFocused();
-    await expect(skip).toBeInViewport();
+    // Shown on focus, not just present: an sr-only link is a 1 px box that is also "in the viewport".
+    await expect.poll(async () => (await skip.boundingBox())?.width ?? 0).toBeGreaterThan(40);
     await page.keyboard.press("Enter");
     await expect(page.locator("main#main")).toBeFocused();
 
