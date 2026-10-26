@@ -1090,7 +1090,8 @@ public sealed class FeedPaginator(
                 s.Title, s.Row.TopContributions, persons, ratedGenres, anchor?.Name,
                 sharedGenre, toneByTitle.GetValueOrDefault(s.Title.Id),
                 // The anchored-row gate's evidence names the link, exactly as on the built rail.
-                evidence.GetValueOrDefault(s.Title.Id));
+                evidence.GetValueOrDefault(s.Title.Id),
+                taste.OverallContrarianOffset);
         }
 
         return result;

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
+using FrostAura.Reel.Application.Search.Retrieval;
 using FrostAura.Reel.Domain.Catalog;
 
 namespace FrostAura.Reel.Application.Ranking;
@@ -8,7 +10,7 @@ namespace FrostAura.Reel.Application.Ranking;
 /// explainability layer behind every card (foresight DescriptionTemplater precedent; optional
 /// LLM polish stays behind a flag, off by default). Never claims a reason the model didn't use.
 /// </summary>
-public static class ExplanationTemplater
+public static partial class ExplanationTemplater
 {
     /// <summary>
     /// The ultimate fallback sentence, emitted when nothing verifiable can be cited. Single-sourced
@@ -36,6 +38,10 @@ public static class ExplanationTemplater
     /// polluted free-text labels. <paramref name="AnchorEvidence"/> is what <see cref="AnchorRowGate"/>
     /// admitted the card on — a shared person, keyword or theme — and when present it is what the
     /// anchor clause names, ahead of the softer genre/tone link.
+    /// <paramref name="AccountContrarianOffset"/> is the account's overall offset from the crowd —
+    /// the number Taste DNA prints as its contrarian score — and null where the caller has no taste
+    /// state: the contrarian clause then never fires, because "your tougher standards" is a claim
+    /// about the reader that only that number can back.
     /// </summary>
     public record Context(
         Title Title,
@@ -45,25 +51,65 @@ public static class ExplanationTemplater
         string? AnchorName,
         string? AnchorSharedGenre = null,
         string? Tone = null,
-        IReadOnlyList<SharedEvidence>? AnchorEvidence = null);
+        IReadOnlyList<SharedEvidence>? AnchorEvidence = null,
+        decimal? AccountContrarianOffset = null);
+
+    /// <summary>
+    /// The contrarian score below which an account is harsher than the crowd. The same −0.3 Taste
+    /// DNA uses for "harsher than the crowd" (<c>TasteDna.tsx</c>), so a card can never call the
+    /// reader tougher than the crowd while their own DNA page says "with the crowd" — the founder,
+    /// at −0.2, read exactly that contradiction on 19 of 21 Home cards (2026-10-25).
+    /// </summary>
+    public const decimal HarsherThanCrowdBelow = -0.3m;
+
+    /// <summary>
+    /// The fewest crowd votes behind a number a why-line may quote — the supply reports' vote
+    /// floor (<see cref="CrowdVotes.MinRelaxVotes"/>). Below it the shrunk score is mostly the
+    /// catalogue prior, so "the crowd backs it" would be citing a crowd that is not there.
+    /// </summary>
+    public const int CrowdClauseMinVotes = CrowdVotes.MinRelaxVotes;
+
+    /// <summary>
+    /// The shrunk crowd score a clause may call praise ("the crowd backs it", "holds up"): half a
+    /// point above the catalogue prior <see cref="CrowdRating.Prior"/> (6.5). At or below the
+    /// prior the crowd is merely average about the title, and the clause would be filler.
+    /// </summary>
+    public const decimal CrowdPraiseFloor = 7.0m;
+
+    /// <summary>
+    /// The share of one rail's or one page's captions a single boilerplate phrase family may hold.
+    /// A family that fits every card says nothing about any of them: the contrarian clause reached
+    /// 116 of 150 why-lines once the era template was retired. The first card in a family is always
+    /// allowed; after that, at most one card in four.
+    /// </summary>
+    public const double BoilerplateFamilyShareCap = 0.25d;
 
     /// <summary>
     /// Builds the deterministic why-sentence. <paramref name="variantSeed"/> shifts every phrasing
     /// pick by that many variants — 0 is the title's canonical sentence; the no-repeat guard bumps
     /// it when two cards on one rail would otherwise render identical text.
     /// </summary>
-    public static string BuildSentence(Context context, int variantSeed = 0)
+    public static string BuildSentence(Context context, int variantSeed = 0) =>
+        BuildSentence(context, variantSeed, NoSuppression);
+
+    private static string BuildSentence(Context context, int variantSeed, IReadOnlySet<string> suppressed)
     {
         var clauses = new List<string>();
 
-        foreach (var (feature, contribution) in context.Contributions)
+        for (var rank = 0; rank < context.Contributions.Count; rank++)
         {
             if (clauses.Count >= 2)
             {
                 break;
             }
 
-            var clause = Translate(feature, contribution, context, variantSeed);
+            var (feature, contribution) = context.Contributions[rank];
+            if (suppressed.Contains(feature))
+            {
+                continue;
+            }
+
+            var clause = Translate(feature, contribution, rank, context, variantSeed);
             if (clause is not null && !clauses.Contains(clause))
             {
                 clauses.Add(clause);
@@ -98,18 +144,115 @@ public static class ExplanationTemplater
     /// until distinct. If every variant collides the last attempt is returned as-is — a repeated
     /// line is a flaw, a crash or a blank card would be a failure. Adds the result to
     /// <paramref name="takenWhys"/> either way.
+    ///
+    /// <para>It also holds the share cap (<see cref="BoilerplateFamilyShareCap"/>): a phrase family
+    /// that already fills its share of what this rail or page shows is left out of this card, which
+    /// then says the next true thing instead.</para>
     /// </summary>
     public static string BuildDistinctSentence(Context context, ISet<string> takenWhys)
     {
-        var sentence = BuildSentence(context);
-        for (var seed = 1; seed <= 3 && takenWhys.Contains(sentence); seed++)
+        var suppressed = new HashSet<string>(StringComparer.Ordinal);
+        var sentence = Distinct(context, takenWhys, suppressed);
+
+        // Each pass only ever suppresses more features, so this ends within one pass per family.
+        while (true)
         {
-            sentence = BuildSentence(context, seed);
+            var newlySuppressed = false;
+            foreach (var feature in FamiliesOverShare(sentence, takenWhys).SelectMany(f => f.Features))
+            {
+                newlySuppressed |= suppressed.Add(feature);
+            }
+
+            if (!newlySuppressed)
+            {
+                break;
+            }
+
+            sentence = Distinct(context, takenWhys, suppressed);
         }
 
         takenWhys.Add(sentence);
         return sentence;
     }
+
+    private static string Distinct(Context context, ISet<string> takenWhys, IReadOnlySet<string> suppressed)
+    {
+        var sentence = BuildSentence(context, 0, suppressed);
+        for (var seed = 1; seed <= 3 && takenWhys.Contains(sentence); seed++)
+        {
+            sentence = BuildSentence(context, seed, suppressed);
+        }
+
+        return sentence;
+    }
+
+    /// <summary>
+    /// True when <paramref name="why"/> belongs to a capped phrase family (see
+    /// <see cref="BoilerplateFamilyShareCap"/>) whose share the lines already in
+    /// <paramref name="taken"/> fill — so this one would push it over. The denominator is the lines
+    /// already shown plus this one; the first line of a family always fits.
+    /// </summary>
+    public static bool ExceedsFamilyShare(string? why, IEnumerable<string> taken) =>
+        FamiliesOverShare(why, taken).Count > 0;
+
+    /// <summary>True when <paramref name="why"/> carries the contrarian phrase family (current or retired phrasing).</summary>
+    public static bool IsContrarianFamily(string? why) => Contrarian.Matches(why);
+
+    private static List<PhraseFamily> FamiliesOverShare(string? why, IEnumerable<string> taken)
+    {
+        var mine = Families.Where(f => f.Matches(why)).ToList();
+        if (mine.Count == 0)
+        {
+            return mine;
+        }
+
+        var shown = 0;
+        var inFamily = new int[mine.Count];
+        foreach (var line in taken)
+        {
+            shown++;
+            for (var i = 0; i < mine.Count; i++)
+            {
+                if (mine[i].Matches(line))
+                {
+                    inFamily[i]++;
+                }
+            }
+        }
+
+        var allowed = Math.Max(1, (int)Math.Floor((shown + 1) * BoilerplateFamilyShareCap));
+        return mine.Where((_, i) => inFamily[i] >= allowed).ToList();
+    }
+
+    /// <summary>
+    /// A capped phrase family: how to recognise it in a rendered line, and the features whose
+    /// clauses produce it (left out when the family is over its share).
+    /// </summary>
+    private sealed record PhraseFamily(Regex Pattern, IReadOnlyList<string> Features)
+    {
+        public bool Matches(string? why) => !string.IsNullOrEmpty(why) && Pattern.IsMatch(why);
+    }
+
+    /// <summary>
+    /// The contrarian family: the clause written now ("…on your harsher-than-the-crowd scale",
+    /// "…marked down to your scale") and the two phrasings retired on 2026-10-25 ("by your
+    /// contrarian standards", "your tougher-than-the-crowd standards"), which reached 116 of 150 lines.
+    /// </summary>
+    private static readonly PhraseFamily Contrarian = new(ContrarianFamilyRegex(), ["contrarianAdjustedRating"]);
+
+    /// <summary>
+    /// The capped families. Only the contrarian one: the crowd clause ("the crowd backs it too (7.9
+    /// on TMDB)") took its place on 46 of 96 rail cards in the 2026-10-25 slot measurement, but every
+    /// one of those lines is true and quotes the badge, and capping it blanked 26 more cards (a
+    /// capped card whose next clause is the generic sentence ships no line). Whether a true,
+    /// badge-repeating line at that share is boilerplate is the surface harness's call to measure.
+    /// </summary>
+    private static readonly PhraseFamily[] Families = [Contrarian];
+
+    private static readonly IReadOnlySet<string> NoSuppression = new HashSet<string>();
+
+    [GeneratedRegex(@"\b(?:contrarian standards|tougher-than-the-crowd standards|harsher-than-the-crowd scale|marked down to your scale)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ContrarianFamilyRegex();
 
     /// <summary>
     /// The response-level guard on <see cref="GenericFallback"/>: the generic sentence may appear
@@ -197,7 +340,7 @@ public static class ExplanationTemplater
         };
     }
 
-    private static string? Translate(string feature, float contribution, Context context, int seed)
+    private static string? Translate(string feature, float contribution, int rank, Context context, int seed)
     {
         if (contribution <= 0)
         {
@@ -242,16 +385,31 @@ public static class ExplanationTemplater
             // "a decade you rate highly" explained that artefact to the user as taste, on 60% of
             // cards. The feature stays in the model (removing it from ranking is an offline
             // question); the sentence is gone, and a null clause just moves on to the next one.
-            "traktRating" when context.Title.TraktRating is { } rating =>
+            // The crowd clause quotes the number the card's crowd badge shows — CrowdRating's
+            // vote-shrunk, Trakt-first resolution — and names the source that number came from. It
+            // fires only on a real crowd (≥ CrowdClauseMinVotes votes) that actually rates the title
+            // above average; a 6.6 on 12 votes "backing" a pick is the prior talking.
+            "traktRating" when PraisedCrowd(context.Title) is { } crowd =>
                 Pick(id, seed,
-                    string.Create(CultureInfo.InvariantCulture, $"the crowd backs it too ({rating:0.0} on Trakt)"),
-                    string.Create(CultureInfo.InvariantCulture, $"rated {rating:0.0} on Trakt by the crowd")),
-            "tmdbPopularityLog" => Pick(id, seed, "trending right now", "having a moment right now"),
+                    string.Create(CultureInfo.InvariantCulture, $"the crowd backs it too ({crowd.Rating:0.0} on {crowd.Source})"),
+                    string.Create(CultureInfo.InvariantCulture, $"rated {crowd.Rating:0.0} on {crowd.Source} by the crowd")),
+            // tmdbPopularityLog deliberately has NO clause. It is a popularity LEVEL, and "trending
+            // right now" is a claim about change: it captioned House (2004) and Law & Order: Criminal
+            // Intent (2001). Nothing in the catalogue records popularity over time, so no recency
+            // signal exists to make "trending" true; the feature stays in the model, the sentence goes.
             "releaseAgeLog" when IsFresh(context.Title) => Pick(id, seed, "fresh off release", "just released"),
-            "contrarianAdjustedRating" =>
+            // The contrarian clause speaks about the READER, so it needs the reader's own number
+            // behind it: an account genuinely harsher than the crowd (the Taste DNA threshold), a
+            // contribution that is one of the two that actually moved this prediction (it was +0.1
+            // against era's +1.0 on Master and Commander), and a real crowd whose score still reads
+            // as praise once marked down by the reader's offset.
+            "contrarianAdjustedRating" when rank < 2
+                && context.AccountContrarianOffset is < HarsherThanCrowdBelow and { } offset
+                && PraisedCrowd(context.Title) is { } crowd
+                && crowd.Rating + offset is var adjusted && adjusted >= CrowdPraiseFloor =>
                 Pick(id, seed,
-                    "scores well even by your contrarian standards",
-                    "holds up even by your tougher-than-the-crowd standards"),
+                    string.Create(CultureInfo.InvariantCulture, $"holds a {adjusted:0.0} even on your harsher-than-the-crowd scale"),
+                    string.Create(CultureInfo.InvariantCulture, $"still a {adjusted:0.0} once the crowd's {crowd.Rating:0.0} is marked down to your scale")),
             "simLovedCentroid" or "simRecentCentroid" or "simTopLovedMax" or "simTopLovedMean" =>
                 Pick(id, seed,
                     "close in feel to the titles you love",
@@ -285,6 +443,22 @@ public static class ExplanationTemplater
     {
         var bytes = titleId.ToByteArray();
         return (uint)(bytes[0] | (bytes[5] << 8) | (bytes[10] << 16) | (bytes[15] << 24));
+    }
+
+    /// <summary>
+    /// The title's crowd score as its badge shows it (<see cref="CrowdRating.Resolve"/>) and the
+    /// source it came from, or null when it is not a crowd a clause may praise: fewer than
+    /// <see cref="CrowdClauseMinVotes"/> votes, or a score under <see cref="CrowdPraiseFloor"/>.
+    /// </summary>
+    private static (decimal Rating, string Source)? PraisedCrowd(Title title)
+    {
+        var (rating, votes) = CrowdRating.Resolve(title);
+        if (rating is not { } score || votes is not { } count || count < CrowdClauseMinVotes || score < CrowdPraiseFloor)
+        {
+            return null;
+        }
+
+        return (score, CrowdRating.Source(title) == CrowdSource.Tmdb ? "TMDB" : "Trakt");
     }
 
     /// <summary>The verified, user-rated person for a role (null when none — no name is invented).</summary>

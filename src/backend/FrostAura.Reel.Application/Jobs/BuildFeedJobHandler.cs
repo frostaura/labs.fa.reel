@@ -1100,7 +1100,8 @@ public class BuildFeedJobHandler(
                 ratedGenres,
                 anchor?.Name,
                 sharedGenre,
-                toneByTitle.GetValueOrDefault(candidate.Title.Id));
+                toneByTitle.GetValueOrDefault(candidate.Title.Id),
+                AccountContrarianOffset: taste.OverallContrarianOffset);
         }
 
         decimal Freshness(Title title)
@@ -2242,12 +2243,19 @@ public class BuildFeedJobHandler(
 
         // No-repeat guard, per rail: two cards rendering IDENTICAL text is exactly the founder's
         // complaint, so the later card re-seeds its templater variant until distinct (bounded).
+        // The same pass holds each boilerplate phrase family to its share of the rail
+        // (ExplanationTemplater.BoilerplateFamilyShareCap): a card over the cap is re-written
+        // without that clause, saying the next true thing instead.
         foreach (var rail in planned.GroupBy(i => (i.Row, i.AnchorTitleId)))
         {
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in rail.OrderBy(i => i.Rank))
             {
-                if (!seen.Add(item.WhyThis))
+                if (!seen.Contains(item.WhyThis) && !ExplanationTemplater.ExceedsFamilyShare(item.WhyThis, seen))
+                {
+                    seen.Add(item.WhyThis);
+                }
+                else
                 {
                     item.WhyThis = ExplanationTemplater.BuildDistinctSentence(item.WhyContext, seen);
                     // A card whose model pass failed keeps saying so — the re-seeded line is still

@@ -15,8 +15,8 @@ namespace FrostAura.Reel.Application.Ranking;
 /// hedge guards.</item>
 /// <item><see cref="IsServable"/> — may a line that is ALREADY persisted on a snapshot be shown?
 /// The shapes known to be invented, broken or self-undermining: the stub sentence, the retired era
-/// template, the a/an grammar defect, a hedge against the pick, and the prompt's "the anchor"
-/// jargon. A persisted line failing it is served as no line at all, which is the honest rendering
+/// template, the retired contrarian and "trending" boilerplate, the a/an grammar defect, a hedge
+/// against the pick, and the prompt's "the anchor" jargon. A persisted line failing it is served as no line at all, which is the honest rendering
 /// of "nothing verifiable to say".</item>
 /// </list>
 ///
@@ -43,6 +43,17 @@ public static partial class FeedWhyGuard
     /// </summary>
     [GeneratedRegex(@"(?:—\s*your era\b|\ba decade you rate highly\b)", RegexOptions.IgnoreCase)]
     private static partial Regex EraTemplateRegex();
+
+    /// <summary>
+    /// The templater's two retired boilerplate families, as they were persisted before 2026-10-25:
+    /// the contrarian clause ("scores well even by your contrarian standards", "holds up even by
+    /// your tougher-than-the-crowd standards"), which fired on 77% of lines whatever the reader's
+    /// contrarian score, and the popularity clause ("trending right now", "having a moment right
+    /// now"), which captioned twenty-year-old shows from a popularity LEVEL. The templater no longer
+    /// writes either phrasing; a persisted copy is a claim nobody checked.
+    /// </summary>
+    [GeneratedRegex(@"\b(?:even by your contrarian standards|even by your tougher-than-the-crowd standards|trending right now|having a moment right now)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex RetiredBoilerplateRegex();
 
     /// <summary>
     /// "A" before a lower-case vowel at the start of the line — "A action pick", "A adventure". Words
@@ -120,6 +131,9 @@ public static partial class FeedWhyGuard
     /// <summary>True when <paramref name="why"/> carries one of the retired era templates.</summary>
     public static bool IsEraTemplate(string? why) => !string.IsNullOrWhiteSpace(why) && EraTemplateRegex().IsMatch(why);
 
+    /// <summary>True when the line carries a retired templater boilerplate phrasing (see <see cref="RetiredBoilerplateRegex"/>).</summary>
+    public static bool IsRetiredBoilerplate(string? why) => !string.IsNullOrWhiteSpace(why) && RetiredBoilerplateRegex().IsMatch(why);
+
     /// <summary>True when the line opens "A" + vowel.</summary>
     public static bool HasWrongArticle(string? why) => !string.IsNullOrWhiteSpace(why) && WrongArticleRegex().IsMatch(why);
 
@@ -134,8 +148,8 @@ public static partial class FeedWhyGuard
 
     /// <summary>May an already-persisted line be shown? See the class remarks.</summary>
     public static bool IsServable(string? why) =>
-        !string.IsNullOrWhiteSpace(why) && !IsStub(why) && !IsEraTemplate(why) && !HasWrongArticle(why)
-        && !IsHedged(why) && !UsesAnchorJargon(why);
+        !string.IsNullOrWhiteSpace(why) && !IsStub(why) && !IsEraTemplate(why) && !IsRetiredBoilerplate(why)
+        && !HasWrongArticle(why) && !IsHedged(why) && !UsesAnchorJargon(why);
 
     /// <summary>May a freshly produced or cached line caption a pick? See the class remarks.</summary>
     public static bool Accepts(string? why) =>

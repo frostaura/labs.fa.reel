@@ -91,6 +91,53 @@ public class CandidateRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogT
         Assert.Contains(b, ids);
     }
 
+    [Theory]
+    // popCount 2: the two best vote-shrunk crowd scores win the arm, whatever their popularity.
+    [InlineData(2, new[] { "Trakt-first classic", "Well-voted gem" })]
+    // popCount 4: then the 10.0 on 2 votes (shrunk 6.6) above the most popular title (6.1), and the
+    // blockbuster with no crowd score at all still last.
+    [InlineData(4, new[] { "Trakt-first classic", "Well-voted gem", "Two-vote ten", "Popular, middling" })]
+    public async Task The_popularity_arm_ranks_by_the_shrunk_crowd_score_trakt_first(int popCount, string[] expected)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync(); // cold: the popularity arm alone fills the pool
+        // TMDB 6.0 on 4,000 votes, but Trakt 8.2 on 400 leads → shrunk 7.99: first.
+        await SeedRatedTitleAsync("Trakt-first classic", popularity: 3m, traktRating: 8.2m, traktVotes: 400, tmdbAverage: 6.0m, tmdbVotes: 4000);
+        // TMDB 7.6 on 5,000 votes → 7.59: second, though barely anyone is watching it this week.
+        await SeedRatedTitleAsync("Well-voted gem", popularity: 1m, traktRating: null, traktVotes: 0, tmdbAverage: 7.6m, tmdbVotes: 5000);
+        // TMDB 10.0 on 2 votes → 6.63: the raw average would put it first.
+        await SeedRatedTitleAsync("Two-vote ten", popularity: 2m, traktRating: null, traktVotes: 0, tmdbAverage: 10.0m, tmdbVotes: 2);
+        // The most popular title, with a mediocre crowd: TMDB 6.1 on 3,000 → 6.11.
+        await SeedRatedTitleAsync("Popular, middling", popularity: 999m, traktRating: null, traktVotes: 0, tmdbAverage: 6.1m, tmdbVotes: 3000);
+        // No crowd score at all: last, however popular.
+        await SeedRatedTitleAsync("Unrated blockbuster", popularity: 5000m, traktRating: null, traktVotes: 0, tmdbAverage: null, tmdbVotes: 0);
+
+        var result = await RetrieveAsync(accountId, popCount: popCount, annCount: 0);
+
+        Assert.Equal(expected, result.Select(t => t.Name).ToArray());
+    }
+
+    [Fact]
+    public async Task Without_any_crowd_scores_the_arm_falls_back_to_popularity()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await SeedRatedTitleAsync("Quiet", popularity: 2m, traktRating: null, traktVotes: 0, tmdbAverage: null, tmdbVotes: 0);
+        await SeedRatedTitleAsync("Loud", popularity: 90m, traktRating: null, traktVotes: 0, tmdbAverage: null, tmdbVotes: 0);
+
+        var result = await RetrieveAsync(accountId, popCount: 1, annCount: 0);
+
+        Assert.Equal("Loud", Assert.Single(result).Name);
+    }
+
     [Fact]
     public async Task RetrieveSimilar_surfaces_unseen_neighbours_and_excludes_the_anchor_and_seen_titles()
     {
@@ -207,6 +254,19 @@ public class CandidateRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogT
         });
         await db.SaveChangesAsync();
         return title.Id;
+    }
+
+    private async Task SeedRatedTitleAsync(
+        string name, decimal popularity, decimal? traktRating, int traktVotes, decimal? tmdbAverage, int tmdbVotes)
+    {
+        var id = await SeedTitleAsync(name, popularity, UnitVector(2));
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var title = await db.Titles.FindAsync(id);
+        title!.TraktRating = traktRating;
+        title.TraktVotes = traktVotes;
+        title.TmdbVoteAverage = tmdbAverage;
+        title.TmdbVoteCount = tmdbVotes;
+        await db.SaveChangesAsync();
     }
 
     private async Task SeedLovedRatingAsync(Guid accountId, Guid titleId)
