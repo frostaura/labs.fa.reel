@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Trash2, X } from "lucide-react";
 import { useDeleteConversationMutation, useListConversationsQuery } from "../../store/api";
 import { relTime } from "../../lib/format";
-import { plural, recentListing } from "../../lib/useAskReelChat";
+import { plural } from "../../lib/askReel/copy";
+import { recentListing } from "../../lib/askReel/paging";
 import UndoToast from "./UndoToast";
 
 /**

@@ -1,7 +1,9 @@
 /**
  * POST-SSE client for live "Ask Reel". EventSource is GET-only, so we read the streamed
  * `text/event-stream` body off a fetch ReadableStream and parse the frames ourselves. Each
- * frame is `event: <name>\ndata: <json>\n\n`. Events: phase → candidate → candidate-scored → done.
+ * frame is `event: <name>\ndata: <json>\n\n`. Events: phase → candidate → candidate-scored → done, plus
+ * §4.9's additive v2 frames (plan, picks, tray, answer, clarify, none-found, degraded) — each
+ * validated here and normalised to one shape, so the reducer never has to know which engine ran.
  */
 
 import { ensureFreshSession } from "./session";
@@ -45,6 +47,12 @@ export interface AskCard {
 
 export interface PhaseData {
   stage: string;
+  /**
+   * The v2 engine's own sentence for this stage ("Checking 6 against your request"). The narration
+   * prints it verbatim when present; a v1 phase has none and is narrated from `stage`.
+   */
+  label?: string;
+  /** Counts a v1 phase carries. A v2 phase carries none, and they are read as zero. */
   found: number;
   scored: number;
   /**
@@ -69,6 +77,51 @@ export interface AskKnockout {
  */
 export interface AskSupply {
   knockouts?: AskKnockout[];
+}
+
+/** The tray a v2 `tray` frame fills. An unknown kind reads as a near miss — never as picks. */
+export type TrayKind = "nearMiss" | "belowFloor" | "unchecked";
+
+/**
+ * The v2 planner's reading of the turn (§4.9 `plan`). `act` is the planner's enum written as its
+ * name; `concepts` are the user's own topic words the refine chips are built from; `references`
+ * are the handles ("T2.3") the message pointed at.
+ */
+export interface PlanData {
+  act: string;
+  concepts: string[];
+  references: string[];
+}
+
+/** One judge batch's picks, already past the gate, in the order they must stay in (§4.8). */
+export interface PicksData {
+  cards: AskCard[];
+}
+
+export interface TrayData {
+  kind: TrayKind;
+  cards: AskCard[];
+}
+
+/** An ItemQuestion's answer: at most two sentences from the title's facts. The grid is untouched. */
+export interface AnswerData {
+  text: string;
+}
+
+/** A clarifying question, with the readings the user can pick between. */
+export interface ClarifyData {
+  question: string;
+  options: string[];
+}
+
+/** The supply behind an honest "nothing left" — sent once, before `done`, on a none-found turn. */
+export interface NoneFoundData {
+  supply: AskSupply;
+}
+
+/** What did not run as designed on this turn: "plan", "judge:1/3", "no-model". Always a list. */
+export interface DegradedData {
+  what: string[];
 }
 
 export interface DoneData {
@@ -194,7 +247,14 @@ export type AskEvent =
   | { event: "candidate-reranked"; data: { titleId: string; fit: number | null; why: string | null } }
   | { event: "assistant-message"; data: AssistantMessageData }
   | { event: "conflict"; data: ConflictData }
-  | { event: "done"; data: DoneData };
+  | { event: "done"; data: DoneData }
+  | { event: "plan"; data: PlanData }
+  | { event: "picks"; data: PicksData }
+  | { event: "tray"; data: TrayData }
+  | { event: "answer"; data: AnswerData }
+  | { event: "clarify"; data: ClarifyData }
+  | { event: "none-found"; data: NoneFoundData }
+  | { event: "degraded"; data: DegradedData };
 
 /**
  * A non-2xx response from /api/search/ask, carrying the status AND the server's stable `code` so
@@ -379,7 +439,7 @@ function parseFrame(frame: string): AskEvent | null {
 function validate(event: string, data: unknown): AskEvent | null {
   switch (event) {
     case "phase":
-      return isPhase(data) ? { event, data } : null;
+      return isPhase(data) ? { event, data: phaseOf(data) } : null;
     case "conversation":
       return isConversation(data) ? { event, data } : null;
     case "candidate":
@@ -394,6 +454,25 @@ function validate(event: string, data: unknown): AskEvent | null {
       return isConflict(data) ? { event, data } : null;
     case "done":
       return isDone(data) ? { event, data } : null;
+    case "plan":
+      return planOf(data);
+    case "picks":
+      return isRecord(data) && isCardList(data.cards) ? { event, data: { cards: data.cards } } : null;
+    case "tray":
+      return isRecord(data) && isCardList(data.cards) ? { event, data: { kind: trayKind(data.kind), cards: data.cards } } : null;
+    case "answer":
+      return isRecord(data) && typeof data.text === "string" && data.text.trim().length > 0
+        ? { event, data: { text: data.text } }
+        : null;
+    case "clarify":
+      return isRecord(data) && typeof data.question === "string" && data.question.trim().length > 0 &&
+        Array.isArray(data.options) && data.options.every((o) => typeof o === "string")
+        ? { event, data: { question: data.question, options: data.options as string[] } }
+        : null;
+    case "none-found":
+      return isRecord(data) && data.supply != null && isSupply(data.supply) ? { event, data: { supply: data.supply } } : null;
+    case "degraded":
+      return degradedOf(data);
     default:
       return null;
   }
@@ -412,14 +491,61 @@ function isBooleanOrAbsent(v: unknown): boolean {
   return v == null || typeof v === "boolean";
 }
 
+/**
+ * A v1 phase carries `found` and `scored`; a v2 one carries a `label` and neither. Either passes, and
+ * {@link phaseOf} fills the absent counts with zero — but a count of the wrong TYPE still fails,
+ * because it is printed ("12 scored") straight off the frame.
+ */
 export function isPhase(data: unknown): data is PhaseData {
   return (
     isRecord(data) &&
     typeof data.stage === "string" &&
-    typeof data.found === "number" &&
-    typeof data.scored === "number" &&
+    (data.found == null || typeof data.found === "number") &&
+    (data.scored == null || typeof data.scored === "number") &&
+    (data.label == null || typeof data.label === "string") &&
     isBooleanOrAbsent(data.heartbeat)
   );
+}
+
+function phaseOf(data: PhaseData): PhaseData {
+  const out: PhaseData = { stage: data.stage, found: data.found ?? 0, scored: data.scored ?? 0 };
+  if (typeof data.label === "string" && data.label.trim()) out.label = data.label;
+  if (data.heartbeat != null) out.heartbeat = data.heartbeat;
+  return out;
+}
+
+/** A non-empty list of renderable cards — every one through {@link isCard}, as the grid's are. */
+function isCardList(v: unknown): v is AskCard[] {
+  return Array.isArray(v) && v.every(isCard);
+}
+
+function trayKind(v: unknown): TrayKind {
+  return v === "belowFloor" || v === "unchecked" ? v : "nearMiss";
+}
+
+/** `T2.3`, from either the handle string or the `{turn, rank}` record the server may write. */
+function handleOf(v: unknown): string | null {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (isRecord(v) && typeof v.turn === "number" && typeof v.rank === "number") return `T${v.turn}.${v.rank}`;
+  return null;
+}
+
+function planOf(data: unknown): AskEvent | null {
+  if (!isRecord(data) || typeof data.act !== "string") return null;
+  const concepts = Array.isArray(data.concepts)
+    ? data.concepts.filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+    : [];
+  const references = Array.isArray(data.references)
+    ? data.references.map(handleOf).filter((h): h is string => h !== null)
+    : [];
+  return { event: "plan", data: { act: data.act, concepts, references } };
+}
+
+function degradedOf(data: unknown): AskEvent | null {
+  if (!isRecord(data)) return null;
+  const what = typeof data.what === "string" ? [data.what] : data.what;
+  if (!Array.isArray(what) || what.length === 0 || !what.every((w) => typeof w === "string")) return null;
+  return { event: "degraded", data: { what: what as string[] } };
 }
 
 /**

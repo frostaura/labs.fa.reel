@@ -494,6 +494,15 @@ test.describe("standing conditions on /search", () => {
 
     const conditions = page.getByTestId("askreel-conditions");
     await expect(conditions).toBeVisible();
+    // Chat UI v2: on a phone the strip is ONE button saying how many, so the reply and a row of
+    // posters fit the first screen. It counts every chip the strip will show — the twelve below
+    // plus the language rule — and one tap opens them all, unabridged.
+    const toggle = page.getByTestId("askreel-conditions-toggle");
+    await expect(toggle).toHaveText(/^\d+ conditions$/);
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(conditions.getByText("no comedy", { exact: true })).toHaveCount(0);
+    await toggle.tap();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
     // No counted overflow: a control that names conditions it will not show is the defect.
     await expect(conditions).not.toContainText("more");
     // Every excluded genre is on screen by name, including the seven the cap hid four of.
@@ -550,6 +559,9 @@ test.describe("touch targets", () => {
     // the composer and the `Recent` row to 44. The button itself is a foreign component shared with
     // the feed header, so the height is applied from `SearchConditions`, scoped to this strip; the
     // feed header's copy is still 34 and is owed a fix upstream.
+    // Behind the phone strip's one button now (chat UI v2) — which is itself a target.
+    await expectTarget(page, "askreel-conditions-toggle");
+    await page.getByTestId("askreel-conditions-toggle").tap();
     await expectTarget(page, "open-conditions");
     // The delete control is the smallest of them and the only destructive one — F6-07 measured it
     // at 26 x 26, eight pixels from the row that opens the thread. The row's own open target was
