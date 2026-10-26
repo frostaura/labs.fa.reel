@@ -231,7 +231,10 @@ public class AskReelV2UnitTests
         var supply = new SupplyReport(16, 12, 0, 4, 0, 0, 0, [], 0, 50, 6.0m, true);
         var reply = new TurnComposer().Compose(Context(FinalMode.NoneFound) with
         {
-            Topic = null, Supply = supply, Person = new PersonConstraint("Christopher Nolan", null, PersonRole.Director), PersonSeen = 12,
+            Topic = null,
+            Supply = supply,
+            Person = new PersonConstraint("Christopher Nolan", null, PersonRole.Director),
+            PersonSeen = 12,
         });
         Assert.StartsWith("There are no Christopher Nolan movies left for you.", reply.Reply, StringComparison.Ordinal);
         Assert.Contains("you've seen 12", reply.Reply, StringComparison.Ordinal);
