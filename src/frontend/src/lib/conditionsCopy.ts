@@ -1,14 +1,22 @@
 /**
- * What the saved conditions actually govern, in one sentence for the conditions dialog.
+ * What the saved conditions actually govern — ONE sentence, rendered by both the Home conditions
+ * dialog and Settings' conditions section.
  *
- * It used to say "Airtight — these apply to the hero, every row and all search", and the search
- * half was false: typeahead applies the genre, keyword, language, crowd and year rules, but not the
- * "for you" minimum, so it listed titles at 4.9–5.7 for an account whose condition was 6.0 with
- * nothing on screen to say why (ireview_surface defect 13, R1-26 / R1-27). The sentence now states
- * the exception instead of the absolute.
+ * History, because each version was wrong in a way the next agent will be tempted to repeat:
+ * - "Airtight — these apply to the hero, every row and all search" (R1-27): typeahead skips the
+ *   "for you" minimum, so "all search" was false.
+ * - "Search applies them too, except the “for you” minimum" (IR1S-06): still false. The top-bar
+ *   typeahead's local leg drops excluded genres, keywords, languages, crowd and year rules but not
+ *   the minimum, and its global leg (`/api/search/typeahead?global=1`, TypeaheadEndpoints'
+ *   GlobalLookupAsync) is a TMDB lookup that applies NONE of them by design — "the notebook" returns
+ *   The Notebook for an account excluding romance, "heat" returns the 1995 Heat past a 2000 rule,
+ *   "amelie" returns Amélie for an English-only account. Settings meanwhile said "only partly
+ *   applies them", so the founder read two contradictory scope sentences.
  *
- * Exported so Settings' conditions section can say the same thing in the same words — two copies
- * of one claim are how this one drifted.
+ * So the sentence does not enumerate which rules the lookup keeps — that list is exactly what
+ * drifted twice — it says the lookup can show what the conditions exclude, which is true of every
+ * leg. Ask Reel is "shaped", not "airtight": it keeps titles under the minimum behind a labelled
+ * "under your bar" fence rather than dropping them.
  */
 export const CONDITIONS_SCOPE_COPY =
-  "These apply to the hero and every row. Search applies them too, except the “for you” minimum — it can still list titles below it.";
+  "These shape the hero, every row and Ask Reel. Top-bar search looks titles up by name and only partly applies them, so it can show titles your conditions exclude.";
