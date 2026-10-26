@@ -122,6 +122,9 @@ jobs:
       - name: Unused files, exports and dependencies (knip)
         run: make ci-knip
 
+      - name: Design ratchet (counted design debt only falls)
+        run: make ci-design-ratchet
+
       - name: Dev proxy records its client and listens on loopback (J-1)
         run: make ci-vite-proxy
 
@@ -152,7 +155,7 @@ jobs:
         working-directory: ./src/frontend
         run: npx playwright install --with-deps chromium webkit
 
-      - name: Run E2E tests (Chromium + WebKit)
+      - name: Run E2E tests (Chromium + WebKit, the axe accessibility spec included)
         timeout-minutes: 15
         run: make ci-e2e
 
