@@ -28,6 +28,8 @@ import {
 } from "../store/onboardingSlice";
 import { saveFailureMessage } from "../components/ui/save-outcome";
 import type { AppDispatch, RootState } from "../store";
+import { Button } from "../components/ui/button";
+import { COARSE_TAP } from "../lib/tapTarget";
 
 /**
  * The status API v2 fields this page reads. `SyncStatus` (store/api/sync.ts, WS-9's) does not
@@ -173,14 +175,16 @@ export default function Onboarding() {
   const counters = Object.entries(onboarding.counters) as [IngestKind, number][];
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-6 relative overflow-hidden">
+    // `main` and the `h1`: this page renders outside the app shell, so it supplies its own landmark
+    // and heading (axe: landmark-one-main, page-has-heading-one, region).
+    <main className="min-h-screen flex items-center justify-center px-6 relative overflow-hidden">
       <div className={`w-full max-w-2xl space-y-8 ${melting ? "reel-melt" : ""}`}>
         <div className="text-center space-y-2">
-          <div className="text-3xl font-light tracking-wide text-fa-frost-bright">Reel</div>
+          <h1 className="text-3xl font-light tracking-wide text-fa-frost-bright">Reel</h1>
           {/* The display name, as everywhere else in the app — the slug ("deanmar09") is an
               identifier, not a greeting. The slug is the last resort for a profile with no name. */}
           {session && (
-            <p className="fa-caption text-fa-frost-dim" data-testid="onboarding-greeting">
+            <p className="fa-caption text-3" data-testid="onboarding-greeting">
               Hello, {session.displayName?.trim() || onboarding.traktUser || session.traktSlug}
             </p>
           )}
@@ -188,7 +192,7 @@ export default function Onboarding() {
             {STAGE_COPY[onboarding.stage]}
           </p>
           {onboarding.stalled && streaming && (
-            <p className="fa-caption text-fa-frost-dim animate-pulse" data-testid="stall-notice">
+            <p className="fa-caption text-3 animate-pulse" data-testid="stall-notice">
               Still working — large libraries take a minute…
             </p>
           )}
@@ -217,7 +221,7 @@ export default function Onboarding() {
         )}
 
         {onboarding.stage === "fitting" && onboarding.modelProgress && (
-          <p className="fa-caption text-fa-frost-dim text-center">
+          <p className="fa-caption text-3 text-center">
             {onboarding.modelProgress.phase}
             {onboarding.modelProgress.total > 0 &&
               ` · ${onboarding.modelProgress.processed.toLocaleString("en-US")} / ${onboarding.modelProgress.total.toLocaleString("en-US")}`}
@@ -236,13 +240,13 @@ export default function Onboarding() {
                 ready.", and this card sits directly beneath it. */}
             <div className="fa-card px-8 py-6 space-y-3 border-fa-frost/30">
               <Sparkles className="h-6 w-6 text-fa-frost mx-auto" />
-              <p className="fa-caption text-fa-frost-dim">
+              <p className="fa-caption text-3">
                 Model trained on your ratings — every pick comes with the reason and a predicted rating.
               </p>
             </div>
-            <button onClick={enterApp} className="fa-button-primary text-base px-6 py-3" data-testid="enter-app">
+            <Button variant="primary" size="lg" onClick={enterApp} className={`text-base py-3 ${COARSE_TAP}`} data-testid="enter-app">
               See tonight&apos;s picks
-            </button>
+            </Button>
           </div>
         )}
 
@@ -251,12 +255,12 @@ export default function Onboarding() {
             <p className="fa-body text-fa-frost-bright" data-testid="needs-ratings-copy">
               {ratingsNeededCopy(onboarding.ratingsFloor)}
             </p>
-            <p className="fa-caption text-fa-frost-dim">
+            <p className="fa-caption text-3">
               Your model learns from what you&apos;ve rated, and titles you&apos;ve watched and never scored are the
               quickest to rate. Once there are enough, {FIRST_MODEL_TIMING} — this page moves on by
               itself when it&apos;s ready.
             </p>
-            <Link to="/rate" className="fa-button-primary inline-flex" data-testid="needs-ratings-rate">
+            <Link to="/rate" className={`fa-button-primary inline-flex ${COARSE_TAP}`} data-testid="needs-ratings-rate">
               Rate a few titles
             </Link>
           </div>
@@ -267,11 +271,11 @@ export default function Onboarding() {
             <p className="fa-body text-fa-frost-bright" data-testid="awaiting-model-copy">
               {awaitingModelTiming(onboarding.hasActiveModel)}.
             </p>
-            <p className="fa-caption text-fa-frost-dim">
+            <p className="fa-caption text-3">
               Nothing to do but wait — this page moves on by itself when the model is ready, so you can close it and
               come back. More ratings make the {onboarding.hasActiveModel ? "next" : "first"} model sharper.
             </p>
-            <Link to="/rate" className="fa-button inline-flex" data-testid="awaiting-model-rate">
+            <Link to="/rate" className={`fa-button inline-flex ${COARSE_TAP}`} data-testid="awaiting-model-rate">
               Rate more while you wait
             </Link>
           </div>
@@ -283,13 +287,13 @@ export default function Onboarding() {
               {failureCopy(onboarding.degradedReason, onboarding.error)}
             </p>
             {needsReconnect(onboarding.degradedReason) ? (
-              <button onClick={reconnect} disabled={reconnecting} className="fa-button-primary" data-testid="onboarding-reconnect">
+              <Button variant="primary" onClick={reconnect} disabled={reconnecting} className={COARSE_TAP} data-testid="onboarding-reconnect">
                 {reconnecting ? "Opening Trakt…" : "Reconnect Trakt"}
-              </button>
+              </Button>
             ) : (
-              <button onClick={retry} disabled={retrying} className="fa-button" data-testid="onboarding-retry">
+              <Button onClick={retry} disabled={retrying} className={COARSE_TAP} data-testid="onboarding-retry">
                 {retrying ? "Starting…" : "Try again"}
-              </button>
+              </Button>
             )}
             {reconnectFailed && (
               <p className="fa-caption text-fa-danger">Couldn&apos;t reach Trakt. Try again in a moment.</p>
@@ -300,7 +304,7 @@ export default function Onboarding() {
               </p>
             )}
             {retryNote?.kind === "queued" && (
-              <p className="fa-caption text-fa-frost-dim" data-testid="onboarding-retry-queued">
+              <p className="fa-caption text-3" data-testid="onboarding-retry-queued">
                 Reel queued a fresh sync, but the server still reports this stop. Nothing is lost — this page moves on
                 by itself if the sync gets further.
               </p>
@@ -308,6 +312,6 @@ export default function Onboarding() {
           </div>
         )}
       </div>
-    </div>
+    </main>
   );
 }
