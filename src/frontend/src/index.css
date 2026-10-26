@@ -164,8 +164,9 @@ body {
   .fa-metric-sm {
     @apply text-lg font-light leading-tight tabular-nums;
   }
+  /* text-3, not frost-dim: frost-dim is 4.3:1 on a glass card, under AA for 10 px text. */
   .fa-stat-label {
-    @apply fa-overline text-fa-frost-dim;
+    @apply fa-overline text-3;
   }
   .fa-stat-value {
     @apply fa-metric text-fa-frost-bright;

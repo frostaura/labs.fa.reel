@@ -1,0 +1,23 @@
+{
+  "onboarding": {
+    "landmark-one-main": 1,
+    "page-has-heading-one": 1,
+    "region": 2
+  },
+  "person": {
+    "page-has-heading-one": 1
+  },
+  "saved": {
+    "label-content-name-mismatch": 1
+  },
+  "settings": {
+    "color-contrast": 1
+  },
+  "title": {
+    "color-contrast": 2,
+    "link-in-text-block": 1
+  },
+  "track-record": {
+    "color-contrast": 4
+  }
+}
