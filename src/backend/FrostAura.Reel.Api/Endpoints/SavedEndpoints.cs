@@ -91,13 +91,19 @@ public static class SavedEndpoints
 
     /// <param name="ExpectedAbsoluteError">What a displayed prediction is typically off by. Null until the account's closed loop has pairs — an unmeasured band is not a band.</param>
     /// <param name="UnscoredRemaining">Saves still without a prediction after this request's budget was spent.</param>
+    /// <param name="HeldOutByRules">
+    /// Live saves the account's content rules now exclude (a genre, keyword, language, crowd floor,
+    /// year window or maturity ceiling set after the save). They are not on the shelf and can never be
+    /// the pin; the count is here so the shelf can say why it is shorter than the list on Trakt.
+    /// </param>
     public sealed record SavedQueueResponse(
         string? ManagedListUrl,
         string Sort,
         int EveningBudgetMinutes,
         double? ExpectedAbsoluteError,
         int UnscoredRemaining,
-        IReadOnlyList<SavedQueueItem> Items);
+        IReadOnlyList<SavedQueueItem> Items,
+        int HeldOutByRules = 0);
 
     /// <param name="PredictedRating">What Reel committed to BEFORE the watch — the number the prompt settles.</param>
     public sealed record RecentlyWatchedItem(
@@ -188,10 +194,28 @@ public static class SavedEndpoints
 
         // Consumed saves — fully watched, or rated — never render, even before the reconciler or the
         // one-off repair has revoked them: the read is the guarantee, the revocation is hygiene.
-        var saved = await SaveConsumption.LiveSaves(db, accountId)
+        var live = await SaveConsumption.LiveSaves(db, accountId)
             .Unconsumed(db)
             .Join(db.Titles, r => r.TitleId, t => t.Id, (r, t) => new { Reaction = r, Title = t })
             .ToListAsync(ct);
+
+        // Saved is the user's own list, but a standing exclusion is airtight on every channel (XM-02):
+        // a save in a genre, keyword or language ruled out since, under the crowd floor or outside the
+        // year window or maturity ceiling, leaves the shelf and can never be tonight's pin. Read
+        // through the one content-rule definition, never a copy of it; the footprint half does not
+        // apply here, because a save IS footprint and consumed saves are handled above.
+        var liveIds = live.Select(s => s.Title.Id).ToList();
+        var allowed = liveIds.Count == 0
+            ? new HashSet<Guid>()
+            : (await new EligibilityQueryBuilder(db).ContentFilteredTitles(accountId)
+                .Where(t => liveIds.Contains(t.Id))
+                .Select(t => t.Id)
+                .ToListAsync(ct)).ToHashSet();
+        var maturityCeiling = account.Settings.MaturityCeiling;
+        var saved = live
+            .Where(s => allowed.Contains(s.Title.Id) && EligibilityQueryBuilder.PassesMaturity(s.Title, maturityCeiling))
+            .ToList();
+        var heldOutByRules = live.Count - saved.Count;
 
         var titleIds = saved.Select(s => s.Title.Id).ToList();
         var scores = await ActiveArtifactScoresAsync(db, accountId, titleIds, ct);
@@ -248,10 +272,7 @@ public static class SavedEndpoints
         // answer" bar, raised by the account's "for you" minimum. The pin is never withheld for being
         // under it — the client walks this same candidate list on "not tonight" — but its reason says
         // so rather than reading as a recommendation (R1-18).
-        var bar = HeroConfidence.BarFor(ContentFilterRules.ParseRating(await db.ContentFilters
-            .Where(f => f.AccountId == accountId && f.Kind == FilterKind.MinPredictedRating)
-            .Select(f => f.Value)
-            .FirstOrDefaultAsync(ct)));
+        var bar = HeroConfidence.BarFor(await ForYouBar.ReadAsync(db, accountId, ct));
         var byId = saved.ToDictionary(s => s.Title.Id);
         var connection = await db.TraktConnections.FirstOrDefaultAsync(c => c.AccountId == accountId, ct);
 
@@ -302,7 +323,8 @@ public static class SavedEndpoints
             eveningBudget,
             expectedAbsoluteError,
             unscoredRemaining,
-            items);
+            items,
+            heldOutByRules);
     }
 
     /// <summary>

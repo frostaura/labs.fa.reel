@@ -3,6 +3,8 @@ using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Saved;
+using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Ml;
@@ -20,7 +22,7 @@ public static class DigestEndpoints
         // build has run — the Home rail hides itself on empty rather than erroring.
         // degradedReason is non-null exactly when the build relaxed the "high for you" floor, so
         // the rail can stop claiming a bar its cards did not clear.
-        group.MapGet("/current", async (IReelDbContext db, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/current", async (IReelDbContext db, EligibilityQueryBuilder eligibility, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
@@ -44,6 +46,22 @@ public static class DigestEndpoints
             }
 
             var digestItems = JsonSerializer.Deserialize<List<DigestItem>>(digest.ItemsJson) ?? [];
+
+            // Built on Friday, read all week (XM-04): a card watched, rated, saved, dismissed or
+            // dropped since the build, ruled out by a content rule added since, or under a For-you
+            // bar raised since, is a suggestion the user has already answered — re-checked here on
+            // every read through the same eligibility definition the build used, and never shown.
+            var builtIds = digestItems.Select(i => i.TitleId).ToList();
+            var stillEligible = builtIds.Count == 0
+                ? new HashSet<Guid>()
+                : (await eligibility.EligibleTitles(account.Id)
+                    .Where(t => builtIds.Contains(t.Id))
+                    .Select(t => t.Id)
+                    .ToListAsync(ct)).ToHashSet();
+            var bar = await ForYouBar.ReadAsync(db, account.Id, ct);
+            digestItems = digestItems
+                .Where(i => stillEligible.Contains(i.TitleId) && ForYouBar.Clears(i.PredictedRating, bar))
+                .ToList();
             var ids = digestItems.Select(i => i.TitleId).ToList();
             var titles = ids.Count == 0
                 ? []
@@ -59,7 +77,8 @@ public static class DigestEndpoints
             var whySources = new List<ExposureWhySource>();
             foreach (var item in digestItems)
             {
-                if (!titles.TryGetValue(item.TitleId, out var title))
+                if (!titles.TryGetValue(item.TitleId, out var title)
+                    || !EligibilityQueryBuilder.PassesMaturity(title, account.Settings.MaturityCeiling))
                 {
                     continue;
                 }

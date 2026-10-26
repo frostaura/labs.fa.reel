@@ -378,6 +378,168 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
 
     // ── Harness ─────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// XM-05: the digest is a suggestion surface, so the account's own For-you bar binds it — at
+    /// build time, under the strict floor and under the relaxed one alike. A bar of 7.5 makes a thin
+    /// week's 6.0 relaxation stop at 7.5, and the copy names the bar it actually used.
+    /// </summary>
+    [Fact]
+    public async Task The_accounts_for_you_bar_binds_the_build_even_when_the_week_is_thin()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var above = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        var between = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-3));
+        var relaxedOnly = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-1));
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [above] = 7.8m,
+            [between] = 7.2m,       // clears the digest's own 7.0, not the account's 7.5
+            [relaxedOnly] = 6.4m,   // clears the relaxed 6.0, not the account's 7.5
+        });
+        await SeedBarAsync(accountId, "7.5");
+
+        await RunDigestAsync(accountId, new FakePushSender());
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(new[] { above }, items.Select(i => i.TitleId).ToArray());
+        // Nothing was relaxed below the bar, so nothing claims it was.
+        Assert.All(items, i => Assert.Null(i.DegradedReason));
+    }
+
+    /// <summary>
+    /// A bar between the two floors: the thin-week relaxation stops at the account's bar, not at 6.0,
+    /// and the degraded copy quotes the floor the digest really used.
+    /// </summary>
+    [Fact]
+    public async Task A_bar_between_the_floors_is_where_the_relaxation_stops()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        var strong = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        var atBar = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-3));
+        var underBar = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-1));
+        await SeedActiveArtifactAndScoresAsync(accountId, new()
+        {
+            [strong] = 7.3m,
+            [atBar] = 6.5m,
+            [underBar] = 6.3m,
+        });
+        await SeedBarAsync(accountId, "6.5");
+
+        await RunDigestAsync(accountId, new FakePushSender());
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(new[] { strong, atBar }, items.Select(i => i.TitleId).ToArray());
+        Assert.All(items, i => Assert.Contains("relaxed to 6.5", i.DegradedReason, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// WS-5's media-mix floor reaches the digest: a 90%-movies account whose week is ten strong shows
+    /// and four good films gets the films seated (the lowest shows give way), not ten shows. A floor
+    /// on representation, never a quota: no film under the digest's floor is pulled in to hit it.
+    /// </summary>
+    [Fact]
+    public async Task The_digest_carries_the_accounts_media_mix()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var accountId = await SeedAccountAsync();
+        await SeedRatedMixAsync(accountId, movies: 9, shows: 1);
+
+        var scores = new Dictionary<Guid, decimal>();
+        var shows = new List<Guid>();
+        var movies = new List<Guid>();
+        for (var i = 0; i < 10; i++)
+        {
+            var show = await SeedTitleAsync(MediaType.Show, firstAiredAt: now.AddDays(-2));
+            scores[show] = 8.9m - (i * 0.1m);
+            shows.Add(show);
+        }
+
+        for (var i = 0; i < 4; i++)
+        {
+            var movie = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+            scores[movie] = 7.4m - (i * 0.1m);
+            movies.Add(movie);
+        }
+
+        var underFloor = await SeedTitleAsync(MediaType.Movie, releasedAt: now.AddDays(-2));
+        scores[underFloor] = 5.5m;
+        await SeedActiveArtifactAndScoresAsync(accountId, scores);
+
+        await RunDigestAsync(accountId, new FakePushSender());
+        var items = await ReadDigestItemsAsync(accountId);
+
+        Assert.Equal(10, items.Count);
+        Assert.Equal(movies.ToHashSet(), items.Select(i => i.TitleId).Where(movies.Contains).ToHashSet());
+        Assert.Equal(shows.Take(6), items.Select(i => i.TitleId).Where(shows.Contains));
+        Assert.DoesNotContain(underFloor, items.Select(i => i.TitleId));
+        // Still a ranking: best first.
+        Assert.Equal(items.OrderByDescending(i => i.PredictedRating).Select(i => i.TitleId), items.Select(i => i.TitleId));
+    }
+
+    private async Task SeedBarAsync(Guid accountId, string value)
+    {
+        await using var db = fixture.CreateContext(new AccountContext());
+        db.ContentFilters.Add(new Domain.Filters.ContentFilter
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = Domain.Filters.FilterKind.MinPredictedRating,
+            Value = value,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Rated titles of each medium, outside the digest window so they are never candidates.</summary>
+    private async Task SeedRatedMixAsync(Guid accountId, int movies, int shows)
+    {
+        var rated = new List<(Guid Id, MediaType Media)>();
+        for (var i = 0; i < movies; i++)
+        {
+            rated.Add((await SeedTitleAsync(MediaType.Movie, releasedAt: DateTime.UtcNow.AddYears(-3)), MediaType.Movie));
+        }
+
+        for (var i = 0; i < shows; i++)
+        {
+            rated.Add((await SeedTitleAsync(MediaType.Show, firstAiredAt: DateTime.UtcNow.AddYears(-3)), MediaType.Show));
+        }
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        foreach (var (id, media) in rated)
+        {
+            db.UserRatings.Add(new UserRating
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = id,
+                SubjectType = media == MediaType.Movie ? RatingSubjectType.Movie : RatingSubjectType.Show,
+                Rating = 8,
+                RatedAt = DateTime.UtcNow.AddDays(-30),
+                FirstRatedAt = DateTime.UtcNow.AddDays(-30),
+                SyncedAt = DateTime.UtcNow.AddDays(-30),
+            });
+        }
+
+        await db.SaveChangesAsync();
+    }
+
     private sealed class FakePushSender : IWebPushSender
     {
         public Dictionary<string, WebPushOutcome> Outcomes { get; } = [];
@@ -432,7 +594,7 @@ public class DigestJobHandlerTests(PostgresFixture fixture)
             new DislikeSignal(db, new MemoryCache(new MemoryCacheOptions())),
             new RatingCalibrationService(db, new MemoryCache(new MemoryCacheOptions())));
         var handler = new BuildDigestJobHandler(
-            db, new EligibilityQueryBuilder(db), scorer, sender, NullLogger<BuildDigestJobHandler>.Instance);
+            db, new EligibilityQueryBuilder(db), scorer, featureBuilder, sender, NullLogger<BuildDigestJobHandler>.Instance);
 
         await handler.ExecuteAsync(
             new SyncJob { Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.BuildDigest },
@@ -692,6 +854,7 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
                     TraktSlug = $"digest-exposure-{Guid.NewGuid():N}",
                     Name = $"Digest Exposure {i} {Guid.NewGuid():N}",
                     Genres = ["drama"],
+                    Language = "en",
                     CreatedAt = now,
                 };
                 db.Add(title);
@@ -787,5 +950,94 @@ public class DigestExposureEndpointTests(PostgresFixture fixture, ReelApiFactory
         Assert.Equal(Hook, exposures[titleIds[0]].WhySentence);
         Assert.Equal("Digest", exposures[titleIds[1]].WhySource);
         Assert.Equal($"Streaming on {providerName}", exposures[titleIds[1]].WhySentence);
+    }
+
+    /// <summary>
+    /// XM-04: the digest is frozen on Friday but read all week, so it is re-checked on every read. A
+    /// card watched since the build, a card now in an excluded genre, and a card under a bar raised
+    /// since the build are neither rendered nor logged; the clean card still is.
+    /// </summary>
+    [Fact]
+    public async Task Reading_the_digest_drops_what_was_ruled_out_or_seen_since_the_build()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, client) = await api.CreateSignedInAccountAsync($"digest-late-{Guid.NewGuid():N}");
+        var now = DateTime.UtcNow;
+        var ids = new List<Guid>();
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            string[][] genres = [["drama"], ["drama"], ["horror"], ["drama"]];
+            for (var i = 0; i < 4; i++)
+            {
+                var title = new Title
+                {
+                    Id = Guid.NewGuid(),
+                    MediaType = MediaType.Movie,
+                    TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+                    TraktId = Random.Shared.NextInt64(1, long.MaxValue),
+                    TraktSlug = $"digest-late-{Guid.NewGuid():N}",
+                    Name = $"Digest Late {i} {Guid.NewGuid():N}",
+                    Genres = genres[i],
+                    Language = "en",
+                    CreatedAt = now,
+                };
+                db.Add(title);
+                ids.Add(title.Id);
+            }
+
+            db.AccountDigests.Add(new AccountDigest
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                WeekStart = DigestWeek.MondayOf(now),
+                GeneratedAt = now.AddDays(-1),
+                ItemsJson = JsonSerializer.Serialize(new[]
+                {
+                    new DigestItem(ids[0], 8.0m, DigestReasons.NewRelease),
+                    new DigestItem(ids[1], 7.9m, DigestReasons.NewRelease),
+                    new DigestItem(ids[2], 7.8m, DigestReasons.NewRelease),
+                    new DigestItem(ids[3], 7.44m, DigestReasons.NewRelease),
+                }),
+            });
+
+            // After the build: watched one, excluded a genre, raised the bar to 7.5 (7.44 shows as 7.4).
+            db.WatchedTitles.Add(new WatchedTitle
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = ids[1],
+                Plays = 1,
+                IsFullyWatched = true,
+                FirstSyncedAt = now,
+                UpdatedAt = now,
+            });
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.ExcludeGenre,
+                Value = "horror",
+                CreatedAt = now,
+            });
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.MinPredictedRating,
+                Value = "7.5",
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await client.GetAsync("/api/digest/current");
+        response.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var cards = body.RootElement.GetProperty("items").EnumerateArray().Select(c => c.GetProperty("titleId").GetGuid()).ToArray();
+        Assert.Equal(new[] { ids[0] }, cards);
     }
 }

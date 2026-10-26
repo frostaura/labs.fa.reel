@@ -2,6 +2,8 @@ using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Providers;
+using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Saved;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
@@ -18,7 +20,8 @@ namespace FrostAura.Reel.Application.Jobs;
 /// Builds the account's weekly digest: eligible titles that either released in the trailing
 /// 7 days or arrived on a streaming-now offer in the account's region inside those 7 days (the
 /// provider set changed — <see cref="StreamingNowPolicy.Arrivals"/>), scored by the personal
-/// model, floored at 7.0 predicted — softly, see <see cref="MinPredictedRating"/> — top 10 kept.
+/// model, floored at 7.0 predicted — softly, see <see cref="MinPredictedRating"/> — and never under
+/// the account's own For-you bar, top 10 kept in the account's media mix.
 /// Upserts <see cref="AccountDigest"/> on
 /// (AccountId, WeekStart = Monday of the current ISO week, UTC) so re-runs within a week
 /// refresh rather than duplicate. When the digest has items, notifies every Web Push
@@ -29,6 +32,7 @@ public sealed class BuildDigestJobHandler(
     IReelDbContext db,
     EligibilityQueryBuilder eligibility,
     OnDemandScorer scorer,
+    FeatureVectorBuilder featureBuilder,
     IWebPushSender pushSender,
     ILogger<BuildDigestJobHandler> logger) : IJobHandler
 {
@@ -121,6 +125,20 @@ public sealed class BuildDigestJobHandler(
             }
         }
 
+        // The maturity ceiling is the one content rule SQL cannot order (certifications), so it is
+        // applied here, in memory, as every other surface applies it — before anything is scored.
+        if (!string.IsNullOrWhiteSpace(account.Settings.MaturityCeiling) && reasons.Count > 0)
+        {
+            var keys = reasons.Keys.ToList();
+            var overCeiling = (await db.Titles.Where(t => keys.Contains(t.Id)).ToListAsync(ct))
+                .Where(t => !EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
+                .Select(t => t.Id);
+            foreach (var id in overCeiling)
+            {
+                reasons.Remove(id);
+            }
+        }
+
         var candidateIds = reasons.Keys.ToList();
         var scores = new Dictionary<Guid, decimal>();
         if (candidateIds.Count > 0)
@@ -153,12 +171,18 @@ public sealed class BuildDigestJobHandler(
             }
         }
 
-        var qualified = scores.Where(kv => kv.Value >= MinPredictedRating).ToList();
+        // The account's own For-you bar binds the digest like every other suggestion surface (XM-05):
+        // no card under it, under the strict floor or the relaxed one. A bar at or above the digest's
+        // own 7.0 leaves nothing to relax into; a bar between the floors is where relaxing stops.
+        var bar = await ForYouBar.ReadAsync(db, accountId, ct);
+        var strictShown = bar is { } high && high > MinPredictedRating ? high : MinPredictedRating;
+        var relaxedShown = bar is { } mid && mid > RelaxedMinPredictedRating ? mid : RelaxedMinPredictedRating;
+        var qualified = scores.Where(kv => kv.Value >= MinPredictedRating && ForYouBar.Clears(kv.Value, bar)).ToList();
         var selected = qualified;
         string? degradedReason = null;
-        if (qualified.Count < ThinDigestCount)
+        if (qualified.Count < ThinDigestCount && relaxedShown < strictShown)
         {
-            var relaxed = scores.Where(kv => kv.Value >= RelaxedMinPredictedRating).ToList();
+            var relaxed = scores.Where(kv => kv.Value >= RelaxedMinPredictedRating && ForYouBar.Clears(kv.Value, bar)).ToList();
             if (relaxed.Count > qualified.Count)
             {
                 selected = relaxed;
@@ -171,14 +195,15 @@ public sealed class BuildDigestJobHandler(
                     "Only {0} of this week's arrivals cleared the {1:0.#} \u201Chigh for you\u201D bar, so it was "
                         + "relaxed to {2:0.#} for this digest.",
                     qualified.Count,
-                    MinPredictedRating,
-                    RelaxedMinPredictedRating);
+                    strictShown,
+                    relaxedShown);
             }
         }
 
-        var items = selected
-            .OrderByDescending(kv => kv.Value)
-            .Take(MaxItems)
+        var ranked = selected.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key).ToList();
+        var picks = await BalanceMediaAsync(accountId, ranked, now, ct);
+
+        var items = picks
             .Select(kv => new DigestItem(
                 kv.Key, Math.Round(kv.Value, 2), reasons[kv.Key], degradedReason,
                 reasons[kv.Key] == DigestReasons.NewOnProvider ? arrivals[kv.Key] : null))
@@ -211,6 +236,40 @@ public sealed class BuildDigestJobHandler(
                 "Digest for {AccountId} is empty even at the relaxed {Floor:0.#} floor — no push sent.",
                 accountId, RelaxedMinPredictedRating);
         }
+    }
+
+    /// <summary>
+    /// The top <see cref="MaxItems"/> of <paramref name="ranked"/>, carrying the account's media mix
+    /// (<see cref="MediaMix"/>, WS-5's floor on representation): a 90%-movies account's week of ten
+    /// strong shows seats the films that also cleared the floor, evicting the lowest shows, rather
+    /// than going out as ten shows. Only what already cleared the digest's floor and bar can be
+    /// swapped in, so the mix never reaches below them; a week without the medium stays as ranked.
+    /// Re-sorted afterwards, because the digest's order is a claim about ranking.
+    /// </summary>
+    private async Task<List<KeyValuePair<Guid, decimal>>> BalanceMediaAsync(
+        Guid accountId, List<KeyValuePair<Guid, decimal>> ranked, DateTime now, CancellationToken ct)
+    {
+        var top = ranked.Take(MaxItems).ToList();
+        if (ranked.Count <= MaxItems)
+        {
+            return top;
+        }
+
+        var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
+        var (wantMovies, target) = MediaMix.TargetFor(top.Count, taste.MovieRatedShare);
+        if (target == 0)
+        {
+            return top;
+        }
+
+        var ids = ranked.Select(kv => kv.Key).ToList();
+        var movies = (await db.Titles
+                .Where(t => ids.Contains(t.Id) && t.MediaType == MediaType.Movie)
+                .Select(t => t.Id)
+                .ToListAsync(ct))
+            .ToHashSet();
+        var (balanced, _) = MediaMix.Balance(top, ranked.Skip(MaxItems).ToList(), kv => movies.Contains(kv.Key) == wantMovies, target);
+        return [.. balanced.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key)];
     }
 
     /// <summary>
