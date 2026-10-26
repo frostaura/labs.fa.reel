@@ -228,7 +228,7 @@ public sealed class JobRunnerService(
     /// <param name="ct">Cancellation.</param>
     internal async Task<ClaimedJob?> ClaimNextAsync(IReadOnlyCollection<string> kinds, CancellationToken ct, Guid? onlyId = null)
     {
-        using var scope = scopeFactory.CreateScope();
+        using var scope = CreateSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -449,17 +449,25 @@ public sealed class JobRunnerService(
         {
             scope = scopeFactory.CreateScope();
             db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+            var tenancy = scope.ServiceProvider.GetRequiredService<IAccountContext>();
 
             // Read through the fence: a row reclaimed before the handler even started is not this
             // execution's to run. Tracked, so the row's AttemptCount and Status concurrency tokens
-            // fence every save the handler makes of it.
+            // fence every save the handler makes of it. Read in system scope: whose job it is is
+            // what this read finds out.
+            var reading = tenancy.EnterSystemScope();
             job = await Fenced(db, claim).FirstOrDefaultAsync(handlerToken)
                 ?? throw new InvalidOperationException("The job no longer belongs to this execution.");
             state.AccountId = job.AccountId;
             if (job.AccountId is { } owner)
             {
-                scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(owner);
+                // An account job runs pinned to its account and nothing else (J-11).
+                reading.Dispose();
+                tenancy.SetAccount(owner);
             }
+
+            // A global job (no account) keeps the system scope for the whole run: reading across
+            // accounts is what a global job is. It ends with the execution's DI scope.
 
             var handler = scope.ServiceProvider.GetServices<IJobHandler>().FirstOrDefault(h => h.Kind == job.Kind)
                 ?? throw new NonRetryableJobException($"No handler registered for job kind {job.Kind}.");
@@ -813,12 +821,24 @@ public sealed class JobRunnerService(
         db.SyncJobs.Where(j => j.Id == claim.Id && j.AttemptCount == claim.Attempt && j.Status == JobStatus.Running);
 
     /// <summary>
-    /// Runs a write on a fresh, unpinned context. Never the handler's token: a terminal write must
+    /// A DI scope for the runner's own bookkeeping — claims, fences, sweeps, terminal writes. Those
+    /// read and write the queue across every account by design, so they say so (J-11); the scope's
+    /// system-scope handle ends with the scope.
+    /// </summary>
+    private IServiceScope CreateSystemScope()
+    {
+        var scope = scopeFactory.CreateScope();
+        scope.ServiceProvider.GetRequiredService<IAccountContext>().EnterSystemScope();
+        return scope;
+    }
+
+    /// <summary>
+    /// Runs a write on a fresh context in system scope. Never the handler's token: a terminal write must
     /// land even when the handler was cancelled.
     /// </summary>
     private async Task<int> WithContextAsync(Func<ReelDbContext, Task<int>> write)
     {
-        using var scope = scopeFactory.CreateScope();
+        using var scope = CreateSystemScope();
         return await write(scope.ServiceProvider.GetRequiredService<ReelDbContext>());
     }
 
@@ -900,7 +920,7 @@ public sealed class JobRunnerService(
     /// </summary>
     internal async Task SweepAsync(CancellationToken ct)
     {
-        using var scope = scopeFactory.CreateScope();
+        using var scope = CreateSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         var now = DateTime.UtcNow;
         var cutoff = now - options.StaleAfter;
@@ -977,7 +997,7 @@ public sealed class JobRunnerService(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
+            using var scope = CreateSystemScope();
             var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
             var broken = "Stalled with no heartbeat after @p1 attempts.";
             var fixedMessage = StalledMessage(options.MaxAttempts);

@@ -6,8 +6,10 @@ using FrostAura.Reel.Infrastructure.Persistence;
 using FrostAura.Reel.Infrastructure.Sse;
 using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace FrostAura.Reel.Infrastructure;
 
@@ -16,6 +18,9 @@ public static partial class DependencyInjection
     /// <summary>Persistence, the tenancy scope, the pipeline event hub and the job runner.</summary>
     private static IServiceCollection AddReelJobs(this IServiceCollection services, string connectionString)
     {
+        // The fail-closed tenancy policy (J-11), once per process so its once-per-call-site log is too.
+        services.TryAddSingleton(sp => UnscopedReadPolicy.FromConfiguration(
+            sp.GetService<IConfiguration>(), sp.GetService<ILogger<UnscopedReadPolicy>>()));
         services.AddScoped<IAccountContext, AccountContext>();
 
         services.AddDbContext<ReelDbContext>(options =>
