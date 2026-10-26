@@ -526,3 +526,59 @@ describe("WS-2 review round 1 — the frames the server really sends", () => {
     expect(judgeDegraded(flags as string[] | undefined)).toBe(failed);
   });
 });
+
+/**
+ * §4.9's additive v2 frames. The client renders them while `ASK_ENGINE=v1` frames keep working:
+ * every one is optional on the wire, and a malformed one is dropped here rather than reaching the
+ * reducer as a typed value — the same discipline as the v1 guards above.
+ */
+describe("streamAskReel — v2 frames (§4.9)", () => {
+  it("parses plan, phase labels, picks, trays, answer, clarify, none-found and degraded", async () => {
+    const events = await collect([
+      frame("plan", { act: "NewRequest", concepts: ["ninja"], references: ["T1.2"] }),
+      frame("phase", { stage: "judging", label: "Checking 6 against your request" }),
+      frame("picks", { cards: [card(1), card(2)] }),
+      frame("tray", { kind: "nearMiss", cards: [card(3)] }),
+      frame("tray", { kind: "belowFloor", cards: [card(4)] }),
+      frame("answer", { text: "Yes — it opens on a massacre." }),
+      frame("clarify", { question: "Which one?", options: ["The first", "The second"] }),
+      frame("none-found", { supply: { knockouts: [] } }),
+      frame("degraded", { what: "judge:1/3" }),
+    ]);
+    expect(events.map((e) => e.event)).toEqual([
+      "plan", "phase", "picks", "tray", "tray", "answer", "clarify", "none-found", "degraded",
+    ]);
+    // A v2 phase carries a label and no counts; the counts read as zero so nothing downstream
+    // has to know which engine sent the frame.
+    expect(events[1].data).toEqual({ stage: "judging", label: "Checking 6 against your request", found: 0, scored: 0 });
+    // `what` is one string or a list on the wire, and always a list to the client.
+    expect(events[8].data).toEqual({ what: ["judge:1/3"] });
+  });
+
+  it("reads an unknown tray kind as a near miss, never as picks", async () => {
+    const [ev] = await collect([frame("tray", { kind: "somethingNew", cards: [card(1)] })]);
+    expect(ev).toEqual({ event: "tray", data: { kind: "nearMiss", cards: [card(1)] } });
+  });
+
+  it("normalises plan references and drops non-string concepts", async () => {
+    const [ev] = await collect([
+      frame("plan", { act: "Refine", concepts: ["heist", 4, null], references: [{ turn: 2, rank: 3 }, "T1.1", 7] }),
+    ]);
+    expect(ev).toEqual({ event: "plan", data: { act: "Refine", concepts: ["heist"], references: ["T2.3", "T1.1"] } });
+  });
+
+  it("drops malformed v2 frames rather than handing them on", async () => {
+    const events = await collect([
+      frame("picks", { cards: [{ titleId: "" }] }),
+      frame("picks", { cards: "nope" }),
+      frame("tray", { kind: "nearMiss" }),
+      frame("answer", { text: 3 }),
+      frame("clarify", { question: "Which?", options: [1] }),
+      frame("none-found", {}),
+      frame("degraded", { what: 5 }),
+      frame("plan", { act: 1 }),
+      frame("phase", { label: "no stage" }),
+    ]);
+    expect(events).toEqual([]);
+  });
+});
