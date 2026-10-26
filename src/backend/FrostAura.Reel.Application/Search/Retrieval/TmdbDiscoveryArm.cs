@@ -597,6 +597,14 @@ public sealed record StandingDiscoverPlan(
             return false;
         }
 
+        // Composite exclusions the row carries data for: anime is animation in Japanese.
+        if (excluded.Contains(GenreStandIns.AnimeSlug)
+            && slugs.Contains(GenreStandIns.AnimeGenre)
+            && string.Equals(language, GenreStandIns.AnimeLanguage, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         if (rules.IncludeGenres.Count > 0 && !slugs.Any(rules.IncludeGenres.Contains))
         {
             return false;

@@ -189,13 +189,44 @@ public static partial class GenreStandIns
     public static IReadOnlyList<string> AliasesOf(string slug) =>
         Aliases.TryGetValue(slug, out var aliases) ? aliases : [];
 
+    /// <summary>The genre a composite slug is a dialect of: anime is animation in Japanese.</summary>
+    public const string AnimeSlug = "anime";
+
+    /// <summary>The genre and original language that make a title anime (H-7: "anime as animation + ja").</summary>
+    public const string AnimeGenre = "animation";
+
+    /// <summary>The original language that, with <see cref="AnimeGenre"/>, makes a title anime.</summary>
+    public const string AnimeLanguage = "ja";
+
+    /// <summary>
+    /// Slugs that are a COMBINATION of catalogue facts rather than a tag: <c>anime</c> is animation
+    /// whose original language is Japanese. Neither TMDB taxonomy has an anime genre and only 2 titles
+    /// carry Trakt's <c>anime</c> slug, so "no anime" removed nothing (H-7: marginal 0) while 1,000+
+    /// Japanese animated titles stayed eligible. The keyword stand-in ("anime") still applies too.
+    /// </summary>
+    public static IReadOnlyList<string> CompositeSlugs { get; } = [AnimeSlug];
+
+    /// <summary>The SQL predicate a composite slug adds to its exclusion, or null when the slug is not composite.</summary>
+    public static Expression<Func<Title, bool>>? CompositeOf(string slug) =>
+        string.Equals(slug, AnimeSlug, StringComparison.Ordinal)
+            ? t => t.Genres.Contains(AnimeGenre) && t.Language != null && t.Language.ToLower() == AnimeLanguage
+            : null;
+
+    /// <summary>The in-memory twin of <see cref="CompositeOf"/>.</summary>
+    public static bool MatchesComposite(Title title, string slug) =>
+        string.Equals(slug, AnimeSlug, StringComparison.Ordinal)
+        && title.Genres.Contains(AnimeGenre, StringComparer.Ordinal)
+        && string.Equals(title.Language, AnimeLanguage, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// True when an ExcludeGenre of <paramref name="slug"/> removes <paramref name="title"/>: the genre
-    /// itself, an alias genre, or a stand-in keyword on a medium that cannot tag it (in memory).
+    /// itself, an alias genre, a composite rule, or a stand-in keyword on a medium that cannot tag it
+    /// (in memory).
     /// </summary>
     public static bool ExcludedBy(Title title, string slug) =>
         title.Genres.Contains(slug, StringComparer.Ordinal)
         || AliasesOf(slug).Any(alias => title.Genres.Contains(alias, StringComparer.Ordinal))
+        || MatchesComposite(title, slug)
         || Carries(title, slug);
 
     /// <summary>The slugs with stand-ins, in a stable order so the generated SQL is stable too.</summary>
@@ -274,8 +305,13 @@ public static partial class GenreStandIns
         Expression? anyKeyword = null;
         if (exact.Length > 0)
         {
+            // The labels ride in as a PARAMETER, not an inlined constant: Npgsql turns
+            // "keywords.Any(k => @labels.Contains(k))" into the overlap operator (&&), but an inlined
+            // array into EXISTS (unnest … IN (…)), a subplan per title that cost the single-pass cost
+            // meter ~40 ms on its own (38k titles, 2026-10-26).
             var k = Expression.Parameter(typeof(string), "k");
-            var contains = Expression.Call(ArrayContainsMethod, Expression.Constant(exact), k);
+            var holder = Expression.Field(Expression.Constant(new LabelSet(exact)), nameof(LabelSet.Labels));
+            var contains = Expression.Call(ArrayContainsMethod, holder, k);
             anyKeyword = Expression.Call(AnyMethod, keywords, Expression.Lambda<Func<string, bool>>(contains, k));
         }
 
@@ -293,6 +329,12 @@ public static partial class GenreStandIns
                 Expression.Equal(Expression.Property(title, nameof(Title.MediaType)), Expression.Constant(media[0])),
                 anyKeyword!);
         return Expression.Lambda<Func<Title, bool>>(body, title);
+    }
+
+    /// <summary>A closure-shaped holder, so EF Core parameterises the exact labels instead of inlining them.</summary>
+    private sealed class LabelSet(string[] labels)
+    {
+        public readonly string[] Labels = labels;
     }
 
     /// <summary>What the labels are joined with before the slug's expression scans them.</summary>
