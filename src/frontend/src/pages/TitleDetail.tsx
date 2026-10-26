@@ -271,6 +271,7 @@ export default function TitleDetail() {
                                   predictedRating={title.prediction.predictedRating}
                                   crowdRating={title.crowdRating ?? null}
                                   crowdVotes={title.crowdVotes ?? null}
+                                  band={title.prediction.expectedAbsoluteError}
                                   size="lg"
                                 />
                               )

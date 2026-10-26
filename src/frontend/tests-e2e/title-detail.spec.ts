@@ -183,6 +183,17 @@ test.describe("title detail", () => {
     await expect(walk.getByTestId("waterfall-step").last()).toContainText("−0.2");
   });
 
+  // A deep-linked title has no feed or Saved read in the cache to borrow the band from, so it
+  // carries its own (prediction.expectedAbsoluteError, change request to WS-5).
+  test("a deep-linked title's chip carries the band the title payload sends", async ({ page }) => {
+    await bootTitle(page, { prediction: { ...TITLE.prediction, expectedAbsoluteError: 1.3 } });
+    await expect(page.getByTestId("predicted-band").first()).toHaveText("±1.3");
+
+    await bootTitle(page, { prediction: { ...TITLE.prediction, expectedAbsoluteError: null } });
+    await expect(page.getByTestId("predicted-rating").first()).toBeVisible();
+    await expect(page.getByTestId("predicted-band")).toHaveCount(0);
+  });
+
   test("a show lists its creators", async ({ page }) => {
     await bootTitle(page, {
       mediaType: "Show",

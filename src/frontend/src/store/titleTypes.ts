@@ -105,6 +105,12 @@ export interface TitleDetailPayload {
      * up to `predictedRating`, and never derives one from the (normalised) contribution bars.
      */
     waterfall?: WaterfallPayload | null;
+    /**
+     * The account's measured band behind this number (FD-4), so a deep-linked title carries it
+     * without a feed or Saved read in the cache. Null means measured-and-absent (no pairs yet);
+     * absent from an older server (change request to WS-5), in which case the cache is read.
+     */
+    expectedAbsoluteError?: number | null;
   } | null;
   contributionDetails: ContributionDetail[];
   userState: {
