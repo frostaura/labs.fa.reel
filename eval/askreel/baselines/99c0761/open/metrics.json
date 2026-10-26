@@ -89,7 +89,7 @@
    "n": 167
   },
   "hedgingWhyLines": {
-   "value": 670,
+   "value": 684,
    "n": 167
   },
   "nonLatinWhyLines": {
@@ -2853,7 +2853,9 @@
      "precision": 0.375,
      "groundingViolations": 0,
      "groundingDetail": [],
-     "hedgingWhys": [],
+     "hedgingWhys": [
+      "NOS4A2: Vic McQueen’s portals and Charlie’s sinister threat offer you intense supernatural conflict, though the brooding series is a slower fit."
+     ],
      "nonLatinWhys": [],
      "echo": true,
      "fallback": true,
@@ -3778,7 +3780,8 @@
       "All the Devils Are Here: A heist crew trapped in a safehouse gives you betrayal and paranoid crime tension, but its mystery focus may be less rewarding.",
       "High Rollers: A casino heist, rival criminals, and FBI pursuit offer you crime-action thrills, though the setup sounds more heist movie than neo-noir.",
       "Neighborhood Watch: The reluctant search for an abducted woman brings you crime-thriller suspense, though its premise sounds less distinctly noir.",
-      "Detective Knight: Rogue: You get brisk pursuit and Bruce Willis as a haunted detective, though the Halloween heist plot sounds more routine action-crime than neo-noir."
+      "Detective Knight: Rogue: You get brisk pursuit and Bruce Willis as a haunted detective, though the Halloween heist plot sounds more routine action-crime than neo-noir.",
+      "Night Teeth: Its nocturnal LA vampire underworld offers you shadowy noir atmosphere and action, but the supernatural horror is a detour from crime noir."
      ],
      "nonLatinWhys": [],
      "echo": true,
@@ -4181,6 +4184,7 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
+      "The Good Thief: A casino heist and a police tip bring gritty crime tension, though this aging gambler's story sounds slower than your favorites.",
       "Finding Steve McQueen: You may enjoy the brisk, true-story $30 million heist, though its thieves are robbers rather than classic con artists.",
       "Cheaters: The academic decathlon team's scheme gives you a deception angle, though this earnest school drama lacks a classic grifter.",
       "Gangster No. 1: You get a gritty gangster rise-and-betrayal story with crime-thriller tension, though it’s not really about a con artist."
@@ -4513,6 +4517,7 @@
       "The Call of Cthulhu: The Cthulhu Cult is central to this eerie investigation, though its vintage, literary horror may feel less brisk than you prefer.",
       "Surveillance: Jennifer Lynch’s FBI hunt leans into conflicting survivor accounts and serial murder, but you won’t find the cult subject you asked for.",
       "The Crazies: You get tense small-town survival and paranoia, but the neighbors’ madness isn’t a cult story.",
+      "Presence: Steven Soderbergh builds tense suburban haunted-house unease around a family, but you get no cult plot and a slower supernatural drama.",
       "All That We Destroy: A geneticist’s clone experiment brings sci-fi menace, but you won’t find a cult-centered premise here.",
       "Bloodline Killer: Moira Cole’s fight to rebuild after her cousin’s family murders brings thriller violence, but not a cult angle.",
       "Vicious: You may appreciate Polly’s high-stakes fight to survive, though the cursed box—not a cult—drives this tense horror film."
@@ -5318,7 +5323,8 @@
      ],
      "hedgingWhys": [
       "Rakka: You may respond to its intense alien invasion and human resistance, though its bleak warlike tone isn't classic kaiju spectacle.",
-      "Alive in Joburg: You may enjoy the alien-arrival sci-fi, though this documentary-style short centers on a spaceship, not a giant monster."
+      "Alive in Joburg: You may enjoy the alien-arrival sci-fi, though this documentary-style short centers on a spaceship, not a giant monster.",
+      "Monsters: Gareth Edwards builds an alien-infected Mexico into a slow, melancholic survival journey, less brisk than you prefer."
      ],
      "nonLatinWhys": [],
      "echo": false,
@@ -7004,7 +7010,9 @@
      "precision": 0.25,
      "groundingViolations": 0,
      "groundingDetail": [],
-     "hedgingWhys": [],
+     "hedgingWhys": [
+      "NOS4A2: Vic McQueen’s portals and Charlie’s sinister threat offer you intense supernatural conflict, though the brooding series is a slower fit."
+     ],
      "nonLatinWhys": [],
      "echo": true,
      "fallback": true,
@@ -7063,7 +7071,8 @@
      "groundingDetail": [],
      "hedgingWhys": [
       "NCIS: Navy-linked murders, espionage and stolen submarines bring you recurring crime-action cases, though the long-running series is less your usual format.",
-      "Luther: Luther’s intense hunt for depraved murderers suits your crime-thriller interest, but its grim mystery focus and series format are weaker fits."
+      "Luther: Luther’s intense hunt for depraved murderers suits your crime-thriller interest, but its grim mystery focus and series format are weaker fits.",
+      "Outcasts: You might like the pioneers building a society on Carpathia, though this slower sci-fi series centers on off-world settlement."
      ],
      "nonLatinWhys": [],
      "echo": true,
@@ -8502,6 +8511,7 @@
      "groundingDetail": [],
      "hedgingWhys": [
       "Twitches Too: Reunited witch twins face forces of darkness, giving you direct magic-and-danger appeal, though its playful family tone is softer than your usual picks.",
+      "The Good Witch's Gift: Cassie’s Christmas Eve wedding complications give you a witch-led family fantasy, though its holiday romance is gentler than your action favorites.",
       "The Good Witch: You may enjoy the haunted-mansion witch mystery and Catherine Bell, though its gentle family-drama tone is softer than your usual action.",
       "A Dark Song: Your witch-movie request fits its dangerous occult ritual, but its brooding, slow pace may test your patience.",
       "The Good Witch's Family: Catherine Bell’s kind-hearted small-town witch offers cozy family magic, but the gentle election-and-family drama is less your usual intensity."
@@ -9147,10 +9157,13 @@
      "groundingDetail": [],
      "hedgingWhys": [
       "Broken: You may connect with this gritty story of intertwined families and injustice, though its bleak adolescence-focused drama lacks Three Billboards’ comic bite.",
+      "Mean Creek: Like the anchor, this small-town crime drama turns a moral choice into lasting consequences, but its teen boat-trip setup is quieter and bleaker.",
       "21 Grams: Its grief-driven crime story and intense ensemble may suit you, though the fractured, bleak drama offers less of Three Billboards’ sharp humor.",
       "Outside In: You may value its intense small-town bond and ex-con's return, but this restrained character drama lacks Three Billboards' crime-driven momentum.",
       "Take Me to the River: You may appreciate the buried family secret, though this restrained reunion drama lacks the anchor’s sharp crime-driven momentum.",
-      "A Love Song for Bobby Long: You get grief and sharp New Orleans character drama, but this melancholic, slow-moving return home is less brisk and confrontational than Three Billboards."
+      "Hereafter: You may connect with its grief and human fallout, though this contemplative afterlife drama moves far slower than Three Billboards.",
+      "A Love Song for Bobby Long: You get grief and sharp New Orleans character drama, but this melancholic, slow-moving return home is less brisk and confrontational than Three Billboards.",
+      "Big Love: Your interest in tense family loyalties may help, but this ensemble series about a polygamous household is a detour from Three Billboards."
      ],
      "nonLatinWhys": [],
      "echo": true,
@@ -9222,6 +9235,7 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
+      "Generation Kill: Like The Hurt Locker, you get a gritty Iraq War viewpoint and intense soldier camaraderie, though this is a slower-burn series.",
       "Stop-Loss: You’ll find Iraq-war intensity and military duty here, though its focus on a veteran’s return is less combat-driven than The Hurt Locker.",
       "Our Girl: You may enjoy the British Army medics’ adventures, but this series offers less gritty frontline tension than The Hurt Locker.",
       "To End All Wars: For your interest in combat intensity, this follows Allied captives in Burma, though its focus is historical imprisonment rather than battlefield action."
@@ -10077,6 +10091,7 @@
       "NCIS: NCIS ties investigations to Navy and Marine Corps personnel, giving you military stakes and brisk action, though it’s crime procedural rather than war drama.",
       "The White Queen: The White Queen builds tense drama around the Wars of the Roses, though its royal succession focus may offer less action than you prefer.",
       "Warrior: Ah Sahm’s martial-arts crime battles offer the brisk action you enjoy, but San Francisco’s Tong Wars aren’t a conventional war drama.",
+      "The War of the Worlds: Edwardian alien-invasion survival brings you tense sci-fi action, but George and Amy’s doomed romance makes this a detour from war drama.",
       "CSI: Crime Scene Investigation: CSI’s Las Vegas forensic team delivers procedural investigations, but you asked for war drama rather than a mystery-led crime series."
      ],
      "nonLatinWhys": [],
@@ -11133,6 +11148,7 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
+      "Light as a Feather: You may enjoy the supernatural death predictions, though this teen-focused series is a bigger format and genre detour.",
       "The Loved Ones: Lola’s violent prom-night revenge brings brisk intensity, but the torture-heavy horror may be harsher than your usual action fare.",
       "Lucky Them: Ellie Klug’s search for a vanished rock star brings a mystery thread, but the wry, low-key music-world drama lacks your usual intensity.",
       "The Client List: Riley Parks’ double life gives you family pressure and personal stakes, but this earnest drama series lacks the action and adventure you favor.",

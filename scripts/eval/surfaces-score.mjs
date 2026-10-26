@@ -11,12 +11,39 @@ export const FOOTPRINT_GATED = new Set(["saved", "watch-tonight"]);
 
 const blockFailed = (b) => b.status !== undefined && b.status !== 200;
 
+// What the user actually READS on each card, by the component that renders the block (R1-15). The copy
+// is scored as rendered, not as the API's whyThis field alone:
+//   hero          RecCardHero since 95aab1f: the hook when there is one, else whyThis (`card.hook ? hook : whyThis`);
+//   hero+lens     RecCardHero before it (99c0761): the hook AND the lens clause beneath it, else whyThis;
+//   card          RecCard (feed rows, rails, Similar, the digest): `lensClause ?? whyThis`;
+//   watch-tonight WatchTonightCard: the pin's watchTonightReason;
+//   none          a surface whose cards carry no why-line (the Saved grid, person pages, typeahead).
+// A recording made before the harness kept the raw fields (version ≤ 2) has no component on its blocks and
+// a single `why` (= whyThis) per card; it is scored on that, which is all it can say.
+export const COMPONENTS = new Set(["hero", "hero+lens", "card", "watch-tonight", "none"]);
+export function rendered(block, c) {
+  switch (block.component) {
+    case undefined: return c.why ? { text: c.why, from: "whyThis" } : null;
+    case "hero": return c.hook ? { text: c.hook, from: "hook" } : c.whyThis ? { text: c.whyThis, from: "whyThis" } : null;
+    case "hero+lens":
+      if (c.hook) return c.lensClause ? { text: `${c.hook} ${c.lensClause}`, from: "hook+lensClause" } : { text: c.hook, from: "hook" };
+      return c.whyThis ? { text: c.whyThis, from: "whyThis" } : null;
+    case "card": {
+      const text = c.lensClause ?? c.whyThis;
+      return text ? { text, from: c.lensClause !== null && c.lensClause !== undefined ? "lensClause" : "whyThis" } : null;
+    }
+    case "watch-tonight": return c.reason ? { text: c.reason, from: "reason" } : null;
+    case "none": return null;
+    default: throw new Error(`unknown component '${block.component}' on block ${block.key}`);
+  }
+}
+
 export function scoreSurfaces(rec) {
   const f = rec.facts;
   const eligible = new Set(f.eligible);
   const seenSet = new Set(f.seen ?? []);
   const perSurface = {};
-  const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, stubWhy: 0, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [] });
+  const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, renderedFrom: {}, stubWhy: 0, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [] });
   const hedges = [];
   for (const block of rec.blocks) {
     const s = bump(block.surface);
@@ -26,9 +53,13 @@ export function scoreSurfaces(rec) {
     if (block.cards.length === 0) s.emptyBlocks++;
     for (const c of block.cards) {
       s.cards++;
-      if (c.why && STUB_WHY.test(c.why.trim())) s.stubWhy++;
-      if (c.why && HEDGE_WHY.test(c.why)) { s.hedgingWhy++; if (hedges.length < 40) hedges.push(`${block.key} · ${c.name}: ${c.why}`); }
-      if (c.why && NON_LATIN.test(c.why)) s.nonLatinWhy++;
+      const why = rendered(block, c);
+      if (why) {
+        s.renderedFrom[why.from] = (s.renderedFrom[why.from] ?? 0) + 1;
+        if (STUB_WHY.test(why.text.trim())) s.stubWhy++;
+        if (HEDGE_WHY.test(why.text)) { s.hedgingWhy++; if (hedges.length < 40) hedges.push(`${block.key} · ${c.name} [${why.from}]: ${why.text}`); }
+        if (NON_LATIN.test(why.text)) s.nonLatinWhy++;
+      }
       const ok = eligible.has(c.titleId);
       if (SUGGESTION.has(block.surface) && !ok) { s.leaks++; if (s.leakNames.length < 20) s.leakNames.push(`${c.name} (${block.key})`); }
       // On a lookup surface the question is not eligibility (a Saved title is ineligible by being saved)
@@ -60,7 +91,7 @@ export function scoreSurfaces(rec) {
     summary: {
       label: rec.label, build: rec.build ?? null, buildInfo: rec.buildInfo ?? null, snapshotId: rec.snapshotId, fresh: rec.fresh, buildStatus: rec.buildStatus ?? null,
       artifact: rec.artifact ?? null, modelKey: rec.modelKey ?? "unrecorded",
-      suggestionCards: cards, stubRate: ratio(total("stubWhy"), cards), exclusionLeaks: total("leaks"), leakRate: ratio(total("leaks"), cards),
+      suggestionCards: cards, cardsBySurface: Object.fromEntries(Object.entries(perSurface).map(([k, v]) => [k, v.cards])), stubRate: ratio(total("stubWhy"), cards), exclusionLeaks: total("leaks"), leakRate: ratio(total("leaks"), cards),
       crossRailRepeats: repeats.length, evidenceShare: ratio(total("evidencePass"), anchored), anchoredCards: anchored,
       hedgingWhyLines: total("hedgingWhy"), hedgeRate: ratio(total("hedgingWhy"), cards), nonLatinWhyLines: total("nonLatinWhy"),
       lookupFootprint: Object.entries(perSurface).filter(([s]) => FOOTPRINT_GATED.has(s)).reduce((n, [, v]) => n + v.footprint, 0),
@@ -79,15 +110,36 @@ export function scoreSurfaces(rec) {
 // Regression check of a surface run against a baseline (eval/surfaces/gates.json). Runs on different
 // snapshots or artifacts are incomparable; a surface the baseline measured and this run did not (an
 // HTTP error, an empty suggestion surface, a surface missing entirely) is a regression, never a pass.
+// The model artifact a run's surfaces were built FROM: the one active before its Fresh build (a Fresh build
+// can chain a retrain, so the artifact serving the fetch is a product of the build under test and differs on
+// every run), or, with no build, the one serving the fetch. Null when the recording predates the field.
+export const inputArtifact = (summary) => summary.artifact?.input ?? (summary.fresh ? null : summary.artifact?.id ?? null);
+
 export function compareSurfaces(current, baseline, gates) {
   const c = current.summary, b = baseline.summary;
   if ((c.snapshotId ?? null) !== (b.snapshotId ?? null)) return { refused: `snapshots differ (${c.snapshotId} vs ${b.snapshotId})`, rows: [] };
-  if (c.artifact?.id && b.artifact?.id && c.artifact.id !== b.artifact.id) return { refused: `model artifacts differ (${c.artifact.id} vs ${b.artifact.id})`, rows: [] };
+  const ci = inputArtifact(c), bi = inputArtifact(b);
+  if (ci && bi && ci !== bi) return { refused: `model artifacts differ (${ci} vs ${bi})`, rows: [] };
   const rows = [];
   const measured = (sum, ps, s) => ps[s] && ps[s].errors === 0 && (!SUGGESTION.has(s) || ps[s].cards > 0);
   for (const s of Object.keys(baseline.perSurface)) {
     if (!measured(b, baseline.perSurface, s)) continue;
     if (!measured(c, current.perSurface, s)) rows.push({ metric: `coverage:${s}`, baseline: baseline.perSurface[s].cards, current: current.perSurface[s]?.cards ?? null, status: "REGRESSION (no data)" });
+  }
+  // Card volume (R1-15): a surface that still answers but with a fraction of its cards (the Similar rail
+  // falling from 60 cards to 5) is a regression even when every rate on the cards it kept improved —
+  // rates over five cards are not comparable with rates over sixty. Anchored cards are gated the same way.
+  const share = gates.volume?.minShareOfBaseline;
+  if (share !== undefined) {
+    const volume = (metric, bv, cv) => {
+      const allowed = Math.ceil(bv * share);
+      rows.push({ metric, baseline: bv, current: cv, allowed, status: cv >= allowed ? "pass" : "REGRESSION (volume)" });
+    };
+    for (const s of Object.keys(baseline.perSurface).filter((s) => SUGGESTION.has(s))) {
+      if (!measured(b, baseline.perSurface, s) || !measured(c, current.perSurface, s)) continue;
+      volume(`volume:${s}`, baseline.perSurface[s].cards, current.perSurface[s].cards);
+    }
+    if (b.anchoredCards) volume("volume:anchored", b.anchoredCards, c.anchoredCards ?? 0);
   }
   for (const t of gates.regression) {
     const cv = c[t.metric], bv = b[t.metric];

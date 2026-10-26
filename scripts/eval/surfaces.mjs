@@ -15,17 +15,21 @@
 // genre rail, the Similar rail for the first five picks, the digest, Saved and its Watch-tonight pin,
 // person pages for the people credited on tonight's picks, and typeahead — recording each response's
 // HTTP status, and reports per surface:
-//   stub rate          why-lines in the template family a failed model call produces;
+//   stub rate          why-lines in the stub family (the model-failure template, GenericFallback);
 //   exclusion leaks    suggestion cards the independent eligibility truth says may not be shown;
 //   cross-rail repeats one title on more than one feed row;
 //   evidence share     anchored ("Because you loved X") and Similar cards that share ≥ 2 TMDB keywords
 //                      with the anchor or sit closer to it than 90% of random eligible pairs;
 //   hedging why-lines  explanations that argue against their own pick, and non-Latin script in copy;
+//   card volume        cards per suggestion surface and anchored cards, gated against the baseline's;
 //   lookup footprint   watched or rated titles still on Saved or pinned as Watch tonight (gated), and on
 //                      person pages and typeahead (reported only — those show what you have seen by design);
 //   coverage           a surface that errored or (suggestion surfaces) came back empty has NO data, and
 //                      the run exits 1 — an error is never scored as "0 leaks";
 //   copy claims        not measured yet (WS-7 task 9, the claims audit).
+// Every copy metric scores the string the user READS, per rendering component (surfaces-score.mjs
+// `rendered`): the hero's hook before its whyThis, a rail card's lensClause before its whyThis, the
+// Watch-tonight pin's reason. The recording keeps every raw field so a replay can re-derive it.
 // Ask is not fetched here: its leaks are the golden eval's exclusionLeaks on the same _eligible.sql truth.
 // Every metric is computed from data frozen into recording.json, so --replay re-scores with no API, no
 // database and no paid call; --compare applies eval/surfaces/gates.json against a baseline.
@@ -67,20 +71,22 @@ function render(rec, m) {
   const s = m.summary;
   const fmt = (v, d = 3) => (v === null || v === undefined ? "—" : typeof v === "number" && !Number.isInteger(v) ? v.toFixed(d) : String(v));
   const L = [`# Surface harness — ${s.label}`, "",
-    `- API build ${s.build ?? "unrecorded"} · snapshot \`${s.snapshotId}\` · artifact \`${s.artifact?.id ?? "unrecorded"}\`${s.artifact?.changedDuringFetch ? " (**CHANGED during the fetch**)" : ""} · ${s.fresh ? `one Fresh build (${s.buildStatus})` : "stored snapshot, no build"} · ${s.wallSeconds} s`,
+    `- API build ${s.build ?? "unrecorded"} · snapshot \`${s.snapshotId}\` · built from artifact \`${s.artifact?.input ?? "unrecorded"}\`, serving \`${s.artifact?.id ?? "unrecorded"}\`${s.artifact?.changedDuringFetch ? " (**CHANGED during the fetch**)" : ""} · ${s.fresh ? `one Fresh build (${s.buildStatus})` : "stored snapshot, no build"} · ${s.wallSeconds} s`,
     `- Jobs drained before the first fetch: ${s.jobsDrainedBeforeFetch === null ? "not recorded (recording predates the drain)" : s.jobsDrainedBeforeFetch ? "yes" : "NO"} · model key: ${s.modelKey}`,
     `- Exposures written by the run: ${s.exposuresWritten}; Trakt calls: ${s.traktCalls}; cost $${fmt(s.costUsd, 4)}`, "",
     s.complete ? "- Coverage: every surface answered with data." : `- **Coverage: ${s.surfacesWithoutData.length} surface(s) have NO data** — ${s.surfacesWithoutData.join("; ")}. Their zeros below are not measurements.`, "",
     "## Gates (task 8 targets)", "", "| Gate | Value | Target | Status |", "|---|---|---|---|",
     ...surfaceGates(m, gates).map((g) => `| ${g.label} | ${fmt(g.value)} | ${g.op} ${g.target} | ${g.status} |`), "",
     "| Metric | Value |", "|---|---|",
-    `| Suggestion cards fetched | ${s.suggestionCards} |`, `| Stub rate (why-lines in the stub family) | ${fmt(s.stubRate)} |`,
+    `| Suggestion cards fetched | ${s.suggestionCards} |`, `| Stub rate (rendered why-lines in the stub family) | ${fmt(s.stubRate)} |`,
     `| Exclusion leaks (suggestion surfaces) | ${s.exclusionLeaks} |`, `| Cross-rail repeats (feed page) | ${s.crossRailRepeats} |`,
     `| Evidence share (anchored + Similar, n=${s.anchoredCards}) | ${fmt(s.evidenceShare)} |`, `| Random-pair cosine p90 (evidence bar) | ${fmt(s.randomCosineP90)} |`,
-    `| Why-lines hedging against their own pick | ${s.hedgingWhyLines} |`, `| Why-lines with non-Latin script | ${s.nonLatinWhyLines} |`,
+    `| Rendered why-lines hedging against their own pick | ${s.hedgingWhyLines} |`, `| Why-lines with non-Latin script | ${s.nonLatinWhyLines} |`,
     `| Watched or rated titles on Saved / Watch tonight | ${s.lookupFootprint} |`, `| False copy claims | not measured yet (task 9) |`, "",
-    "## Per surface", "", "| Surface | Blocks | HTTP errors | Empty blocks | Cards | Stub why | Hedging | Non-Latin | Leaks | Anchored | Evidence pass | Watched or rated (lookup surfaces) |", "|---|---|---|---|---|---|---|---|---|---|---|---|"];
-  for (const [k, v] of Object.entries(m.perSurface)) L.push(`| ${k} | ${v.blocks} | ${v.errors} | ${v.emptyBlocks} | ${v.cards} | ${v.stubWhy} | ${v.hedgingWhy} | ${v.nonLatinWhy} | ${v.leaks} | ${v.anchored} | ${v.evidencePass} | ${v.footprint} |`);
+    "## Per surface", "", "Copy is scored as rendered: the hero's hook, else its whyThis; a rail card's lensClause, else its whyThis; the Watch-tonight reason. \"Read from\" counts which field each scored line came from (a version-2 recording kept whyThis only).", "",
+    "| Surface | Blocks | HTTP errors | Empty blocks | Cards | Read from | Stub why | Hedging | Non-Latin | Leaks | Anchored | Evidence pass | Watched or rated (lookup surfaces) |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"];
+  const from = (r) => Object.entries(r ?? {}).map(([k, n]) => `${k} ${n}`).join(", ") || "—";
+  for (const [k, v] of Object.entries(m.perSurface)) L.push(`| ${k} | ${v.blocks} | ${v.errors} | ${v.emptyBlocks} | ${v.cards} | ${from(v.renderedFrom)} | ${v.stubWhy} | ${v.hedgingWhy} | ${v.nonLatinWhy} | ${v.leaks} | ${v.anchored} | ${v.evidencePass} | ${v.footprint} |`);
   const leaks = Object.entries(m.perSurface).flatMap(([k, v]) => v.leakNames.map((n) => `${k}: ${n}`));
   if (leaks.length) L.push("", "## Leaks (first 20 per surface)", "", ...leaks.map((x) => `- ${x}`));
   if (m.repeats.length) L.push("", "## Cross-rail repeats", "", ...m.repeats.map((r) => `- ${r.name}: ${r.rows.join(", ")}`));
@@ -103,7 +109,8 @@ if (args.compare) {
 
 if (args.replay) {
   const rec = JSON.parse(readFileSync(args.replay, "utf8"));
-  const out = args.out ?? dirname(args.replay);
+  const out = resolve(typeof args.out === "string" ? args.out : dirname(args.replay));
+  mkdirSync(out, { recursive: true });
   const m = scoreSurfaces(rec);
   writeFileSync(join(out, "metrics.json"), JSON.stringify(m, null, 1));
   writeFileSync(join(out, "report.md"), render(rec, m));
@@ -149,6 +156,9 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 let buildStatus = null;
 let jobsDrainedBeforeFetch = null;
+// The artifact the surfaces are built FROM (compareSurfaces' comparability key): before the Fresh build,
+// because the build can chain a retrain whose new artifact differs on every run.
+const artifactInput = activeArtifact();
 if (args.fresh) {
   const enqueuedAfter = new Date(Date.now() - 1000).toISOString();
   const r = await post("/api/feed/rebuild", {});
@@ -176,47 +186,60 @@ if (args.fresh) {
 }
 const artifactAtStart = activeArtifact();
 
-const card = (c) => ({ titleId: c.titleId, name: c.name, why: c.whyThis ?? c.why ?? null });
+// The hero's copy changed shape at 95aab1f: before it, the hook was followed by the lens clause. Read the
+// RecCardHero of the build being measured (BUILD_INFO's commit; the working tree without one), so a
+// 99c0761 run is scored on what 99c0761 rendered.
+function heroComponent(commit) {
+  const path = "src/frontend/src/components/rec/RecCardHero.tsx";
+  const source = commit ? execFileSync("git", ["-C", repo, "show", `${commit}:${path}`]).toString() : readFileSync(join(repo, path), "utf8");
+  return source.includes('data-testid="hero-lens-clause"') ? "hero+lens" : "hero";
+}
+const hero = heroComponent(buildInfo?.commit ?? null);
+// Every copy field a component can render is kept raw; which one the user reads is the scorer's call
+// (surfaces-score.mjs `rendered`), so a replay re-derives it and a rule change re-scores old runs.
+const card = (c) => ({ titleId: c.titleId, name: c.name, whyThis: c.whyThis ?? null, lensClause: c.lensClause ?? null, hook: c.hook ?? null, reason: c.watchTonightReason ?? null });
 const blocks = [];
-const push = (surface, key, res, items, extra = {}) => blocks.push({ surface, key, status: res.status, ...extra, cards: ok(res) ? (items(res.body) ?? []).map(card) : [] });
+// `component` is the frontend component that renders the block: RecCardHero ("hero" / "hero+lens"), RecCard ("card"),
+// WatchTonightCard ("watch-tonight"), or a card with no why-line ("none").
+const push = (surface, key, component, res, items, extra = {}) => blocks.push({ surface, key, component, status: res.status, ...extra, cards: ok(res) ? (items(res.body) ?? []).map(card) : [] });
 const feedRes = await get("/api/feed");
 if (!ok(feedRes)) die(`GET /api/feed: HTTP ${feedRes.status}`);
 const feed = feedRes.body;
-push("feed-hero", "tonights-picks", feedRes, (b) => b.hero);
+push("feed-hero", "tonights-picks", hero, feedRes, (b) => b.hero);
 for (const row of feed.rows ?? []) {
   const key = row.kind + (row.anchorName ? `:${row.anchorName}` : "");
-  push("feed-row", key, feedRes, () => row.items, { anchorTitleId: row.anchorTitleId ?? null });
+  push("feed-row", key, "card", feedRes, () => row.items, { anchorTitleId: row.anchorTitleId ?? null });
   const shown = (row.items ?? []).map((c) => c.titleId);
   const more = await post("/api/feed/more", { row: row.kind, anchorTitleId: row.anchorTitleId ?? null, excludeTitleIds: shown, limit: 12 });
-  push("more", `${key} (page 2)`, more, (b) => b.items, { anchorTitleId: row.anchorTitleId ?? null });
+  push("more", `${key} (page 2)`, "card", more, (b) => b.items, { anchorTitleId: row.anchorTitleId ?? null });
 }
 const heroMore = await post("/api/feed/more", { row: "tonights-picks", excludeTitleIds: (feed.hero ?? []).map((c) => c.titleId), limit: 12 });
-push("more", "tonights-picks (page 2)", heroMore, (b) => b.items);
+push("more", "tonights-picks (page 2)", hero, heroMore, (b) => b.items); // InfiniteHero pages render as hero cards
 for (const slug of ["new-for-you", "deep-cuts"]) {
   if ((feed.rows ?? []).some((r) => r.kind === slug)) continue;
-  push("more", slug, await post("/api/feed/more", { row: slug, excludeTitleIds: [], limit: 12 }), (b) => b.items);
+  push("more", slug, "card", await post("/api/feed/more", { row: slug, excludeTitleIds: [], limit: 12 }), (b) => b.items);
 }
 const genresRes = await get("/api/feed/genres");
-if (!ok(genresRes)) blocks.push({ surface: "genre-rail", key: "genres", status: genresRes.status, cards: [] });
+if (!ok(genresRes)) blocks.push({ surface: "genre-rail", key: "genres", component: "card", status: genresRes.status, cards: [] });
 for (const g of genresRes.body?.genres ?? []) {
-  push("genre-rail", `genre:${g.slug}`, await post("/api/feed/more", { row: "genre", genre: g.slug, excludeTitleIds: [], limit: 12 }), (b) => b.items);
+  push("genre-rail", `genre:${g.slug}`, "card", await post("/api/feed/more", { row: "genre", genre: g.slug, excludeTitleIds: [], limit: 12 }), (b) => b.items);
 }
 for (const h of (feed.hero ?? []).slice(0, 5)) {
-  push("similar", `similar:${h.name}`, await post("/api/feed/more", { row: "similar", anchorTitleId: h.titleId, excludeTitleIds: [], limit: 12 }), (b) => b.items, { anchorTitleId: h.titleId });
+  push("similar", `similar:${h.name}`, "card", await post("/api/feed/more", { row: "similar", anchorTitleId: h.titleId, excludeTitleIds: [], limit: 12 }), (b) => b.items, { anchorTitleId: h.titleId });
 }
-push("digest", "digest", await get("/api/digest/current"), (b) => b.items);
+push("digest", "digest", "card", await get("/api/digest/current"), (b) => b.items); // StaticRail → RecRow → RecCard
 const savedRes = await get("/api/saved");
-push("saved", "saved", savedRes, (b) => b.items);
-push("watch-tonight", "watch-tonight", savedRes, (b) => (b.items ?? []).filter((x) => x.watchTonight));
+push("saved", "saved", "none", savedRes, (b) => b.items);
+push("watch-tonight", "watch-tonight", "watch-tonight", savedRes, (b) => (b.items ?? []).filter((x) => x.watchTonight));
 // Person pages: the top-billed people on tonight's picks (cast order, then crew), five at most.
 const heroIds = (feed.hero ?? []).map((c) => c.titleId).filter(Boolean);
 const people = heroIds.length ? sql(db, `select "PersonId" from (select distinct on ("PersonId") "PersonId", coalesce("CastOrder", 99) o
     from "TitleCredits" where "TitleId" in (${heroIds.map((x) => `'${x}'`).join(",")}) order by "PersonId", o) p order by o, "PersonId" limit 5`).map((r) => r[0]) : [];
 for (const pid of people) {
-  push("person", `person:${pid}`, await get(`/api/people/${pid}`), (b) => b.filmography);
+  push("person", `person:${pid}`, "none", await get(`/api/people/${pid}`), (b) => b.filmography);
 }
 for (const q of ["matrix", "nolan", "ninja", "comedy", "the", "blade runner", "romance", "anime", "severance", "dune"]) {
-  push("typeahead", `typeahead:${q}`, await get(`/api/search/typeahead?q=${encodeURIComponent(q)}`), (b) => b.titles);
+  push("typeahead", `typeahead:${q}`, "none", await get(`/api/search/typeahead?q=${encodeURIComponent(q)}`), (b) => b.titles);
 }
 const artifactAtEnd = activeArtifact();
 
@@ -263,8 +286,8 @@ const jobsDuringRun = sql(db, `select "Kind", "Status", count(*) from "SyncJobs"
 const names = Object.fromEntries(blocks.flatMap((bl) => bl.cards.map((c) => [c.titleId, c.name])));
 
 const rec = {
-  kind: "surface-recording", version: 2, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch,
-  artifact: { id: artifactAtStart[0], version: artifactAtStart[1] ? Number(artifactAtStart[1]) : null, changedDuringFetch: artifactAtStart[0] !== artifactAtEnd[0] },
+  kind: "surface-recording", version: 3, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch,
+  artifact: { input: artifactInput[0], id: artifactAtStart[0], version: artifactAtStart[1] ? Number(artifactAtStart[1]) : null, changedDuringFetch: artifactAtStart[0] !== artifactAtEnd[0] },
   startedAt: new Date(started).toISOString(), wallSeconds: Math.round((finished - started) / 1000), blocks, names,
   ledger: ledgerDelta, costUsd, exposuresWritten: exposuresAfter - exposuresBefore, jobsDuringRun,
   facts: { eligible, seen, evidence, randomCosineP90: p90 === undefined || p90 === "" ? null : Number(p90) },

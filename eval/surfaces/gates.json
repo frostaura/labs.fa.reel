@@ -50,6 +50,10 @@
       "target": 0
     }
   ],
+  "volume": {
+    "note": "R1-15 (2026-10-25): card volume is gated. On each suggestion surface both runs measured, and on anchored cards, a run must keep at least this share of the baseline's cards (rounded up). The P0 round's merged build fell from 60 Similar cards to 5 and from 126 anchored cards to 11 with every rate gate green.",
+    "minShareOfBaseline": 0.5
+  },
   "regression": [
     {
       "metric": "leakRate",

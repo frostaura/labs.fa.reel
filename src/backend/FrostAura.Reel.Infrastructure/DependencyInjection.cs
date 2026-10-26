@@ -28,6 +28,9 @@ public static partial class DependencyInjection
         services.AddReelSearch();
         services.AddReelFeed(configuration);
 
+        // Last area call: on the eval stack it replaces the Trakt adapter registered above.
+        services.AddReelEvalIsolation(configuration);
+
         // ── Shared-work coordination + request caching ───────────────────────────────────
         services.AddMemoryCache();
 

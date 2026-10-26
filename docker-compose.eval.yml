@@ -80,6 +80,8 @@ services:
       # Trakt isolation, layer 2: no Trakt credentials at all, the dev-link session resolves the existing
       # snapshot account by slug (no token exchange), and every outbound HTTPS call except the model and
       # TMDB hosts goes through a dead proxy.
+      # Layer 3: this client id selects the in-process OfflineTraktClient (DependencyInjection.Eval.cs),
+      # which fails every Trakt call before a socket opens.
       TRAKT_CLIENT_ID: eval-no-trakt
       TRAKT_CLIENT_SECRET: eval-no-trakt
       TRAKT_ACCESS_TOKEN: ""

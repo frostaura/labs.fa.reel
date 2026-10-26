@@ -239,7 +239,7 @@ public sealed class ReelApiFactory : WebApplicationFactory<Program>
     internal static void GuardAgainstLiveCredentials(IConfiguration configuration)
     {
         var live = ProviderCredentialVariables
-            .Where(variable => !string.IsNullOrEmpty(configuration[variable]))
+            .Where(variable => !string.IsNullOrEmpty(configuration[variable]) && !IsEvalTraktSelector(variable, configuration[variable]))
             .ToList();
         if (live.Count > 0)
         {
@@ -270,4 +270,15 @@ public sealed class ReelApiFactory : WebApplicationFactory<Program>
                 "throwaway database. Refusing to build a host that would write into whatever .env points at.");
         }
     }
+
+    /// <summary>
+    /// <c>TRAKT_CLIENT_ID=eval-no-trakt</c> is the eval stack's selector for
+    /// <see cref="Infrastructure.Eval.OfflineTraktClient"/>, not a credential: no Trakt application has
+    /// that id, and it is what takes Trakt offline. It is the one non-blank value the guard lets
+    /// through, so a test can boot the whole app the way the eval launchers do. Exact match only —
+    /// any other client id is still refused as live.
+    /// </summary>
+    internal static bool IsEvalTraktSelector(string variable, string? value) =>
+        variable == "TRAKT_CLIENT_ID"
+        && string.Equals(value?.Trim(), Infrastructure.Eval.OfflineTraktClient.EvalClientId, StringComparison.OrdinalIgnoreCase);
 }

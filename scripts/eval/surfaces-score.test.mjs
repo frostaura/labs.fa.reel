@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { scoreSurfaces, compareSurfaces, surfaceGates } from "./surfaces-score.mjs";
+import { scoreSurfaces, compareSurfaces, surfaceGates, rendered, inputArtifact } from "./surfaces-score.mjs";
+import { STUB_WHY, HEDGE_WHY } from "./askreel-score.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const gates = JSON.parse(readFileSync(join(repo, "eval", "surfaces", "gates.json"), "utf8"));
@@ -83,6 +84,100 @@ test("cross-rail repeats: one title on two feed rows is one repeat", () => {
     { surface: "more", key: "deep-cuts (page 2)", cards: [card(A)] },
   ]));
   assert.equal(m.summary.crossRailRepeats, 1, "a next page is not a second row of the feed page");
+});
+
+// R1-15: the copy is scored as the user reads it, per rendering component.
+const lens = (titleId, f) => ({ titleId, name: titleId, whyThis: null, lensClause: null, hook: null, reason: null, ...f });
+const SLOWER = "For you, the emotional intensity may be the draw, though this is a much slower drama than the action and adventure you often prefer.";
+const DETOUR = "For your usual appetite for brisk action and adventure, this is a quieter, heavier detour: a man returns to Ireland with nowhere to live but his car, then a…";
+const CLEAN = "If you want a darker city-thriller that still moves cleanly, this is Jodie Foster in a New York revenge story: a woman, shaken by a brutal attack, starts hunting…";
+const HEDGED_WHY = "Tense, though this procedural series is less aligned with your film-first taste.";
+
+test("rendered copy: a rail card is read as lensClause ?? whyThis, a hero as hook || whyThis", () => {
+  const m = scoreSurfaces(rec([
+    { surface: "feed-row", key: "r", component: "card", cards: [
+      lens(A, { lensClause: SLOWER, whyThis: "Fits." }), // the lens clause is what shows, and it hedges
+      lens(B, { lensClause: CLEAN, whyThis: HEDGED_WHY }), // the hedging whyThis is never on screen
+      lens(C, { whyThis: HEDGED_WHY }), // no lens copy: whyThis shows
+      lens(X, { lensClause: "", whyThis: HEDGED_WHY }), // `??` keeps an empty clause: a blank line shows
+    ] },
+    { surface: "feed-hero", key: "h", component: "hero", cards: [
+      lens(A, { hook: "You get a hopeful musical detour from the thrillers you usually reach for.", whyThis: "Fits." }),
+      lens(B, { hook: "Ralph Fiennes turns memory into a slow-burn trap.", whyThis: HEDGED_WHY }),
+      lens(C, { hook: "", whyThis: DETOUR }), // RecCardHero tests `card.hook ?` — an empty hook falls back
+    ] },
+  ], { eligible: [A, B, C, X] }));
+  assert.equal(m.perSurface["feed-row"].hedgingWhy, 2, "SLOWER (lensClause) and C's whyThis; never B's or X's whyThis");
+  assert.equal(m.perSurface["feed-hero"].hedgingWhy, 2, "A's hook and C's fallback whyThis; never B's whyThis");
+  assert.deepEqual(m.perSurface["feed-row"].renderedFrom, { lensClause: 2, whyThis: 1 });
+  assert.deepEqual(m.perSurface["feed-hero"].renderedFrom, { hook: 2, whyThis: 1 });
+  assert.ok(m.hedges.some((h) => h.includes("[lensClause]") && h.includes("much slower drama")));
+});
+
+test("rendered copy: the Watch-tonight pin is read by its reason; Saved, person and typeahead cards carry none", () => {
+  const m = scoreSurfaces(rec([
+    { surface: "watch-tonight", key: "w", component: "watch-tonight", cards: [lens(C, { reason: "A quieter detour for a weeknight, though it is slower than your usual.", whyThis: "Fits." })] },
+    { surface: "saved", key: "s", component: "none", cards: [lens(X, { whyThis: HEDGED_WHY, lensClause: SLOWER })] },
+    { surface: "typeahead", key: "t", component: "none", cards: [lens(A, { whyThis: "Strong fit with your taste profile." })] },
+  ]));
+  assert.equal(m.perSurface["watch-tonight"].hedgingWhy, 1);
+  assert.equal(m.perSurface.saved.hedgingWhy, 0, "nothing on a Saved grid card is read as a why-line");
+  assert.equal(m.perSurface.typeahead.stubWhy, 0);
+  // 99c0761's hero showed the lens clause beneath the hook, so a hedge there was on screen.
+  assert.deepEqual(rendered({ key: "h", component: "hero+lens" }, lens(A, { hook: "Ralph Fiennes turns memory into a slow-burn trap.", lensClause: DETOUR, whyThis: "Fits." })).from, "hook+lensClause");
+  assert.equal(HEDGE_WHY.test(rendered({ key: "h", component: "hero+lens" }, lens(A, { hook: "A trap.", lensClause: DETOUR })).text), true);
+  assert.equal(HEDGE_WHY.test(rendered({ key: "h", component: "hero" }, lens(A, { hook: "A trap.", lensClause: DETOUR })).text), false, "today's hero does not show the clause");
+  assert.deepEqual(rendered({ key: "h", component: "hero+lens" }, lens(A, { whyThis: "Fits.", lensClause: DETOUR })), { text: "Fits.", from: "whyThis" }, "no hook: the templated line alone");
+  assert.throws(() => rendered({ key: "k", component: "carousel" }, lens(A, {})), /unknown component 'carousel'/);
+  assert.deepEqual(rendered({ key: "legacy" }, { why: "Fits." }), { text: "Fits.", from: "whyThis" }, "a version-2 recording is scored on its single why");
+});
+
+test("stub family: GenericFallback alone or as an anchored tail is a stub; a real reason that mentions taste is not", () => {
+  for (const w of ["Strong fit with your taste profile.", "strong fit with your taste profile", "Shares the slow-burn dread of Hereditary, and strong fit with your taste profile.", "A horror pick aligned with your taste."]) {
+    assert.ok(STUB_WHY.test(w), w);
+  }
+  for (const w of ["Strong fit with your taste for heists, and you rate Michael Mann 8.1.", "A strong fit for your taste profile's love of noir.", "Shares the slow-burn dread of Hereditary."]) {
+    assert.ok(!STUB_WHY.test(w), w);
+  }
+  const m = scoreSurfaces(rec([{ surface: "more", key: "m", component: "card", cards: [lens(A, { whyThis: "Strong fit with your taste profile." }), lens(B, { whyThis: "Shares the dread of Hereditary." })] }]));
+  assert.equal(m.summary.stubRate, 0.5);
+});
+
+test("hedge family: the lens copy's comparisons and detours count; a pitch's own contrast does not", () => {
+  for (const w of [SLOWER, DETOUR, "You get a Nashville detour and a reflective change of pace.", "You usually want brisk action or adventure, but this is a quieter kind of journey: Mark joins Kurt.",
+    "Brandon Beckett leads soldiers against a militia in this military action film, not a ninja adventure for you.", "Its brooding series is slower than what you usually go for."]) {
+    assert.ok(HEDGE_WHY.test(w), w);
+  }
+  for (const w of [CLEAN, "Give this a try if you want grief handled through a friend, not a speech.", "Ralph Fiennes turns memory into a slow-burn trap.",
+    "Shares the slow-burn dread of Hereditary, and you rate Ari Aster 8.2.", "A brisk heist you will like more than the sequel."]) {
+    assert.ok(!HEDGE_WHY.test(w), w);
+  }
+});
+
+test("compare gates card volume: a surface that keeps answering with a fraction of its cards regresses", () => {
+  const cards = (n, prefix = "t") => Array.from({ length: n }, (_, i) => card(`${prefix}${i}`));
+  const run = (similar, anchoredRow) => scoreSurfaces({ ...rec([
+    { surface: "similar", key: "s", component: "card", anchorTitleId: X, status: 200, cards: cards(similar, "s") },
+    { surface: "feed-row", key: "because", component: "card", anchorTitleId: X, status: 200, cards: cards(anchoredRow, "f") },
+  ], { eligible: [...cards(60, "s"), ...cards(66, "f")].map((c) => c.titleId) }), snapshotId: "s1" });
+  const base = run(60, 66);
+  assert.equal(base.summary.anchoredCards, 126);
+  const shrunk = compareSurfaces(run(5, 6), base, gates);
+  assert.equal(shrunk.rows.find((r) => r.metric === "volume:similar").status, "REGRESSION (volume)");
+  assert.equal(shrunk.rows.find((r) => r.metric === "volume:anchored").status, "REGRESSION (volume)", "126 → 11");
+  const half = compareSurfaces(run(30, 33), base, gates);
+  assert.equal(half.rows.filter((r) => r.metric.startsWith("volume:")).every((r) => r.status === "pass"), true, "half the baseline is the floor, inclusive");
+  assert.equal(compareSurfaces(run(29, 66), base, gates).rows.find((r) => r.metric === "volume:similar").status, "REGRESSION (volume)");
+});
+
+test("compare: runs are comparable by the artifact their build started from, not the one a retrain produced", () => {
+  const s = (artifact, fresh = true) => ({ ...scoreSurfaces({ ...rec([{ surface: "genre-rail", key: "g", status: 200, cards: [card(A)] }]), snapshotId: "s1", fresh, artifact }) });
+  const a = s({ input: "art-0", id: "art-1" }), b = s({ input: "art-0", id: "art-2" });
+  assert.equal(inputArtifact(a.summary), "art-0");
+  assert.equal(compareSurfaces(a, b, gates).refused, null, "two Fresh builds from one snapshot each retrain to a new id");
+  assert.match(compareSurfaces(s({ input: "art-9", id: "art-1" }), b, gates).refused, /model artifacts differ \(art-9 vs art-0\)/);
+  assert.equal(compareSurfaces(s({ id: "art-1" }), b, gates).refused, null, "a Fresh recording without an input artifact predates the field");
+  assert.match(compareSurfaces(s({ id: "art-1" }, false), s({ id: "art-2" }, false), gates).refused, /art-1 vs art-2/, "with no build, the serving artifact is the input");
 });
 
 test("replay: every committed surface baseline re-scores to its committed metrics", () => {

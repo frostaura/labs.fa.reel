@@ -89,7 +89,7 @@
    "n": 60
   },
   "hedgingWhyLines": {
-   "value": 231,
+   "value": 243,
    "n": 60
   },
   "nonLatinWhyLines": {
@@ -636,6 +636,7 @@
       "As You Are: You may like the police-investigation framing, but this 1990s teen friendship drama leans into memory over brisk action.",
       "Same Kind of Different as Me: Greg Kinnear and Djimon Hounsou anchor a heartfelt homelessness-and-marriage drama, though its warm, measured tone may lack your preferred pace.",
       "A Second Chance: A young gymnast’s push toward the Australian squad brings uplifting adversity, but this family-sports drama may feel gentler than you prefer.",
+      "Thirteen Conversations About One Thing: Its interwoven New York lives ponder happiness at a reflective pace, which is less brisk and action-driven than you tend to enjoy.",
       "Lorelei: This lyrical reunion of an ex-con and his high-school girlfriend centers on regret and second chances, less aligned with your action-forward taste."
      ],
      "nonLatinWhys": [],
@@ -1110,7 +1111,8 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
-      "The Thirteenth Tale: A dark childhood story at an isolated mansion offers you gothic mystery in a film, though its drama focus may be less appealing lately."
+      "The Thirteenth Tale: A dark childhood story at an isolated mansion offers you gothic mystery in a film, though its drama focus may be less appealing lately.",
+      "The Tale: Like The Ones Below, this is a brooding psychological story, but Laura Dern’s memory investigation is slower and trauma-focused."
      ],
      "nonLatinWhys": [],
      "echo": true,
@@ -1184,6 +1186,7 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
+      "Doom Patrol: Your taste for weird cases may click with the Doom Patrol investigating bizarre phenomena, though its superhero trauma is heavier than Scooby.",
       "Shetland: Shetland has a close-knit team solving island murders, but its brooding, slow-burn investigations are more serious than your Scooby-Doo request.",
       "Creepshow: Its horror-comic anthology brings supernatural creatures, though you may find these terrifying tales far less playful than Scooby-Doo."
      ],
@@ -1239,6 +1242,7 @@
      "groundingDetail": [],
      "hedgingWhys": [
       "Mystery 101: You get a murder case and an amateur sleuth in professor Amy, though this balanced partnership mystery sounds less intense.",
+      "Princess: Your taste for adventure could suit this quest to save mythical creatures, though its whimsical family tone is gentler.",
       "Verity: You get a strong mystery hook as Lowen uncovers disturbing truths in the Crawfords' home, though its thriller focus may feel familiar.",
       "The Fall: Your adventure-loving side may enjoy the five mythical heroes and blurred reality, though this dreamlike, reflective fantasy is less brisk.",
       "Legend of the White Dragon: Your fantasy request gets a fugitive hero and mysterious villain, though this superhero-style setup may be less appealing lately.",
@@ -1564,7 +1568,8 @@
       "The Ones Below: A shocking dinner-party accident turns this pregnancy-focused neighbor story into tense domestic dread, though it is more psychological than action-led.",
       "The Loved Ones: You may respond to the brisk revenge and survival setup, but Lola’s wildly violent prom plot is much darker than your usual action picks.",
       "Good Girls: Three suburban mothers turn to crime for money and control, but this wry series is less aligned with your film-first, action-leaning taste.",
-      "For the People: You get high-stakes courtroom cases, but this earnest legal-workplace series is a weaker match for your film-first, action-leaning taste."
+      "For the People: You get high-stakes courtroom cases, but this earnest legal-workplace series is a weaker match for your film-first, action-leaning taste.",
+      "Land of Plenty: Wim Wenders' return to a Vietnam-wounded uncle is reflective drama, far slower than the brisk adventures you favor."
      ],
      "nonLatinWhys": [],
      "echo": true,
@@ -2350,6 +2355,7 @@
      "hedgingWhys": [
       "Triple Threat: You get 2019-era mercenary action and brisk fights in Triple Threat, though its protection plot isn't a heist.",
       "Close: You get a tense 2019 action thriller with Noomi Rapace on the run, but its kidnapping plot isn’t a heist.",
+      "The Good Thief: Nick Nolte's aging gambler plans a Monte Carlo casino robbery, though this slower 2003 drama is outside your era.",
       "Breaking: A tense bank hostage standoff gives you crime pressure, but Breaking is a 2022 drama, not a 2010s heist.",
       "Sharper: A theft fuels this tense con thriller, but the 2023 New York family drama isn’t a 2010s heist.",
       "Rev: You get action around car theft and exotic-car smuggling, but this 2020 informant drama isn’t quite a heist thriller from the 2010s.",
@@ -2636,6 +2642,8 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
+      "Medium: Your crime-and-sci-fi interests meet Allison’s psychic clues, though this earnest case-solving show moves at a gentler pace.",
+      "NOS4A2: Vic McQueen’s portals and clash with Charlie Manx offer you intense supernatural suspense, though the brooding tone and slower pace may drag.",
       "Project Blue Book: For your sci-fi interest, 1950s Air Force UFO investigations offer intrigue, though the historical mystery may feel measured."
      ],
      "nonLatinWhys": [],
@@ -2865,7 +2873,8 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
-      "Boy Wonder: Sean’s gritty hunt for his mother’s killer offers crime, revenge, and brisk action, though his vigilante crusade may feel too superhero-adjacent for you."
+      "Boy Wonder: Sean’s gritty hunt for his mother’s killer offers crime, revenge, and brisk action, though his vigilante crusade may feel too superhero-adjacent for you.",
+      "Special: Michael Rapaport’s lonely metermaid and his superhero delusion give you melancholic fantasy rather than the brisk action you favor."
      ],
      "nonLatinWhys": [],
      "echo": true,
@@ -2930,6 +2939,8 @@
      "groundingViolations": 0,
      "groundingDetail": [],
      "hedgingWhys": [
+      "Finding Steve McQueen: This true-story 1972 bank heist gives you brisk crime and a close-knit crew, with a wry tone that adds more comedy than you usually favor.",
+      "Cash Out: For your heist request, Mason's bank score and betrayal deliver tense, brisk action, though the romance and family loyalty add softer notes.",
       "Rev: You get brisk action around exotic-car thefts, but this informant story centers on busting a smuggling ring, not a heist.",
       "Finestkind: Boston brothers get pulled into an organized-crime deal, but this family drama is less directly about a heist.",
       "Inside Man: Your crime-thriller streak may suit this undercover descent into a violent syndicate, but it lacks the requested heist premise.",
@@ -3473,6 +3484,7 @@
      "hedgingWhys": [
       "Under the Hood: For your superhero request, this Watchmen tie-in traces the origins of hooded adventurers, though it may offer less action than you prefer.",
       "Kin: A boy's alien weapon sparks a brisk brotherhood-and-pursuit adventure, though this is sci-fi action rather than a superhero movie.",
+      "The New Mutants: You get young mutants fighting captivity in a tense sci-fi horror, though its slower pace and grim tone may temper the superhero appeal.",
       "Final Score: You may like the fast stadium rescue led by an ex-soldier, though this terrorism thriller lacks superhero elements.",
       "Stone Cold Fox: Fox’s brisk revenge-and-rescue story suits your action taste, but it isn’t a superhero movie."
      ],

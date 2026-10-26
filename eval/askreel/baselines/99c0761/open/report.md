@@ -48,7 +48,7 @@
 | mediaFilterViolations | 0 | 167 |
 | mediaMismatches | 94 | 167 |
 | mustNotViolations | 49 | 167 |
-| hedgingWhyLines | 670 | 167 |
+| hedgingWhyLines | 684 | 167 |
 | nonLatinWhyLines | 2 | 167 |
 | missedSupply | 0 | 167 |
 | failedTurns | 0 | 167 |

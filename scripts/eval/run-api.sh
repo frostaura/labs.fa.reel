@@ -22,7 +22,16 @@
 #     switches below and HOME/PATH/TMPDIR — never a key inherited from the caller's shell profile (a
 #     2026-10-24 smoke run with a key-less env file still paid 19 rerank-page calls on an OPENROUTER_API_KEY
 #     the shell had exported). --dry-run prints the variable NAMES the API would get (values never) and exits.
-# It never starts on :5054 (the live dev port) and never on the `reel` database.
+#   - the API boots the way the merged code expects an eval copy to boot: from the dll's own folder (its
+#     content root, so appsettings.json loads), with Database__AutoMigrateOnStartup=true (a pre-merge copy
+#     is migrated, never run against an older schema) and no pre-migration dump handshake (a disposable copy
+#     needs none), with boot-time data repairs and the trust purge OFF (both mutate the snapshot, and the
+#     purge forces a paid Fresh build), and with Trakt OFFLINE in-process (TRAKT_CLIENT_ID=eval-no-trakt
+#     selects the OfflineTraktClient, so no Trakt call ever opens a socket);
+#   - an env file without a JWT_SECRET is refused here, by name, instead of the API dying later with an
+#     options-validation error.
+# It never starts on :5054 (the live dev port), never on the `reel` database and never on a *_template
+# database (the shared base every slot is cloned from: migrating it would change every later clone).
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -44,6 +53,7 @@ done
 [ -n "$port" ] || eval_die "--port is required"
 [ "$port" = "5054" ] && eval_die "refusing port 5054 — that is the founder's live dev API"
 eval_guard_target "$db"
+case "$db" in *_template) eval_die "refusing $db — a template is cloned, never run (clone it first: scripts/eval/snapshot.sh clone $db <slot db>)" ;; esac
 [ -f "$envfile" ] || eval_die "--env-file is required (model/TMDB keys only)"
 
 # No .env anywhere above the dll: the API would read the first one it finds.
@@ -69,6 +79,12 @@ while IFS= read -r -d '' kv; do
   case "$n" in PWD|SHLVL|_|OLDPWD) continue ;; esac
   export "$n=${kv#*=}"; names+=("$n")
 done < <(env -i bash -c 'set -a; . "$1"; set +a; env -0' _ "$envfile")
+# The API refuses to start without a session signing secret; say so by name rather than let it die later.
+jwt_in_file=false
+for n in ${names[@]+"${names[@]}"}; do [ "$n" = "JWT_SECRET" ] && jwt_in_file=true; done
+if ! $jwt_in_file || [ -z "${JWT_SECRET//[[:space:]]/}" ]; then
+  eval_die "$envfile sets no JWT_SECRET, and the API will not start without one. Add a throwaway local value (any 32+ characters, never the live secret): JWT_SECRET=<value>"
+fi
 # Every credential the env file did not set is exported EMPTY, so nothing can fill it from elsewhere.
 credentials=(OPENROUTER_API_KEY EMBEDDINGS_API_KEY OPENAI_API_KEY STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET STRIPE_PRICE_ID TRAKT_CLIENT_SECRET TRAKT_ACCESS_TOKEN TRAKT_REFRESH_TOKEN)
 for v in "${credentials[@]}"; do
@@ -80,6 +96,11 @@ done
 export ConnectionStrings__Postgres="Host=$EVAL_PGHOST;Port=$EVAL_PGPORT;Username=$EVAL_PGUSER;Password=$PGPASSWORD;Database=$db"
 export ASPNETCORE_ENVIRONMENT=Development QA_HELPERS_ENABLED=true
 export TRAKT_DEV_PROFILE="${EVAL_TRAKT_DEV_PROFILE:-deanmar09}"
+# Trakt isolation in-process: this client id selects OfflineTraktClient, which fails every call locally,
+# and no Trakt token reaches the API even when the env file carries one (the compose eval stack's rule).
+export TRAKT_CLIENT_ID=eval-no-trakt TRAKT_CLIENT_SECRET=eval-no-trakt TRAKT_ACCESS_TOKEN="" TRAKT_REFRESH_TOKEN=""
+# Boot like a disposable eval copy: migrate it, with no dump handshake, no repairs and no trust purge.
+export Database__AutoMigrateOnStartup=true BACKUP_REQUEST_DIR="" Background__DataRepairs=false Background__TrustPurge=false
 for s in OutboxDispatcher TokenRefresh DeltaPoll Digest CatalogGrowth NightlyReconcile CatalogFollowThrough LanguageBackfill; do
   export "Background__$s=false"
 done
@@ -99,21 +120,39 @@ export LLM_RERANK_DAILY_TOKENS="${EVAL_RERANK_DAILY_TOKENS:-200000000}"
 
 # Exactly these variables reach the API, from an empty environment.
 pass=(HOME PATH TMPDIR USER LANG ${names[@]+"${names[@]}"} "${credentials[@]}" ConnectionStrings__Postgres ASPNETCORE_ENVIRONMENT QA_HELPERS_ENABLED
-  TRAKT_DEV_PROFILE Background__JobRunner HTTPS_PROXY HTTP_PROXY NO_PROXY LLM_RERANK_DAILY_CALLS LLM_RERANK_DAILY_TOKENS)
+  TRAKT_DEV_PROFILE TRAKT_CLIENT_ID Database__AutoMigrateOnStartup BACKUP_REQUEST_DIR Background__DataRepairs Background__TrustPurge
+  Background__JobRunner HTTPS_PROXY HTTP_PROXY NO_PROXY LLM_RERANK_DAILY_CALLS LLM_RERANK_DAILY_TOKENS)
 for s in OutboxDispatcher TokenRefresh DeltaPoll Digest CatalogGrowth NightlyReconcile CatalogFollowThrough LanguageBackfill; do pass+=("Background__$s"); done
 [ "$jobs" = true ] && pass+=(LLM_XREF_DAILY_CALLS LLM_XREF_DAILY_TOKENS EXTRACT_DAILY_TOKENS EMBED_DAILY_TOKENS HYDRATE_MAX_TITLES_PER_DAY)
 envv=()
 for n in $(printf '%s\n' "${pass[@]}" | sort -u); do
   [ -n "${!n+x}" ] && envv+=("$n=${!n}")
 done
+# The content root is the dll's own folder (appsettings*.json sit beside the dll); the log and pid file
+# paths are made absolute first, because the API starts from that folder.
+dlldir="$(cd "$(dirname "$dll")" && pwd)"
+abspath() { case "$1" in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
+[ -n "$log" ] && log="$(abspath "$log")"
+[ -n "$pidfile" ] && pidfile="$(abspath "$pidfile")"
+[ -f "$dlldir/appsettings.json" ] || echo "run-api: warning: no appsettings.json beside $dll, so the API runs on code defaults" >&2
 if [ "$dryrun" = true ]; then
-  for kv in "${envv[@]}"; do n="${kv%%=*}"; if [ -n "${kv#*=}" ]; then echo "$n"; else echo "$n (empty)"; fi; done
+  echo "run-api: content root $dlldir" >&2
+  # Names only, never values — except the isolation switches this script itself sets, which hold no
+  # secret and are what a reader needs to check (e.g. Background__DataRepairs=false).
+  for kv in "${envv[@]}"; do
+    n="${kv%%=*}"
+    case "$n" in
+      Background__*|Database__*|BACKUP_REQUEST_DIR|TRAKT_CLIENT_ID|TRAKT_DEV_PROFILE|ASPNETCORE_ENVIRONMENT|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|LLM_RERANK_DAILY_*) echo "$kv" ;;
+      *) if [ -n "${kv#*=}" ]; then echo "$n"; else echo "$n (empty)"; fi ;;
+    esac
+  done
   exit 0
 fi
 
 log="${log:-/dev/null}"
 dotnet="${DOTNET:-$HOME/.dotnet/dotnet}"
-nohup env -i "${envv[@]}" "$dotnet" "$dll" --urls "http://127.0.0.1:$port" < /dev/null > "$log" 2>&1 &
+cd "$dlldir"
+nohup env -i "${envv[@]}" "$dotnet" "$dlldir/$(basename "$dll")" --urls "http://127.0.0.1:$port" < /dev/null > "$log" 2>&1 &
 pid=$!
 [ -n "$pidfile" ] && echo "$pid" > "$pidfile"
 for _ in $(seq 1 120); do

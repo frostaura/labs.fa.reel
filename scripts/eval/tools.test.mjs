@@ -3,7 +3,7 @@
 //   node --test 'scripts/eval/*.test.mjs'
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -47,7 +47,7 @@ test("run-api.sh gives the API an empty environment: a key exported by the calle
     mkdirSync(join(dir, "build"), { recursive: true });
     writeFileSync(join(dir, "build", "Api.dll"), "");
     writeFileSync(join(dir, "founder.env"), "OPENROUTER_API_KEY=sk-founder\n");
-    writeFileSync(join(dir, "nokey.env"), "TMDB_READ_ACCESS_TOKEN=t\nexport OPENROUTER_MODEL=m\n");
+    writeFileSync(join(dir, "nokey.env"), "TMDB_READ_ACCESS_TOKEN=t\nexport OPENROUTER_MODEL=m\nJWT_SECRET=local-throwaway-secret-32-characters\n");
     const r = spawnSync("bash", [join(here, "run-api.sh"), "--dll", join(dir, "build", "Api.dll"), "--db", "reel_ws_test", "--port", "5999", "--env-file", join(dir, "nokey.env"), "--dry-run"],
       { env: { ...process.env, EVAL_FOUNDER_ENV: join(dir, "founder.env"), OPENROUTER_API_KEY: "sk-inherited-from-the-shell", STRIPE_SECRET_KEY: "sk-live-inherited", SOME_OTHER_SECRET: "x" }, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
@@ -56,8 +56,79 @@ test("run-api.sh gives the API an empty environment: a key exported by the calle
     assert.ok(names.includes("STRIPE_SECRET_KEY (empty)"));
     assert.ok(!names.some((n) => n.startsWith("SOME_OTHER_SECRET")), "nothing the env file and the script do not name is passed");
     assert.ok(names.includes("TMDB_READ_ACCESS_TOKEN") && names.includes("OPENROUTER_MODEL"));
-    assert.ok(names.includes("Background__TokenRefresh") && names.includes("HTTPS_PROXY"));
+    assert.ok(names.includes("Background__TokenRefresh=false") && names.includes("HTTPS_PROXY=http://127.0.0.1:9"));
     assert.equal(r.stdout.includes("sk-"), false, "dry-run prints names, never values");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// A dry run of run-api.sh against a scratch dll folder, with the env file's text and any extra args.
+function dryRun(envText, { db = "reel_ws_test", withAppsettings = true } = {}) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "ws7-runapi-")));
+  mkdirSync(join(dir, "build", "net10.0"), { recursive: true });
+  writeFileSync(join(dir, "build", "net10.0", "Api.dll"), "");
+  if (withAppsettings) writeFileSync(join(dir, "build", "net10.0", "appsettings.json"), "{}");
+  writeFileSync(join(dir, "founder.env"), "OPENROUTER_API_KEY=sk-founder\n");
+  writeFileSync(join(dir, "eval.env"), envText);
+  const r = spawnSync("bash", [join(here, "run-api.sh"), "--dll", join("build", "net10.0", "Api.dll"), "--db", db, "--port", "5999", "--env-file", join(dir, "eval.env"), "--dry-run"],
+    { cwd: dir, env: { ...process.env, EVAL_FOUNDER_ENV: join(dir, "founder.env") }, encoding: "utf8" });
+  rmSync(dir, { recursive: true, force: true });
+  return { ...r, dir, lines: r.stdout.trim().split("\n") };
+}
+const JWT = "JWT_SECRET=local-throwaway-secret-32-characters\n";
+
+test("run-api.sh refuses an env file with no JWT_SECRET, or a blank one, by name and before the API starts", () => {
+  for (const text of ["TMDB_READ_ACCESS_TOKEN=t\n", "TMDB_READ_ACCESS_TOKEN=t\nJWT_SECRET=\n", "JWT_SECRET=\"   \"\n"]) {
+    const r = dryRun(text);
+    assert.equal(r.status, 2, text);
+    assert.match(r.stderr, /sets no JWT_SECRET, and the API will not start without one/, text);
+  }
+  // A secret the caller's shell exported does not count: the API never sees the caller's environment.
+  const dir = mkdtempSync(join(tmpdir(), "ws7-runapi-"));
+  try {
+    mkdirSync(join(dir, "build"), { recursive: true });
+    writeFileSync(join(dir, "build", "Api.dll"), "");
+    writeFileSync(join(dir, "founder.env"), "OPENROUTER_API_KEY=sk-founder\n");
+    writeFileSync(join(dir, "eval.env"), "TMDB_READ_ACCESS_TOKEN=t\n");
+    const r = runApi(dir, join(dir, "build", "Api.dll"), join(dir, "eval.env"), { JWT_SECRET: "inherited-from-the-shell-32-characters" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /sets no JWT_SECRET/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("run-api.sh boots an eval copy migrated, from the dll's folder, with repairs, purge, dump handshake and Trakt off — whatever the env file says", () => {
+  const r = dryRun(JWT + "Background__DataRepairs=true\nBackground__TrustPurge=true\nDatabase__AutoMigrateOnStartup=false\nBACKUP_REQUEST_DIR=/backups\nTRAKT_CLIENT_ID=real-client\nTRAKT_ACCESS_TOKEN=at\nTRAKT_REFRESH_TOKEN=rt\n");
+  assert.equal(r.status, 0, r.stderr);
+  for (const want of ["Database__AutoMigrateOnStartup=true", "Background__DataRepairs=false", "Background__TrustPurge=false", "BACKUP_REQUEST_DIR=", "TRAKT_CLIENT_ID=eval-no-trakt", "TRAKT_ACCESS_TOKEN (empty)", "TRAKT_REFRESH_TOKEN (empty)", "Background__JobRunner=false"]) {
+    assert.ok(r.lines.includes(want), `${want} — got:\n${r.stdout}`);
+  }
+  // The dll was named by a RELATIVE path; the content root is still its own absolute folder.
+  assert.ok(r.stderr.includes(`content root ${r.dir}/build/net10.0\n`), r.stderr);
+  assert.doesNotMatch(r.stderr, /no appsettings\.json/);
+  assert.match(dryRun(JWT, { withAppsettings: false }).stderr, /no appsettings\.json beside/, "a dll folder without its appsettings is called out");
+});
+
+test("run-api.sh never runs on a template database (every slot is cloned from it)", () => {
+  for (const db of ["reel_eval_template", "reel_ws7_template"]) {
+    const r = dryRun(JWT, { db });
+    assert.equal(r.status, 2, db);
+    assert.match(r.stderr, /a template is cloned, never run/, db);
+  }
+  assert.equal(dryRun(JWT, { db: "reel_eval" }).status, 0, "the eval database itself is still allowed");
+});
+
+test("surfaces.mjs --replay creates a missing --out directory (recursively) and writes beside the recording without one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ws7-replay-"));
+  try {
+    const recording = { kind: "surface-recording", version: 3, label: "t", snapshotId: "s", blocks: [{ surface: "genre-rail", key: "g", component: "card", status: 200, cards: [{ titleId: "a", name: "A", whyThis: "Fits.", lensClause: null, hook: null, reason: null }] }],
+      names: { a: "A" }, ledger: [], facts: { eligible: ["a"], seen: [], evidence: {}, randomCosineP90: null } };
+    writeFileSync(join(dir, "recording.json"), JSON.stringify(recording));
+    const out = join(dir, "not", "there", "yet");
+    const r = spawnSync(process.execPath, [join(here, "surfaces.mjs"), "--replay", join(dir, "recording.json"), "--out", out], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(existsSync(join(out, "metrics.json")) && existsSync(join(out, "report.md")));
+    const beside = spawnSync(process.execPath, [join(here, "surfaces.mjs"), "--replay", join(dir, "recording.json")], { encoding: "utf8" });
+    assert.equal(beside.status, 0, beside.stderr);
+    assert.ok(existsSync(join(dir, "metrics.json")));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

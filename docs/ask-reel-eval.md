@@ -13,16 +13,22 @@ integrator, which no build lane passes.
 |---|---|---|
 | Postgres | `fareel-eval-postgres`, `127.0.0.1:5434`, volume `fareel_eval_pgdata` | A separate container and volume; adopted (not recreated) by `docker-compose.eval.yml` behind the `db` profile |
 | Snapshot | `reel_eval_template` → `reel_eval` / lane slots | `scripts/eval/snapshot.sh` placeholders every Trakt token, truncates the outbox, deletes pending jobs, push subscriptions, `AppSecrets` (the VAPID private key), `DataProtectionKeys` and `RefreshSessions`, archives the ledger of any database it is about to drop, and stamps the snapshot id (`COMMENT ON DATABASE`) |
-| API | `127.0.0.1:5180` (compose project `fareel-eval`) or a slot via `scripts/eval/run-api.sh` | Every hosted service off; job runner off unless a surface run needs one Fresh build; Trakt blackholed (see below); eval-only Ask/rerank allowances; refuses a dll with a `.env` in any parent folder, starts the API from an **empty environment** holding only the env file's variables and its own switches (never a key the caller's shell exports), and exports every credential the env file leaves unset as empty (`--dry-run` lists the names the API would get) |
+| API | `127.0.0.1:5180` (compose project `fareel-eval`) or a slot via `scripts/eval/run-api.sh` | Every hosted service off; job runner off unless a surface run needs one Fresh build; Trakt blackholed (see below); eval-only Ask/rerank allowances; refuses a dll with a `.env` in any parent folder, starts the API from an **empty environment** holding only the env file's variables and its own switches (never a key the caller's shell exports), exports every credential the env file leaves unset as empty, and refuses an env file with no `JWT_SECRET`. It boots the copy the way the merged code needs: from the dll's own folder (the content root, so `appsettings.json` loads), with `Database__AutoMigrateOnStartup=true` and no dump handshake, `Background__DataRepairs` and `Background__TrustPurge` off, Trakt tokens empty and `TRAKT_CLIENT_ID=eval-no-trakt`; it never runs on a `*_template` database (`--dry-run` lists the names the API would get, and the values of the switches it sets) |
 | Model key | `EVAL_OPENROUTER_API_KEY` (its own $10/day cap) | **Not supplied yet.** The shared lane key in `~/src/fa.reel-ws/lane.env` **is the founder's own OpenRouter key** (SHA-256 match with the live clone's `.env`, compared without printing either). Every paid call WS-7 has made — the three 99c0761 baselines, the surface baseline and the aborted attempts — went on it. `run-api.sh`, `askreel.mjs live` and `surfaces.mjs` now refuse that key unless the founder's sign-off is passed (`EVAL_FOUNDER_KEY_SIGNOFF` / `--founder-key-signoff`) and recorded in the recording |
 
-**Trakt isolation, two layers.** (1) Inside the eval container Trakt's hosts resolve to `0.0.0.0`; for a
+**Trakt isolation, three layers.** (1) Inside the eval container Trakt's hosts resolve to `0.0.0.0`; for a
 process slot, all outbound HTTPS goes through a dead loopback proxy except `openrouter.ai` and the TMDB
 hosts. (2) No Trakt credentials are configured, and the dev-link session resolves the snapshot account by
-slug, so nothing exchanges a token. The proof is the ledger: Trakt usage is recorded before the request
-is sent, so a run's `ExternalApiUsages` delta counts attempts, and a Trakt row fails the `traktCalls`
-gate. A code-level fake `ITraktClient` for the API host is a change request to WS-4/WS-8; until it lands,
-the network layer is the guarantee.
+slug, so nothing exchanges a token. (3) `TRAKT_CLIENT_ID=eval-no-trakt` replaces the Trakt adapter with
+`OfflineTraktClient` (`Inf/Eval/`, wired by `DependencyInjection.Eval.cs`), which fails every call with the
+`HttpRequestException` an unreachable Trakt produces before any socket opens, and logs each refusal as a
+warning ("Trakt is offline on this stack"). It fails rather than answers because an empty watched list or a
+silently accepted write would be read by ingestion and the outbox as truth. Layer 3 needs the one call line
+in `AddReelInfrastructure` (WS-1's file), after `AddReelData()`; until that line lands, layers 1 and 2 are
+the guarantee, and `IT/AskReelGolden/EvalTraktIsolationWiringTests` — which boots the whole app through
+`Program` with the eval client id and drives a sign-in — fails, naming the missing line. The real
+adapter records Trakt usage before the request is sent, so with layer 3 in place a Trakt row in a run's
+`ExternalApiUsages` delta means a call got past the fake — an isolation failure the `traktCalls` gate fails.
 
 **Test databases** for every workstream live on the eval Postgres as `reel_test_<ws>`.
 `PostgresFixtureGate.LiveTargetRefusal` makes the fixture and `ReelApiFactory` refuse, before connecting,
@@ -58,7 +64,7 @@ node scripts/eval/askreel.mjs check [--db reel_eval]          # --db also execut
 # Surface harness: one Fresh build (API started with --jobs), then every surface; compare against a baseline.
 node scripts/eval/surfaces.mjs --api http://127.0.0.1:5180 --db reel_eval --label <name> --fresh --api-env <eval env> --build-info <...>
 node scripts/eval/surfaces.mjs --replay <recording.json>
-node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/99c0761/metrics.json
+node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/99c0761-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one
 
 # Ledger cost check (§7): every eval and lane database together, and the provider's own figure for a key.
 node scripts/eval/ledger.mjs --all
@@ -169,7 +175,8 @@ them, which is the point of the baseline.
 | Open set (`eval/askreel/baselines/99c0761/open/`) | **Valid quality baseline.** Re-scored by replay under the amended rules (act now no data; hedging 670). Paid with the founder's key |
 | Latency (`…/99c0761/latency/`) | **Not a latency baseline.** It ran 18:51–19:12 UTC while other lanes were building (§5.0 rule 1, §7 rule 5) and without held build slots, so its latency gates now read "not gated". Re-run with `--hold-build-slots` on the eval key |
 | Holdout (sealed) | Valid for the holdout **as it was** (scored against `scenarios-at-recording/`); the holdout has since been revised, so a fresh holdout baseline (one run, 64 turns) is owed before G2 |
-| Surfaces (`eval/surfaces/baselines/99c0761/`) | Partial: digest returned no cards (no data), person pages and Watch tonight were not fetched, chained jobs ran mid-fetch and the artifact was not recorded (`provenance.md`). Re-run with the current harness on the eval key |
+| Surfaces (`eval/surfaces/baselines/99c0761/`) | Partial, keyed (founder's key): digest returned no cards (no data), person pages and Watch tonight were not fetched, chained jobs ran mid-fetch, the artifact was not recorded (`provenance.md`), and it kept only `whyThis`, so the lens copy and hooks users read are unmeasured. Re-scored under the 2026-10-25 rules (stub 0.212). Re-run with the current harness on the eval key |
+| Surfaces, keyless (`eval/surfaces/baselines/99c0761-keyless/`) | **The reference for keyless runs** (every surface run so far on the merged tree has been keyless). Current harness: raw copy fields, every surface, jobs drained, input artifact recorded. No model call ran, so its why-lines are the templater's and the stored lens copy (`provenance.md`) |
 
 ## The LLM judge and κ
 
@@ -186,14 +193,28 @@ disabled weekly service would enqueue), and only after every chained job has dra
 active artifact at the start and end of the fetch. Per surface it reports stub rate, exclusion leaks (same
 `_eligible.sql`), cross-rail repeats on the feed page, the share of anchored and Similar cards with evidence
 (≥ 2 shared TMDB keywords with the anchor, or embedding cosine above the p90 of 2,000 seeded random
-eligible pairs on the same snapshot), hedging and non-Latin why-lines, and the watched-or-rated footprint
+eligible pairs on the same snapshot), hedging and non-Latin why-lines, card volume, and the watched-or-rated footprint
 of Saved and the Watch-tonight pin (gated; typeahead and person pages show what you have seen by design
 and are reported only). Every response's HTTP status is recorded: an error, or an empty suggestion
 surface, is **no data** — listed at the top of the report, and the run exits 1 — never "0 leaks". Ask is
 measured by the golden eval on the same truth. `eval/surfaces/gates.json` holds the task-8 targets and the
 regression tolerances `--compare` applies (rates per suggestion card; a surface the baseline measured that
-goes dark is a regression; different snapshots are refused). False copy claims wait for the claims audit
-(task 9).
+goes dark is a regression; each suggestion surface, and anchored cards, must keep at least half the
+baseline's cards; different snapshots, or Fresh builds that started from different artifacts, are refused).
+False copy claims wait for the claims audit (task 9).
+
+**Copy is scored as rendered.** The recording keeps every copy field raw (`whyThis`, `lensClause`, `hook`,
+the pin's `reason`) and the component that renders each block; the scorer derives the string on screen:
+the hero's hook, else its `whyThis` (`RecCardHero` since `95aab1f`; at `99c0761` the hook was followed by
+the lens clause, and the harness reads the measured build's own `RecCardHero` to tell which), a rail card's
+`lensClause ?? whyThis` (`RecCard`: feed rows, rails, Similar, the digest), and the Watch-tonight reason.
+Saved grid cards, person pages and typeahead carry no why-line. Scoring `whyThis` alone missed the lens
+copy's hedges (8 of 21 feed cards carried a lens clause in the P0 review, 3 hedging). The stub family
+includes `GenericFallback` ("Strong fit with your taste profile."), alone or after an anchor clause, and
+the hedge family includes comparisons against the account's own taste ("…slower … than the action you
+often prefer") and departure framing ("detour", "change of pace"). Both families are shared with the
+golden eval, and were calibrated on the snapshot's 316 lens copies and stored why-lines, each hit read by
+hand.
 
 ## Spend
 

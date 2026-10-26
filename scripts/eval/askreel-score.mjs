@@ -9,16 +9,29 @@ import { createHash } from "node:crypto";
 // Template families the v1 pipeline emits when a model call failed. Matching one is a fallback, and a
 // stub why-line on a card is ALSO a grounding violation, because it is invented copy shown as an
 // explanation (labelled Llm on v1).
-export const STUB_WHY = /^an? [\p{L}\p{N} &'’-]+ pick aligned with your taste\.?$/iu;
+// The stub family: copy that names no reason at all. The model-failure template ("A horror pick aligned
+// with your taste.") and the feed templater's GenericFallback ("Strong fit with your taste profile.",
+// ExplanationTemplater.GenericFallback), alone or as the tail after an anchor clause
+// ("…, and strong fit with your taste profile.").
+export const STUB_WHY = /^(?:an? [\p{L}\p{N} &'’-]+ pick aligned with your taste\.?|(?:.+, and )?strong fit with your taste profile\.?)$/iu;
 export const STUB_REPLY = /^here are some .+ picks for [“"']/iu;
 // A why-line that argues against its own pick ("isn't a ninja film", "not quite …", "though its mystery
-// focus may be less to your taste", "though … is a series rather than your usual film pick").
+// focus may be less to your taste", "though … is a series rather than your usual film pick", and — on the
+// lens copy the feed renders — "though this is a much slower drama than the action and adventure you often
+// prefer", "this is a quieter, heavier detour").
 export const HEDGE_WHY = new RegExp([
-  String.raw`\b(?:isn['’]t|is not|aren['’]t|not (?:really |quite |exactly )?(?:a|an|about)|doesn['’]t (?:have|feature|involve|include)|lacks?|though it['’]s not|not strictly)\b`,
-  // A concession clause that then argues against the pick: "though … less …", "but … rather than …".
-  String.raw`\b(?:though|although|even if|while|but|yet)\b[^.;]*\b(?:less|rather than|weaker|not (?:your|quite|really|exactly|as)|may not|might not|isn['’]t|won['’]t|may (?:feel|test|land)|outweighs?|lower for you|than (?:you (?:prefer|favou?r|usually)|your usual)|(?:pace|it) is slow|more [\w-]+(?: [\w-]+)? than|over (?:brisk|your)|dominates)\b`,
+  // "X, not a Y" hedges a pick ("a military action film, not a ninja adventure"); after "if you want …" it
+  // is the pitch's own contrast ("if you want grief handled through a friend, not a speech"), not a hedge.
+  String.raw`\b(?:isn['’]t|is not|aren['’]t|(?<!\bif you (?:want|need|like)\b[^.;]*)not (?:really |quite |exactly )?(?:a|an|about)|doesn['’]t (?:have|feature|involve|include)|lacks?|though it['’]s not|not strictly)\b`,
+  // A concession clause that then argues against the pick: "though … less …", "but … rather than …",
+  // "though … at a gentler pace", "but this is a quieter kind of journey".
+  String.raw`\b(?:though|although|even if|while|but|yet)\b[^.;]*\b(?:less|rather than|weaker|not (?:your|quite|really|exactly|as)|may not|might not|isn['’]t|won['’]t|may (?:feel|test|land)|outweighs?|lower for you|than (?:you (?:prefer|favou?r|usually)|your usual)|(?:pace|it) is slow|more [\w-]+(?: [\w-]+)? than|over (?:brisk|your)|dominates|slower|quieter|heavier|gentler|softer|bleaker|grimmer|calmer|sadder|denser)\b`,
   String.raw`\bless (?:aligned|suited|to your taste|your usual|certain)\b`,
   String.raw`\bnot your (?:usual|typical)\b`,
+  // Measured against the account's own taste: "… than the action and adventure you often prefer".
+  String.raw`\bthan (?:the |what |your )?[^.;]{0,60}?\byou(?:['’]d)? (?:often |usually |typically |normally |mostly |tend to )?(?:prefer|favou?r|like|enjoy|reach for|go for|rate)\b`,
+  // Framed as a departure from that taste: "a quieter, heavier detour", "a change of pace".
+  String.raw`\b(?:detour|change of pace|departure from|(?:step|break) (?:away )?from (?:your|the) usual|outside (?:your|the) (?:usual|comfort)|comfort zone)\b`,
 ].join("|"), "iu");
 // English copy that slipped into another script mid-sentence (e.g. "your film-first偏好").
 export const NON_LATIN = /(?!\p{Script=Latin})(?!\p{Script=Common})(?!\p{Script=Inherited})\p{L}/u;
