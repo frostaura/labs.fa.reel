@@ -537,7 +537,11 @@ public class LensPipelineTests(PostgresFixture fixture)
             seed.Persons.AddRange(PersonNamed(Name("David Dunn")), PersonNamed(Name("Elijah Price")), PersonNamed(Name("Denis Villeneuve")), actor);
             seed.TitleCredits.Add(new TitleCredit
             {
-                Id = Guid.NewGuid(), TitleId = titleId, PersonId = actor.Id, Role = CreditRole.Actor, CastOrder = 0,
+                Id = Guid.NewGuid(),
+                TitleId = titleId,
+                PersonId = actor.Id,
+                Role = CreditRole.Actor,
+                CastOrder = 0,
                 CharacterName = Name("Elijah Price"),
             });
             await seed.SaveChangesAsync();
