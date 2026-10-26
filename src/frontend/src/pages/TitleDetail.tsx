@@ -45,7 +45,7 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
   return (
     <div className="space-y-2">
       <p className="fa-overline text-3">{label}</p>
-      <FadeScrollRow className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
+      <FadeScrollRow bleed className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
         {people.map((p) => (
           <CastMemberCard key={p.personId} member={p} />
         ))}
@@ -298,7 +298,9 @@ export default function TitleDetail() {
                   )}
                 </div>
 
-                <div className="p-5 sm:p-6 space-y-6">
+                {/* The shell's gutter, not a padding of its own, so the rows below bleed to the sheet's
+                    edge exactly as Home's rails bleed to the page's (WS-9, O-9). */}
+                <div className="px-gutter py-5 sm:py-6 space-y-6">
                   {/* Reactions */}
                   <div className="flex items-center gap-2 flex-wrap" data-testid="reaction-bar">
                     {/* The trailer is an action like the rest, here with them — not a disc over the

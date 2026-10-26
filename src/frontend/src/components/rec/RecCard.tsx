@@ -23,7 +23,7 @@ export default function RecCard({ card }: { card: FeedCard }) {
   const providers = cardProviders(card.providers);
 
   return (
-    <div className="group relative w-44 sm:w-48 shrink-0" data-testid="rec-card">
+    <div className="group relative w-card shrink-0" data-testid="rec-card">
       <div className="relative overflow-hidden rounded-lg transition-transform duration-200 group-hover:scale-[1.03] group-has-[a:focus-visible]:ring-2 group-has-[a:focus-visible]:ring-fa-frost/60">
         <PosterImage path={card.posterPath} alt={card.name} />
         {/* The shared stack owns the null/NaN guards, the no-overlap layout and the scrim — the

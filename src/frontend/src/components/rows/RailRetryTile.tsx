@@ -27,7 +27,7 @@ export default function RailRetryTile({ onRetry, shape = "poster" }: Props) {
   );
 
   return shape === "poster" ? (
-    <div className="snap-start w-44 sm:w-48 shrink-0">
+    <div className="snap-start w-card shrink-0">
       <div className="aspect-[2/3]">{body}</div>
     </div>
   ) : (
