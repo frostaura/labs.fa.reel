@@ -14,7 +14,8 @@ import { useRef, useState } from "react";
 import { Link } from "react-router";
 import { Share2 } from "lucide-react";
 import { toPng } from "html-to-image";
-import { useGetSessionQuery, useGetTasteDnaQuery } from "../store/api";
+import { useGetSessionQuery, useGetSyncStatusQuery, useGetTasteDnaQuery } from "../store/api";
+import { modelReadiness, noModelSentence } from "../lib/modelReadiness";
 import { profileUrl } from "../lib/tmdbImages";
 import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
 import ShareCard from "../components/dna/ShareCard";
@@ -46,6 +47,10 @@ function ChartTip({ active, payload, label }: { active?: boolean; payload?: { na
 export default function TasteDna() {
   const { currentData: data, isError, isFetching, refetch } = useGetTasteDnaQuery();
   const { data: session } = useGetSessionQuery();
+  // Nothing on this page needs the model — it reads the ratings — so a missing model is a line of
+  // context, never a gate or a failure (R1-57).
+  const { data: sync } = useGetSyncStatusQuery();
+  const noModel = noModelSentence(modelReadiness(sync));
   const templateRef = useRef<HTMLDivElement>(null);
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
@@ -133,6 +138,12 @@ export default function TasteDna() {
           )}
         </div>
       </div>
+
+      {noModel && (
+        <p className="fa-card px-4 py-3 fa-caption text-fa-frost" data-testid="dna-no-model">
+          {noModel} Everything below is read straight from your ratings, so none of it waits for the model.
+        </p>
+      )}
 
       {/* What Reel believes about you, in words — and your correction to it. Above the charts on
           purpose: the charts describe the data, this describes the person the data was read as,

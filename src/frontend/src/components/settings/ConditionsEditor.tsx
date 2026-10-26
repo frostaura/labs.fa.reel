@@ -291,8 +291,12 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       {!bare && (
         <div>
           <h2 className="fa-section-title">Conditions for tonight&apos;s picks</h2>
-          <p className="fa-caption text-fa-frost-dim mt-1">
-            These are airtight — they apply to the hero, every row, and all search.
+          {/* Only what the server enforces. The top-bar typeahead is a name lookup: it drops titles
+              your exclusions rule out without saying so, but not the "for you" floor, and its
+              global leg applies none of them — "all search" was false (R1-26). */}
+          <p className="fa-caption text-fa-frost-dim mt-1" data-testid="conditions-scope">
+            These are airtight for the hero, every row and Ask Reel. Quick search in the top bar looks titles up by
+            name and only partly applies them, so it can show a title these rules would leave out.
           </p>
         </div>
       )}

@@ -16,6 +16,7 @@ import { rememberOauthState } from "../lib/traktOauth";
 import { useCountUp } from "../lib/useCountUp";
 import {
   FIRST_MODEL_TIMING,
+  awaitingModelTiming,
   failureCopy,
   needsReconnect,
   pollAdvance,
@@ -121,6 +122,7 @@ export default function Onboarding() {
         degradedReason: status.degradedReason ?? null,
         notEnoughRatings: status.notEnoughRatings ?? null,
         lastFailures: status.lastFailures ?? null,
+        retrain: status.retrain ?? null,
       })
     );
   }, [syncStatus, fulfilledTimeStamp, dispatch]);
@@ -263,11 +265,11 @@ export default function Onboarding() {
         {onboarding.stage === "awaitingModel" && (
           <div className="fa-card border-fa-frost/30 px-6 py-5 text-center space-y-3 reel-rise" data-testid="awaiting-model">
             <p className="fa-body text-fa-frost-bright" data-testid="awaiting-model-copy">
-              {FIRST_MODEL_TIMING}.
+              {awaitingModelTiming(onboarding.hasActiveModel)}.
             </p>
             <p className="fa-caption text-fa-frost-dim">
               Nothing to do but wait — this page moves on by itself when the model is ready, so you can close it and
-              come back. More ratings make the first model sharper.
+              come back. More ratings make the {onboarding.hasActiveModel ? "next" : "first"} model sharper.
             </p>
             <Link to="/rate" className="fa-button inline-flex" data-testid="awaiting-model-rate">
               Rate more while you wait

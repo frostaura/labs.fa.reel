@@ -12,10 +12,12 @@ import {
 } from "recharts";
 import { Target } from "lucide-react";
 import LoadFailed from "../components/settings/LoadFailed";
-import { useGetAccuracyQuery, type AccuracyMoment } from "../store/api";
+import { useGetAccuracyQuery, useGetSyncStatusQuery, type AccuracyMoment } from "../store/api";
+import { modelReadiness, noModelSentence } from "../lib/modelReadiness";
 import { posterUrl } from "../lib/tmdbImages";
 import { verdictSurface } from "../lib/verdictCopy";
 import {
+  NO_MODEL_SOURCE_NOTE,
   agreementNote,
   biasNote,
   headlineSentence,
@@ -107,6 +109,10 @@ export default function TrackRecord() {
   // `currentData`, not `data`: `data` keeps the PREVIOUS window's payload while a new window loads
   // or after it fails, which would print 90-day numbers under an "all time" button.
   const { currentData: data, isError, isFetching, refetch } = useGetAccuracyQuery({ window: window_ });
+  // Whether there is a model to score anything yet. Without one, "rate a few titles it has already
+  // put a number on" sends the user looking for numbers that do not exist (R1-57).
+  const { data: sync } = useGetSyncStatusQuery();
+  const noModel = noModelSentence(modelReadiness(sync));
 
   // The window switch stays on screen through every state: a skeleton or an error that also took
   // the buttons away would leave no way to step back to the window that did load.
@@ -175,8 +181,16 @@ export default function TrackRecord() {
         <p className="text-3xl font-light text-fa-frost-bright mt-1" data-testid="headline-sentence">
           {headlineSentence(data)}
         </p>
+        {/* Only on the empty page: numbers already on screen were scored by a model, and a line
+            saying there is none would contradict them (seen on the slot with the Active artifact
+            retired under 65 scored cards). */}
+        {empty && noModel && (
+          <p className="fa-body text-fa-frost mt-2" data-testid="track-record-no-model">
+            {noModel}
+          </p>
+        )}
         <p className="fa-caption text-fa-frost-dim mt-2" data-testid="source-note">
-          {sourceNote(data)}
+          {empty && noModel ? NO_MODEL_SOURCE_NOTE : sourceNote(data)}
         </p>
         {/* The empty state's way forward. The page fills as you rate titles Reel had already scored
             for you; /rate offers what you've watched and never rated (plus popular titles), so the

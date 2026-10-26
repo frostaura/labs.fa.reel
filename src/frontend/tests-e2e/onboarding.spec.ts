@@ -1,5 +1,15 @@
 import { test, expect } from "@playwright/test";
-import { EMPTY_SYNC, SESSION_FOUNDER, emit, mockJson, stubEventSource, waitForStream } from "./helpers";
+import { SESSION_FOUNDER, emit, mockJson, stubEventSource, syncStatus, waitForStream } from "./helpers";
+
+/**
+ * A new account mid-onboarding: no model exists yet. The shared idle payload says there is one
+ * (`retrain.hasActiveModel: true`), which made the floor-met wait read as a rebuild of a model the
+ * account never had — the copy decides "first" or "next" from this field.
+ */
+const EMPTY_SYNC = syncStatus({
+  pipelineStage: "Ingesting",
+  retrain: { minNewRatings: 10, newRatingsSinceTrain: 0, hasActiveModel: false, lastTrainedAt: null },
+});
 
 /**
  * The live build-up show against a fully mocked backend + scripted SSE — pins the staged

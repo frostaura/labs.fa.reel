@@ -8,6 +8,7 @@ import reducer, {
   pollAdvance,
   reset,
   retryStarted,
+  awaitingModelTiming,
   stageFromPipeline,
   stageFromStatus,
   type OnboardingState,
@@ -169,6 +170,32 @@ describe("onboarding below the training floor (H-5) — a stop that is not a fai
     expect(s.stage).toBe("failed");
     // An unrelated failed job does not turn the wait into a failure.
     expect(reducer(initial(), pollAdvance({ ...FLOOR_MET, lastFailures: [{ kind: "DeltaSync" }] })).stage).toBe("awaitingModel");
+  });
+
+  // CR-6: the reason the server will send for the same wait. Taken at its word — the server only
+  // sends it after checking the Train history itself — whatever stage it is stored under.
+  it("the server's AwaitingFirstModel reason is the wait, on any stored stage", () => {
+    for (const pipelineStage of ["Degraded", "NotEnoughRatings", "FeedReady"]) {
+      const s = reducer(initial(), pollAdvance({ pipelineStage, degradedReason: "AwaitingFirstModel", notEnoughRatings: null, lastFailures: [] }));
+      expect(s.stage).toBe("awaitingModel");
+      expect(s.degradedReason).toBe("AwaitingFirstModel");
+    }
+  });
+
+  it("a reason the client does not know is never read as the wait", () => {
+    expect(reducer(initial(), pollAdvance({ ...FLOOR_MET, degradedReason: "SomethingNewer" })).stage).toBe("failed");
+    expect(reducer(initial(), pollAdvance({ ...FLOOR_MET, degradedReason: "ProviderDown" })).stage).toBe("failed");
+  });
+
+  it("the wait names the first model, or the next build of the one the account already has", () => {
+    const first = reducer(initial(), pollAdvance({ ...FLOOR_MET, retrain: { hasActiveModel: false } }));
+    expect(first.hasActiveModel).toBe(false);
+    expect(awaitingModelTiming(first.hasActiveModel)).toBe("Reel builds your first model in tonight's refresh at the latest");
+    const next = reducer(initial(), pollAdvance({ ...FLOOR_MET, retrain: { hasActiveModel: true } }));
+    expect(next.stage).toBe("awaitingModel");
+    expect(awaitingModelTiming(next.hasActiveModel)).toBe("Reel rebuilds your model in tonight's refresh at the latest");
+    // An older payload without `retrain` says "first", the common case.
+    expect(awaitingModelTiming(reducer(initial(), pollAdvance(FLOOR_MET)).hasActiveModel)).toMatch(/first model/);
   });
 
   it("the poll can put the show back below the floor (ratings were removed on Trakt)", () => {

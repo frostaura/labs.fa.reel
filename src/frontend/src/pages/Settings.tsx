@@ -8,6 +8,7 @@ import PushOptIn from "../components/settings/PushOptIn";
 import LoadFailed from "../components/settings/LoadFailed";
 import SaveStatus from "../components/settings/SaveStatus";
 import { useLeaveGuard } from "../components/settings/useLeaveGuard";
+import { pipelineLabel } from "../lib/modelReadiness";
 import {
   emailSaveMessage,
   saveFailureMessage,
@@ -176,7 +177,9 @@ export default function Settings() {
         </div>
         <div className="flex items-center justify-between border-t border-fa-edge/50 pt-3">
           <div className="fa-caption text-fa-frost-dim">
-            <p>Pipeline: {sync?.pipelineStage ?? session?.pipelineStage ?? "…"}</p>
+            {/* In words, from the status that explains it: the raw stage read "Degraded" to an
+                account that had rated enough and was only waiting for its first model (R1-57). */}
+            <p data-testid="settings-pipeline">Pipeline: {pipelineLabel(sync) ?? session?.pipelineStage ?? "…"}</p>
             <p>
               Last sync:{" "}
               {sync?.lastDeltaSyncAt ? new Date(sync.lastDeltaSyncAt).toLocaleString() : "never"}
