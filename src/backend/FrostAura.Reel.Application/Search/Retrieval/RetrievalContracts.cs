@@ -117,8 +117,9 @@ public sealed record RetrievalQuery(
 /// <param name="Similarity">Cosine similarity from the semantic arm, when that arm found it.</param>
 /// <param name="Evidence">
 /// Why it matches the request, as <c>source:value</c> strings: <c>keyword:ninja</c>, <c>genre:horror</c>,
-/// <c>person:Christopher Nolan/director</c>, <c>fts:overview</c>. A candidate for a request with
-/// concepts always carries at least one <c>keyword:</c>, <c>genre:</c> or <c>fts:</c> entry.
+/// <c>person:Christopher Nolan/director</c>, <c>name:ninja</c> (the label stands as a word in the
+/// title's name), <c>fts:overview</c>. A candidate for a request with concepts always carries at
+/// least one <c>keyword:</c>, <c>name:</c>, <c>genre:</c> or <c>fts:</c> entry.
 /// </param>
 public sealed record Candidate(Guid TitleId, double FusedScore, double? Similarity, IReadOnlyList<string> Evidence);
 
@@ -171,7 +172,8 @@ public sealed record ConditionKnockout(
 ///
 /// <para><b>Partition.</b> The population splits exactly, each title in the first bucket it reaches:
 /// <c>MatchingInCatalogue = AlreadySeen + SavedOrDismissed + ExcludedByConditions + Eligible</c>,
-/// and <c>Eligible = Unscored + BelowFloor + ClearingFloor</c>.</para>
+/// <c>Eligible = Unscored + BelowFloor + ClearingFloor</c>, and
+/// <c>ClearingFloor = AlreadyShown + Offerable</c>.</para>
 /// </summary>
 /// <param name="MatchingInCatalogue">Titles satisfying the hard constraints, at or above the vote floor.</param>
 /// <param name="AlreadySeen">Of those, watched (even partly) or rated. Never offered as a relaxation.</param>
@@ -191,6 +193,12 @@ public sealed record ConditionKnockout(
 /// False only for a broad request (a large population) with plenty clearing the bar, where measuring
 /// relaxations would re-count the whole catalogue per rule and no relaxation is worth offering.
 /// </param>
+/// <param name="AlreadyShown">
+/// Of <see cref="ClearingFloor"/>, the titles this conversation has already shown. They are still
+/// eligible (nothing about them changed) but they are not offered again, so they are excluded from
+/// <see cref="Offerable"/> and from every knockout's unlock count. Zero when the caller passed no
+/// shown titles.
+/// </param>
 public sealed record SupplyReport(
     int MatchingInCatalogue,
     int AlreadySeen,
@@ -203,10 +211,14 @@ public sealed record SupplyReport(
     int LowVoteMatches,
     int MinVotes,
     decimal? PredictedFloor,
-    bool KnockoutsMeasured)
+    bool KnockoutsMeasured,
+    int AlreadyShown = 0)
 {
     /// <summary>Eligible, scored and at or above the For-you bar — the only titles that can become picks.</summary>
     public int ClearingFloor => Eligible - BelowFloor - Unscored;
+
+    /// <summary>Clearing the bar and not yet shown in this conversation — the supply a reply may still offer.</summary>
+    public int Offerable => ClearingFloor - AlreadyShown;
 }
 
 /// <summary>
@@ -225,5 +237,15 @@ public interface IAskReelRetriever
 /// </summary>
 public interface ISupplyReporter
 {
-    Task<SupplyReport> ReportAsync(Guid accountId, HardConstraints hard, CancellationToken ct);
+    /// <summary>The supply behind <paramref name="hard"/>, with nothing yet shown.</summary>
+    Task<SupplyReport> ReportAsync(Guid accountId, HardConstraints hard, CancellationToken ct) =>
+        ReportAsync(accountId, hard, [], ct);
+
+    /// <summary>
+    /// The supply behind <paramref name="hard"/>, with <paramref name="alreadyShown"/> (the titles
+    /// this conversation has shown) counted in <see cref="SupplyReport.AlreadyShown"/> and excluded
+    /// from what is offered.
+    /// </summary>
+    Task<SupplyReport> ReportAsync(
+        Guid accountId, HardConstraints hard, IReadOnlyCollection<Guid> alreadyShown, CancellationToken ct);
 }

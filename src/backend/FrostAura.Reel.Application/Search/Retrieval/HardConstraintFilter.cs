@@ -1,4 +1,6 @@
 using System.Linq.Expressions;
+using System.Text;
+using System.Text.RegularExpressions;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
@@ -12,8 +14,20 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 ///
 /// <para>The rules, each chosen so a count quoted to the user is defensible:</para>
 /// <list type="bullet">
-/// <item>A concept matches by TMDB keyword CONTAINMENT (<c>%ninja%</c>) or by genre slug. Keywords
-/// are stored lower-cased by ingest, so the labels are lower-cased here and the column is not.</item>
+/// <item>A concept matches by a TMDB keyword that CONTAINS the label from a word start
+/// (<c>\mninja</c>: "ninja", "female ninja", "ninja warrior"), by a label standing as a whole word in
+/// the title's NAME (plural allowed), or by genre slug. Keywords are stored lower-cased by ingest, so
+/// the labels are lower-cased here and the keyword column is not; the name is matched
+/// case-insensitively.</item>
+/// <item>The keyword match starts at a word boundary because bare containment counted mid-word hits:
+/// "heist" matched the keyword "atheist", putting Stigmata and Religulous in the founder's heist
+/// supply (13 titles over the eval truth). It stays open at the end, so "heists", "zombies" and
+/// "time traveler" still match.</item>
+/// <item>The name arm exists because TMDB's keyword tags are incomplete: "3 Ninjas", "Alien vs.
+/// Ninja" and "Batman Ninja vs. Yakuza League" carry no ninja keyword at all, so a keyword-only
+/// count told the founder 63 ninja films when the catalogue holds 70. It is a whole-word match, not
+/// containment, because names are short prose: containment would count "Ninjababy" (a pregnancy
+/// comedy) and "Ninjago" as ninja films, which the eval truth deliberately does not.</item>
 /// <item>Concepts AND together; the labels and genres inside one concept OR together.</item>
 /// <item>A person matches by credit, by resolved id or else by exact case-insensitive name.</item>
 /// <item>The year window is inclusive and resolves <c>Year → ReleasedAt → FirstAiredAt</c>; an
@@ -86,9 +100,17 @@ public static class HardConstraintFilter
             var labels = LabelsOf(concept);
             foreach (var keyword in title.Keywords)
             {
-                if (labels.Any(l => keyword.Contains(l, StringComparison.Ordinal)))
+                if (labels.Any(l => KeywordMatches(keyword, l)))
                 {
                     evidence.Add($"keyword:{keyword}");
+                }
+            }
+
+            foreach (var label in labels)
+            {
+                if (NameMatches(title.Name, label))
+                {
+                    evidence.Add($"name:{label}");
                 }
             }
 
@@ -111,13 +133,60 @@ public static class HardConstraintFilter
         return evidence.Distinct(StringComparer.Ordinal).ToList();
     }
 
+    /// <summary>
+    /// The Postgres (ARE) pattern the name arm matches <paramref name="label"/> with: the label as a
+    /// whole word or phrase, optionally pluralised (<c>\mninja(e?s)?\M</c> matches "3 Ninjas" and
+    /// "Alien vs. Ninja", not "Ninjababy" or "Ninjago"). Regex metacharacters in the label are escaped,
+    /// so a label is always matched literally.
+    /// </summary>
+    internal static string NamePattern(string label) => $@"\m{EscapeLiteral(label)}(e?s)?\M";
+
+    /// <summary>
+    /// The Postgres (ARE) pattern the keyword arm matches <paramref name="label"/> with: the label
+    /// starting at a word boundary, open at the end (<c>\mheist</c> matches "heist" and "heists", not
+    /// "atheist"), metacharacters escaped.
+    /// </summary>
+    internal static string KeywordPattern(string label) => $@"\m{EscapeLiteral(label)}";
+
+    /// <summary>The in-memory twin of <see cref="KeywordPattern"/>, for evidence.</summary>
+    internal static bool KeywordMatches(string? keyword, string label) =>
+        !string.IsNullOrEmpty(keyword)
+        && label.Length > 0
+        && Regex.IsMatch(
+            keyword,
+            $@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(label)}",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromMilliseconds(100));
+
+    /// <summary>
+    /// The in-memory twin of <see cref="NamePattern"/>, for evidence: true when <paramref name="label"/>
+    /// stands in <paramref name="name"/> as a whole word or phrase, optionally pluralised. A word
+    /// character is a letter, a digit or an underscore, as it is for Postgres's <c>\m</c> and <c>\M</c>.
+    /// </summary>
+    internal static bool NameMatches(string? name, string label) =>
+        !string.IsNullOrEmpty(name)
+        && label.Length > 0
+        && Regex.IsMatch(
+            name,
+            $@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(label)}(e?s)?(?![\p{{L}}\p{{N}}_])",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            TimeSpan.FromMilliseconds(100));
+
     private static Expression<Func<Title, bool>> ConceptPredicate(ConceptTerm concept)
     {
         var arms = new List<Expression<Func<Title, bool>>>();
         foreach (var label in LabelsOf(concept))
         {
+            // Translated by Npgsql to k ~ @keywordPattern over unnest("Keywords"), and "Name" ~* @namePattern
+            // (see the class remarks for why each arm is bounded where it is). Each regex sits behind a
+            // plain strpos guard that implies nothing new (the label is a substring of any match) but
+            // lets Postgres skip the regex engine for almost every row: unguarded, the three heist
+            // labels cost ~440 ms over the 38k-title catalogue; guarded, ~70 ms, as containment did.
             var value = label;
-            arms.Add(t => t.Keywords.Any(k => k.Contains(value)));
+            var keywordPattern = KeywordPattern(label);
+            arms.Add(t => t.Keywords.Any(k => k.Contains(value) && Regex.IsMatch(k, keywordPattern)));
+            var namePattern = NamePattern(label);
+            arms.Add(t => t.Name.ToLower().Contains(value) && Regex.IsMatch(t.Name, namePattern, RegexOptions.IgnoreCase));
         }
 
         foreach (var genre in GenresOf(concept))
@@ -155,6 +224,26 @@ public static class HardConstraintFilter
             c.TitleId == t.Id
             && (anyRole || c.Role == role)
             && db.Persons.Any(p => p.Id == c.PersonId && p.Name.ToLower() == name));
+    }
+
+    /// <summary>
+    /// Escapes the characters a Postgres advanced regular expression treats as special. Only ASCII
+    /// punctuation is escaped: a backslash before a letter or digit would start an ARE escape.
+    /// </summary>
+    private static string EscapeLiteral(string label)
+    {
+        var escaped = new StringBuilder(label.Length * 2);
+        foreach (var c in label)
+        {
+            if (c is '\\' or '^' or '$' or '.' or '|' or '?' or '*' or '+' or '(' or ')' or '[' or ']' or '{' or '}')
+            {
+                escaped.Append('\\');
+            }
+
+            escaped.Append(c);
+        }
+
+        return escaped.ToString();
     }
 
     private static List<string> Clean(IEnumerable<string> values) =>
