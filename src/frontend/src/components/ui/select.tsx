@@ -54,7 +54,7 @@ export function Select({
           id={triggerId}
           data-testid={testId}
           className={cn(
-            "inline-flex h-9 items-center justify-between gap-2 rounded-control border border-fa-edge bg-fa-glass px-3 text-sm text-1 transition",
+            "inline-flex h-9 items-center justify-between gap-2 rounded-control border border-fa-edge bg-fa-glass px-3 text-sm text-1 transition coarse:min-h-11",
             "hover:border-fa-edge-strong data-[placeholder]:text-3",
             "focus-visible:outline-none focus-visible:border-fa-frost/60 focus-visible:ring-2 focus-visible:ring-fa-frost/30",
             "disabled:cursor-not-allowed disabled:opacity-50"
@@ -78,7 +78,7 @@ export function Select({
                   value={option.value}
                   disabled={option.disabled}
                   className={cn(
-                    "relative flex cursor-pointer select-none items-center rounded-control py-1.5 pl-8 pr-3 text-sm text-2",
+                    "relative flex cursor-pointer select-none items-center rounded-control py-1.5 pl-8 pr-3 text-sm text-2 coarse:min-h-11",
                     "outline-none data-[highlighted]:bg-fa-glass-strong data-[highlighted]:text-1 focus:bg-fa-glass-strong",
                     "data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
                   )}

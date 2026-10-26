@@ -85,7 +85,7 @@ export function SegmentedControl<T extends string>({
             onClick={() => onValueChange(option.value)}
             onKeyDown={(e) => onKeyDown(e, i)}
             className={cn(
-              "rounded-[5px] font-medium transition",
+              "rounded-[5px] font-medium transition coarse:min-h-11 coarse:min-w-11",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60",
               "disabled:pointer-events-none disabled:opacity-50",
               size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm",

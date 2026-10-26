@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 /**
  * The data router (WS-9, R1-54). The app moved from `<BrowserRouter>` to `createBrowserRouter`, so
@@ -83,6 +84,9 @@ async function bootSettings(page: Page) {
   await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
   await mockJson(page, "**/api/preferences/tags", []);
   await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
+  // The genre chips come from the catalogue (WS-3), so without this the page offers only the
+  // genres already saved and there is no "war" chip to dirty the draft with.
+  await mockFilterChips(page);
   await mockJson(page, "**/api/settings", { region: "US", onboarded: true, email: null, eveningBudgetMinutes: 150 });
   await mockJson(page, "**/api/settings/filters", {
     excludeGenres: ["horror"],

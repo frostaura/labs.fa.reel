@@ -21,7 +21,7 @@ export default function Footer() {
             <Link
               key={path}
               to={path}
-              className="fa-caption text-fa-frost-dim underline-offset-4 hover:text-fa-frost-bright hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50 rounded"
+              className="fa-caption text-fa-frost-dim underline-offset-4 hover:text-fa-frost-bright hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50 rounded coarse:inline-flex coarse:min-h-11 coarse:items-center"
             >
               {label}
             </Link>

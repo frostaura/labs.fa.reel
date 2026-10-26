@@ -458,7 +458,7 @@ describe("operator alerts (WS-6 `alerts`, Founder tier only)", () => {
 
   it("names the model provider without its brand when no breaker covers it", () => {
     const s = status({ alerts: [alert({ code: "provider_refused", provider: "OpenRouter", reasonCode: "payment_required", kinds: null })] });
-    expect(pill(s)?.label).toBe("The model provider refusing Reel");
+    expect(pill(s)?.label).toBe("Model provider refusing Reel");
   });
 
   it("an unknown code, an unknown job kind and missing counts read as generic copy, never as identifiers", () => {

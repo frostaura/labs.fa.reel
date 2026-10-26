@@ -105,6 +105,9 @@
   "askreel-negation.spec.ts \u203a Ask Reel \u2014 the collision notice stays with its answer \u203a the stopped turn's own collision is shown with the stopped turn": [
     "GET /api/settings/filters"
   ],
+  "askreel-render.spec.ts \u203a standing conditions on /search \u203a every condition is named, and the editor is one tap away": [
+    "GET /api/search/filter-chips"
+  ],
   "askreel-trust.spec.ts \u203a Ask Reel \u2014 WS-2 review round 1 \u203a a none-found answer renders even when one relaxation offer is malformed": [
     "GET /api/settings/filters"
   ],
@@ -148,21 +151,6 @@
     "GET /api/settings/filters"
   ],
   "cross-reference.spec.ts \u203a cross-reference pass \u203a a Trakt poll cannot steal the pill from a run in progress": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the band counts through the pool while the pass runs": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the band renders nothing at all when the server has nothing honest to say": [
-    "GET /api/accuracy",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "cross-reference.spec.ts \u203a cross-reference pass \u203a the band reports what it found and never implies a demotion": [
     "GET /api/accuracy",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
@@ -326,50 +314,6 @@
     "GET /api/feed/learned",
     "GET /api/saved/recently-watched",
     "GET /api/settings/filters"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (confident, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (confident, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (reaching, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 220px of the top at 1440\u00d7900 (reaching, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (confident, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (confident, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (reaching, no track record)": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
-  ],
-  "hero-layout.spec.ts \u203a the first hero card starts within 300px of the top at 390\u00d7844 (reaching, with a track record)": [
-    "GET /api/feed/cross-reference",
-    "GET /api/feed/learned",
-    "GET /api/saved/recently-watched"
   ],
   "hero-layout.spec.ts \u203a title contrast at 1440 \u203a every one of 20 hero titles is at least 4.5:1 over near-white art": [
     "GET /api/accuracy",
@@ -595,6 +539,9 @@
   "onboarding.spec.ts \u203a onboarding build-up \u203a the trainer's Degraded frame for too few ratings becomes the counts once the poll lands": [
     "GET /api/feed"
   ],
+  "phone-targets.spec.ts \u203a phone targets on WS-10A routes \u203a Saved has no interactive element under 44 px": [
+    "GET /api/titles/movie/:id/providers"
+  ],
   "pin.spec.ts \u203a settings PIN \u203a a PIN-configured account is locked until the correct PIN unlocks it": [
     "GET /api/billing/status",
     "GET /api/preferences/tags",
@@ -817,12 +764,6 @@
     "GET /api/settings/filters"
   ],
   "visible-recalibration.spec.ts \u203a visible recalibration \u203a a sync that found nothing says so, rather than reverting to a timestamp": [
-    "GET /api/accuracy",
-    "GET /api/feed/cross-reference",
-    "GET /api/saved/recently-watched",
-    "GET /api/settings/filters"
-  ],
-  "visible-recalibration.spec.ts \u203a visible recalibration \u203a the model-learned band renders its sentence and dismisses per retrain": [
     "GET /api/accuracy",
     "GET /api/feed/cross-reference",
     "GET /api/saved/recently-watched",

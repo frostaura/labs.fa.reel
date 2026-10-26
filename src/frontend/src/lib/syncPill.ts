@@ -174,7 +174,7 @@ function operatorAlertIssues(status: SyncStatus): PillIssue[] {
       const name = providerName(alert.provider);
       issues.push({
         tone: "danger",
-        label: `${name.charAt(0).toUpperCase()}${name.slice(1)} refusing Reel`,
+        label: `${headline(name)} refusing Reel`,
         detail: `${reasonCopy(alert.reasonCode)} Reel stopped calling ${name} ${relTime(alert.since)}, for every account, until the key or the account is fixed.`,
         reconnect: false,
       });
@@ -190,6 +190,12 @@ function operatorAlertIssues(status: SyncStatus): PillIssue[] {
     }
   }
   return issues;
+}
+
+/** "the model provider" → "Model provider", for the start of a label. */
+function headline(name: string): string {
+  const bare = name.replace(/^the /, "");
+  return `${bare.charAt(0).toUpperCase()}${bare.slice(1)}`;
 }
 
 function jobFailuresDetail(alert: OperatorAlert): string {
