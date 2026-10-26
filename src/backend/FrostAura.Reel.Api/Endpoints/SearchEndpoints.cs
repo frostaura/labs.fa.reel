@@ -1980,7 +1980,7 @@ public static class SearchEndpoints
             turn.ConflictJson = outcome.ConflictJson;
             turn.ModelArtifactId = outcome.ModelArtifactId;
             turn.ModelId = outcome.ModelId;
-            turn.PromptVersion = AskReelPromptVersion.Current;
+            turn.PromptVersion = outcome.Act is null ? AskReelPromptVersion.Current : AskReelPromptVersion.V2;
             turn.LatencyMs = latencyMs;
             turn.CompletedAt = now;
             // J-13 / M-8: where the turn's seconds went, which models answered and at what effort,

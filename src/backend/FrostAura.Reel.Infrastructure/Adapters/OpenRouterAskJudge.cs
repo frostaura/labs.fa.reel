@@ -104,7 +104,7 @@ public sealed class OpenRouterAskJudge(
         {
             if (entry.ValueKind != JsonValueKind.Object
                 || !entry.TryGetProperty("id", out var idEl) || idEl.ValueKind != JsonValueKind.String
-                || !Guid.TryParse(idEl.GetString(), out var id) || !asked.Contains(id)
+                || IdOf(idEl.GetString(), input) is not { } id || !asked.Contains(id)
                 || !entry.TryGetProperty("satisfies", out var satEl) || satEl.ValueKind != JsonValueKind.String
                 || LlmResultText.ParseSatisfies(satEl.GetString()) is not { } satisfies
                 || !entry.TryGetProperty("fit", out var fitEl) || fitEl.ValueKind != JsonValueKind.Number
@@ -144,15 +144,32 @@ public sealed class OpenRouterAskJudge(
         || SecondPersonVoice.Rejects(why)
         || (satisfies == Satisfies.Yes && (SecondPersonVoice.SoundsHedged(why) || SecondPersonVoice.SoundsAntiRecommendation(why)));
 
+    /// <summary>
+    /// The title an answer's <c>id</c> names: the 1-based position the prompt numbered it with. A
+    /// position, not the title's UUID, because the id is echoed in every entry and a UUID is ~20
+    /// output tokens a title — a fifth of a batch's answer, and output tokens are what a batch waits
+    /// on. A full UUID is still accepted, for a model that copies one from elsewhere.
+    /// </summary>
+    internal static Guid? IdOf(string? value, JudgeInput input)
+    {
+        if (int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var position)
+            && position >= 1 && position <= input.Titles.Count)
+        {
+            return input.Titles[position - 1].TitleId;
+        }
+
+        return Guid.TryParse(value, out var id) ? id : null;
+    }
+
     internal static string UserPrompt(JudgeInput input)
     {
         var payload = new
         {
             request = input.Request,
             viewer = input.Persona,
-            titles = input.Titles.Select(t => new
+            titles = input.Titles.Select((t, index) => new
             {
-                id = t.TitleId.ToString(),
+                id = (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
                 name = t.Name,
                 year = t.Year,
                 media = t.Media == Domain.Catalog.MediaType.Show ? "tv" : "movie",
@@ -169,13 +186,14 @@ public sealed class OpenRouterAskJudge(
     internal const string SystemPrompt =
         "You are the judge for Reel, a film and TV recommender. For EVERY title given, decide whether it IS what the " +
         "request asks for, judged only from what is given about the title (genres, keywords, overview, themes, tone). " +
-        "Return ONLY {\"results\":[{\"id\",\"satisfies\",\"fit\",\"why\",\"evidence\"}]} with one entry per title. " +
+        "Return ONLY {\"results\":[{\"id\",\"satisfies\",\"fit\",\"why\",\"evidence\"}]} with one entry per title, " +
+        "id being the title's id exactly as given (\"1\", \"2\", …). " +
         "satisfies: \"yes\" = plainly the thing asked for, every concept the request requires; \"partial\" = matches some " +
         "of it, or only loosely; \"no\" = not what was asked for. A title missing a required concept is \"no\", however " +
         "good it is. Never \"yes\" because a title is merely good, popular or similar in mood. A title carrying a thing " +
         "the request rules out is \"no\". fit: 0.0-1.0, how well it fits this viewer AND the request. evidence: the " +
-        "specific given fact your verdict rests on, quoted or named (\"keyword: ninja\", \"overview: a shinobi clan\", " +
-        "\"genre: comedy\"). why: at most 140 characters, addressed to the viewer as \"you\", naming that evidence — " +
+        "specific given fact your verdict rests on, at most 40 characters (\"keyword: ninja\", \"overview: a shinobi clan\", " +
+        "\"genre: comedy\"). why: at most 100 characters, addressed to the viewer as \"you\", naming that evidence — " +
         "never \"they\" or \"the user\", never generic (\"fits your taste\"), never hedging or arguing against the " +
         "title when satisfies is \"yes\". Output strictly valid JSON.";
 

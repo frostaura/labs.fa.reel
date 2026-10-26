@@ -138,9 +138,11 @@ public sealed class TurnComposer : ITurnComposer
                 : Inv($"I don't know of any {Noun(c.Media, 2)} {Credit(person)} that you haven't seen.");
         }
 
+        // A person request's supply is counted over their credits, so the person names the shelf
+        // ("Christopher Nolan movies") the way a topic does.
         return NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
             c.Supply,
-            c.Topic,
+            c.Topic ?? c.Person?.Name,
             c.Media,
             c.UnderBarNames,
             c.NearMissNames.Count,

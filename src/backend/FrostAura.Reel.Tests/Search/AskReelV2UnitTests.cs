@@ -226,6 +226,18 @@ public class AskReelV2UnitTests
     }
 
     [Fact]
+    public void A_person_none_found_names_the_person_as_the_shelf_and_counts_the_seen()
+    {
+        var supply = new SupplyReport(16, 12, 0, 4, 0, 0, 0, [], 0, 50, 6.0m, true);
+        var reply = new TurnComposer().Compose(Context(FinalMode.NoneFound) with
+        {
+            Topic = null, Supply = supply, Person = new PersonConstraint("Christopher Nolan", null, PersonRole.Director), PersonSeen = 12,
+        });
+        Assert.StartsWith("There are no Christopher Nolan movies left for you.", reply.Reply, StringComparison.Ordinal);
+        Assert.Contains("you've seen 12", reply.Reply, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_none_found_reply_comes_from_the_supply()
     {
         var supply = new SupplyReport(12, 12, 0, 0, 0, 0, 0, [], 0, 50, 6.0m, true);
@@ -366,6 +378,15 @@ public class AskReelV2UnitTests
         Assert.Null(verdicts[B].Why);
         Assert.Equal(ResultSource.Fallback, verdicts[B].WhySource);
         Assert.False(verdicts.ContainsKey(C));
+
+        // The prompt numbers titles from 1, and an answer naming a position names that title.
+        using var positional = JsonDocument.Parse("""
+            {"results":[{"id":"2","satisfies":"no","fit":0.1,"why":"You get no ninjas here.","evidence":"genre: drama"},
+                        {"id":"9","satisfies":"yes","fit":0.9,"why":"x","evidence":"y"}]}
+            """);
+        var byPosition = OpenRouterAskJudge.Parse(positional.RootElement, input);
+        Assert.Equal([B], byPosition.Keys);
+        Assert.Contains("\"id\":\"1\"", OpenRouterAskJudge.UserPrompt(input), StringComparison.Ordinal);
     }
 
     [Theory]

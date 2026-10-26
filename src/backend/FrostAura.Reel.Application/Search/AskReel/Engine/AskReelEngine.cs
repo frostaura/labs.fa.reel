@@ -140,6 +140,7 @@ public sealed class AskReelEngine(
         {
             act = plan.Act.ToString(),
             concepts = next.Hard.Concepts.Select(c => c.UserWords).ToList(),
+            people = next.Hard.People.Select(p => new { name = p.Name, role = p.Role.ToString() }).ToList(),
             references = plan.References.Select(r => r.ToString()).ToList(),
             media = next.Hard.Media.ToString(),
             source = plan.Source.ToString(),
@@ -478,11 +479,18 @@ public sealed class AskReelEngine(
 
         var mode = picks.Count > 0 ? SearchTurnMode.Picks : SearchTurnMode.NoneFound;
         SupplyReport? supply = null;
-        if (mode == SearchTurnMode.NoneFound && !(personOnly && retrieval.Supply.MatchingInCatalogue == 0))
+        if (mode == SearchTurnMode.NoneFound)
         {
             // Counted after this turn's scoring, so the split by score is the one the trays show
-            // (IREV3-SYS-01).
-            supply = await RecountAsync(turn, hard, retrieval.Supply, ct);
+            // (IREV3-SYS-01). Only a request with something to count — a topic or a person — has a
+            // supply: a mood request's "supply" would be the whole catalogue, and a reply built on it
+            // said "270 unseen titles tagged that way" about a request that named no tag.
+            var countable = hard.HasConcepts || hard.People.Count > 0;
+            if (countable && !(personOnly && retrieval.Supply.MatchingInCatalogue == 0))
+            {
+                supply = await RecountAsync(turn, hard, retrieval.Supply, ct);
+            }
+
             await turn.Emit("none-found", new { supply = LiveSearchExpansionService.SupplyWire(supply) });
         }
 
@@ -510,6 +518,12 @@ public sealed class AskReelEngine(
                 Person = personOnly ? hard.People[0] : null,
                 PersonSeen = personSeen,
             });
+        }
+
+        if (mode == SearchTurnMode.NoneFound)
+        {
+            // A follow-up that gets the same answer hears that it was heard (the v1 rule, kept).
+            composed = composed with { Reply = NoneFoundCopy.Again(composed.Reply, PreviousReply(turn.Input.History)) };
         }
 
         if (turn.Degraded.Count > 0)
@@ -1090,6 +1104,19 @@ public sealed class AskReelEngine(
         }
 
         return string.Join(". ", parts);
+    }
+
+    /// <summary>The previous answer's reply, without the handle suffix history lines carry.</summary>
+    private static string? PreviousReply(IReadOnlyList<ChatTurn> history)
+    {
+        var text = history.LastOrDefault(t => t.Role == "assistant")?.Text;
+        if (text is null)
+        {
+            return null;
+        }
+
+        var marker = text.IndexOf(AskReelHandles.HistoryMarker, StringComparison.Ordinal);
+        return marker >= 0 ? text[..marker] : text;
     }
 
     private static bool Trips(Title title, string negation) =>

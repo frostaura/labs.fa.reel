@@ -526,7 +526,7 @@ uses it only to know which frames to expect.
 | --- | --- | --- |
 | `conversation` | first, always | `{ id, turnId, sequence, engine: "v2" }` |
 | `phase` | at every stage, and repeated with `heartbeat: true` after 5 s of silence | `{ stage, label }` — `stage` is `planning` · `searching` · `judging` · `answering` · `composing`; `label` is a plain sentence a narration line can show as-is ("Checking 16 titles against your request") |
-| `plan` | once, after planning | `{ act, concepts: ["ninja"], references: ["T2.3"], media: "Any" \| "Movies" \| "Shows", source: "Llm" \| "LlmRetry" \| "CarriedForward" }` |
+| `plan` | once, after planning | `{ act, concepts: ["ninja"], people: [{ name, role: "Director" \| "Cast" \| "Any" }], references: ["T2.3"], media: "Any" \| "Movies" \| "Shows", source: "Llm" \| "LlmRetry" \| "CarriedForward" }` |
 | `conflict` | when the request collides with a standing condition | the v1 shape, unchanged |
 | `picks` | once per judge batch that produced at least one pick | `{ batch, cards: [card] }` — append in arrival order; never re-sort |
 | `tray` | once per non-empty tray, after judging | `{ kind: "nearMiss" \| "belowFloor" \| "unchecked", cards: [card] }` — the whole tray in one frame |
