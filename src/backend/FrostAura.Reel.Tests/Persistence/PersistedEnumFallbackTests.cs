@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Domain.Catalog;
@@ -160,9 +161,25 @@ public class PersistedEnumFallbackTests
     /// </summary>
     private static readonly Dictionary<string, string> PendingAdoption = new(StringComparer.Ordinal)
     {
-        ["OutboxPayload.MediaType"] =
-            "WS-4 (R1-43 CR): UnrecognisedJsonEnumConverter<MediaType>, and send only an explicit Movie or Show",
+        ["OutboxPayload.MediaType"] = OutboxReaderPending,
     };
+
+    /// <summary>
+    /// The production readers of persisted JSON that still fail on a member a newer build wrote,
+    /// each with the change request that fixes it in its owner's file. Each is checked against the
+    /// real reader: while listed, the reader must still show the hazard, so a fix that lands without
+    /// deleting its entry fails; once deleted, the reader must read every newer shape safely. Rolling
+    /// back by REEL_TAG is not safe for these rows until this table is empty.
+    /// </summary>
+    private static readonly Dictionary<string, string> PendingReaders = new(StringComparer.Ordinal)
+    {
+        ["OutboxDispatcher.OutboxPayload"] = OutboxReaderPending,
+        ["AskReelCarry.Parse"] =
+            "R1-43 CR-3 (WS-2, AskReelCarry.cs): read with PersistedJson.Options and UnrecognisedJsonEnumConverter<MediaType>, then drop media types that are not members",
+    };
+
+    private const string OutboxReaderPending =
+        "R1-43 CR-2 (WS-4, OutboxDispatcher.cs): UnrecognisedJsonEnumConverter<MediaType> on the payload, and dead-letter any entry that is not an explicit Movie or Show before any Trakt call";
 
     private static IReadOnlyList<(string Path, Type EnumType, PropertyInfo? Property)> JsonPersistedEnums()
     {
@@ -326,9 +343,6 @@ public class PersistedEnumFallbackTests
 
         var newer = current.Replace("\"Show\"", "\"Episode\"", StringComparison.Ordinal);
 
-        // Today: the whole kind's batch fails to deserialize on one entry (CR to WS-4).
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(newer));
-
         // Adopted: the entry reads, and is neither a movie nor a show, so the dispatcher's
         // Movie/Show partition sends it nowhere. The declared fallback (Movie) would have sent a
         // show's id to Trakt's movie endpoint — why this converter is not the table's.
@@ -336,6 +350,99 @@ public class PersistedEnumFallbackTests
         Assert.NotEqual(MediaType.Movie, read.MediaType);
         Assert.NotEqual(MediaType.Show, read.MediaType);
         Assert.Throws<JsonException>(() => JsonSerializer.Serialize(read));
+    }
+
+    /// <summary>
+    /// Media-type tokens a newer build (or a hand-edited row) could leave in an outbox payload: an
+    /// unknown name, an unknown number, other casing, padding, a comma list (which Enum.TryParse
+    /// reads as the OR of two members), null, and a non-scalar.
+    /// </summary>
+    private static readonly string[] NewerMediaTypeTokens =
+        ["\"Episode\"", "7", "-1", "\"show\"", "\" Show\"", "\"Movie, Show\"", "null", "{\"kind\":\"Season\"}"];
+
+    [Fact]
+    public void The_outbox_reader_reads_a_newer_media_type_as_no_member_or_is_listed_as_pending()
+    {
+        var titleId = Guid.NewGuid();
+        foreach (var known in Enum.GetValues<MediaType>())
+        {
+            // Every payload the current writers produce reads back unchanged, adopted or not.
+            var written = JsonSerializer.Serialize(new OutboxDispatcher.OutboxPayload(titleId, known, 1399, 1390, 9, null));
+            var back = JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(written)!;
+            Assert.Equal(known, back.MediaType);
+            Assert.Equal(written, JsonSerializer.Serialize(back));
+        }
+
+        var template = JsonSerializer.Serialize(new OutboxDispatcher.OutboxPayload(titleId, MediaType.Show, 1399, 1390, 9, null));
+        var unsafeReads = NewerMediaTypeTokens
+            .Where(token => ReadsAsAWrite(template.Replace("\"Show\"", token, StringComparison.Ordinal)))
+            .ToList();
+
+        if (PendingReaders.ContainsKey("OutboxDispatcher.OutboxPayload"))
+        {
+            Assert.True(unsafeReads.Count > 0, "CR-2 landed: delete OutboxDispatcher.OutboxPayload from PendingReaders");
+        }
+        else
+        {
+            Assert.Empty(unsafeReads);
+        }
+
+        // A token is safe only when the entry deserializes (one bad row must not fail the kind's
+        // whole batch) AND names neither member (so no movie or show write can be built from it).
+        static bool ReadsAsAWrite(string json)
+        {
+            try
+            {
+                return Enum.IsDefined(JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(json)!.MediaType);
+            }
+            catch (JsonException)
+            {
+                return true;
+            }
+        }
+    }
+
+    [Fact]
+    public void The_ask_carry_reads_a_stored_intent_from_a_newer_build_or_is_listed_as_pending()
+    {
+        // Written as LiveSearchExpansionService writes SearchTurns.IntentJson today (default options,
+        // so enums are numbers), then what a newer build with more members could have stored.
+        var stored = JsonSerializer.Serialize(new SearchIntent(
+            ["Drama"], [], [MediaType.Show], "slow burn", null, null,
+            People: [new PersonQuery("Denis Villeneuve", PersonRole.Director)]));
+        var current = AskReelCarry.Parse(stored)!;
+        Assert.Equal([MediaType.Show], current.MediaTypes);
+        Assert.Equal([PersonRole.Director], current.People!.Select(p => p.Role));
+
+        var mixed = JsonNode.Parse(stored)!;
+        mixed["MediaTypes"]!.AsArray().Add(7);
+        mixed["MediaTypes"]!.AsArray().Add("Documentary");
+        mixed["People"]!.AsArray().Add(new JsonObject { ["Name"] = "Hans Zimmer", ["Role"] = "Composer" });
+        mixed["People"]!.AsArray().Add(new JsonObject { ["Name"] = "Roger Deakins", ["Role"] = 9 });
+
+        // Only unknown media types: the carry must not invent a filter (reading "Documentary" as the
+        // table's Movie fallback would pin the next turn to movies).
+        var unknownOnly = JsonNode.Parse(stored)!;
+        unknownOnly["MediaTypes"] = new JsonArray("Documentary");
+        var numberOnly = JsonNode.Parse(stored)!;
+        numberOnly["MediaTypes"] = new JsonArray(7);
+
+        var safe =
+            AskReelCarry.Parse(mixed.ToJsonString()) is { } fromMixed
+            && fromMixed.MediaTypes.SequenceEqual([MediaType.Show])
+            && fromMixed.People!.Select(p => p.Role).SequenceEqual([PersonRole.Director, PersonRole.Any, PersonRole.Any])
+            && fromMixed.FreeText == "slow burn"
+            && AskReelCarry.Parse(unknownOnly.ToJsonString()) is { MediaTypes.Count: 0, FreeText: "slow burn" }
+            && AskReelCarry.Parse(numberOnly.ToJsonString()) is { MediaTypes.Count: 0 };
+
+        if (PendingReaders.ContainsKey("AskReelCarry.Parse"))
+        {
+            Assert.False(safe, "CR-3 landed: delete AskReelCarry.Parse from PendingReaders");
+        }
+        else
+        {
+            Assert.True(safe, PendingReaders.GetValueOrDefault("AskReelCarry.Parse", "AskReelCarry.Parse must read a newer intent safely"));
+        }
     }
 
     private static void JsonRoundTrips<TEnum>()
