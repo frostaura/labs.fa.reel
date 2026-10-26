@@ -13,6 +13,8 @@ import { useGetCrossReferenceStatsQuery } from "../../store/api";
 export default function CrossReferenceStats() {
   const { data, isError, isFetching, refetch } = useGetCrossReferenceStatsQuery({ window: "all" });
 
+  // The lab keeps every section in its slot (G-14): a skeleton while this loads, a sentence when
+  // there is nothing to show — never a section that appears later and pushes the page down.
   if (!data) {
     return isError ? (
       <LoadFailed
@@ -22,11 +24,22 @@ export default function CrossReferenceStats() {
         variant="inline"
         testId="lab-xref-error"
       />
-    ) : null;
+    ) : (
+      <div className="h-40 rounded-xl reel-shimmer" data-testid="lab-xref-loading" aria-hidden />
+    );
   }
 
   const { backtests, online, minimumOutcomes } = data.crossReference;
-  if (backtests.length === 0 && online.length === 0) return null;
+  if (backtests.length === 0 && online.length === 0) {
+    return (
+      <section className="fa-card p-5" data-testid="lab-xref" data-empty="true">
+        <h2 className="fa-section-title mb-1">Cross-reference — backtests and outcomes</h2>
+        <p className="fa-caption text-3">
+          No prompt generation has been backtested yet, and nothing it judged has come back rated.
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className="fa-card p-5 space-y-4" data-testid="lab-xref">
