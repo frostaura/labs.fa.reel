@@ -98,7 +98,7 @@ public static class SearchVocabulary
         {
             "addiction", "alien", "anime", "apocalypse", "cannibal", "cartoon", "clown", "cult",
             "demon", "dinosaur", "dragon", "drug", "dubbed", "dystopia", "exorcism", "footage",
-            "ghost", "gore", "gory", "haunted", "haunting", "incest", "jumpscare", "killer",
+            "ghost", "gore", "gory", "haunted", "haunting", "hero", "incest", "jumpscare", "killer",
             "monster", "murder",
             "musical", "mutant", "nudity", "paranormal", "pirate", "possession", "prequel",
             "rape", "reboot", "remake", "robot", "satanic", "scare", "sequel", "shark", "slasher",

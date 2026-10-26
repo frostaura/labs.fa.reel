@@ -17,11 +17,14 @@ using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Search;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
+using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Concurrency;
 using FrostAura.Reel.Infrastructure.Ml;
+using FrostAura.Reel.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -602,6 +605,66 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             r => Assert.Equal(
                 "Closest match we could find, but it's one that matches ‘superheroes’ — which you asked to skip.",
                 r.GetProperty("why").GetString()));
+    }
+
+    /// <summary>
+    /// IREV1-SYS-03: the same turn, but the requested exclusions come from the REAL heuristic rather
+    /// than a hand-written list. The heuristic stores the vocabulary's singular ("superhero"), so the
+    /// picks drop both the keyword and the genre matches and the caption quotes the singular.
+    /// </summary>
+    [Fact]
+    public async Task A_plural_negation_read_by_the_real_heuristic_keeps_singular_matches_out_of_the_picks()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = $"gatefeel{Guid.NewGuid():N}"[..20];
+        var query = $"{topic}, no superheroes please";
+        var requested = RealHeuristic(query).ExcludeKeywords;
+        Assert.Equal(["superhero"], requested);
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        for (var i = 0; i < 3; i++)
+        {
+            await SeedTopicalTitleAsync(topic, t => { t.Name = $"Gate Yes keyword-hero {i}"; t.Keywords = [topic, "superhero"]; });
+            await SeedTopicalTitleAsync(topic, t => { t.Name = $"Gate Yes genre-hero {i}"; t.Genres = ["superhero", "comedy"]; });
+        }
+
+        for (var i = 0; i < 4; i++)
+        {
+            await SeedTopicalTitleAsync(topic, t => t.Name = $"Gate Yes calm {i}");
+        }
+
+        var agent = new VerdictAgent(keywords: [topic], requestedExclusions: requested);
+        var (service, events) = BuildService(
+            accountId, new ScriptedTmdbClient([]), agent, out var emit, withRetrieval: true);
+
+        await service.StreamAsync(query, [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var results = Assert.Single(events, e => e.Event == "done").Data.GetProperty("results").EnumerateArray().ToList();
+        var picks = results.Where(r => !r.GetProperty("outsideRequest").GetBoolean()).ToList();
+        Assert.Equal(4, picks.Count);
+        Assert.All(picks, p => Assert.StartsWith("Gate Yes calm", p.GetProperty("name").GetString(), StringComparison.Ordinal));
+        Assert.All(
+            results.Where(r => r.GetProperty("outsideRequest").GetBoolean()),
+            r => Assert.Equal(
+                "Closest match we could find, but it's one that matches ‘superhero’ — which you asked to skip.",
+                r.GetProperty("why").GetString()));
+    }
+
+    /// <summary>The production heuristic, with no network: it reads the sentence locally.</summary>
+    private static SearchIntent RealHeuristic(string query)
+    {
+        using var http = new HttpClient();
+        var recorder = new ApiUsageRecorder(
+            new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<ApiUsageRecorder>.Instance);
+        return new OpenRouterSearchInterpreter(
+                http, recorder, new ConfigurationBuilder().Build(), NullLogger<OpenRouterSearchInterpreter>.Instance)
+            .Heuristic(query);
     }
 
     // ── Round 1 (R1-01, R1-02, R1-04, R1-09, R1-10) ─────────────────────────────────────────────

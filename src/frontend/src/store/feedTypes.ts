@@ -153,6 +153,8 @@ export interface DigestPayload {
   weekStart: string | null;
   generatedAt: string | null;
   items: FeedCard[];
+  /** Why the build relaxed the "high for you" bar to fill the rail; null when it met the bar (IR1S-03). */
+  degradedReason: string | null;
 }
 
 /** A Blend joint pick: the shared card fields plus both personal predictions (1dp). */

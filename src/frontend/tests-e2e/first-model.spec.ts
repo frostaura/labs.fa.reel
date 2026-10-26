@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { CONDITIONS_SCOPE_COPY } from "../src/lib/conditionsCopy";
 
 /**
  * "Enough ratings, no model yet" on every WS-10B surface (R1-57, CR-6).
@@ -244,13 +245,15 @@ test.describe("settings", () => {
     await expect(page.getByTestId("settings-pipeline")).toHaveText("Pipeline: stopped");
   });
 
-  // R1-26: the typeahead does not apply the "for you" floor and its global leg applies no rule.
+  // R1-26, IR1S-06: Settings renders the one shared scope sentence. The typeahead does not apply the
+  // "for you" floor, its global leg applies no rule, and Ask Reel keeps under-minimum titles behind a
+  // tray — so the sentence never claims "airtight" or "all search".
   test("the conditions say where they apply, and do not claim all search", async ({ page }) => {
     await bootSettings(page, syncStatus());
 
     const scope = page.getByTestId("conditions-scope");
-    await expect(scope).toContainText("airtight for the hero, every row and Ask Reel");
-    await expect(scope).toContainText("Quick search in the top bar");
+    await expect(scope).toHaveText(CONDITIONS_SCOPE_COPY);
+    await expect(scope).not.toContainText("airtight");
     await expect(scope).not.toContainText("all search");
     await expect(page.getByTestId("settings-pipeline")).toHaveText("Pipeline: ready");
   });

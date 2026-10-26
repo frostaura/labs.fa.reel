@@ -9,8 +9,9 @@ import PredictedRatingBadge from "../rec/PredictedRatingBadge";
 
 /**
  * One box, two modes: typing streams instant typeahead matches (personal lens — predicted
- * ratings, watched badges, filters airtight); the pinned "Ask Reel" row (or Enter) runs
- * natural-language search. A hint, never a silent mode switch.
+ * ratings, watched badges; the local matches drop titles the conditions exclude but ignore the
+ * "for you" minimum, and the global leg, `?global=1`, applies no conditions by design); the pinned
+ * "Ask Reel" row (or Enter) runs natural-language search. A hint, never a silent mode switch.
  *
  * Spec §7 asks for title AND person results, and the dropdown is a proper combobox: Up/Down move
  * an active option, Enter takes it (falling back to Ask Reel only when nothing is active), Escape
