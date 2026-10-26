@@ -8,6 +8,7 @@ using FrostAura.Reel.Infrastructure.Telemetry;
 using LlmCallMetrics = FrostAura.Reel.Infrastructure.Llm.LlmCallMetrics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace FrostAura.Reel.Infrastructure;
 
@@ -17,6 +18,13 @@ public static partial class DependencyInjection
     private static IServiceCollection AddReelLlm(this IServiceCollection services, IConfiguration configuration)
     {
         // ── Fair-Use usage ledger ──────────────────────────────────────────────────────────
+        // The day a row counts against: the account's own for per-account ceilings (task 12,
+        // ADD-22), UTC for the rest. One singleton, so the recorder and every budget read agree.
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddSingleton<IAccountZoneSource>(sp => new AccountZoneSource(sp.GetRequiredService<IServiceScopeFactory>()));
+        services.AddSingleton<IBudgetCalendar>(sp => new BudgetCalendar(
+            sp.GetRequiredService<IAccountZoneSource>(), sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<Microsoft.Extensions.Logging.ILogger<BudgetCalendar>>()));
         services.AddSingleton<ApiUsageRecorder>();
         services.AddHostedService(sp => sp.GetRequiredService<ApiUsageRecorder>());
         // The same instance, seen as the port the lens budget gate reads its in-flight counters

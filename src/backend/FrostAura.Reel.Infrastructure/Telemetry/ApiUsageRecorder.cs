@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,10 +25,17 @@ namespace FrostAura.Reel.Infrastructure.Telemetry;
 /// before a response body is still worth a row: pass no tokens and the columns stay NULL, which
 /// reads as "never reported" rather than "cost nothing".
 /// </summary>
-public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<ApiUsageRecorder> logger)
+public sealed class ApiUsageRecorder(
+    IServiceScopeFactory scopeFactory, ILogger<ApiUsageRecorder> logger, IBudgetCalendar? calendar = null)
     : BackgroundService, IPendingApiUsage
 {
     private readonly ConcurrentDictionary<UsageKey, Counters> _pending = new();
+
+    /// <summary>
+    /// Which day a row is stamped with (task 12, ADD-22): the account-local date for a purpose with a
+    /// per-account ceiling, the UTC date for everything else — the same calendar every budget reads.
+    /// </summary>
+    private readonly IBudgetCalendar _calendar = calendar ?? BudgetCalendar.Utc;
 
     /// <summary>
     /// Records one external API call. <paramref name="purpose"/> is one of
@@ -45,7 +53,7 @@ public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<
         long? completionTokens = null,
         long calls = 1)
     {
-        var key = new UsageKey(provider, DateOnly.FromDateTime(DateTime.UtcNow), accountId, model, purpose);
+        var key = new UsageKey(provider, DateOnly.FromDateTime(_calendar.DayFor(accountId, purpose)), accountId, model, purpose);
         var counters = _pending.GetOrAdd(key, static _ => new Counters());
 
         Interlocked.Add(ref counters.Calls, calls);
@@ -75,7 +83,6 @@ public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<
     private (long Calls, long Tokens) SumPending(
         ApiProvider provider, string purpose, Func<UsageKey, bool> accountMatches)
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
         long calls = 0, tokens = 0;
         // Iterating the whole dictionary rather than probing a key: the ledger's grain includes the
         // MODEL, which the caller has no business knowing, so a budget for a purpose has to sum
@@ -83,8 +90,10 @@ public sealed class ApiUsageRecorder(IServiceScopeFactory scopeFactory, ILogger<
         // (provider, day, account, model, purpose) within a 15s window — this is a handful of rows.
         foreach (var (key, counters) in _pending)
         {
-            if (key.Provider != provider || key.Day != today || !accountMatches(key)
-                || !string.Equals(key.Purpose, purpose, StringComparison.Ordinal))
+            // "Today" is each row's own day: its account's for a per-account purpose, UTC otherwise.
+            if (key.Provider != provider || !accountMatches(key)
+                || !string.Equals(key.Purpose, purpose, StringComparison.Ordinal)
+                || key.Day != DateOnly.FromDateTime(_calendar.DayFor(key.AccountId, key.Purpose)))
             {
                 continue;
             }

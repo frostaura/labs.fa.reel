@@ -179,7 +179,7 @@ public sealed class LlmCallGate(
             reservedTokens += rt;
         }
 
-        var today = DateTime.UtcNow.Date;
+        var today = await (services.GetService<IBudgetCalendar>() ?? BudgetCalendar.Utc).TodayAsync(account, ct);
         var rows = await services.GetRequiredService<IReelDbContext>().ExternalApiUsages
             .Where(u => u.Provider == ApiProvider.OpenRouter && u.AccountId == account
                 && members.Contains(u.Purpose) && u.Day == today)

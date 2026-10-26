@@ -789,7 +789,7 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.Equal(AgentFailureKind.BudgetSpent, reply.Failure);
         Assert.Equal("budget_spent", reply.FailureCode);
         Assert.Equal(AgentReply.BudgetSpentReply, reply.Reply);
-        Assert.Contains("midnight UTC", reply.Reply, StringComparison.Ordinal);
+        Assert.Contains("midnight in your account's time zone", reply.Reply, StringComparison.Ordinal);
         Assert.DoesNotContain("in a moment", reply.Reply, StringComparison.Ordinal);
     }
 

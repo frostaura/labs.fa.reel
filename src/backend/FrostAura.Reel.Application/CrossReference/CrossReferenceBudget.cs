@@ -1,4 +1,5 @@
 using FrostAura.Reel.Application.Configuration;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
@@ -72,7 +73,8 @@ public sealed record CrossReferenceAllowance(long CallsUsed, long CallsLimit, lo
 /// <c>cross-reference-eval</c>, so validating the judge cannot consume the budget the judge runs
 /// on — the same separation <c>lens-audit</c> already has from <c>lens</c>.</para>
 /// </summary>
-public sealed class CrossReferenceBudget(IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null)
+public sealed class CrossReferenceBudget(
+    IReelDbContext db, IConfiguration configuration, IPendingApiUsage? pending = null, IBudgetCalendar? calendar = null)
 {
     /// <summary>Calls per account per day. One complete cold pass over today's pool is ~68.</summary>
     public const int DefaultDailyCalls = 80;
@@ -91,7 +93,8 @@ public sealed class CrossReferenceBudget(IReelDbContext db, IConfiguration confi
     /// <summary>Today's spend against today's ceiling, for one account.</summary>
     public async Task<CrossReferenceAllowance> AllowanceAsync(Guid accountId, CancellationToken ct)
     {
-        var today = DateTime.UtcNow.Date;
+        // The account's own day (task 12, ADD-22): the recorder stamps these rows with the same calendar.
+        var today = await (calendar ?? BudgetCalendar.Utc).TodayAsync(accountId, ct);
         // The ledger is not IAccountScoped — AccountId is a dimension on an operations table, not
         // ownership of it — so the account predicate is written out here rather than arriving from
         // a global filter.

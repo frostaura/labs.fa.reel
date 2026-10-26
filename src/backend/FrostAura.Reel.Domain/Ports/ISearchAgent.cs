@@ -35,7 +35,7 @@ public sealed record ChatTurn(string Role, string Text);
 ///
 /// <para>A degraded <paramref name="Reply"/> is chosen BY the failure: one of the constants below,
 /// never a sentence about the request. "Try asking again in a moment" is only true of a transient
-/// failure — a spent daily allowance resets at midnight UTC and a refused key or an empty account
+/// failure — a spent daily allowance resets at the account's midnight and a refused key or an empty account
 /// never recovers by waiting, so telling the user to retry sends them into the same wall.</para>
 /// </summary>
 public sealed record AgentReply(
@@ -51,10 +51,12 @@ public sealed record AgentReply(
 
     /// <summary>
     /// The degraded reply when the day's Ask allowance refused the call before it was sent. The
-    /// allowance is counted per UTC day, so the reset is stated rather than "in a moment".
+    /// allowance is counted per day in the account's time zone (ADD-22; UTC until one is set), so
+    /// the reset is stated rather than "in a moment" — and named in the account's time, because
+    /// "midnight UTC" was 02:00 for a viewer at +02:00.
     /// </summary>
     public const string BudgetSpentReply =
-        "Today's Ask allowance is used up, so I can't think this one through. It resets at midnight UTC.";
+        "Today's Ask allowance is used up, so I can't think this one through. It resets at midnight in your account's time zone.";
 
     /// <summary>The degraded reply when the provider answered 402, or its breaker is open for one.</summary>
     public const string OutOfCreditReply =
