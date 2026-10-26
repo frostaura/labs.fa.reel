@@ -9,10 +9,9 @@ namespace FrostAura.Reel.Infrastructure.Background;
 /// <summary>
 /// Keeps the keyword vocabulary's label embeddings current (<see cref="KeywordLabelRefresher"/>):
 /// shortly after start, then once a day. Each run re-counts every label (free) and embeds at most
-/// <c>Retrieval:VocabularyEmbedsPerRun</c> labels that lack an embedding from the current model
-/// (default 2,000; batched 100 per call, so a run is at most 20 small calls — about $0.0001 at
-/// text-embedding-3-small prices). Once the backlog is embedded a run embeds only labels the day's
-/// ingest added.
+/// <see cref="EmbedsPerRun"/> labels that lack an embedding from the current model (batched 100 per
+/// call, so a run is at most 20 small calls — about $0.0001 at text-embedding-3-small prices).
+/// Once the backlog is embedded a run embeds only labels the day's ingest added.
 ///
 /// <para>Gate: <c>Background:KeywordVocabulary</c> (default on). Off, the concept resolver still
 /// resolves by containment and synonyms; only its nearest-label fallback has nothing to read. A
@@ -26,8 +25,8 @@ public sealed class KeywordLabelRefreshService(
     /// <summary>The configuration key that turns the service off.</summary>
     public const string GateKey = "Background:KeywordVocabulary";
 
-    /// <summary>The configuration key for the per-run embedding cap.</summary>
-    public const string EmbedsPerRunKey = "Retrieval:VocabularyEmbedsPerRun";
+    /// <summary>The most labels one run embeds; a first run on a large catalogue spreads over days.</summary>
+    public const int EmbedsPerRun = 2_000;
 
     private static readonly TimeSpan WarmDelay = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan StartDelay = TimeSpan.FromMinutes(2);
@@ -41,7 +40,6 @@ public sealed class KeywordLabelRefreshService(
             return;
         }
 
-        var perRun = Math.Max(0, configuration.GetValue(EmbedsPerRunKey, 2_000));
         try
         {
             // Warm the in-memory vocabulary first (one ~175 ms aggregate), so the first Ask turn
@@ -64,7 +62,7 @@ public sealed class KeywordLabelRefreshService(
                 {
                     using var scope = scopeFactory.CreateScope();
                     var refresher = scope.ServiceProvider.GetRequiredService<KeywordLabelRefresher>();
-                    await refresher.RefreshAsync(perRun, stoppingToken);
+                    await refresher.RefreshAsync(EmbedsPerRun, stoppingToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
