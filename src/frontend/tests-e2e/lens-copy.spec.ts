@@ -69,9 +69,29 @@ async function bootTitle(page: Page, lens: unknown) {
   await mockJson(page, "**/api/providers/4242", { region: "US", providers: [] });
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await page.goto("/title/movie/4242");
+  // The lens sits behind "More" under the one pitch line (F-14); these tests are about what it
+  // says once opened. That it starts closed is pinned on its own below.
+  if ((lens as { lens?: string | null }).lens) await page.getByTestId("lens-more").click();
 }
 
 test.describe("through your lens", () => {
+  test("starts closed behind “More”, under the one pitch line", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/titles/movie/4242", { ...TITLE, lens: LENS });
+    await mockJson(page, "**/api/titles/movie/4242/lens", LENS);
+    await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
+    await page.goto("/title/movie/4242");
+    await expect(page.getByTestId("why-this")).toContainText("Taylor Sheridan");
+    await expect(page.getByTestId("lens-more")).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("lens-text")).toHaveCount(0);
+    await expect(page.getByTestId("lens-mood")).toHaveCount(0);
+  });
+
   test("renders the lens above the synopsis, and never instead of it", async ({ page }) => {
     await bootTitle(page, LENS);
 

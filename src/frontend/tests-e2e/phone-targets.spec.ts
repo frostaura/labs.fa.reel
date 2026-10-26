@@ -15,10 +15,10 @@ import { mockHomeChrome } from "./home-chrome";
 
 const PHONE = { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true };
 
-async function smallTargets(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const main = document.querySelector("main");
-    if (!main) return ["<no main>"];
+async function smallTargets(page: Page, rootSelector = "main"): Promise<string[]> {
+  return page.evaluate((rootSelector) => {
+    const main = document.querySelector(rootSelector);
+    if (!main) return [`<no ${rootSelector}>`];
     const selector = 'a[href], button, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])';
     const out: string[] = [];
     for (const el of Array.from(main.querySelectorAll<HTMLElement>(selector))) {
@@ -34,7 +34,7 @@ async function smallTargets(page: Page): Promise<string[]> {
       out.push(`${el.tagName.toLowerCase()} "${label}" ${Math.round(r.width)}×${Math.round(r.height)}`);
     }
     return out;
-  });
+  }, rootSelector);
 }
 
 const card = (n: number) => ({
@@ -104,6 +104,50 @@ test.describe("phone targets on WS-10A routes", () => {
     });
     await page.goto("/saved");
     await expect(page.getByTestId("saved-card").first()).toBeVisible();
+    expect(await smallTargets(page)).toEqual([]);
+    await context.close();
+  });
+
+  test("the title sheet has no interactive element under 44 px", async ({ browser }) => {
+    const context = await browser.newContext(PHONE);
+    const page = await context.newPage();
+    await boot(page);
+    await mockJson(page, "**/api/titles/movie/1001", {
+      titleId: "00000000-0000-0000-0000-0000000000e1", mediaType: "Movie", tmdbId: 1001, name: "Quiet Harbor", year: 2024,
+      overview: "A harbormaster keeps one last secret.", whyThis: "Shares the slow-burn dread you love.", tagline: null,
+      runtimeMinutes: 112, certification: "PG-13", genres: ["drama"], network: null, status: "Released", traktRating: 7.8,
+      traktVotes: 12000, crowdRating: 7.6, crowdVotes: 12000, posterPath: null, backdropPath: null,
+      trailerUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", cast: [], directors: [], writers: [],
+      prediction: { predictedRating: 8.2, scoredAt: "2026-10-25T10:00:00Z", contributions: [{ feature: "genreAffinity", value: 0.6 }] },
+      contributionDetails: [],
+      userState: { isFullyWatched: false, plays: 0, userRating: null, savedForLater: false, notInterested: false, dropped: false },
+    });
+    await mockJson(page, "**/api/titles/movie/1001/lens", {
+      source: "fresh", lens: "A slow tightening.", hook: "One more secret.", caution: "Slow.", anchors: [], mood: "tense",
+      whenToWatch: null, generatedAt: "2026-10-25T10:00:00Z",
+    });
+    await mockJson(page, "**/api/titles/movie/1001/providers", {
+      region: "US", attribution: "Data from JustWatch via TMDB", tmdbWatchPage: "https://www.themoviedb.org/movie/1001/watch",
+      providers: [{ provider: "Netflix", logoPath: null, kinds: ["Flatrate"], linkKind: "direct", url: "https://www.netflix.com/search?q=x", displayPriority: 1 }],
+    });
+    await page.goto("/title/movie/1001");
+    await expect(page.getByTestId("provider-chip")).toHaveCount(1);
+    await page.getByTestId("lens-more").click();
+    expect(await smallTargets(page, '[data-testid="title-detail"]')).toEqual([]);
+    await context.close();
+  });
+
+  test("a person page has no interactive element under 44 px", async ({ browser }) => {
+    const context = await browser.newContext(PHONE);
+    const page = await context.newPage();
+    await boot(page);
+    await mockJson(page, "**/api/people/00000000-0000-0000-0000-0000000000aa", {
+      id: "00000000-0000-0000-0000-0000000000aa", name: "Michael Mann", department: "Directing", profilePath: null,
+      userRating: 8, derivedAffinity: 8.1, ratedTitleCount: 3,
+      filmography: [{ titleId: "00000000-0000-0000-0000-000000000701", mediaType: "Movie", tmdbId: 949, name: "Heat", year: 1995, posterPath: null, userRating: 9, predictedRating: null, roles: ["Director"] }],
+    });
+    await page.goto("/person/00000000-0000-0000-0000-0000000000aa");
+    await expect(page.getByTestId("filmography-role")).toHaveText("Director");
     expect(await smallTargets(page)).toEqual([]);
     await context.close();
   });

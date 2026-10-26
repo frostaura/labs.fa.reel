@@ -14,6 +14,10 @@ interface Props {
   filter: BrowseFilter;
   /** The tonight-mood chip in force. Re-sorts this rail in place; removes nothing. */
   mood?: TonightMood | null;
+  /** A time limit per request; past it the rail shows its Retry tile (see `useInfiniteRow`). */
+  timeoutMs?: number;
+  /** Skeleton cards held while the first page loads (see `RecRow`). */
+  skeletonCount?: number;
 }
 
 /**
@@ -23,7 +27,7 @@ interface Props {
  * has no seed (the detail page's "more like this"), a top-up when its seed is thin — only once it
  * nears the viewport; a seeded row renders its snapshot slice immediately either way.
  */
-export default function InfiniteRecRow({ title, context, seed, filter, mood = null }: Props) {
+export default function InfiniteRecRow({ title, context, seed, filter, mood = null, timeoutMs, skeletonCount }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const near = useNearViewport(ref);
   // Thread the browse-filter medium to the server so the paged window + TMDB deepen are media-specific;
@@ -32,7 +36,7 @@ export default function InfiniteRecRow({ title, context, seed, filter, mood = nu
   const { items, loadMore, retry, loading, failed, idle, exhausted } = useInfiniteRow(
     { ...context, mediaType },
     seed,
-    { active: near }
+    { active: near, timeoutMs }
   );
 
   const visible = sortForMood(items.filter((c) => matchesBrowseFilter(c, filter)), mood);
@@ -55,6 +59,7 @@ export default function InfiniteRecRow({ title, context, seed, filter, mood = nu
         failed={failed}
         onRetry={retry}
         exhausted={exhausted}
+        skeletonCount={skeletonCount}
       />
     </div>
   );

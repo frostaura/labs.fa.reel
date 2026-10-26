@@ -1,3 +1,5 @@
+import type { WaterfallPayload } from "../lib/predictionWaterfall";
+
 /** A clickable, rateable person chip — cast or crew. */
 export interface CreditPerson {
   personId: string;
@@ -31,6 +33,14 @@ export interface PersonPayload {
     posterPath: string | null;
     userRating: number | null;
     predictedRating: number | null;
+    /**
+     * What this person did on the title — "Director", "Writer", "Actor" — so a filmography says
+     * whether a title is theirs or merely features them (F-24). Optional: until the API sends it
+     * (change request to WS-5) the page shows no role rather than guessing one from `department`.
+     */
+    roles?: string[] | null;
+    /** The character played, for an acting credit. */
+    character?: string | null;
   }[];
 }
 
@@ -70,16 +80,31 @@ export interface TitleDetailPayload {
   status: string | null;
   traktRating: number | null;
   traktVotes: number;
+  /** The card-consistent community score (vote-shrunk), the same number the cards' chip shows. */
+  crowdRating?: number | null;
+  crowdVotes?: number | null;
   posterPath: string | null;
   backdropPath: string | null;
   trailerUrl: string | null;
   cast: CastMember[];
   directors: CreditPerson[];
   writers: CreditPerson[];
+  /**
+   * A show's creators (TMDB `created_by`) — for TV the people who made it, where `directors` is
+   * per-episode and usually empty (F-24). Optional until the catalogue ingests them (change request
+   * to WS-3/WS-5); the page lists them whenever they arrive.
+   */
+  creators?: CreditPerson[] | null;
   prediction: {
     predictedRating: number;
     contributions: { feature: string; value: number }[];
     scoredAt: string;
+    /**
+     * The prediction as additive steps from a baseline, in rating points (F-25). Optional until the
+     * API sends it (change request to WS-5); `lib/predictionWaterfall.ts` draws it only when it adds
+     * up to `predictedRating`, and never derives one from the (normalised) contribution bars.
+     */
+    waterfall?: WaterfallPayload | null;
   } | null;
   contributionDetails: ContributionDetail[];
   userState: {

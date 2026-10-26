@@ -41,6 +41,13 @@ export interface InfiniteRowOptions {
    * scroll near a rail's end only happens on a rail that is on screen, so it needs no gate.
    */
   active?: boolean;
+  /**
+   * A time limit on each request, in ms. A request still out when it expires is abandoned and the
+   * rail goes straight to its Retry tile (no automatic retries — see the `timeout` event). For the
+   * title page's Similar rail (F-14), whose first page is a kNN plus a rerank and has hung for tens
+   * of seconds behind a shimmer that promised cards. Unset: no limit, as every Home rail has.
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -57,6 +64,7 @@ export interface InfiniteRowOptions {
 export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: InfiniteRowOptions = {}) {
   const { row, anchorTitleId, genre, mediaType } = context;
   const active = options.active ?? true;
+  const timeoutMs = options.timeoutMs;
   const page = useRailPage();
   const [items, setItems] = useState<FeedCard[]>(seed);
   const [exhausted, setExhausted] = useState(false);
@@ -128,15 +136,31 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
       body.pageToken = page.pageToken();
     }
     let next: MoreFeedResponse | null;
+    let timedOut = false;
+    const request = loadMoreFeed(body);
+    // The limit abandons the request: its late answer must not land on a rail that has already
+    // told the user it could not load (a Retry asks again, under a fresh limit).
+    const limit =
+      timeoutMs === undefined
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            request.abort();
+          }, timeoutMs);
     try {
-      next = await loadMoreFeed(body).unwrap();
+      next = await request.unwrap();
     } catch {
       next = null;
     } finally {
       inFlight.current = false;
+      if (limit !== null) clearTimeout(limit);
     }
     // Unmounted while the request was out: nothing to update, and above all nothing to schedule.
     if (!mounted.current) return;
+    if (timedOut) {
+      transition({ type: "timeout" });
+      return;
+    }
     if (next === null) {
       const after = transition({ type: "failure" });
       if (after.phase === "backoff" && after.retryInMs !== null) {
@@ -158,7 +182,7 @@ export function useInfiniteRow(context: RowContext, seed: FeedCard[], options: I
       exhaustedRef.current = true;
       setExhausted(true);
     }
-  }, [row, anchorTitleId, genre, mediaType, page, loadMoreFeed, transition]);
+  }, [row, anchorTitleId, genre, mediaType, page, loadMoreFeed, transition, timeoutMs]);
 
   // The backoff timer calls whichever `attempt` is current when it fires, not the one that
   // scheduled it.
