@@ -125,8 +125,13 @@ public class OpenRouterSearchInterpreter(
         // Compounds the tokenizer would destroy are rewritten first: it splits on hyphens, so
         // "rom-com" arrives as two fragments that mean nothing on their own.
         var lower = SearchVocabulary.NormaliseCompounds(query.ToLowerInvariant());
-        var tokens = Tokenize(lower);
         var (minYear, maxYear) = ParseYearRange(lower);
+
+        // The release window is read from the full phrase above; the phrase that carried it is then
+        // removed before tokenizing, because a date is a BOUND, never a concept. Left in, "heist
+        // movies from the 2010s" became keywords [heist, 2010]: the supply pulled every title tagged
+        // "2010" and a degraded reply named its topic "heist or 2010" (IREV3-SYS-05).
+        var tokens = Tokenize(StripYearPhrases(lower));
 
         var genres = new List<string>();
         var keywords = new List<string>();
@@ -345,6 +350,9 @@ public class OpenRouterSearchInterpreter(
         "the", "a", "an", "and", "or", "of", "with", "for", "about", "like", "some", "any",
         "good", "best", "great", "really", "very", "more", "most", "kind", "stuff", "things",
         "something", "show", "me", "find", "want", "watch",
+        // "from" survives the year strip when it introduces a decade ("from the 2010s") and never
+        // names a concept on its own; Ask Reel's sanitizer already treats it as a stop word.
+        "from",
         // Negation machinery — these steer the parse, they are never content themselves.
         "less", "fewer", "not", "no", "don", "dont", "doesn", "without", "except", "avoid", "hate",
         "but", "instead", "rather",
@@ -443,6 +451,31 @@ public class OpenRouterSearchInterpreter(
         int? max = before.Success ? int.Parse(before.Groups[1].Value, CultureInfo.InvariantCulture) : null;
         return (min, max);
     }
+
+    /// <summary>
+    /// The query with every phrase <see cref="ParseYearRange"/> reads as a release window blanked
+    /// out: decade words ("nineties"), decade forms ("80s", "'90s", "2010s"), and a four-digit year
+    /// together with the word that bounds it ("before 2000", "from 2015", "newer than 2010"). A
+    /// BARE four-digit number survives, for the reason <see cref="ParseYearRange"/> gives — "1917"
+    /// and "2001" are titles far more often than dates. Phrases are replaced by a space, never a
+    /// clause separator, so the negation scope sees the same sentence boundaries it did before.
+    /// </summary>
+    internal static string StripYearPhrases(string lower)
+    {
+        var stripped = DecadeWordPattern.Replace(lower, " ");
+        stripped = DecadeFormPattern.Replace(stripped, " ");
+        return BoundedYearPattern.Replace(stripped, " ");
+    }
+
+    private static readonly Regex DecadeWordPattern = new(
+        @"\b(?:" + string.Join("|", DecadeWords.Keys) + @")\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static readonly Regex DecadeFormPattern = new(
+        @"\b(?:\d{2}|\d{4})s\b", RegexOptions.CultureInvariant);
+
+    private static readonly Regex BoundedYearPattern = new(
+        @"\b(?:before|earlier than|older than|up to|until|pre|after|since|from|newer than|later than|post)\s+\d{4}\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Words that sit between a negator and its target without ending the negation —
