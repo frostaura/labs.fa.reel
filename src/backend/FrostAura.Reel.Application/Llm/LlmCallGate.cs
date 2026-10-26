@@ -65,7 +65,9 @@ public interface ILlmCallGate
 /// recorder holds the real figure. Concurrent callers therefore see each other, and the day's
 /// total can never pass the ceiling — the acceptance's "no overshoot".</para>
 ///
-/// <para><b>What is gated.</b> Ask Reel v2's three purposes against <see cref="AskBudget"/>; the
+/// <para><b>What is gated.</b> Every Ask Reel call: v2's three purposes against <see cref="AskBudget"/>,
+/// and v1's question-reading pair (<c>search-agent</c>, <c>search-interpret</c>) against the plan
+/// ceiling they share with <c>ask-plan</c>; the
 /// re-rank family against <see cref="RerankBudget"/>, with the Ask members held to its Ask share
 /// and the feed to its background fraction; cross-reference against
 /// <see cref="CrossReferenceBudget"/>. Everything else — lens (its own budget runs at the caller),
@@ -116,9 +118,13 @@ public sealed class LlmCallGate(
         }
     }
 
-    /// <summary>True for the purposes this gate meters per account.</summary>
+    /// <summary>
+    /// True for the purposes this gate meters per account: every Ask Reel call (v2's three purposes
+    /// and v1's question-reading pair, see <see cref="AskBudget.PlanStage"/>), the re-rank family
+    /// and cross-reference.
+    /// </summary>
     public static bool IsGated(string purpose) =>
-        ApiUsagePurpose.AskFamily.Contains(purpose)
+        AskBudget.Meters(purpose)
         || ApiUsagePurpose.RerankFamily.Contains(purpose)
         || purpose == ApiUsagePurpose.CrossReference;
 
@@ -157,21 +163,34 @@ public sealed class LlmCallGate(
                 : $"cross-reference ceiling would be passed ({allowance.Describe()})";
         }
 
+        // An Ask purpose, summed over every string that shares its ceiling: the v1 plan stage's
+        // search-agent and search-interpret rows spend ask-plan's allowance, and the reverse.
         var ceiling = AskBudget.For(configuration, purpose)!;
-        var (pendingCalls, pendingTokens) = services.GetService<IPendingApiUsage>()
-            ?.PendingToday(ApiProvider.OpenRouter, account, purpose) ?? (0L, 0L);
+        var members = AskBudget.SharedWith(purpose).ToArray();
+        var pendingSource = services.GetService<IPendingApiUsage>();
+        long pendingCalls = 0, pendingTokens = 0, reservedCalls = 0, reservedTokens = 0;
+        foreach (var member in members)
+        {
+            var (pc, pt) = pendingSource?.PendingToday(ApiProvider.OpenRouter, account, member) ?? (0L, 0L);
+            var (rc, rt) = Reserved(account, member);
+            pendingCalls += pc;
+            pendingTokens += pt;
+            reservedCalls += rc;
+            reservedTokens += rt;
+        }
+
         var today = DateTime.UtcNow.Date;
         var rows = await services.GetRequiredService<IReelDbContext>().ExternalApiUsages
             .Where(u => u.Provider == ApiProvider.OpenRouter && u.AccountId == account
-                && u.Purpose == purpose && u.Day == today)
+                && members.Contains(u.Purpose) && u.Day == today)
             .Select(u => new { u.CallCount, u.TokensUsed })
             .ToListAsync(ct);
-        var (reservedCalls, reservedTokens) = Reserved(account, purpose);
         var calls = rows.Sum(r => r.CallCount) + pendingCalls + reservedCalls;
         var used = rows.Sum(r => r.TokensUsed ?? 0) + pendingTokens + reservedTokens;
+        var shared = members.Length > 1 ? ", shared by the ask-plan stage" : string.Empty;
         return calls + 1 <= ceiling.Calls && used + tokens <= ceiling.Tokens
             ? null
-            : $"{purpose} ceiling would be passed ({calls}/{ceiling.Calls} calls, {used}/{ceiling.Tokens} tokens)";
+            : $"{purpose} ceiling would be passed ({calls}/{ceiling.Calls} calls, {used}/{ceiling.Tokens} tokens{shared})";
     }
 
     private (long Calls, long Tokens) Reserved(Guid account, string purpose)

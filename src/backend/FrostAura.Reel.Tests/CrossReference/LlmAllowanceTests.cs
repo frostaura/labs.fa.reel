@@ -16,7 +16,8 @@ namespace FrostAura.Reel.Tests.CrossReference;
 /// <c>rerank-page</c> at 2,397. The heaviest Ask day is 2026-10-22 — 29 v1 turns made 93
 /// <c>rerank-ask</c> calls at 2,153 tokens, 3.2 a turn. The gate RESERVES a call's worst case
 /// (prompt plus completion ceiling): ~5.5k for a 9-title curation batch (2.2k prompt + 3.3k
-/// ceiling) and ~2.7k for a 6-title Ask batch, then releases it for the recorded figure.</para>
+/// ceiling) and ~4.3k for a 6-title Ask batch (2k prompt + 100 + 370 x 6), then releases it for the
+/// recorded figure.</para>
 /// </summary>
 public class LlmAllowanceTests
 {
@@ -24,7 +25,7 @@ public class LlmAllowanceTests
     private const long TokenLimit = RerankBudget.DefaultDailyTokens; // 600k
 
     private const long CurationReserve = 5_500;
-    private const long AskReserve = 2_700;
+    private const long AskReserve = 4_300;
 
     // ── The admission rule (pure) ──────────────────────────────────────────────────────────
 
@@ -120,6 +121,29 @@ public class LlmAllowanceTests
         // in RerankBudget's note stays checkable.
         var day = Simulate(AskV1Calls(128), HeaviestCurationDay(), 150, 300_000);
         Assert.True(day.RefusedCuration > 0);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(9)]
+    public void The_request_judging_ceiling_is_above_the_feeds_whose_prompt_it_extends(int titles)
+    {
+        // Round-1 review defect 6: rerank-ask truncated 2 of ~20 calls at 100 + 111 x n (544 for 4
+        // titles, 766 for 6). Its prompt is the feed's plus a satisfies verdict per entry, so its
+        // per-title tail can never be shorter than the feed's measured one; a ceiling below the
+        // feed's is the defect, whatever the batch size.
+        var catalog = new LlmPurposeCatalog(new ConfigurationBuilder().Build());
+        var feed = catalog.For(ApiUsagePurpose.RerankFeed).MaxTokensFor(titles);
+
+        foreach (var purpose in new[] { ApiUsagePurpose.RerankAsk, ApiUsagePurpose.RerankExpand, ApiUsagePurpose.AskJudge })
+        {
+            Assert.True(catalog.For(purpose).MaxTokensFor(titles) > feed, $"{purpose} at {titles} titles");
+        }
+
+        // The 6-title answer that only finished on the 2x retry (inside 1,532) now fits the first attempt.
+        Assert.True(catalog.For(ApiUsagePurpose.RerankAsk).MaxTokensFor(6) >= 1_532);
     }
 
     [Fact]

@@ -387,6 +387,66 @@ public class LlmBudgetGateTests(PostgresFixture fixture)
         Assert.True((await gate.TryReserveAsync(accountId, ApiUsagePurpose.CrossReference, 19_000, CancellationToken.None)).Admitted);
     }
 
+    [Theory]
+    [InlineData(ApiUsagePurpose.SearchAgent)]
+    [InlineData(ApiUsagePurpose.SearchInterpret)]
+    [InlineData(ApiUsagePurpose.AskPlan)]
+    public async Task The_v1_question_reading_calls_spend_the_ask_plan_ceiling(string spentBy)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Round-1 review defect 5: search-agent and search-interpret were admitted with no
+        // per-account ceiling. They are the shipping pipeline's plan stage and now share ask-plan's.
+        // Vary the fixture: whichever of the three spent the day, all three are refused.
+        var (callsSetting, _) = AskBudget.Settings("ASK_PLAN");
+        var gate = Gate(new() { [callsSetting] = "3" });
+
+        // Control first: a fresh day admits every member.
+        var fresh = await SeedAccountAsync();
+        foreach (var member in AskBudget.PlanStage)
+        {
+            using var admission = await gate.TryReserveAsync(fresh, member, 100, CancellationToken.None);
+            Assert.True(admission.Admitted, member);
+            Assert.NotSame(LlmAdmission.Unmetered, admission);
+        }
+
+        var accountId = await SeedAccountAsync();
+        await RecordAsync(accountId, spentBy, calls: 3, tokens: 1_000);
+
+        foreach (var member in AskBudget.PlanStage)
+        {
+            var refused = await gate.TryReserveAsync(accountId, member, 100, CancellationToken.None);
+            Assert.False(refused.Admitted, member);
+            Assert.Contains("shared by the ask-plan stage", refused.Refusal, StringComparison.Ordinal);
+        }
+
+        // Its own stage only: the judge and the re-rank family are separate allowances.
+        Assert.True((await gate.TryReserveAsync(accountId, ApiUsagePurpose.AskJudge, 100, CancellationToken.None)).Admitted);
+        Assert.True((await gate.TryReserveAsync(accountId, ApiUsagePurpose.RerankAsk, 100, CancellationToken.None)).Admitted);
+    }
+
+    [Fact]
+    public async Task Concurrent_v1_and_v2_plan_calls_cannot_overshoot_their_shared_ceiling()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Reserve-before-call across the three strings: twelve callers split over them race for
+        // four calls, and nobody releases. Two ceilings would have admitted up to twelve.
+        var accountId = await SeedAccountAsync();
+        var gate = Gate(new() { [AskBudget.Settings("ASK_PLAN").Calls] = "4" });
+
+        var admissions = await Task.WhenAll(Enumerable.Range(0, 12)
+            .Select(i => gate.TryReserveAsync(accountId, AskBudget.PlanStage[i % 3], 500, CancellationToken.None)));
+
+        Assert.Equal(4, admissions.Count(a => a.Admitted));
+    }
+
     [Fact]
     public async Task Catalogue_wide_work_and_ungated_purposes_are_unmetered()
     {

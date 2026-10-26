@@ -74,12 +74,32 @@ public class OpenRouterSearchAgent(
         : _chat.Options(ApiUsagePurpose.SearchAgent).Model;
 
     /// <summary>
-    /// The result-format version, plus the model AND the reasoning effort this purpose is sent at:
-    /// a verdict written at one effort is a different instrument from one written at another.
+    /// The result-format version, the model AND the reasoning effort this purpose is sent at, and
+    /// the version of the prompt and schema it is sent with: a verdict written at one effort, or
+    /// under one prompt, is a different instrument from one written under another. The prompt part
+    /// is a fingerprint of the text itself (<see cref="PromptVersion"/>), so an edit to a prompt
+    /// re-keys every cache built on it without anyone remembering to bump a constant.
     /// </summary>
     public string CacheSalt(string usagePurpose) => StubMode
         ? string.Concat(RerankCacheVersion.Current, ":", ModelId)
-        : string.Concat(RerankCacheVersion.Current, ":", _chat.CacheSalt(usagePurpose));
+        : string.Concat(RerankCacheVersion.Current, ":", _chat.CacheSalt(usagePurpose), ":", PromptVersion(usagePurpose));
+
+    /// <summary>
+    /// A short fingerprint of the system prompt and response schema <paramref name="usagePurpose"/>
+    /// is sent with — <c>p</c> plus the first eight hex digits of their SHA-256. Stable across
+    /// processes and machines (no string hashing), and changed by any edit to either.
+    /// </summary>
+    internal static string PromptVersion(string usagePurpose)
+    {
+        var (prompt, schema) = usagePurpose == ApiUsagePurpose.SearchAgent
+            ? (InterpretSystemPrompt, InterpretSchema())
+            : JudgesRequest(usagePurpose)
+                ? (AskRerankSystemPrompt, AskRerankSchema())
+                : (RerankSystemPrompt, RerankSchema());
+        var text = prompt + "\n" + JsonSerializer.Serialize(schema);
+        var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text));
+        return "p" + Convert.ToHexStringLower(hash.AsSpan(0, 4));
+    }
 
     public async Task<AgentReply> InterpretAsync(
         IReadOnlyList<ChatTurn> history, string message, string tasteSummary, IReadOnlyList<string> shownTitles,
@@ -161,14 +181,16 @@ public class OpenRouterSearchAgent(
     private async Task<InterpretAttempt> TryInterpretAsync(
         string user, string message, SearchIntent intentFallback, CancellationToken ct)
     {
-        // ResponseFormat null deliberately (json_object). The interpret spec is a dozen fields wide
-        // and strict mode requires every one of them declared and required, with nullability
-        // expressed as a union type — that schema is the planner's, written against the finished
-        // field set.
+        // A strict schema, so the provider's constrained decoding cannot open the answer with prose:
+        // under plain json_object luna answered "I…" before its JSON on both attempts of an eval
+        // turn, and the turn degraded. A model that rejects strict mode is downgraded to
+        // json_object by the client, once per process; the parse below then still reads an object
+        // that has text around it.
         var completion = await _chat.CompleteAsync(
             new LlmChatRequest(
                 ApiUsagePurpose.SearchAgent,
-                [LlmMessage.System(InterpretSystemPrompt), LlmMessage.User(user)]),
+                [LlmMessage.System(InterpretSystemPrompt), LlmMessage.User(user)],
+                InterpretSchema()),
             ct);
         if (!completion.Succeeded)
         {
@@ -178,15 +200,18 @@ public class OpenRouterSearchAgent(
                 completion.AgentFailure!.Value, retryable: completion.Failure == LlmCallFailure.EmptyAnswer);
         }
 
+        using var doc = ReadObject(ApiUsagePurpose.SearchAgent, completion.Content);
+        if (doc is null)
+        {
+            // Counted as what it is — an unreadable answer — so it is retried once and, if the retry
+            // fails the same way, the turn is DEGRADED with MalformedAnswer on its record: the figure
+            // the fallback rate is computed from.
+            return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer);
+        }
+
         try
         {
-            using var doc = JsonDocument.Parse(completion.Content!);
             var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
-            {
-                return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer);
-            }
-
             var intent = SearchIntentParser.FromJson(root, message, intentFallback);
             if (root.TryGetProperty("reply", out var r) && r.ValueKind == JsonValueKind.String
                 && r.GetString() is { } s && !string.IsNullOrWhiteSpace(s))
@@ -200,16 +225,35 @@ public class OpenRouterSearchAgent(
 
             return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer, intent);
         }
-        catch (JsonException ex)
-        {
-            logger.LogWarning(ex, "Agent interpret returned content that is not JSON.");
-            return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer);
-        }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException)
         {
             logger.LogWarning(ex, "Agent interpret returned a spec the parser could not read.");
             return InterpretAttempt.Failed(AgentFailureKind.MalformedAnswer);
         }
+    }
+
+    /// <summary>
+    /// The first JSON object in a model's answer (see <see cref="LlmJson"/>), or null — logged
+    /// either way, because an answer that needed text cut away is a format slip the per-purpose
+    /// figures must see even when the object inside it was usable.
+    /// </summary>
+    private JsonDocument? ReadObject(string purpose, string? content)
+    {
+        var doc = LlmJson.FirstObject(content, out var slip);
+        if (doc is null)
+        {
+            logger.LogWarning(
+                "{Purpose} answer held no readable JSON object ({Chars} chars); counted as a malformed answer.",
+                purpose, content?.Length ?? 0);
+        }
+        else if (slip != LlmJsonSlip.None)
+        {
+            logger.LogWarning(
+                "{Purpose} answer carried text outside its JSON object ({Slip}); the object was read and the rest discarded.",
+                purpose, slip);
+        }
+
+        return doc;
     }
 
     public async Task<IReadOnlyList<RerankResult>> RerankBatchAsync(
@@ -248,63 +292,73 @@ public class OpenRouterSearchAgent(
             return titles.Select((t, i) => FallbackVerdict(t, i)).ToList();
         }
 
-        try
+        using var doc = ReadObject(usagePurpose, completion.Content);
+        if (doc is null)
         {
-            using var doc = JsonDocument.Parse(completion.Content!);
-            var byId = new Dictionary<Guid, RerankResult>();
-            var rejected = 0;
-            if (doc.RootElement.ValueKind == JsonValueKind.Object
-                && doc.RootElement.TryGetProperty("results", out var arr) && arr.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var el in arr.EnumerateArray())
-                {
-                    // Per-ENTRY defence, deliberately. Every accessor below is kind-checked and the
-                    // whole entry is wrapped, because the catch further down is batch-wide: one
-                    // entry returning titleId as a JSON number used to throw
-                    // InvalidOperationException out of GetString(), and every OTHER title in the
-                    // batch then silently lost its model fit score. One bad entry costs exactly one
-                    // entry.
-                    if (!TryReadEntry(el, judgesRequest, out var result))
-                    {
-                        rejected++;
-                        continue;
-                    }
-
-                    byId[result.TitleId] = result;
-                }
-            }
-
-            if (rejected > 0)
-            {
-                logger.LogWarning(
-                    "Agent rerank discarded {Rejected} malformed result entr(ies) of {Count}; those titles are labelled fallbacks.",
-                    rejected, titles.Count);
-            }
-
-            // Row-aligned: any title the model skipped is a labelled fallback.
-            return titles.Select((t, index) =>
-            {
-                if (!byId.TryGetValue(t.TitleId, out var res))
-                {
-                    return FallbackVerdict(t, index);
-                }
-
-                // Output guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's"),
-                // opens with the banned "Because you loved" template, or blows the length contract
-                // is discarded. The model's fit score (and its request verdict) are kept — only the
-                // offending sentence goes, and NOTHING is written in its place: the consumer shows
-                // its own deterministic line, labelled as what it is.
-                return SecondPersonVoice.Rejects(res.Why)
-                    ? res with { Why = string.Empty, WhySource = ResultSource.Fallback }
-                    : res;
-            }).ToList();
-        }
-        catch (JsonException ex)
-        {
-            logger.LogWarning(ex, "Agent rerank returned content that is not JSON ({Count} titles); the batch is a labelled fallback.", titles.Count);
             return titles.Select((t, i) => FallbackVerdict(t, i)).ToList();
         }
+
+        var byId = new Dictionary<Guid, RerankResult>();
+        var rejected = 0;
+        if (doc.RootElement.TryGetProperty("results", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in arr.EnumerateArray())
+            {
+                // Per-ENTRY defence, deliberately. Every accessor below is kind-checked and the
+                // whole entry is wrapped, because a throw out of this loop is batch-wide: one
+                // entry returning titleId as a JSON number used to throw
+                // InvalidOperationException out of GetString(), and every OTHER title in the
+                // batch then silently lost its model fit score. One bad entry costs exactly one
+                // entry.
+                if (!TryReadEntry(el, judgesRequest, out var result))
+                {
+                    rejected++;
+                    continue;
+                }
+
+                byId[result.TitleId] = result;
+            }
+        }
+
+        if (rejected > 0)
+        {
+            logger.LogWarning(
+                "Agent rerank discarded {Rejected} malformed result entr(ies) of {Count}; those titles are labelled fallbacks.",
+                rejected, titles.Count);
+        }
+
+        // Row-aligned: any title the model skipped is a labelled fallback.
+        return titles.Select((t, index) =>
+        {
+            if (!byId.TryGetValue(t.TitleId, out var res))
+            {
+                return FallbackVerdict(t, index);
+            }
+
+            // Output guard: a "why" that talks ABOUT the viewer ("their tastes", "the user's"),
+            // opens with the banned "Because you loved" template, blows the length contract, or
+            // hedges against its own pick (see RejectsWhy) is discarded. The model's fit score
+            // (and its request verdict) are kept — only the offending sentence goes, and NOTHING
+            // is written in its place: the consumer shows its own deterministic line, labelled as
+            // what it is.
+            return RejectsWhy(res, judgesRequest)
+                ? res with { Why = string.Empty, WhySource = ResultSource.Fallback }
+                : res;
+        }).ToList();
     }
+
+    /// <summary>
+    /// Whether a model's why-line is discarded (fit and request verdict kept): the voice guard
+    /// always, and the hedge guard wherever the line would caption a PICK — every feed purpose, and
+    /// on the request-judging purposes a title the model said satisfies the request. A line that
+    /// argues against its own pick ("…though this is a much slower drama than you prefer") is the
+    /// model qualifying a recommendation it was asked to make. Where the title only partly or does
+    /// not satisfy the request, the line explains the miss on the near-miss and outside-request
+    /// channels, and an honest negative there is the point, so it stands.
+    /// </summary>
+    internal static bool RejectsWhy(RerankResult result, bool judgesRequest) =>
+        SecondPersonVoice.Rejects(result.Why)
+        || ((!judgesRequest || result.Satisfies == Satisfies.Yes) && SecondPersonVoice.SoundsHedged(result.Why));
 
     /// <summary>
     /// True for the re-rank purposes whose query is the user's own request (Ask Reel's turn and the
@@ -388,6 +442,80 @@ public class OpenRouterSearchAgent(
     /// a field optional — and the feed's must stay exactly as it was.
     /// </summary>
     internal static object AskRerankSchema() => Schema("reel_rerank_ask", withSatisfies: true);
+
+    /// <summary>
+    /// The genre slugs the interpret prompt lists, in its order — the schema's enum. Kept here
+    /// beside the prompt so a test can hold the two to each other and to the catalogue's own slugs.
+    /// </summary>
+    internal static readonly string[] InterpretGenreSlugs =
+    [
+        "action", "adventure", "animation", "comedy", "crime", "documentary", "drama", "family", "fantasy",
+        "history", "horror", "music", "mystery", "romance", "science-fiction", "thriller", "war", "western",
+    ];
+
+    /// <summary>
+    /// The interpret response shape, field-for-field what <see cref="InterpretSystemPrompt"/> asks
+    /// for and <see cref="SearchIntentParser"/> reads. Strict mode requires every field, so the
+    /// optional ones are nullable unions (<c>["integer","null"]</c>) or arrays the model leaves
+    /// empty — both of which the parser already reads as "not given".
+    ///
+    /// <para><b>Why it exists.</b> Under plain <c>json_object</c> the model answered in prose on
+    /// both attempts of an eval turn, and the turn degraded. Constrained decoding cannot start an
+    /// answer with "I…".</para>
+    /// </summary>
+    internal static object InterpretSchema()
+    {
+        static object Strings() => new { type = "array", items = new { type = "string" } };
+        static object Genres() => new { type = "array", items = new { type = "string", @enum = InterpretGenreSlugs } };
+        static object NullableInt() => new { type = new[] { "integer", "null" } };
+
+        var properties = new Dictionary<string, object>
+        {
+            ["reply"] = new { type = "string" },
+            ["genres"] = Genres(),
+            ["keywords"] = Strings(),
+            ["people"] = new
+            {
+                type = "array",
+                items = new
+                {
+                    type = "object",
+                    additionalProperties = false,
+                    required = new[] { "name", "role" },
+                    properties = new Dictionary<string, object>
+                    {
+                        ["name"] = new { type = "string" },
+                        ["role"] = new { type = "string", @enum = new[] { "director", "cast", "any" } },
+                    },
+                },
+            },
+            ["mediaTypes"] = new { type = "array", items = new { type = "string", @enum = new[] { "movie", "tv" } } },
+            ["minYear"] = NullableInt(),
+            ["maxYear"] = NullableInt(),
+            ["freeText"] = new { type = new[] { "string", "null" } },
+            ["excludeGenres"] = Genres(),
+            ["excludeKeywords"] = Strings(),
+            ["referenceTitles"] = Strings(),
+            ["maxRuntimeMinutes"] = NullableInt(),
+        };
+
+        return new
+        {
+            type = "json_schema",
+            json_schema = new
+            {
+                name = "reel_interpret",
+                strict = true,
+                schema = new
+                {
+                    type = "object",
+                    additionalProperties = false,
+                    required = properties.Keys.ToArray(),
+                    properties,
+                },
+            },
+        };
+    }
 
     private static object Schema(string name, bool withSatisfies)
     {
@@ -685,7 +813,8 @@ public class OpenRouterSearchAgent(
         "then resolve the request into a discovery spec. Return ONLY a JSON object: reply (string), genres (array of " +
         "slugs from EXACTLY: action, adventure, animation, comedy, crime, documentary, drama, family, fantasy, history, " +
         "horror, music, mystery, romance, science-fiction, thriller, war, western), keywords (array of up to 5 concept " +
-        "phrases), people (array of {name, role} where role is \"director\", \"cast\", or \"any\" — extract any named " +
+        "phrases; the FIRST is the user's own topic word for the request, as they said it, before any related concept " +
+        "you add), people (array of {name, role} where role is \"director\", \"cast\", or \"any\" — extract any named " +
         "filmmaker or actor; e.g. \"movies Christopher Nolan directs\" → people:[{\"name\":\"Christopher Nolan\",\"role\":\"director\"}], " +
         "\"films with Tom Hardy\" → people:[{\"name\":\"Tom Hardy\",\"role\":\"cast\"}]; do NOT put a person's name in keywords " +
         "or freeText), mediaTypes (array of \"movie\"/\"tv\"; empty = both), minYear (integer or null), maxYear (integer or " +
@@ -720,8 +849,8 @@ public class OpenRouterSearchAgent(
         "Each why MUST be at most 160 characters and MUST cite something SPECIFIC about THAT title — its plot " +
         "premise, tone, era, craft, or a person by name from its overview. Generic filler (\"matches your taste\", " +
         "\"fits your profile\", \"a great pick for you\") is FORBIDDEN. When an anchor title is given, say what " +
-        "actually links the candidate to it — a shared premise, mood, or craft (e.g. \"shares the anchor's " +
-        "slow-burn small-town dread\") — NEVER just that you loved the anchor. NEVER start a why with \"Because " +
+        "actually links the candidate to it — a shared premise, mood, or craft — naming it by its title, never " +
+        "calling it \"the anchor\", and NEVER just that you loved it. NEVER start a why with \"Because " +
         "you loved\". Vary the sentence openers across the batch — no two whys may start with the same words. " +
         "titleId MUST be the id string quoted exactly as given, never a number. fit MUST be a " +
         "bare JSON number between 0.0 and 1.0 — never a 0-10 or 0-100 score and never a string. " +
@@ -740,7 +869,7 @@ public class OpenRouterSearchAgent(
         "what the request asks for, judged only from what is given about the title (its genres, overview, themes, " +
         "tone and people), and SEPARATELY from whether you would like it. \"yes\": it plainly is the thing asked " +
         "for, every concept the request names. \"partial\": it matches some of the request, or only loosely. " +
-        "\"no\": it is not what was asked for — an action film with no ninjas is \"no\" for \"ninja movies\", " +
+        "\"no\": it is not what was asked for — a title missing a concept the request names is \"no\", " +
         "however well it fits your taste. Never answer \"yes\" because a title is merely good or similar in mood.";
 
     /// <summary>One interpret attempt's outcome: an answer, or a classified failure.</summary>

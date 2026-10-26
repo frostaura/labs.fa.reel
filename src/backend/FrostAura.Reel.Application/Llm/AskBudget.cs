@@ -20,7 +20,8 @@ namespace FrostAura.Reel.Application.Llm;
 /// themselves — 20 an hour, 100 a day, Free 10 — are the Ask engine's to enforce per turn; these
 /// ceilings are what stops a loop that ignores them. Settings: <c>LLM_ASK_PLAN_DAILY_CALLS</c>,
 /// <c>LLM_ASK_PLAN_DAILY_TOKENS</c>, and the same pair for <c>ASK_JUDGE</c> and
-/// <c>ASK_ANSWER</c>.</para>
+/// <c>ASK_ANSWER</c>. The v1 pipeline's question-reading calls spend the plan ceiling too
+/// (<see cref="PlanStage"/>); its judge, <c>rerank-ask</c>, spends the family's Ask share.</para>
 /// </summary>
 public static class AskBudget
 {
@@ -34,10 +35,36 @@ public static class AskBudget
     public const int DefaultAnswerCalls = 350;
     public const int DefaultAnswerTokens = 400_000;
 
+    /// <summary>
+    /// The Ask Reel v1 calls that read the question — the conversational interpret
+    /// (<c>search-agent</c>) and its recovery interpreter (<c>search-interpret</c>). They are the
+    /// shipping pipeline's plan stage, so they bill their own strings (the ledger and every eval
+    /// cost line read them) but spend <c>ask-plan</c>'s ceiling.
+    ///
+    /// <para><b>Why shared rather than a ceiling of their own.</b> The ceiling is a per-account
+    /// limit on "how many times may this account's questions be read today", and v1 and v2 are two
+    /// implementations of that one stage. Two ceilings would double the allowance on the day both
+    /// paths run; one ceiling summed over all three strings cannot. Before this, both were admitted
+    /// with no per-account limit at all (round-1 review defect 5).</para>
+    /// </summary>
+    public static readonly string[] PlanStage = [ApiUsagePurpose.AskPlan, ApiUsagePurpose.SearchAgent, ApiUsagePurpose.SearchInterpret];
+
+    /// <summary>Every purpose this class meters: the v2 family and the v1 plan stage.</summary>
+    public static bool Meters(string purpose) =>
+        ApiUsagePurpose.AskFamily.Contains(purpose) || PlanStage.Contains(purpose);
+
+    /// <summary>
+    /// The purposes whose ledger rows count against <paramref name="purpose"/>'s ceiling: the whole
+    /// plan stage for any of its members, otherwise the purpose alone.
+    /// </summary>
+    public static IReadOnlyList<string> SharedWith(string purpose) =>
+        PlanStage.Contains(purpose) ? PlanStage : [purpose];
+
     /// <summary>The ceiling for an Ask purpose, or null when <paramref name="purpose"/> is not one.</summary>
     public static Ceiling? For(IConfiguration configuration, string purpose) => purpose switch
     {
-        ApiUsagePurpose.AskPlan => Read(configuration, "ASK_PLAN", DefaultPlanCalls, DefaultPlanTokens),
+        ApiUsagePurpose.AskPlan or ApiUsagePurpose.SearchAgent or ApiUsagePurpose.SearchInterpret
+            => Read(configuration, "ASK_PLAN", DefaultPlanCalls, DefaultPlanTokens),
         ApiUsagePurpose.AskJudge => Read(configuration, "ASK_JUDGE", DefaultJudgeCalls, DefaultJudgeTokens),
         ApiUsagePurpose.AskAnswer => Read(configuration, "ASK_ANSWER", DefaultAnswerCalls, DefaultAnswerTokens),
         _ => null,

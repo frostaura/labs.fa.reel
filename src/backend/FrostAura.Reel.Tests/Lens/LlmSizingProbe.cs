@@ -160,7 +160,7 @@ public class LlmSizingProbe
                     Queries[i % Queries.Length], tasteSummary,
                     i % 5 == 4 ? rows.Skip(i).Take(6).Select(id => titles[id].Name).ToList() : [],
                     "never horror; English only"))],
-            null, 0));
+            OpenRouterSearchAgent.InterpretSchema(), 0));
 
         await Run(ApiUsagePurpose.SearchInterpret, calls, i => (
             [LlmMessage.System(OpenRouterSearchInterpreter.SystemPrompt),

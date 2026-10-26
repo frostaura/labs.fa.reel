@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
+using FrostAura.Reel.Domain.Ports.Tmdb;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -349,20 +350,22 @@ public class OpenRouterSearchAgentLiveModeTests
     [Fact]
     public async Task Interpret_sends_its_measured_ceiling()
     {
-        // WS-1 task 3: p99 completion at effort none (125) x 1.5, rounded up — 200, where the
-        // mini-era 400 was spent on hidden reasoning by a reasoning model.
+        // WS-1 task 3: p99 completion at effort none (125), plus ~60 tokens for the fields the
+        // strict schema now makes the model write out, x 1.5, rounded up — 300. The mini-era 400
+        // was spent on hidden reasoning by a reasoning model; 200 had no room for the schema.
         var handler = new CannedHandler(Ok("""{"reply":"ok","genres":["science-fiction"]}"""));
 
         await Agent(handler).InterpretAsync([], "80s sci-fi movies", "likes sci-fi", []);
 
-        Assert.Equal(200, MaxTokensOf(handler.Bodies[0]));
+        Assert.Equal(300, MaxTokensOf(handler.Bodies[0]));
         Assert.Equal("none", EffortOf(handler.Bodies[0]));
     }
 
     [Theory]
     [InlineData(ApiUsagePurpose.RerankFeed, 100 + (356 * 3))]
     [InlineData(ApiUsagePurpose.RerankPage, 100 + (356 * 3))]
-    [InlineData(ApiUsagePurpose.RerankAsk, 100 + (111 * 3))]
+    [InlineData(ApiUsagePurpose.RerankAsk, 100 + (370 * 3))]
+    [InlineData(ApiUsagePurpose.RerankExpand, 100 + (370 * 3))]
     public async Task Rerank_sends_an_envelope_plus_a_measured_per_title_share(string purpose, int expected)
     {
         // Deliberately per title: the re-rank answer is one entry per title, and a flat ceiling
@@ -589,8 +592,8 @@ public class OpenRouterSearchAgentLiveModeTests
     }
 
     [Theory]
-    [InlineData("length", 400)]
-    [InlineData("empty", 200)]
+    [InlineData("length", 600)]
+    [InlineData("empty", 300)]
     public async Task Only_a_truncated_attempt_retries_at_twice_the_ceiling(string firstFailure, int retryBudget)
     {
         // At temperature 0 a ceiling that truncated once truncates again; any other failure has
@@ -604,7 +607,7 @@ public class OpenRouterSearchAgentLiveModeTests
         var reply = await Agent(handler, recorder).InterpretAsync([], "ninja movies", "likes action", []);
 
         Assert.False(reply.Degraded);
-        Assert.Equal([200, retryBudget], handler.Bodies.Select(MaxTokensOf));
+        Assert.Equal([300, retryBudget], handler.Bodies.Select(MaxTokensOf));
         // Both attempts are on the ledger: the failed one was billed too.
         Assert.Equal(2, recorder.PendingToday(ApiProvider.OpenRouter, null, ApiUsagePurpose.SearchAgent).Calls);
     }
@@ -807,6 +810,320 @@ public class OpenRouterSearchAgentLiveModeTests
             Assert.Equal(ResultSource.Fallback, r.WhySource);
             Assert.Null(r.Satisfies);
         });
+    }
+
+    // ── Round 1: format slips, the interpret schema, hedges, prompts and the cache salt ──────
+
+    [Fact]
+    public async Task Interpret_is_sent_under_a_strict_schema_that_matches_the_prompt_and_the_parser()
+    {
+        // Round-1 review defect 7: under json_object the model answered "I…" on both attempts and
+        // the turn degraded. Constrained decoding cannot open with prose.
+        var handler = new CannedHandler(Ok("""{"reply":"ok","genres":["action"]}"""));
+
+        await Agent(handler).InterpretAsync([], "ninja movies", "likes action", []);
+
+        using var body = JsonDocument.Parse(handler.Bodies[0]);
+        var format = body.RootElement.GetProperty("response_format");
+        Assert.Equal("json_schema", format.GetProperty("type").GetString());
+        var schema = format.GetProperty("json_schema");
+        Assert.Equal("reel_interpret", schema.GetProperty("name").GetString());
+        Assert.True(schema.GetProperty("strict").GetBoolean());
+
+        // Every field the prompt asks for, and nothing else — strict mode refuses the rest.
+        var required = schema.GetProperty("schema").GetProperty("required").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Equal(
+            ["reply", "genres", "keywords", "people", "mediaTypes", "minYear", "maxYear", "freeText", "excludeGenres",
+                "excludeKeywords", "referenceTitles", "maxRuntimeMinutes"],
+            required);
+        foreach (var field in required)
+        {
+            Assert.Contains(field!, OpenRouterSearchAgent.InterpretSystemPrompt, StringComparison.Ordinal);
+        }
+
+        // The genre enum is the prompt's list, every slug is one the catalogue maps, and the list
+        // is complete — a slug the prompt offers but the enum forbids would be undecodable.
+        foreach (var slug in OpenRouterSearchAgent.InterpretGenreSlugs)
+        {
+            Assert.Contains(slug, OpenRouterSearchAgent.InterpretSystemPrompt, StringComparison.Ordinal);
+            Assert.True(TmdbGenres.SlugToIds.ContainsKey(slug), slug);
+        }
+
+        Assert.Contains(
+            "EXACTLY: " + string.Join(", ", OpenRouterSearchAgent.InterpretGenreSlugs) + ")",
+            OpenRouterSearchAgent.InterpretSystemPrompt,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_strict_answer_with_every_field_present_reads_as_the_short_answer_did()
+    {
+        // Strict mode makes the model write out the fields it used to omit, as [] and null. The
+        // parser must read those exactly as absence — vary the fixture, not just the code.
+        var full = """
+            {"reply":"Here","genres":["action"],"keywords":["ninja"],"people":[],"mediaTypes":[],"minYear":null,
+             "maxYear":null,"freeText":null,"excludeGenres":[],"excludeKeywords":[],"referenceTitles":[],"maxRuntimeMinutes":null}
+            """;
+        var blankText = full.Replace("\"freeText\":null", "\"freeText\":\"\"", StringComparison.Ordinal);
+        var shortForm = """{"reply":"Here","genres":["action"],"keywords":["ninja"]}""";
+
+        var intents = new List<SearchIntent>();
+        foreach (var answer in new[] { shortForm, full, blankText })
+        {
+            var reply = await Agent(new CannedHandler(Ok(answer))).InterpretAsync([], "ninja movies", "likes action", []);
+            Assert.False(reply.Degraded);
+            intents.Add(reply.Intent);
+        }
+
+        Assert.All(intents, i =>
+        {
+            Assert.Equal(intents[0].Genres, i.Genres);
+            Assert.Equal(intents[0].Keywords, i.Keywords);
+            Assert.Equal(intents[0].MinYear, i.MinYear);
+            Assert.Equal(intents[0].MaxYear, i.MaxYear);
+            Assert.Equal(intents[0].FreeText, i.FreeText);
+            Assert.Equal(intents[0].MediaTypes, i.MediaTypes);
+        });
+    }
+
+    [Theory]
+    [InlineData("I found a few for you. {\"reply\":\"Here are some.\",\"genres\":[\"action\"],\"keywords\":[\"ninja\"]}")]
+    [InlineData("{\"reply\":\"Here are some.\",\"genres\":[\"action\"],\"keywords\":[\"ninja\"]}\n{\"reply\":\"again\"}")]
+    [InlineData("Sure! {\"reply\":\"Here are some.\",\"genres\":[\"action\"],\"keywords\":[\"ninja\"]} Enjoy.")]
+    public async Task An_interpret_object_wrapped_in_text_is_read_and_the_text_discarded(string content)
+    {
+        // A model on json_object (strict retired for it) still writes text around its object. The
+        // object is the answer; the text is not a reason to bill a retry and degrade the turn.
+        var handler = new CannedHandler(Ok(content));
+
+        var reply = await Agent(handler).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.Single(handler.Bodies);
+        Assert.False(reply.Degraded);
+        Assert.Equal("Here are some.", reply.Reply);
+        Assert.Contains("ninja", reply.Intent.Keywords);
+    }
+
+    [Fact]
+    public async Task Prose_with_no_object_counts_as_a_malformed_answer_retries_once_and_degrades()
+    {
+        // The exact eval failure: both attempts open "I…" and carry no object at all. It is retried
+        // once, then the turn is DEGRADED with MalformedAnswer on its record — the figure the
+        // fallback rate is counted from — and the reply claims nothing.
+        var handler = new CannedHandler(Ok("I can help you find ninja films."), Ok("I'd suggest some ninja films."));
+        var interpreter = new HeuristicInterpreter();
+
+        var reply = await Agent(handler, interpreter).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.Equal(2, handler.Bodies.Count);
+        Assert.True(reply.Degraded);
+        Assert.Equal(AgentFailureKind.MalformedAnswer, reply.Failure);
+        Assert.Equal(AgentReply.DegradedReply, reply.Reply);
+        Assert.Equal(1, interpreter.InterpretCalls); // recovery reads the intent; the reply stays degraded
+    }
+
+    [Theory]
+    [InlineData("trailing")]
+    [InlineData("preamble")]
+    public async Task A_rerank_object_with_text_around_it_keeps_its_verdicts(string shape)
+    {
+        // The heist turn's retry: one complete results object, then a stray quote on the next line —
+        // and six titles lost their verdicts to "invalid after a single JSON value".
+        var obj = $$"""{"results":[{"titleId":"{{TitleA}}","fit":0.81,"why":"Your kind of slow-burn chase."},{"titleId":"{{TitleB}}","fit":0.4,"why":"A quiet courtroom piece you rate."}]}""";
+        var content = shape == "trailing" ? obj + "\n\"" : "Here are the scores: " + obj;
+
+        var results = await Agent(new CannedHandler(Ok(content))).RerankBatchAsync(Titles(), "q", "taste");
+
+        Assert.Equal(ResultSource.Llm, results[0].FitSource);
+        Assert.Equal(0.81d, results[0].Fit, 3);
+        Assert.Equal(ResultSource.Llm, results[1].FitSource);
+        Assert.Equal(ResultSource.Fallback, results[2].FitSource); // the title it skipped
+    }
+
+    [Fact]
+    public async Task A_cut_off_rerank_object_is_still_no_object()
+    {
+        // Salvage reads a COMPLETE object only; it never repairs one.
+        var content = $$"""{"results":[{"titleId":"{{TitleA}}","fit":0.81,"why":"Your kind of slow""";
+
+        var results = await Agent(new CannedHandler(Ok(content))).RerankBatchAsync(Titles(), "q", "taste");
+
+        Assert.All(results, r => Assert.Equal(ResultSource.Fallback, r.FitSource));
+    }
+
+    [Theory]
+    [InlineData(ApiUsagePurpose.RerankFeed, null, true)]
+    [InlineData(ApiUsagePurpose.RerankPage, null, true)]
+    [InlineData(ApiUsagePurpose.RerankAsk, "yes", true)]
+    [InlineData(ApiUsagePurpose.RerankAsk, "partial", false)]
+    [InlineData(ApiUsagePurpose.RerankExpand, "no", false)]
+    public async Task A_hedged_why_is_dropped_where_it_would_caption_a_pick(string purpose, string? satisfies, bool dropped)
+    {
+        // Round-1 surface review defect 2: "…though this is a much slower drama than the action and
+        // adventure you often prefer" captioned a pick. On a pick the hedge goes and the fit stays;
+        // where the title only partly or does not satisfy the request, the line explains the miss.
+        const string Hedged = "A boxing drama about legacy, though this is a much slower drama than the action and adventure you often prefer.";
+        var verdict = satisfies is null ? string.Empty : $",\"satisfies\":\"{satisfies}\"";
+        var content = $$"""{"results":[{"titleId":"{{TitleA}}","fit":0.8,"why":"{{Hedged}}"{{verdict}}}]}""";
+
+        var results = await Agent(new CannedHandler(Ok(content))).RerankBatchAsync(Titles(), "q", "taste", anchorName: null, purpose);
+
+        Assert.Equal(ResultSource.Llm, results[0].FitSource);
+        Assert.Equal(0.8d, results[0].Fit, 3);
+        Assert.Equal(dropped ? ResultSource.Fallback : ResultSource.Llm, results[0].WhySource);
+        Assert.Equal(dropped ? string.Empty : Hedged, results[0].Why);
+    }
+
+    [Fact]
+    public async Task A_clean_why_on_a_pick_is_kept()
+    {
+        // The control for the hedge rule: the same pick, a line that does not argue against itself.
+        var content = $$"""{"results":[{"titleId":"{{TitleA}}","fit":0.8,"why":"A boxing drama about legacy, told with the patience you rate.","satisfies":"yes"}]}""";
+
+        var results = await Agent(new CannedHandler(Ok(content))).RerankBatchAsync(
+            Titles(), "q", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+
+        Assert.Equal(ResultSource.Llm, results[0].WhySource);
+    }
+
+    [Fact]
+    public void The_prompts_carry_no_anchor_jargon_example_and_no_golden_topic_noun()
+    {
+        // "shares the anchor's slow-burn small-town dread" taught the model the jargon seven of
+        // seven anchored lines then used. And a topic noun a golden scenario asks about, written
+        // into a prompt as the worked example, coaches exactly that scenario.
+        Assert.DoesNotContain("anchor's", OpenRouterSearchAgent.RerankSystemPrompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("anchor's", OpenRouterSearchAgent.AskRerankSystemPrompt, StringComparison.OrdinalIgnoreCase);
+        foreach (var prompt in new[]
+                 {
+                     OpenRouterSearchAgent.InterpretSystemPrompt, OpenRouterSearchAgent.RerankSystemPrompt,
+                     OpenRouterSearchAgent.AskRerankSystemPrompt,
+                 })
+        {
+            Assert.DoesNotContain("samurai", prompt, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ninja", prompt, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // WS-2's ask, carried by the integrator: the user's own topic word leads the keywords, so
+        // the counts and the copy describe what was asked for rather than a synonym the model chose.
+        Assert.Contains("the FIRST is the user's own topic word", OpenRouterSearchAgent.InterpretSystemPrompt, StringComparison.Ordinal);
+
+        // The feed's prompt is still the prefix of the request-judging one.
+        Assert.StartsWith(OpenRouterSearchAgent.RerankSystemPrompt, OpenRouterSearchAgent.AskRerankSystemPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_cache_salt_carries_a_fingerprint_of_the_prompt_and_schema_each_purpose_is_sent_with()
+    {
+        var agent = Agent(new CannedHandler(Ok("{}")));
+        var feed = OpenRouterSearchAgent.PromptVersion(ApiUsagePurpose.RerankFeed);
+        var ask = OpenRouterSearchAgent.PromptVersion(ApiUsagePurpose.RerankAsk);
+        var interpret = OpenRouterSearchAgent.PromptVersion(ApiUsagePurpose.SearchAgent);
+
+        Assert.Matches("^p[0-9a-f]{8}$", feed);
+
+        // One prompt, one version: feed, page and the legacy purpose share it; Ask and expand share
+        // theirs; interpret is its own. Edit any of them and its version moves on its own.
+        Assert.Equal(feed, OpenRouterSearchAgent.PromptVersion(ApiUsagePurpose.RerankPage));
+        Assert.Equal(feed, OpenRouterSearchAgent.PromptVersion(ApiUsagePurpose.Rerank));
+        Assert.Equal(ask, OpenRouterSearchAgent.PromptVersion(ApiUsagePurpose.RerankExpand));
+        Assert.Equal(3, new[] { feed, ask, interpret }.Distinct().Count());
+
+        Assert.EndsWith(":" + feed, agent.CacheSalt(ApiUsagePurpose.RerankFeed), StringComparison.Ordinal);
+        Assert.Contains("|none:", agent.CacheSalt(ApiUsagePurpose.RerankFeed), StringComparison.Ordinal); // the effort
+        Assert.StartsWith(RerankCacheVersion.Current + ":", agent.CacheSalt(ApiUsagePurpose.RerankAsk), StringComparison.Ordinal);
+        Assert.NotEqual(agent.CacheSalt(ApiUsagePurpose.RerankFeed), agent.CacheSalt(ApiUsagePurpose.RerankAsk));
+    }
+
+    [Fact]
+    public void The_rerank_cache_key_carries_the_salt_the_context_and_the_candidate_set()
+    {
+        var account = Guid.NewGuid();
+        var batch = new[] { TitleA, TitleB, TitleC };
+        var key = RerankCacheKey.For("feedfit", "rr2:m|none:p00000000", account, TitleA, "row-1", batch);
+
+        // Order and duplicates do not matter — the agent shuffles the prompt itself.
+        Assert.Equal(key, RerankCacheKey.For("feedfit", "rr2:m|none:p00000000", account, TitleA, "row-1", [TitleC, TitleA, TitleB, TitleA]));
+
+        // Every part does. The same title judged among other companions is another observation.
+        Assert.NotEqual(key, RerankCacheKey.For("feedfit", "rr2:m|none:p00000000", account, TitleA, "row-1", [TitleA, TitleB]));
+        Assert.NotEqual(key, RerankCacheKey.For("feedfit", "rr2:m|low:p00000000", account, TitleA, "row-1", batch));
+        Assert.NotEqual(key, RerankCacheKey.For("feedfit", "rr2:m|none:p11111111", account, TitleA, "row-1", batch));
+        Assert.NotEqual(key, RerankCacheKey.For("feedfit", "rr2:m|none:p00000000", account, TitleA, "row-2", batch));
+        Assert.NotEqual(key, RerankCacheKey.For("feedfit", "rr2:m|none:p00000000", Guid.NewGuid(), TitleA, "row-1", batch));
+        Assert.NotEqual(key, RerankCacheKey.For("feedfit", "rr2:m|none:p00000000", account, TitleB, "row-1", batch));
+        Assert.Matches("^c[0-9a-f]{16}$", RerankCacheKey.CandidateSet(batch));
+    }
+
+    [Fact]
+    public async Task Every_ask_path_call_reserves_against_a_per_account_ceiling()
+    {
+        // Round-1 review defect 5: the turn's question-reading calls (search-agent and its recovery
+        // interpreter, search-interpret) were admitted with no per-account ceiling. This drives every
+        // model call the shipping Ask path can make — the interpret, its retry, the recovery
+        // interpreter, the request-judging re-rank and the expansion — through a recording gate.
+        var gate = new RecordingGate();
+        var account = new FrostAura.Reel.Application.Tenancy.AccountContext();
+        account.SetAccount(Guid.NewGuid());
+        var config = LiveConfig();
+        var interpreterClient = new HttpClient(new InterpreterHandler(Envelope("""{"genres":["action"],"keywords":["ninja"]}""")))
+        {
+            BaseAddress = new Uri("https://openrouter.invalid/api/v1/"),
+        };
+        var interpreter = new OpenRouterSearchInterpreter(
+            interpreterClient, Recorder(), config, NullLogger<OpenRouterSearchInterpreter>.Instance, account, gate: gate);
+        var handler = new CannedHandler(
+            Ok("I can help with that."), Ok("Still prose."), Ok("""{"results":[]}"""), Ok("""{"results":[]}"""));
+        var agent = new OpenRouterSearchAgent(
+            new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            interpreter, Recorder(), config, NullLogger<OpenRouterSearchAgent>.Instance, account, gate: gate);
+
+        await agent.InterpretAsync([], "ninja movies", "likes action", []);
+        await agent.RerankBatchAsync(Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankAsk);
+        await agent.RerankBatchAsync(Titles(), "ninja movies", "taste", anchorName: null, ApiUsagePurpose.RerankExpand);
+
+        Assert.Equal(
+            [ApiUsagePurpose.SearchAgent, ApiUsagePurpose.SearchAgent, ApiUsagePurpose.SearchInterpret,
+                ApiUsagePurpose.RerankAsk, ApiUsagePurpose.RerankExpand],
+            gate.Calls.Select(c => c.Purpose));
+        Assert.All(gate.Calls, c =>
+        {
+            Assert.Equal(account.AccountId, c.AccountId);
+            Assert.True(FrostAura.Reel.Application.Llm.LlmCallGate.IsGated(c.Purpose), c.Purpose);
+            Assert.True(
+                FrostAura.Reel.Application.Llm.AskBudget.For(config, c.Purpose) is not null
+                    || ApiUsagePurpose.RerankFamily.Contains(c.Purpose),
+                c.Purpose);
+        });
+
+        // And the v2 purposes, which no shipping path calls yet, are gated the same way.
+        Assert.All(ApiUsagePurpose.AskFamily, p => Assert.True(FrostAura.Reel.Application.Llm.LlmCallGate.IsGated(p), p));
+    }
+
+    private static IConfiguration LiveConfig() =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OPENROUTER_API_KEY"] = "test-key-not-a-real-one",
+                ["TestHelpers:ModelStubMode"] = "false",
+            })
+            .Build();
+
+    /// <summary>Admits every call and records who asked for what.</summary>
+    private sealed class RecordingGate : FrostAura.Reel.Application.Llm.ILlmCallGate
+    {
+        public List<(Guid? AccountId, string Purpose)> Calls { get; } = [];
+
+        public Task<FrostAura.Reel.Application.Llm.LlmAdmission> TryReserveAsync(
+            Guid? accountId, string purpose, long estimatedTokens, CancellationToken ct)
+        {
+            lock (Calls)
+            {
+                Calls.Add((accountId, purpose));
+            }
+
+            return Task.FromResult(FrostAura.Reel.Application.Llm.LlmAdmission.Unmetered);
+        }
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────

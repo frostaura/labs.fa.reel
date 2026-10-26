@@ -10,6 +10,7 @@ using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Lens;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ml;
+using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using FrostAura.Reel.Infrastructure.Adapters;
@@ -584,6 +585,79 @@ public class LensPipelineTests(PostgresFixture fixture)
         var only = Assert.Single(rows); // rewritten in place: the unique key is (hash, prompt)
         Assert.Equal(currentSalt, only.ModelId);
         Assert.Equal(LensSource.Fresh, (await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default)).Source);
+    }
+
+    // ── A hedged hook is never served (round-1 review: hedges rendered on Home) ────────────────
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_stored_note_with_a_hedged_hook_is_not_served_and_is_rewritten_in_place(bool olderCleanNote)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync("Parked", 2010);
+
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var taste = await deps.Features.BuildTasteStateAsync(accountId, DateTime.UtcNow, default);
+        var built = await deps.Facts.BuildAsync(accountId, taste, DateTime.UtcNow, default);
+        await deps.Lens.ResolveOrGenerateAsync(accountId, titleId, taste, built.ProfileHash, default);
+
+        // A note written before the hedge rule: same key, a hook that argues against its pick.
+        var row = await db.TitleLensCopies.SingleAsync(c => c.AccountId == accountId && c.TitleId == titleId);
+        var clean = JsonSerializer.Deserialize<LensNote>(row.LensJson, JsonOptions)!;
+        row.LensJson = JsonSerializer.Serialize(clean with { Hook = "A quieter, heavier detour you might still take." }, JsonOptions);
+        if (olderCleanNote)
+        {
+            // Vary the fixture: with an older clean note on the ladder, that is what is served.
+            db.TitleLensCopies.Add(new TitleLensCopy
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleId,
+                ProfileHash = "older0000000000a",
+                PromptVersion = row.PromptVersion,
+                ModelId = row.ModelId,
+                LensJson = JsonSerializer.Serialize(clean, JsonOptions),
+                Status = LensStatus.Done,
+                GeneratedAt = row.GeneratedAt.AddDays(-3),
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        var resolved = await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default);
+        var many = await deps.Lens.ResolveManyAsync(accountId, [titleId], built.ProfileHash, default);
+        if (olderCleanNote)
+        {
+            Assert.Equal(LensSource.Stale, resolved.Source);
+            Assert.Equal(clean.Hook, resolved.Note!.Hook);
+            Assert.Equal(clean.Hook, many[titleId].Note!.Hook);
+        }
+        else
+        {
+            Assert.Equal(LensSource.None, resolved.Source);
+            Assert.False(many.ContainsKey(titleId));
+        }
+
+        // The next pass rewrites it under today's guards, once, in place.
+        var outcome = await deps.Lens.GenerateForJobAsync(accountId, taste, built.ProfileHash, [titleId], default);
+        Assert.Equal(1, outcome.Written);
+        var current = await deps.Lens.ResolveAsync(accountId, titleId, built.ProfileHash, default);
+        Assert.Equal(LensSource.Fresh, current.Source);
+        Assert.False(SecondPersonVoice.SoundsHedged(current.Note!.Hook));
+        Assert.Single(await db.TitleLensCopies
+            .Where(c => c.AccountId == accountId && c.TitleId == titleId && c.ProfileHash == built.ProfileHash)
+            .ToListAsync());
+
+        // And a second pass spends nothing: the rewritten note is servable.
+        var again = await deps.Lens.GenerateForJobAsync(accountId, taste, built.ProfileHash, [titleId], default);
+        Assert.Equal(0, again.Written);
     }
 
     [Fact]
