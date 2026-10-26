@@ -213,6 +213,20 @@ public class BuildFeedJobHandler(
             return;
         }
 
+        // ── Short-circuit: nothing this build reads has changed (task 13, F+1) ───────────────
+        // A Preserve build over unchanged inputs used to refresh the pool (TMDB), score the field
+        // and assemble the page only to find it item-for-item the Active one. The fingerprint of
+        // everything it reads that the account or its model can change decides that before any of
+        // it runs: when it matches the fingerprint that produced the Active snapshot, the page cannot
+        // differ, and the build records its no-op and stops. Remembered in process; a restart costs
+        // one ordinary build. Never for a user-forced or trust-purge build, which are Fresh anyway.
+        var inputHash = await FeedBuildInputs.HashAsync(db, account, artifact, DateOnly.FromDateTime(now), ct);
+        if (await UnchangedSinceActiveAsync(accountId, artifact.Id, job.TriggerReason, inputHash, now, ct) is { } activeId)
+        {
+            await RecordUnchangedAsync(job, accountId, artifact.Id, activeId, now, stopwatch, ct);
+            return;
+        }
+
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         // The online residual head for this Active artifact, loaded once and folded into every score
         // (first-pass ranking + final predicted rating). Zero head ⇒ no change from the base model.
@@ -461,6 +475,7 @@ public class BuildFeedJobHandler(
             logger.LogInformation(
                 "Feed unchanged for {AccountId} — snapshot suppressed ({Recalibrated} score(s) updated in place).",
                 accountId, scoreUpdates.Count);
+            await RememberInputsAsync(accountId, inputHash, ct);
             return;
         }
 
@@ -499,6 +514,7 @@ public class BuildFeedJobHandler(
 
         // See the no-op path above: the availability and enrichment enqueues both race the index.
         await db.SaveAbsorbingRebuildRaceAsync(ct);
+        RememberInputs(accountId, snapshot.Id, inputHash);
 
         events.Publish(accountId, PipelineEventTypes.StageChanged, new Dictionary<string, object?> { ["stage"] = "FeedReady" });
         events.Publish(accountId, PipelineEventTypes.FeedReady, new Dictionary<string, object?>
@@ -523,6 +539,91 @@ public class BuildFeedJobHandler(
                 + "{Dropped} rail(s) dropped).",
             snapshot.Id, accountId, candidates.Count, capture.AveragePriorMagnitude, capture.JudgedBeforeAssembly,
             capture.AnchorsPassedOver, capture.RailsDropped);
+    }
+
+    /// <summary>The fingerprint the Active snapshot was dealt (or kept) under, remembered per account in process.</summary>
+    private sealed record BuiltFrom(Guid SnapshotId, string InputHash);
+
+    private static string InputsKey(Guid accountId) => $"feedinputs:{accountId:N}";
+
+    /// <summary>How long a remembered fingerprint is trusted: past a day the stable-tonight key has moved anyway.</summary>
+    private static readonly TimeSpan InputsMemory = TimeSpan.FromHours(26);
+
+    private void RememberInputs(Guid accountId, Guid snapshotId, string inputHash) =>
+        cache.Set(InputsKey(accountId), new BuiltFrom(snapshotId, inputHash), InputsMemory);
+
+    /// <summary>The no-op exit's half: the Active snapshot it kept is the one these inputs produced.</summary>
+    private async Task RememberInputsAsync(Guid accountId, string inputHash, CancellationToken ct)
+    {
+        var activeId = await db.FeedSnapshots
+            .Where(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active)
+            .OrderByDescending(s => s.GeneratedAt)
+            .Select(s => (Guid?)s.Id)
+            .FirstOrDefaultAsync(ct);
+        if (activeId is { } id)
+        {
+            RememberInputs(accountId, id, inputHash);
+        }
+    }
+
+    /// <summary>
+    /// The Active snapshot's id when this build would be a Preserve build over exactly the inputs that
+    /// produced it; null when anything differs, nothing is remembered, or the build would be Fresh.
+    /// </summary>
+    private async Task<Guid?> UnchangedSinceActiveAsync(
+        Guid accountId, Guid artifactId, string? triggerReason, string inputHash, DateTime now, CancellationToken ct)
+    {
+        if (!cache.TryGetValue<BuiltFrom>(InputsKey(accountId), out var built) || built is null || built.InputHash != inputHash)
+        {
+            return null;
+        }
+
+        var active = await db.FeedSnapshots
+            .Where(s => s.AccountId == accountId && s.Status == SnapshotStatus.Active)
+            .OrderByDescending(s => s.GeneratedAt)
+            .Select(s => new { s.Id, s.GeneratedAt, s.ModelArtifactId })
+            .FirstOrDefaultAsync(ct);
+        return active is not null
+            && active.Id == built.SnapshotId
+            && FeedBuildPolicy.Decide(active.GeneratedAt, active.ModelArtifactId, artifactId, triggerReason, now) == FeedBuildMode.Preserve
+                ? active.Id
+                : null;
+    }
+
+    /// <summary>
+    /// The short-circuit's record: a NoOp build row (the instrument shows every run, as the skipped
+    /// exit's does, with the counts it did not compute written as zero), the job's message, and the
+    /// same completed frame a no-op build publishes.
+    /// </summary>
+    private async Task RecordUnchangedAsync(
+        SyncJob job, Guid accountId, Guid artifactId, Guid activeId, DateTime now,
+        System.Diagnostics.Stopwatch stopwatch, CancellationToken ct)
+    {
+        job.ProgressMessage = "feed unchanged — kept tonight's picks";
+        db.FeedBuildStats.Add(new FeedBuildStat
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            FeedSnapshotId = activeId,
+            ModelArtifactId = artifactId,
+            BuiltAt = now,
+            Mode = FeedBuildOutcome.NoOp,
+            ClustersUsed = 0,
+            AnnPerClusterJson = "[]",
+            SeedPoolSize = 0,
+            SeedsUsed = 0,
+            NewlyEligiblePerArmJson = "[]",
+            DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        });
+        await db.SaveAbsorbingRebuildRaceAsync(ct);
+        events.Publish(accountId, PipelineEventTypes.JobCompleted, new Dictionary<string, object?>
+        {
+            ["kind"] = "feed",
+            ["picksChanged"] = 0,
+        });
+        logger.LogInformation(
+            "Feed build for {AccountId} short-circuited: nothing it reads has changed since snapshot {SnapshotId}.",
+            accountId, activeId);
     }
 
     /// <summary>

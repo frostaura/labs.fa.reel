@@ -93,6 +93,46 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     }
 
     [Fact]
+    public async Task A_preserve_build_over_unchanged_inputs_stops_before_the_pool_and_a_changed_input_runs_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Task 13: the fingerprint of everything the build reads decides the no-op before the pool
+        // refresh, the scoring and the assembly run — and a user action still gets a real build.
+        var accountId = await SeedAccountAsync();
+        await SeedLovedTitlesAsync(accountId, 12);
+        await SeedEligibleTitlesAsync(80);
+        await SeedActiveArtifactAsync(accountId);
+        using var processCache = new MemoryCache(new MemoryCacheOptions());
+
+        await RunBuildAsync(accountId, fitCache: processCache);
+        await RunBuildAsync(accountId, fitCache: processCache);
+
+        List<FeedBuildStat> stats;
+        await using (var db = Fixture.CreateContext(new AccountContext()))
+        {
+            stats = await db.FeedBuildStats.Where(s => s.AccountId == accountId).OrderBy(s => s.BuiltAt).ToListAsync();
+        }
+
+        Assert.Equal(2, stats.Count);
+        Assert.Equal(FeedBuildOutcome.Fresh, stats[0].Mode);
+        Assert.Equal(FeedBuildOutcome.NoOp, stats[1].Mode);
+        Assert.Equal(0, stats[1].ShortlistCount); // nothing was scored
+        Assert.Equal(stats[0].FeedSnapshotId, stats[1].FeedSnapshotId);
+
+        // A new condition is an input: the next build runs in full (Fresh, because the user changed
+        // what may appear — the filter save's own reason).
+        await AddContentFilterAsync(accountId, FilterKind.ExcludeKeyword, $"kw-{Guid.NewGuid():N}");
+        await RunBuildAsync(accountId, fitCache: processCache);
+        await using var verify = Fixture.CreateContext(new AccountContext());
+        var third = await verify.FeedBuildStats.Where(s => s.AccountId == accountId).OrderByDescending(s => s.BuiltAt).FirstAsync();
+        Assert.True(third.ShortlistCount > 0);
+    }
+
+    [Fact]
     public async Task Every_progress_frame_is_on_the_job_row_before_it_is_published()
     {
         if (!Fixture.Available)
