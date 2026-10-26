@@ -2,6 +2,7 @@
 
 - API build 99c0761 · snapshot `reel-2026-10-23` · built from artifact `unrecorded`, serving `unrecorded` · one Fresh build (Succeeded) · 300 s
 - Jobs drained before the first fetch: not recorded (recording predates the drain) · model key: unrecorded
+- Digest arrivals: not recorded (the recording predates seeding; its digest read the snapshot as stored)
 - Exposures written by the run: 282; Trakt calls: 0; cost $0.0262
 
 - **Coverage: 1 surface(s) have NO data** — digest: no cards. Their zeros below are not measurements.

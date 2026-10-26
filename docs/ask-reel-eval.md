@@ -60,11 +60,20 @@ node scripts/eval/askreel.mjs compare .tmp/eval/<date>/<name>/metrics.json --bas
 node --test 'scripts/eval/*.test.mjs'
 node scripts/eval/askreel.mjs replay <recording.json>
 node scripts/eval/askreel.mjs check [--db reel_eval]          # --db also executes every truth query used
+node scripts/eval/askreel.mjs check --db reel_eval --api http://127.0.0.1:5180   # + the truth against the API's own eligibility (cost meter)
 
 # Surface harness: one Fresh build (API started with --jobs), then every surface; compare against a baseline.
 node scripts/eval/surfaces.mjs --api http://127.0.0.1:5180 --db reel_eval --label <name> --fresh --api-env <eval env> --build-info <...>
 node scripts/eval/surfaces.mjs --replay <recording.json>
-node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/9f42c9d-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
+node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/224eea0-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
+
+# Zero-footprint audit of the exposure log (exit 1 on any exposure served after its lock started).
+node scripts/eval/footprint-audit.mjs --db reel_eval [--since <ISO time>]
+
+# Exposure-free perf (task 11): the built app (npm run build; VITE_API_TARGET=<api> npx vite preview --port 5207) on an
+# eval-slot API. Stubs /feed/more, the digest, lens and Ask at the route layer and exits 1 if the account's exposure
+# count moved. First hero card, LCP, CLS, load and long tasks, p50/p95 over cold runs.
+node scripts/eval/perf.mjs --app http://127.0.0.1:5207 --api http://127.0.0.1:5187 --db <slot db> --runs 7
 
 # Ledger cost check (§7): every eval and lane database together, and the provider's own figure for a key.
 node scripts/eval/ledger.mjs --all
@@ -126,6 +135,17 @@ bar at badge precision, and `supply/rules.sql` for which single rule holds each 
 (a knockout). `check --db` fails when `rules.sql` and `_eligible.sql` disagree on any title;
 `SupplyTruthParityTests` pins both files to `SupplyReporter` on fixtures that fill every bucket and trip
 every relaxation from both sides, and pins the reply wording the eval parses (`NoneFoundCopy`).
+
+**The ExcludeGenre rule includes the taxonomy gaps.** The API also excludes a title by an alias genre
+(Trakt's `children` for family, `suspense` for thriller) or by a stand-in keyword on a medium whose TMDB
+taxonomy has no id for the genre (`GenreStandIns`: TV romance, horror, history, thriller and music; anime
+and musical on both media). Both truth files carry that rule's DATA as generated `VALUES` lists between
+`-- BEGIN/END GENERATED` markers; `StandInTruthSqlTests` fails when they drift from `GenreStandIns`, and
+`REEL_REGENERATE_EVAL_SQL=1` rewrites them. The matching itself is hand-written and pinned by the parity
+tests' stand-in fixtures. `check --db <db> --api <url of an API on that db>` then holds the truth to the
+API's own eligibility on the real catalogue: the cost meter's eligible count and every saved rule's
+marginal must equal the SQL's, ±0 (IREV3-SYS-02: without the stand-ins the truth counted 3,825 eligible
+where the API counts 3,508, and nine marginals moved).
 
 A truth set is written as a concept, deliberately, not as a copy of the pipeline's topic rule. Where the
 two would differ on a real title the truth says why: `samurai.sql` matches "ronin" as a TMDB keyword (the
@@ -194,15 +214,35 @@ them, which is the point of the baseline.
 | Holdout (sealed) | Valid for the holdout **as it was** (scored against `scenarios-at-recording/`); the holdout has since been revised, so a fresh holdout baseline (one run, 64 turns) is owed before G2 |
 | Surfaces (`eval/surfaces/baselines/99c0761/`) | Partial, keyed (founder's key): digest returned no cards (no data), person pages and Watch tonight were not fetched, chained jobs ran mid-fetch, the artifact was not recorded (`provenance.md`), and it kept only `whyThis`, so the lens copy and hooks users read are unmeasured. Re-scored under the 2026-10-25 rules (stub 0.212). Re-run with the current harness on the eval key |
 | Surfaces, keyless (`eval/surfaces/baselines/99c0761-keyless/`) | The pre-program keyless reference, kept for what the re-baseline was measured against. Current harness: raw copy fields, every surface, jobs drained, input artifact recorded. No model call ran, so its why-lines are the templater's and the stored lens copy (`provenance.md`) |
-| Surfaces, keyless (`eval/surfaces/baselines/9f42c9d-keyless/`) | **The reference for keyless runs** since round 3 (IR2S-04). Same snapshot and input artifact. Its lower anchored and Similar volume is the evidence gate (3 of 99c0761's 126 anchored cards pass it; all 12 of these do). Its stub rate is owned by WS-5, not waived: the absolute stub gate still fails (`provenance.md`) |
+| Surfaces, keyless (`eval/surfaces/baselines/9f42c9d-keyless/`) | The keyless reference for round 3 (IR2S-04), superseded by `224eea0-keyless` because it seeded no digest arrivals. Same snapshot and input artifact. Its lower anchored and Similar volume is the evidence gate (3 of 99c0761's 126 anchored cards pass it; all 12 of these do). Its stub rate is owned by WS-5, not waived: the absolute stub gate still fails (`provenance.md`) |
+| Surfaces, keyless (`eval/surfaces/baselines/224eea0-keyless/`) | **The reference for keyless runs** since wave A (IREV3S-02): the first baseline with seeded digest arrivals (`eval/surfaces/seed-arrivals.sql`), so the digest is measured (10 cards) instead of empty. Reproduced on a second fresh clone with every compare row passing (`provenance.md`). The keyed `99c0761/` seeded nothing, so `--compare` refuses it against a seeded run until the keyed re-run on the eval key |
 
 ## The LLM judge and κ
 
-The 0–3 "satisfies the request" judge and the 100-item founder labelling set are WS-7 task 5. Until the
-founder's labels exist and Cohen's κ ≥ 0.6, **only the SQL truth gates** — the judge gates nothing.
-That is the state today. The 45-minute and $1 full-run acceptance lines include the judge's ~2,000 calls,
-so neither is proven yet: the 99c0761 runs (open 27.2 min + holdout 10.0 min, $0.47) measured the SQL-truth
-half only.
+`scripts/eval/judge.mjs` (WS-7 task 5). Until the founder's labels exist and the judge agrees with them at
+Cohen's κ ≥ 0.6, **only the SQL truth gates** — the judge gates nothing. That is the state today: the
+labels are not in, and no judge call has been made (no eval key).
+
+- **The judge.** `judge.mjs run --recording <r> --db <db> --judge-env <env file>` asks
+  `openai/gpt-6-luna` at reasoning effort none, temperature 0, structured output: one call per card in each
+  turn's top 8 ("does this title satisfy the request", 0–3, UMBRELA-style — one passage per call, so cards
+  never anchor each other) and one per reply ("is the reply grounded in its cards"). The card is described
+  by the catalogue's own facts, never by the system's why-line. It refuses the founder's key without his
+  recorded sign-off, stops at the first 401/402/403 (§7 rule 4), and records usage and length stops.
+- **The prompt is sealed** in `~/src/fa.reel-eval-sealed/askreel/judge/prompt.md` (two sections,
+  `## satisfies` and `## grounded`); the runner refuses a prompt inside a worktree and records only its
+  SHA-256, so the engine under test cannot be tuned to the judge's wording.
+- **The labels.** `eval/askreel/labels/founder-100.csv`: 100 cards from 100 different turns of the 99c0761
+  open baseline, drawn by `judge.mjs items --seed 42`, with the scale and instructions in
+  `eval/askreel/labels/README.md`. WS-3's 20 ninja films are appended as confirm rows (`--confirm`) once
+  that list exists.
+- **κ.** `judge.mjs kappa --labels … --judge …`: unweighted Cohen's κ on the 0–3 scale is the
+  pre-registered gate (`gates.json` → `judge`, registered before any label or verdict existed), with the
+  quadratic-weighted and relevant/not-relevant κ beside it. It exits 0 only at κ ≥ 0.6 with every labelled
+  item judged; then `judge.mjs compare --judge <run> --baseline <baseline judge> --kappa <kappa.json>` holds `judge.relevantShare` (−0.02) and `judge.ungroundedReplies` (+0) against the baseline, and refuses runs judged with a different prompt or model.
+
+The 45-minute and $1 full-run acceptance lines include the judge's ~2,000 calls, so neither is proven yet:
+the 99c0761 runs (open 27.2 min + holdout 10.0 min, $0.47) measured the SQL-truth half only.
 
 ## The surface harness
 
@@ -236,6 +276,45 @@ the hedge family includes comparisons against the account's own taste ("…slowe
 often prefer") and departure framing ("detour", "change of pace"). Both families are shared with the
 golden eval, and were calibrated on the snapshot's 316 lens copies and stored why-lines, each hit read by
 hand.
+
+**Digest arrivals are seeded (IREV3S-02).** The digest announces offers that arrived in the trailing
+week (`TitleAvailabilities.FirstSeenAt`), and a snapshot carries none, so `--fresh` first runs
+`eval/surfaces/seed-arrivals.sql` — the 60 most popular titles' streaming-now offers in the account's
+region stamped as arrived yesterday, eligible or not, so the digest's own filter is what the leak check
+measures — after the chained jobs drain and before the digest build. How arrivals were made is part of a
+recording (`digestSeed`) and a comparability key: `--compare` refuses runs seeded differently.
+
+## The exclusion matrix (WS-7 task 7)
+
+`Tests/IntegrationTests/ExclusionMatrix` holds every standing exclusion — genre (and its TV stand-in),
+keyword, language, crowd floor, the For-you bar, and five kinds of footprint (watched, rated, not
+interested, dropped, saved) — for movies and TV against every surface: tonight's picks, feed rows and their
+pages, genre rails, Similar, the digest, Ask, typeahead, person pages, Saved and the Watch-tonight pin;
+each both **standing** (before the build) and **late** (added after it, no rebuild). It runs in the
+ordinary integration pass (the `postgres` collection) in about two minutes.
+
+- **A world of its own.** One small catalogue in a database the class creates and drops, because ranked
+  surfaces on the shared test database rank every other class's leftovers. Accounts come in pairs — a
+  guarded account carrying the exclusion and a control twin with the same history and none — and every
+  surface is fetched through the real API host with offline TMDB and the stub model.
+- **A cell counts only when it was exercised**: the control was shown the violator on that surface. An
+  unexercised cell fails. Focus pairs (the pool narrowed by watching everything else, with decoys above it
+  for the rows) exercise the capped surfaces; pin pairs (a queue of one title) exercise the pin; a film
+  carrying a horror stand-in must stay visible (films have the horror id).
+- **The contract** is in `MatrixCells`: suggestion surfaces hold out everything; lookups (typeahead,
+  person pages) hold out every content rule but may show what you have seen; Saved holds out content rules
+  and consumed saves and must show what you saved; the pin is never a ruled-out or consumed title, and
+  under the bar its reason says so. The bar is held at badge precision.
+- **Leaks are ratcheted** in `MatrixLedger` with their defect and owner (XM-01…07). A ledgered cell that
+  stops leaking fails, so the ledger can only shrink as owners land fixes.
+
+**The timestamp-aware audit.** `node scripts/eval/footprint-audit.mjs --db <eval db> [--since <ISO>]`
+lists every exposure in the append-only log served after its title entered the footprint or a standing
+exclusion, per surface and reason, with the share more than a day late and the share from FD-18 probe
+conversations (`eval/surfaces/footprint-audit.sql`; `FootprintAuditSqlTests` pins it). It exits 1 on any;
+with `--since <a harness run's start>` it gates that run's own exposures. Rules are judged as they are
+defined today (stand-ins included), and the maturity ceiling and deleted rules are not audited, because
+nothing records when they started.
 
 ## Spend
 

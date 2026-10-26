@@ -2,6 +2,7 @@
 
 - API build 99c0761245d7e9a312595d693753f30b3e9388df · snapshot `reel-2026-10-23` · built from artifact `0536acbf-a642-4a26-a68d-19a0b527c484`, serving `9b286afb-327e-417b-b9fe-29d5b95f2490` · one Fresh build (Succeeded) · 74 s
 - Jobs drained before the first fetch: yes · model key: no OpenRouter key (model calls cannot succeed)
+- Digest arrivals: not recorded (the recording predates seeding; its digest read the snapshot as stored)
 - Exposures written by the run: 279; Trakt calls: 0; cost $0
 
 - Coverage: every surface answered with data.

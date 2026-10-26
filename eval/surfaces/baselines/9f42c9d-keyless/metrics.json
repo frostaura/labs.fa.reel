@@ -55,7 +55,8 @@
   "costUsd": 0,
   "traktCalls": 0,
   "jobsDrainedBeforeFetch": true,
-  "wallSeconds": 39
+  "wallSeconds": 39,
+  "digestSeed": "unrecorded"
  },
  "perSurface": {
   "feed-hero": {

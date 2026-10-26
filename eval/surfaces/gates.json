@@ -1,9 +1,9 @@
 {
   "note": "Surface-harness gates (WS-7 tasks 8 and 10), registered 2026-10-24 after the 99c0761 surface baseline existed (the P0 review found the harness had no gate or compare at all). Absolute targets are task 8's goals and are the G1 bar, not a per-merge bar; the regression tolerances block a merge. Rates are per suggestion card, because the cards a build serves differ run to run. Change them only by a reviewed commit, never to make a run pass.",
   "baselines": {
-    "keyless": "eval/surfaces/baselines/9f42c9d-keyless",
+    "keyless": "eval/surfaces/baselines/224eea0-keyless",
     "keyed": "eval/surfaces/baselines/99c0761",
-    "note": "--compare runs against these. 99c0761-keyless stays in the tree as the pre-program reference the 9f42c9d re-baseline was measured against (its provenance.md)."
+    "note": "--compare runs against these. 99c0761-keyless and 9f42c9d-keyless stay in the tree as references (their provenance.md); neither seeded digest arrivals, so --compare refuses them against a seeded run. The keyed 99c0761 is in the same position until its re-run on the eval key."
   },
   "gates": [
     {
@@ -113,6 +113,13 @@
       "dataSeen": "the round-2 integration surface run (9f42c9d, keyless) and WS-7's own re-run of the same commit, both against 99c0761-keyless",
       "change": "(a) the keyless regression baseline moves from 99c0761-keyless to 9f42c9d-keyless; (b) stub why-lines are reported by kind (generic once-per-page, composed tail, aligned template) and every kind still counts in stubRate and the stub gate",
       "reason": "IR2S-04. The volume drop (anchored 126 -> 12, Similar 60 -> 6, feed rows 40 -> 16) is the spec'd evidence gate: applied as written, 3 of 99c0761's 126 anchored cards pass it and all 12 of 9f42c9d's do (provenance.md). The stub rise (0.0035 -> 0.095) is NOT waived: the absolute stub gate stays at 0 and keeps failing, owned by WS-5 (change request: an empty caption instead of GenericFallback, and no composed tail, per the program's 'templated anchored line or nothing'). Aligning STUB_WHY with the once-per-page policy instead was rejected: it would pass one boilerplate line on every rail and page (8 on the 8 genre rails) as honest copy."
+    },
+    {
+      "when": "2026-10-26",
+      "commit": "ws7-wave-a (IREV3S-02)",
+      "dataSeen": "int-r3's keyless run (1c11da8: digest empty, BuildDigest wrote a 0-item row) and two keyless runs of 224eea0 on fresh clones (both: 10 digest cards, every gate and every compare row passing)",
+      "change": "(a) --fresh seeds digest arrivals (eval/surfaces/seed-arrivals.sql: the 60 most popular titles with a streaming-now offer in the account's region marked FirstSeenAt yesterday, FetchedAt now; eligible or not) after the drain and builds the digest after it; (b) how arrivals were made is a comparability key, so --compare refuses runs seeded differently; (c) the keyless baseline moves to 224eea0-keyless, the build/trust-v1 tip at the time",
+      "reason": "IREV3S-02. Since M3b the digest reads arrivals (FirstSeenAt inside the week), and the snapshot carries none, so the digest had no data on every eval copy and the coverage gate could never pass. Seeding what a provider-set change would stamp measures the digest's selection, copy and eligibility (ineligible titles are seeded on purpose, so the leak check sees the digest's own filter). Accepting an empty digest instead was rejected: it would leave the surface unmeasured for the rest of the program."
     }
   ]
 }

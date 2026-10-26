@@ -45,7 +45,8 @@
   "costUsd": 0.0262145,
   "traktCalls": 0,
   "jobsDrainedBeforeFetch": null,
-  "wallSeconds": 300
+  "wallSeconds": 300,
+  "digestSeed": "unrecorded"
  },
  "perSurface": {
   "feed-hero": {

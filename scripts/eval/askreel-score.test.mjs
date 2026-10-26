@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN } from "./askreel-score.mjs";
-import { compactTurn, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar } from "./askreel.mjs";
+import { compactTurn, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar, costMeterDrift, COST_METER_MAX_COSTED_RULES } from "./askreel.mjs";
 import { envKeyHash, classifyKey, modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -622,3 +622,32 @@ function loadOpen(recording) {
   }
   return out;
 }
+
+// IREV3-SYS-02: the SQL truth against the API's own eligibility on the real catalogue, via the cost meter.
+test("costMeterDrift is silent when the API's cost report and the SQL truth agree", () => {
+  const truth = [["eligible", "", "421"], ["marginal", "ExcludeGenre/romance", "12"], ["marginal", "Language/en", "300"]];
+  const report = { eligible: 421, byRule: [
+    { kind: "ExcludeGenre", value: "romance", marginal: 12 },
+    { kind: "Language", value: "en", marginal: 300 },
+    // A value the SQL never sees alone (one of a multi-value allow-list) is costed 0 by the meter's clamp.
+    { kind: "IncludeGenre", value: "drama", marginal: 0 },
+  ] };
+  assert.deepEqual(costMeterDrift(truth, report), []);
+});
+
+test("costMeterDrift names a moved eligible count, a moved marginal and a rule only the SQL knows", () => {
+  const truth = [["eligible", "", "44"], ["marginal", "ExcludeGenre/romance", "3"], ["marginal", "MinYear/2000", "5"]];
+  const report = { eligible: 41, byRule: [{ kind: "ExcludeGenre", value: "romance", marginal: 2 }] };
+  assert.deepEqual(costMeterDrift(truth, report), [
+    "eligible: API 41 vs SQL truth 44",
+    "ExcludeGenre/romance: API 2 vs SQL truth 3",
+    "MinYear/2000: SQL truth 5, but the API costs no such rule",
+  ]);
+});
+
+test("costMeterDrift skips rules past the meter's cap, which it reports without a marginal", () => {
+  const byRule = Array.from({ length: COST_METER_MAX_COSTED_RULES + 1 }, (_, i) => ({ kind: "ExcludeKeyword", value: `k${i}`, marginal: 0 }));
+  const last = `ExcludeKeyword/k${COST_METER_MAX_COSTED_RULES}`;
+  const truth = [["eligible", "", "10"], ["marginal", last, "4"]];
+  assert.deepEqual(costMeterDrift(truth, { eligible: 10, byRule }), []);
+});

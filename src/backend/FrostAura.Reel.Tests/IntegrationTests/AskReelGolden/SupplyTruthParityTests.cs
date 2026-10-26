@@ -149,6 +149,44 @@ public class SupplyTruthParityTests(PostgresFixture fixture)
         Assert.Contains($"Turning off “{knockout.Label}” would unlock {knockout.WouldUnlock}.", reply, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Supply_truth_equals_the_reporter_when_a_stand_in_keyword_or_alias_is_the_knockout()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // IREV3-SYS-02's live cases in miniature: an animation film that also carries the "anime" keyword
+        // fails TWO exclusions, so dropping animation alone unlocks nothing (the truth used to count it as an
+        // animation knockout); a romantic show and a period-drama show are held out by their stand-ins.
+        var topic = $"goldensupply{Guid.NewGuid():N}";
+        var account = await SeedAccountAsync(null,
+            (FilterKind.ExcludeGenre, "animation"),
+            (FilterKind.ExcludeGenre, "anime"),
+            (FilterKind.ExcludeGenre, "romance"),
+            (FilterKind.ExcludeGenre, "history"),
+            (FilterKind.ExcludeGenre, "thriller"));
+
+        await SeedTitleAsync(topic, t => (t.Genres, t.Keywords) = (["animation"], [topic, "anime"]));
+        await SeedTitleAsync(topic, t => t.Genres = ["animation"]);
+        await SeedTitleAsync(topic, t => (t.MediaType, t.Keywords) = (MediaType.Show, [topic, "romantic"]));
+        await SeedTitleAsync(topic, t => (t.MediaType, t.Keywords) = (MediaType.Show, [topic, "period drama"]));
+        await SeedTitleAsync(topic, t => (t.MediaType, t.Genres) = (MediaType.Show, ["suspense"]));
+        // Eligible: the same labels on a film (which has romance and history ids), and a show with "bromance".
+        await SeedTitleAsync(topic, t => t.Keywords = [topic, "romantic", "period drama"]);
+        await SeedTitleAsync(topic, t => (t.MediaType, t.Keywords) = (MediaType.Show, [topic, "bromance"]));
+
+        var (report, truth) = await BothAsync(account, topic);
+
+        Assert.Equal(Shape(report), truth);
+        Assert.Equal(
+            "matching=7|lowVoteMatches=0|alreadySeen=0|savedOrDismissed=0|excludedByConditions=5|eligible=2"
+            + "|unscored=2|belowFloor=0|clearingFloor=0"
+            + "|ExcludeGenre/animation=1|ExcludeGenre/history=1|ExcludeGenre/romance=1|ExcludeGenre/thriller=1",
+            truth);
+    }
+
     /// <summary>The reporter's counts and the eval's SQL truth for one topic, each as a comparable line.</summary>
     private async Task<(SupplyReport Report, string Truth)> BothAsync(Guid accountId, string topic, MediaScope media = MediaScope.Any)
     {

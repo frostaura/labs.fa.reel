@@ -6,11 +6,13 @@
 //   node scripts/eval/surfaces.mjs --replay <recording.json> [--out <dir>]
 //   node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline <metrics.json>
 //
-// --fresh  enqueues ONE Fresh feed build (POST /api/feed/rebuild) and one digest build (the BuildDigest
-//          job the weekly service would enqueue; it makes no model call), waits for both, then waits for
-//          EVERY job the build chained (Train, PersonaliseTitles, RefreshAvailability, a second BuildFeed…)
-//          to drain before the first fetch, so nothing moves underneath the measurement. The API must run
-//          with its job runner on (run-api.sh --jobs). Without --fresh it measures the snapshot as stored.
+// --fresh  enqueues ONE Fresh feed build (POST /api/feed/rebuild), waits for it and for EVERY job the
+//          build chained (Train, PersonaliseTitles, RefreshAvailability, a second BuildFeed…) to drain, then
+//          seeds digest arrivals (eval/surfaces/seed-arrivals.sql: the 60 most popular titles' streaming
+//          offers marked as arrived yesterday, eligible or not) and builds the digest (the BuildDigest job the
+//          weekly service would enqueue; it makes no model call) before the first fetch, so nothing moves
+//          underneath the measurement. The API must run with its job runner on (run-api.sh --jobs). Without
+//          --fresh it measures the snapshot as stored.
 // Then it fetches every surface — the feed (tonight's picks and every row), each row's next page, each
 // genre rail, the Similar rail for the first five picks, the digest, Saved and its Watch-tonight pin,
 // person pages for the people credited on tonight's picks, and typeahead — recording each response's
@@ -73,6 +75,7 @@ function render(rec, m) {
   const L = [`# Surface harness — ${s.label}`, "",
     `- API build ${s.build ?? "unrecorded"} · snapshot \`${s.snapshotId}\` · built from artifact \`${s.artifact?.input ?? "unrecorded"}\`, serving \`${s.artifact?.id ?? "unrecorded"}\`${s.artifact?.changedDuringFetch ? " (**CHANGED during the fetch**)" : ""} · ${s.fresh ? `one Fresh build (${s.buildStatus})` : "stored snapshot, no build"} · ${s.wallSeconds} s`,
     `- Jobs drained before the first fetch: ${s.jobsDrainedBeforeFetch === null ? "not recorded (recording predates the drain)" : s.jobsDrainedBeforeFetch ? "yes" : "NO"} · model key: ${s.modelKey}`,
+    `- Digest arrivals: ${digestSeedLine(rec.digestSeed)}`,
     `- Exposures written by the run: ${s.exposuresWritten}; Trakt calls: ${s.traktCalls}; cost $${fmt(s.costUsd, 4)}`, "",
     s.complete ? "- Coverage: every surface answered with data." : `- **Coverage: ${s.surfacesWithoutData.length} surface(s) have NO data** — ${s.surfacesWithoutData.join("; ")}. Their zeros below are not measurements.`, "",
     "## Gates (task 8 targets)", "", "| Gate | Value | Target | Status |", "|---|---|---|---|",
@@ -96,6 +99,13 @@ function render(rec, m) {
   L.push("", "## Ledger delta", "", "| Provider | Model | Purpose | Calls | Prompt | Completion |", "|---|---|---|---|---|---|",
     ...(m.ledger ?? []).map((r) => `| ${r.provider} | ${r.model || "—"} | ${r.purpose || "—"} | ${r.calls} | ${r.promptTokens} | ${r.completionTokens} |`));
   return L.join("\n") + "\n";
+}
+
+function digestSeedLine(seed) {
+  if (seed === undefined) return "not recorded (the recording predates seeding; its digest read the snapshot as stored)";
+  if (seed === null) return "none seeded (no Fresh build)";
+  if (seed.skipped) return `none seeded — ${seed.skipped}`;
+  return `${seed.titles.length} title(s) seeded as arrived yesterday (eval/surfaces/seed-arrivals.sql, ${seed.requested} requested), digest build ${seed.buildStatus ?? "unrecorded"}`;
 }
 
 if (args.compare) {
@@ -157,6 +167,16 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 let buildStatus = null;
 let jobsDrainedBeforeFetch = null;
+let digestSeed = null;
+// How many titles' streaming offers seed-arrivals.sql marks as arrived yesterday. Part of what makes two
+// runs comparable (compareSurfaces): the digest's card count depends on it.
+const DIGEST_SEED_TITLES = 60;
+function seedArrivals() {
+  const hasColumn = sql(db, `select count(*) from information_schema.columns where table_name = 'TitleAvailabilities' and column_name = 'FirstSeenAt'`)[0][0] === "1";
+  if (!hasColumn) return { titles: [], requested: DIGEST_SEED_TITLES, skipped: "the schema predates TitleAvailabilities.FirstSeenAt (that build's digest reads FetchedAt)" };
+  const titles = sql(db, readFileSync(join(repo, "eval", "surfaces", "seed-arrivals.sql"), "utf8"), { account: accountId, n: DIGEST_SEED_TITLES }).map((r) => r[0]);
+  return { titles, requested: DIGEST_SEED_TITLES, skipped: null };
+}
 // The artifact the surfaces are built FROM (compareSurfaces' comparability key): before the Fresh build,
 // because the build can chain a retrain whose new artifact differs on every run.
 const artifactInput = activeArtifact();
@@ -164,10 +184,6 @@ if (args.fresh) {
   const enqueuedAfter = new Date(Date.now() - 1000).toISOString();
   const r = await post("/api/feed/rebuild", {});
   if (!ok(r)) die(`rebuild refused: HTTP ${r.status}`);
-  // The digest is built by the weekly service, which is off on the eval stack; enqueue the same job it
-  // would, so the digest surface is measured rather than empty.
-  sql(db, `insert into "SyncJobs" ("Id", "AccountId", "Kind", "Priority", "Status", "AttemptCount", "EnqueuedAt", "TriggerReason")
-           values (gen_random_uuid(), :'account', 'BuildDigest', 2, 'Pending', 0, now(), 'eval-surface-harness')`, { account: accountId });
   for (let i = 0; i < 180; i++) {
     const row = sql(db, `select "Status" from "SyncJobs" where "AccountId" = :'account' and "Kind" = 'BuildFeed' and "EnqueuedAt" >= '${enqueuedAfter}' order by "EnqueuedAt" asc limit 1`, { account: accountId })[0];
     buildStatus = row?.[0] ?? "Pending";
@@ -183,6 +199,24 @@ if (args.fresh) {
     await sleep(5000);
   }
   console.error(`surfaces: chained jobs ${jobsDrainedBeforeFetch ? "drained" : "STILL RUNNING after 20 min"}`);
+  // The digest is built by the weekly service, which is off on the eval stack; enqueue the same job it
+  // would, so the digest surface is measured rather than empty. A snapshot carries no arrivals (FirstSeenAt
+  // inside the week), so first seed the ones a provider-set change would have stamped (IREV3S-02,
+  // eval/surfaces/seed-arrivals.sql) — after the drain, so a chained RefreshAvailability cannot overwrite them.
+  digestSeed = seedArrivals();
+  const digestAfter = new Date(Date.now() - 1000).toISOString();
+  sql(db, `insert into "SyncJobs" ("Id", "AccountId", "Kind", "Priority", "Status", "AttemptCount", "EnqueuedAt", "TriggerReason")
+           values (gen_random_uuid(), :'account', 'BuildDigest', 2, 'Pending', 0, now(), 'eval-surface-harness')`, { account: accountId });
+  let digestStatus = "Pending";
+  for (let i = 0; i < 120; i++) {
+    digestStatus = sql(db, `select "Status" from "SyncJobs" where "AccountId" = :'account' and "Kind" = 'BuildDigest' and "EnqueuedAt" >= '${digestAfter}' order by "EnqueuedAt" asc limit 1`, { account: accountId })[0]?.[0] ?? "Pending";
+    if (digestStatus === "Succeeded" || digestStatus === "Failed") break;
+    await sleep(5000);
+  }
+  digestSeed.buildStatus = digestStatus;
+  console.error(`surfaces: digest build ${digestStatus} on ${digestSeed.titles.length} seeded arrival title(s)`);
+  if (digestStatus !== "Succeeded") die(`the digest build did not succeed (${digestStatus})`);
+  if (openJobs() !== 0) jobsDrainedBeforeFetch = false;
   await relink();
 }
 const artifactAtStart = activeArtifact();
@@ -287,7 +321,7 @@ const jobsDuringRun = sql(db, `select "Kind", "Status", count(*) from "SyncJobs"
 const names = Object.fromEntries(blocks.flatMap((bl) => bl.cards.map((c) => [c.titleId, c.name])));
 
 const rec = {
-  kind: "surface-recording", version: 3, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch,
+  kind: "surface-recording", version: 3, label, build: buildInfo?.commit ?? null, buildInfo, modelKey: modelKey.recorded, api, db, snapshotId, accountId, fresh: Boolean(args.fresh), buildStatus, jobsDrainedBeforeFetch, digestSeed,
   artifact: { input: artifactInput[0], id: artifactAtStart[0], version: artifactAtStart[1] ? Number(artifactAtStart[1]) : null, changedDuringFetch: artifactAtStart[0] !== artifactAtEnd[0] },
   startedAt: new Date(started).toISOString(), wallSeconds: Math.round((finished - started) / 1000), blocks, names,
   ledger: ledgerDelta, costUsd, exposuresWritten: exposuresAfter - exposuresBefore, jobsDuringRun,

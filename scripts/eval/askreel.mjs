@@ -474,6 +474,61 @@ select count(*) from "Titles" t
         and not exists (select 1 from eval_rules r where r."Id" = t."Id"));`;
 }
 
+// The rule truth restated as the conditions editor's cost meter counts it (FilterCostMeter, POST
+// /api/settings/filters/cost): eligible = footprint-free titles that break no content rule, and each rule's
+// marginal = footprint-free titles that rule ALONE holds out. Maturity is not a content rule (the meter does
+// not apply it), so it is left out of both. Rows: ("eligible", "", n) and ("marginal", "Kind/Value", n).
+function costTruthSql() {
+  return `create temp view eval_rules as ${stripSql(readFileSync(join(evalDir, "supply", "rules.sql"), "utf8"))};
+with ff as (select t."Id" from "Titles" t
+             where not exists (select 1 from "WatchedTitles" w where w."AccountId" = :'account' and w."TitleId" = t."Id")
+               and not exists (select 1 from "UserRatings" r where r."AccountId" = :'account' and r."TitleId" = t."Id")
+               and not exists (select 1 from "UserTitleReactions" ux where ux."AccountId" = :'account' and ux."TitleId" = t."Id"
+                                 and ux."RevokedAt" is null and ux."Kind" in ('NotInterested', 'SaveForLater', 'Dropped'))),
+     fails as (select r."Id", count(*) as n, min(r."Kind") as kind, min(r."Value") as value
+                 from eval_rules r where r."Kind" <> 'Maturity' group by r."Id")
+select 'eligible', '', ((select count(*) from ff) - (select count(*) from fails))::int
+union all
+select 'marginal', kind || '/' || value, count(*)::int from fails where n = 1 group by kind, value;`;
+}
+
+// Where the API's cost meter and the SQL rule truth disagree on the account's SAVED rules: the eligible
+// count, and every costed rule's marginal (a rule the SQL never sees alone — a value of a multi-value
+// allow-list — is expected at 0, the meter's clamp). Rules past the meter's cap carry no marginal and are
+// skipped. Returns human-readable lines; empty when the two statements agree.
+export const COST_METER_MAX_COSTED_RULES = 30;
+export function costMeterDrift(truthRows, report) {
+  const drift = [];
+  const truthEligible = Number(truthRows.find(([kind]) => kind === "eligible")?.[2] ?? NaN);
+  if (truthEligible !== report.eligible) drift.push(`eligible: API ${report.eligible} vs SQL truth ${truthEligible}`);
+  const marginals = new Map(truthRows.filter(([kind]) => kind === "marginal").map(([, key, n]) => [key, Number(n)]));
+  const seen = new Set();
+  (report.byRule ?? []).forEach((rule, i) => {
+    const key = `${rule.kind}/${rule.value}`;
+    seen.add(key);
+    if (i >= COST_METER_MAX_COSTED_RULES) return;
+    const expected = marginals.get(key) ?? 0;
+    if (expected !== rule.marginal) drift.push(`${key}: API ${rule.marginal} vs SQL truth ${expected}`);
+  });
+  for (const [key, n] of marginals) if (!seen.has(key) && !key.endsWith("/*")) drift.push(`${key}: SQL truth ${n}, but the API costs no such rule`);
+  return drift;
+}
+
+// The API's cost report for the linked account's saved rules (dev/link on the eval stack only).
+async function costReport(api) {
+  const link = await fetch(`${api}/api/auth/dev/link`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  if (!link.ok) throw new Error(`dev/link failed: ${link.status}`);
+  const cookie = link.headers.getSetCookie().map((c) => c.split(";")[0]).find((c) => c.startsWith("reel_at="));
+  const { accountId } = await link.json();
+  const saved = await fetch(`${api}/api/settings/filters`, { headers: { Cookie: cookie } });
+  if (!saved.ok) throw new Error(`GET /api/settings/filters failed: ${saved.status}`);
+  const cost = await fetch(`${api}/api/settings/filters/cost`, {
+    method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify(await saved.json()),
+  });
+  if (!cost.ok) throw new Error(`POST /api/settings/filters/cost failed: ${cost.status}`);
+  return { accountId, report: await cost.json() };
+}
+
 // supply.sql's (Bucket, Kind, Value, Count) rows as one object; knockouts biggest first, as the API orders them.
 export function supplyFromRows(rows, minVotes) {
   const out = { minVotes, knockouts: [] };
@@ -550,7 +605,22 @@ if (mode === "check") {
       const concept = [...usedTruthKeys(sc)][0];
       if (concept) supplyTruth(args.db, accountId, readTruth(concept), "Any", DEFAULT_MIN_VOTES);
     } catch (err) { errors.push(`supply truth failed on ${args.db}: ${String(err.message).split("\n")[0]}`); }
-  }
+    // With --api (an API running on that same database): the SQL truth against the API's own eligibility,
+    // through the cost meter — the eligible count and every rule's marginal. Fixture parity tests pin the
+    // predicates; this pins them on the real catalogue, where a stand-in keyword or alias the truth does not
+    // model shows up as a count that moved (IREV3-SYS-02).
+    if (args.api) {
+      try {
+        const { accountId: linked, report } = await costReport(String(args.api));
+        if (linked !== accountId) errors.push(`--api links account ${linked}, but ${args.db}'s first account is ${accountId} — is the API on ${args.db}?`);
+        else {
+          const drift = costMeterDrift(sql(args.db, costTruthSql(), { account: accountId }), report);
+          for (const d of drift) errors.push(`API eligibility and the SQL truth disagree on ${args.db}: ${d}`);
+          if (!drift.length) console.log(`api parity: eligible ${report.eligible}, ${report.byRule.length} rule marginals agree with the SQL truth`);
+        }
+      } catch (err) { errors.push(`API eligibility parity failed: ${String(err.message).split("\n")[0]}`); }
+    }
+  } else if (args.api) errors.push("--api needs --db (the database that API runs on)");
   const multi = sc.filter((s) => s.turns.length > 1).length;
   const turns = sc.reduce((n, s) => n + s.turns.length, 0);
   console.log(`scenarios ${sc.length} (multi-turn ${multi}), turns ${turns}`);

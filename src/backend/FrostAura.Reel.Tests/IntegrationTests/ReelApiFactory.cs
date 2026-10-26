@@ -76,6 +76,48 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// </summary>
 public sealed class ReelApiFactory : WebApplicationFactory<Program>
 {
+    /// <summary>The fixture's shared throwaway database — the harness every test class uses.</summary>
+    public ReelApiFactory()
+        : this(databaseConnectionString: null)
+    {
+    }
+
+    /// <summary>
+    /// Private, with <see cref="ForDatabase"/> as its door: xUnit refuses a class fixture with more than
+    /// one public constructor.
+    /// </summary>
+    private ReelApiFactory(string? databaseConnectionString)
+    {
+        if (databaseConnectionString is not null)
+        {
+            if (PostgresFixtureGate.LiveTargetRefusal(databaseConnectionString) is { } refusal)
+            {
+                throw new InvalidOperationException(refusal);
+            }
+
+            var shared = new Npgsql.NpgsqlConnectionStringBuilder(TestConnectionString);
+            var own = new Npgsql.NpgsqlConnectionStringBuilder(databaseConnectionString);
+            if (own.Host != shared.Host || own.Port != shared.Port || own.Database == shared.Database)
+            {
+                throw new InvalidOperationException(
+                    "A database override must be a different database on the fixture's own eval server.");
+            }
+        }
+
+        _databaseConnectionString = databaseConnectionString;
+    }
+
+    private readonly string? _databaseConnectionString;
+
+    /// <summary>
+    /// A harness whose EF context opens <paramref name="databaseConnectionString"/> instead of the shared
+    /// fixture database: a test class that needs a catalogue nothing else writes into (the exclusion
+    /// matrix, whose ranking surfaces would otherwise rank every other class's leftovers) owns a
+    /// database of its own. It must name a different database on the same server as
+    /// <see cref="PostgresFixtureGate.ConnectionStringVariable"/>'s and pass the live-target guard.
+    /// </summary>
+    public static ReelApiFactory ForDatabase(string databaseConnectionString) => new(databaseConnectionString);
+
     /// <summary>
     /// Every credential that must be blank for a test run to be incapable of spending money or
     /// touching a third party. <c>OPENAI_API_KEY</c> is here even though nothing reads it today:
@@ -160,6 +202,16 @@ public sealed class ReelApiFactory : WebApplicationFactory<Program>
             // The one adapter with no stub contract of its own.
             services.RemoveAll<IEmbeddingProvider>();
             services.AddSingleton<IEmbeddingProvider, StubEmbeddingProvider>();
+
+            // A class that owns its database: every EF context the host builds opens it instead. The
+            // registration is replaced whole (options and their configuration callbacks), so nothing
+            // composes the shared connection string back in.
+            if (_databaseConnectionString is { } own)
+            {
+                services.RemoveAll<DbContextOptions<ReelDbContext>>();
+                services.RemoveAll<Microsoft.EntityFrameworkCore.Infrastructure.IDbContextOptionsConfiguration<ReelDbContext>>();
+                services.AddDbContext<ReelDbContext>(options => options.UseNpgsql(own, npgsql => npgsql.UseVector()));
+            }
         });
     }
 

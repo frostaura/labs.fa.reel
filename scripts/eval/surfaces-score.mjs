@@ -118,6 +118,7 @@ export function scoreSurfaces(rec) {
       copyClaimsChecked: null, randomCosineP90: f.randomCosineP90,
       exposuresWritten: rec.exposuresWritten, costUsd: rec.costUsd ?? null, traktCalls: (rec.ledger ?? []).filter((r) => r.provider === "Trakt").reduce((n, r) => n + r.calls, 0),
       jobsDrainedBeforeFetch: rec.jobsDrainedBeforeFetch ?? null, wallSeconds: rec.wallSeconds,
+      digestSeed: digestSeedKey(rec),
     },
     perSurface,
     hedges,
@@ -134,9 +135,22 @@ export function scoreSurfaces(rec) {
 // every run), or, with no build, the one serving the fetch. Null when the recording predates the field.
 export const inputArtifact = (summary) => summary.artifact?.input ?? (summary.fresh ? null : summary.artifact?.id ?? null);
 
+// How the digest's arrivals were made, as a comparability key (IREV3S-02): "seeded:<n requested>" when
+// seed-arrivals.sql ran, "none" when nothing was seeded (no Fresh build, or a schema that predates
+// FirstSeenAt), "unrecorded" for a recording that predates seeding. The digest's card count depends on it,
+// so two runs that differ here measure different digests.
+export function digestSeedKey(rec) {
+  if (rec.digestSeed === undefined) return "unrecorded";
+  if (rec.digestSeed === null || rec.digestSeed.skipped) return "none";
+  return `seeded:${rec.digestSeed.requested}`;
+}
+
 export function compareSurfaces(current, baseline, gates) {
   const c = current.summary, b = baseline.summary;
   if ((c.snapshotId ?? null) !== (b.snapshotId ?? null)) return { refused: `snapshots differ (${c.snapshotId} vs ${b.snapshotId})`, rows: [] };
+  if ((c.digestSeed ?? "unrecorded") !== (b.digestSeed ?? "unrecorded")) {
+    return { refused: `digest arrivals were made differently (${c.digestSeed ?? "unrecorded"} vs ${b.digestSeed ?? "unrecorded"}) — re-baseline with the same seeding`, rows: [] };
+  }
   const ci = inputArtifact(c), bi = inputArtifact(b);
   if (ci && bi && ci !== bi) return { refused: `model artifacts differ (${ci} vs ${bi})`, rows: [] };
   const rows = [];

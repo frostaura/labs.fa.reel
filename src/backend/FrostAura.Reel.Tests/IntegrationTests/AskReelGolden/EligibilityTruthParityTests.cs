@@ -274,6 +274,55 @@ public class EligibilityTruthParityTests(PostgresFixture fixture)
         Assert.Equal(new[] { "show-clean", "show-aired-2005", "released-beats-aired" }.Select(k => t[k]).ToHashSet(), truth);
     }
 
+    [Fact]
+    public async Task Truth_and_builder_agree_on_genre_stand_ins_and_aliases_on_both_media()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // IREV3-SYS-02: an ExcludeGenre also removes a title by an alias genre (Trakt's children / suspense)
+        // or by a stand-in keyword on a medium whose TMDB taxonomy has no id for the genre. Before the truth
+        // modelled this, every row below marked "out" was truth-eligible while the API excluded it.
+        var account = await SeedAccountAsync(
+            (FilterKind.ExcludeGenre, "anime"),
+            (FilterKind.ExcludeGenre, "romance"),
+            (FilterKind.ExcludeGenre, "history"),
+            (FilterKind.ExcludeGenre, "thriller"),
+            (FilterKind.ExcludeGenre, "family"),
+            (FilterKind.ExcludeGenre, "musical"));
+        var t = new Dictionary<string, Guid>
+        {
+            // Out: anime has an id on neither medium, so its exact label removes films and shows alike.
+            ["movie-anime"] = await SeedTitleAsync(genres: ["animation"], keywords: ["anime"]),
+            ["show-anime"] = await SeedTitleAsync(mediaType: MediaType.Show, genres: ["animation"], keywords: ["anime"]),
+            // Out: a whole-word romance stem inside a TV label; a period label stands in for history on TV.
+            ["show-teenage-romance"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["teenage romance"]),
+            ["show-romantic"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["romantic"]),
+            ["show-period-drama"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["period drama"]),
+            // Out: Trakt's alias genres.
+            ["show-suspense"] = await SeedTitleAsync(mediaType: MediaType.Show, genres: ["suspense"]),
+            ["show-children"] = await SeedTitleAsync(mediaType: MediaType.Show, genres: ["children"]),
+            // Out: musical has no id anywhere, exact label.
+            ["movie-jukebox-musical"] = await SeedTitleAsync(keywords: ["jukebox musical"]),
+            // In: films have a romance and a history id, so a keyword never stands in for them there.
+            ["movie-teenage-romance"] = await SeedTitleAsync(keywords: ["teenage romance"]),
+            ["movie-period-drama"] = await SeedTitleAsync(keywords: ["period drama"]),
+            // In: a stem only inside another word, and an exact anime label only as a substring.
+            ["show-bromance"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["bromance"]),
+            ["show-anime-inspired"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["anime inspired"]),
+            ["show-clean"] = await SeedTitleAsync(mediaType: MediaType.Show, keywords: ["heist"]),
+        };
+
+        var (builder, truth) = await BothAsync(account, t.Values);
+
+        Assert.Equal(builder, truth);
+        Assert.Equal(
+            new[] { "movie-teenage-romance", "movie-period-drama", "show-bromance", "show-anime-inspired", "show-clean" }.Select(k => t[k]).ToHashSet(),
+            truth);
+    }
+
     /// <summary>
     /// The eligible ids among <paramref name="titles"/> by every statement of the rule: the persisted
     /// builder overload and the <see cref="FilterRuleSet"/> overload (each through the in-memory maturity

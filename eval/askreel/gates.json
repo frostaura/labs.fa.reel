@@ -283,6 +283,33 @@
       "dataSeen": "the round-2 integration reviewer's hand counts on the slot snapshot (ninja movies 70 matching / 18 seen at the vote floor; samurai 66 / 8) and the three 99c0761 recordings",
       "change": "(a) supply count accuracy also reads the REPLY's words (replySupply: the partition, the under-bar and unscored counts, each named relaxation) and compares every done.supply bucket, not only seen and unscored; (b) a named relaxation must equal the truth and no unnamed one may unlock more than the smallest named; (c) a none-found reply whose report says a partition or an unscored count was due but which states none the parser reads fails, so reworded copy cannot pass vacuously; (d) truth/samurai.sql no longer matches 'ronin' in a name (keyword arm unchanged) and its name arm is a whole word",
       "reason": "IREV2-SYS-03: the scorer never compared a reply's numbers with the truth, so a live golden run could neither pass nor fail the WS-2 acceptance, and the samurai truth counted Ronin (1998), a crime thriller with no samurai tag, putting the truth one over an honest reply. Each change makes a dishonest reply fail; the 99c0761 baselines re-score byte-identical (their v1 replies state no counts)."
+    },
+    {
+      "when": "2026-10-26",
+      "commit": "ws7-wave-a (task 5)",
+      "dataSeen": "none: no judge verdict and no founder label exists",
+      "change": "adds the judge section: kappaMin 0.6 on unweighted Cohen's kappa, the labelling set's provenance, and the two judge metrics that join the regression set once kappa clears",
+      "reason": "Task 5. Registered before any data so the bar cannot be fitted to the first kappa, and so the judge cannot gate on the strength of its own unmeasured opinion."
     }
-  ]
+  ],
+  "judge": {
+    "note": "Pre-registered 2026-10-26, before any judge verdict or founder label exists (§4.12, WS-7 task 5). The judge (scripts/eval/judge.mjs: openai/gpt-6-luna at reasoning effort none, one call per top-8 card, sealed prompt) gates NOTHING until its agreement with the founder's 100 labels reaches kappaMin; below it, or until the labels exist, only the SQL truth gates.",
+    "kappaMin": 0.6,
+    "kappa": "Cohen's unweighted kappa on the 0-3 'satisfies the request' scale over the founder's labelled items, every labelled item judged (judge.mjs kappa). The quadratic-weighted and relevant (>= 2) kappas are reported beside it and gate nothing.",
+    "labels": "eval/askreel/labels/founder-100.csv, drawn by judge.mjs items --seed 42 from the 99c0761 open baseline recording",
+    "whenGating": [
+      {
+        "metric": "judge.relevantShare",
+        "label": "Share of judged top-8 cards that satisfy the request (>= 2)",
+        "higherIsBetter": true,
+        "tolerance": 0.02
+      },
+      {
+        "metric": "judge.ungroundedReplies",
+        "label": "Replies the judge finds ungrounded in their cards",
+        "higherIsBetter": false,
+        "tolerance": 0
+      }
+    ]
+  }
 }

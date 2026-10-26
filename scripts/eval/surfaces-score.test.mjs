@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { scoreSurfaces, stubKind, compareSurfaces, surfaceGates, rendered, inputArtifact } from "./surfaces-score.mjs";
+import { scoreSurfaces, stubKind, compareSurfaces, surfaceGates, rendered, inputArtifact, digestSeedKey } from "./surfaces-score.mjs";
 import { STUB_WHY, HEDGE_WHY } from "./askreel-score.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -201,6 +201,18 @@ test("compare: runs are comparable by the artifact their build started from, not
   assert.match(compareSurfaces(s({ input: "art-9", id: "art-1" }), b, gates).refused, /model artifacts differ \(art-9 vs art-0\)/);
   assert.equal(compareSurfaces(s({ id: "art-1" }), b, gates).refused, null, "a Fresh recording without an input artifact predates the field");
   assert.match(compareSurfaces(s({ id: "art-1" }, false), s({ id: "art-2" }, false), gates).refused, /art-1 vs art-2/, "with no build, the serving artifact is the input");
+});
+
+test("compare (IREV3S-02): runs whose digest arrivals were made differently are refused, not scored", () => {
+  const s = (digestSeed) => scoreSurfaces({ ...rec([{ surface: "digest", key: "digest", status: 200, cards: [card(A)] }]), snapshotId: "s1", fresh: true, digestSeed });
+  const seeded = s({ titles: [A, B], requested: 60, skipped: null, buildStatus: "Succeeded" });
+  assert.equal(seeded.summary.digestSeed, "seeded:60");
+  assert.equal(digestSeedKey({ digestSeed: null }), "none");
+  assert.equal(digestSeedKey({ digestSeed: { titles: [], requested: 60, skipped: "the schema predates FirstSeenAt" } }), "none");
+  assert.equal(digestSeedKey({}), "unrecorded");
+  assert.equal(compareSurfaces(seeded, seeded, gates).refused, null);
+  assert.match(compareSurfaces(seeded, s(undefined), gates).refused, /digest arrivals were made differently \(seeded:60 vs unrecorded\)/);
+  assert.match(compareSurfaces(s(null), seeded, gates).refused, /none vs seeded:60/);
 });
 
 test("replay: every committed surface baseline re-scores to its committed metrics", () => {
