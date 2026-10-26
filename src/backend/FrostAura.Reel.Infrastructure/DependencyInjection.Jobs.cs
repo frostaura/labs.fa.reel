@@ -27,7 +27,7 @@ public static partial class DependencyInjection
         services.TryAddSingleton(sp => new SlowCommandDiagnostics(
             sp.GetRequiredService<ILogger<SlowCommandDiagnostics>>(), connectionString));
         // Every context connection carries the session bounds (idle-in-transaction, F+1).
-        services.TryAddSingleton(sp => DatabaseSessionSettings.From(connectionString, sp.GetService<IConfiguration>()));
+        services.TryAddSingleton(DatabaseSessionSettings.For(connectionString));
         services.AddDbContext<ReelDbContext>((sp, options) => options
             .UseNpgsql(sp.GetRequiredService<DatabaseSessionSettings>().ConnectionString, npgsql => npgsql.UseVector())
             .AddInterceptors(sp.GetRequiredService<SlowCommandDiagnostics>()));

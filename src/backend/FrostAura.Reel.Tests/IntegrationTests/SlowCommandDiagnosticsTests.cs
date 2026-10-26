@@ -2,7 +2,6 @@ using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Npgsql;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -77,22 +76,17 @@ public sealed class SlowCommandDiagnosticsTests(JobRunnerDatabaseFixture fixture
     }
 
     [Fact]
-    public void The_session_bound_defaults_to_a_minute_reads_its_override_and_zero_leaves_the_server_alone()
+    public void The_session_bound_is_a_minute_and_keeps_the_options_already_in_the_connection_string()
     {
-        const string Raw = "Host=127.0.0.1;Port=5434;Database=x;Username=u;Password=p";
-        static IConfiguration Config(string? value) => new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { [DatabaseSessionSettings.IdleInTransactionTimeoutKey] = value })
-            .Build();
+        const string Raw = "Host=127.0.0.1;Port=5434;Database=x;Username=u;Password=p;Options=-c statement_timeout=0";
 
-        var defaults = DatabaseSessionSettings.From(Raw, configuration: null);
-        Assert.Equal(TimeSpan.FromSeconds(60), defaults.IdleInTransactionTimeout);
-        Assert.Contains("idle_in_transaction_session_timeout=60000", new NpgsqlConnectionStringBuilder(defaults.ConnectionString).Options, StringComparison.Ordinal);
-        Assert.Equal(TimeSpan.FromSeconds(5), DatabaseSessionSettings.From(Raw, Config("5")).IdleInTransactionTimeout);
-        Assert.Equal(TimeSpan.FromSeconds(60), DatabaseSessionSettings.From(Raw, Config("soon")).IdleInTransactionTimeout);
+        var settings = DatabaseSessionSettings.For(Raw);
 
-        var off = DatabaseSessionSettings.From(Raw, Config("0"));
-        Assert.Null(off.IdleInTransactionTimeout);
-        Assert.Equal(Raw, off.ConnectionString);
+        Assert.Equal(TimeSpan.FromSeconds(60), settings.IdleInTransactionTimeout);
+        Assert.Equal(
+            "-c statement_timeout=0 -c idle_in_transaction_session_timeout=60000",
+            new NpgsqlConnectionStringBuilder(settings.ConnectionString).Options);
+        Assert.Equal(Raw, DatabaseSessionSettings.With(Raw, null).ConnectionString);
     }
 
     [Fact]

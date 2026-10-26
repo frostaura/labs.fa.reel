@@ -1,5 +1,4 @@
 using System.Globalization;
-using Microsoft.Extensions.Configuration;
 using Npgsql;
 
 namespace FrostAura.Reel.Infrastructure.Persistence;
@@ -17,15 +16,13 @@ namespace FrostAura.Reel.Infrastructure.Persistence;
 /// legitimately idles inside a transaction: the two explicit transactions (the claim, a session
 /// rotation) are database-only, and SaveChanges' own is statements back to back.</para>
 ///
-/// <para><c>Database:IdleInTransactionTimeoutSeconds</c> overrides the default; <c>0</c> leaves the
-/// server's setting alone.</para>
+/// <para>A code constant, not a configuration key, like the alert rules: changing the bound is a
+/// reviewed change, and a rollback is the image tag.</para>
 /// </summary>
 public sealed class DatabaseSessionSettings
 {
-    public const string IdleInTransactionTimeoutKey = "Database:IdleInTransactionTimeoutSeconds";
-
     /// <summary>
-    /// The default bound. A minute is two orders of magnitude above the longest gap SaveChanges
+    /// The bound. A minute is two orders of magnitude above the longest gap SaveChanges
     /// leaves between batches, and well under the runner's 12-minute stale window, so a parked
     /// transaction is gone long before anything treats its job as dead.
     /// </summary>
@@ -43,19 +40,9 @@ public sealed class DatabaseSessionSettings
     /// <summary>The bound applied, or null when it is left to the server.</summary>
     public TimeSpan? IdleInTransactionTimeout { get; }
 
-    public static DatabaseSessionSettings From(string connectionString, IConfiguration? configuration)
-    {
-        var timeout = DefaultIdleInTransactionTimeout;
-        var raw = configuration?[IdleInTransactionTimeoutKey];
-        if (!string.IsNullOrWhiteSpace(raw)
-            && int.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds)
-            && seconds >= 0)
-        {
-            timeout = TimeSpan.FromSeconds(seconds);
-        }
-
-        return With(connectionString, timeout > TimeSpan.Zero ? timeout : null);
-    }
+    /// <summary>The settings every context in the app uses.</summary>
+    public static DatabaseSessionSettings For(string connectionString) =>
+        With(connectionString, DefaultIdleInTransactionTimeout);
 
     /// <summary>The settings for an explicit bound (null leaves the server's setting alone). For tests.</summary>
     public static DatabaseSessionSettings With(string connectionString, TimeSpan? idleInTransactionTimeout)
