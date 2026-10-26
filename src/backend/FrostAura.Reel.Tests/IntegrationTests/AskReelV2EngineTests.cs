@@ -173,6 +173,38 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.DoesNotContain(events, e => e.Event is "picks" or "tray");
     }
 
+    /// <summary>
+    /// Clarify: two readings that differ in what they require are asked back once — no search, no
+    /// judge — and the state remembers it, so the planner is never allowed a second one.
+    /// </summary>
+    [Fact]
+    public async Task A_clarifying_question_is_asked_once_with_no_search()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.NewRequest) with
+        {
+            ClarifyQuestion = "Do you mean the film or the series?",
+            ClarifyOptions = ["The film", "The series"],
+        });
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(Input("something like fargo"), accountId, emit, CancellationToken.None);
+
+        var clarify = Assert.Single(events, e => e.Event == "clarify").Data;
+        Assert.Equal("Do you mean the film or the series?", clarify.GetProperty("question").GetString());
+        Assert.Equal(2, clarify.GetProperty("options").GetArrayLength());
+        Assert.Equal(SearchTurnMode.Clarify, outcome.Mode);
+        Assert.Equal(0, judge.Batches);
+        Assert.DoesNotContain(events, e => e.Event is "picks" or "tray" or "none-found");
+        Assert.True(ConversationStateJson.Read(outcome.ConversationStateJson)!.ClarifiedOnce);
+    }
+
     [Fact]
     public async Task A_spent_plan_allowance_is_a_coded_refusal_before_any_work()
     {
