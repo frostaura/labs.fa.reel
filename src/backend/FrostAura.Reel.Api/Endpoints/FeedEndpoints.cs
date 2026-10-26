@@ -142,6 +142,41 @@ public static class FeedEndpoints
             // smallest footprint that still captures every refilled card.
             var refilled = new List<ExposureCard>();
             var excludedTitleIds = await eligibility.InteractedTitleIdsAsync(account.Id, snapshotTitleIds, ct);
+
+            // The same holds for a content rule or a "for you" bar saved after the build (XM-03,
+            // XM-07): the snapshot was dealt under yesterday's rules, and "airtight on every channel"
+            // includes the minutes before the rebuild the save queued. Rules and the maturity ceiling
+            // are read from EligibilityQueryBuilder like the footprint; the bar is the build's own raw
+            // comparison (ForYouBar.Clears), so a card the build would not deal now is not served.
+            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
+                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
+                .Select(f => f.Value)
+                .FirstOrDefaultAsync(ct));
+            var forYouBar = minPredicted ?? 0m;
+            var allowedByRules = (await eligibility.ContentFilteredTitles(account.Id)
+                    .Where(t => snapshotTitleIds.Contains(t.Id))
+                    .Select(t => t.Id)
+                    .ToListAsync(ct))
+                .ToHashSet();
+            var ruledOut = items
+                .Where(x => !allowedByRules.Contains(x.Title.Id)
+                    || !EligibilityQueryBuilder.PassesMaturity(x.Title, account.Settings.MaturityCeiling))
+                .Select(x => x.Title.Id)
+                .ToHashSet();
+            var underBar = items
+                .Where(x => !ruledOut.Contains(x.Title.Id) && !ForYouBar.Clears(x.Item.PredictedRating, forYouBar))
+                .Select(x => x.Title.Id)
+                .ToHashSet();
+            excludedTitleIds = [.. excludedTitleIds, .. ruledOut, .. underBar];
+
+            // A reason written while the bar still relaxed describes cards this read no longer serves.
+            var degradedReason = ForYouBar.IsRetiredRelaxation(snapshot.DegradedReason) ? null : snapshot.DegradedReason;
+            if (underBar.Count > 0)
+            {
+                var heldBack = ForYouBar.HeldBackOnRead(forYouBar, underBar.Count);
+                degradedReason = degradedReason is null ? heldBack : $"{degradedReason} {heldBack}";
+            }
+
             if (excludedTitleIds.Count > 0)
             {
                 // Rows shrink when a since-interacted title is dropped, leaving gaps until the next
@@ -173,6 +208,7 @@ public static class FeedEndpoints
                         where s.AccountId == account.Id && s.ModelArtifactId == snapshot.ModelArtifactId
                             && t.TmdbId != null && t.PosterPath != null
                             && !onFeed.Contains(s.TitleId) && eligibleIds.Contains(s.TitleId)
+                            && (forYouBar <= 0m || s.PredictedRating >= forYouBar)
                         orderby s.PredictedRating descending
                         select new { s.PredictedRating, s.ContributionsJson, Title = t })
                         .Take((needed * 6) + 20)
@@ -341,12 +377,9 @@ public static class FeedEndpoints
                         .Take(3).Select(x => new CardProvider(x.Name, x.LogoPath)).ToList());
 
             // The bar the build required of the hero, re-derived here from the same shared constant.
-            // The build relaxes it silently when nothing clears it — on live data that is the normal
-            // case, not an edge — so the card has to be able to say which side of it a pick sits on.
-            var minPredicted = ContentFilterRules.ParseRating(await db.ContentFilters
-                .Where(f => f.AccountId == account.Id && f.Kind == FilterKind.MinPredictedRating)
-                .Select(f => f.Value)
-                .FirstOrDefaultAsync(ct));
+            // The never-blank backfill reaches below it when nothing clears it — on live data that is
+            // the normal case, not an edge — so the card has to be able to say which side of it a
+            // pick sits on.
             var heroBar = HeroConfidence.BarFor(minPredicted);
 
             // Lens copy for the whole page in one query. READ ONLY — this path never generates:
@@ -461,7 +494,7 @@ public static class FeedEndpoints
                     lockedRowCount,
                     // Why this build is not literally what the settings asked for (null when it is).
                     // A blank feed must always arrive with the reason attached.
-                    snapshot.DegradedReason,
+                    degradedReason,
                 });
             }
 
@@ -512,7 +545,7 @@ public static class FeedEndpoints
                 hero,
                 rows,
                 lockedRowCount = 0,
-                snapshot.DegradedReason,
+                degradedReason,
             });
         });
 

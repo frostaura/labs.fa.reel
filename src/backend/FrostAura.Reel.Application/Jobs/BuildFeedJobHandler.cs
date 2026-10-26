@@ -124,21 +124,12 @@ public class BuildFeedJobHandler(
     private const double PreferenceTagWeight = 0.10;
 
     /// <summary>
-    /// How many shortlist titles must clear the account's own <c>MinPredictedRating</c> before the
-    /// floor is taken at face value. Four times the hero: a floor that leaves fewer candidates than
-    /// four heroes' worth is not selecting the page, it IS the page, and the whole feed below the
-    /// hero then assembles out of whatever handful survived. On 2026-09-10 this was fourteen reality
-    /// shows on a 220-title shortlist.
+    /// How many shortlist titles must clear the account's own <c>MinPredictedRating</c> for the page
+    /// not to be short. Four times the hero: a bar that leaves fewer is not selecting the page, it IS
+    /// the page, and the page says so (<see cref="ForYouBar.ShortReason"/>). It no longer relaxes the
+    /// bar: FD-4's default is that a card under it never reaches a main grid (XM-07).
     /// </summary>
-    private const int FloorRelaxMinimum = 4 * HeroSize;
-
-    /// <summary>
-    /// The quantile the floor relaxes TO. Not zero — relaxing to nothing throws away the user's
-    /// setting entirely and lets the bottom of the shortlist onto rails. The 80th percentile keeps
-    /// the top fifth of what was actually scored, which is a weaker claim than the user asked for
-    /// and an honest one, and it is stated on the page rather than applied in silence.
-    /// </summary>
-    private const double FloorRelaxQuantile = 0.80d;
+    private const int ShortPageBelow = 4 * HeroSize;
 
     /// <summary>
     /// How many shortlist candidates the pre-assembly fit pass judges on a Fresh build. Forty is
@@ -939,48 +930,20 @@ public class BuildFeedJobHandler(
         string? profileHash, BuildCapture capture,
         Func<IReadOnlyList<Title>, CancellationToken, Task<IReadOnlyList<Candidate>>> scoreFinal, CancellationToken ct)
     {
-        // ── The floor is soft; the content rules are not ────────────────────────────────────
-        // Content filters are the user's statement about CONTENT — they bind absolutely and are
-        // already applied in retrieval. MinPredictedRating is a statement about the MODEL's opinion,
-        // and the model's output scale is not something the user can see or calibrate against. When
-        // almost nothing clears it, honouring it strictly renders a blank — or worse, a page built
-        // entirely out of the handful of titles that happened to squeak over; relaxing it and SAYING
-        // SO shows honest, lower-confidence rankings instead. Same call Ask Reel already makes
-        // (LiveSearchExpansionService's MinFloorRelaxedCount arm) — the feed build was the one
-        // suggestion surface still treating "empty" as a verdict rather than a failure to look harder.
-        //
-        // TWO things changed here on 2026-09-10, both from the same live build.
-        //
-        // The TRIGGER is no longer "nothing clears it". A floor that admits fourteen titles out of a
-        // 220-title shortlist is not selecting a page, it is BEING the page — hero, deep cuts and
-        // every rail assemble out of those fourteen, and on the founder's account all fourteen were
-        // reality shows. The bar is now FloorRelaxMinimum: four heroes' worth of supply, or the floor
-        // is treated as the failure it is.
-        //
-        // The DESTINATION is no longer zero. Relaxing to nothing discards the user's setting whole
-        // and lets the bottom of the shortlist onto rails; relaxing to the shortlist's 80th
-        // percentile keeps the top fifth of what the model actually scored. Guarded with Math.Min so
-        // a "relaxation" can never RAISE the floor above what the user asked for.
+        // ── The bar holds; a short page says so ─────────────────────────────────────────────
+        // Content filters are the user's statement about CONTENT and are already applied in
+        // retrieval. MinPredictedRating is the user's "for you" bar, and FD-4's default is that a
+        // card below it never reaches a main grid (XM-07). Until 2026-10-26 the build relaxed it to
+        // the shortlist's 80th percentile whenever fewer than four heroes' worth cleared it, and said
+        // so; that put cards under the user's own bar into tonight's picks. The bar now holds, and
+        // when it leaves the page short the reason names the bar and the count, so a sparse or empty
+        // page is never a silent one. The model-saturation failure the relaxation was built for
+        // (2026-09-10) is the calibration work's to prevent, not the bar's to absorb.
         var effectiveFloor = minPredicted;
-        string? degradedReason = null;
-        var clearingFloor = candidates.Count(c => c.Predicted >= minPredicted);
-        if (minPredicted > 0m && clearingFloor < FloorRelaxMinimum)
-        {
-            effectiveFloor = Math.Min(minPredicted, Percentile(candidates, FloorRelaxQuantile) ?? 0m);
-
-            // Invariant culture, deliberately: these numbers are ratings on the same 0–10 scale the
-            // settings screen shows and ContentFilterRules stores, and a server whose locale renders
-            // "9,9" would quote the user a threshold they never typed.
-            degradedReason = candidates.Count > 0
-                ? string.Format(
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    "Your ≥{0:0.0} “for you” floor left only {1} title{2} tonight; relaxed to {3:0.0} for this build.",
-                    minPredicted,
-                    clearingFloor,
-                    clearingFloor == 1 ? string.Empty : "s",
-                    effectiveFloor)
-                : null;
-        }
+        var clearingFloor = candidates.Count(c => ForYouBar.Clears(c.Predicted, minPredicted));
+        var degradedReason = candidates.Count > 0
+            ? ForYouBar.ShortReason(minPredicted, clearingFloor, ShortPageBelow)
+            : null;
 
         // An empty candidate pool is a different failure with a different answer: retrieval, not
         // ranking, came back with nothing, so the feed must name the content condition responsible.
@@ -1421,7 +1384,9 @@ public class BuildFeedJobHandler(
             hero.AddRange(previousItems
                 .Where(i => i.Row == FeedRowKind.Hero)
                 .OrderBy(i => i.Rank)
-                .Where(i => candidatesById.ContainsKey(i.TitleId))
+                // A kept seat still has to clear the bar: a bar raised since the last build applies
+                // now, not tomorrow (XM-07).
+                .Where(i => candidatesById.TryGetValue(i.TitleId, out var kept) && ForYouBar.Clears(kept.Predicted, effectiveFloor))
                 .Select(i => candidatesById[i.TitleId])
                 .Take(HeroSize));
         }

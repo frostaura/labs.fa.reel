@@ -430,6 +430,8 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
         MediaType = MediaType.Movie,
         TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
         TraktSlug = $"surface-honesty-{Guid.NewGuid():N}",
+        // The default language rule is English only, and the Home read applies the rules (XM-03).
+        Language = "en",
         Name = name,
         Year = 2016,
         PosterPath = "/p.jpg",

@@ -34,8 +34,8 @@ namespace FrostAura.Reel.Tests.IntegrationTests;
 /// residual head saturating its clamp (covered arithmetically in <c>OnlineResidualSaturationTests</c>),
 /// which pushed every prediction ~3 points down until nothing could clear the account's
 /// MinPredictedRating. This test pins the structural half: whatever the model's output scale does,
-/// a build with a healthy candidate pool must never produce zero cards, and when the floor has to be
-/// relaxed to achieve that the snapshot must SAY so instead of rendering a blank page.
+/// a build with a healthy candidate pool must never produce a SILENT blank: when the account's own
+/// "for you" bar holds every card back, the snapshot says so (the bar itself holds — FD-4, XM-07).
 ///
 /// <b>Frozen anchors.</b> "Because you loved The Great Wall / The Bone Collector" never changed,
 /// because the anchors were the strict top of a rating-first order that a large rating history
@@ -63,24 +63,20 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
     private const decimal UnreachableFloor = 9.9m;
 
     [Fact]
-    public async Task A_healthy_pool_never_builds_an_empty_feed_and_says_why_the_floor_was_relaxed()
+    public async Task A_bar_nothing_clears_deals_no_card_under_it_and_says_so()
     {
         if (!Fixture.Available)
         {
             return;
         }
 
+        // The structural half of the empty-feed defect, re-stated under FD-4's default (XM-07): the
+        // bar is the user's, so a build whose healthy pool holds nothing above it deals nothing below
+        // it — and the page is never SILENTLY empty: the reason names the bar. Until 2026-10-26 the
+        // build relaxed the bar to the shortlist's 80th percentile here and dealt the cards under it.
         var accountId = await SeedAccountAsync();
         await SeedLovedTitlesAsync(accountId, 12);
         await SeedEligibleTitlesAsync(80);
-
-        // A hard CONTENT rule alongside the soft floor, so the test can prove the relaxation is
-        // surgical: documentaries are excluded outright and a mass of them is the most attractive
-        // thing in the pool, so a build that relaxed indiscriminately would surface them.
-        var excludedGenre = $"doc-{Guid.NewGuid():N}";
-        await SeedEligibleTitlesAsync(40, genre: excludedGenre);
-        await AddContentFilterAsync(accountId, FilterKind.ExcludeGenre, excludedGenre);
-
         await SeedActiveArtifactAsync(accountId);
         await AddContentFilterAsync(accountId, FilterKind.MinPredictedRating, ContentFilterRules.FormatRating(UnreachableFloor));
 
@@ -90,19 +86,10 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         var snapshot = await ActiveSnapshotAsync(db, accountId);
         var items = await db.FeedItems.Where(i => i.FeedSnapshotId == snapshot.Id).ToListAsync();
 
-        // The candidate pool was healthy by construction — so zero cards is a pipeline failure, not
-        // an honest verdict, exactly as the relaxation ladder in LiveSearchExpansionService holds.
-        Assert.NotEmpty(items);
-        Assert.Contains(items, i => i.Row == FeedRowKind.Hero);
-
-        // And the user is told, rather than left staring at picks that quietly ignore their setting.
+        Assert.All(items, i => Assert.True(i.PredictedRating >= UnreachableFloor, $"{i.PredictedRating} is under the bar"));
         Assert.NotNull(snapshot.DegradedReason);
         Assert.Contains("9.9", snapshot.DegradedReason);
-
-        // Relaxing the SOFT floor must never relax a HARD content rule with it.
-        var shownIds = items.Select(i => i.TitleId).ToList();
-        var shownGenres = await db.Titles.Where(t => shownIds.Contains(t.Id)).Select(t => t.Genres).ToListAsync();
-        Assert.All(shownGenres, g => Assert.DoesNotContain(excludedGenre, g));
+        Assert.DoesNotContain("relaxed", snapshot.DegradedReason);
     }
 
     [Fact]
