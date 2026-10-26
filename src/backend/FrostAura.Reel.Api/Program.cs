@@ -4,10 +4,12 @@ using FrostAura.Reel.Api;
 using FrostAura.Reel.Api.Endpoints;
 using FrostAura.Reel.Api.Middleware;
 using FrostAura.Reel.Api.Security;
+using FrostAura.Reel.Application.Auth;
 using FrostAura.Reel.Application.Configuration;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Infrastructure;
 using FrostAura.Reel.Infrastructure.Persistence;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -55,6 +57,32 @@ builder.Services.AddSingleton<SettingsUnlockTokenService>();
 builder.Services.AddValidatedOptions<PreMigrationBackupOptions>();
 builder.Services.AddOpenApi();
 
+// ── Edge security (J-7, J-8, K-4) ────────────────────────────────────────────────────────────
+// The client's scheme and address arrive as X-Forwarded-* from the gateway; they are believed only
+// from TRUSTED_PROXY_NETWORKS (TrustedProxyOptions), so Request.IsHttps and the remote address are
+// the real client's behind cloudflared → nginx and cannot be claimed by anyone else.
+builder.Services.AddValidatedOptions<TrustedProxyOptions>();
+builder.Services.AddOptions<ForwardedHeadersOptions>().Configure<IOptions<TrustedProxyOptions>>((forwarded, trusted) =>
+{
+    forwarded.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    forwarded.KnownProxies.Clear();
+    forwarded.KnownIPNetworks.Clear();
+    foreach (var network in trusted.Value.Networks)
+    {
+        forwarded.KnownIPNetworks.Add(network);
+    }
+});
+builder.Services.AddHsts(options =>
+{
+    // A year, this host only: frostaura.net carries other subdomains this API does not speak for.
+    options.MaxAge = TimeSpan.FromDays(365);
+    options.IncludeSubDomains = false;
+});
+builder.Services.TryAddSingleton(TimeProvider.System);
+builder.Services.AddValidatedOptions<AskTurnLimitOptions>();
+builder.Services.AddSingleton<AskTurnLimiter>();
+builder.Services.AddSingleton<PinAttemptLimiter>();
+
 // X-Request-Id in, X-Request-Id out, and the same value as every log line's RequestId (R1-36).
 builder.Services.AddRequestIds();
 
@@ -71,9 +99,18 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 
 var app = builder.Build();
 
+// First, so everything after it — HSTS, the Secure-cookie rule, the loopback guard, the logs —
+// sees the real client rather than the gateway.
+app.UseForwardedHeaders();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+
 app.UseCors();
 
 app.UseMiddleware<AccountResolutionMiddleware>();
+app.UseMiddleware<InboundLimits>();
 
 // The document is generated at build time; at runtime it is served only to a developer.
 if (app.Environment.IsDevelopment())
@@ -108,7 +145,9 @@ app.MapSseEndpoints();
 app.MapObservabilityEndpoints();
 app.MapDevEndpoints();
 
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+// Liveness, plus the commit this process was built from: the deploy job polls it and fails unless
+// the SHA it just shipped is the one answering (A-17, K-9).
+app.MapGet("/health", () => Results.Ok(new { status = "ok", commit = ReleaseInfo.Commit }));
 
 app.MapGet("/health/ready", async (ReelDbContext db, CancellationToken ct) =>
 {
@@ -145,6 +184,16 @@ try
     using (var ceilingsScope = app.Services.CreateScope())
     {
         app.Logger.LogInformation("{Ceilings}", EffectiveCeilings.Describe(ceilingsScope.ServiceProvider, app.Configuration));
+    }
+
+    // An unencrypted key ring means a database dump decrypts every Trakt token (J-12). Not fatal —
+    // the certificate is a founder action — but never silent outside Development.
+    if (!app.Environment.IsDevelopment()
+        && app.Services.GetRequiredService<IOptions<FrostAura.Reel.Infrastructure.Security.KeyRingOptions>>().Value.Certificate is null)
+    {
+        app.Logger.LogWarning(
+            "The Data Protection key ring is stored unencrypted: set {CertPathKey} (docs/deployment.md#key-ring-certificate).",
+            FrostAura.Reel.Infrastructure.Security.KeyRingOptions.CertPathKey);
     }
 
     // A dump before any pending migration, or no migration (K-1). No-op when nothing is pending.

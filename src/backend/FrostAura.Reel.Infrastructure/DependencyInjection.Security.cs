@@ -15,9 +15,24 @@ public static partial class DependencyInjection
     /// <summary>Data protection, secret protection, sign-in, the shared rate gates and web push.</summary>
     private static IServiceCollection AddReelSecurity(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddDataProtection()
+        var dataProtection = services.AddDataProtection()
             .SetApplicationName("FrostAura.Reel")
             .PersistKeysToDbContext<ReelDbContext>();
+
+        // The key ring encrypted at rest to a certificate when one is configured (J-12). Read here,
+        // at registration, because the builder needs the certificate itself; an unusable setting is
+        // left unapplied and fails the host at startup through the same options' validation, which
+        // names the key — so a broken certificate never silently means "unencrypted".
+        services.AddValidatedOptions<KeyRingOptions>();
+        var keyRing = ValidatedOptions.From<KeyRingOptions>(configuration);
+        if (keyRing.Problems.Count == 0 && keyRing.Certificate is { } certificate)
+        {
+            dataProtection.ProtectKeysWithCertificate(certificate);
+            if (keyRing.OldCertificates.Count > 0)
+            {
+                dataProtection.UnprotectKeysWithAnyCertificate([certificate, .. keyRing.OldCertificates]);
+            }
+        }
 
         services.AddSingleton<ISecretProtector, SecretProtector>();
 

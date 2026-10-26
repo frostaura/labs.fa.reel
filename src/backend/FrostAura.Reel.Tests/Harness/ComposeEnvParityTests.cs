@@ -20,8 +20,8 @@ namespace FrostAura.Reel.Tests.Harness;
 /// rule without anyone remembering to list it. The only hand-written lists are the exceptions below,
 /// each with its reason.</para>
 ///
-/// <para><b>The four descriptors</b> are the dev stack, the prod file, the Portainer stack and WS-7's
-/// eval stack. The eval file is checked as soon as it exists in the tree.</para>
+/// <para><b>The descriptors</b> are the dev stack, the one production file (the Portainer stack's
+/// content) and WS-7's eval stack. The eval file is checked as soon as it exists in the tree.</para>
 /// </summary>
 public partial class ComposeEnvParityTests
 {
@@ -29,7 +29,7 @@ public partial class ComposeEnvParityTests
     private static readonly string[] DevDescriptors = ["docker-compose.yml", "docker-compose.eval.yml"];
 
     /// <summary>Descriptors whose backend runs Production.</summary>
-    private static readonly string[] ProdDescriptors = ["docker-compose.prod.yml", "deploy/portainer-stack.yml"];
+    private static readonly string[] ProdDescriptors = ["docker-compose.prod.yml"];
 
     /// <summary>
     /// The API service in each descriptor. WS-7's eval stack names its API <c>eval-api</c>; a lookup
@@ -40,7 +40,6 @@ public partial class ComposeEnvParityTests
     {
         ["docker-compose.yml"] = "backend",
         ["docker-compose.prod.yml"] = "backend",
-        ["deploy/portainer-stack.yml"] = "backend",
         ["docker-compose.eval.yml"] = "eval-api",
     };
 
@@ -163,12 +162,17 @@ public partial class ComposeEnvParityTests
     }
 
     [Fact]
-    public void The_three_owned_descriptors_exist()
+    public void The_owned_descriptors_exist_and_production_has_exactly_one()
     {
-        foreach (var descriptor in new[] { "docker-compose.yml", "docker-compose.prod.yml", "deploy/portainer-stack.yml" })
+        foreach (var descriptor in new[] { "docker-compose.yml", "docker-compose.prod.yml" })
         {
             Assert.True(ComposeDescriptor.Exists(descriptor), $"{descriptor} is missing.");
         }
+
+        // K-14: a second production descriptor (deploy/portainer-stack.yml) drifted from the first —
+        // different required keys, a different nginx, a different volume name — and nothing said
+        // which one the live stack ran. There is one now; a second is a regression, not a variant.
+        Assert.False(ComposeDescriptor.Exists("deploy/portainer-stack.yml"), "deploy/portainer-stack.yml is back; docker-compose.prod.yml is the only production descriptor.");
     }
 
     [Theory]

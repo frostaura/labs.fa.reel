@@ -8,7 +8,9 @@
 POSTGRES_PASSWORD ?= reel_local_pw
 JWT_SECRET ?= reel_local_jwt_secret_at_least_32_chars
 GATEWAY_PORT ?= 8090
-COMPOSE_ENV = POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) JWT_SECRET=$(JWT_SECRET) GATEWAY_PORT=$(GATEWAY_PORT)
+# GIT_SHA is stamped into the backend image so /health reports the commit (A-17).
+GIT_SHA ?= $(shell git rev-parse HEAD 2> /dev/null)
+COMPOSE_ENV = POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) JWT_SECRET=$(JWT_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) GIT_SHA=$(GIT_SHA)
 
 up:
 	$(COMPOSE_ENV) docker compose up -d --build
@@ -52,6 +54,12 @@ docker-ready:
 			&& curl -fsS http://localhost:$(GATEWAY_PORT)/health/ready >/dev/null 2>&1 \
 			&& curl -fsS http://localhost:$(GATEWAY_PORT)/ >/dev/null 2>&1; then \
 			echo "Stack ready: gateway → backend (/health, /health/ready) and frontend all responding."; \
+			commit=$$(curl -fsS http://localhost:$(GATEWAY_PORT)/health | sed -E 's/.*"commit":"([^"]*)".*/\1/'); \
+			if [ -n "$(GIT_SHA)" ] && [ "$$commit" != "$(GIT_SHA)" ]; then \
+				echo "docker-ready failed: /health reports commit '$$commit', not $(GIT_SHA) (A-17)." >&2; \
+				exit 1; \
+			fi; \
+			echo "/health reports commit $$commit."; \
 			exit 0; \
 		fi; \
 		sleep 3; \
@@ -211,12 +219,9 @@ ci-trivy:
 ci-compose:
 	$(COMPOSE_ENV) docker compose -f docker-compose.yml config -q
 	$(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f docker-compose.prod.yml config -q
-	$(COMPOSE_ENV) DOCKERHUB_USERNAME=ci APP_PUBLIC_URL=https://ci.invalid BACKUP_HOST_DIR=/var/lib/reel-ci/backups docker compose -f deploy/portainer-stack.yml config -q
-	@# And the production files refuse to start with nowhere for the dumps but a volume of the stack.
+	@# And the production file refuses to start with nowhere for the dumps but a volume of the stack.
 	@! env -u BACKUP_HOST_DIR $(COMPOSE_ENV) TRAKT_CLIENT_ID=ci TRAKT_CLIENT_SECRET=ci TMDB_READ_ACCESS_TOKEN=ci docker compose -f docker-compose.prod.yml config -q 2> /dev/null \
 		|| { echo "ci-compose: docker-compose.prod.yml parsed without BACKUP_HOST_DIR" >&2; exit 1; }
-	@! env -u BACKUP_HOST_DIR $(COMPOSE_ENV) DOCKERHUB_USERNAME=ci APP_PUBLIC_URL=https://ci.invalid docker compose -f deploy/portainer-stack.yml config -q 2> /dev/null \
-		|| { echo "ci-compose: deploy/portainer-stack.yml parsed without BACKUP_HOST_DIR" >&2; exit 1; }
 
 # Build both images and prove the composed stack serves, under its own project name and ports.
 ci-docker:

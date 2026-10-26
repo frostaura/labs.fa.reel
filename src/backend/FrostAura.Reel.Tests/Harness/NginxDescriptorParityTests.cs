@@ -3,25 +3,26 @@ using System.Text.RegularExpressions;
 namespace FrostAura.Reel.Tests.Harness;
 
 /// <summary>
-/// A source-level guard over the three nginx descriptors this repository ships.
+/// A source-level guard over the gateway's nginx config, which this repository ships twice.
 ///
 /// <para>
-/// There are three of them and there is no way to make there be one. <c>nginx/nginx.conf</c> is a
-/// real file mounted by the dev compose stack; <c>docker-compose.prod.yml</c> and
-/// <c>deploy/portainer-stack.yml</c> inline their gateway config as a compose <c>configs:</c>
-/// block, because a Portainer stack cannot mount a file out of a repository it never clones. So
-/// "one source of truth" here means one CANONICAL file — <c>nginx/nginx.conf</c> — plus this
-/// check, rather than a deletion.
+/// <c>nginx/nginx.conf</c> is the CANONICAL file, an envsubst template the dev compose stack
+/// mounts; <c>docker-compose.prod.yml</c> carries the same file inline as the compose config
+/// <c>gateway_nginx</c>, because a Portainer stack cannot mount a file out of a repository it never
+/// clones. The two are held byte-equal after the inline copy's three template values are filled in
+/// and compose's <c>$$</c> escape is undone (<see cref="The_production_copy_is_the_canonical_file"/>),
+/// so every other check here is a check of both.
 /// </para>
 ///
 /// <para>
-/// The check exists because the divergence was real and it was invisible. On 2026-09-10 the
-/// Portainer descriptor was found to be rewriting <c>/api/…</c> to <c>/…</c> before it reached the
-/// backend — a <c>proxy_pass</c> with a trailing-slash URI replaces the matched location prefix —
-/// so every API call on the deployed host would have 404'd, while all three files looked fine to
-/// a reader skimming them side by side. The same pass found that none of the three gave
-/// <c>/api/</c> the streaming directives <c>/sse/</c> had, which is what makes a token-by-token
-/// Ask Reel stream arrive as one buffered lump.
+/// The check exists because the divergence was real and it was invisible. On 2026-09-10 a second
+/// production descriptor (since removed) was found to be rewriting <c>/api/…</c> to <c>/…</c>
+/// before it reached the backend — a <c>proxy_pass</c> with a trailing-slash URI replaces the
+/// matched location prefix — so every API call on the deployed host would have 404'd, while every
+/// file looked fine to a reader skimming them side by side. The same pass found that none of them
+/// gave Ask Reel's stream the directives <c>/sse/</c> had, which is what makes a token-by-token
+/// answer arrive as one buffered lump; and until K-8 the production copy had no resolver, so a
+/// recreated backend container left the gateway proxying to a dead address.
 /// </para>
 ///
 /// <para>
@@ -29,18 +30,25 @@ namespace FrostAura.Reel.Tests.Harness;
 /// runs in the default <c>dotnet test</c> pass rather than behind the integration gate.
 /// </para>
 /// </summary>
-public class NginxDescriptorParityTests
+public partial class NginxDescriptorParityTests
 {
-    /// <summary>
-    /// Repository-relative paths of every descriptor that configures the gateway. The canonical
-    /// one is first; the other two are inline copies that must not drift from it.
-    /// </summary>
+    /// <summary>The canonical file first, then the inline production copy.</summary>
     private static readonly string[] Descriptors =
     [
         "nginx/nginx.conf",
         "docker-compose.prod.yml",
-        "deploy/portainer-stack.yml",
     ];
+
+    /// <summary>The values the production copy fills into the canonical template.</summary>
+    private static readonly (string Placeholder, string Value)[] ProductionTemplateValues =
+    [
+        ("${NGINX_BACKEND_PORT}", "5000"),
+        ("${NGINX_FRONTEND_PORT}", "80"),
+        ("${NGINX_CLIENT_MAX_BODY_SIZE}", "10m"),
+    ];
+
+    /// <summary>The streamed locations: Ask Reel's turn and the pipeline event channel.</summary>
+    private static readonly string[] StreamedLocations = ["= /api/search/ask", "/sse/"];
 
     /// <summary>
     /// The six directives that decide whether a response streams or arrives as one lump. They are
@@ -117,7 +125,7 @@ public class NginxDescriptorParityTests
     }
 
     [Fact]
-    public void The_streaming_directives_are_present_in_both_proxied_locations_everywhere()
+    public void The_streaming_directives_are_present_in_both_streamed_locations_everywhere()
     {
         var gaps = new List<string>();
 
@@ -125,12 +133,18 @@ public class NginxDescriptorParityTests
         {
             var text = ReadDescriptor(descriptor);
 
-            foreach (var location in new[] { "/api/", "/sse/" })
+            foreach (var location in StreamedLocations)
             {
                 var block = LocationBlock(text, location);
                 if (block is null)
                 {
-                    continue; // Covered by the routing test.
+                    gaps.Add($"{descriptor}: no `location {location}` block");
+                    continue;
+                }
+
+                if (!GzipOff().IsMatch(block))
+                {
+                    gaps.Add($"{descriptor}: `location {location}` is missing `gzip off` — a compressed stream is a buffered one");
                 }
 
                 foreach (var (name, pattern) in StreamingDirectives)
@@ -145,7 +159,7 @@ public class NginxDescriptorParityTests
 
         Assert.True(
             gaps.Count == 0,
-            "Both proxied locations need the full streaming set in every descriptor — a stream that "
+            "Both streamed locations need the full streaming set in every descriptor — a stream that "
             + "buffers at the gateway arrives as one lump however well the server chunks it:"
             + Environment.NewLine
             + string.Join(Environment.NewLine, gaps));
@@ -163,7 +177,7 @@ public class NginxDescriptorParityTests
         {
             var text = ReadDescriptor(descriptor);
 
-            foreach (var location in new[] { "/api/", "/sse/" })
+            foreach (var location in new[] { "/api/", "/sse/", "= /api/search/ask" })
             {
                 if (LocationBlock(text, location) is { } block && !forwards.IsMatch(block))
                 {
@@ -198,6 +212,87 @@ public class NginxDescriptorParityTests
             "The compose healthchecks call /health/ready in-container, but an operator and any "
             + "external monitor reach it through the gateway. Not proxied by: "
             + string.Join(", ", missing));
+    }
+
+    [Fact]
+    public void The_production_copy_is_the_canonical_file()
+    {
+        var root = RepositoryRoot();
+        var expected = ProductionTemplateValues.Aggregate(
+            File.ReadAllText(Path.Combine(root, "nginx", "nginx.conf")).Replace("\r\n", "\n", StringComparison.Ordinal),
+            (text, pair) => text.Replace(pair.Placeholder, pair.Value, StringComparison.Ordinal));
+        var inline = ComposeDescriptor.Load("docker-compose.prod.yml").InlineConfig("gateway_nginx");
+
+        Assert.NotNull(inline);
+        Assert.DoesNotContain("${NGINX_", expected.Replace("NGINX_*", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+        // Compose interpolates the inline copy, so every nginx $ in it is written $$.
+        Assert.DoesNotMatch(@"(?<!\$)\$(?!\$)", inline);
+        var actual = inline.Replace("$$", "$", StringComparison.Ordinal);
+        Assert.True(
+            string.Equals(expected, actual, StringComparison.Ordinal),
+            "docker-compose.prod.yml's gateway_nginx is not nginx/nginx.conf. Replace its content block with:"
+            + Environment.NewLine
+            + string.Join('\n', expected.Replace("$", "$$", StringComparison.Ordinal).TrimEnd('\n').Split('\n').Select(l => l.Length == 0 ? l : "      " + l)));
+    }
+
+    [Fact]
+    public void The_gateway_resolves_upstreams_per_request()
+    {
+        // K-8: a literal upstream is resolved once at startup, so a recreated container leaves the
+        // gateway proxying to a dead address with every request a 502.
+        foreach (var descriptor in Descriptors)
+        {
+            var text = ReadDescriptor(descriptor);
+            Assert.Matches(@"resolver\s+127\.0\.0\.11\b", text);
+            Assert.DoesNotMatch(@"\bupstream\s+\w+\s*\{", text);
+            Assert.All(ProxyPassTargets(text), target => Assert.StartsWith("http://$", target, StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void The_gateway_hides_its_version_compresses_sets_headers_and_refuses_source_maps()
+    {
+        foreach (var descriptor in Descriptors)
+        {
+            var text = ReadDescriptor(descriptor);
+            Assert.Matches(@"server_tokens\s+off\s*;", text);
+            Assert.Matches(@"gzip\s+on\s*;", text);
+            Assert.Matches(@"gzip_types[^;]*application/json", text);
+            Assert.DoesNotMatch(@"gzip_types[^;]*text/event-stream", text);
+            foreach (var header in new[] { "X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy", "Strict-Transport-Security" })
+            {
+                Assert.Matches(@"add_header\s+" + Regex.Escape(header) + @"\s", text);
+            }
+
+            var map = LocationBlock(text, @"~* \.map$");
+            Assert.NotNull(map);
+            Assert.Matches(@"return\s+404\s*;", map);
+            // J-7: the visitor's scheme, not the gateway's own http.
+            Assert.DoesNotMatch(@"X-Forwarded-Proto\s+\$scheme\s*;", text);
+        }
+    }
+
+    [Fact]
+    public void The_frontend_serves_hashed_assets_immutable_and_its_shell_uncached()
+    {
+        var text = Decomment(File.ReadAllText(Path.Combine(RepositoryRoot(), "src", "frontend", "nginx.conf")));
+
+        // I-3: a missing hashed asset is a 404, never index.html with a 200.
+        var assets = LocationBlock(text, "/assets/");
+        Assert.NotNull(assets);
+        Assert.Matches(@"try_files\s+\$uri\s+=404\s*;", assets);
+        Assert.Contains("immutable", assets, StringComparison.Ordinal);
+
+        foreach (var shell in new[] { "= /index.html", "= /sw.js" })
+        {
+            var block = LocationBlock(text, shell);
+            Assert.NotNull(block);
+            Assert.Matches(@"Cache-Control\s+""no-cache""", block);
+        }
+
+        Assert.Matches(@"server_tokens\s+off\s*;", text);
+        Assert.Matches(@"gzip\s+on\s*;", text);
+        Assert.NotNull(LocationBlock(text, @"~* \.map$"));
     }
 
     /// <summary>
@@ -316,6 +411,9 @@ public class NginxDescriptorParityTests
         Assert.Fail($"Unbalanced braces after `location {prefix}`.");
         return null;
     }
+
+    [GeneratedRegex(@"gzip\s+off\s*;")]
+    private static partial Regex GzipOff();
 
     private static string[] ProxyPassTargets(string block) =>
         [.. new Regex(@"proxy_pass\s+([^;]+);")

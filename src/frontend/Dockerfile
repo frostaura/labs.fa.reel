@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1
-FROM node:22-alpine AS build
+# The build stage runs on the build machine's architecture: its output is static files, identical
+# for every target, so emulating arm64 to produce them only made the arm64 image slower to build.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 
+# Reproducible install from the lockfile, in its own layer keyed on the manifests. No fallback to
+# `npm install` (K-13): a lockfile out of sync with package.json is a defect to fix in the repo,
+# and resolving around it here built images from dependency versions nobody had reviewed.
 COPY src/frontend/package*.json ./
-# Reproducible install from the lockfile; fall back to a legacy-peer-deps resolve if the lock
-# is ever out of sync so a strict peer check can't break the image build (foresight precedent).
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+RUN npm ci --no-audit --no-fund
 
 COPY src/frontend/ ./
 RUN npm run build

@@ -132,22 +132,8 @@ public static class DevEndpoints
             }
 
             var session = await sessions.IssueAsync(account, MarkDevLinkUserAgent(http.Request.Headers.UserAgent.FirstOrDefault()), ct);
-            http.Response.Cookies.Append("reel_at", session.AccessToken, new CookieOptions
-            {
-                HttpOnly = true,
-                SameSite = SameSiteMode.Lax,
-                Path = "/",
-                Expires = session.AccessExpiresAt,
-            });
-            http.Response.Cookies.Append("reel_rt", session.RefreshToken, new CookieOptions
-            {
-                HttpOnly = true,
-                SameSite = SameSiteMode.Lax,
-                Path = "/api/auth",
-                Expires = session.RefreshExpiresAt,
-            });
-
-            return Results.Ok(account.ToSessionPayload());
+            SessionCookies.Write(http, session);
+            return Results.Ok(await account.ToSessionPayloadAsync(http, ct));
         }).RequireLoopback();
 
         // ── Residual-head dry run ───────────────────────────────────────────────────────
@@ -339,15 +325,9 @@ public static class DevEndpoints
         // can be checked rather than argued with.
         dev.MapPost("/seed-catalog", async (
             IReelDbContext db,
-            HttpContext http,
             CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
-            {
-                return EndpointHelpers.Forbidden("founder only");
-            }
-
+            // Founder and loopback are enforced on the group (RequireFounder, RequireLoopback).
             var (queued, job) = await Application.Jobs.CatalogSeedScheduler.EnqueueAsync(db, DateTime.UtcNow, ct);
             var cursor = Application.Jobs.CatalogSeedCursor.Read(job.CursorJson);
             return Results.Accepted(value: new
@@ -364,19 +344,12 @@ public static class DevEndpoints
         });
 
         dev.MapGet("/seed-catalog", async (
-            IReelDbContext db,
-            HttpContext http,
             Application.Jobs.CatalogSeedProgressQuery progress,
             ITitleAttributeExtractor extractor,
             IConfiguration configuration,
             CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
-            {
-                return EndpointHelpers.Forbidden("founder only");
-            }
-
+            // Founder and loopback are enforced on the group (RequireFounder, RequireLoopback).
             var report = await progress.RunAsync(extractor.Version, DateTime.UtcNow, ct);
             return Results.Ok(new
             {
@@ -488,17 +461,13 @@ public static class DevEndpoints
         // newest run PER prompt version, so v1 and v2 sit side by side; with `?runId=` it returns
         // that run's per-title items so a human can read the actual misses.
         dev.MapPost("/cross-reference-eval", async (
-            IReelDbContext db,
             HttpContext http,
             Application.CrossReference.CrossReferenceBacktest backtest,
             int? promptVersion,
             CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
-            {
-                return EndpointHelpers.Forbidden("founder only");
-            }
+            // Founder and loopback are enforced on the group (RequireFounder, RequireLoopback).
+            var account = http.GatedAccount();
 
             // Exactly the two generations that exist. An unbounded int here would write rows under a
             // version nothing can render and nothing will ever judge against again.
@@ -527,11 +496,8 @@ public static class DevEndpoints
             int? take,
             CancellationToken ct) =>
         {
-            var account = await http.GetCurrentAccountAsync(db, ct);
-            if (account is null || account.Tier != AccountTier.Founder)
-            {
-                return EndpointHelpers.Forbidden("founder only");
-            }
+            // Founder and loopback are enforced on the group (RequireFounder, RequireLoopback).
+            var account = http.GatedAccount();
 
             return runId is { } requested
                 ? await ItemsAsync(db, account.Id, requested, skip ?? 0, take ?? MaxEvaluationItemsPerPage, ct)

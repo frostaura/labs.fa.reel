@@ -18,7 +18,7 @@ namespace FrostAura.Reel.Tests.Harness;
 /// </summary>
 public partial class ComposeHardeningTests
 {
-    private static readonly string[] Descriptors = ["docker-compose.yml", "docker-compose.prod.yml", "deploy/portainer-stack.yml"];
+    private static readonly string[] Descriptors = ["docker-compose.yml", "docker-compose.prod.yml"];
 
     public static TheoryData<string> AllDescriptors()
     {
@@ -180,7 +180,6 @@ public partial class ComposeHardeningTests
 
     [Theory]
     [InlineData("docker-compose.prod.yml")]
-    [InlineData("deploy/portainer-stack.yml")]
     public void Production_dumps_go_to_a_required_host_directory_never_a_stack_volume(string descriptor)
     {
         // A volume of the stack shares fate with the database: `down -v`, or removing the stack with
@@ -189,6 +188,43 @@ public partial class ComposeHardeningTests
 
         Assert.Contains(compose.ServiceBlock("backup"), l => l.StartsWith("      - ${BACKUP_HOST_DIR:?", StringComparison.Ordinal));
         Assert.DoesNotContain(compose.TopLevelBlock("volumes"), l => l == "  reel_backups:");
+    }
+
+    [Theory]
+    [MemberData(nameof(DeployableDescriptors))]
+    public void The_backend_gets_45_seconds_to_stop(string descriptor)
+    {
+        // K-12: Docker's 10 s default SIGKILLs a streaming Ask turn and the job runner's claim
+        // mid-write on every redeploy.
+        Assert.Contains("    stop_grace_period: 45s", ComposeDescriptor.Load(descriptor).ServiceBlock("backend"));
+    }
+
+    [Theory]
+    [InlineData("backend")]
+    [InlineData("frontend")]
+    public void Production_images_are_pinned_by_REEL_TAG(string service)
+    {
+        // K-9: `:latest` names whatever was pushed last, so neither a rollback nor "what is running"
+        // had an answer. The deploy job sets REEL_TAG=sha-<short>; a rollback sets it back.
+        Assert.Contains(
+            $"    image: ${{DOCKERHUB_USERNAME:-frostaura}}/reel-{service}:${{REEL_TAG:-latest}}",
+            ComposeDescriptor.Load("docker-compose.prod.yml").ServiceBlock(service));
+    }
+
+    [Fact]
+    public void The_images_never_run_as_root_and_never_resolve_around_the_lockfile()
+    {
+        var root = ComposeDescriptor.RepositoryRoot();
+        var backend = File.ReadAllLines(Path.Combine(root, "src", "backend", "Dockerfile"));
+        var frontend = File.ReadAllText(Path.Combine(root, "src", "frontend", "Dockerfile"));
+
+        // K-12: the last USER of the runtime stage is the unprivileged app user.
+        Assert.Equal("USER $APP_UID", backend.Last(l => l.StartsWith("USER ", StringComparison.Ordinal)));
+        // K-13: cross-published for the target architecture, restore cached in its own layer.
+        Assert.Contains(backend, l => l.Contains("-a \"$TARGETARCH\"", StringComparison.Ordinal) && l.Contains("dotnet restore", StringComparison.Ordinal));
+        // K-13: no `npm ci || npm install` — a lockfile drift fails the build instead of being resolved around.
+        Assert.DoesNotContain("||", frontend.Split('\n').Where(l => !l.TrimStart().StartsWith('#')).Aggregate(string.Empty, string.Concat), StringComparison.Ordinal);
+        Assert.Contains("RUN npm ci --no-audit --no-fund\n", frontend, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -242,15 +278,15 @@ public partial class ComposeHardeningTests
 }
 
 /// <summary>
-/// The backup script ships three times — the canonical file the dev stack mounts, and two inline
-/// copies, because a Portainer stack cannot mount a file out of a repository it never cloned. Same
+/// The backup script ships twice — the canonical file the dev stack mounts, and the inline copy in
+/// the production descriptor, because a Portainer stack cannot mount a file out of a repository it
+/// never cloned. Same
 /// discipline as <see cref="NginxDescriptorParityTests"/>: one canonical copy plus this check.
 /// </summary>
 public class BackupDescriptorParityTests
 {
     [Theory]
     [InlineData("docker-compose.prod.yml")]
-    [InlineData("deploy/portainer-stack.yml")]
     public void The_inline_script_is_the_canonical_script(string descriptor)
     {
         var canonical = File.ReadAllText(Path.Combine(ComposeDescriptor.RepositoryRoot(), "deploy", "backup", "reel-backup.sh"))
