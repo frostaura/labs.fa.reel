@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Tenancy;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Infrastructure.Llm;
@@ -42,7 +43,7 @@ public class OpenRouterAttributeExtractor(
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
     ILlmCallGate? gate = null)
-    : ITitleAttributeExtractor
+    : ITitleAttributeExtractor, IClassifyingAttributeExtractor
 {
     /// <summary>
     /// The shared transport — and for extraction a TRANSPORT-ONLY move (WS-1 task 2, FD-1 default).
@@ -131,6 +132,35 @@ public class OpenRouterAttributeExtractor(
     public async Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
         IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
     {
+        var outcomes = await ExtractOutcomesAsync(inputs, ct);
+        return outcomes.Select(o => o.Attributes).ToArray();
+    }
+
+    /// <summary>
+    /// The same requests as <see cref="ExtractAsync"/>, with the reason for every missing answer:
+    /// <see cref="AttributeFailureClass.Transport"/> when no request for the title produced a
+    /// completion (a dropped connection, a timeout, a 408/429/5xx, a refused key, an open breaker or
+    /// a spent allowance), <see cref="AttributeFailureClass.Parse"/> when a completion came back
+    /// unusable or the provider rejected the request itself. When EVERY title in the batch failed in
+    /// transport it throws <see cref="AttributeExtractionTransportException"/>, so the enrich run
+    /// stops instead of spending its next batch against the same outage (E-6, R1-47).
+    /// </summary>
+    public async Task<IReadOnlyList<AttributeExtractionOutcome>> ExtractClassifiedAsync(
+        IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
+    {
+        var outcomes = await ExtractOutcomesAsync(inputs, ct);
+        if (outcomes.Count > 0 && outcomes.All(o => o.Failure == AttributeFailureClass.Transport))
+        {
+            throw new AttributeExtractionTransportException(
+                $"All {outcomes.Count} attribute extraction request(s) in the batch failed before producing a completion.");
+        }
+
+        return outcomes;
+    }
+
+    private async Task<IReadOnlyList<AttributeExtractionOutcome>> ExtractOutcomesAsync(
+        IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct)
+    {
         if (inputs.Count == 0)
         {
             return [];
@@ -138,13 +168,13 @@ public class OpenRouterAttributeExtractor(
 
         if (StubMode)
         {
-            return inputs.Select(Stub).ToArray();
+            return inputs.Select(i => AttributeExtractionOutcome.Success(Stub(i))).ToArray();
         }
 
         // Bounded concurrency (OPENROUTER_MAX_CONCURRENCY, default 4) — one title per request,
         // results written back in index order so the batch stays row-aligned for the caller.
         var maxConcurrency = Math.Max(1, configuration.GetValue("OPENROUTER_MAX_CONCURRENCY", 4));
-        var results = new ExtractedTitleAttributes?[inputs.Count];
+        var results = new AttributeExtractionOutcome[inputs.Count];
         using var gate = new SemaphoreSlim(maxConcurrency);
         var tasks = inputs.Select(async (input, index) =>
         {
@@ -167,21 +197,24 @@ public class OpenRouterAttributeExtractor(
     /// One title. At most two billable requests, and the second one only ever fires when it is
     /// materially different from the first — see <see cref="Repair"/>.
     /// </summary>
-    private async Task<ExtractedTitleAttributes?> ExtractOneAsync(TitleAttributeInput input, CancellationToken ct)
+    private async Task<AttributeExtractionOutcome> ExtractOneAsync(TitleAttributeInput input, CancellationToken ct)
     {
         var first = await AttemptAsync(input, repairHint: null, compact: false, ct);
         if (first.Attributes is { } parsed)
         {
-            return parsed;
+            return AttributeExtractionOutcome.Success(parsed);
         }
 
         var repair = Repair(first);
         if (repair is null)
         {
-            // Transport / empty-body failures: nothing about a second identical request makes it
-            // likelier to succeed inside this call. The caller's attempt budget covers the
-            // transient case by retrying on a LATER job run, minutes or hours away.
-            return null;
+            // Transport / empty-body / rejected-request failures: nothing about a second identical
+            // request makes it likelier to succeed inside this call. A transport failure is retried
+            // on a LATER job run, backed off by time and never charged; an empty answer or a
+            // rejected request spends one attempt, because the attempt budget is the only bound on
+            // spend for a title the provider keeps answering badly.
+            return AttributeExtractionOutcome.Failed(
+                first.Failure == ExtractionFailure.Transport ? AttributeFailureClass.Transport : AttributeFailureClass.Parse);
         }
 
         logger.LogWarning(
@@ -191,14 +224,17 @@ public class OpenRouterAttributeExtractor(
         var second = await AttemptAsync(input, repair.Hint, repair.Compact, ct);
         if (second.Attributes is { } repaired)
         {
-            return repaired;
+            return AttributeExtractionOutcome.Success(repaired);
         }
 
         logger.LogWarning(
             "Attribute extraction for {Title} ({TitleId}) failed after the repair pass ({Failure}: {Detail}). "
             + "No attributes written — the row stays un-Done rather than being filled with neutral guesses.",
             input.Name, input.TitleId, second.Failure, string.Join("; ", second.Problems));
-        return null;
+
+        // The first answer was a paid completion that could not be used, so this title is charged
+        // even when the repair request then died in transport.
+        return AttributeExtractionOutcome.Failed(AttributeFailureClass.Parse);
     }
 
     /// <summary>
@@ -268,7 +304,7 @@ public class OpenRouterAttributeExtractor(
                 "Attribute extraction {Failure} (HTTP {Status}) for {Title} ({TitleId}).",
                 failure, result.HttpStatus, input.Name, input.TitleId);
             return AttemptOutcome.Failed(
-                ExtractionFailure.Transport,
+                failure == LlmCallFailure.BadRequest ? ExtractionFailure.Rejected : ExtractionFailure.Transport,
                 [result.HttpStatus is { } status ? $"HTTP {status}" : failure.ToString()]);
         }
 
@@ -548,8 +584,17 @@ public class OpenRouterAttributeExtractor(
     {
         None,
 
-        /// <summary>Network, HTTP status, or deserialization of the envelope. Not worth an identical retry here.</summary>
+        /// <summary>
+        /// No completion: network, timeout, a 408/429/5xx, an unreadable envelope, a refused key, an
+        /// open breaker or a spent allowance. Not worth an identical retry here; never charged.
+        /// </summary>
         Transport,
+
+        /// <summary>
+        /// The provider rejected the request itself (a 4xx other than 401/402/403/408/429). The same
+        /// bytes get the same answer, so it is charged like an unusable completion.
+        /// </summary>
+        Rejected,
 
         /// <summary>200 OK with no completion text.</summary>
         Empty,

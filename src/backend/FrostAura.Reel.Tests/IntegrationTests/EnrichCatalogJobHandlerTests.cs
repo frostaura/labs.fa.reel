@@ -1345,6 +1345,115 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
     }
 
     /// <summary>
+    /// R1-47 end to end, through the PRODUCTION adapter and a canned HTTP transport: a title whose
+    /// request died in the network is backed off and never charged; a title the model answered
+    /// badly is charged one attempt. Run with the drop on either title, so the class follows the
+    /// title and not its position in the batch.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task Through_the_real_adapter_a_network_drop_is_backed_off_and_a_bad_answer_is_charged(int dropping)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(2);
+        var malformed = """{"darkness":0.8,"pacing":0.3,"complexity":0.6,"emotionalIntensity":0.7,"optimism":0.2,"ensembleVsSolo":0.4,"tone":"brooding","era":"modern","themes":["grief"]}""";
+        var transport = new RoutingHttpHandler(body => body.Contains($"Library Title {dropping}", StringComparison.Ordinal)
+            ? null
+            : ChatEnvelope(malformed));
+        var log = new CapturingLogger();
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), LiveExtractor(transport), cap: 2, logger: log);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var dropped = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleIds[dropping]);
+        Assert.Equal(0, dropped.AttemptCount);
+        Assert.Equal(1, dropped.TransportFailures);
+        Assert.NotEqual(AttributeExtractionStatus.Failed, dropped.Status);
+        Assert.True(dropped.RetryAfter > DateTime.UtcNow.AddMinutes(25));
+
+        var answeredBadly = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleIds[1 - dropping]);
+        Assert.Equal(AttributeExtractionStatus.Failed, answeredBadly.Status);
+        Assert.Equal(1, answeredBadly.AttemptCount);
+        Assert.Equal(0, answeredBadly.TransportFailures);
+
+        Assert.Contains(log.Lines, l => l.Contains("1 transport failure(s)", StringComparison.Ordinal)
+            && l.Contains("1 parse failure(s)", StringComparison.Ordinal)
+            && l.Contains("0 unclassified failure(s)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The whole batch dropped: the production adapter throws its typed transport exception, every
+    /// title is backed off, nothing is charged, and the run stops.
+    /// </summary>
+    [Fact]
+    public async Task Through_the_real_adapter_a_wholly_dropped_batch_charges_nothing()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(2);
+        var transport = new RoutingHttpHandler(_ => null);
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), LiveExtractor(transport), cap: 2);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, row =>
+        {
+            Assert.Equal(0, row.AttemptCount);
+            Assert.Equal(1, row.TransportFailures);
+            Assert.NotEqual(AttributeExtractionStatus.Failed, row.Status);
+        });
+    }
+
+    private static OpenRouterAttributeExtractor LiveExtractor(HttpMessageHandler transport)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OPENROUTER_API_KEY"] = "test-key-not-a-real-one",
+                ["TestHelpers:ModelStubMode"] = "false",
+                ["OPENROUTER_MAX_CONCURRENCY"] = "1",
+            })
+            .Build();
+        var scopeFactory = new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+        var recorder = new ApiUsageRecorder(scopeFactory, NullLogger<ApiUsageRecorder>.Instance);
+        var client = new HttpClient(transport) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
+        return new OpenRouterAttributeExtractor(client, recorder, config, NullLogger<OpenRouterAttributeExtractor>.Instance);
+    }
+
+    private static string ChatEnvelope(string content) =>
+        System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { role = "assistant", content }, finish_reason = "stop" } },
+        });
+
+    /// <summary>
+    /// Answers each request from its body; a null answer is a connection that died before any
+    /// response, which is what a laptop host's sleep or a flaky uplink looks like to HttpClient.
+    /// </summary>
+    private sealed class RoutingHttpHandler(Func<string, string?> answer) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var body = await request.Content!.ReadAsStringAsync(ct);
+            var reply = answer(body) ?? throw new HttpRequestException("Connection reset by peer");
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(reply, System.Text.Encoding.UTF8, "application/json"),
+            };
+        }
+    }
+
+    /// <summary>
     /// Runs one enrich pass exactly as JobRunnerService would.
     /// <para>
     /// <paramref name="cap"/> sets <c>ENRICH_MAX_TITLES_PER_RUN</c>. Tests that assert on WHICH

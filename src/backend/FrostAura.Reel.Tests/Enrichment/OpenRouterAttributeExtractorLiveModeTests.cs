@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -248,6 +249,177 @@ public class OpenRouterAttributeExtractorLiveModeTests
         Assert.NotNull(results[1]);
     }
 
+
+    // ── failure classes (R1-47 / CR-1) ──────────────────────────────────────────────────────
+    //
+    // The enrich handler charges an attempt only for a title the provider answered badly. Before
+    // this adapter could say why a title failed, a dropped connection and a malformed answer were
+    // the same null, and both were charged: 2,038 titles ended Failed on the founder's catalogue,
+    // 1,110 of 1,116 warnings being network drops (E-6). Each case below pairs the failing title
+    // with a good one, so the batch is not WHOLLY transport and the per-title class is visible.
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    public async Task A_status_that_produced_no_completion_is_transport(HttpStatusCode status)
+    {
+        var handler = new CannedHandler(new CannedResponse(status, "upstream said no"), Ok(GoodPayload));
+
+        var outcomes = await Extractor(handler).ExtractClassifiedAsync([Input("Fails"), Input("Answers")]);
+
+        Assert.Equal(AttributeFailureClass.Transport, outcomes[0].Failure);
+        Assert.Null(outcomes[0].Attributes);
+        Assert.Equal(AttributeFailureClass.None, outcomes[1].Failure);
+        Assert.Equal(2, handler.Bodies.Count); // no second request bought for the failed title
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.PaymentRequired)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    public async Task A_refused_key_is_transport_and_the_open_breaker_spares_the_rest_of_the_batch(HttpStatusCode status)
+    {
+        // A refusal is the key's or the credit's, never the title's. It opens the provider breaker,
+        // so the titles after it are not sent at all — and are not charged either.
+        var refusedLast = new CannedHandler(Ok(GoodPayload), new CannedResponse(status, "key refused"));
+        var outcomes = await Extractor(refusedLast).ExtractClassifiedAsync([Input("Answers"), Input("Refused")]);
+        Assert.Equal(AttributeFailureClass.None, outcomes[0].Failure);
+        Assert.Equal(AttributeFailureClass.Transport, outcomes[1].Failure);
+
+        // Refused first: the second title is held back by the breaker, so the whole batch failed
+        // without a completion — the typed exception that stops the enrich run.
+        var refusedFirst = new CannedHandler(new CannedResponse(status, "key refused"), Ok(GoodPayload));
+        await Assert.ThrowsAsync<AttributeExtractionTransportException>(
+            () => Extractor(refusedFirst).ExtractClassifiedAsync([Input("Refused"), Input("Held back")]));
+        Assert.Single(refusedFirst.Bodies);
+    }
+
+    [Theory]
+    [InlineData(DropKind.Connection)]
+    [InlineData(DropKind.Timeout)]
+    public async Task A_dropped_connection_or_a_timeout_is_transport_whichever_title_it_hits(DropKind drop)
+    {
+        // Same failure, failing title first and then second: the class follows the title, not
+        // its position in the batch.
+        var first = new CannedHandler(new CannedResponse(HttpStatusCode.OK, "", drop), Ok(GoodPayload));
+        var second = new CannedHandler(Ok(GoodPayload), new CannedResponse(HttpStatusCode.OK, "", drop));
+
+        var a = await Extractor(first).ExtractClassifiedAsync([Input("Drops"), Input("Answers")]);
+        var b = await Extractor(second).ExtractClassifiedAsync([Input("Answers"), Input("Drops")]);
+
+        Assert.Equal(AttributeFailureClass.Transport, a[0].Failure);
+        Assert.Equal(AttributeFailureClass.None, a[1].Failure);
+        Assert.Equal(AttributeFailureClass.None, b[0].Failure);
+        Assert.Equal(AttributeFailureClass.Transport, b[1].Failure);
+    }
+
+    [Fact]
+    public async Task A_rejected_request_is_charged_as_parse()
+    {
+        // A 400 that is not about the schema: the same bytes get the same answer, so the attempt
+        // budget is what stops this title being billed every run.
+        var handler = new CannedHandler(
+            new CannedResponse(HttpStatusCode.BadRequest, """{"error":{"message":"context length exceeded"}}"""),
+            Ok(GoodPayload));
+
+        var outcomes = await Extractor(handler).ExtractClassifiedAsync([Input("Rejected"), Input("Answers")]);
+
+        Assert.Equal(AttributeFailureClass.Parse, outcomes[0].Failure);
+        Assert.Equal(AttributeFailureClass.None, outcomes[1].Failure);
+    }
+
+    [Fact]
+    public async Task An_empty_completion_is_parse_not_transport()
+    {
+        var handler = new CannedHandler(Ok(""), Ok(GoodPayload));
+
+        var outcomes = await Extractor(handler).ExtractClassifiedAsync([Input("Empty"), Input("Answers")]);
+
+        Assert.Equal(AttributeFailureClass.Parse, outcomes[0].Failure);
+        Assert.Equal(2, handler.Bodies.Count);
+    }
+
+    [Fact]
+    public async Task A_completion_still_malformed_after_the_repair_is_parse()
+    {
+        var bad = Without(GoodPayload, "humor");
+        var handler = new CannedHandler(Ok(bad), Ok(bad), Ok(GoodPayload));
+
+        var outcomes = await Extractor(handler).ExtractClassifiedAsync([Input("Malformed"), Input("Answers")]);
+
+        Assert.Equal(AttributeFailureClass.Parse, outcomes[0].Failure);
+        Assert.Equal(AttributeFailureClass.None, outcomes[1].Failure);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public async Task A_paid_unusable_answer_stays_charged_when_its_repair_dies_in_transport(HttpStatusCode status)
+    {
+        // The first completion was billed and unusable; a transport failure on the repair must not
+        // launder the title into "never charged", or a title the model always answers badly would
+        // be paid for on every run for ever.
+        var handler = new CannedHandler(
+            Ok(Without(GoodPayload, "humor")), new CannedResponse(status, "upstream said no"), Ok(GoodPayload));
+
+        var outcomes = await Extractor(handler).ExtractClassifiedAsync([Input("Malformed"), Input("Answers")]);
+
+        Assert.Equal(AttributeFailureClass.Parse, outcomes[0].Failure);
+        Assert.Equal(AttributeFailureClass.None, outcomes[1].Failure);
+    }
+
+    [Fact]
+    public async Task A_repaired_answer_is_a_success()
+    {
+        var handler = new CannedHandler(
+            new CannedResponse(HttpStatusCode.OK, Envelope(GoodPayload, finishReason: "length")), Ok(GoodPayload));
+
+        var outcome = (await Extractor(handler).ExtractClassifiedAsync([Input()]))[0];
+
+        Assert.Equal(AttributeFailureClass.None, outcome.Failure);
+        Assert.NotNull(outcome.Attributes);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task A_batch_that_failed_wholly_in_transport_throws_the_typed_exception(int titles)
+    {
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.OK, "", DropKind.Connection));
+        var inputs = Enumerable.Range(0, titles).Select(i => Input($"Title {i}")).ToList();
+
+        await Assert.ThrowsAsync<AttributeExtractionTransportException>(
+            () => Extractor(handler).ExtractClassifiedAsync(inputs));
+        Assert.Equal(titles, handler.Bodies.Count);
+    }
+
+    [Fact]
+    public async Task A_batch_mixing_transport_and_parse_returns_classes_instead_of_throwing()
+    {
+        var handler = new CannedHandler(
+            new CannedResponse(HttpStatusCode.ServiceUnavailable, "upstream said no"), Ok(""));
+
+        var outcomes = await Extractor(handler).ExtractClassifiedAsync([Input("Drops"), Input("Empty")]);
+
+        Assert.Equal(AttributeFailureClass.Transport, outcomes[0].Failure);
+        Assert.Equal(AttributeFailureClass.Parse, outcomes[1].Failure);
+    }
+
+    [Fact]
+    public async Task The_plain_port_still_returns_nulls_for_a_wholly_failed_batch()
+    {
+        // ITitleAttributeExtractor's contract is unchanged: row-aligned, null for no answer, no throw.
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.OK, "", DropKind.Connection));
+
+        var results = await Extractor(handler).ExtractAsync([Input("A"), Input("B")]);
+
+        Assert.Equal(2, results.Count);
+        Assert.All(results, Assert.Null);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
 
     private static OpenRouterAttributeExtractor Extractor(CannedHandler handler)
@@ -317,7 +489,18 @@ public class OpenRouterAttributeExtractorLiveModeTests
             .EnumerateArray().Select(m => m.GetProperty("content").GetString()));
     }
 
-    private sealed record CannedResponse(HttpStatusCode Status, string Body);
+    public enum DropKind
+    {
+        None,
+
+        /// <summary>The connection died before a response: the handler throws HttpRequestException.</summary>
+        Connection,
+
+        /// <summary>HttpClient's own timeout: a cancellation nobody asked for.</summary>
+        Timeout,
+    }
+
+    private sealed record CannedResponse(HttpStatusCode Status, string Body, DropKind Drop = DropKind.None);
 
     /// <summary>Replays a fixed script of responses and keeps every request body for assertion.</summary>
     private sealed class CannedHandler(params CannedResponse[] script) : HttpMessageHandler
@@ -330,6 +513,14 @@ public class OpenRouterAttributeExtractorLiveModeTests
         {
             Bodies.Add(await request.Content!.ReadAsStringAsync(ct));
             var canned = script[Math.Min(_index++, script.Length - 1)];
+            switch (canned.Drop)
+            {
+                case DropKind.Connection:
+                    throw new HttpRequestException("Connection reset by peer");
+                case DropKind.Timeout:
+                    throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout.");
+            }
+
             return new HttpResponseMessage(canned.Status)
             {
                 Content = new StringContent(canned.Body, Encoding.UTF8, "application/json"),
