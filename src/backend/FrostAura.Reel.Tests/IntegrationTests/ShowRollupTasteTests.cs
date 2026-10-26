@@ -26,21 +26,38 @@ public class ShowRollupTasteTests(PostgresFixture fixture)
         await using var db = fixture.CreateContext(new AccountContext());
         var account = new Account
         {
-            Id = Guid.NewGuid(), TraktUserSlug = $"rollup-{Guid.NewGuid():N}", CreatedAt = now, LastSeenAt = now, PipelineStageChangedAt = now,
+            Id = Guid.NewGuid(),
+            TraktUserSlug = $"rollup-{Guid.NewGuid():N}",
+            CreatedAt = now,
+            LastSeenAt = now,
+            PipelineStageChangedAt = now,
         };
         var show = new Title
         {
-            Id = Guid.NewGuid(), MediaType = MediaType.Show, TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
-            TraktSlug = string.Empty, Name = $"Rollup show {genre}", Genres = [genre], Year = 2015, CreatedAt = now,
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Show,
+            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
+            TraktSlug = string.Empty,
+            Name = $"Rollup show {genre}",
+            Genres = [genre],
+            Year = 2015,
+            CreatedAt = now,
         };
         db.AddRange(account, show);
         for (var episode = 1; episode <= 6; episode++)
         {
             db.UserRatings.Add(new UserRating
             {
-                Id = Guid.NewGuid(), AccountId = account.Id, TitleId = show.Id, SubjectType = RatingSubjectType.Episode,
-                SeasonNumber = 1, EpisodeNumber = episode, Rating = 10, RatedAt = now.AddDays(-episode),
-                FirstRatedAt = now.AddDays(-episode), SyncedAt = now,
+                Id = Guid.NewGuid(),
+                AccountId = account.Id,
+                TitleId = show.Id,
+                SubjectType = RatingSubjectType.Episode,
+                SeasonNumber = 1,
+                EpisodeNumber = episode,
+                Rating = 10,
+                RatedAt = now.AddDays(-episode),
+                FirstRatedAt = now.AddDays(-episode),
+                SyncedAt = now,
             });
         }
 

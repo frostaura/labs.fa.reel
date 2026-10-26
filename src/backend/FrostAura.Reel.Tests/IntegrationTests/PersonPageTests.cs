@@ -43,7 +43,11 @@ public class PersonPageTests(PostgresFixture fixture, ReelApiFactory api) : ICla
                 Credit(ruledOut, person, CreditRole.Actor, "The Ghost"));
             db.ContentFilters.Add(new ContentFilter
             {
-                Id = Guid.NewGuid(), AccountId = accountId, Kind = FilterKind.ExcludeGenre, Value = "horror", CreatedAt = DateTime.UtcNow,
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = FilterKind.ExcludeGenre,
+                Value = "horror",
+                CreatedAt = DateTime.UtcNow,
             });
             await db.SaveChangesAsync();
         }
@@ -83,7 +87,11 @@ public class PersonPageTests(PostgresFixture fixture, ReelApiFactory api) : ICla
 
     private static TitleCredit Credit(Title title, Person person, CreditRole role, string? character = null) => new()
     {
-        Id = Guid.NewGuid(), TitleId = title.Id, PersonId = person.Id, Role = role, CharacterName = character,
+        Id = Guid.NewGuid(),
+        TitleId = title.Id,
+        PersonId = person.Id,
+        Role = role,
+        CharacterName = character,
         CastOrder = role == CreditRole.Actor ? 1 : null,
     };
 }

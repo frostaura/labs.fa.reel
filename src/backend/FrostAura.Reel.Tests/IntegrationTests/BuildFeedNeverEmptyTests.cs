@@ -152,8 +152,13 @@ public class BuildFeedNeverEmptyTests(PostgresFixture fixture) : EmbeddedCatalog
         {
             seed.SyncJobs.Add(new SyncJob
             {
-                Id = jobId, AccountId = accountId, Kind = JobKind.BuildFeed, EnqueuedAt = DateTime.UtcNow,
-                Status = JobStatus.Running, AttemptCount = 1, StartedAt = DateTime.UtcNow,
+                Id = jobId,
+                AccountId = accountId,
+                Kind = JobKind.BuildFeed,
+                EnqueuedAt = DateTime.UtcNow,
+                Status = JobStatus.Running,
+                AttemptCount = 1,
+                StartedAt = DateTime.UtcNow,
             });
             await seed.SaveChangesAsync();
         }

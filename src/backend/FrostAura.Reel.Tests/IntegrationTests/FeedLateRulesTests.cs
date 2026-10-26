@@ -38,8 +38,11 @@ public class FeedLateRulesTests(PostgresFixture fixture, ReelApiFactory api) : I
         db.Titles.AddRange(kept, horror, weak, row);
         var snapshot = new FeedSnapshot
         {
-            Id = Guid.NewGuid(), AccountId = accountId, ModelArtifactId = Guid.NewGuid(),
-            GeneratedAt = DateTime.UtcNow.AddMinutes(-5), Status = SnapshotStatus.Active,
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            ModelArtifactId = Guid.NewGuid(),
+            GeneratedAt = DateTime.UtcNow.AddMinutes(-5),
+            Status = SnapshotStatus.Active,
         };
         db.FeedSnapshots.Add(snapshot);
         db.FeedItems.AddRange(
@@ -54,8 +57,11 @@ public class FeedLateRulesTests(PostgresFixture fixture, ReelApiFactory api) : I
             new ContentFilter { Id = Guid.NewGuid(), AccountId = accountId, Kind = FilterKind.ExcludeGenre, Value = "horror", CreatedAt = DateTime.UtcNow },
             new ContentFilter
             {
-                Id = Guid.NewGuid(), AccountId = accountId, Kind = FilterKind.MinPredictedRating,
-                Value = ContentFilterRules.FormatRating(7.5m), CreatedAt = DateTime.UtcNow,
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = FilterKind.MinPredictedRating,
+                Value = ContentFilterRules.FormatRating(7.5m),
+                CreatedAt = DateTime.UtcNow,
             });
         await db.SaveChangesAsync();
 
