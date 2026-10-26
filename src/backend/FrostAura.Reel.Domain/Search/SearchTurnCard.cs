@@ -167,5 +167,11 @@ public class SearchTurnCard : IAccountScoped
     /// <summary>How that sentence was produced — an <c>ExposureWhySource</c> value.</summary>
     public string WhySource { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The v2 judge's evidence for its verdict ("keyword: ninja"), or the credit a person card stands
+    /// on; null on v1 cards and on cards no judge ruled on.
+    /// </summary>
+    public string? SatisfiesEvidence { get; set; }
+
     public DateTime CreatedAt { get; set; }
 }

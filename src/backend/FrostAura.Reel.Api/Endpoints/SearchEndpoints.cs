@@ -2,6 +2,7 @@ using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Search.AskReel;
+using FrostAura.Reel.Application.Search.AskReel.Engine;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
@@ -48,6 +49,8 @@ public static class SearchEndpoints
             EligibilityQueryBuilder eligibility,
             OnDemandScorer scorer,
             ILoggerFactory loggerFactory,
+            IConfiguration configuration,
+            AskReelEngine engineV2,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("FrostAura.Reel.Api.AskReel");
@@ -261,6 +264,12 @@ public static class SearchEndpoints
             // ALWAYS present and null when the caller is not entitled to them, and a replay that
             // omitted them gave the client a second shape to parse for one event name.
             var debug = EndpointHelpers.AllowsFounderDebug(http.Request.Query["debug"], profile?.Tier);
+
+            // Which engine answers (§4.13): ASK_ENGINE, which a founder may override for one request
+            // with ?engine=v1|v2 — gated exactly like ?debug, ignored for everyone else.
+            var engine = AskReelEngineOptions.For(
+                configuration,
+                profile?.Tier == Domain.Tenancy.AccountTier.Founder ? http.Request.Query["engine"].ToString() : null);
 
             var jsonOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
 
@@ -525,6 +534,7 @@ public static class SearchEndpoints
                 id = conversation.Id,
                 turnId = assistantTurn.Id,
                 sequence = assistantTurn.Sequence,
+                engine,
             });
 
             using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -542,12 +552,31 @@ public static class SearchEndpoints
                 var presented = await PresentedAsync(db, conversation.Id, priorSequences, ct);
                 var history = await HistoryAsync(db, conversation.Id, priorSequences, ct);
                 var priorIntent = await PriorIntentAsync(db, conversation.Id, priorSequences, ct);
-                outcome = await expansion.StreamAsync(
-                    new LiveSearchExpansionService.AskTurnInput(
-                        message, history, shown, presented, profile?.Region, mediaFilter,
-                        Domain.Sync.ApiUsagePurpose.RerankAsk, debug, assistantTurn.Id, progress, priorIntent),
-                    emit,
-                    ct);
+                var turnInput = new LiveSearchExpansionService.AskTurnInput(
+                    message, history, shown, presented, profile?.Region, mediaFilter,
+                    Domain.Sync.ApiUsagePurpose.RerankAsk, debug, assistantTurn.Id, progress, priorIntent);
+                if (engine == AskReelEngineOptions.V2)
+                {
+                    // This answer's number, for its handles: the assistant rows before it, plus one.
+                    var answerNumber = await db.SearchTurns.CountAsync(
+                        t => t.ConversationId == conversation.Id && t.Role == "assistant" && t.Sequence < assistantTurn.Sequence, ct) + 1;
+                    var threadId = conversation.Id;
+                    var turnId = assistantTurn.Id;
+                    outcome = await engineV2.StreamAsync(
+                        turnInput with
+                        {
+                            ConversationId = threadId,
+                            AnswerNumber = answerNumber,
+                            PersistCards = cards => PersistCardsAsync(scopeFactory, logger, accountId, threadId, turnId, cards),
+                        },
+                        accountId,
+                        emit,
+                        ct);
+                }
+                else
+                {
+                    outcome = await expansion.StreamAsync(turnInput, emit, ct);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -935,6 +964,9 @@ public static class SearchEndpoints
     /// into it. <c>lastTurnAt</c> is beside <c>lastCardsAt</c> because a transcript-only thread has
     /// a null <c>lastCardsAt</c> by definition and would otherwise carry no date at all.</para>
     /// </summary>
+    /// <summary>How many of a thread's newest answers a resume returns cards for, per turn.</summary>
+    private const int ResumedTurnCards = 12;
+
     private static async Task<object> ResumeAsync(
         IReelDbContext db,
         EligibilityQueryBuilder eligibility,
@@ -971,6 +1003,21 @@ public static class SearchEndpoints
 
         var lastQuery = turns.LastOrDefault(t => t.Role == "user")?.Text;
         var mediaFilter = block.Count > 0 ? block[^1].MediaFilter : null;
+
+        // Every answer's own cards (§5.2 WS-2 task 3: "resume returns turns[].cards"), so a resumed
+        // thread renders each turn's cards under its own bubble instead of only the newest block. Each
+        // answer is replayed on its own through the same projection — the same eligibility re-filter,
+        // the same tier split — so a card the account has since seen drops out of every turn alike.
+        // The newest answers only: a long thread's oldest turns render as transcript.
+        var perTurn = new Dictionary<Guid, ReplayedTurns>();
+        foreach (var answer in turns
+                     .Where(t => t.Role == "assistant"
+                                 && (t.Status == Domain.Search.SearchTurnStatus.Completed
+                                     || t.FailureCode == Domain.Search.SearchTurnFailure.ClientAborted))
+                     .TakeLast(ResumedTurnCards))
+        {
+            perTurn[answer.Id] = await ReplayAsync(db, eligibility, scorer, accountId, [answer], ct);
+        }
 
         return new
         {
@@ -1012,6 +1059,15 @@ public static class SearchEndpoints
                 // Whether a judge batch failed, so the screen can say some cards went unchecked.
                 judgeDegraded = Domain.Search.SearchTurnDegraded.JudgeFailed(t.DegradedFlags),
                 mode = t.Role == "assistant" ? Domain.Search.SearchTurnMode.Parse(t.Mode) : null,
+                // Ask Reel v2's act (null on v1 rows and user rows).
+                act = t.Act,
+                // This answer's own cards and trays; null for a user row, a failure, or an answer
+                // older than the newest ResumedTurnCards.
+                cards = perTurn.TryGetValue(t.Id, out var own) ? own.Cards : null,
+                belowFloor = perTurn.TryGetValue(t.Id, out var ownFloor) ? ownFloor.BelowFloor : null,
+                nearMiss = perTurn.TryGetValue(t.Id, out var ownNear) ? ownNear.NearMiss ?? [] : null,
+                @unchecked = perTurn.TryGetValue(t.Id, out var ownUnchecked) ? ownUnchecked.Unchecked ?? [] : null,
+                reason = perTurn.TryGetValue(t.Id, out var ownReason) ? ownReason.Reason : null,
             }),
             cards = replay.Cards,
             // The tray, restored as a tray. It is never merged into `cards` — these cards did not
@@ -1814,6 +1870,75 @@ public static class SearchEndpoints
     /// have. Failure is logged at Error, loudly, because a silent one leaves the whole feature
     /// looking like it works while nothing persists.</para>
     /// </summary>
+    /// <summary>
+    /// Ask Reel v2's write-on-emit (§4.6): the cards a <c>picks</c> or <c>tray</c> frame just put on
+    /// screen, stored under the turn at once on a scope of their own, so a turn that dies mid-stream —
+    /// a crash, not just a client abort — still holds what it showed, in history and in the
+    /// no-repeat set. A failure here costs nothing: the final write stores whatever is missing.
+    /// </summary>
+    private static async Task PersistCardsAsync(
+        IServiceScopeFactory scopeFactory,
+        ILogger logger,
+        Guid accountId,
+        Guid conversationId,
+        Guid turnId,
+        IReadOnlyList<LiveSearchExpansionService.TurnCard> cards)
+    {
+        if (cards.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(accountId);
+            var db = scope.ServiceProvider.GetRequiredService<IReelDbContext>();
+            var ids = cards.Select(c => c.TitleId).ToList();
+            var stored = await db.SearchTurnCards
+                .Where(c => c.TurnId == turnId && ids.Contains(c.TitleId))
+                .Select(c => c.TitleId)
+                .ToListAsync(CancellationToken.None);
+            var now = DateTime.UtcNow;
+            db.SearchTurnCards.AddRange(cards.Where(c => !stored.Contains(c.TitleId)).Select(card => new Domain.Search.SearchTurnCard
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                ConversationId = conversationId,
+                TurnId = turnId,
+                TitleId = card.TitleId,
+                TmdbId = card.TmdbId,
+                Rank = card.Rank,
+                OutsideRequest = card.OutsideRequest,
+                Similarity = card.Similarity,
+                PredictedRating = card.PredictedRating,
+                LlmFit = card.LlmFit,
+                Blend = card.Blend,
+                Why = card.Why,
+                WhySource = card.WhySource,
+                BelowFloor = card.BelowFloor,
+                Tier = card.Tier,
+                Satisfies = card.Satisfies,
+                FitSource = card.FitSource,
+                SatisfiesEvidence = card.SatisfiesEvidence,
+                CreatedAt = now,
+            }));
+            var conversation = await db.SearchConversations.FirstOrDefaultAsync(c => c.Id == conversationId, CancellationToken.None);
+            if (conversation is not null)
+            {
+                conversation.LastCardsAt = now;
+            }
+
+            await db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex, "Ask Reel v2 could not store {Count} card(s) of turn {TurnId} as they were shown; the final write will.",
+                cards.Count, turnId);
+        }
+    }
+
     private static async Task PersistTurnAsync(
         IServiceScopeFactory scopeFactory,
         ILogger logger,
@@ -1855,7 +1980,7 @@ public static class SearchEndpoints
             turn.ConflictJson = outcome.ConflictJson;
             turn.ModelArtifactId = outcome.ModelArtifactId;
             turn.ModelId = outcome.ModelId;
-            turn.PromptVersion = AskReelPromptVersion.Current;
+            turn.PromptVersion = outcome.Act is null ? AskReelPromptVersion.Current : AskReelPromptVersion.V2;
             turn.LatencyMs = latencyMs;
             turn.CompletedAt = now;
             // J-13 / M-8: where the turn's seconds went, which models answered and at what effort,
@@ -1866,14 +1991,26 @@ public static class SearchEndpoints
             turn.ReasoningEffort = outcome.ReasoningEffort;
             turn.Mode = outcome.Mode;
             turn.DegradedFlags = outcome.DegradedFlags;
+            turn.Act = outcome.Act;
+            turn.PlanSource = outcome.PlanSource;
+            turn.TruncationCount = outcome.TruncationCount;
 
             // Cards are stored for every turn that SHOWED some — a completed answer, and a turn the
             // client ended after cards were already on screen (B-3). A crash stores none: its cards,
             // if any, never reached a `done`, and the client renders the failure instead.
+            // A v2 turn writes its cards as it emits them (PersistCardsAsync); what is already stored is
+            // not written twice.
+            var stored = outcome.Cards.Count == 0
+                ? []
+                : await db.SearchTurnCards
+                    .Where(c => c.TurnId == turnId)
+                    .Select(c => c.TitleId)
+                    .ToListAsync(CancellationToken.None);
+            var unstored = outcome.Cards.Where(c => !stored.Contains(c.TitleId)).ToList();
             if (outcome.Cards.Count > 0
                 && (!outcome.Failed || outcome.FailureCode == Domain.Search.SearchTurnFailure.ClientAborted))
             {
-                db.SearchTurnCards.AddRange(outcome.Cards.Select(card => new Domain.Search.SearchTurnCard
+                db.SearchTurnCards.AddRange(unstored.Select(card => new Domain.Search.SearchTurnCard
                 {
                     Id = Guid.NewGuid(),
                     AccountId = accountId,
@@ -1896,6 +2033,7 @@ public static class SearchEndpoints
                     Tier = card.Tier,
                     Satisfies = card.Satisfies,
                     FitSource = card.FitSource,
+                    SatisfiesEvidence = card.SatisfiesEvidence,
                     CreatedAt = now,
                 }));
 
@@ -1904,6 +2042,18 @@ public static class SearchEndpoints
                 if (conversation is not null)
                 {
                     conversation.LastCardsAt = now;
+                }
+            }
+
+            // Ask Reel v2: the conversation's state after this turn (a cache of the turn record).
+            if (outcome.ConversationStateJson is { } stateJson)
+            {
+                var conversation = await db.SearchConversations
+                    .FirstOrDefaultAsync(c => c.Id == turn.ConversationId, CancellationToken.None);
+                if (conversation is not null)
+                {
+                    conversation.StateJson = stateJson;
+                    conversation.StateVersion = ConversationStateJson.Read(stateJson)?.Version ?? 0;
                 }
             }
 

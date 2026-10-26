@@ -34,4 +34,15 @@ public class SearchConversation : IAccountScoped
     /// cards and a reason that explains itself.
     /// </summary>
     public DateTime? LastCardsAt { get; set; }
+
+    /// <summary>
+    /// Ask Reel v2's state after the newest turn (§4.6) — requirements, preferences, the user's own
+    /// negations, rejected titles and the handles on screen — as JSON, every enum by name. A cache of
+    /// the turn record, never its source: null (every pre-v2 conversation) or unreadable means the
+    /// next v2 turn rebuilds it from the stored turns.
+    /// </summary>
+    public string? StateJson { get; set; }
+
+    /// <summary>The answer number <see cref="StateJson"/> was written after; 0 when there is none.</summary>
+    public int StateVersion { get; set; }
 }

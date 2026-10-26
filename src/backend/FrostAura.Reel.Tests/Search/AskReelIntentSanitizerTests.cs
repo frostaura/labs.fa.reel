@@ -68,6 +68,9 @@ public class AskReelIntentSanitizerTests
     /// "no superheroes please" names nothing to search FOR; a pointer question leaves only filler;
     /// a negation inside a request keeps the request and rules the rest out — including a word no
     /// vocabulary lists ("marvel"), since a keyless card that trips it is dropped, never captioned.
+    /// IREV3-SYS-04: "none of the above" rejects the results, not the topic, and the latest mention of
+    /// a word decides it — so the acceptance follow-up "none of the above are ninja movies. I want
+    /// ninja movies" searches ninja, while a word ruled out after it was asked for stays ruled out.
     /// </summary>
     [Theory]
     [InlineData("no superheroes please", "", "superheroes")]
@@ -79,6 +82,13 @@ public class AskReelIntentSanitizerTests
     [InlineData("superhero movies but no marvel", "superhero", "marvel")]
     [InlineData("not too long please", "", "long")]
     [InlineData("ninja ninja movies", "ninja", "")]
+    [InlineData("none of the above are ninja movies. I want ninja movies", "ninja", "")]
+    [InlineData("none of the above are ninja movies", "ninja", "")]
+    [InlineData("neither of those, give me samurai", "samurai", "")]
+    [InlineData("those aren't ninja movies. I want ninja movies", "ninja", "")]
+    [InlineData("no superheroes. superheroes then", "superheroes", "")]
+    [InlineData("heist movies. no heist", "", "heist")]
+    [InlineData("none of the horror ones please", "", "horror")]
     public void A_keyless_reading_searches_only_what_was_asked_for(string raw, string positive, string negated)
     {
         var reading = AskReelIntentSanitizer.ReadKeyless(raw);

@@ -179,6 +179,7 @@ public sealed class LiveSearchExpansionService(
     /// <param name="Tier">One of <c>SearchTurnCardTier</c>; null only from a caller that predates it.</param>
     /// <param name="Satisfies">The judge's request verdict (<c>yes</c>/<c>partial</c>/<c>no</c>), or null when unjudged.</param>
     /// <param name="FitSource">Where <paramref name="LlmFit"/> came from, by name; null where there is no fit.</param>
+    /// <param name="SatisfiesEvidence">The v2 judge's evidence line for its verdict; null on v1 and where unjudged.</param>
     public readonly record struct TurnCard(
         Guid TitleId,
         long? TmdbId,
@@ -193,7 +194,8 @@ public sealed class LiveSearchExpansionService(
         bool BelowFloor = false,
         string? Tier = null,
         string? Satisfies = null,
-        string? FitSource = null);
+        string? FitSource = null,
+        string? SatisfiesEvidence = null);
 
     /// <summary>
     /// What the turn was, handed back to whoever has a place to put it.
@@ -221,6 +223,10 @@ public sealed class LiveSearchExpansionService(
     /// <param name="StageTimingsJson">The per-stage milliseconds, serialised.</param>
     /// <param name="ModelIdsJson">The models behind the turn by role, serialised.</param>
     /// <param name="ReasoningEffort">The effort the turn's model calls were made at.</param>
+    /// <param name="Act">The v2 planner's act, by name; null on a v1 turn.</param>
+    /// <param name="PlanSource">Where the v2 plan came from, by name; null on a v1 turn.</param>
+    /// <param name="TruncationCount">How many of a v2 turn's calls finished on <c>length</c>; null on v1.</param>
+    /// <param name="ConversationStateJson">The conversation's state after a v2 turn, for <c>SearchConversations.StateJson</c>.</param>
     public sealed record TurnOutcome(
         string? AssistantText,
         string? Reason,
@@ -238,7 +244,11 @@ public sealed class LiveSearchExpansionService(
         string? DegradedFlags = null,
         string? StageTimingsJson = null,
         string? ModelIdsJson = null,
-        string? ReasoningEffort = null)
+        string? ReasoningEffort = null,
+        string? Act = null,
+        string? PlanSource = null,
+        int? TruncationCount = null,
+        string? ConversationStateJson = null)
     {
         /// <summary>A turn that answered without the full pipeline — an empty query, a fallback, a filmography.</summary>
         public static TurnOutcome Answered(string? assistantText, string? reason, IReadOnlyList<TurnCard>? cards = null) =>
@@ -275,6 +285,10 @@ public sealed class LiveSearchExpansionService(
     /// <param name="Debug">Whether the founder-only diagnostics ride the terminal frame.</param>
     /// <param name="SourceTurnId">The assistant row this turn is, for the exposure key.</param>
     /// <param name="Progress">Where the turn records what it has emitted, so an abort can persist it.</param>
+    /// <param name="PriorIntent">The previous answer's reading, for what a silent follow-up inherits (v1).</param>
+    /// <param name="ConversationId">The conversation, for the v2 engine's state.</param>
+    /// <param name="AnswerNumber">This answer's number in the conversation, for its handles ("T{n}.{rank}").</param>
+    /// <param name="PersistCards">Writes cards the moment they are emitted (v2), so a turn that dies keeps what it showed.</param>
     public sealed record AskTurnInput(
         string Message,
         IReadOnlyList<ChatTurn> History,
@@ -286,7 +300,10 @@ public sealed class LiveSearchExpansionService(
         bool Debug = false,
         Guid? SourceTurnId = null,
         AskTurnProgress? Progress = null,
-        SearchIntent? PriorIntent = null);
+        SearchIntent? PriorIntent = null,
+        Guid? ConversationId = null,
+        int AnswerNumber = 1,
+        Func<IReadOnlyList<TurnCard>, Task>? PersistCards = null);
 
     /// <summary>
     /// Single-turn convenience overload (no conversation history / shown set) — a query EXPANDED
@@ -509,9 +526,10 @@ public sealed class LiveSearchExpansionService(
             // The model's sentence, plain text, qualified by the conditions it is about to meet. A
             // degraded reading carries the degraded copy for ITS cause (IREV2-SYS-02), which claims
             // nothing and quotes nobody. Re-derived from the failure rather than read from Reply, so a
-            // degraded reply built anywhere else still can never echo the request.
+            // degraded reply built anywhere else still can never echo the request. A spent PLAN
+            // allowance names only what it cost — the judge has its own (IREV3-SYS-03).
             var modelSentence = agentReply.Degraded
-                ? LlmFailureCodes.DegradedReply(agentReply.Failure, agentReply.FailureCode)
+                ? AskReelDegradedCopy.SearchLead(agentReply.Failure, agentReply.FailureCode)
                 : AskReelText.StripMarkdown(agentReply.Reply) ?? string.Empty;
             var pickReply = hasConflict && !agentReply.Degraded
                 ? AskReelStandingFilters.Qualify(
@@ -955,11 +973,13 @@ public sealed class LiveSearchExpansionService(
                     .Where(p => p.Value.Placement != AskReelGate.Placement.Unjudged)
                     .Select(p => p.Key)
                     .ToList();
+                // The scoring stage above ran (and stored what it scored), so the supply the facet arm
+                // counted at discovery is re-counted where it still had unscored titles.
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded ? modelSentence : null, ReplyAsync, degraded, timings, input,
                     emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld,
-                    judgedIds);
+                    judgedIds, scoredThisTurn: true);
             }
 
             await ReplyAsync(pickReply);
@@ -1259,12 +1279,20 @@ public sealed class LiveSearchExpansionService(
         CancellationToken ct,
         IReadOnlyList<GatedCard>? uncheckedTray = null,
         IReadOnlyList<string>? unscoredHeld = null,
-        IReadOnlyCollection<Guid>? judgedIds = null)
+        IReadOnlyCollection<Guid>? judgedIds = null,
+        bool scoredThisTurn = false)
     {
         uncheckedTray ??= [];
         judgedIds ??= [];
         Retrieval.SupplyReport? supply = facet?.Supply;
-        if (supply is null && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
+
+        // The facet arm counted the supply at DISCOVERY, before this turn scored anything. Its split
+        // of the eligible titles by score is stale the moment the turn scores one of its unscored
+        // titles: the dinosaur turn said "4 have no score from your model yet" above a tray showing
+        // all four at 6.06–6.53 against a 6.0 bar (IREV3-SYS-01). So a supply with unscored titles is
+        // counted again, through the same reporter, once the turn's scores are stored.
+        var stale = scoredThisTurn && supply is { Unscored: > 0 };
+        if ((supply is null || stale) && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
         {
             try
             {
@@ -1273,9 +1301,16 @@ public sealed class LiveSearchExpansionService(
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // The counts are the explanation, not the answer: without them the reply still says
-                // nothing matched, it just cannot say how many were seen.
+                // nothing matched, it just cannot say how many were seen. A stale count is not kept
+                // in their place — it is the false sentence this re-count exists to prevent.
                 logger.LogWarning(ex, "Ask Reel: the supply report failed; the none-found reply carries no counts.");
+                supply = null;
             }
+        }
+        else if (stale)
+        {
+            // No reporter to count again with: no counts rather than counts the turn has outdated.
+            supply = null;
         }
 
         // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used.

@@ -568,7 +568,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     /// <c>plan-cause:</c> token beside <c>plan</c>, so history still reads the turn as plan-failed.
     /// </summary>
     [Theory]
-    [InlineData(AgentFailureKind.BudgetSpent, "budget_spent", AgentReply.BudgetSpentReply)]
+    [InlineData(AgentFailureKind.BudgetSpent, "budget_spent", AskReelDegradedCopy.PlanBudgetSpentReply)]
     [InlineData(AgentFailureKind.ProviderRefused, "payment_required", AgentReply.OutOfCreditReply)]
     [InlineData(AgentFailureKind.ProviderRefused, "unauthorized", AgentReply.KeyRejectedReply)]
     public async Task A_degraded_reading_replies_with_its_cause_and_records_it_beside_the_plan_flag(
@@ -581,7 +581,9 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
 
         var accountId = await SeedAccountAsync();
         await MarkAllExistingTitlesSeenAsync(accountId);
-        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 500, ("Yes", 3)));
+        // Its own TMDB ids per row: sharing the labelled-degraded test's ids made whichever ran second see
+        // those titles as already in the catalogue — and so as seen — and answer none-found.
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 3000 + (code[0] * 10), ("Yes", 3)));
         var agent = new VerdictAgent(degradedReading: true, degradedFailure: failure, degradedCode: code);
         var (service, events) = BuildService(accountId, tmdb, agent, out var emit, new MemoryCache(new MemoryCacheOptions()));
 
@@ -593,6 +595,9 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.DoesNotContain(AgentReply.DegradedReply, text, StringComparison.Ordinal);
         Assert.DoesNotContain("no superheroes please", text, StringComparison.Ordinal);
         Assert.Equal(outcome.AssistantText, text);
+        // IREV3-SYS-03: only the plan allowance is spent, and the same turn judged — so the reply never
+        // says the whole Ask allowance is used up.
+        Assert.DoesNotContain(AgentReply.BudgetSpentReply, text, StringComparison.Ordinal);
         Assert.True(SearchTurnDegraded.PlanFailed(outcome.DegradedFlags));
         Assert.Contains($"{SearchTurnDegraded.PlanCausePrefix}{code}", outcome.DegradedFlags!.Split(','));
         var done = events.First(e => e.Event == "done").Data.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()).ToList();
@@ -1241,6 +1246,47 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             outcome.AssistantText,
             StringComparison.Ordinal);
         Assert.DoesNotContain("none of the ones I checked", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// IREV3-SYS-01: the facet arm counts the supply at DISCOVERY, before the turn scores anything. A
+    /// turn that scores those unscored titles on demand must not then say they "have no score from
+    /// your model yet" — the counts in the reply and on the wire are taken after the turn's scores.
+    /// </summary>
+    [Fact]
+    public async Task A_none_found_reply_counts_the_supply_after_the_turn_scored_it()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = $"scoredin{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        for (var i = 0; i < 4; i++)
+        {
+            await SeedTopicalTitleAsync(topic, t => t.Name = $"Gate Partial {topic} {i}");
+        }
+
+        // An active artifact with no stored scores: every topical title is unscored at discovery and
+        // scored on demand (8.4 against a 6.0 bar) once it reaches the judge.
+        await SeedScoresAsync(accountId, [], 8.0m);
+        await SetRatingFloorAsync(accountId, "6.0");
+        var tmdb = new ScriptedTmdbClient([]);
+        var agent = new VerdictAgent(keywords: [topic]);
+        var (service, events) = BuildService(accountId, tmdb, agent, out var emit, withRetrieval: true);
+
+        var outcome = await service.StreamAsync(
+            $"{topic} movies", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Equal(4, done.GetProperty("nearMiss").GetArrayLength());
+        var supply = done.GetProperty("supply");
+        Assert.Equal(0, supply.GetProperty("unscored").GetInt32());
+        Assert.Equal(4, supply.GetProperty("clearingFloor").GetInt32());
+        Assert.DoesNotContain("no score from your model yet", outcome.AssistantText, StringComparison.Ordinal);
     }
 
     private const string TaggedMarker = "tagged-far";

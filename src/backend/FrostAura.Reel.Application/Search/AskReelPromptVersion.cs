@@ -23,4 +23,11 @@ public static class AskReelPromptVersion
 {
     /// <summary>The current Ask Reel prompt generation. Bump on any prompt edit — see the type doc.</summary>
     public const string Current = "askreel-2026-10-24";
+
+    /// <summary>
+    /// The Ask Reel v2 prompt generation (§4.5): the planner, the Ask-only judge and the answerer.
+    /// Recorded on every v2 turn; each v2 cache key also carries its own prompt fingerprint, so an
+    /// edit re-keys it even when this is not bumped.
+    /// </summary>
+    public const string V2 = "askreel-2026-11-v2";
 }

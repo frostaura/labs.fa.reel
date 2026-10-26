@@ -83,6 +83,27 @@ public sealed class AskStageTimings
     /// <summary>From the start of the turn to the first pick on the wire — §4.11's first-card number.</summary>
     public const string FirstCard = "firstCard";
 
+    /// <summary>Ask Reel v2: the planner call (§4.2 step 1).</summary>
+    public const string Plan = "plan";
+
+    /// <summary>Ask Reel v2: building the planner's context (taste summary, persona), inside <see cref="Plan"/>.</summary>
+    public const string PlanContext = "plan.context";
+
+    /// <summary>Ask Reel v2: the retrieval tool (§4.2 step 2).</summary>
+    public const string Retrieve = "retrieve";
+
+    /// <summary>Ask Reel v2: every judge batch, first sent to last returned (§4.2 step 3).</summary>
+    public const string Judge = "judge";
+
+    /// <summary>Ask Reel v2: the first judge batch to return.</summary>
+    public const string JudgeFirstBatch = "judge.first";
+
+    /// <summary>Ask Reel v2: the ItemQuestion answer call.</summary>
+    public const string Answer = "answer";
+
+    /// <summary>Ask Reel v2: composing the reply and the terminal frame.</summary>
+    public const string Compose = "compose";
+
     /// <summary>
     /// Canonical order — the order the work happens in, which is the order a reader wants it. The
     /// snapshot is built from this list, so a stage that never ran is simply absent rather than zero.
@@ -92,6 +113,7 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
+            Plan, PlanContext, Retrieve, Judge, JudgeFirstBatch, Answer, Compose,
         ];
 
     /// <summary>

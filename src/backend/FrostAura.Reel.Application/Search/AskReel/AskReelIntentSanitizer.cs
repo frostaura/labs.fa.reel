@@ -70,6 +70,16 @@ public static class AskReelIntentSanitizer
         "where", "let", "lets", "let's", "ok", "okay", "yes", "yeah", "maybe", "earlier", "before", "after",
     };
 
+    /// <summary>
+    /// Words that, after "none of" or "neither of", point at what was already shown — "none of the
+    /// above", "none of those", "neither of them" — rather than name a topic.
+    /// </summary>
+    private static readonly IReadOnlySet<string> ResultReferents = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "above", "those", "these", "them", "that", "ones", "previous", "last", "earlier", "results", "suggestions",
+        "options", "picks",
+    };
+
     /// <summary>The intent with non-positive keywords removed and standing conditions stripped from its exclusions.</summary>
     public static SearchIntent Sanitize(SearchIntent intent, FilterRuleSet standing, string rawQuery)
     {
@@ -218,13 +228,23 @@ public static class AskReelIntentSanitizer
                         && !StopWords.Contains(w.Word) && !PointerWords.Contains(w.Word)
                         && !SearchVocabulary.IsFloorWord(w.Word))
             .ToList();
+
+        // The LATEST mention of a word decides it (IREV3-SYS-04). "those aren't ninja movies. I want
+        // ninja movies" negates "ninja" in its first clause and asks for it in its second; reading the
+        // negation as winning wherever it stood dropped the only word the user asked for, and the
+        // turn answered that the message "only names what to skip". A word ruled out AFTER it was
+        // asked for ("ninja movies, no ninja") is still ruled out.
+        static bool Same(string a, string b) => NegationTerms.EqualsAnyForm(a, b) || NegationTerms.EqualsAnyForm(b, a);
+        bool Superseded(int index) =>
+            content.Skip(index + 1).Any(later => later.Negated != content[index].Negated && Same(later.Word, content[index].Word));
+
         var negated = content
-            .Where(w => w.Negated)
+            .Where((w, index) => w.Negated && !Superseded(index))
             .Select(w => w.Word)
             .Distinct(StringComparer.Ordinal)
             .ToList();
         var positive = content
-            .Where(w => !w.Negated && !negated.Any(n => NegationTerms.EqualsAnyForm(w.Word, n)))
+            .Where((w, index) => !w.Negated && !Superseded(index))
             .Select(w => w.Word)
             .Distinct(StringComparer.Ordinal)
             .ToList();
@@ -235,34 +255,100 @@ public static class AskReelIntentSanitizer
     /// Every content word of a raw sentence with whether a negation cue governs it. A cue opens the
     /// scope; "but", "and", "with", a comma, a full stop or a semicolon closes it. The cues and those
     /// three conjunctions are never content themselves.
+    ///
+    /// <para>"None of the above (are ninja movies)" rejects the RESULTS, not the topic (IREV3-SYS-04):
+    /// the acceptance follow-up "none of the above are ninja movies. I want ninja movies" asks for
+    /// ninja films twice. So "none of" / "neither of" followed by a pointer at what was shown opens no
+    /// scope, and the words that point are not content.</para>
     /// </summary>
     private static IEnumerable<(string Word, bool Negated)> Scoped(string? raw)
     {
-        var suppressing = false;
+        var words = new List<(string Word, bool Closes)>();
         foreach (var token in (raw ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            foreach (var word in Words(token))
+            // A comma, a full stop or a semicolon closes the clause a negation cue opened.
+            var closes = token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';');
+            var tokenWords = Words(token);
+            if (tokenWords.Count == 0)
             {
-                if (NegationCues.Contains(word))
+                if (closes && words.Count > 0)
                 {
-                    suppressing = true;
+                    words[^1] = (words[^1].Word, true);
                 }
-                else if (word is "but" or "and" or "with")
-                {
-                    suppressing = false;
-                }
-                else
-                {
-                    yield return (word, suppressing);
-                }
+
+                continue;
             }
 
-            // A comma, a full stop or a semicolon closes the clause a negation cue opened.
-            if (token.EndsWith(',') || token.EndsWith('.') || token.EndsWith(';'))
+            for (var i = 0; i < tokenWords.Count; i++)
+            {
+                words.Add((tokenWords[i], closes && i == tokenWords.Count - 1));
+            }
+        }
+
+        var suppressing = false;
+        for (var i = 0; i < words.Count; i++)
+        {
+            var closes = words[i].Closes;
+            var rejected = RejectedResults(words, i);
+            if (rejected > 0)
+            {
+                i += rejected - 1;
+                closes = words[i].Closes;
+                suppressing = false;
+            }
+            else if (NegationCues.Contains(words[i].Word))
+            {
+                suppressing = true;
+            }
+            else if (words[i].Word is "but" or "and" or "with")
+            {
+                suppressing = false;
+            }
+            else
+            {
+                yield return (words[i].Word, suppressing);
+            }
+
+            if (closes)
             {
                 suppressing = false;
             }
         }
+    }
+
+    /// <summary>
+    /// How many words starting at <paramref name="start"/> reject what was shown — "none of the
+    /// above", "neither of those", "none of them were" — or 0 when the words there are not one. Only
+    /// filler, pointers and the referring words are taken, up to the end of the clause, so the topic
+    /// that follows ("are ninja movies") stays content.
+    /// </summary>
+    private static int RejectedResults(IReadOnlyList<(string Word, bool Closes)> words, int start)
+    {
+        if (words[start].Word is not ("none" or "neither")
+            || words[start].Closes || start + 1 >= words.Count || words[start + 1].Word != "of")
+        {
+            return 0;
+        }
+
+        var referent = false;
+        var end = start + 2;
+        for (var j = start + 1; j < words.Count; j++)
+        {
+            var (word, closes) = words[j];
+            if (j > start + 1 && !StopWords.Contains(word) && !PointerWords.Contains(word) && !ResultReferents.Contains(word))
+            {
+                break;
+            }
+
+            referent |= ResultReferents.Contains(word);
+            end = j + 1;
+            if (closes)
+            {
+                break;
+            }
+        }
+
+        return referent ? end - start : 0;
     }
 }
 
