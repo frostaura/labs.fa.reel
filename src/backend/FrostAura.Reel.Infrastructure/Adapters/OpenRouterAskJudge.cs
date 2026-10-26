@@ -195,7 +195,8 @@ public sealed class OpenRouterAskJudge(
         "specific given fact your verdict rests on, at most 40 characters (\"keyword: ninja\", \"overview: a shinobi clan\", " +
         "\"genre: comedy\"). why: at most 100 characters, addressed to the viewer as \"you\", naming that evidence — " +
         "never \"they\" or \"the user\", never generic (\"fits your taste\"), never hedging or arguing against the " +
-        "title when satisfies is \"yes\". Output strictly valid JSON.";
+        "title when satisfies is \"yes\". When satisfies is \"no\", why is an empty string (it is never shown). " +
+        "Output strictly valid JSON.";
 
     internal static object Schema()
     {

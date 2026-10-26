@@ -461,6 +461,15 @@ public class AskReelV2UnitTests
         var byPosition = OpenRouterAskJudge.Parse(positional.RootElement, input);
         Assert.Equal([B], byPosition.Keys);
         Assert.Contains("\"id\":\"1\"", OpenRouterAskJudge.UserPrompt(input), StringComparison.Ordinal);
+
+        // A "no" carries no why (it is never shown, and output tokens are what a batch waits on): the
+        // verdict still counts as judged.
+        Assert.Contains("When satisfies is \"no\", why is an empty string", OpenRouterAskJudge.SystemPrompt, StringComparison.Ordinal);
+        using var silentNo = JsonDocument.Parse("""{"results":[{"id":"1","satisfies":"no","fit":0.1,"why":"","evidence":"genre: drama"}]}""");
+        var no = OpenRouterAskJudge.Parse(silentNo.RootElement, input)[A];
+        Assert.True(no.Judged);
+        Assert.Equal(Satisfies.No, no.Satisfies);
+        Assert.Null(no.Why);
     }
 
     [Theory]
