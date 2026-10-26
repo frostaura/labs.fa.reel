@@ -74,10 +74,43 @@ public sealed record ClusterFact(
     [property: JsonPropertyName("share")] decimal Share,
     [property: JsonPropertyName("titleCount")] int TitleCount);
 
+/// <summary>Where an account's ratings sit against the crowd's, in the three bands every surface uses.</summary>
+public enum CrowdStance
+{
+    /// <summary>Within <see cref="ContrarianFact.Band"/> of the crowd either way.</summary>
+    WithTheCrowd,
+
+    /// <summary>Above the crowd by more than the band.</summary>
+    KinderThanTheCrowd,
+
+    /// <summary>Below the crowd by more than the band.</summary>
+    HarsherThanTheCrowd,
+}
+
 /// <summary>How far the account sits from the crowd, overall and on its strongest genres.</summary>
 public sealed record ContrarianFact(
     [property: JsonPropertyName("overall")] decimal Overall,
-    [property: JsonPropertyName("byGenre")] IReadOnlyList<GenreOffset> ByGenre);
+    [property: JsonPropertyName("byGenre")] IReadOnlyList<GenreOffset> ByGenre)
+{
+    /// <summary>
+    /// The width of "with the crowd", in rating points either way. The Taste DNA tile and the
+    /// why-line contrarian clause both read an offset inside ±0.3 as "with the crowd", so prose
+    /// written from these facts must too: a narrative that says "you rate below the crowd" beside a
+    /// tile reading "-0.2 · with the crowd" contradicts the page it sits on (IREV3S-07).
+    /// </summary>
+    public const decimal Band = 0.3m;
+
+    /// <summary>The band an offset falls in. The edge itself (exactly ±0.3) is still with the crowd.</summary>
+    public static CrowdStance StanceOf(decimal offset) => offset switch
+    {
+        > Band => CrowdStance.KinderThanTheCrowd,
+        < -Band => CrowdStance.HarsherThanTheCrowd,
+        _ => CrowdStance.WithTheCrowd,
+    };
+
+    /// <summary>The overall band — the only claim about the crowd the narrative may make.</summary>
+    public CrowdStance Stance() => StanceOf(Overall);
+}
 
 public sealed record GenreOffset(
     [property: JsonPropertyName("genre")] string Genre,

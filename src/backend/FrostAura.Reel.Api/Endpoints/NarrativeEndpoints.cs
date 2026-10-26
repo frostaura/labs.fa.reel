@@ -74,7 +74,11 @@ public static class NarrativeEndpoints
                 narrative.Version,
                 narrative.RatingsCount,
                 narrative.GeneratedAt,
-                !string.Equals(narrative.ProfileHash, built.ProfileHash, StringComparison.Ordinal),
+                // Stale when the fingerprint moved OR the account crossed a crowd band the
+                // fingerprint's coarser bands miss — the narrative's crowd claim would otherwise sit
+                // beside a tile that contradicts it (IREV3S-07).
+                !string.Equals(narrative.ProfileHash, built.ProfileHash, StringComparison.Ordinal)
+                    || TasteNarrativeService.CrowdStanceMoved(narrative.FactsJson, built.Facts),
                 regenerating,
                 writer.IsAvailable));
         });

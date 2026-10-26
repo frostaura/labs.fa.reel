@@ -68,8 +68,13 @@ public class OpenRouterLensWriter(
     /// highest, carries recent loves and dislikes, and labels sparse genres as sparse. A stored v1
     /// narrative was written from a fact sheet that could not distinguish twenty-six holiday films
     /// from eight hundred thrillers, so it means something different and must not be reused.</para>
+    ///
+    /// <para>v3: the crowd is given as a band (with / kinder than / harsher than, at ±0.3 — the
+    /// band the Taste DNA tile uses), and per-genre gaps only where they leave that band. A v2
+    /// narrative read "-0.18" as "you rate below the crowd overall" beside a tile reading "with the
+    /// crowd" (IREV3S-07), so a stored v2 claim about the crowd cannot be trusted.</para>
     /// </summary>
-    public const int CurrentNarrativePromptVersion = 2;
+    public const int CurrentNarrativePromptVersion = 3;
 
     /// <summary>
     /// The lens prompt generation, and half the lens cache key. Same bump rule.
@@ -629,8 +634,9 @@ public class OpenRouterLensWriter(
         + "  4. Describe the person, not the data. \"You reach for something bleak and slow before "
         + "you reach for something loud\" — not \"your darkness attribute is high\".\n"
         + "  5. No marketing voice, no flattery, no \"you have great taste\". Say what is true, "
-        + "including the awkward parts: what you avoid, where you disagree with the crowd, what you "
-        + "have gone off lately.\n"
+        + "including the awkward parts: what you avoid, where the crowd lines say you part from the "
+        + "crowd, what you have gone off lately. When they say \"with the crowd\", you do not "
+        + "disagree with it.\n"
         + "  6. Each sentence carries its own idea. Do not open two sentences the same way.\n"
         + "  7. OPEN WITH VOLUME. The first sentence describes what they actually watch most — the "
         + "\"Mostly watches\" line — and how they rate it. What a person reaches for again and again "
@@ -846,13 +852,23 @@ public class OpenRouterLensWriter(
                 t.SampleSize));
         }
 
+        // The crowd as a BAND, never a bare offset: given "-0.18" the model wrote "you rate below
+        // the crowd overall" beside a tile reading "with the crowd" (IREV3S-07). The band is the
+        // one the tile and the why-line clause use, and a genre is named only when it leaves it.
         sb.Append(string.Format(
-            c, "Against the crowd overall: {0:+0.00;-0.00} rating points.\n", facts.Contrarian.Overall));
-        if (facts.Contrarian.ByGenre.Count > 0)
+            c, "Against the crowd overall: {0} ({1:+0.00;-0.00} rating points). {2}\n",
+            StanceWords(facts.Contrarian.Stance()), facts.Contrarian.Overall,
+            facts.Contrarian.Stance() == CrowdStance.WithTheCrowd
+                ? "Do not say they rate above or below the crowd overall."
+                : "Say this, and no stronger."));
+        var gaps = facts.Contrarian.ByGenre
+            .Where(o => ContrarianFact.StanceOf(o.Offset) != CrowdStance.WithTheCrowd)
+            .ToList();
+        if (gaps.Count > 0)
         {
-            sb.Append("Against the crowd by genre: ");
-            sb.AppendJoin(" · ", facts.Contrarian.ByGenre.Select(o =>
-                string.Format(c, "{0} {1:+0.00;-0.00}", o.Genre, o.Offset)));
+            sb.Append("Against the crowd by genre (only genres that leave the band; no other genre is a gap): ");
+            sb.AppendJoin(" · ", gaps.Select(o =>
+                string.Format(c, "{0} {1} ({2:+0.00;-0.00})", o.Genre, StanceWords(ContrarianFact.StanceOf(o.Offset)), o.Offset)));
             sb.Append('\n');
         }
 
@@ -1025,6 +1041,14 @@ public class OpenRouterLensWriter(
         return sb.ToString();
     }
 
+    /// <summary>The band in the words the Taste DNA tile shows for it.</summary>
+    internal static string StanceWords(CrowdStance stance) => stance switch
+    {
+        CrowdStance.KinderThanTheCrowd => "kinder than the crowd",
+        CrowdStance.HarsherThanTheCrowd => "harsher than the crowd",
+        _ => "with the crowd",
+    };
+
     // ── Deterministic stubs ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -1058,9 +1082,12 @@ public class OpenRouterLensWriter(
             facts.Texture is { Complexity: > 0.5m }
                 ? "You would rather be made to work than be carried."
                 : "You do not need a film to be difficult to be worth your evening.",
-            facts.Contrarian.Overall > 0m
-                ? "You are kinder than the crowd about the things you choose."
-                : "You are harder on what you watch than most people are.",
+            facts.Contrarian.Stance() switch
+            {
+                CrowdStance.KinderThanTheCrowd => "You are kinder than the crowd about the things you choose.",
+                CrowdStance.HarsherThanTheCrowd => "You are harder on what you watch than most people are.",
+                _ => "Overall you rate much as the crowd does.",
+            },
             people.Count > 0
                 ? $"You have a real track record with {string.Join(" and ", people)}."
                 : "No single name has earned your trust yet.",

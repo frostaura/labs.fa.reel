@@ -103,8 +103,69 @@ public class GoldenPromptTests
         Assert.Contains("Denis Villeneuve as director, 9.2 over 4", prompt, StringComparison.Ordinal);
         // The texture — the aggregate of scalars the catalogue was enriched with.
         Assert.Contains("darkness 0.72", prompt, StringComparison.Ordinal);
-        Assert.Contains("Against the crowd overall: +0.37", prompt, StringComparison.Ordinal);
+        Assert.Contains("Against the crowd overall: kinder than the crowd (+0.37 rating points)", prompt, StringComparison.Ordinal);
+        Assert.Contains("crime kinder than the crowd (+0.70)", prompt, StringComparison.Ordinal);
         Assert.Contains("cerebral sci-fi", prompt, StringComparison.Ordinal);
+    }
+
+    // ── The crowd is a band, the same one the Taste DNA tile shows (IREV3S-07) ──────────────
+
+    [Theory]
+    [InlineData(-0.18, "with the crowd")]
+    [InlineData(-0.30, "with the crowd")]
+    [InlineData(0.30, "with the crowd")]
+    [InlineData(-0.31, "harsher than the crowd")]
+    [InlineData(0.45, "kinder than the crowd")]
+    public void The_narrative_prompt_states_the_crowd_band_the_tile_shows(double overall, string band)
+    {
+        // The founder's fact sheet: overall -0.18, so the tile read "-0.2 · with the crowd" while
+        // the narrative written from "-0.18 rating points" said "You rate below the crowd overall".
+        var prompt = OpenRouterLensWriter.NarrativePrompt(Facts with { Contrarian = new ContrarianFact((decimal)overall, []) });
+
+        Assert.Contains($"Against the crowd overall: {band} (", prompt, StringComparison.Ordinal);
+        Assert.Equal(
+            band == "with the crowd",
+            prompt.Contains("Do not say they rate above or below the crowd overall.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_genre_inside_the_band_is_never_offered_as_a_gap()
+    {
+        // The stored 2026-10-16 narrative named "the clearest gaps in drama and mystery" from
+        // drama -0.38 and mystery -0.14. Only drama leaves the band.
+        var prompt = OpenRouterLensWriter.NarrativePrompt(Facts with
+        {
+            Contrarian = new ContrarianFact(
+                -0.18m,
+                [new GenreOffset("holiday", 0.40m), new GenreOffset("drama", -0.38m), new GenreOffset("mystery", -0.14m)]),
+        });
+
+        Assert.Contains("drama harsher than the crowd (-0.38)", prompt, StringComparison.Ordinal);
+        Assert.Contains("holiday kinder than the crowd (+0.40)", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("mystery", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Without_any_gap_the_by_genre_line_is_absent()
+    {
+        var prompt = OpenRouterLensWriter.NarrativePrompt(Facts with
+        {
+            Contrarian = new ContrarianFact(0.1m, [new GenreOffset("crime", 0.2m)]),
+        });
+
+        Assert.DoesNotContain("Against the crowd by genre", prompt, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(-0.18, "much as the crowd")]
+    [InlineData(0.18, "much as the crowd")]
+    [InlineData(-0.5, "harder on what you watch")]
+    [InlineData(0.5, "kinder than the crowd")]
+    public void The_stub_narrative_follows_the_same_band(double overall, string expected)
+    {
+        var sentences = OpenRouterLensWriter.StubNarrative(Facts with { Contrarian = new ContrarianFact((decimal)overall, []) });
+
+        Assert.Contains(sentences, s => s.Contains(expected, StringComparison.Ordinal));
     }
 
     [Fact]
