@@ -14,6 +14,7 @@
     "test:e2e:preview": "playwright test -c playwright.preview.config.ts",
     "test:e2e:full": "playwright test && playwright test -c playwright.preview.config.ts",
     "audit:gate": "node scripts/audit-gate.mjs",
+    "slot:api": "node scripts/e2e/slotApi.ts",
     "gen:api": "MSBuildEnableWorkloadResolver=false dotnet build ../backend/FrostAura.Reel.Api/FrostAura.Reel.Api.csproj --nologo --no-incremental -p:OpenApiGenerateDocuments=true && openapi-typescript openapi/reel-api.json -o src/store/generated/openapi.ts"
   },
   "dependencies": {
