@@ -478,3 +478,106 @@ Neither retention nor the user-facing delete touches `ExposureEvents`. The log i
 accuracy number is computed from it, and a dangling `ExposureEvent.SourceTurnId` afterwards is the
 designed state — the product did serve those cards, and that stays true after the transcript is
 gone.
+
+## Engine v2 (`ASK_ENGINE=v2`)
+
+The request, the refusals, the rows written before the stream, idempotency, replay, the read routes,
+stale turns, the tray and retention are **unchanged** — only what runs between the `conversation`
+frame and `done` differs. `ASK_ENGINE` is `v1` (default) or `v2`; any other value reads as `v1`. A
+founder may force either engine for one request with `?engine=v1|v2` (gated like `?debug`; ignored for
+everyone else). Every live turn's `conversation` frame now carries `engine: "v1" | "v2"`; a client
+uses it only to know which frames to expect.
+
+### The pipeline
+
+1. **Plan** — one model call (`ask-plan`, strict JSON schema, effort none). It classifies the message
+   as one **act** — `NewRequest`, `Refine`, `CritiqueSet`, `CritiqueItem`, `ItemQuestion` or
+   `Chitchat` — and returns a delta to the conversation's state, the handles it refers to, and the
+   tools it wants. A `length` finish or a timeout is retried once at twice the budget; if the retry
+   fails too the previous state is **carried forward**, only additive words from the new message are
+   added (never ordinals, never a negation phrase as a topic), and the turn is degraded (`plan`).
+   A spent plan allowance (`ask_budget_spent`) or an open provider breaker (`provider_unavailable`)
+   ends the turn **before any work**: `Failed` with that code and the cause's degraded copy.
+2. **Execute** — deterministic tools only; no tool output goes back to the model except the fact
+   sheet an `ItemQuestion` answer is written from.
+3. **Judge** — the top **16** candidates in retrieval order, batches of at most **6**, at most
+   **3** in flight, an Ask-only prompt (`ask-judge`). Each batch is placed and **emitted as it
+   returns**.
+4. **Rank** — `yes` and clearing the bar → picks, appended per batch, **never reordered once
+   shown**; `partial` → the near-miss tray; `yes` under the bar → the floor tray; `no` → dropped;
+   a failed batch → its cards rank after every judged pick, in retrieval order, with no why-line, or
+   go to `unchecked` when the turn has no judged pick.
+5. **Compose** — the reply is written by templates from the supply report, the handles and the
+   facts. **No model writes a search turn's reply.** No markdown, never "pulled", never an echo of
+   the message.
+6. **Persist** — cards are written **as they are emitted** (each `picks` / `tray` frame is a row
+   write), so a turn that dies mid-stream still holds what it showed; the turn's act, mode, plan
+   source, degraded flags, timings, models and effort are written at the end, and the conversation's
+   state is saved beside it.
+
+### Frames, in order
+
+| Frame | When | Payload |
+| --- | --- | --- |
+| `conversation` | first, always | `{ id, turnId, sequence, engine: "v2" }` |
+| `phase` | at every stage, and repeated with `heartbeat: true` after 5 s of silence | `{ stage, label }` — `stage` is `planning` · `searching` · `judging` · `answering` · `composing`; `label` is a plain sentence a narration line can show as-is ("Checking 16 titles against your request") |
+| `plan` | once, after planning | `{ act, concepts: ["ninja"], references: ["T2.3"], media: "Any" \| "Movies" \| "Shows", source: "Llm" \| "LlmRetry" \| "CarriedForward" }` |
+| `conflict` | when the request collides with a standing condition | the v1 shape, unchanged |
+| `picks` | once per judge batch that produced at least one pick | `{ batch, cards: [card] }` — append in arrival order; never re-sort |
+| `tray` | once per non-empty tray, after judging | `{ kind: "nearMiss" \| "belowFloor" \| "unchecked", cards: [card] }` — the whole tray in one frame |
+| `none-found` | a search act with no pick | `{ supply }` — the `done.supply` shape |
+| `answer` | `ItemQuestion`, `Chitchat`, a supply or conditions question | `{ text, handle, titleId }` — `handle` and `titleId` are null when the answer is about no single title |
+| `clarify` | the planner found two readings that differ in their hard constraints (at most once per conversation) | `{ question, options: [string] }` |
+| `degraded` | before `done`, when anything did not run as designed | `{ what: [flag] }` — the `done.degraded` tokens |
+| `assistant-message` | once, just before `done` | `{ text, degraded }` — the composed reply |
+| `done` | last, always | every v1 key, plus `engine: "v2"`, `act`, `planSource`, `answer` (string or null) and `clarify` (object or null). `mode` is `Picks` · `NoneFound` · `Clarify` · `Answer` |
+
+A v2 turn emits **no** `candidate`, `candidate-scored` or `candidate-reranked` frames; `done.results`
+still carries every pick, so a client that only reads `done` keeps working.
+
+**A card** is the v1 card plus three keys: `handle` (`"T3.2"` — answer 3, rank 2, the label the
+user and the planner both use), `tier` (`Pick` · `NearMiss` · `BelowFloor` · `Unchecked`) and
+`evidence` (the judge's one-line evidence for its verdict, or null). `satisfies` is `"yes"` /
+`"partial"` / null as in v1.
+
+**An answer turn** (`mode: "Answer"`) leaves the grid exactly as it was: no cards, no judge call, no
+exposure. Its text is at most two sentences, every claim in it taken from the fact sheet it was
+written from, and it is the turn's assistant text.
+
+### Acts and what they do to the state
+
+The conversation's state (`SearchConversations.StateJson`, `StateVersion`) is derived from the turn
+record and never accepted from the client.
+
+| Act | State | Grid |
+| --- | --- | --- |
+| `NewRequest` | hard constraints and soft preferences **replaced** | new picks |
+| `Refine` | delta **merged** into the current state | new picks |
+| `CritiqueSet` ("none of these are X") | every shown handle → rejected; the concept becomes hard | new picks, none of the rejected |
+| `CritiqueItem` ("more heart than T2.1") | the critiqued titles → rejected; the direction shifts the soft preferences | new picks |
+| `ItemQuestion` | unchanged | unchanged — `answer` |
+| `Chitchat` | unchanged | unchanged — `answer` |
+
+Negations come only from the user's words; standing conditions are never written into the state.
+**People and seen titles (FD-3, lock-compliant default):** a person request returns only titles the
+account has not seen; the reply counts the seen ones and never names them. A person's credits are
+their own evidence (`person:Christopher Nolan/director`), so a pure person request is not sent to
+the judge — its cards carry `satisfies: "yes"` with `FitSource = Facet`.
+
+### Pre-v2 conversations
+
+A conversation with no `StateJson` is rebuilt from its stored turns on its first v2 turn: the first
+answer reads as `NewRequest`, later ones as `Refine`, every answer as `Picks`; stored cards become
+`Tier = Pick` with `Satisfies` null (unjudged — never re-shown as judged); handles come from stored
+rank; a legacy card with no `TitleId` is translated through `Titles` by `TmdbId`, and one that cannot
+be translated stays excluded by its TMDB id.
+
+### Stored, beyond v1
+
+| Row | Column | Meaning |
+| --- | --- | --- |
+| `SearchConversations` | `StateJson`, `StateVersion` | the state after the newest turn; the version increments once per v2 turn |
+| `SearchTurns` | `Act` | the planner's act, as its name; unknown values read as `NewRequest` |
+| `SearchTurns` | `PlanSource` | `Llm` · `LlmRetry` · `CarriedForward`; unknown values read as `CarriedForward` |
+| `SearchTurns` | `TruncationCount` | how many of the turn's calls finished on `length` |
+| `SearchTurnCards` | `SatisfiesEvidence` | the judge's evidence line for the verdict |
