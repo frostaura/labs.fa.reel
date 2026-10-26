@@ -198,11 +198,13 @@ public static class FeedEndpoints
                         // The refill is the one path that can put a card on tonight's page without a
                         // build having chosen it, so it has to rank the way the build ranks. The
                         // ordering is the persisted TitleScore — unchanged, still what the card shows
-                        // — TIMES the account's taste prior. Sorted in memory rather than in SQL,
-                        // because the prior needs the title's genres and the account's history and
-                        // neither is expressible in the ORDER BY above.
+                        // — TIMES the account's taste prior and the title's crowd term, the build's
+                        // OrderPrior. Sorted in memory rather than in SQL, because the prior needs the
+                        // title's genres and the account's history and neither is expressible in the
+                        // ORDER BY above.
                         var prior = TastePrior.From(taste);
-                        pool = [.. pool.OrderByDescending(c => prior.Rank(c.PredictedRating, c.Title))];
+                        pool = [.. pool.OrderByDescending(c =>
+                            prior.Rank(c.PredictedRating, c.Title) * (decimal)CrowdPrior.FactorFor(c.Title))];
 
                         var poolIds = pool.Select(c => c.Title.Id).ToList();
                         var personsByTitle = VerifiedPeople.BestByRole(

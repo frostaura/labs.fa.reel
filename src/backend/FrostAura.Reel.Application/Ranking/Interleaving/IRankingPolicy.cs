@@ -28,6 +28,12 @@ namespace FrostAura.Reel.Application.Ranking.Interleaving;
 /// exactly the same information.
 /// </param>
 /// <param name="LlmFit">The re-rank fit where one has been observed for this title; otherwise null.</param>
+/// <param name="CrowdPrior">
+/// The title's crowd term (see <c>CrowdPrior</c>): a bounded multiplier read off the vote-shrunk,
+/// Trakt-first crowd score, 1 where there is none. Supplied by the caller for the same reason the
+/// taste prior is, and kept separate from it because it is a property of the title, not of the
+/// account: folding it into <c>TastePrior</c> would inflate the build's taste-prior magnitude.
+/// </param>
 public readonly record struct PolicyCandidate(
     Guid TitleId,
     decimal Predicted,
@@ -36,7 +42,8 @@ public readonly record struct PolicyCandidate(
     decimal Popularity,
     double SlateAffinity = 1d,
     double TastePrior = 1d,
-    double? LlmFit = null);
+    double? LlmFit = null,
+    double CrowdPrior = 1d);
 
 /// <summary>
 /// A ranker, as the interleaving harness sees one: an id that ends up on the exposure row, and a
@@ -64,8 +71,8 @@ public interface IRankingPolicy
 }
 
 /// <summary>
-/// The order the feed serves today: calibrated prediction × the taste prior × freshness ×
-/// preference boost, times the slate's own affinity term. This is policy A in the honest first
+/// The order the feed serves today: calibrated prediction × the taste prior × the crowd term ×
+/// freshness × preference boost, times the slate's own affinity term. This is policy A in the honest first
 /// comparison, and it exists as a named policy so that "what the product does now" is a thing the
 /// harness can measure rather than an implicit baseline.
 /// </summary>
@@ -78,14 +85,15 @@ public sealed class CalibratedModelPolicy : IRankingPolicy
     public string PolicyId => Id;
 
     /// <inheritdoc />
-    public string Description => "Calibrated prediction × taste prior × freshness × preference boost — today's served order.";
+    public string Description => "Calibrated prediction × taste prior × crowd term × freshness × preference boost — today's served order.";
 
     /// <summary>
     /// The served ordering key. Public because the other policies fall back to it and the tests pin
     /// that it reproduces the feed builder's own comparator.
     /// </summary>
     public static decimal Key(PolicyCandidate c) =>
-        c.Predicted * (decimal)c.TastePrior * c.Freshness * (decimal)c.PreferenceBoost * (decimal)c.SlateAffinity;
+        c.Predicted * (decimal)c.TastePrior * (decimal)c.CrowdPrior * c.Freshness * (decimal)c.PreferenceBoost
+            * (decimal)c.SlateAffinity;
 
     /// <inheritdoc />
     public IReadOnlyList<PolicyCandidate> Order(IReadOnlyList<PolicyCandidate> candidates) =>
