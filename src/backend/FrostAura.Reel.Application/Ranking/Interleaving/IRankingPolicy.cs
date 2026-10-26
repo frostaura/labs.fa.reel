@@ -34,6 +34,10 @@ namespace FrostAura.Reel.Application.Ranking.Interleaving;
 /// taste prior is, and kept separate from it because it is a property of the title, not of the
 /// account: folding it into <c>TastePrior</c> would inflate the build's taste-prior magnitude.
 /// </param>
+/// <param name="Challenger">
+/// The transparent challenger's signals for this title (see <see cref="TransparentBlendPolicy"/>),
+/// or null where the caller did not read them; only that policy looks at them.
+/// </param>
 public readonly record struct PolicyCandidate(
     Guid TitleId,
     decimal Predicted,
@@ -43,7 +47,8 @@ public readonly record struct PolicyCandidate(
     double SlateAffinity = 1d,
     double TastePrior = 1d,
     double? LlmFit = null,
-    double CrowdPrior = 1d);
+    double CrowdPrior = 1d,
+    ChallengerSignals? Challenger = null);
 
 /// <summary>
 /// A ranker, as the interleaving harness sees one: an id that ends up on the exposure row, and a

@@ -333,7 +333,10 @@ public class BuildFeedJobHandler(
                 var calibrated = calibrator.Calibrate(adjusted);
                 var predicted = DislikeSignal.ApplyDemotion(
                     (decimal)calibrated, demotions.GetValueOrDefault(title.Id));
-                return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted));
+                return new Candidate(title, row, predicted, (decimal)adjusted, (decimal)(calibrated - adjusted))
+                {
+                    Challenger = ChallengerSignals.From(finalVectors[title.Id], title),
+                };
             }).ToList();
         }
 
@@ -744,7 +747,11 @@ public class BuildFeedJobHandler(
     /// columns on <c>TitleScore</c>, which stays the write-only serving cache it is documented to be.
     /// </summary>
     private sealed record Candidate(
-        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta);
+        Title Title, ScoredRow Row, decimal Predicted, decimal BaseScore, decimal CalibrationDelta)
+    {
+        /// <summary>The transparent challenger's signals, read from the same vector the card was scored on.</summary>
+        public ChallengerSignals? Challenger { get; init; }
+    }
 
     /// <summary>
     /// The counts assembly knows and the caller needs for <see cref="FeedBuildStat"/>. A mutable
@@ -855,6 +862,30 @@ public class BuildFeedJobHandler(
                 probeBaseMae = current ? online!.ProbeBaseMae : null,
             },
         });
+    }
+
+    /// <summary>
+    /// Hands the transparent challenger this account's fitted weights — the ones the newest
+    /// evaluation chose on its 60–70% origins — when interleaving is on and the challenger is one of
+    /// the teams. Unfitted (no evaluation yet, or an older ledger row) it drafts with the defaults.
+    /// </summary>
+    private async Task<Func<IRankingPolicy, IRankingPolicy>?> ChallengerWeightsAsync(Guid accountId, CancellationToken ct)
+    {
+        if (!_interleave.Enabled
+            || (_interleave.PolicyA != TransparentBlendPolicy.Id && _interleave.PolicyB != TransparentBlendPolicy.Id))
+        {
+            return null;
+        }
+
+        var ledger = await db.EvaluationResults
+            .AsNoTracking()
+            .Where(r => r.AccountId == accountId && r.BaselinesJson != null)
+            .OrderByDescending(r => r.ComputedAt)
+            .Select(r => r.BaselinesJson)
+            .FirstOrDefaultAsync(ct);
+        return EvalHarness.ChallengerWeights(ledger) is { } weights
+            ? policy => policy is TransparentBlendPolicy ? new TransparentBlendPolicy(weights.Affinity, weights.Similarity) : policy
+            : null;
     }
 
     private static decimal? Percentile(IReadOnlyList<Candidate> candidates, double quantile)
@@ -1270,7 +1301,9 @@ public class BuildFeedJobHandler(
         //
         // `interleaver` being null is the single branch that decides this. Every `else` below is
         // the code that shipped before this harness existed, unchanged.
-        var interleaver = mode == FeedBuildMode.Fresh ? SlateInterleaver.For(_interleave) : null;
+        var interleaver = mode == FeedBuildMode.Fresh
+            ? SlateInterleaver.For(_interleave, await ChallengerWeightsAsync(account.Id, ct))
+            : null;
 
         // Minted here rather than at the write below because a slate's seed and its InterleaveGroup
         // are both derived from it. Harmlessly discarded on the Preserve no-op path, which returns
@@ -1310,7 +1343,8 @@ public class BuildFeedJobHandler(
                     // makes ProfileRerankPolicy fall back to the calibrated key for it rather than
                     // ordering it as a genuine mid-scoring verdict it never received.
                     preAssemblyFits.TryGetValue(x.Candidate.Title.Id, out var judged) ? judged : null,
-                    CrowdPrior.FactorFor(x.Candidate.Title)))]);
+                    CrowdPrior.FactorFor(x.Candidate.Title),
+                    x.Candidate.Challenger))]);
 
             List<Candidate> Selected() => [.. draft.Selected.Select(id => byId[id].Candidate)];
             var stages = phases.Length > 0

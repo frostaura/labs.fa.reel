@@ -5,6 +5,7 @@ using System.Text.Json;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Ranking;
+using FrostAura.Reel.Application.Ranking.Interleaving;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -366,7 +367,8 @@ public class EvalHarness(
             EligibleHoldoutCount = primary.EligibleHoldoutCount,
             UnfilteredHoldoutCount = primary.UnfilteredHoldoutCount,
             OriginsJson = JsonSerializer.Serialize(OriginPayloads(origins)),
-            BaselinesJson = JsonSerializer.Serialize(BaselineLedger(primary.Rows, primary.Ranked, primary.Threshold, primary.Baselines)),
+            BaselinesJson = JsonSerializer.Serialize(BaselineLedger(
+                primary.Rows, primary.Ranked, primary.Threshold, primary.Baselines, ChallengerReport(origins, primary))),
             FeatureSetHash = primary.FeatureSetHash,
             DetailJson = JsonSerializer.Serialize(detail),
             ComputedAt = DateTime.UtcNow,
@@ -417,7 +419,8 @@ public class EvalHarness(
         IReadOnlyList<(Guid TitleId, short Rating, double Predicted)> Ranked,
         TrainedModel Model,
         string FeatureSetHash,
-        IReadOnlyList<BaselineRanking> Baselines);
+        IReadOnlyList<BaselineRanking> Baselines,
+        IReadOnlyList<ChallengerSignals> Challenger);
 
     private async Task<OriginOutcome?> EvaluateOriginAsync(
         Guid accountId,
@@ -564,7 +567,8 @@ public class EvalHarness(
             ranked,
             model,
             featureSetHash,
-            baselines);
+            baselines,
+            [.. scoreable.Select(h => ChallengerSignals.From(holdoutVectors[h.TitleId], titleSide.Titles[h.TitleId]))]);
     }
 
     private static object[] OriginPayloads(IReadOnlyCollection<OriginOutcome> origins) =>
@@ -768,7 +772,8 @@ public class EvalHarness(
         IReadOnlyList<HoldoutRow> rows,
         IReadOnlyList<(Guid TitleId, short Rating, double Predicted)> ranked,
         decimal threshold,
-        IReadOnlyList<BaselineRanking> baselines)
+        IReadOnlyList<BaselineRanking> baselines,
+        object? challenger = null)
     {
         var modelNdcg = NdcgAtK(ranked.Select(r => r.Rating), threshold, NdcgDepth);
         var entries = new List<object>();
@@ -808,7 +813,93 @@ public class EvalHarness(
             model = modelNdcg,
             baselines = entries,
             caveat = BaselinesAsOfCaveat,
+            challenger,
         };
+    }
+
+    /// <summary>
+    /// The transparent challenger's pre-registered report (WS-5 task 11): weights fitted on the
+    /// origins at or below <see cref="TransparentBlendPolicy.FitOriginCeiling"/> only, its NDCG@10 at
+    /// every origin beside FastTree's, and at the primary origin the paired bootstrap CI on
+    /// challenger minus FastTree and challenger minus popularity, read by the rule in
+    /// <see cref="TransparentBlendPolicy.PreRegistration"/>. Null when no fit origin was evaluable.
+    /// </summary>
+    private static object? ChallengerReport(IReadOnlyList<OriginOutcome> origins, OriginOutcome primary)
+    {
+        var fitOrigins = origins.Where(o => o.Fraction <= TransparentBlendPolicy.FitOriginCeiling + 1e-9).ToList();
+        var fit = TransparentBlendPolicy.Fit(
+            [.. fitOrigins.Select(o => ((IReadOnlyList<ChallengerSignals>)o.Challenger, (IReadOnlyList<short>)[.. o.Rows.Select(r => r.Rating)], o.Threshold))]);
+        if (fit is not { } weights)
+        {
+            return null;
+        }
+
+        var scores = TransparentBlendPolicy.Scores([.. primary.Challenger], weights.Affinity, weights.Similarity);
+        var versusModel = primary.Rows.Select((r, i) => new HoldoutRow(r.Rating, scores[i], r.ModelScore)).ToList();
+        var versusPopularity = primary.Rows.Select((r, i) => new HoldoutRow(r.Rating, scores[i], r.BaselineScore)).ToList();
+        var (modelLow, modelHigh) = BootstrapPairedNdcgCi(versusModel, primary.Threshold, NdcgDepth, BootstrapResamples, BootstrapSeed);
+        var (popLow, popHigh) = BootstrapPairedNdcgCi(versusPopularity, primary.Threshold, NdcgDepth, BootstrapResamples, BootstrapSeed);
+        var challengerNdcg = TransparentBlendPolicy.Ndcg(
+            primary.Challenger, [.. primary.Rows.Select(r => r.Rating)], primary.Threshold, weights.Affinity, weights.Similarity);
+
+        static string Reading(decimal low, decimal high) =>
+            low > 0m ? "better" : high < 0m ? "worse" : "no measurable difference";
+
+        return new
+        {
+            policyId = TransparentBlendPolicy.Id,
+            preRegistration = TransparentBlendPolicy.PreRegistration,
+            weights = new { affinity = weights.Affinity, similarity = weights.Similarity, crowd = 1d, votes = 1d },
+            fitOrigins = fitOrigins.Select(o => o.Fraction),
+            fitMeanNdcg = weights.MeanNdcg,
+            origins = origins.Select(o => new
+            {
+                fraction = o.Fraction,
+                usedForFit = o.Fraction <= TransparentBlendPolicy.FitOriginCeiling + 1e-9,
+                challenger = TransparentBlendPolicy.Ndcg(
+                    o.Challenger, [.. o.Rows.Select(r => r.Rating)], o.Threshold, weights.Affinity, weights.Similarity),
+                model = o.ModelNdcg,
+                popularity = o.BaselineNdcg,
+            }),
+            primary = new
+            {
+                origin = PrimaryOrigin,
+                challenger = challengerNdcg,
+                model = primary.ModelNdcg,
+                popularity = primary.BaselineNdcg,
+                versusModel = new { lift = challengerNdcg - primary.ModelNdcg, ciLow = modelLow, ciHigh = modelHigh, reading = Reading(modelLow, modelHigh) },
+                versusPopularity = new { lift = challengerNdcg - primary.BaselineNdcg, ciLow = popLow, ciHigh = popHigh, reading = Reading(popLow, popHigh) },
+            },
+        };
+    }
+
+    /// <summary>
+    /// The challenger weights a ledger row chose, or null when the row has none (written before the
+    /// challenger existed, or its fit had nothing to fit on). Tolerant by contract: an unreadable row
+    /// means "use the defaults", never a failed build.
+    /// </summary>
+    public static (double Affinity, double Similarity)? ChallengerWeights(string? baselinesJson)
+    {
+        if (string.IsNullOrWhiteSpace(baselinesJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(baselinesJson);
+            return doc.RootElement.TryGetProperty("challenger", out var challenger)
+                && challenger.ValueKind == JsonValueKind.Object
+                && challenger.TryGetProperty("weights", out var weights)
+                && weights.TryGetProperty("affinity", out var affinity)
+                && weights.TryGetProperty("similarity", out var similarity)
+                    ? (affinity.GetDouble(), similarity.GetDouble())
+                    : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>The mean NDCG@10 of <see cref="RandomBaselinePermutations"/> seeded shuffles of the holdout.</summary>

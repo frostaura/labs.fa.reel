@@ -93,6 +93,7 @@ public static class RankingPolicyCatalog
         new CalibratedModelPolicy(),
         new PopularityBaselinePolicy(),
         new ProfileRerankPolicy(),
+        new TransparentBlendPolicy(),
     ];
 
     /// <summary>Every policy the harness can run, for the founder-facing panel.</summary>

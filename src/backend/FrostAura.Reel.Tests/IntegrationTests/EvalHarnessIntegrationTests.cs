@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Ranking.Interleaving;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
@@ -184,6 +185,25 @@ public class EvalHarnessIntegrationTests(PostgresFixture fixture)
                 Assert.True(baseline.GetProperty("ciHigh").GetDecimal() >= baseline.GetProperty("ciLow").GetDecimal());
             }
         }
+
+        // The challenger's pre-registered report: fitted on the 60–70% origins only, read out of
+        // sample at the primary origin with paired CIs against FastTree and popularity.
+        var challenger = ledger.GetProperty("challenger");
+        Assert.Equal(TransparentBlendPolicy.PreRegistration, challenger.GetProperty("preRegistration").GetString());
+        Assert.All(challenger.GetProperty("fitOrigins").EnumerateArray(), o => Assert.True(o.GetDouble() <= 0.70d + 1e-9));
+        Assert.Contains(challenger.GetProperty("weights").GetProperty("affinity").GetDouble(), TransparentBlendPolicy.WeightGrid);
+        var primary = challenger.GetProperty("primary");
+        foreach (var versus in new[] { "versusModel", "versusPopularity" })
+        {
+            var read = primary.GetProperty(versus);
+            Assert.True(read.GetProperty("ciHigh").GetDecimal() >= read.GetProperty("ciLow").GetDecimal());
+            Assert.Contains(read.GetProperty("reading").GetString(), new[] { "better", "worse", "no measurable difference" });
+        }
+
+        Assert.Equal(first.Result.NdcgAt10Model, primary.GetProperty("model").GetDecimal());
+        Assert.Equal(
+            EvalHarness.ChallengerWeights(first.Result.BaselinesJson),
+            (challenger.GetProperty("weights").GetProperty("affinity").GetDouble(), challenger.GetProperty("weights").GetProperty("similarity").GetDouble()));
 
         // The popularity entry is the gate's own baseline, not a second definition of it.
         Assert.Equal(first.Result.NdcgAt10Baseline, baselines["popularity"].GetProperty("ndcg").GetDecimal());
