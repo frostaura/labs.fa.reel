@@ -749,13 +749,17 @@ public sealed class LiveSearchExpansionService(
             var (ranked, outside) = PartitionByNegation(scoredPool, negations, evidence.ContainsKey);
 
             // The judge's order is the partition's order: titles carrying catalogue evidence for the
-            // concept first (facet arm), then by similarity.
-            var judgeOrder = ranked.Take(AskReelJudge.MaxJudged).ToList();
+            // concept first (facet arm), then by similarity — and, when there are more tagged titles
+            // than the judge rules on, the tagged ones the account's bar lets through ahead of the
+            // rest (IREV2-SYS-01).
+            var floor = MinPredictedFloor(filterRows);
+            var judgeOrder = (await JudgeOrderAsync(accountId, ranked, evidence.ContainsKey, floor, now, taste, timings, ct))
+                .Take(AskReelJudge.MaxJudged)
+                .ToList();
 
             // ── Score what can reach the screen ──────────────────────────────────────────────
             var sliceIds = judgeOrder.Concat(outside).Select(x => x.Title.Id).ToList();
             await Phase(new { stage = "scoring", found = sliceIds.Count, scored = 0 });
-            var floor = MinPredictedFloor(filterRows);
             IReadOnlyDictionary<Guid, decimal> scores;
             using (timings.Stage(AskStageTimings.Score))
             {
@@ -936,10 +940,16 @@ public sealed class LiveSearchExpansionService(
                     .ToList();
                 var underBar = heldMatches.Where(c => c.Predicted is not null).Select(c => c.Title.Name).ToList();
                 var unscoredHeld = heldMatches.Where(c => c.Predicted is null).Select(c => c.Title.Name).ToList();
+                // What the judge actually ruled on — a skipped or failed entry is not a check.
+                var judgedIds = placed
+                    .Where(p => p.Value.Placement != AskReelGate.Placement.Unjudged)
+                    .Select(p => p.Key)
+                    .ToList();
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded, ReplyAsync, degraded, timings, input,
-                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld);
+                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld,
+                    judgedIds);
             }
 
             await ReplyAsync(pickReply);
@@ -1238,9 +1248,11 @@ public sealed class LiveSearchExpansionService(
         string? effort,
         CancellationToken ct,
         IReadOnlyList<GatedCard>? uncheckedTray = null,
-        IReadOnlyList<string>? unscoredHeld = null)
+        IReadOnlyList<string>? unscoredHeld = null,
+        IReadOnlyCollection<Guid>? judgedIds = null)
     {
         uncheckedTray ??= [];
+        judgedIds ??= [];
         Retrieval.SupplyReport? supply = facet?.Supply;
         if (supply is null && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
         {
@@ -1259,7 +1271,12 @@ public sealed class LiveSearchExpansionService(
         // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used.
         var concept = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
         var shownHere = supply is { ClearingFloor: > 0 }
-            ? await ShownInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct)
+            ? await ClearingInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct) ?? 0
+            : 0;
+        // How many of the tagged titles that clear the bar the judge actually ruled on (IREV2-SYS-01):
+        // the supply counts the whole catalogue, the judge at most MaxJudged a turn.
+        var checkedOfTagged = supply is { ClearingFloor: > 0 }
+            ? await ClearingInSupplyAsync(accountId, hard, supply, judgedIds, floor, ct)
             : 0;
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
             supply, concept, hard.Media, underBar, nearMiss.Count, floor,
@@ -1267,7 +1284,9 @@ public sealed class LiveSearchExpansionService(
             JudgedAny: judge?.JudgedAny ?? true,
             ShownHere: shownHere,
             UnscoredHeld: unscoredHeld,
-            NearMissNames: [.. nearMiss.Select(c => c.Title.Name)]));
+            NearMissNames: [.. nearMiss.Select(c => c.Title.Name)],
+            Checked: judgedIds.Count,
+            CheckedOfTagged: checkedOfTagged));
 
         // A follow-up that changes nothing hears that it was heard, not the same paragraph again.
         text = NoneFoundCopy.Again(text, PreviousReply(input.History));
@@ -1379,23 +1398,25 @@ public sealed class LiveSearchExpansionService(
             };
 
     /// <summary>
-    /// How many of the titles the supply counts as clearing the bar this conversation has already
-    /// shown — counted through the same eligibility and topic predicates, then the same bar. They were
-    /// excluded before anything was judged, so the reply names them as shown rather than as rejected
-    /// (D4). A failure costs the sentence, never the turn.
+    /// How many of <paramref name="titleIds"/> the supply counts as clearing the bar — counted through
+    /// the same eligibility and topic predicates, then the same bar. Asked of the titles this
+    /// conversation has already shown, which were excluded before anything was judged, so the reply
+    /// names them as shown rather than as rejected (D4); and of the titles the judge ruled on, so the
+    /// reply never says it checked tagged titles it never sent to the judge (IREV2-SYS-01). A failure
+    /// costs the sentence, never the turn: it answers null.
     /// </summary>
-    private async Task<int> ShownInSupplyAsync(
+    private async Task<int?> ClearingInSupplyAsync(
         Guid accountId, Retrieval.HardConstraints hard, Retrieval.SupplyReport supply,
-        IReadOnlyCollection<Guid> shownIds, decimal floor, CancellationToken ct)
+        IReadOnlyCollection<Guid> titleIds, decimal floor, CancellationToken ct)
     {
-        if (shownIds.Count == 0)
+        if (titleIds.Count == 0)
         {
             return 0;
         }
 
         try
         {
-            var ids = shownIds.ToList();
+            var ids = titleIds.ToList();
             var ceiling = await eligibility.MaturityCeilingAsync(accountId, ct);
             var topical = (await Retrieval.HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard)
                     .Where(t => ids.Contains(t.Id))
@@ -1425,8 +1446,8 @@ public sealed class LiveSearchExpansionService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Ask Reel: counting the conversation's shown titles failed; the reply omits them.");
-            return 0;
+            logger.LogWarning(ex, "Ask Reel: counting titles inside the supply failed; the reply omits the count.");
+            return null;
         }
     }
 
@@ -2125,6 +2146,48 @@ public sealed class LiveSearchExpansionService(
         || NegationTerms.AnyLabelMatches(title.Subgenres, word)
         || NegationTerms.MatchesPhrase(title.Name, word, literalOnly: true)
         || NegationTerms.MatchesPhrase(title.Overview, word, literalOnly: true);
+
+    /// <summary>
+    /// The order the judge sees the ranked pool in: the partition's order (catalogue evidence first,
+    /// then similarity), except that when more tagged titles are ranked than the judge rules on, the
+    /// tagged titles the account's bar lets through go ahead of the tagged titles it holds back.
+    ///
+    /// <para><b>Why (IREV2-SYS-01).</b> The facet arm returns up to 24 tagged titles and the judge
+    /// rules on 16. Similarity says nothing about which of them can become a pick, so a heist turn
+    /// judged 16 tagged titles by cosine, never sent four of the five that cleared the bar, and
+    /// answered none-found. A tagged title under the bar can only ever reach the floor tray. Scored
+    /// only in that case: below the judge's cap every tagged title is judged anyway.</para>
+    /// </summary>
+    private async Task<List<(Title Title, double Sim)>> JudgeOrderAsync(
+        Guid accountId, List<(Title Title, double Sim)> ranked, Func<Guid, bool> hasEvidence, decimal floor,
+        DateTime now, FeatureVectorBuilder.TasteState taste, AskStageTimings timings, CancellationToken ct)
+    {
+        var tagged = ranked.Where(x => hasEvidence(x.Title.Id)).Select(x => x.Title.Id).ToList();
+        if (floor <= 0m || tagged.Count <= AskReelJudge.MaxJudged)
+        {
+            return ranked;
+        }
+
+        IReadOnlyDictionary<Guid, decimal> predicted;
+        using (timings.Stage(AskStageTimings.Score))
+        {
+            predicted = await scorer.ScoreAsync(accountId, tagged, now, ct, taste);
+        }
+
+        return OrderForJudge(ranked, hasEvidence, id => AskReelGate.Clears(predicted.TryGetValue(id, out var p) ? p : null, floor));
+    }
+
+    /// <summary>
+    /// Tagged titles the bar lets through, then the other tagged titles, then the rest — stably, so
+    /// equal footing keeps the partition's order.
+    /// </summary>
+    internal static List<(Title Title, double Sim)> OrderForJudge(
+        IReadOnlyList<(Title Title, double Sim)> ranked, Func<Guid, bool> hasEvidence, Func<Guid, bool> clearsBar) =>
+        [.. ranked
+            .Select((x, index) => (x, index))
+            .OrderBy(p => !hasEvidence(p.x.Title.Id) ? 2 : clearsBar(p.x.Title.Id) ? 0 : 1)
+            .ThenBy(p => p.index)
+            .Select(p => p.x)];
 
     /// <summary>
     /// Splits the similarity-ordered pool into the picks, the flagged "outside your request"

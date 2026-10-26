@@ -1095,11 +1095,14 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     /// so a tagged title survived only if it was also among the nearest, and the reply counted "5
     /// unseen heist movies tagged that way" that no judge ever saw. Here every tagged title sits at
     /// the BOTTOM of the similarity order, under more distractors than the cut keeps; varied over
-    /// several tagged matches (an answer) and a lone one held back by the bar (the samurai turn,
-    /// which must name it under the bar rather than count it and show nothing).
+    /// several tagged matches (an answer), a lone one that clears a set bar beneath more than 24
+    /// nearer titles (IREV2-SYS-01: it must be judged, and it is the answer), and a lone one held
+    /// back by the bar (the samurai turn, which must name it under the bar rather than count it and
+    /// show nothing). The gate's scorer predicts 8.4 for every title here.
     /// </summary>
     [Theory]
     [InlineData(5, "0", 30)]
+    [InlineData(1, "6", 30)]
     [InlineData(1, "9.9", 30)]
     [InlineData(3, "0", 26)]
     public async Task Tagged_titles_are_judged_before_any_similarity_cut(int tagged, string floor, int distractors)
@@ -1136,7 +1139,7 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.All(taggedIds, id => Assert.Contains(id, agent.Judged));
         var done = Assert.Single(events, e => e.Event == "done").Data;
         var taggedNames = Enumerable.Range(0, tagged).Select(i => $"Gate Yes {TaggedMarker} {i}").ToList();
-        if (floor == "0")
+        if (decimal.Parse(floor, System.Globalization.CultureInfo.InvariantCulture) <= 8.4m)
         {
             Assert.Equal("Picks", done.GetProperty("mode").GetString());
             Assert.Equal(taggedNames.Order(StringComparer.Ordinal), Names(done.GetProperty("results")).Order(StringComparer.Ordinal));
@@ -1148,6 +1151,56 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
             Assert.Contains($"Under your {floor} bar: {taggedNames[0]}", outcome.AssistantText, StringComparison.Ordinal);
         }
 
+        Assert.DoesNotContain("none of the ones I checked", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// IREV2-SYS-01: the supply counts every tagged title in the catalogue, the judge rules on at most
+    /// 16 a turn. With more tagged titles clearing the bar than that, every judge slot goes to a
+    /// tagged title (never to a nearer untagged one), and a none-found reply says how many of them it
+    /// checked — never "none of the ones I checked" over titles no judge saw. Varied over how far the
+    /// tagged supply overruns the judge.
+    /// </summary>
+    [Theory]
+    [InlineData(20, 30)]
+    [InlineData(17, 40)]
+    public async Task A_none_found_reply_says_how_many_tagged_titles_it_actually_checked(int tagged, int distractors)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = $"evcount{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        var taggedIds = new List<Guid>();
+        for (var i = 0; i < tagged; i++)
+        {
+            taggedIds.Add(await SeedTopicalTitleAsync(topic, t => t.Name = $"Gate No {TaggedMarker} {i}"));
+        }
+
+        await SeedScoresAsync(accountId, taggedIds, 8.0m);
+        await SetRatingFloorAsync(accountId, "6");
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 2100 + (tagged * 50) + distractors, ("No", distractors)));
+        var agent = new VerdictAgent(keywords: [topic]);
+        var (service, events) = BuildService(
+            accountId, tmdb, agent, out var emit, withRetrieval: true, embeddings: new TaggedFarEmbeddingProvider());
+
+        var outcome = await service.StreamAsync(
+            $"{topic} movies", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+        Assert.Equal(tagged, done.GetProperty("supply").GetProperty("clearingFloor").GetInt32());
+        Assert.Equal(AskReelJudge.MaxJudged, agent.Judged.Count);
+        Assert.All(agent.Judged, id => Assert.Contains(id, taggedIds));
+        var rest = tagged - AskReelJudge.MaxJudged;
+        Assert.Contains(
+            FormattableString.Invariant(
+                $"You have {tagged} unseen {topic} titles tagged that way. I checked 16 of them and none is really a match; the other {rest} {(rest == 1 ? "wasn't" : "weren't")} among the 16 titles I checked this time."),
+            outcome.AssistantText,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("none of the ones I checked", outcome.AssistantText, StringComparison.Ordinal);
     }
 

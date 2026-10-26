@@ -51,6 +51,14 @@ public static class NoneFoundCopy
     /// match they are the closest thing it did find, so the reply names them rather than counting
     /// them (R1-01: "Blade of the 47 Ronin" sat in the tray of a samurai turn whose reply never said so).
     /// </param>
+    /// <param name="Checked">How many titles the judge actually ruled on this turn.</param>
+    /// <param name="CheckedOfTagged">
+    /// How many of the unseen titles the supply counts as clearing the bar were among those the judge
+    /// ruled on — or null when that was not counted. The supply counts every tagged title in the
+    /// catalogue and the judge rules on at most <see cref="AskReelJudge.MaxJudged"/> a turn, so "none
+    /// of the ones I checked is really a match" over tagged titles nobody judged implied a check that
+    /// never happened (IREV2-SYS-01). The sentence says how many were checked instead.
+    /// </param>
     public sealed record Facts(
         SupplyReport? Supply,
         string? ConceptWords,
@@ -62,7 +70,9 @@ public static class NoneFoundCopy
         bool JudgedAny = true,
         int ShownHere = 0,
         IReadOnlyList<string>? UnscoredHeld = null,
-        IReadOnlyList<string>? NearMissNames = null);
+        IReadOnlyList<string>? NearMissNames = null,
+        int Checked = 0,
+        int? CheckedOfTagged = null);
 
     /// <summary>The lead a reply gets when it would otherwise repeat the previous answer word for word.</summary>
     public const string AgainLead = "Looking again turned up nothing new.";
@@ -123,8 +133,7 @@ public static class NoneFoundCopy
 
                 var other = shown > 0 ? " other" : string.Empty;
                 sentences.Add(facts.JudgedAny
-                    ? FormattableString.Invariant(
-                        $"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way, but none of the ones I checked is really a match.")
+                    ? Tagged(fresh, other, topic, facts.Checked, facts.CheckedOfTagged)
                     : FormattableString.Invariant(
                         $"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way, but I couldn't check them against what you asked this time."));
             }
@@ -195,6 +204,36 @@ public static class NoneFoundCopy
         }
 
         return string.Join(" ", sentences);
+    }
+
+    /// <summary>
+    /// The tagged-supply sentence on a turn the judge ran: "none of the ones I checked" only when
+    /// every one of them was checked, and otherwise how many were, out of how many the judge saw.
+    /// </summary>
+    private static string Tagged(int fresh, string other, string? topic, int judged, int? checkedOfTagged)
+    {
+        var lead = FormattableString.Invariant($"You have {fresh}{other} unseen {Noun(topic, fresh)} tagged that way");
+        var ofTagged = checkedOfTagged is { } c ? Math.Clamp(c, 0, fresh) : fresh;
+        if (ofTagged >= fresh)
+        {
+            return $"{lead}, but none of the ones I checked is really a match.";
+        }
+
+        if (judged <= 0)
+        {
+            return $"{lead}, but I didn't check {(fresh == 1 ? "it" : "them")} against what you asked this time.";
+        }
+
+        var checkedTitles = FormattableString.Invariant($"the {judged} {(judged == 1 ? "title" : "titles")} I checked this time");
+        if (ofTagged == 0)
+        {
+            return $"{lead}, but {(fresh == 1 ? "it wasn't" : "none of them was")} among {checkedTitles}"
+                + $", and {(judged == 1 ? "that one isn't" : "none of those is")} really a match.";
+        }
+
+        var rest = fresh - ofTagged;
+        return FormattableString.Invariant(
+            $"{lead}. I checked {ofTagged} of them and {(ofTagged == 1 ? "it isn't" : "none is")} really a match; the other {rest} {(rest == 1 ? "wasn't" : "weren't")} among {checkedTitles}.");
     }
 
     /// <summary>"Of the 12 in the catalogue, you've seen 6, 2 are saved or dismissed and your conditions hold out 4."</summary>

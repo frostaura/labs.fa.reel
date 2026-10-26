@@ -163,6 +163,42 @@ public class NoneFoundCopyTests
         Assert.Contains("3 close-but-not-quite titles are tucked away below.", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// IREV2-SYS-01: the supply counts every tagged title, the judge rules on at most 16 a turn. "None
+    /// of the ones I checked is really a match" stands only when every tagged title that clears the
+    /// bar was checked; otherwise the reply says how many were. Varied over all, some, one, none of
+    /// the tagged titles checked, a single tagged title, a single title checked, and no check at all.
+    /// </summary>
+    [Theory]
+    [InlineData(5, 16, 5, "You have 5 unseen heist movies tagged that way, but none of the ones I checked is really a match.")]
+    [InlineData(5, 16, 9, "You have 5 unseen heist movies tagged that way, but none of the ones I checked is really a match.")]
+    [InlineData(20, 16, 16, "You have 20 unseen heist movies tagged that way. I checked 16 of them and none is really a match; the other 4 weren't among the 16 titles I checked this time.")]
+    [InlineData(5, 16, 1, "You have 5 unseen heist movies tagged that way. I checked 1 of them and it isn't really a match; the other 4 weren't among the 16 titles I checked this time.")]
+    [InlineData(5, 16, 4, "You have 5 unseen heist movies tagged that way. I checked 4 of them and none is really a match; the other 1 wasn't among the 16 titles I checked this time.")]
+    [InlineData(5, 16, 0, "You have 5 unseen heist movies tagged that way, but none of them was among the 16 titles I checked this time, and none of those is really a match.")]
+    [InlineData(1, 16, 0, "You have 1 unseen heist movie tagged that way, but it wasn't among the 16 titles I checked this time, and none of those is really a match.")]
+    [InlineData(5, 1, 0, "You have 5 unseen heist movies tagged that way, but none of them was among the 1 title I checked this time, and that one isn't really a match.")]
+    [InlineData(5, 0, 0, "You have 5 unseen heist movies tagged that way, but I didn't check them against what you asked this time.")]
+    [InlineData(1, 0, 0, "You have 1 unseen heist movie tagged that way, but I didn't check it against what you asked this time.")]
+    public void A_tagged_supply_sentence_never_claims_a_check_that_did_not_happen(
+        int clearing, int judged, int checkedOfTagged, string expected)
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = clearing }, "heist", MediaScope.Movies, [], 0, 6m,
+            Checked: judged, CheckedOfTagged: checkedOfTagged));
+
+        Assert.Equal(expected, text);
+    }
+
+    [Fact]
+    public void An_uncounted_check_keeps_the_sentence_it_always_had()
+    {
+        var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
+            Ninja() with { Eligible = 3 }, "ninja", MediaScope.Movies, [], 0, 6m, Checked: 16, CheckedOfTagged: null));
+
+        Assert.Equal("You have 3 unseen ninja movies tagged that way, but none of the ones I checked is really a match.", text);
+    }
+
     [Fact]
     public void Tagged_titles_the_judge_rejected_are_not_called_none_left()
     {

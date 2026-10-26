@@ -246,6 +246,31 @@ public class OutsideRequestChannelTests
         Assert.Equal(pool.Take(24 - Math.Min(tagged, 24)).Select(x => x.Title.Id), ranked.Skip(tagged).Select(x => x.Title.Id));
     }
 
+    /// <summary>
+    /// IREV2-SYS-01: with more tagged titles than the judge rules on, the tagged titles the bar lets
+    /// through are judged first — similarity says nothing about which can become a pick. Varied over
+    /// where the clearing titles sit among the tagged ones, and over none clearing.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { 19, 20, 21, 22 })]
+    [InlineData(new[] { 0, 22 })]
+    [InlineData(new int[0])]
+    public void Tagged_titles_the_bar_lets_through_are_judged_first(int[] clearingAt)
+    {
+        var pool = Pool(clean: 30, contradicting: 0);
+        var tagged = pool.Take(23).Select(x => x.Title.Id).ToHashSet();
+        var clearing = clearingAt.Select(i => pool[i].Title.Id).ToHashSet();
+
+        var ordered = LiveSearchExpansionService.OrderForJudge(pool, tagged.Contains, clearing.Contains);
+
+        Assert.Equal(pool.Count, ordered.Count);
+        Assert.Equal(clearingAt.Select(i => pool[i].Title.Id), ordered.Take(clearingAt.Length).Select(x => x.Title.Id));
+        Assert.Equal(
+            pool.Take(23).Where(x => !clearing.Contains(x.Title.Id)).Select(x => x.Title.Id),
+            ordered.Skip(clearingAt.Length).Take(23 - clearingAt.Length).Select(x => x.Title.Id));
+        Assert.Equal(pool.Skip(23).Select(x => x.Title.Id), ordered.Skip(23).Select(x => x.Title.Id));
+    }
+
     [Fact]
     public void Without_evidence_the_partition_keeps_the_similarity_order()
     {
