@@ -32,6 +32,11 @@
    "typeahead": 32
   },
   "stubRate": 0.0035335689045936395,
+  "stubKinds": {
+   "generic": 1,
+   "composed": 0,
+   "aligned": 0
+  },
   "exclusionLeaks": 21,
   "leakRate": 0.07420494699646643,
   "crossRailRepeats": 0,
@@ -64,6 +69,11 @@
     "whyThis": 1
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -84,6 +94,11 @@
     "lensClause": 14
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 3,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -103,6 +118,11 @@
     "whyThis": 65
    },
    "stubWhy": 1,
+   "stubKinds": {
+    "generic": 1,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -122,6 +142,11 @@
     "whyThis": 96
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 21,
@@ -162,6 +187,11 @@
     "whyThis": 60
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -182,6 +212,11 @@
     "whyThis": 6
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -199,6 +234,11 @@
    "cards": 150,
    "renderedFrom": {},
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -239,6 +279,11 @@
     "reason": 1
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -256,6 +301,11 @@
    "cards": 134,
    "renderedFrom": {},
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -294,6 +344,11 @@
    "cards": 32,
    "renderedFrom": {},
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,

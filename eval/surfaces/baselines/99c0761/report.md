@@ -23,6 +23,7 @@
 |---|---|
 | Suggestion cards fetched | 273 |
 | Stub rate (rendered why-lines in the stub family) | 0.212 |
+| Stub why-lines by kind (generic once-per-page / composed tail / aligned template) | 1 / 0 / 57 |
 | Exclusion leaks (suggestion surfaces) | 22 |
 | Cross-rail repeats (feed page) | 0 |
 | Evidence share (anchored + Similar, n=126) | 0.667 |

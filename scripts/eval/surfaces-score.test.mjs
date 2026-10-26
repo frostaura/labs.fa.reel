@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { scoreSurfaces, compareSurfaces, surfaceGates, rendered, inputArtifact } from "./surfaces-score.mjs";
+import { scoreSurfaces, stubKind, compareSurfaces, surfaceGates, rendered, inputArtifact } from "./surfaces-score.mjs";
 import { STUB_WHY, HEDGE_WHY } from "./askreel-score.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -141,6 +141,29 @@ test("stub family: GenericFallback alone or as an anchored tail is a stub; a rea
   }
   const m = scoreSurfaces(rec([{ surface: "more", key: "m", component: "card", cards: [lens(A, { whyThis: "Strong fit with your taste profile." }), lens(B, { whyThis: "Shares the dread of Hereditary." })] }]));
   assert.equal(m.summary.stubRate, 0.5);
+});
+
+test("stub kinds (IR2S-04): the once-per-page generic line, the composed tail (IR2S-01) and the aligned template are each a stub, and the report says which", () => {
+  // Verbatim from the round-2 integration run (9f42c9d, keyless).
+  const composed = ["Written by Arthur Conan Doyle, like Sherlock: The Abominable Bride, and Strong fit with your taste profile.",
+    "Explores murder mystery, like Sherlock: The Abominable Bride, and Strong fit with your taste profile.",
+    "Same writer as Sherlock: The Abominable Bride: Arthur Conan Doyle, and Strong fit with your taste profile.",
+    "Shares Twitches Too's theme of magic, and Strong fit with your taste profile."];
+  for (const w of composed) assert.equal(stubKind(w), "composed", w);
+  assert.equal(stubKind("Strong fit with your taste profile."), "generic");
+  assert.equal(stubKind("A drama pick aligned with your taste."), "aligned");
+  assert.equal(stubKind("Written by Arthur Conan Doyle, like Sherlock: The Abominable Bride."), null);
+  // One bare generic line per rail is what the paginator allows; every one still counts. Eight genre rails
+  // with one each, a composed tail on an anchored row: 9 stubs, by kind.
+  const rails = Array.from({ length: 8 }, (_, i) => ({ surface: "genre-rail", key: `genre:${i}`, component: "card",
+    cards: [lens(`g${i}a`, { whyThis: "Strong fit with your taste profile." }), lens(`g${i}b`, { whyThis: "Shares the dread of Hereditary." })] }));
+  const row = { surface: "feed-row", key: "because-you-loved:Sherlock", component: "card", anchorTitleId: X, cards: [lens(A, { whyThis: composed[0] }), lens(B, { whyThis: "You rate Arthur Conan Doyle 8.4." })] };
+  const s = scoreSurfaces(rec([...rails, row])).summary;
+  assert.deepEqual(s.stubKinds, { generic: 8, composed: 1, aligned: 0 });
+  assert.equal(s.stubRate, 9 / 18);
+  // Vary one card: the composed tail replaced by its clause alone leaves only the generic lines.
+  const fixed = { ...row, cards: [lens(A, { whyThis: "Written by Arthur Conan Doyle, like Sherlock: The Abominable Bride." }), row.cards[1]] };
+  assert.deepEqual(scoreSurfaces(rec([...rails, fixed])).summary.stubKinds, { generic: 8, composed: 0, aligned: 0 });
 });
 
 test("hedge family: the lens copy's comparisons and detours count; a pitch's own contrast does not", () => {

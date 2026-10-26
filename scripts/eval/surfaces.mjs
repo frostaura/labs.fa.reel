@@ -79,6 +79,7 @@ function render(rec, m) {
     ...surfaceGates(m, gates).map((g) => `| ${g.label} | ${fmt(g.value)} | ${g.op} ${g.target} | ${g.status} |`), "",
     "| Metric | Value |", "|---|---|",
     `| Suggestion cards fetched | ${s.suggestionCards} |`, `| Stub rate (rendered why-lines in the stub family) | ${fmt(s.stubRate)} |`,
+    `| Stub why-lines by kind (generic once-per-page / composed tail / aligned template) | ${s.stubKinds ? `${s.stubKinds.generic} / ${s.stubKinds.composed} / ${s.stubKinds.aligned}` : "not recorded"} |`,
     `| Exclusion leaks (suggestion surfaces) | ${s.exclusionLeaks} |`, `| Cross-rail repeats (feed page) | ${s.crossRailRepeats} |`,
     `| Evidence share (anchored + Similar, n=${s.anchoredCards}) | ${fmt(s.evidenceShare)} |`, `| Random-pair cosine p90 (evidence bar) | ${fmt(s.randomCosineP90)} |`,
     `| Rendered why-lines hedging against their own pick | ${s.hedgingWhyLines} |`, `| Why-lines with non-Latin script | ${s.nonLatinWhyLines} |`,

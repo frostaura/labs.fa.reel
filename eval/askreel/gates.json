@@ -14,6 +14,18 @@
       "target": 1.0
     },
     {
+      "metric": "missedSupply",
+      "label": "Missed supply (no pick while eligible titles clear the bar)",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "supplyCountAccuracy",
+      "label": "Supply counts equal the SQL truth (none-found replies)",
+      "op": ">=",
+      "target": 1.0
+    },
+    {
       "metric": "referenceAccuracy",
       "label": "Reference accuracy",
       "op": ">=",
@@ -64,6 +76,12 @@
     {
       "metric": "mediaFilterViolations",
       "label": "Picks against the request's own media filter",
+      "op": "<=",
+      "target": 0
+    },
+    {
+      "metric": "mustNotViolations",
+      "label": "Ruled-out titles shown (picks and trays)",
       "op": "<=",
       "target": 0
     },
@@ -124,6 +142,17 @@
       "tolerance": 0
     },
     {
+      "metric": "missedSupply",
+      "higherIsBetter": false,
+      "tolerance": 0,
+      "paired": true
+    },
+    {
+      "metric": "supplyCountAccuracy",
+      "higherIsBetter": true,
+      "tolerance": 0
+    },
+    {
       "metric": "referenceAccuracy",
       "higherIsBetter": true,
       "tolerance": 0.02
@@ -168,6 +197,12 @@
     },
     {
       "metric": "mediaFilterViolations",
+      "higherIsBetter": false,
+      "tolerance": 0,
+      "paired": true
+    },
+    {
+      "metric": "mustNotViolations",
       "higherIsBetter": false,
       "tolerance": 0,
       "paired": true
@@ -234,6 +269,20 @@
       "dataSeen": "all three 99c0761 recordings",
       "change": "(a) Templater counts as a fallback on an in-request pick; (b) honest-empty requires a turn that ran and reported NoneFound; (c) unrun turns are scored as failed turns with failed checks, and a failed turn scores precision 0; (d) act is no data for an engine that emits none (v1) instead of being inferred from turn position; (e) failed and unrun turns are charged the client cap in latency; (f) latency gates also require every build slot held for the run; (g) mediaFilterViolations (picks against the request's own media filter) is gated; (h) compare refuses runs with different scenario fingerprints, turn counts, snapshot or artifact, compares counts paired over turns that ran in both runs, charges newly failed turns, and treats a metric the baseline measured but the run did not as a regression; (i) hedging covers the 'though … less / rather than' family and non-Latin script in English copy is counted",
       "reason": "Independent reviewers showed compare passing a run with scenarios removed (leaks 66 → 0), a 500 passing honest-empty, crashes raising act and lowering grounding/echo, timeouts improving p95, and v1's act 0.864 being a property of turn position. Each change makes failing worse, never better; none of them was chosen to move a baseline number."
+    },
+    {
+      "commit": "ws7-round2",
+      "when": "2026-10-26",
+      "dataSeen": "the integration reviewer's keyless subset run on 7ee235b (IREV1-SYS-02, IREV1-SYS-06) and the three 99c0761 recordings",
+      "change": "(a) degraded is read from done.degraded and assistant-message.degraded (the API never sends a frame named 'degraded'); a judge count of zero is not degraded; (b) the near-miss and unchecked trays on v1's done frame are recorded as shown cards, and exclusion leaks, ruled-out titles and grounding all count every tray, not only picks; (c) mustNotViolations is gated at 0; (d) missedSupply is gated at 0 and is now 'no pick while eligible titles clear the For-you bar' (eligible > 0 with nothing clearing the bar is an honest-empty check instead, the samurai case); (e) a none-found turn's done.supply is recorded and its alreadySeen, unscored and knockouts must equal the SQL supply truth (eval/askreel/supply/*.sql) exactly: supplyCountAccuracy gated at 100%; (f) the runner reads the mode v1 names on done",
+      "reason": "A keyless run where every turn carried done.degraded=['no-model'] reported fallbackRate 0 and every gate passing, and a 'no superheroes' turn whose unchecked tray held 17 superhero titles reported 0 leaks and 0 ruled-out titles; 19/35 turns missed supply with no gate failing. Each change makes a failing run fail; none was chosen to move a baseline number. Effect on the 99c0761 baselines is in their re-scored metrics.json."
+    },
+    {
+      "commit": "ws7-round3",
+      "when": "2026-10-26",
+      "dataSeen": "the round-2 integration reviewer's hand counts on the slot snapshot (ninja movies 70 matching / 18 seen at the vote floor; samurai 66 / 8) and the three 99c0761 recordings",
+      "change": "(a) supply count accuracy also reads the REPLY's words (replySupply: the partition, the under-bar and unscored counts, each named relaxation) and compares every done.supply bucket, not only seen and unscored; (b) a named relaxation must equal the truth and no unnamed one may unlock more than the smallest named; (c) a none-found reply whose report says a partition or an unscored count was due but which states none the parser reads fails, so reworded copy cannot pass vacuously; (d) truth/samurai.sql no longer matches 'ronin' in a name (keyword arm unchanged) and its name arm is a whole word",
+      "reason": "IREV2-SYS-03: the scorer never compared a reply's numbers with the truth, so a live golden run could neither pass nor fail the WS-2 acceptance, and the samurai truth counted Ronin (1998), a crime thriller with no samurai tag, putting the truth one over an honest reply. Each change makes a dishonest reply fail; the 99c0761 baselines re-score byte-identical (their v1 replies state no counts)."
     }
   ]
 }

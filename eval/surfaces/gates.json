@@ -1,5 +1,10 @@
 {
   "note": "Surface-harness gates (WS-7 tasks 8 and 10), registered 2026-10-24 after the 99c0761 surface baseline existed (the P0 review found the harness had no gate or compare at all). Absolute targets are task 8's goals and are the G1 bar, not a per-merge bar; the regression tolerances block a merge. Rates are per suggestion card, because the cards a build serves differ run to run. Change them only by a reviewed commit, never to make a run pass.",
+  "baselines": {
+    "keyless": "eval/surfaces/baselines/9f42c9d-keyless",
+    "keyed": "eval/surfaces/baselines/99c0761",
+    "note": "--compare runs against these. 99c0761-keyless stays in the tree as the pre-program reference the 9f42c9d re-baseline was measured against (its provenance.md)."
+  },
   "gates": [
     {
       "metric": "exclusionLeaks",
@@ -99,6 +104,15 @@
       "metric": "traktCalls",
       "higherIsBetter": false,
       "tolerance": 0
+    }
+  ],
+  "amendments": [
+    {
+      "when": "2026-10-26",
+      "commit": "ws7-round3",
+      "dataSeen": "the round-2 integration surface run (9f42c9d, keyless) and WS-7's own re-run of the same commit, both against 99c0761-keyless",
+      "change": "(a) the keyless regression baseline moves from 99c0761-keyless to 9f42c9d-keyless; (b) stub why-lines are reported by kind (generic once-per-page, composed tail, aligned template) and every kind still counts in stubRate and the stub gate",
+      "reason": "IR2S-04. The volume drop (anchored 126 -> 12, Similar 60 -> 6, feed rows 40 -> 16) is the spec'd evidence gate: applied as written, 3 of 99c0761's 126 anchored cards pass it and all 12 of 9f42c9d's do (provenance.md). The stub rise (0.0035 -> 0.095) is NOT waived: the absolute stub gate stays at 0 and keeps failing, owned by WS-5 (change request: an empty caption instead of GenericFallback, and no composed tail, per the program's 'templated anchored line or nothing'). Aligning STUB_WHY with the once-per-page policy instead was rejected: it would pass one boilerplate line on every rail and page (8 on the 8 genre rails) as honest copy."
     }
   ]
 }

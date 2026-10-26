@@ -20,8 +20,8 @@
   "wallSeconds": 1235,
   "costUsd": 0.13126682,
   "latencyGated": false,
-  "gatesPassed": 4,
-  "gatesFailed": 8
+  "gatesPassed": 5,
+  "gatesFailed": 9
  },
  "metrics": {
   "constraintPrecisionAt8": {
@@ -60,6 +60,10 @@
    "value": 1,
    "n": 6
   },
+  "supplyCountAccuracy": {
+   "value": null,
+   "n": 0
+  },
   "groundingViolations": {
    "value": 54,
    "n": 60
@@ -85,7 +89,7 @@
    "n": 60
   },
   "mustNotViolations": {
-   "value": 17,
+   "value": 23,
    "n": 60
   },
   "hedgingWhyLines": {
@@ -164,6 +168,24 @@
    "value": 0,
    "n": 4,
    "status": "FAIL"
+  },
+  {
+   "metric": "missedSupply",
+   "label": "Missed supply (no pick while eligible titles clear the bar)",
+   "op": "<=",
+   "target": 0,
+   "value": 0,
+   "n": 60,
+   "status": "pass"
+  },
+  {
+   "metric": "supplyCountAccuracy",
+   "label": "Supply counts equal the SQL truth (none-found replies)",
+   "op": ">=",
+   "target": 1,
+   "value": null,
+   "n": 0,
+   "status": "no data"
   },
   {
    "metric": "referenceAccuracy",
@@ -245,6 +267,15 @@
    "value": 0,
    "n": 60,
    "status": "pass"
+  },
+  {
+   "metric": "mustNotViolations",
+   "label": "Ruled-out titles shown (picks and trays)",
+   "op": "<=",
+   "target": 0,
+   "value": 23,
+   "n": 60,
+   "status": "FAIL"
   },
   {
    "metric": "traktCalls",
@@ -1292,7 +1323,8 @@
      "mustNotViolations": [
       "A Dark Song",
       "The Dark",
-      "Creeped Out"
+      "Creeped Out",
+      "Herman"
      ],
      "precision": 0.75,
      "groundingViolations": 1,
@@ -2867,7 +2899,12 @@
       "Powers",
       "Marvel One-Shot: Item 47",
       "Supergirl",
-      "Batwoman"
+      "Batwoman",
+      "Supacell",
+      "Spider-Noir",
+      "The New Mutants",
+      "DC's Stargirl",
+      "Superman & Lois"
      ],
      "precision": 0.375,
      "groundingViolations": 0,

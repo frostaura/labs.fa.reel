@@ -20,6 +20,11 @@
    "typeahead": 32
   },
   "stubRate": 0.21245421245421245,
+  "stubKinds": {
+   "generic": 1,
+   "composed": 0,
+   "aligned": 57
+  },
   "exclusionLeaks": 22,
   "leakRate": 0.08058608058608059,
   "crossRailRepeats": 0,
@@ -53,6 +58,11 @@
     "whyThis": 5
    },
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 1,
    "nonLatinWhy": 1,
    "leaks": 0,
@@ -72,6 +82,11 @@
     "whyThis": 40
    },
    "stubWhy": 8,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 8
+   },
    "hedgingWhy": 1,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -91,6 +106,11 @@
     "whyThis": 71
    },
    "stubWhy": 18,
+   "stubKinds": {
+    "generic": 1,
+    "composed": 0,
+    "aligned": 17
+   },
    "hedgingWhy": 5,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -110,6 +130,11 @@
     "whyThis": 96
    },
    "stubWhy": 17,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 17
+   },
    "hedgingWhy": 22,
    "nonLatinWhy": 0,
    "leaks": 22,
@@ -150,6 +175,11 @@
     "whyThis": 60
    },
    "stubWhy": 15,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 15
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -167,6 +197,11 @@
    "cards": 0,
    "renderedFrom": {},
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -184,6 +219,11 @@
    "cards": 150,
    "renderedFrom": {},
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,
@@ -222,6 +262,11 @@
    "cards": 32,
    "renderedFrom": {},
    "stubWhy": 0,
+   "stubKinds": {
+    "generic": 0,
+    "composed": 0,
+    "aligned": 0
+   },
    "hedgingWhy": 0,
    "nonLatinWhy": 0,
    "leaks": 0,

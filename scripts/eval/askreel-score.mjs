@@ -116,7 +116,9 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
   const turnCapMs = opts.turnCapMs ?? DEFAULT_TURN_CAP_MS;
   const eligible = new Set(facts.eligible);
   const picks = t.cards ?? [];
-  const shown = [...picks, ...(t.belowFloor ?? []), ...(t.nearMiss ?? [])];
+  // Everything on screen: the picks and every tray (under the bar, near misses, and the cards no model
+  // checked). A tray card is still shown to the user, so it is held to the same locks as a pick.
+  const shown = [...picks, ...(t.belowFloor ?? []), ...(t.nearMiss ?? []), ...(t.unchecked ?? [])];
   const server = facts.server?.[t.turnId] ?? null;
   const r = { turn: index + 1, query: t.query, status: t.status, failed: Boolean(t.failed), notRun: Boolean(t.notRun), picks: picks.length, checks: {} };
 
@@ -131,7 +133,7 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
   r.mediaFilterViolations = wrongMedia(filterScope);
 
   const mustNotMembers = new Set((e.mustNot ?? []).flatMap((k) => facts.truth?.[k]?.members ?? []));
-  r.mustNotViolations = picks.filter((c) => mustNotMembers.has(c.titleId)).map((c) => c.name);
+  r.mustNotViolations = shown.filter((c) => mustNotMembers.has(c.titleId)).map((c) => c.name);
 
   if (e.concept) {
     const tr = facts.truth?.[e.concept];
@@ -141,16 +143,26 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
     const precise = first8.filter((c) => members.has(c.titleId) && !mustNotMembers.has(c.titleId));
     r.supply = supply;
     r.offTopic = first8.filter((c) => !members.has(c.titleId)).map((c) => c.name);
+    // What Ask Reel could have picked: eligible, scored and clearing the For-you bar. Recordings made
+    // before `clearing` was materialised carry `aboveBar`, the same count compared unrounded.
+    const clearing = supply ? (supply.clearing ?? supply.aboveBar ?? null) : null;
+    const honest = () => !t.failed && t.mode === "NoneFound" && picks.length === 0;
     if (supply && supply.eligible === 0) {
       // Honest only when the turn ran and SAID none were found; a 500, a timeout or an unrun turn is not.
-      r.checks.honestEmpty = !t.failed && t.mode === "NoneFound" && picks.length === 0;
+      r.checks.honestEmpty = honest();
     } else if (first8.length > 0) {
       r.precision = precise.length / first8.length;
     } else if (t.failed) {
       r.precision = 0; // a failure must never improve precision by leaving the denominator
+    } else if (clearing === 0) {
+      // Eligible titles exist but none clears the bar (or none is scored): nothing could be a pick, so
+      // the honest answer is none-found (with the under-bar tray) — the "samurai films" case.
+      r.checks.honestEmpty = honest();
     } else {
+      // The truth holds titles that clear the bar and the turn showed no pick: missed supply (gated).
       r.missedSupply = true;
     }
+    supplyCheck(r, t, tr?.supply?.[scope] ?? tr?.supply?.Any ?? null);
   } else if ((e.mustNot ?? []).length > 0 && (picks.length > 0 || t.failed)) {
     // Negation-only scenarios: precision is "nothing the user ruled out", over the first 8.
     const first8 = picks.slice(0, 8);
@@ -194,7 +206,7 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
 
   // Grounding: invented explanations shown as model output, and replies naming titles not on screen.
   const stubWhys = picks.filter((c) => c.why && STUB_WHY.test(c.why.trim()));
-  const earlierCards = new Set(scenarioTurns.slice(0, index + 1).flatMap((x) => (x.cards ?? []).concat(x.belowFloor ?? []).map((c) => c.titleId)));
+  const earlierCards = new Set(scenarioTurns.slice(0, index + 1).flatMap((x) => [...(x.cards ?? []), ...(x.belowFloor ?? []), ...(x.nearMiss ?? []), ...(x.unchecked ?? [])].map((c) => c.titleId)));
   const userText = norm(scenarioTurns.slice(0, index + 1).map((x) => x.query).join(" "));
   // A title counts as named only when it appears with its own capitalisation and is not made of common
   // words alone — "the other one" and "in and out" are prose, not the films The Other and In and Out.
@@ -209,19 +221,145 @@ export function evaluateTurn(def, t, index, scenarioTurns, facts, opts = {}) {
   // Only a source that SAYS it is a fallback counts here (typed sources, WS-1/WS-5). "Generic" is the
   // by-design captionless filmography list, not a failed call; stub copy labelled Llm is caught above.
   const fallbackWhySources = picks.map((c) => [c.whySource ?? c.fitSource ?? server?.whySources?.[c.titleId], c]).filter(([src, c]) => isFallbackSource(src, c)).map(([src]) => src);
-  r.fallback = Boolean(t.failed || (t.reply && STUB_REPLY.test(t.reply.trim())) || stubWhys.length > 0 || fallbackWhySources.length > 0 || (t.degraded ?? []).length > 0);
+  const degraded = degradedFlags(t.degraded);
+  r.fallback = Boolean(t.failed || (t.reply && STUB_REPLY.test(t.reply.trim())) || stubWhys.length > 0 || fallbackWhySources.length > 0 || degraded.length > 0);
   r.fallbackDetail = [
     t.notRun ? "never ran (an earlier turn ended the scenario)" : t.failed ? `failed (${t.error ?? t.status}${server?.failureCode ? `/${server.failureCode}` : ""})` : null,
     t.reply && STUB_REPLY.test(t.reply.trim()) ? "stub reply" : null,
     stubWhys.length ? `${stubWhys.length} stub why-lines` : null,
     fallbackWhySources.length ? `${fallbackWhySources.length} cards with WhySource ${[...new Set(fallbackWhySources)].join("/")}` : null,
-    (t.degraded ?? []).length ? `degraded: ${JSON.stringify(t.degraded)}` : null,
+    degraded.length ? `degraded: ${degraded.join(", ")}` : null,
   ].filter(Boolean);
   r.latency = t.failed
     ? { totalMs: Math.max(t.totalMs ?? 0, turnCapMs), firstCardMs: Math.max(t.firstCardMs ?? 0, turnCapMs), serverMs: server?.latencyMs ?? null, charged: true }
     : { totalMs: t.totalMs, firstCardMs: t.firstCardMs, serverMs: server?.latencyMs ?? null };
   r.cardsShown = picks.slice(0, 8).map((c) => c.name);
   return r;
+}
+
+// The flags that make a turn degraded: every flag the API sent except a judge count of zero
+// ("judge:0/3"), which the server itself reads as no failure (SearchTurnDegraded.JudgeFailed).
+export function degradedFlags(flags) {
+  return (Array.isArray(flags) ? flags : []).filter((f) => !(typeof f === "string" && /^judge(?:-missing)?:0\//.test(f)));
+}
+
+// Rules the API reports one per kind, whose value is a formatting of the account's setting rather than
+// an identity (the language list, the crowd floor, the year ends): matched by kind alone.
+const SINGLE_RULE_KINDS = new Set(["Language", "MinCrowdRating", "MinYear", "MaxYear"]);
+// SupplyReporter.IdNarrowingLimit and SupplyReporter.ThinSupply: when the API may skip measuring relaxations.
+const SUPPLY_ID_NARROWING_LIMIT = 2000;
+const SUPPLY_THIN = 24;
+const knockoutKey = (k) => (SINGLE_RULE_KINDS.has(k.kind) ? k.kind : `${k.kind}:${String(k.value ?? "").trim().toLowerCase()}`);
+
+// A relaxation's label as the reply prints it (SupplyReporter.LabelFor) back to the rule it names.
+const KNOCKOUT_LABELS = [
+  [/^excluded genre: (.+)$/u, "ExcludeGenre"],
+  [/^only these genres: (.+)$/u, "IncludeGenre"],
+  [/^excluded keyword: (.+)$/u, "ExcludeKeyword"],
+  [/^English only$/u, "Language"],
+  [/^languages: (.+)$/u, "Language"],
+  [/^crowd rating at least (.+)$/u, "MinCrowdRating"],
+  [/^released (.+) or later$/u, "MinYear"],
+  [/^released (.+) or earlier$/u, "MaxYear"],
+];
+export function knockoutOfLabel(label) {
+  for (const [re, kind] of KNOCKOUT_LABELS) {
+    const m = re.exec(label.trim());
+    if (m) return { kind, value: m[1] ?? "" };
+  }
+  return { kind: "Unknown", value: label.trim() };
+}
+
+// The supply counts a none-found REPLY states in words (NoneFoundCopy): "Of the N <topic> in the catalogue
+// with at least V votes, you've seen S, X are saved or dismissed and your conditions hold out H.", "U have
+// no score from your model yet.", "B are under your 6.0 bar." and "turning off “<rule>” would unlock K".
+// What a user reads is the claim; `done.supply` is only the report it was composed from, and a v2 engine
+// may send no report at all. Returns only the counts the reply actually states; null when it states none.
+export function replySupply(reply) {
+  if (typeof reply !== "string" || reply.length === 0) return null;
+  const out = {};
+  const partition = /Of the (\d+) .+? in the catalogue with at least (\d+) votes(, none is unseen and inside your conditions|, ([^.]*))\./u.exec(reply);
+  if (partition) {
+    const rest = partition[4] ?? "";
+    const n = (re) => Number(re.exec(rest)?.[1] ?? 0); // a part the sentence leaves out is zero (NoneFoundCopy.Partition)
+    Object.assign(out, {
+      matching: Number(partition[1]), minVotes: Number(partition[2]),
+      alreadySeen: n(/you[’']ve seen (\d+)/u), savedOrDismissed: n(/(\d+) (?:is|are) saved or dismissed/u),
+      excludedByConditions: n(/your conditions hold out (\d+)/u),
+    });
+  }
+  const below = /(?:^|[.!?] )(\d+) (?:is|are) under your [\d.]+ bar\./u.exec(reply);
+  if (below) out.belowFloor = Number(below[1]);
+  // "…have no score from your model yet." ends the sentence; the held-titles sentence goes on ", so your … bar".
+  const unscored = /(?:^|[.!?] )(\d+) (?:has|have) no score from your model yet\./u.exec(reply);
+  if (unscored) out.unscored = Number(unscored[1]);
+  const offers = [...reply.matchAll(/[Tt]urning off “([^”]+)” would unlock (\d+)/gu)];
+  if (offers.length) out.knockouts = offers.map((m) => ({ ...knockoutOfLabel(m[1]), wouldUnlock: Number(m[2]) }));
+  return Object.keys(out).length ? out : null;
+}
+
+// The buckets `done.supply` carries, by the name the SQL truth gives each.
+const SUPPLY_BUCKETS = [["matchingInCatalogue", "matching"], ["alreadySeen", "alreadySeen"], ["savedOrDismissed", "savedOrDismissed"],
+  ["excludedByConditions", "excludedByConditions"], ["eligible", "eligible"], ["belowFloor", "belowFloor"], ["unscored", "unscored"],
+  ["clearingFloor", "clearingFloor"]];
+
+// Supply honesty (WS-2 acceptance, IREV2-SYS-03): every count a none-found turn states must equal the SQL
+// supply truth counted at the same vote floor, ±0 — both the report the turn carried (`done.supply`) and
+// the numbers its REPLY says in words. A turn that states no count is not checked; a turn whose floor has
+// no materialised truth is unverified, never passed.
+export function supplyCheck(r, t, scopeTruth) {
+  const said = t.supply ?? null;
+  const text = replySupply(t.reply);
+  if (!said && !text) return;
+  const minVotes = said?.minVotes ?? text?.minVotes ?? 50;
+  const truth = scopeTruth?.floored?.[minVotes] ?? null;
+  if (!truth) { r.supplyUnverified = `no SQL supply truth at vote floor ${minVotes}`; return; }
+  const mismatches = [];
+  if (said) {
+    for (const [wire, k] of SUPPLY_BUCKETS) {
+      if (typeof said[wire] === "number" && said[wire] !== truth[k]) mismatches.push(`${k} ${said[wire]} vs truth ${truth[k]}`);
+    }
+    if (said.knockoutsMeasured === false) {
+      // The API skips relaxations only for a broad request (more than IdNarrowingLimit matches) with
+      // plenty clearing the bar (at least ThinSupply); the truth says whether that premise held.
+      if (!((truth.matching ?? 0) > SUPPLY_ID_NARROWING_LIMIT && (truth.clearingFloor ?? 0) >= SUPPLY_THIN)) {
+        mismatches.push(`knockouts not measured, but truth has ${truth.matching} matching and ${truth.clearingFloor} clearing`);
+      }
+    } else {
+      const saidK = new Map((said.knockouts ?? []).map((k) => [knockoutKey(k), k.wouldUnlock]));
+      const realK = new Map((truth.knockouts ?? []).map((k) => [knockoutKey(k), k.wouldUnlock]));
+      for (const key of new Set([...saidK.keys(), ...realK.keys()])) {
+        if (saidK.get(key) !== realK.get(key)) mismatches.push(`knockout ${key} ${saidK.get(key) ?? "absent"} vs truth ${realK.get(key) ?? "absent"}`);
+      }
+    }
+  }
+  // The reply states the partition whenever its report has matches and none clears the bar, and the
+  // unscored count whenever there is one (NoneFoundCopy.Compose). A reply that should and does not is
+  // copy this parser no longer reads — never a vacuous pass.
+  if (said && t.mode === "NoneFound" && !t.failed) {
+    if ((said.matchingInCatalogue ?? 0) > 0 && said.clearingFloor === 0 && !(text && "matching" in text)) mismatches.push("reply states no partition, though its report has matches and none clears the bar");
+    if ((said.unscored ?? 0) > 0 && !(text && "unscored" in text)) mismatches.push("reply states no unscored count, though its report has one");
+  }
+  if (text) {
+    for (const k of ["matching", "alreadySeen", "savedOrDismissed", "excludedByConditions", "belowFloor", "unscored"]) {
+      if (k in text && text[k] !== truth[k]) mismatches.push(`reply says ${k} ${text[k]}, truth ${truth[k]}`);
+    }
+    const realK = new Map((truth.knockouts ?? []).map((k) => [knockoutKey(k), k.wouldUnlock]));
+    const named = text.knockouts ?? [];
+    for (const k of named) {
+      const real = realK.get(knockoutKey(k));
+      if (real !== k.wouldUnlock) mismatches.push(`reply says dropping ${knockoutKey(k)} unlocks ${k.wouldUnlock}, truth ${real ?? "nothing"}`);
+    }
+    // The reply names the biggest relaxations (NoneFoundCopy.MaxKnockoutsNamed); one it left out may not
+    // unlock more than the smallest it named.
+    if (named.length) {
+      const smallest = Math.min(...named.map((k) => k.wouldUnlock));
+      const namedKeys = new Set(named.map(knockoutKey));
+      for (const [key, n] of realK) if (!namedKeys.has(key) && n > smallest) mismatches.push(`reply leaves out ${key}, which unlocks ${n}`);
+    }
+  }
+  r.supplyMismatches = mismatches;
+  r.checks.supplyCounts = !t.failed && mismatches.length === 0;
 }
 
 // The planned turns of a recorded scenario: what ran, then every turn the definition has that never ran
@@ -231,7 +369,7 @@ function plannedTurns(s, def) {
   for (let i = s.turns.length; i < (def?.turns?.length ?? 0); i++) {
     const d = def.turns[i];
     planned.push({ query: d.query, status: null, failed: true, notRun: true, error: "not run", turnId: null, mode: null,
-      cards: [], belowFloor: [], nearMiss: [], reply: null, totalMs: null, firstCardMs: null, mediaTypes: d.mediaTypes ?? def.mediaTypes ?? null });
+      cards: [], belowFloor: [], nearMiss: [], unchecked: [], reply: null, totalMs: null, firstCardMs: null, mediaTypes: d.mediaTypes ?? def.mediaTypes ?? null });
   }
   return planned;
 }
@@ -280,6 +418,7 @@ export function score(recording, scenarios, prices, gates) {
     conflictDetection: passRate("conflict"),
     modeAccuracy: passRate("mode"),
     noRepeatCompliance: passRate("noRepeat"),
+    supplyCountAccuracy: passRate("supplyCounts"),
     groundingViolations: { value: turns.reduce((n, t) => n + t.groundingViolations, 0), n: attempted },
     echoReplies: { value: turns.filter((t) => t.echo).length, n: attempted },
     fallbackRate: { value: rate(turns.filter((t) => t.fallback).length, attempted), n: attempted },
@@ -364,7 +503,7 @@ export function renderReport(recording, metrics) {
   for (const r of metrics.cost) L.push(`| ${r.provider} | ${r.model || "—"} | ${r.purpose || "—"} | ${r.calls} | ${r.promptTokens} | ${r.completionTokens} | ${fmt(r.usd, 4)} |`);
   L.push("", "## Per-scenario diffs (turns with a failed check, a leak, a fallback or a grounding violation)", "");
   for (const sc of metrics.scenarios) {
-    const bad = sc.turns.filter((t) => Object.values(t.checks).some((v) => !v) || t.leaks.length || t.mediaViolations.length || t.fallback || t.groundingViolations || t.echo || t.mustNotViolations.length || t.nonLatinWhys.length);
+    const bad = sc.turns.filter((t) => Object.values(t.checks).some((v) => !v) || t.leaks.length || t.mediaViolations.length || t.fallback || t.groundingViolations || t.echo || t.mustNotViolations.length || t.nonLatinWhys.length || t.missedSupply || t.supplyUnverified);
     if (!bad.length && !sc.missingTurns) continue;
     L.push(`### ${sc.id} (${sc.categories.join(", ")})`);
     if (sc.missingTurns) L.push(`- ${sc.missingTurns} turn(s) never ran (an earlier turn was refused); scored as failed turns`);
@@ -375,6 +514,9 @@ export function renderReport(recording, metrics) {
       if (t.leaks.length) L.push(`  - exclusion leaks: ${t.leaks.join("; ")}`);
       if (t.mediaViolations.length) L.push(`  - wrong media: ${t.mediaViolations.join("; ")}`);
       if (t.mustNotViolations.length) L.push(`  - ruled-out titles shown: ${t.mustNotViolations.join("; ")}`);
+      if (t.missedSupply) L.push(`  - missed supply: no pick, while ${t.supply?.clearing ?? t.supply?.aboveBar ?? "?"} eligible title(s) clear the bar`);
+      if (t.supplyMismatches?.length) L.push(`  - supply counts differ from the SQL truth: ${t.supplyMismatches.join("; ")}`);
+      if (t.supplyUnverified) L.push(`  - supply counts unverified: ${t.supplyUnverified}`);
       if (t.offTopic?.length) L.push(`  - off-topic in first 8: ${t.offTopic.join("; ")}`);
       if (t.repeatsRejected?.length) L.push(`  - re-showed rejected: ${t.repeatsRejected.join("; ")}`);
       if (t.repeats?.length) L.push(`  - repeated earlier cards: ${t.repeats.join("; ")}`);
@@ -396,6 +538,7 @@ const PAIRED = {
   echoReplies: (t) => (t.echo ? 1 : 0),
   mediaFilterViolations: (t) => (t.mediaFilterViolations ?? []).length,
   mustNotViolations: (t) => t.mustNotViolations.length,
+  missedSupply: (t) => (t.missedSupply ? 1 : 0),
   hedgingWhyLines: (t) => t.hedgingWhys.length,
   nonLatinWhyLines: (t) => (t.nonLatinWhys ?? []).length,
 };

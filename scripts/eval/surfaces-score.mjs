@@ -38,12 +38,29 @@ export function rendered(block, c) {
   }
 }
 
+// Which stub a stub why-line is, so a report names the code path to fix (IR2S-04):
+//   generic   ExplanationTemplater.GenericFallback on its own — the "nothing verifiable" line, which the
+//             paginator and the feed response allow ONCE per served page (so 8 genre rails can carry 8);
+//   composed  the same sentence appended as a tail to a real clause ("Written by Arthur Conan Doyle, like
+//             Sherlock: The Abominable Bride, and Strong fit with your taste profile." — IR2S-01), which no
+//             once-per-page guard catches because it is not the bare sentence;
+//   aligned   the old model-failure template ("A drama pick aligned with your taste.").
+// Every kind is a stub and counts in stubRate; none is exempted by the once-per-page policy. The program
+// asks for a fallback card to show "the templated anchored line or nothing" (§5.2 WS-5 task 1), and the
+// policy's own rationale ("an empty caption reads better than repeated filler") holds for the first one.
+export function stubKind(text) {
+  const t = String(text ?? "").trim();
+  if (!STUB_WHY.test(t)) return null;
+  if (/aligned with your taste/iu.test(t)) return "aligned";
+  return /^strong fit with your taste profile\.?$/iu.test(t) ? "generic" : "composed";
+}
+
 export function scoreSurfaces(rec) {
   const f = rec.facts;
   const eligible = new Set(f.eligible);
   const seenSet = new Set(f.seen ?? []);
   const perSurface = {};
-  const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, renderedFrom: {}, stubWhy: 0, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [] });
+  const bump = (s) => (perSurface[s] ??= { blocks: 0, errors: 0, errorKeys: [], emptyBlocks: 0, cards: 0, renderedFrom: {}, stubWhy: 0, stubKinds: { generic: 0, composed: 0, aligned: 0 }, hedgingWhy: 0, nonLatinWhy: 0, leaks: 0, leakNames: [], anchored: 0, evidencePass: 0, footprint: 0, footprintNames: [] });
   const hedges = [];
   for (const block of rec.blocks) {
     const s = bump(block.surface);
@@ -56,7 +73,8 @@ export function scoreSurfaces(rec) {
       const why = rendered(block, c);
       if (why) {
         s.renderedFrom[why.from] = (s.renderedFrom[why.from] ?? 0) + 1;
-        if (STUB_WHY.test(why.text.trim())) s.stubWhy++;
+        const kind = stubKind(why.text);
+        if (kind) { s.stubWhy++; s.stubKinds[kind]++; }
         if (HEDGE_WHY.test(why.text)) { s.hedgingWhy++; if (hedges.length < 40) hedges.push(`${block.key} · ${c.name} [${why.from}]: ${why.text}`); }
         if (NON_LATIN.test(why.text)) s.nonLatinWhy++;
       }
@@ -91,7 +109,8 @@ export function scoreSurfaces(rec) {
     summary: {
       label: rec.label, build: rec.build ?? null, buildInfo: rec.buildInfo ?? null, snapshotId: rec.snapshotId, fresh: rec.fresh, buildStatus: rec.buildStatus ?? null,
       artifact: rec.artifact ?? null, modelKey: rec.modelKey ?? "unrecorded",
-      suggestionCards: cards, cardsBySurface: Object.fromEntries(Object.entries(perSurface).map(([k, v]) => [k, v.cards])), stubRate: ratio(total("stubWhy"), cards), exclusionLeaks: total("leaks"), leakRate: ratio(total("leaks"), cards),
+      suggestionCards: cards, cardsBySurface: Object.fromEntries(Object.entries(perSurface).map(([k, v]) => [k, v.cards])), stubRate: ratio(total("stubWhy"), cards),
+      stubKinds: Object.fromEntries(["generic", "composed", "aligned"].map((k) => [k, sugg.reduce((n, [, v]) => n + (v.stubKinds?.[k] ?? 0), 0)])), exclusionLeaks: total("leaks"), leakRate: ratio(total("leaks"), cards),
       crossRailRepeats: repeats.length, evidenceShare: ratio(total("evidencePass"), anchored), anchoredCards: anchored,
       hedgingWhyLines: total("hedgingWhy"), hedgeRate: ratio(total("hedgingWhy"), cards), nonLatinWhyLines: total("nonLatinWhy"),
       lookupFootprint: Object.entries(perSurface).filter(([s]) => FOOTPRINT_GATED.has(s)).reduce((n, [, v]) => n + v.footprint, 0),

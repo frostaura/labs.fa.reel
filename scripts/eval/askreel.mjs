@@ -34,7 +34,7 @@ import { join, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { score, renderReport, compare, DEFAULT_TURN_CAP_MS } from "./askreel-score.mjs";
+import { score, renderReport, compare, replySupply, DEFAULT_TURN_CAP_MS } from "./askreel-score.mjs";
 import { modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -76,7 +76,7 @@ export function guardTarget(db, port = PG.port) {
 function sql(db, query, vars = {}) {
   guardTarget(db);
   const v = Object.entries(vars).flatMap(([k, val]) => ["-v", `${k}=${val}`]);
-  const out = execFileSync("psql", ["-X", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\x1f", "-h", PG.host, "-p", PG.port,
+  const out = execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\x1f", "-h", PG.host, "-p", PG.port,
     "-U", PG.user, "-d", db, ...v, "-f", "-"], {
     input: query, env: { ...process.env, PGPASSWORD: PG.password, PGTZ: "UTC" }, maxBuffer: 256 * 1024 * 1024,
   }).toString();
@@ -215,6 +215,34 @@ const cardOf = (c, rank) => ({
   satisfies: c.satisfies ?? null, whySource: c.whySource ?? null, fitSource: c.fitSource ?? null,
 });
 
+// What made a turn degraded, as the API says it: `done.degraded` (plan, judge:{failed}/{batches},
+// judge-missing:{missing}/{judged}, no-model), a reply sent as the degraded copy (`assistant-message`
+// with degraded: true), and v2's `degraded` frames. A judge flag counting zero is no degradation — the
+// server's own SearchTurnDegraded.JudgeFailed reads it the same way.
+export function degradedOf(frames, done) {
+  const flags = [];
+  for (const x of frames) {
+    if (x.ev === "degraded") flags.push(x.data?.what ?? x.data);
+    if (x.ev === "assistant-message" && x.data?.degraded === true) flags.push("reply");
+  }
+  if (Array.isArray(done?.degraded)) flags.push(...done.degraded);
+  return [...new Set(flags.filter((f) => typeof f === "string" && f.length > 0 && !/^judge(?:-missing)?:0\//.test(f)))];
+}
+
+// The supply counts a none-found turn carried (v1 `done.supply`, or a v2 none-found frame's `supply`
+// object), reduced to what the scorer compares; null when the turn carried none.
+export function supplyOf(done, noneFound) {
+  const s = [done?.supply, noneFound?.supply].find((x) => x && typeof x === "object") ?? null;
+  if (!s) return null;
+  return {
+    matchingInCatalogue: s.matchingInCatalogue ?? null, alreadySeen: s.alreadySeen ?? null, savedOrDismissed: s.savedOrDismissed ?? null,
+    excludedByConditions: s.excludedByConditions ?? null, eligible: s.eligible ?? null, belowFloor: s.belowFloor ?? null,
+    unscored: s.unscored ?? null, clearingFloor: s.clearingFloor ?? null, lowVoteMatches: s.lowVoteMatches ?? null,
+    minVotes: s.minVotes ?? null, knockoutsMeasured: s.knockoutsMeasured ?? null,
+    knockouts: (s.knockouts ?? []).map((k) => ({ kind: String(k.kind), value: String(k.value ?? ""), wouldUnlock: k.wouldUnlock })),
+  };
+}
+
 // Reduce a raw SSE transcript to what the scorer reads. Works for v1 and v2 frame vocabularies.
 export function compactTurn(raw) {
   const f = (ev) => raw.frames.filter((x) => x.ev === ev);
@@ -226,16 +254,24 @@ export function compactTurn(raw) {
   const answer = f("answer").at(-1)?.data?.text ?? null;
   const assistant = f("assistant-message").at(-1)?.data ?? null;
   const cards = (v2Picks.length > 0 ? v2Picks : done?.results ?? []).map((c, i) => cardOf(c, i + 1));
-  const belowFloor = [...(done?.belowFloor ?? []), ...trays.filter((t) => t.data?.kind === "belowFloor").flatMap((t) => t.data.cards ?? [])]
+  // Every tray the user sees, from v1's `done` (belowFloor, nearMiss, unchecked) and v2's `tray` frames.
+  // The unchecked tray holds cards no model checked against the request — still on screen, so a leak or
+  // a ruled-out title there counts exactly as it would among the picks.
+  const tray = (kind) => [...(Array.isArray(done?.[kind]) ? done[kind] : []), ...trays.filter((t) => t.data?.kind === kind).flatMap((t) => t.data.cards ?? [])]
     .map((c, i) => cardOf(c, i + 1));
-  const nearMiss = trays.filter((t) => t.data?.kind === "nearMiss").flatMap((t) => t.data.cards ?? []).map((c, i) => cardOf(c, i + 1));
+  const belowFloor = tray("belowFloor");
+  const nearMiss = tray("nearMiss");
+  const unchecked = tray("unchecked");
   const conflictFrame = f("conflict").length > 0;
   // A turn ends on v1's `done`, or on a v2 terminal frame (none-found, clarify, answer, picks) followed by
   // a clean end of stream — so a v2 engine that stops sending `done` is still scored, not failed.
   const v2Terminal = f("none-found").length > 0 || f("clarify").length > 0 || answer !== null || v2Picks.length > 0;
   const ended = Boolean(done) || (Boolean(plan) && v2Terminal);
   let observedMode = null;
-  if (f("none-found").length) observedMode = "NoneFound";
+  // v1 states its mode on `done`; a mode it names wins over inferring one from the card count (a clarify
+  // has zero cards too, and is not a none-found).
+  if (typeof done?.mode === "string" && MODES.includes(done.mode) && done.mode !== "Any") observedMode = done.mode;
+  else if (f("none-found").length) observedMode = "NoneFound";
   else if (f("clarify").length) observedMode = "Clarify";
   else if (answer) observedMode = "Answer";
   else if (raw.status === 200 && ended) observedMode = cards.length > 0 ? "Picks" : "NoneFound";
@@ -250,11 +286,14 @@ export function compactTurn(raw) {
     conflict: Boolean(assistant?.conflict) || conflictFrame,
     failed: Boolean(done?.failed) || raw.status !== 200 || !ended || Boolean(raw.error),
     reason: done?.reason ?? null,
-    degraded: f("degraded").map((x) => x.data?.what ?? x.data),
+    degraded: degradedOf(raw.frames, done),
     mode: observedMode,
+    // The supply report an honest none-found reply is built from (null on a turn with picks, or when
+    // no model read the request); the scorer holds its counts to the SQL truth.
+    supply: supplyOf(done, f("none-found").at(-1)?.data),
     intent: done?.debug?.intent ?? null,
     relaxation: done?.debug?.relaxation ?? null,
-    cards, belowFloor, nearMiss,
+    cards, belowFloor, nearMiss, unchecked,
     frameCounts: Object.fromEntries(Object.entries(raw.frames.reduce((m, x) => ((m[x.ev] = (m[x.ev] ?? 0) + 1), m), {}))),
   };
 }
@@ -310,7 +349,7 @@ function mediaClause(media) {
 function materialise(db, accountId, recording, scenarios) {
   const byId = new Map(scenarios.map((s) => [s.id, s]));
   const shownIds = new Set();
-  for (const s of recording.scenarios) for (const t of s.turns) for (const c of [...t.cards, ...t.belowFloor, ...t.nearMiss]) if (c.titleId) shownIds.add(c.titleId);
+  for (const s of recording.scenarios) for (const t of s.turns) for (const c of [...t.cards, ...t.belowFloor, ...t.nearMiss, ...(t.unchecked ?? [])]) if (c.titleId) shownIds.add(c.titleId);
   const shownList = [...shownIds];
   const inShown = shownList.length ? shownList.map((x) => `'${x}'`).join(",") : "NULL";
 
@@ -319,19 +358,29 @@ function materialise(db, accountId, recording, scenarios) {
   const eligible = new Set(sql(db, `with e as (${eligibleSql}) select "Id" from e where "Id" in (${inShown})`, { account: accountId }).map((r) => r[0]));
   const media = Object.fromEntries(sql(db, `select "Id", "MediaType" from "Titles" where "Id" in (${inShown})`).map((r) => [r[0], r[1]]));
   // Titles below the account's For-you bar under the ACTIVE artifact (artifact-dependent; versioned).
-  const artifact = sql(db, `select "Id", "Version" from "ModelArtifacts" where "AccountId" = :'account' and "Status" = 'Active'`, { account: accountId })[0] ?? [null, null];
-  const bar = sql(db, `select "Value" from "ContentFilters" where "AccountId" = :'account' and "Kind" = 'MinPredictedRating'`, { account: accountId })[0]?.[0] ?? null;
+  // The active artifact the API reads: the highest version (SupplyReporter, AskReel scoring).
+  const artifact = sql(db, `select "Id", "Version" from "ModelArtifacts" where "AccountId" = :'account' and "Status" = 'Active' order by "Version" desc limit 1`, { account: accountId })[0] ?? [null, null];
+  const bar = sql(db, `select "Value" from "ContentFilters" where "AccountId" = :'account' and "Kind" = 'MinPredictedRating' order by "CreatedAt", "Id" limit 1`, { account: accountId })[0]?.[0] ?? null;
+  const clearBar = forYouBar(bar);
 
   const truth = {};
   const need = new Map(); // key -> set of media scopes
+  const supplyNeed = new Map(); // concept key -> scope -> set of vote floors, for turns that carried supply counts
   for (const s of recording.scenarios) {
     const def = byId.get(s.id);
     s.turns.forEach((t, i) => {
       const e = def?.turns[i]?.expect ?? {};
+      const m = e.media ?? mediaClause(t.mediaTypes) ?? "Any";
       for (const k of [e.concept, ...(e.mustNot ?? [])].filter(Boolean)) {
-        const m = e.media ?? mediaClause(t.mediaTypes) ?? "Any";
         if (!need.has(k)) need.set(k, new Set());
         need.get(k).add(m);
+      }
+      // A turn that states supply counts — in its report or in its reply's words — is held to the truth
+      // counted at the vote floor it states.
+      const stated = t.supply ?? replySupply(t.reply);
+      if (e.concept && stated) {
+        const scopes = supplyNeed.get(e.concept) ?? new Map();
+        supplyNeed.set(e.concept, scopes.set(m, (scopes.get(m) ?? new Set()).add(Number(stated.minVotes ?? DEFAULT_MIN_VOTES))));
       }
     });
   }
@@ -341,16 +390,25 @@ function materialise(db, accountId, recording, scenarios) {
     const supply = {};
     for (const scope of scopes) {
       const mediaFilter = scope === "Any" ? "" : ` and t."MediaType" = '${scope}'`;
-      const [matching, elig, scored, above] = sql(db, `
-        with c as (${body}), e as (${eligibleSql})
+      // clearing: eligible, scored by the active model and at or above the For-you bar at badge
+      // precision (one decimal, half away from zero) — the only titles Ask Reel may pick. A turn that
+      // shows nothing while clearing > 0 missed supply. No vote floor: picks are not vote-floored.
+      const [matching, elig, scored, above, clearing] = sql(db, `
+        with c as (select distinct "Id" from (${body}) q), e as (${eligibleSql})
         select count(*),
                count(*) filter (where e."Id" is not null),
                count(*) filter (where e."Id" is not null and s."PredictedRating" is not null),
-               count(*) filter (where e."Id" is not null and s."PredictedRating" >= coalesce(:bar, 0))
+               count(*) filter (where e."Id" is not null and s."PredictedRating" >= coalesce(:bar, 0)),
+               count(*) filter (where e."Id" is not null and s."PredictedRating" is not null
+                                  and (:clearbar::numeric is null or round(s."PredictedRating", 1) >= :clearbar::numeric))
           from c join "Titles" t on t."Id" = c."Id" left join e on e."Id" = c."Id"
           left join "TitleScores" s on s."TitleId" = c."Id" and s."AccountId" = :'account' and s."ModelArtifactId" = :'artifact'
-         where true${mediaFilter}`, { account: accountId, artifact: artifact[0] ?? "00000000-0000-0000-0000-000000000000", bar: bar ?? "NULL" })[0].map(Number);
-      supply[scope] = { matching, eligible: elig, scored, aboveBar: above };
+         where true${mediaFilter}`, { account: accountId, artifact: artifact[0] ?? "00000000-0000-0000-0000-000000000000", bar: bar ?? "NULL", clearbar: clearBar ?? "NULL" })[0].map(Number);
+      supply[scope] = { matching, eligible: elig, scored, aboveBar: above, clearing };
+      for (const minVotes of supplyNeed.get(key)?.get(scope) ?? []) {
+        supply[scope].floored ??= {};
+        supply[scope].floored[minVotes] = supplyTruth(db, accountId, body, scope, minVotes);
+      }
     }
     truth[key] = { members, supply };
   }
@@ -375,6 +433,56 @@ function materialise(db, accountId, recording, scenarios) {
   }
 
   return { eligible: [...eligible], media, artifact: { id: artifact[0], version: artifact[1] ? Number(artifact[1]) : null }, forYouBar: bar === null ? null : Number(bar), truth, server, named };
+}
+
+// A query file as a view body: comment lines and a trailing semicolon dropped.
+const stripSql = (q) => q.split("\n").filter((l) => !l.trimStart().startsWith("--")).join("\n").trim().replace(/;$/, "");
+
+// The For-you bar as the API reads it (SupplyReporter.PredictedFloor): clamped to 0–10, where zero or a
+// malformed value means no bar.
+export function forYouBar(raw) {
+  if (raw === null || raw === undefined || !/^\s*[+-]?[0-9]+(\.[0-9]+)?\s*$/.test(String(raw))) return null;
+  const v = Math.min(10, Math.max(0, Number(raw)));
+  return v > 0 ? v : null;
+}
+
+// The vote floor the API counts supply with (CrowdVotes.MinRelaxVotes).
+export const DEFAULT_MIN_VOTES = 50;
+
+// The SQL truth of one concept's supply (eval/askreel/supply/supply.sql over the concept, the eligibility
+// truth and the rule truth), as the object the scorer compares a none-found turn's counts against.
+function supplyTruth(db, accountId, conceptSql, scope, minVotes) {
+  const views = [
+    `create temp view eval_concept as ${stripSql(conceptSql)};`,
+    `create temp view eval_eligible as ${stripSql(readTruth("_eligible"))};`,
+    `create temp view eval_rules as ${stripSql(readFileSync(join(evalDir, "supply", "rules.sql"), "utf8"))};`,
+  ].join("\n");
+  const rows = sql(db, `${views}\n${readFileSync(join(evalDir, "supply", "supply.sql"), "utf8")};`, { account: accountId, media: scope, minvotes: minVotes });
+  return supplyFromRows(rows, minVotes);
+}
+
+// How many titles the rule truth and the eligibility truth classify differently (0 when they agree).
+function eligibilityAgreementSql() {
+  return `create temp view eval_eligible as ${stripSql(readTruth("_eligible"))};
+create temp view eval_rules as ${stripSql(readFileSync(join(evalDir, "supply", "rules.sql"), "utf8"))};
+select count(*) from "Titles" t
+ where exists (select 1 from eval_eligible e where e."Id" = t."Id")
+    <> (not exists (select 1 from "WatchedTitles" w where w."AccountId" = :'account' and w."TitleId" = t."Id")
+        and not exists (select 1 from "UserRatings" r where r."AccountId" = :'account' and r."TitleId" = t."Id")
+        and not exists (select 1 from "UserTitleReactions" ux where ux."AccountId" = :'account' and ux."TitleId" = t."Id"
+                          and ux."RevokedAt" is null and ux."Kind" in ('NotInterested', 'SaveForLater', 'Dropped'))
+        and not exists (select 1 from eval_rules r where r."Id" = t."Id"));`;
+}
+
+// supply.sql's (Bucket, Kind, Value, Count) rows as one object; knockouts biggest first, as the API orders them.
+export function supplyFromRows(rows, minVotes) {
+  const out = { minVotes, knockouts: [] };
+  for (const [bucket, kind, value, count] of rows) {
+    if (bucket === "knockout") out.knockouts.push({ kind, value, wouldUnlock: Number(count) });
+    else out[bucket] = Number(count);
+  }
+  out.knockouts.sort((a, b) => b.wouldUnlock - a.wouldUnlock || (a.kind + a.value < b.kind + b.value ? -1 : 1));
+  return out;
 }
 
 function ledger(db, accountId, sinceDay) {
@@ -433,6 +541,15 @@ if (mode === "check") {
         if (k !== "_eligible" && Number(n) === 0) errors.push(`truth/${k}.sql matches no title on ${args.db}`);
       } catch (err) { errors.push(`truth/${k}.sql failed on ${args.db}: ${String(err.message).split("\n")[0]}`); }
     }
+    // The rule truth and the eligibility truth are two statements of one rule: a footprint-free title
+    // that breaks no rule in supply/rules.sql must be exactly a title _eligible.sql admits, or every
+    // knockout count the eval holds a reply to is wrong.
+    try {
+      const [[drift]] = sql(args.db, `${eligibilityAgreementSql()}`, { account: accountId });
+      if (Number(drift) !== 0) errors.push(`supply/rules.sql and truth/_eligible.sql disagree on ${drift} title(s) on ${args.db}`);
+      const concept = [...usedTruthKeys(sc)][0];
+      if (concept) supplyTruth(args.db, accountId, readTruth(concept), "Any", DEFAULT_MIN_VOTES);
+    } catch (err) { errors.push(`supply truth failed on ${args.db}: ${String(err.message).split("\n")[0]}`); }
   }
   const multi = sc.filter((s) => s.turns.length > 1).length;
   const turns = sc.reduce((n, s) => n + s.turns.length, 0);

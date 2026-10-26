@@ -20,8 +20,8 @@
   "wallSeconds": 1632,
   "costUsd": 0.33828329999999995,
   "latencyGated": false,
-  "gatesPassed": 3,
-  "gatesFailed": 9
+  "gatesPassed": 4,
+  "gatesFailed": 10
  },
  "metrics": {
   "constraintPrecisionAt8": {
@@ -60,6 +60,10 @@
    "value": 1,
    "n": 15
   },
+  "supplyCountAccuracy": {
+   "value": null,
+   "n": 0
+  },
   "groundingViolations": {
    "value": 118,
    "n": 167
@@ -85,7 +89,7 @@
    "n": 167
   },
   "mustNotViolations": {
-   "value": 49,
+   "value": 63,
    "n": 167
   },
   "hedgingWhyLines": {
@@ -164,6 +168,24 @@
    "value": 0,
    "n": 17,
    "status": "FAIL"
+  },
+  {
+   "metric": "missedSupply",
+   "label": "Missed supply (no pick while eligible titles clear the bar)",
+   "op": "<=",
+   "target": 0,
+   "value": 0,
+   "n": 167,
+   "status": "pass"
+  },
+  {
+   "metric": "supplyCountAccuracy",
+   "label": "Supply counts equal the SQL truth (none-found replies)",
+   "op": ">=",
+   "target": 1,
+   "value": null,
+   "n": 0,
+   "status": "no data"
   },
   {
    "metric": "referenceAccuracy",
@@ -245,6 +267,15 @@
    "value": 0,
    "n": 167,
    "status": "pass"
+  },
+  {
+   "metric": "mustNotViolations",
+   "label": "Ruled-out titles shown (picks and trays)",
+   "op": "<=",
+   "target": 0,
+   "value": 63,
+   "n": 167,
+   "status": "FAIL"
   },
   {
    "metric": "traktCalls",
@@ -1310,7 +1341,9 @@
      "mediaFilterViolations": [],
      "mustNotViolations": [
       "A Dark Song",
-      "The Dark"
+      "The Dark",
+      "After the Dark",
+      "Herman"
      ],
      "precision": 0.75,
      "groundingViolations": 1,
@@ -2848,7 +2881,12 @@
       "Doom Patrol",
       "The Gifted",
       "Marvel One-Shot: Item 47",
-      "Batwoman"
+      "Batwoman",
+      "Supacell",
+      "Spider-Noir",
+      "The New Mutants",
+      "DC's Stargirl",
+      "Superman & Lois"
      ],
      "precision": 0.375,
      "groundingViolations": 0,
@@ -6523,7 +6561,9 @@
      "leaks": [],
      "mediaViolations": [],
      "mediaFilterViolations": [],
-     "mustNotViolations": [],
+     "mustNotViolations": [
+      "Proximity"
+     ],
      "supply": {
       "matching": 4805,
       "eligible": 576,
@@ -6992,7 +7032,12 @@
       "Doom Patrol",
       "The Gifted",
       "Marvel One-Shot: Item 47",
-      "Batwoman"
+      "Batwoman",
+      "Supacell",
+      "Spider-Noir",
+      "The New Mutants",
+      "DC's Stargirl",
+      "Superman & Lois"
      ],
      "supply": {
       "matching": 6062,
@@ -7052,7 +7097,9 @@
       "Star Trek: Short Treks"
      ],
      "mediaFilterViolations": [],
-     "mustNotViolations": [],
+     "mustNotViolations": [
+      "Proximity"
+     ],
      "supply": {
       "matching": 6062,
       "eligible": 399,

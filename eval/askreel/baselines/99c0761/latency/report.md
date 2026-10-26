@@ -12,6 +12,8 @@
 |---|---|---|---|---|
 | Constraint precision@8 (facet scenarios) | 0.414 | 35 | >= 0.9 | FAIL |
 | Honest-empty compliance | 0 | 4 | >= 1 | FAIL |
+| Missed supply (no pick while eligible titles clear the bar) | 0 | 60 | <= 0 | pass |
+| Supply counts equal the SQL truth (none-found replies) | — | 0 | >= 1 | no data |
 | Reference accuracy | 0 | 5 | >= 0.95 | FAIL |
 | Critique compliance | 0 | 1 | >= 0.9 | FAIL |
 | Act classification | — | 0 | >= 0.9 | no data |
@@ -21,6 +23,7 @@
 | Fallback rate | 0.717 | 60 | <= 0.01 | FAIL |
 | Standing-exclusion leaks (shown titles outside the eligibility truth) | 0 | 60 | <= 0 | pass |
 | Picks against the request's own media filter | 0 | 60 | <= 0 | pass |
+| Ruled-out titles shown (picks and trays) | 23 | 60 | <= 0 | FAIL |
 | Trakt calls from the eval stack | 0 | 60 | <= 0 | pass |
 | Turn latency p50 (ms, concurrency ≤ 2) | 40927 | 60 | <= 8000 | not-gated (build slots not held during the run) |
 | Turn latency p95 (ms, concurrency ≤ 2) | 53018 | 60 | <= 15000 | not-gated (build slots not held during the run) |
@@ -41,13 +44,14 @@
 | conflictDetection | 0.667 | 3 |
 | modeAccuracy | 0 | 8 |
 | noRepeatCompliance | 1 | 6 |
+| supplyCountAccuracy | — | 0 |
 | groundingViolations | 54 | 60 |
 | echoReplies | 38 | 60 |
 | fallbackRate | 0.717 | 60 |
 | exclusionLeaks | 0 | 60 |
 | mediaFilterViolations | 0 | 60 |
 | mediaMismatches | 34 | 60 |
-| mustNotViolations | 17 | 60 |
+| mustNotViolations | 23 | 60 |
 | hedgingWhyLines | 243 | 60 |
 | nonLatinWhyLines | 1 | 60 |
 | missedSupply | 0 | 60 |
@@ -160,7 +164,7 @@
   - reply echoes the user's message
 - T2 “Ok let's do mind benders instead. dark ones” — 11 picks, precision@8 0.75
   - wrong media: Mr. Mercedes; Tell Me a Story; Chambers; Persons Unknown; Creeped Out; Dig
-  - ruled-out titles shown: A Dark Song; The Dark; Creeped Out
+  - ruled-out titles shown: A Dark Song; The Dark; Creeped Out; Herman
   - fallback: stub reply; 1 stub why-lines
   - grounding: stub why on Persons Unknown
   - reply echoes the user's message
@@ -277,7 +281,7 @@
   - grounding: stub why on Swallows and Amazons
 - T2 “no superheroes please” — 16 picks, precision@8 0.38
   - wrong media: Sanctuary; NOS4A2; Heroes; Marvel's Runaways; Doom Patrol; Heroes Reborn; The Gifted; Watchmen; Titans; Powers; Supergirl; Batwoman
-  - ruled-out titles shown: Special; Heroes; Death of a Superhero; Marvel's Runaways; Doom Patrol; Heroes Reborn; The Gifted; Watchmen; Titans; Powers; Marvel One-Shot: Item 47; Supergirl; Batwoman
+  - ruled-out titles shown: Special; Heroes; Death of a Superhero; Marvel's Runaways; Doom Patrol; Heroes Reborn; The Gifted; Watchmen; Titans; Powers; Marvel One-Shot: Item 47; Supergirl; Batwoman; Supacell; Spider-Noir; The New Mutants; DC's Stargirl; Superman & Lois
   - fallback: stub reply
   - reply echoes the user's message
 

@@ -12,6 +12,8 @@
 |---|---|---|---|---|
 | Constraint precision@8 (facet scenarios) | 0.467 | 103 | >= 0.9 | FAIL |
 | Honest-empty compliance | 0 | 17 | >= 1 | FAIL |
+| Missed supply (no pick while eligible titles clear the bar) | 0 | 167 | <= 0 | pass |
+| Supply counts equal the SQL truth (none-found replies) | — | 0 | >= 1 | no data |
 | Reference accuracy | 0 | 15 | >= 0.95 | FAIL |
 | Critique compliance | 0.200 | 5 | >= 0.9 | FAIL |
 | Act classification | — | 0 | >= 0.9 | no data |
@@ -21,6 +23,7 @@
 | Fallback rate | 0.623 | 167 | <= 0.01 | FAIL |
 | Standing-exclusion leaks (shown titles outside the eligibility truth) | 66 | 167 | <= 0 | FAIL |
 | Picks against the request's own media filter | 0 | 167 | <= 0 | pass |
+| Ruled-out titles shown (picks and trays) | 63 | 167 | <= 0 | FAIL |
 | Trakt calls from the eval stack | 0 | 167 | <= 0 | pass |
 | Turn latency p50 (ms, concurrency ≤ 2) | 39620 | 167 | <= 8000 | not-gated (concurrency > 2) |
 | Turn latency p95 (ms, concurrency ≤ 2) | 51045 | 167 | <= 15000 | not-gated (concurrency > 2) |
@@ -41,13 +44,14 @@
 | conflictDetection | 0.643 | 14 |
 | modeAccuracy | 0 | 30 |
 | noRepeatCompliance | 1 | 15 |
+| supplyCountAccuracy | — | 0 |
 | groundingViolations | 118 | 167 |
 | echoReplies | 85 | 167 |
 | fallbackRate | 0.623 | 167 |
 | exclusionLeaks | 66 | 167 |
 | mediaFilterViolations | 0 | 167 |
 | mediaMismatches | 94 | 167 |
-| mustNotViolations | 49 | 167 |
+| mustNotViolations | 63 | 167 |
 | hedgingWhyLines | 684 | 167 |
 | nonLatinWhyLines | 2 | 167 |
 | missedSupply | 0 | 167 |
@@ -159,7 +163,7 @@
   - fallback: stub reply
   - reply echoes the user's message
 - T2 “Ok let's do mind benders instead. dark ones” — 8 picks, precision@8 0.75
-  - ruled-out titles shown: A Dark Song; The Dark
+  - ruled-out titles shown: A Dark Song; The Dark; After the Dark; Herman
   - fallback: 1 stub why-lines
   - grounding: stub why on A Dark Song
 
@@ -275,7 +279,7 @@
   - reply echoes the user's message
 - T2 “no superheroes please” — 16 picks, precision@8 0.38
   - wrong media: Sanctuary; NOS4A2; Heroes; Marvel's Runaways; Heroes Reborn; Watchmen; Powers; Titans; Supergirl; Doom Patrol; The Gifted; Batwoman
-  - ruled-out titles shown: Death of a Superhero; Heroes; Marvel's Runaways; Special; Heroes Reborn; Watchmen; Powers; Titans; Supergirl; Doom Patrol; The Gifted; Marvel One-Shot: Item 47; Batwoman
+  - ruled-out titles shown: Death of a Superhero; Heroes; Marvel's Runaways; Special; Heroes Reborn; Watchmen; Powers; Titans; Supergirl; Doom Patrol; The Gifted; Marvel One-Shot: Item 47; Batwoman; Supacell; Spider-Noir; The New Mutants; DC's Stargirl; Superman & Lois
   - fallback: stub reply
   - reply echoes the user's message
 
@@ -467,6 +471,10 @@
 - T1 “action movies but nothing with superheroes” — 24 picks, precision@8 1, supply 692 eligible of 7667
   - ruled-out titles shown: Code 8 Part II; Under the Hood; Death of a Superhero; Shadow Master
 
+### neg-scifi-no-aliens (negation, facet)
+- T1 “sci-fi without aliens” — 6 picks, precision@8 1, supply 576 eligible of 4805
+  - ruled-out titles shown: Proximity
+
 ### neg-horror-no-zombies-vampires (negation, facet)
 - T1 “horror but no zombies or vampires” — 9 picks, precision@8 0.38, supply 448 eligible of 4858
   - off-topic in first 8: Channel Zero; Fear Itself; Masters of Horror; Creepshow; The Terror
@@ -490,12 +498,13 @@
 ### neg-followup-no-superheroes (negation, refine)
 - T2 “no superheroes please” — 16 picks, precision@8 0.25, supply 399 eligible of 6062
   - wrong media: Sanctuary; NOS4A2; Heroes; Marvel's Runaways; Heroes Reborn; Watchmen; Powers; Titans; Supergirl; Doom Patrol; The Gifted; Batwoman
-  - ruled-out titles shown: Death of a Superhero; Heroes; Marvel's Runaways; Special; Heroes Reborn; Watchmen; Powers; Titans; Supergirl; Doom Patrol; The Gifted; Marvel One-Shot: Item 47; Batwoman
+  - ruled-out titles shown: Death of a Superhero; Heroes; Marvel's Runaways; Special; Heroes Reborn; Watchmen; Powers; Titans; Supergirl; Doom Patrol; The Gifted; Marvel One-Shot: Item 47; Batwoman; Supacell; Spider-Noir; The New Mutants; DC's Stargirl; Superman & Lois
   - off-topic in first 8: NOS4A2; Death of a Superhero; Heroes; Special; Heroes Reborn
   - fallback: stub reply
   - reply echoes the user's message
 - T3 “and nothing with aliens either” — 7 picks, precision@8 0.29, supply 399 eligible of 6062
   - wrong media: NCIS; Luther; Outcasts; Origin; Star Trek: Short Treks
+  - ruled-out titles shown: Proximity
   - off-topic in first 8: Luther; Outcasts; Origin; UFO; Two Harbors
   - fallback: stub reply
   - reply echoes the user's message

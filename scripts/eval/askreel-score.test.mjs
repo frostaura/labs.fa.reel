@@ -10,8 +10,8 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { score, evaluateTurn, isEcho, compare, STUB_WHY, HEDGE_WHY, NON_LATIN } from "./askreel-score.mjs";
-import { compactTurn, runDay, unusedOpenTruth } from "./askreel.mjs";
+import { score, evaluateTurn, isEcho, compare, replySupply, knockoutOfLabel, STUB_WHY, HEDGE_WHY, NON_LATIN } from "./askreel-score.mjs";
+import { compactTurn, runDay, unusedOpenTruth, degradedOf, supplyFromRows, forYouBar } from "./askreel.mjs";
 import { envKeyHash, classifyKey, modelKeyFor, holdAllBuildSlots } from "./guards.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -323,6 +323,231 @@ test("runner: a v2 turn without `done` ends on its terminal frame; a stream that
   assert.equal(v1.failed, false);
   assert.equal(v1.mode, "NoneFound");
   assert.equal(compactTurn(frames([["conversation", { id: "c", turnId: "t" }], ["candidate", {}]])).failed, true, "v1 with no done");
+});
+
+// A v1 transcript as the API streams it today (LiveSearchExpansionService): `conversation`, an
+// `assistant-message`, then one `done` carrying the trays, the mode, the supply report and `degraded`.
+const v1Frames = (done, assistant = { text: "Nothing I could check against your request.", conflict: false, degraded: false }) => ({
+  status: 200, totalMs: 900, firstByteMs: 5, firstCardMs: null,
+  frames: [["conversation", { id: "conv-1", turnId: "turn-1", sequence: 2 }], ["assistant-message", assistant],
+    ["done", { results: [], belowFloor: [], nearMiss: [], unchecked: [], mode: "NoneFound", supply: null, degraded: [], reason: "x", ...done }]]
+    .map(([ev, data], i) => ({ at: i, ev, data })),
+});
+
+test("runner: degraded comes from done.degraded and a degraded reply, never from a frame the API does not send", () => {
+  // The keyless shape the round-2 reviewer recorded: every turn's done said no-model.
+  const keyless = compactTurn(v1Frames({ degraded: ["no-model"] }, { text: "There is no model to read that.", conflict: false, degraded: true }));
+  assert.deepEqual(keyless.degraded, ["reply", "no-model"]);
+  // Vary one field at a time: only done, only the reply, neither, and a zero judge count.
+  assert.deepEqual(compactTurn(v1Frames({ degraded: ["plan"] })).degraded, ["plan"]);
+  assert.deepEqual(compactTurn(v1Frames({}, { text: "x", conflict: false, degraded: true })).degraded, ["reply"]);
+  assert.deepEqual(compactTurn(v1Frames({})).degraded, []);
+  assert.deepEqual(degradedOf([], { degraded: ["judge:0/3", "judge-missing:0/12", "judge:1/3", "judge-missing:2/12"] }), ["judge:1/3", "judge-missing:2/12"]);
+  // A v2 `degraded` frame still counts.
+  assert.deepEqual(degradedOf([{ ev: "degraded", data: { what: "judge" } }], null), ["judge"]);
+  // The mode v1 names on done wins over inferring one from zero cards.
+  assert.equal(compactTurn(v1Frames({ mode: "Clarify" })).mode, "Clarify");
+});
+
+test("replay: a recording whose done frames say degraded fails the fallback gate", () => {
+  const sc = [{ id: "keyless", categories: ["facet"], turns: [{ query: "heist movies", expect: {} }, { query: "more", expect: {} }] }];
+  const rec = (degraded) => ({ label: "k", concurrency: 4, ledger: [], facts: facts(), scenarios: [{ id: "keyless", categories: ["facet"], turns: [
+    { ...compactTurn(v1Frames({ degraded })), query: "heist movies", mediaTypes: null },
+    { ...compactTurn(v1Frames({ degraded: [] })), query: "more", mediaTypes: null },
+  ] }] });
+  const bad = score(rec(["no-model"]), sc, prices, gates);
+  assert.equal(bad.metrics.fallbackRate.value, 0.5);
+  assert.equal(bad.gates.find((g) => g.metric === "fallbackRate").status, "FAIL");
+  assert.match(bad.scenarios[0].turns[0].fallbackDetail.join(" "), /degraded: no-model/);
+  const clean = score(rec([]), sc, prices, gates);
+  assert.equal(clean.metrics.fallbackRate.value, 0);
+  assert.equal(clean.gates.find((g) => g.metric === "fallbackRate").status, "pass");
+  // A zero judge count is not a fallback.
+  assert.equal(score(rec(["judge:0/2"]), sc, prices, gates).metrics.fallbackRate.value, 0);
+});
+
+test("trays: near-miss and unchecked cards on done are shown cards, held to leaks, ruled-out titles and grounding", () => {
+  const raw = v1Frames({ nearMiss: [{ titleId: A, name: "Alpha" }], unchecked: [{ titleId: D, name: "Blue Beetle" }, { titleId: B, name: "Bravo" }] });
+  const t = { ...compactTurn(raw), query: "no superheroes please", mediaTypes: null };
+  assert.deepEqual(t.nearMiss.map((c) => c.titleId), [A]);
+  assert.deepEqual(t.unchecked.map((c) => c.titleId), [D, B]);
+  const f = facts({ truth: { superhero: { members: [D], supply: {} } } });
+  const def = { expect: { mustNot: ["superhero"] } };
+  const r = evaluateTurn(def, t, 0, [t], f);
+  assert.deepEqual(r.leaks, ["Blue Beetle"], "D is outside the eligibility truth, and the unchecked tray is on screen");
+  assert.deepEqual(r.mustNotViolations, ["Blue Beetle"]);
+  // The same card among no tray at all: no leak, nothing ruled out.
+  const empty = { ...compactTurn(v1Frames({})), query: "no superheroes please", mediaTypes: null };
+  const r0 = evaluateTurn(def, empty, 0, [empty], f);
+  assert.deepEqual([r0.leaks, r0.mustNotViolations], [[], []]);
+  // A reply naming a title in the unchecked tray names something on screen: grounded.
+  const named = { ...t, reply: "Blue Beetle is in the unchecked row." };
+  const g = evaluateTurn(def, named, 0, [named], { ...f, named: { [t.turnId]: [{ titleId: D, name: "Blue Beetle" }] } });
+  assert.equal(g.groundingViolations, 0);
+  // Scored over a recording, both gated counts fail.
+  const sc = [{ id: "rainy", categories: ["negation"], turns: [{ query: "no superheroes please", expect: { mustNot: ["superhero"] } }] }];
+  const res = score({ label: "t", concurrency: 4, ledger: [], facts: f, scenarios: [{ id: "rainy", categories: ["negation"], turns: [t] }] }, sc, prices, gates);
+  assert.equal(res.gates.find((x) => x.metric === "exclusionLeaks").status, "FAIL");
+  assert.equal(res.gates.find((x) => x.metric === "mustNotViolations").status, "FAIL");
+});
+
+// Supply honesty (IREV1-SYS-06). The truth's floored counts are what supply.sql returns.
+const supplyTruthOf = (over = {}) => ({ matching: 40, eligible: 5, scored: 4, aboveBar: 2, clearing: 2,
+  floored: { 50: { minVotes: 50, matching: 30, alreadySeen: 12, savedOrDismissed: 1, excludedByConditions: 13, eligible: 4, unscored: 1, belowFloor: 1, clearingFloor: 2,
+    knockouts: [{ kind: "ExcludeGenre", value: "comedy", wouldUnlock: 3 }, { kind: "MinYear", value: "2000", wouldUnlock: 2 }], ...over.floored } }, ...over.top });
+const saidSupply = (over = {}) => ({ alreadySeen: 12, unscored: 1, minVotes: 50, knockoutsMeasured: true,
+  knockouts: [{ kind: "ExcludeGenre", value: "Comedy", wouldUnlock: 3 }, { kind: "MinYear", value: "2000", wouldUnlock: 2 }], ...over });
+
+test("missed supply: no pick while eligible titles clear the bar fails a gate; nothing clearing the bar is honest-empty", () => {
+  const def = { expect: { concept: "heist" } };
+  const none = turn("heist movies", [], { mode: "NoneFound" });
+  const r = evaluateTurn(def, none, 0, [none], facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf() } } } }));
+  assert.equal(r.missedSupply, true);
+  assert.equal(r.checks.honestEmpty, undefined);
+  // Eligible titles exist but none clears the bar: none-found is the honest answer, not missed supply.
+  const underBar = facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf({ top: { clearing: 0, aboveBar: 0 } }) } } } });
+  const h = evaluateTurn(def, none, 0, [none], underBar);
+  assert.equal(h.missedSupply, undefined);
+  assert.equal(h.checks.honestEmpty, true);
+  const clarify = turn("heist movies", [], { mode: "Clarify" });
+  assert.equal(evaluateTurn(def, clarify, 0, [clarify], underBar).checks.honestEmpty, false);
+  // A recording from before `clearing` existed falls back to aboveBar.
+  const legacy = facts({ truth: { heist: { members: [A], supply: { Any: { matching: 3, eligible: 2, scored: 2, aboveBar: 1 } } } } });
+  assert.equal(evaluateTurn(def, none, 0, [none], legacy).missedSupply, true);
+  // Gated: one missed turn fails the run.
+  const sc = [{ id: "heist", categories: ["facet"], turns: [{ query: "heist movies", expect: { concept: "heist" } }] }];
+  const rec = (t, f) => ({ label: "m", concurrency: 4, ledger: [], facts: f, scenarios: [{ id: "heist", categories: ["facet"], turns: [t] }] });
+  const f = facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf() } } } });
+  assert.equal(score(rec(none, f), sc, prices, gates).gates.find((g) => g.metric === "missedSupply").status, "FAIL");
+  assert.equal(score(rec(turn("heist movies", [card(A, "Alpha")]), f), sc, prices, gates).gates.find((g) => g.metric === "missedSupply").status, "pass");
+});
+
+test("supply counts: a none-found reply's seen, unscored and relaxation counts must equal the SQL truth, ±0", () => {
+  const def = { expect: { concept: "heist" } };
+  const f = facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf({ top: { clearing: 0 } }) } } } });
+  // The reply states the report's unscored count, as NoneFoundCopy does whenever there is one.
+  const run = (supply) => { const t = turn("heist movies", [], { mode: "NoneFound", supply, reply: "1 has no score from your model yet." }); return evaluateTurn(def, t, 0, [t], f); };
+  assert.equal(run(saidSupply()).checks.supplyCounts, true, "values compare case-insensitively for the list rules");
+  for (const [field, value, pattern] of [
+    ["alreadySeen", 11, /alreadySeen 11 vs truth 12/],
+    ["unscored", 0, /unscored 0 vs truth 1/],
+    ["knockouts", [{ kind: "ExcludeGenre", value: "comedy", wouldUnlock: 3 }], /knockout MinYear absent vs truth 2/],
+    ["knockouts", [...saidSupply().knockouts, { kind: "ExcludeGenre", value: "romance", wouldUnlock: 1 }], /knockout ExcludeGenre:romance 1 vs truth absent/],
+    ["knockouts", [{ kind: "ExcludeGenre", value: "comedy", wouldUnlock: 4 }, { kind: "MinYear", value: "2000", wouldUnlock: 2 }], /ExcludeGenre:comedy 4 vs truth 3/],
+  ]) {
+    const r = run(saidSupply({ [field]: value }));
+    assert.equal(r.checks.supplyCounts, false, `${field} varied`);
+    assert.match(r.supplyMismatches.join("; "), pattern);
+  }
+  // Single-rule kinds match by kind: the API values the language rule as its list.
+  assert.equal(run(saidSupply({ knockouts: [{ kind: "ExcludeGenre", value: "comedy", wouldUnlock: 3 }, { kind: "MinYear", value: "2,000", wouldUnlock: 2 }] })).checks.supplyCounts, true);
+  // Skipping relaxations is honest only for a broad request with plenty clearing the bar.
+  assert.equal(run(saidSupply({ knockoutsMeasured: false, knockouts: [] })).checks.supplyCounts, false);
+  const broad = facts({ truth: { heist: { members: [A], supply: { Any: supplyTruthOf({ floored: { matching: 5000, clearingFloor: 30 } }) } } } });
+  const tb = turn("heist movies", [], { mode: "NoneFound", supply: saidSupply({ knockoutsMeasured: false, knockouts: [] }), reply: "1 has no score from your model yet." });
+  assert.equal(evaluateTurn(def, tb, 0, [tb], broad).checks.supplyCounts, true);
+  // No supply on the turn: nothing to check. A truth at another vote floor: unverified, not passed.
+  const quiet = turn("heist movies", [], { mode: "NoneFound", supply: null, reply: "Nothing I found matches what you asked closely enough to show." });
+  assert.equal(evaluateTurn(def, quiet, 0, [quiet], f).checks.supplyCounts, undefined);
+  const other = run(saidSupply({ minVotes: 10 }));
+  assert.equal(other.checks.supplyCounts, undefined);
+  assert.match(other.supplyUnverified, /vote floor 10/);
+  // Gated at 100%.
+  const sc = [{ id: "heist", categories: ["empty-supply"], turns: [{ query: "heist movies", expect: { concept: "heist" } }] }];
+  const res = score({ label: "s", concurrency: 4, ledger: [], facts: f, scenarios: [{ id: "heist", categories: ["empty-supply"], turns: [turn("heist movies", [], { mode: "NoneFound", supply: saidSupply({ unscored: 7 }) })] }] }, sc, prices, gates);
+  assert.equal(res.gates.find((g) => g.metric === "supplyCountAccuracy").status, "FAIL");
+});
+
+// IREV2-SYS-03: the reply's own words. The two none-found shapes NoneFoundCopy composes on this snapshot,
+// with the counts supply.sql gives at the 50-vote floor (ninja movies 70/18/52; samurai movies 66/8/57
+// once the samurai truth stopped matching "Ronin" (1998) by name).
+const ninjaTruth = { minVotes: 50, matching: 70, lowVoteMatches: 16, alreadySeen: 18, savedOrDismissed: 0, excludedByConditions: 52, eligible: 0, unscored: 0, belowFloor: 0, clearingFloor: 0,
+  knockouts: [{ kind: "Language", value: "en", wouldUnlock: 4 }, { kind: "ExcludeGenre", value: "animation", wouldUnlock: 3 }, { kind: "MinYear", value: "2000", wouldUnlock: 3 }, { kind: "MinCrowdRating", value: "6.0", wouldUnlock: 2 }] };
+const ninjaReply = "There are no ninja movies left for you. Of the 70 ninja movies in the catalogue with at least 50 votes, you've seen 18 and your conditions hold out 52. "
+  + "Turning off “English only” would unlock 4; turning off “excluded genre: animation” would unlock 3.";
+const samuraiTruth = { minVotes: 50, matching: 66, lowVoteMatches: 9, alreadySeen: 8, savedOrDismissed: 0, excludedByConditions: 57, eligible: 1, unscored: 0, belowFloor: 1, clearingFloor: 0,
+  knockouts: [{ kind: "Language", value: "en", wouldUnlock: 13 }, { kind: "ExcludeGenre", value: "animation", wouldUnlock: 1 }, { kind: "MinCrowdRating", value: "6.0", wouldUnlock: 1 }, { kind: "MinYear", value: "2000", wouldUnlock: 1 }] };
+const samuraiReply = "None of your unseen samurai movies clears your 6.0 bar. Of the 66 samurai movies in the catalogue with at least 50 votes, you've seen 8 and your conditions hold out 57. "
+  + "Under your 6.0 bar: Blade of the 47 Ronin — shown below. Turning off “English only” would unlock 13; turning off “excluded genre: animation” would unlock 1.";
+
+test("reply supply: the counts a none-found reply states are read back from its words", () => {
+  assert.deepEqual(replySupply(ninjaReply), { matching: 70, minVotes: 50, alreadySeen: 18, savedOrDismissed: 0, excludedByConditions: 52,
+    knockouts: [{ kind: "Language", value: "", wouldUnlock: 4 }, { kind: "ExcludeGenre", value: "animation", wouldUnlock: 3 }] });
+  // Every part of the partition, the under-bar count, the unscored count; the held-titles sentence is not a count.
+  const full = replySupply("There are no ninja movies left for you. Of the 11 ninja movies in the catalogue with at least 50 votes, you've seen 6, 1 is saved or dismissed and your conditions hold out 4. "
+    + "2 are under your 6.0 bar. 1917 has no score from your model yet, so your 6.0 bar holds it back — shown below. 3 have no score from your model yet.");
+  assert.deepEqual([full.matching, full.alreadySeen, full.savedOrDismissed, full.excludedByConditions, full.belowFloor, full.unscored], [11, 6, 1, 4, 2, 3]);
+  // The reply SupplyTruthParityTests composes from the real reporter (allow-list fixture), read back.
+  assert.deepEqual(replySupply("There are no goldensupply1 titles left for you. Of the 7 goldensupply1 titles in the catalogue with at least 50 votes, your conditions hold out 5. "
+    + "2 have no score from your model yet. Turning off “only these genres: thriller” would unlock 2."),
+  { matching: 7, minVotes: 50, alreadySeen: 0, savedOrDismissed: 0, excludedByConditions: 5, unscored: 2, knockouts: [{ kind: "IncludeGenre", value: "thriller", wouldUnlock: 2 }] });
+  // "none is unseen and inside your conditions": every part is zero.
+  const none = replySupply("There are no ninja shows left for you. Of the 2 ninja shows in the catalogue with at least 50 votes, none is unseen and inside your conditions.");
+  assert.deepEqual([none.matching, none.alreadySeen, none.savedOrDismissed, none.excludedByConditions], [2, 0, 0, 0]);
+  // A reply that states no count; a picks reply.
+  assert.equal(replySupply("Nothing I found matches what you asked closely enough to show."), null);
+  assert.equal(replySupply("Here are three heist films."), null);
+  assert.equal(replySupply(null), null);
+  // Every label SupplyReporter.LabelFor prints.
+  assert.deepEqual(["excluded genre: Comedy", "only these genres: thriller", "excluded keyword: gore", "English only", "languages: en,fr", "crowd rating at least 6.0", "released 2000 or later", "released 2015 or earlier"]
+    .map((l) => knockoutOfLabel(l).kind), ["ExcludeGenre", "IncludeGenre", "ExcludeKeyword", "Language", "Language", "MinCrowdRating", "MinYear", "MaxYear"]);
+});
+
+test("reply supply: a none-found reply's words must equal the floored SQL truth, ±0 (ninja and samurai)", () => {
+  const check = (concept, truth, reply, supply = null) => {
+    const def = { expect: { concept } };
+    const t = turn(`${concept} movies`, [], { mode: "NoneFound", reply, supply });
+    const f = facts({ truth: { [concept]: { members: [A], supply: { Any: { matching: 86, eligible: 0, scored: 0, aboveBar: 0, clearing: 0, floored: { 50: truth } } } } } });
+    return evaluateTurn(def, t, 0, [t], f);
+  };
+  for (const [concept, truth, reply] of [["ninja", ninjaTruth, ninjaReply], ["samurai", samuraiTruth, samuraiReply]]) {
+    const ok = check(concept, truth, reply);
+    assert.equal(ok.checks.supplyCounts, true, `${concept}: ${ok.supplyMismatches}`);
+    assert.equal(ok.checks.honestEmpty, true);
+  }
+  // Vary one stated number at a time; each fails and names what differs.
+  for (const [from, to, pattern] of [
+    ["Of the 70", "Of the 86", /reply says matching 86, truth 70/],
+    ["you've seen 18", "you've seen 21", /reply says alreadySeen 21, truth 18/],
+    ["hold out 52", "hold out 49", /reply says excludedByConditions 49, truth 52/],
+    ["would unlock 4;", "would unlock 5;", /dropping Language unlocks 5, truth 4/],
+    ["“excluded genre: animation” would unlock 3", "“excluded genre: comedy” would unlock 3", /dropping ExcludeGenre:comedy unlocks 3, truth nothing/],
+    ["“English only” would unlock 4; turning off “excluded genre: animation” would unlock 3", "“crowd rating at least 6.0” would unlock 2", /reply leaves out Language, which unlocks 4/],
+  ]) {
+    const r = check("ninja", ninjaTruth, ninjaReply.replace(from, to));
+    assert.equal(r.checks.supplyCounts, false, `${from} -> ${to}`);
+    assert.match(r.supplyMismatches.join("; "), pattern);
+  }
+  // The samurai under-bar count, stated as a number when no title is named.
+  const counted = samuraiReply.replace("Under your 6.0 bar: Blade of the 47 Ronin — shown below.", "2 are under your 6.0 bar.");
+  assert.match(check("samurai", samuraiTruth, counted).supplyMismatches.join("; "), /reply says belowFloor 2, truth 1/);
+  // The words and the report are both held: a true reply over a report that disagrees still fails.
+  const report = { matchingInCatalogue: 70, alreadySeen: 18, savedOrDismissed: 0, excludedByConditions: 52, eligible: 0, belowFloor: 0, unscored: 0, clearingFloor: 0, minVotes: 50, knockoutsMeasured: true,
+    knockouts: ninjaTruth.knockouts };
+  assert.equal(check("ninja", ninjaTruth, ninjaReply, report).checks.supplyCounts, true);
+  assert.match(check("ninja", ninjaTruth, ninjaReply, { ...report, eligible: 1 }).supplyMismatches.join("; "), /eligible 1 vs truth 0/);
+  // Copy the parser cannot read is a failure, not a pass: the report says a partition and an unscored count were due.
+  const reworded = check("ninja", ninjaTruth, "No ninja movies remain. You saw 18 of 70.", report);
+  assert.equal(reworded.checks.supplyCounts, false);
+  assert.match(reworded.supplyMismatches.join("; "), /reply states no partition/);
+  assert.match(check("ninja", { ...ninjaTruth, unscored: 2 }, ninjaReply, { ...report, unscored: 2 }).supplyMismatches.join("; "), /reply states no unscored count/);
+  // A reply at a floor the truth was not counted at is unverified, never passed.
+  const other = check("ninja", ninjaTruth, ninjaReply.replace("at least 50 votes", "at least 10 votes"));
+  assert.equal(other.checks.supplyCounts, undefined);
+  assert.match(other.supplyUnverified, /vote floor 10/);
+});
+
+test("runner: done.supply is recorded in camelCase as the API streams it, and supply.sql rows fold into one object", () => {
+  const t = compactTurn(v1Frames({ supply: { matchingInCatalogue: 30, alreadySeen: 12, savedOrDismissed: 1, excludedByConditions: 13, eligible: 4, belowFloor: 1, unscored: 1, clearingFloor: 2,
+    lowVoteMatches: 3, minVotes: 50, predictedFloor: 6, knockoutsMeasured: true,
+    knockouts: [{ kind: "ExcludeGenre", value: "comedy", contentFilterId: null, label: "excluded genre: comedy", wouldUnlock: 3, sample: [] }] } }));
+  assert.deepEqual(t.supply.knockouts, [{ kind: "ExcludeGenre", value: "comedy", wouldUnlock: 3 }]);
+  assert.equal(t.supply.alreadySeen, 12);
+  assert.equal(compactTurn(v1Frames({})).supply, null);
+  const folded = supplyFromRows([["matching", "", "", "30"], ["alreadySeen", "", "", "12"], ["knockout", "MinYear", "2000", "2"], ["knockout", "ExcludeGenre", "comedy", "3"]], 50);
+  assert.deepEqual(folded, { minVotes: 50, matching: 30, alreadySeen: 12, knockouts: [{ kind: "ExcludeGenre", value: "comedy", wouldUnlock: 3 }, { kind: "MinYear", value: "2000", wouldUnlock: 2 }] });
+  // The For-you bar as the API reads it.
+  assert.deepEqual(["6.0", "0", "abc", "12", null, " 5.5 "].map(forYouBar), [6, null, null, 10, null, 5.5]);
 });
 
 test("runner: a resumed run reads the ledger from the day its first attempt started", () => {

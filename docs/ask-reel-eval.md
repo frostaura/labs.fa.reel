@@ -64,7 +64,7 @@ node scripts/eval/askreel.mjs check [--db reel_eval]          # --db also execut
 # Surface harness: one Fresh build (API started with --jobs), then every surface; compare against a baseline.
 node scripts/eval/surfaces.mjs --api http://127.0.0.1:5180 --db reel_eval --label <name> --fresh --api-env <eval env> --build-info <...>
 node scripts/eval/surfaces.mjs --replay <recording.json>
-node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/99c0761-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one
+node scripts/eval/surfaces.mjs --compare <metrics.json> --baseline eval/surfaces/baselines/9f42c9d-keyless/metrics.json   # keyless run; the keyed 99c0761/ for a keyed one (gates.json → baselines)
 
 # Ledger cost check (§7): every eval and lane database together, and the provider's own figure for a key.
 node scripts/eval/ledger.mjs --all
@@ -117,6 +117,20 @@ surfaces apply it — so it is measured per surface by the exclusion matrix (tas
 TMDB keyword tags are noisy (Batman Begins carries "ninja"), so a truth set bounds precision from above and
 is **never a recall target** — keyword-defined recall is circular (program §1, C*4).
 
+**Supply truth.** A none-found reply states counts ("Of the 70 ninja movies in the catalogue with at least
+50 votes, you've seen 18 and your conditions hold out 52", "2 have no score from your model yet",
+"turning off “English only” would unlock 4"). `eval/askreel/supply/supply.sql` is the eval's own count of
+them over a concept's truth set: the same vote floor as the reply (the badge's source, Trakt first at 50+
+votes, then TMDB, then Trakt; `CrowdVotes.MinRelaxVotes` = 50), the active artifact's scores, the For-you
+bar at badge precision, and `supply/rules.sql` for which single rule holds each footprint-free title out
+(a knockout). `check --db` fails when `rules.sql` and `_eligible.sql` disagree on any title;
+`SupplyTruthParityTests` pins both files to `SupplyReporter` on fixtures that fill every bucket and trip
+every relaxation from both sides, and pins the reply wording the eval parses (`NoneFoundCopy`).
+
+A truth set is written as a concept, deliberately, not as a copy of the pipeline's topic rule. Where the
+two would differ on a real title the truth says why: `samurai.sql` matches "ronin" as a TMDB keyword (the
+masterless-samurai tag) but never in a name, because "Ronin" (1998) is a crime thriller (IREV2-SYS-03).
+
 ## Metrics
 
 Pre-registered 2026-10-24 before the 99c0761 baseline. Every change made after any baseline data existed
@@ -133,7 +147,10 @@ is listed with its reason in `eval/askreel/gates.json` → `amendments`.
 | Grounding violations | Stub-family why-lines on picks (invented explanations shown as model output) + catalogue titles a reply names that are not on screen and not in the user's words |
 | Echo | The reply quotes the user's message (“…”), or repeats a message of five or more words verbatim |
 | Fallback rate | Turns that failed, carry a stub reply, a stub why-line, a typed fallback source (`Fallback`, `Stub`, or `Templater` on an in-request pick), or a `degraded` frame. `Generic` (the captionless filmography list) and `Templater` on an outside-request card (its deterministic exclusion caption) are by design |
-| Exclusion leaks | Shown titles (picks and trays) outside `_eligible.sql` |
+| Missed supply | Turns with a concept that show no pick while the truth holds eligible titles clearing the For-you bar (gated at 0). Eligible titles with none clearing the bar make the turn an honest-empty check instead |
+| Supply count accuracy | Over none-found turns that state supply counts: every count in `done.supply` and every count the **reply's words** state (matching, seen, saved or dismissed, held out, under the bar, unscored, each named relaxation, and that no unnamed relaxation unlocks more than a named one) equals the supply truth at the stated vote floor, ±0. A reply whose report says a partition or an unscored count was due, but which states none the parser reads, fails. Gated at 100% |
+| Exclusion leaks | Shown titles (picks and every tray: under the bar, near misses, unchecked) outside `_eligible.sql` |
+| Ruled-out titles | Shown titles (picks and every tray) in a turn's `mustNot` truth (gated at 0) |
 | Media filter violations | Picks against the request's own `mediaTypes` filter (gated). Picks against the user's words alone ("only movies") are reported as media mismatches, ungated |
 | Hedging why-lines (ungated) | Why-lines that argue against their own pick, including the concession family ("though/but … less / rather than / a weaker match") |
 | Non-Latin script (ungated) | English why-lines carrying another script ("film-first偏好") |
@@ -176,7 +193,8 @@ them, which is the point of the baseline.
 | Latency (`…/99c0761/latency/`) | **Not a latency baseline.** It ran 18:51–19:12 UTC while other lanes were building (§5.0 rule 1, §7 rule 5) and without held build slots, so its latency gates now read "not gated". Re-run with `--hold-build-slots` on the eval key |
 | Holdout (sealed) | Valid for the holdout **as it was** (scored against `scenarios-at-recording/`); the holdout has since been revised, so a fresh holdout baseline (one run, 64 turns) is owed before G2 |
 | Surfaces (`eval/surfaces/baselines/99c0761/`) | Partial, keyed (founder's key): digest returned no cards (no data), person pages and Watch tonight were not fetched, chained jobs ran mid-fetch, the artifact was not recorded (`provenance.md`), and it kept only `whyThis`, so the lens copy and hooks users read are unmeasured. Re-scored under the 2026-10-25 rules (stub 0.212). Re-run with the current harness on the eval key |
-| Surfaces, keyless (`eval/surfaces/baselines/99c0761-keyless/`) | **The reference for keyless runs** (every surface run so far on the merged tree has been keyless). Current harness: raw copy fields, every surface, jobs drained, input artifact recorded. No model call ran, so its why-lines are the templater's and the stored lens copy (`provenance.md`) |
+| Surfaces, keyless (`eval/surfaces/baselines/99c0761-keyless/`) | The pre-program keyless reference, kept for what the re-baseline was measured against. Current harness: raw copy fields, every surface, jobs drained, input artifact recorded. No model call ran, so its why-lines are the templater's and the stored lens copy (`provenance.md`) |
+| Surfaces, keyless (`eval/surfaces/baselines/9f42c9d-keyless/`) | **The reference for keyless runs** since round 3 (IR2S-04). Same snapshot and input artifact. Its lower anchored and Similar volume is the evidence gate (3 of 99c0761's 126 anchored cards pass it; all 12 of these do). Its stub rate is owned by WS-5, not waived: the absolute stub gate still fails (`provenance.md`) |
 
 ## The LLM judge and κ
 
@@ -210,7 +228,10 @@ the lens clause, and the harness reads the measured build's own `RecCardHero` to
 `lensClause ?? whyThis` (`RecCard`: feed rows, rails, Similar, the digest), and the Watch-tonight reason.
 Saved grid cards, person pages and typeahead carry no why-line. Scoring `whyThis` alone missed the lens
 copy's hedges (8 of 21 feed cards carried a lens clause in the P0 review, 3 hedging). The stub family
-includes `GenericFallback` ("Strong fit with your taste profile."), alone or after an anchor clause, and
+includes `GenericFallback` ("Strong fit with your taste profile."), alone or after an anchor clause (the
+report counts each kind: the bare line, which the feed allows once per served page, the composed tail, and
+the old "aligned with your taste" template — none is exempt, because a fallback card shows the templated
+anchored line or nothing), and
 the hedge family includes comparisons against the account's own taste ("…slower … than the action you
 often prefer") and departure framing ("detour", "change of pace"). Both families are shared with the
 golden eval, and were calibrated on the snapshot's 316 lens copies and stored why-lines, each hit read by
