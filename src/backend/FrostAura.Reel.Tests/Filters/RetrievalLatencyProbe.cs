@@ -104,7 +104,7 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
             var concept = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
             var hard = new HardConstraints([concept], [], null, null, MediaScope.Any);
             var clock = Stopwatch.StartNew();
-            var ids = await CrowdVotes.MostVotedFirst(HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard))
+            var ids = await CrowdVotes.BestShrunkFirst(HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard))
                 .Select(t => t.Id).Take(HybridRetriever.ArmDepth).ToListAsync();
             facet.Add(clock.Elapsed.TotalMilliseconds);
             output.WriteLine(string.Create(
@@ -427,6 +427,69 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         }
 
         output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"mean recall@60 {recalls.Average():F3} over {recalls.Count} concepts; {recalls.Count(r => r >= 0.85)} at or above 0.85"));
+    }
+
+    /// <summary>
+    /// The mood arm and keyless search on the slot (no paid call: no embedding provider). Prints each
+    /// mood's head with its evidence and the time per request, so a person can judge whether "cosy"
+    /// reads as cosy; asserts only that every mood is answered and every candidate carries the mood.
+    /// </summary>
+    [Fact]
+    public async Task Moods_and_keyless_search_on_the_slot()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var (accountId, _) = await AccountAsync();
+        var elapsed = new List<double>();
+        foreach (var mood in new[] { "cosy", "tense", "mind-bending", "feel-good", "funny", "dark", "relaxing", "scary" })
+        {
+            await using var db = Context();
+            var cache = new MemoryCache(new MemoryCacheOptions());
+            var embeddings = new ConceptEmbeddings(new UnavailableEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance);
+            var eligibility = new EligibilityQueryBuilder(db);
+            var retriever = new HybridRetriever(
+                db, eligibility, new SupplyReporter(db, eligibility),
+                new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
+                new FullTextArm(db), embeddings,
+                new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+                NullLogger<HybridRetriever>.Instance);
+            var clock = Stopwatch.StartNew();
+            var result = await retriever.RetrieveAsync(
+                new RetrievalQuery(accountId, new HardConstraints([], [], null, null, MediaScope.Movies), new SoftPreferences([mood], [], []), [], 24)
+                {
+                    Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic,
+                },
+                default);
+            elapsed.Add(clock.Elapsed.TotalMilliseconds);
+            var ids = result.Candidates.Take(8).Select(c => c.TitleId).ToList();
+            var names = await db.Titles.Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, t => t.Name);
+            output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{mood}: {result.Candidates.Count} in {clock.Elapsed.TotalMilliseconds:F0} ms [{string.Join(", ", result.Timings.ElapsedMs.Select(kv => $"{kv.Key} {kv.Value}"))}]"));
+            foreach (var c in result.Candidates.Take(8))
+            {
+                output.WriteLine($"   {names[c.TitleId]}  [{string.Join(", ", c.Evidence)}]");
+            }
+
+            Assert.NotEmpty(result.Candidates);
+            Assert.All(result.Candidates, c => Assert.Contains(c.Evidence, e => e.StartsWith("mood:", StringComparison.Ordinal)));
+        }
+
+        output.WriteLine(Summary("mood retrieval", elapsed));
+
+        var keyless = new List<double>();
+        foreach (var query in new[] { "medevil fun", "ninja", "heist", "time loop", "survival at sea", "cosy christmas", "scarry zombies" })
+        {
+            await using var db = Context();
+            var search = KeylessTextSearch.Offline(db, new EligibilityQueryBuilder(db));
+            var clock = Stopwatch.StartNew();
+            var hits = await search.SearchAsync(accountId, query, 24, default);
+            keyless.Add(clock.Elapsed.TotalMilliseconds);
+            output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"keyless \"{query}\": {hits.Count} in {clock.Elapsed.TotalMilliseconds:F0} ms: {string.Join(" | ", hits.Take(6).Select(h => $"{h.Title.Name} [{string.Join(", ", h.MatchedOn.Take(3))}]"))}"));
+        }
+
+        output.WriteLine(Summary("keyless search", keyless));
     }
 
     private static string SourceDirectory([System.Runtime.CompilerServices.CallerFilePath] string path = "") =>

@@ -124,33 +124,39 @@ public sealed class KeylessTextSearch(
                 admitted: null).ToDictionary(f => f.TitleId, f => f.Score));
         }
 
-        var scored = perUnit
-            .SelectMany(scores => scores.Keys)
-            .Distinct()
-            .Select(id =>
-            {
-                var matched = perUnit.Count(s => s.ContainsKey(id));
-                var score = perUnit.Sum(s => s.GetValueOrDefault(id)) + (CoverageStep * (matched - 1));
-                return (Id: id, Score: score);
-            })
-            .OrderByDescending(x => x.Score)
-            .ThenBy(x => x.Id)
-            .ToList();
-
-        var head = scored.Take((take * 2) + 20).Select(x => x.Id).ToList();
+        // Coverage is judged on the titles themselves, not on list membership: each unit's lists stop
+        // at ReadDepth, so a title matching "medieval" AND "fun" can sit below the top of the broad
+        // "fun" list and would otherwise count as matching one unit.
+        var candidateIds = perUnit.SelectMany(scores => scores.Keys).Distinct().ToList();
         var ceiling = await eligibility.MaturityCeilingAsync(accountId, ct);
         var titles = EligibilityQueryBuilder.WithinMaturity(
-                await db.Titles.AsNoTracking().Where(t => head.Contains(t.Id)).ToListAsync(ct), ceiling)
+                await db.Titles.AsNoTracking().Where(t => candidateIds.Contains(t.Id)).ToListAsync(ct), ceiling)
             .ToDictionary(t => t.Id);
+        var unitHards = concepts.Select(c => new HardConstraints([c], [], null, null, MediaScope.Any)).ToList();
         var all = new HardConstraints(concepts, [], null, null, MediaScope.Any);
-        return [.. scored
-            .Where(x => titles.ContainsKey(x.Id))
+        return [.. titles.Values
+            .Select(title =>
+            {
+                var matched = 0;
+                for (var u = 0; u < unitHards.Count; u++)
+                {
+                    if (perUnit[u].ContainsKey(title.Id) || HardConstraintFilter.EvidenceFor(title, unitHards[u]).Count > 0)
+                    {
+                        matched++;
+                    }
+                }
+
+                var score = perUnit.Sum(scores => scores.GetValueOrDefault(title.Id)) + (CoverageStep * (matched - 1));
+                return (Title: title, Score: score);
+            })
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Title.Id)
             .Take(take)
             .Select(x => new KeylessHit(
-                titles[x.Id],
+                x.Title,
                 x.Score,
-                [.. HardConstraintFilter.EvidenceFor(titles[x.Id], all)
-                    .Concat(textEvidence.GetValueOrDefault(x.Id, []))
+                [.. HardConstraintFilter.EvidenceFor(x.Title, all)
+                    .Concat(textEvidence.GetValueOrDefault(x.Title.Id, []))
                     .Distinct(StringComparer.Ordinal)]))];
     }
 

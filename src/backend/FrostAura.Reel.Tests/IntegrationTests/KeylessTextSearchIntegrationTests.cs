@@ -5,6 +5,7 @@ using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Tenancy;
+using Microsoft.EntityFrameworkCore;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -92,6 +93,44 @@ public class KeylessTextSearchIntegrationTests(PostgresFixture fixture)
         var results = await SearchAsync(accountId, "romantic");
 
         Assert.Contains(results, r => r.Title.Name == "Ware Romance");
+    }
+
+    [Fact]
+    public async Task Coverage_is_judged_on_the_title_not_on_a_broad_units_top_list()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // "fun" reaches thousands of comedies; its list stops at ReadDepth. A medieval comedy with no
+        // crowd votes sits far below that cut, and must still rank as matching BOTH units, above a
+        // well-regarded medieval drama that matches one.
+        var tag = Guid.NewGuid().ToString("N")[..6];
+        var accountId = await SeedAccountAsync();
+        var both = await SeedTitleAsync($"Jousting Japes {tag}", ["comedy"], ["medieval"], voted: false);
+        await SeedTitleAsync($"Grim Siege {tag}", ["drama"], ["medieval"]);
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            for (var i = 0; i < KeylessTextSearch.ReadDepth + 10; i++)
+            {
+                db.Add(NewTitle($"filler-{tag}-{i}", ["comedy"], [], null, null, voted: true));
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        try
+        {
+            var results = await SearchAsync(accountId, "medieval fun");
+
+            Assert.Equal(both, results[0].Title.Id);
+        }
+        finally
+        {
+            await using var cleanup = fixture.CreateContext(new AccountContext());
+            await cleanup.Titles.Where(t => t.Name.StartsWith($"filler-{tag}-")).ExecuteDeleteAsync();
+        }
     }
 
     [Fact]
@@ -247,33 +286,37 @@ public class KeylessTextSearchIntegrationTests(PostgresFixture fixture)
         return account.Id;
     }
 
-    private async Task<Guid> SeedTitleAsync(string name, string[] genres, string[] keywords, string? certification = null, string? overview = null)
+    private async Task<Guid> SeedTitleAsync(
+        string name, string[] genres, string[] keywords, string? certification = null, string? overview = null, bool voted = true)
     {
         await using var db = fixture.CreateContext(new AccountContext());
-        var id = Guid.NewGuid();
-        db.Add(new Title
+        var title = NewTitle(name, genres, keywords, certification, overview, voted);
+        db.Add(title);
+        await db.SaveChangesAsync();
+        return title.Id;
+    }
+
+    private static Title NewTitle(string name, string[] genres, string[] keywords, string? certification, string? overview, bool voted) =>
+        new()
         {
-            Id = id,
+            Id = Guid.NewGuid(),
             MediaType = MediaType.Movie,
             TraktId = Random.Shared.NextInt64(1, long.MaxValue),
+            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
             TraktSlug = name.ToLowerInvariant().Replace(' ', '-'),
             Name = name,
             Genres = genres,
             Keywords = keywords,
             Certification = certification,
             Overview = overview,
-            TmdbId = Random.Shared.NextInt64(1, long.MaxValue),
-            TmdbVoteAverage = 9.4m,
-            TmdbVoteCount = 2_000_000,
+            TmdbVoteAverage = voted ? 9.4m : null,
+            TmdbVoteCount = voted ? 2_000_000 : 0,
             // English by default: the eligibility builder excludes null-language titles under the
             // English-only default, which would otherwise mask what each assertion checks.
             Language = "en",
             TmdbPopularity = 50,
             CreatedAt = DateTime.UtcNow,
-        });
-        await db.SaveChangesAsync();
-        return id;
-    }
+        };
 
     private async Task<List<KeylessHit>> SearchAsync(Guid accountId, string query)
     {

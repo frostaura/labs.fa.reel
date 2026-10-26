@@ -37,8 +37,14 @@ public sealed record MoodArmResult(
 /// </summary>
 public sealed class MoodArm(IReelDbContext db, IConceptResolver resolver)
 {
-    /// <summary>How many titles each source (tone, labels and genres) reads per mood before scoring.</summary>
+    /// <summary>How many admitted titles each source (tone; labels and genres) contributes per mood before scoring.</summary>
     public const int ReadDepth = 300;
+
+    /// <summary>
+    /// How many best-regarded raw hits each source reads before eligibility: generous, because a heavy
+    /// watcher has seen most of a mood's famous titles and they rank highest.
+    /// </summary>
+    public const int HitDepth = 2_000;
 
     private const double ToneWeight = 2.0;
     private const double LabelWeight = 1.5;
@@ -102,28 +108,38 @@ public sealed class MoodArm(IReelDbContext db, IConceptResolver resolver)
         var scored = new Dictionary<Guid, (double Score, int Order, List<string> Evidence)>();
         var order = 0;
 
+        // Hits first, then eligibility by id (as the full-text arm does): composing the account's
+        // eligibility into a crowd-ordered scan of every "tense" or "thriller" title made Postgres
+        // evaluate the whole eligibility predicate before ordering (~0.7-1.4 s per mood on the slot);
+        // the best-regarded HitDepth hits are read raw and then checked against the pool by key.
         if (reading.Tones.Count > 0)
         {
             var tones = reading.Tones.ToList();
-            var byTone = await CrowdVotes.BestShrunkFirst(pool.Where(t => db.TitleAttributes.Any(a =>
+            var raw = await CrowdVotes.BestShrunkFirst(db.Titles.Where(t => db.TitleAttributes.Any(a =>
                     a.TitleId == t.Id && a.Status == AttributeExtractionStatus.Done && a.Tone != null && tones.Contains(a.Tone))))
-                .Select(t => new { t.Id, Tone = db.TitleAttributes.Where(a => a.TitleId == t.Id).Select(a => a.Tone).FirstOrDefault() })
-                .Take(ReadDepth)
+                .Select(t => t.Id)
+                .Take(HitDepth)
                 .ToListAsync(ct);
-            foreach (var row in byTone)
+            var allowed = await Allowed(pool, raw, ct);
+            var tone = await db.TitleAttributes
+                .Where(a => raw.Contains(a.TitleId))
+                .Select(a => new { a.TitleId, a.Tone })
+                .ToDictionaryAsync(a => a.TitleId, a => a.Tone, ct);
+            foreach (var id in raw.Where(allowed.Contains).Take(ReadDepth))
             {
-                Credit(scored, row.Id, ToneWeight, $"tone:{row.Tone}", ref order);
+                Credit(scored, id, ToneWeight, $"tone:{tone.GetValueOrDefault(id)}", ref order);
             }
         }
 
         if (HardConstraintFilter.SoftPredicate(reading.Labels, reading.Genres) is { } predicate)
         {
             var labels = reading.Labels.ToHashSet(StringComparer.Ordinal);
-            var byLabel = await CrowdVotes.BestShrunkFirst(pool.Where(predicate))
+            var raw = await CrowdVotes.BestShrunkFirst(db.Titles.Where(predicate))
                 .Select(t => new Title { Id = t.Id, Name = t.Name, MediaType = t.MediaType, Language = t.Language, Keywords = t.Keywords, Genres = t.Genres })
-                .Take(ReadDepth)
+                .Take(HitDepth)
                 .ToListAsync(ct);
-            foreach (var row in byLabel)
+            var allowed = await Allowed(pool, [.. raw.Select(r => r.Id)], ct);
+            foreach (var row in raw.Where(r => allowed.Contains(r.Id)).Take(ReadDepth))
             {
                 var keyword = row.Keywords.FirstOrDefault(labels.Contains);
                 if (keyword is not null)
@@ -147,6 +163,10 @@ public sealed class MoodArm(IReelDbContext db, IConceptResolver resolver)
             .Take(take)
             .Select(kv => new MoodHit(kv.Key, [$"mood:{mood}", .. kv.Value.Evidence]))];
     }
+
+    /// <summary>Which of <paramref name="ids"/> the pool admits (eligibility and the request's hard constraints), by key.</summary>
+    private static async Task<HashSet<Guid>> Allowed(IQueryable<Title> pool, List<Guid> ids, CancellationToken ct) =>
+        ids.Count == 0 ? [] : (await pool.Where(t => ids.Contains(t.Id)).Select(t => t.Id).ToListAsync(ct)).ToHashSet();
 
     private static void Credit(
         Dictionary<Guid, (double Score, int Order, List<string> Evidence)> scored, Guid id, double weight, string evidence, ref int order)
