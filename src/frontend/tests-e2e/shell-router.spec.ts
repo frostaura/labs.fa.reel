@@ -76,3 +76,51 @@ test("a render error outside the page boundary shows Reel's root boundary, not t
   await expect(page.getByText("Unexpected Application Error")).toHaveCount(0);
   await expect.poll(() => reports.length).toBeGreaterThanOrEqual(1);
 });
+
+/** Settings with one saved condition, enough for a conditions draft to go dirty. */
+async function bootSettings(page: Page) {
+  await boot(page);
+  await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
+  await mockJson(page, "**/api/preferences/tags", []);
+  await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
+  await mockJson(page, "**/api/settings", { region: "US", onboarded: true, email: null, eveningBudgetMinutes: 150 });
+  await mockJson(page, "**/api/settings/filters", {
+    excludeGenres: ["horror"],
+    includeGenres: [],
+    excludeKeywords: [],
+    maturityCeiling: null,
+    minPredictedRating: null,
+    languages: ["en"],
+    minCrowdRating: null,
+    minYear: null,
+    maxYear: null,
+  });
+}
+
+test("Back with an unsaved draft asks first; Cancel keeps the page and its draft (IREV3S-04)", async ({ page }) => {
+  await bootSettings(page);
+  await page.goto("/saved");
+  await expect(page.getByRole("heading", { name: "Saved" })).toBeVisible();
+  // In-app, so Back is a router pop the blocker can question — not a document load.
+  await page.getByRole("button", { name: SESSION_FOUNDER.displayName }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await page.getByTestId("genre-war").click();
+  await expect(page.getByTestId("conditions-unsaved")).toBeVisible();
+
+  const prompts: string[] = [];
+  page.once("dialog", (dialog) => {
+    prompts.push(dialog.message());
+    void dialog.dismiss();
+  });
+  await page.goBack();
+  await expect.poll(() => prompts.length).toBe(1);
+  expect(prompts[0]).toMatch(/unsaved changes/i);
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByTestId("genre-war")).toHaveAttribute("data-state", "include");
+  await expect(page.getByTestId("conditions-unsaved")).toBeVisible();
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.goBack();
+  await expect(page).toHaveURL(/\/saved$/);
+});

@@ -252,7 +252,7 @@ function PillBody({ view, status }: { view: PillView; status: SyncStatus | undef
           <ul className="space-y-1">
             {view.lines.map((line, index) => (
               <li key={`${index}:${line}`} className="fa-caption text-fa-frost-dim flex gap-1.5">
-                <span aria-hidden className="text-fa-frost/50">·</span>
+                <span aria-hidden className="text-3">·</span>
                 {line}
               </li>
             ))}

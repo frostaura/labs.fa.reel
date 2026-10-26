@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { cn } from "../lib/cn";
 
 const FADE = "3.5rem";
 
@@ -18,9 +19,14 @@ export default function FadeScrollRow({
   className,
   children,
   onNearEnd,
+  bleed = false,
 }: {
   className?: string;
   children: ReactNode;
+  /** Bleed through the shell's side gutter to its edge (O-9): the first card still lines up with
+   *  the page's text, but the row scrolls out to the edge instead of stopping short of it, and the
+   *  edge fades sit in the gutter rather than over a card. */
+  bleed?: boolean;
   /** Fired (idempotently — the caller must guard) when the scroll nears its right edge, or when
    *  content doesn't yet overflow. Powers infinite-scroll page fetches and initial auto-fill. */
   onNearEnd?: () => void;
@@ -56,18 +62,18 @@ export default function FadeScrollRow({
 
   const mask =
     edges.left && edges.right
-      ? `linear-gradient(to right, transparent, #000 ${FADE}, #000 calc(100% - ${FADE}), transparent)`
+      ? `linear-gradient(to right, transparent, black ${FADE}, black calc(100% - ${FADE}), transparent)`
       : edges.right
-        ? `linear-gradient(to right, #000 calc(100% - ${FADE}), transparent)`
+        ? `linear-gradient(to right, black calc(100% - ${FADE}), transparent)`
         : edges.left
-          ? `linear-gradient(to right, transparent, #000 ${FADE})`
+          ? `linear-gradient(to right, transparent, black ${FADE})`
           : undefined;
 
   return (
     <div
       ref={ref}
       onScroll={measure}
-      className={className}
+      className={bleed ? cn("-mx-gutter px-gutter scroll-px-gutter", className) : className}
       style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
     >
       {children}

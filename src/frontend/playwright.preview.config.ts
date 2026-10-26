@@ -25,14 +25,14 @@ export default defineConfig({
     tripwireServer(tripwire),
     {
       command: `npm run build && npx vite preview --port ${port} --strictPort`,
-      url: `http://localhost:${port}`,
+      url: `http://127.0.0.1:${port}`,
       env: viteProxyEnv(tripwire),
       reuseExistingServer: false,
       timeout: 300_000,
     },
   ],
   use: {
-    baseURL: `http://localhost:${port}`,
+    baseURL: `http://127.0.0.1:${port}`,
     serviceWorkers: "block",
     headless: true,
     viewport: { width: 1440, height: 900 },

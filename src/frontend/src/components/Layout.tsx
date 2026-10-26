@@ -12,6 +12,9 @@ import ErrorBoundary from "./ErrorBoundary";
 import OfflineBanner from "./OfflineBanner";
 import UpdatePrompt from "./UpdatePrompt";
 import { markSignOutPending } from "../lib/signOut";
+import { prefetchWhenIdle } from "../lib/idlePrefetch";
+import { loadTitleDetail } from "../lib/routeChunks";
+import { LEAVE_CONFIRMED, pendingLeaveQuestion } from "../lib/navigationGuard";
 import reelMark from "../assets/brand/reel-mark.svg";
 import {
   DropdownMenu,
@@ -62,21 +65,35 @@ export default function Layout() {
     setMobileSearchOpen(false);
   }, [location.pathname, location.search]);
 
+  // Every signed-in page opens the title sheet from a poster; fetch its chunk while idle (I-17).
+  useEffect(() => prefetchWhenIdle(loadTitleDetail), []);
+
   const handleSignOut = async () => {
+    // Ask about unsaved drafts BEFORE the session ends: asking after logout, a Cancel would leave
+    // the page signed out underneath its own draft (IREV3S-04).
+    const question = pendingLeaveQuestion();
+    if (question !== null && !window.confirm(question)) return;
     await logout().unwrap().catch(() => undefined);
     // The cleanup runs on the landing page, once this shell and its pages have unmounted
     // (components/SignOutCleanup.tsx): clearing here would reset the cache under live subscribers,
     // and every one of them would refetch. Everything this browser holds for the account goes, not
     // just the RTK cache: the slices, the reel.* keys and the worker's offline API cache (I-11).
     markSignOutPending();
-    navigate("/");
+    navigate("/", { state: LEAVE_CONFIRMED });
   };
 
   return (
     <div className="min-h-screen flex flex-col">
+      {/* The first Tab stop: skips the header and its controls straight to the page (WCAG 2.4.1). */}
+      <a
+        href="#main"
+        className="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-4 focus-visible:top-3 focus-visible:z-50 focus-visible:rounded-control focus-visible:bg-fa-ink-2 focus-visible:px-3 focus-visible:py-2 focus-visible:text-sm focus-visible:text-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/60"
+      >
+        Skip to content
+      </a>
       <RealtimeSync />
       <header className="sticky top-0 z-40 border-b border-fa-edge/50 bg-fa-ink/80 backdrop-blur-md">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 h-14 flex items-center gap-4">
+        <div className="mx-auto max-w-shell px-gutter h-14 flex items-center gap-4">
           <Link to="/home" aria-label="Reel home" className="flex items-center gap-2 shrink-0 hover:opacity-80 transition">
             <img src={reelMark} alt="" aria-hidden className="h-7 w-7 shrink-0" />
             <span className="text-lg font-light tracking-wide text-fa-frost-bright">Reel</span>
@@ -141,8 +158,10 @@ export default function Layout() {
       </header>
       <OfflineBanner />
       {/* At least a viewport tall (less the 3.5rem header), so the footer never sits in the first
-          screen while a page is still loading and then jumps away (G-14, I-5). */}
-      <main className="flex-1 mx-auto w-full max-w-7xl px-4 sm:px-6 py-6 pb-24 md:pb-6 min-h-[calc(100dvh-3.5rem)]">
+          screen while a page is still loading and then jumps away (G-14, I-5).
+          Fluid up to 1,680 px with a gutter that grows with the screen (O-9): a wide screen gets
+          more cards per row, not a narrow column in a sea of background. */}
+      <main id="main" tabIndex={-1} className="flex-1 mx-auto w-full max-w-shell px-gutter focus:outline-none py-6 pb-24 md:pb-6 min-h-[calc(100dvh-3.5rem)]">
         {/* The boundary and the suspense both sit INSIDE the shell: a page that throws, or whose
             chunk is still loading, replaces only itself — the header, nav and pill stay (I-4).
             Navigating elsewhere clears a caught error. */}

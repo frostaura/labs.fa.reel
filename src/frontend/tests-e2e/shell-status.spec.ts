@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { SESSION_FOUNDER, mockJson, stubEventSource, syncJob, syncStatus } from "./helpers";
+import { SESSION_FOUNDER, expectHolds, mockJson, stubEventSource, syncJob, syncStatus } from "./helpers";
 
 /**
  * The header pill (WS-9 P0 task 1; H-1, H-17, I-1, I*1, H-16, I-12). Every fixture is a full v2
@@ -291,8 +291,7 @@ test.describe("pill details with a mouse (R1-20)", () => {
     await expect(details).toBeVisible();
     await chip.click();
     await page.mouse.move(5, 600);
-    await page.waitForTimeout(400);
-    await expect(details).toBeVisible();
+    await expectHolds(() => expect(details).toBeVisible({ timeout: 0 }), 400);
     await expect(chip).toHaveAttribute("aria-expanded", "true");
 
     // A second click closes it.
@@ -312,6 +311,8 @@ test.describe("status polling", () => {
     const afterLoad = shell.polls();
     for (let i = 0; i < 24; i += 1) {
       await page.clock.runFor(5_000);
+      // A real-time yield, not a wait for a condition: the fake clock fired the poll timer, and the
+      // routed response needs a turn of the real event loop to land before the next tick.
       await page.waitForTimeout(25);
     }
     expect(shell.polls() - afterLoad).toBeGreaterThanOrEqual(1);
@@ -344,8 +345,7 @@ test.describe("status polling", () => {
     });
     await expect.poll(() => shell.polls()).toBe(hiddenAt + 1);
     // The held invalidations and the stale-answer refetch land as ONE status request, not two.
-    await page.waitForTimeout(500);
-    expect(shell.polls()).toBe(hiddenAt + 1);
+    await expectHolds(() => expect(shell.polls()).toBe(hiddenAt + 1), 500);
   });
 
   test("work the user started polls every 5 s", async ({ page }) => {

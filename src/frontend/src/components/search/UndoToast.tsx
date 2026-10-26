@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Undo2, X } from "lucide-react";
+import { Button } from "../ui/button";
 
 /** Long enough to notice a thing has happened and change your mind; short enough not to camp. */
 export const UNDO_WINDOW_MS = 6000;
@@ -61,25 +62,26 @@ export default function UndoToast({
       className="fixed inset-x-4 bottom-24 z-[60] mx-auto flex max-w-md items-center gap-3 rounded-xl border border-fa-edge bg-fa-ink/95 px-4 py-3 shadow-lg backdrop-blur-md md:bottom-6"
     >
       <p className="fa-body flex-1 text-fa-frost-bright">{message}</p>
-      <button
-        type="button"
+      <Button
+        variant="chip"
         onClick={onUndo}
         data-testid={`${testId}-undo`}
-        className="fa-caption inline-flex min-h-11 items-center gap-1.5 rounded-full border border-fa-frost/30 px-4 text-fa-frost-bright transition-colors hover:border-fa-frost/60 hover:bg-fa-frost/10"
+        className="fa-caption min-h-11 gap-1.5 border-fa-frost/30 px-4 text-fa-frost-bright hover:border-fa-frost/60 hover:bg-fa-frost/10"
       >
         <Undo2 className="h-3.5 w-3.5" /> {undoLabel}
-      </button>
+      </Button>
       {/* Dismiss commits, exactly as letting the clock run out does — the button means "yes, I
           meant it", never "cancel the thing I just asked for". */}
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="icon"
         onClick={onExpire}
         aria-label="Dismiss"
         data-testid={`${testId}-dismiss`}
-        className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center text-fa-frost-dim transition hover:text-fa-frost-bright"
+        className="min-h-11 min-w-11 shrink-0 text-fa-frost-dim hover:bg-transparent"
       >
         <X className="h-4 w-4" />
-      </button>
+      </Button>
     </div>
   );
 }

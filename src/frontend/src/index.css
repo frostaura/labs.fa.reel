@@ -39,25 +39,59 @@
   }
 }
 
-/* Design tokens — single source of truth. Tailwind theme mirrors these so any color referenced via
-   `fa-*` Tailwind class or `var(--fa-*)` resolves to the same value. */
+/* ── Design tokens — the single source of truth (WS-9 task 7) ─────────────────────────────────
+   Colours are RGB CHANNELS (`--c-*`), so Tailwind can wrap them as `rgb(var(--c-x) / <alpha-value>)`
+   and every opacity modifier (`bg-fa-ink/80`) still works. A colour written as `var(--fa-x)` in a
+   Tailwind theme swallows every modifier silently and emits no CSS at all.
+   `--fa-*` keep their old meaning (a complete colour) for CSS that reads `var(--fa-*)` directly.
+   tailwind.config.js mirrors this layer; src/design/tokens.test.ts fails if the two drift. */
 :root {
-  --fa-ink: #06121F;
-  --fa-ink-2: #0B1B30;
-  --fa-ink-3: #102744;
-  --fa-frost: #A4D4F4;
-  --fa-frost-bright: #D4ECFF;
-  --fa-frost-dim: #5C8AB4;
-  --fa-glass: rgba(164, 212, 244, 0.06);
-  --fa-glass-strong: rgba(164, 212, 244, 0.12);
-  --fa-edge: rgba(164, 212, 244, 0.18);
-  --fa-success: #7CE3B6;
-  --fa-warning: #F6C667;
-  --fa-danger: #F08484;
+  /* Surfaces */
+  --c-ink: 6 18 31;            /* #06121F */
+  --c-ink-2: 11 27 48;         /* #0B1B30 */
+  --c-ink-3: 16 39 68;         /* #102744 */
+  /* Frost — brand chrome */
+  --c-frost: 164 212 244;      /* #A4D4F4 */
+  --c-frost-bright: 212 236 255; /* #D4ECFF */
+  --c-frost-dim: 92 138 180;   /* #5C8AB4 */
+  /* Text — three steps, every one AA on ink, ink-2 and ink-3. Opacity is not a text colour. */
+  --c-text-1: 230 242 255;     /* #E6F2FF primary */
+  --c-text-2: 164 212 244;     /* #A4D4F4 secondary */
+  --c-text-3: 127 163 198;     /* #7FA3C6 tertiary */
+  /* Semantic */
+  --c-success: 124 227 182;    /* #7CE3B6 */
+  --c-warning: 246 198 103;    /* #F6C667 */
+  --c-danger: 240 132 132;     /* #F08484 */
 
+  --fa-ink: rgb(var(--c-ink));
+  --fa-ink-2: rgb(var(--c-ink-2));
+  --fa-ink-3: rgb(var(--c-ink-3));
+  --fa-frost: rgb(var(--c-frost));
+  --fa-frost-bright: rgb(var(--c-frost-bright));
+  --fa-frost-dim: rgb(var(--c-frost-dim));
+  --fa-success: rgb(var(--c-success));
+  --fa-warning: rgb(var(--c-warning));
+  --fa-danger: rgb(var(--c-danger));
+  --fa-glass: rgb(var(--c-frost) / 0.06);
+  --fa-glass-strong: rgb(var(--c-frost) / 0.12);
+  --fa-edge: rgb(var(--c-frost) / 0.18);
+  --fa-edge-strong: rgb(var(--c-frost) / 0.32);
+  --fa-scrim: rgb(var(--c-ink) / 0.55);
+  --fa-scrim-strong: rgb(var(--c-ink) / 0.88);
+
+  /* Radii: control 6 · card 10 · panel 16 · full. The old 4/8/12 steps stay until their users migrate. */
+  --fa-radius-control: 6px;
+  --fa-radius-card: 10px;
+  --fa-radius-panel: 16px;
   --fa-radius-sm: 4px;
   --fa-radius: 8px;
   --fa-radius-lg: 12px;
+
+  /* Layout: the shell is fluid up to 1,680 px; the gutter grows with the screen, and carousels
+     bleed through it to the shell's edge (FadeScrollRow `bleed`). */
+  --fa-shell-max: 1680px;
+  --fa-gutter: 16px;
+  --fa-card-w: clamp(160px, 11vw, 220px);
 
   --fa-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --fa-duration-fast: 150ms;
@@ -65,18 +99,22 @@
   --fa-duration-slow: 400ms;
 }
 
+@media (min-width: 640px) { :root { --fa-gutter: 24px; } }
+@media (min-width: 1024px) { :root { --fa-gutter: 32px; } }
+@media (min-width: 1536px) { :root { --fa-gutter: 40px; } }
+
 html, body, #root {
   height: 100%;
 }
 
 body {
-  background: #06121F;
+  background: rgb(var(--c-ink));
   background-image:
-    radial-gradient(1200px 600px at 30% 0%, rgba(164, 212, 244, 0.08), transparent 60%),
-    linear-gradient(180deg, #06121F 0%, #050D17 100%);
+    radial-gradient(1200px 600px at 30% 0%, rgb(var(--c-frost) / 0.08), transparent 60%),
+    linear-gradient(180deg, rgb(var(--c-ink)) 0%, #050D17 100%);
   background-attachment: fixed;
-  color: #A4D4F4;
-  font-family: "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: rgb(var(--c-text-2));
+  font-family: "Figtree Variable", "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -126,8 +164,9 @@ body {
   .fa-metric-sm {
     @apply text-lg font-light leading-tight tabular-nums;
   }
+  /* text-3, not frost-dim: frost-dim is 4.3:1 on a glass card, under AA for 10 px text. */
   .fa-stat-label {
-    @apply fa-overline text-fa-frost-dim;
+    @apply fa-overline text-3;
   }
   .fa-stat-value {
     @apply fa-metric text-fa-frost-bright;
@@ -210,14 +249,15 @@ body {
   100% { transform: translateX(250%); }
 }
 
-/* Job/sync status orbs (pipeline metrics, sync pill). */
+/* Job/sync status orbs (pipeline metrics, sync pill), in the semantic colours: green, amber and
+   red outside the palette read as a different product (O-15). */
 .fa-status-orb { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
-.fa-status-clean   { background: #34d399; box-shadow: 0 0 8px 1px rgba(52, 211, 153, 0.55); }
-.fa-status-failed  { background: #f43f5e; box-shadow: 0 0 8px 1px rgba(244, 63, 94, 0.55); }
-.fa-status-running { background: #fb923c; box-shadow: 0 0 8px 1px rgba(251, 146, 60, 0.55); animation: fa-running-pulse 1.4s ease-in-out infinite; }
+.fa-status-clean   { background: rgb(var(--c-success)); box-shadow: 0 0 8px 1px rgb(var(--c-success) / 0.55); }
+.fa-status-failed  { background: rgb(var(--c-danger)); box-shadow: 0 0 8px 1px rgb(var(--c-danger) / 0.55); }
+.fa-status-running { background: rgb(var(--c-warning)); box-shadow: 0 0 8px 1px rgb(var(--c-warning) / 0.55); animation: fa-running-pulse 1.4s ease-in-out infinite; }
 @keyframes fa-running-pulse {
-  0%, 100% { box-shadow: 0 0 8px 1px rgba(251, 146, 60, 0.55); }
-  50%      { box-shadow: 0 0 14px 3px rgba(251, 146, 60, 0.9); }
+  0%, 100% { box-shadow: 0 0 8px 1px rgb(var(--c-warning) / 0.55); }
+  50%      { box-shadow: 0 0 14px 3px rgb(var(--c-warning) / 0.9); }
 }
 
 /* Shimmer flash for numeric counters that just updated (onboarding tickers). Keyed on value in

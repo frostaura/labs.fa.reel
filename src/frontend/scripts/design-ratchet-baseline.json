@@ -1,0 +1,141 @@
+{
+  "src/components/ChatErrorBoundary.tsx": {
+    "rawButton": 1
+  },
+  "src/components/dna/DislikePanel.tsx": {
+    "rawButton": 3
+  },
+  "src/components/dna/ShareCard.tsx": {
+    "hexColour": 9
+  },
+  "src/components/dna/TasteNarrativePanel.tsx": {
+    "rawButton": 6
+  },
+  "src/components/rec/BrowseFilters.tsx": {
+    "rawButton": 1
+  },
+  "src/components/rec/CardQuickActions.tsx": {
+    "rawButton": 6
+  },
+  "src/components/rec/CrowdRatingBadge.tsx": {
+    "lowTextOpacity": 1
+  },
+  "src/components/rec/ModelLearnedBand.tsx": {
+    "rawButton": 1
+  },
+  "src/components/rec/PickConditionsButton.tsx": {
+    "rawButton": 1
+  },
+  "src/components/rec/RefreshPicksButton.tsx": {
+    "rawButton": 1
+  },
+  "src/components/rec/TonightMoodChips.tsx": {
+    "rawButton": 1
+  },
+  "src/components/rows/ContinueWatchingRow.tsx": {
+    "rawButton": 1
+  },
+  "src/components/rows/RailRetryTile.tsx": {
+    "rawButton": 1
+  },
+  "src/components/saved/PostWatchStrip.tsx": {
+    "rawButton": 3,
+    "lowTextOpacity": 1
+  },
+  "src/components/saved/SavedQueueCard.tsx": {
+    "rawButton": 1,
+    "lowTextOpacity": 1
+  },
+  "src/components/saved/SavedSortControl.tsx": {
+    "rawButton": 1
+  },
+  "src/components/saved/WatchTonightCard.tsx": {
+    "rawButton": 2
+  },
+  "src/components/search/ConversationSwitcher.tsx": {
+    "rawButton": 6,
+    "lowTextOpacity": 1
+  },
+  "src/components/search/SearchBox.tsx": {
+    "rawButton": 1
+  },
+  "src/components/settings/BillingCard.tsx": {
+    "rawButton": 1
+  },
+  "src/components/settings/ConditionSummary.tsx": {
+    "rawButton": 1
+  },
+  "src/components/settings/ConditionsEditor.tsx": {
+    "rawButton": 8,
+    "nativeSelect": 1
+  },
+  "src/components/settings/PreferenceTags.tsx": {
+    "rawButton": 2,
+    "lowTextOpacity": 1
+  },
+  "src/components/settings/PreferencesSection.tsx": {
+    "rawButton": 4
+  },
+  "src/components/settings/PushOptIn.tsx": {
+    "rawButton": 1
+  },
+  "src/components/title/CastMemberCard.tsx": {
+    "lowTextOpacity": 1
+  },
+  "src/components/title/LensBlock.tsx": {
+    "rawButton": 2
+  },
+  "src/components/title/WhereToWatch.tsx": {
+    "lowTextOpacity": 3
+  },
+  "src/pages/Blend.tsx": {
+    "rawButton": 5,
+    "lowTextOpacity": 1
+  },
+  "src/pages/Home.tsx": {
+    "rawButton": 1
+  },
+  "src/pages/Lab.tsx": {
+    "rawButton": 1,
+    "lowTextOpacity": 3
+  },
+  "src/pages/Landing.tsx": {
+    "rawButton": 1,
+    "hexColour": 15
+  },
+  "src/pages/Onboarding.tsx": {
+    "rawButton": 3
+  },
+  "src/pages/Person.tsx": {
+    "rawButton": 3,
+    "lowTextOpacity": 1
+  },
+  "src/pages/RatePicker.tsx": {
+    "rawButton": 2
+  },
+  "src/pages/Saved.tsx": {
+    "rawButton": 2,
+    "lowTextOpacity": 2
+  },
+  "src/pages/SearchResults.tsx": {
+    "rawButton": 10,
+    "lowTextOpacity": 10
+  },
+  "src/pages/Settings.tsx": {
+    "rawButton": 2,
+    "nativeSelect": 1,
+    "lowTextOpacity": 1
+  },
+  "src/pages/TasteDna.tsx": {
+    "rawButton": 1,
+    "hexColour": 8
+  },
+  "src/pages/TitleDetail.tsx": {
+    "rawButton": 12,
+    "lowTextOpacity": 1
+  },
+  "src/pages/TrackRecord.tsx": {
+    "rawButton": 1,
+    "hexColour": 3
+  }
+}

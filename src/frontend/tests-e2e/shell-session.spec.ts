@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { SESSION_FOUNDER, expectHolds, mockJson, stubEventSource, syncStatus } from "./helpers";
 
 /**
  * Session, error boundaries, deploy safety and sign-out (WS-9 P0 tasks 2–5; H+1, H-15, I-3, I-4,
@@ -259,8 +259,7 @@ test.describe("sign-out", () => {
         }))
       )
       .toEqual({ cache: false, keys: [], unrelated: "kept" });
-    await page.waitForTimeout(500);
-    expect(afterSignOut).toEqual([]);
+    await expectHolds(() => expect(afterSignOut).toEqual([]), 500);
 
     // What account B could still be shown from this browser after A signed out is exactly what the
     // asserts above cover: linking B is a full page load (Trakt redirects back), so the store
@@ -306,8 +305,7 @@ test.describe("offline fallback", () => {
       (window as unknown as { __sse: { emit: (t: string, d: unknown) => void } }).__sse.emit("failed", {})
     );
     await expect.poll(() => statusAnswers).toBeGreaterThan(before);
-    await page.waitForTimeout(200);
-    await expect(banner).toBeVisible();
+    await expectHolds(() => expect(banner).toBeVisible({ timeout: 0 }), 200);
 
     // Leaving the page leaves its cached answer behind: Home's answers are live.
     await page.getByRole("link", { name: "Reel home" }).click();

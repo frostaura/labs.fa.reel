@@ -5,19 +5,20 @@ import {
   Route,
   Routes,
   createBrowserRouter,
-  matchPath,
   useLocation,
   useRouteError,
-  type Location,
 } from "react-router";
 import { RouterProvider } from "react-router/dom";
 import Footer from "./components/Footer";
 import Layout from "./components/Layout";
+import NavigationGuard from "./components/NavigationGuard";
 import RequireAuth from "./components/RequireAuth";
 import RequireFounder from "./components/RequireFounder";
 import SignOutCleanup from "./components/SignOutCleanup";
 import Landing from "./pages/Landing";
 import { LEGAL_PAGES } from "./lib/legalPages";
+import { pageLocation } from "./lib/navigationGuard";
+import { loadTitleDetail } from "./lib/routeChunks";
 import reelMark from "./assets/brand/reel-mark.svg";
 
 // Landing stays eager — it is the signed-out entry point and must paint without a second
@@ -29,7 +30,7 @@ const Onboarding = lazy(() => import("./pages/Onboarding"));
 const Home = lazy(() => import("./pages/Home"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Lab = lazy(() => import("./pages/Lab"));
-const TitleDetail = lazy(() => import("./pages/TitleDetail"));
+const TitleDetail = lazy(loadTitleDetail);
 const Person = lazy(() => import("./pages/Person"));
 const Saved = lazy(() => import("./pages/Saved"));
 const TasteDna = lazy(() => import("./pages/TasteDna"));
@@ -79,12 +80,12 @@ function PublicShell({ children }: { children: ReactNode }) {
  */
 function AppRoutes() {
   const location = useLocation();
-  const background = (location.state as { backgroundLocation?: Location } | null)?.backgroundLocation;
-  const isTitleOverlay = !!background && matchPath("/title/:mediaType/:tmdbId", location.pathname) != null;
-  const mainLocation = isTitleOverlay ? background! : location;
+  const mainLocation = pageLocation(location);
+  const isTitleOverlay = mainLocation !== location;
 
   return (
     <>
+      <NavigationGuard />
       {/* Each <Routes> gets its own boundary. A single shared one would defeat the overlay:
           the modal's chunk suspending would swap the whole tree for the fallback and unmount
           the very background page this arrangement exists to keep alive. */}
@@ -181,8 +182,8 @@ function RethrowToRootBoundary(): never {
 /**
  * A data router (R1-54). The routes themselves are unchanged — one splat route renders the same
  * descendant `<Routes>` as before, which the title overlay's pinned background location depends
- * on — but navigation now runs through the router, so `useBlocker` can question the browser's
- * Back button and programmatic `navigate()` calls, not only link clicks.
+ * on — but navigation now runs through the router, so `<NavigationGuard>`'s `useBlocker` can
+ * question the browser's Back button and programmatic `navigate()` calls, not only link clicks.
  */
 const router = createBrowserRouter([{ path: "*", element: <AppRoutes />, ErrorBoundary: RethrowToRootBoundary }]);
 
