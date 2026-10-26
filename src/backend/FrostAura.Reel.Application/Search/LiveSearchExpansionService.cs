@@ -509,9 +509,10 @@ public sealed class LiveSearchExpansionService(
             // The model's sentence, plain text, qualified by the conditions it is about to meet. A
             // degraded reading carries the degraded copy for ITS cause (IREV2-SYS-02), which claims
             // nothing and quotes nobody. Re-derived from the failure rather than read from Reply, so a
-            // degraded reply built anywhere else still can never echo the request.
+            // degraded reply built anywhere else still can never echo the request. A spent PLAN
+            // allowance names only what it cost — the judge has its own (IREV3-SYS-03).
             var modelSentence = agentReply.Degraded
-                ? LlmFailureCodes.DegradedReply(agentReply.Failure, agentReply.FailureCode)
+                ? AskReelDegradedCopy.SearchLead(agentReply.Failure, agentReply.FailureCode)
                 : AskReelText.StripMarkdown(agentReply.Reply) ?? string.Empty;
             var pickReply = hasConflict && !agentReply.Degraded
                 ? AskReelStandingFilters.Qualify(
@@ -955,11 +956,13 @@ public sealed class LiveSearchExpansionService(
                     .Where(p => p.Value.Placement != AskReelGate.Placement.Unjudged)
                     .Select(p => p.Key)
                     .ToList();
+                // The scoring stage above ran (and stored what it scored), so the supply the facet arm
+                // counted at discovery is re-counted where it still had unscored titles.
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded ? modelSentence : null, ReplyAsync, degraded, timings, input,
                     emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld,
-                    judgedIds);
+                    judgedIds, scoredThisTurn: true);
             }
 
             await ReplyAsync(pickReply);
@@ -1259,12 +1262,20 @@ public sealed class LiveSearchExpansionService(
         CancellationToken ct,
         IReadOnlyList<GatedCard>? uncheckedTray = null,
         IReadOnlyList<string>? unscoredHeld = null,
-        IReadOnlyCollection<Guid>? judgedIds = null)
+        IReadOnlyCollection<Guid>? judgedIds = null,
+        bool scoredThisTurn = false)
     {
         uncheckedTray ??= [];
         judgedIds ??= [];
         Retrieval.SupplyReport? supply = facet?.Supply;
-        if (supply is null && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
+
+        // The facet arm counted the supply at DISCOVERY, before this turn scored anything. Its split
+        // of the eligible titles by score is stale the moment the turn scores one of its unscored
+        // titles: the dinosaur turn said "4 have no score from your model yet" above a tray showing
+        // all four at 6.06–6.53 against a 6.0 bar (IREV3-SYS-01). So a supply with unscored titles is
+        // counted again, through the same reporter, once the turn's scores are stored.
+        var stale = scoredThisTurn && supply is { Unscored: > 0 };
+        if ((supply is null || stale) && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
         {
             try
             {
@@ -1273,9 +1284,16 @@ public sealed class LiveSearchExpansionService(
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // The counts are the explanation, not the answer: without them the reply still says
-                // nothing matched, it just cannot say how many were seen.
+                // nothing matched, it just cannot say how many were seen. A stale count is not kept
+                // in their place — it is the false sentence this re-count exists to prevent.
                 logger.LogWarning(ex, "Ask Reel: the supply report failed; the none-found reply carries no counts.");
+                supply = null;
             }
+        }
+        else if (stale)
+        {
+            // No reporter to count again with: no counts rather than counts the turn has outdated.
+            supply = null;
         }
 
         // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used.
