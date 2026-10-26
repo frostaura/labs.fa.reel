@@ -162,6 +162,73 @@ public class OnDemandScorerContributionsTests(PostgresFixture fixture)
         Assert.All(contributions, c => Assert.Contains(c.Feature, FeatureSchema.AllNames()));
     }
 
+    [Fact]
+    public async Task The_waterfall_walks_from_the_models_start_to_the_number_on_the_page()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // F-25: additive steps in rating points that land on the prediction, from a start every title
+        // shares — the property the page's walk is drawn on, and the one the normalised bars lack.
+        var accountId = await SeedAccountAsync();
+        await SeedTrainedArtifactAsync(accountId);
+        var first = await SeedTitleAsync("thriller");
+        var second = await SeedTitleAsync("comedy");
+
+        await using var db = Context(accountId);
+        var scorer = Scorer(db, new FastTreeModelEngine());
+        var now = DateTime.UtcNow;
+        var scored = await scorer.ScoreAsync(accountId, [first, second], now, CancellationToken.None);
+        var taste = await new FeatureVectorBuilder(db).BuildTasteStateAsync(accountId, now, CancellationToken.None);
+
+        var walks = new List<PredictionWaterfall>();
+        foreach (var title in new[] { first, second })
+        {
+            var walk = await scorer.WaterfallAsync(accountId, title, scored[title], taste, now, CancellationToken.None);
+            Assert.NotNull(walk);
+            Assert.Equal(PredictionWaterfall.StartLabel, walk!.BaselineLabel);
+            Assert.InRange(walk.Steps.Count, 1, OnDemandScorer.WaterfallFeatureSteps + 4);
+            Assert.InRange(walk.Baseline + walk.Steps.Sum(s => s.Value), scored[title] - 0.005m, scored[title] + 0.005m);
+            walks.Add(walk);
+        }
+
+        // The start is the ensemble's, not the title's: identical for both titles (no head, no
+        // calibration pairs and no dislikes on this account, so nothing else moves it), and near the
+        // mean of the labels it was trained on (3 + 8 x U(0,1) mean, about 7).
+        // Within the roundings: each walk's start absorbs its own 2dp number and 3dp steps.
+        Assert.InRange(Math.Abs(walks[0].Baseline - walks[1].Baseline), 0m, 0.025m);
+        Assert.InRange(walks[0].Baseline, 5.5m, 8.5m);
+
+        // A walk that cannot land on the shown number is not offered.
+        Assert.Null(await scorer.WaterfallAsync(accountId, first, scored[first] + 1m, taste, now, CancellationToken.None));
+    }
+
+    [Fact]
+    public void The_engines_unnormalised_contributions_sum_to_the_score_less_one_shared_start()
+    {
+        // The additivity the waterfall is built on, at float precision and with no rounding in the way.
+        var engine = new FastTreeModelEngine();
+        var bytes = TrainedBytes();
+        var key = Guid.NewGuid();
+        var rng = new Random(5);
+        var starts = Enumerable.Range(0, 5).Select(_ =>
+        {
+            var v = new float[FeatureSchema.VectorLength];
+            for (var j = 0; j < v.Length; j++)
+            {
+                v[j] = (float)rng.NextDouble();
+            }
+
+            var row = engine.ExplainCached(key, bytes, v, FeatureSchema.AllNames())!;
+            Assert.Equal(engine.ScoreCached(key, bytes, [v])[0], row.Score, 4);
+            return row.Score - row.TopContributions.Sum(c => c.Contribution);
+        }).ToList();
+
+        Assert.InRange(starts.Max() - starts.Min(), 0f, 1e-3f);
+    }
+
     // ── Harness ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -269,7 +336,9 @@ public class OnDemandScorerContributionsTests(PostgresFixture fixture)
     /// A small real FastTree whose label leans on EVERY feature, so a title vector away from the
     /// training mean gets non-zero contributions whichever features its catalogue row fills.
     /// </summary>
-    private Task<Guid> SeedTrainedArtifactAsync(Guid accountId)
+    private Task<Guid> SeedTrainedArtifactAsync(Guid accountId) => AddArtifactAsync(accountId, TrainedBytes());
+
+    private static byte[] TrainedBytes()
     {
         var rng = new Random(11);
         var rows = new List<float[]>();
@@ -289,7 +358,7 @@ public class OnDemandScorerContributionsTests(PostgresFixture fixture)
         var trained = new FastTreeModelEngine().Train(
             new TrainingMatrix([.. rows], [.. labels], FeatureSchema.AllNames()),
             TrainJobHandler.DefaultHyperparams);
-        return AddArtifactAsync(accountId, trained.ArtifactBytes);
+        return trained.ArtifactBytes;
     }
 
     private async Task<Guid> AddArtifactAsync(Guid accountId, byte[] bytes)

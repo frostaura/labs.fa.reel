@@ -75,6 +75,10 @@ public class FeedLateRulesTests(PostgresFixture fixture, ReelApiFactory api) : I
         Assert.NotNull(reason);
         Assert.Contains("7.5", reason, StringComparison.Ordinal);
         Assert.Contains("holds back 1", reason, StringComparison.Ordinal);
+
+        // The page carries its measured band; this account's closed loop has no pairs, so it is
+        // null rather than a "± 0.0" (WS-10A reads it before the Saved queue's).
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("expectedAbsoluteError").ValueKind);
     }
 
     [Fact]

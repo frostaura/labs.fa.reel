@@ -210,6 +210,11 @@ public static class TitleEndpoints
                 }
             }
 
+            // The number as a walk from the model's start (F-25), when the recomputation lands on it.
+            var waterfall = score is null || taste is null
+                ? null
+                : await scorer.WaterfallAsync(accountId, title.Id, score.PredictedRating, taste, DateTime.UtcNow, ct);
+
             var watched = await db.WatchedTitles.FirstOrDefaultAsync(w => w.AccountId == accountId && w.TitleId == title.Id, ct);
             var rating = await db.UserRatings.FirstOrDefaultAsync(
                 r => r.AccountId == accountId && r.TitleId == title.Id
@@ -254,6 +259,9 @@ public static class TitleEndpoints
                     predictedRating = Math.Round(score.PredictedRating, 1),
                     contributions,
                     scoredAt = score.ScoredAt,
+                    // Additive steps in rating points that sum to the prediction; null when the walk
+                    // cannot be recomputed to land on it.
+                    waterfall,
                 },
                 contributionDetails,
                 userState = new

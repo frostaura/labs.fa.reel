@@ -98,13 +98,20 @@ public static class FeedEndpoints
     {
         var group = app.MapGroup("/api/feed").RequireAccount();
 
-        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, CrossReferenceFactors crossReference, LensService lens, TasteFactsBuilder tasteFacts, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
+        group.MapGet("/", async (IReelDbContext db, EligibilityQueryBuilder eligibility, FeatureVectorBuilder featureBuilder, ExposureLog exposures, CrossReferenceFactors crossReference, LensService lens, TasteFactsBuilder tasteFacts, RatingCalibrationService calibration, IMemoryCache cache, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
             if (account is null)
             {
                 return Results.Unauthorized();
             }
+
+            // The measured band behind every "for you" number on the page (FD-4 default): what a
+            // displayed prediction has typically been off by against the ratings this account went on
+            // to give — the same calibrator, and so the same "± 1.1", the Saved queue shows. Null until
+            // the closed loop has pairs: an unmeasured band is not a band.
+            var calibrator = await calibration.GetAsync(account.Id, ct);
+            double? expectedAbsoluteError = calibrator.PairCount == 0 ? null : Math.Round(calibrator.ExpectedAbsoluteError, 1);
 
             var snapshot = await db.FeedSnapshots
                 .Where(s => s.AccountId == account.Id && s.Status == SnapshotStatus.Active)
@@ -117,6 +124,7 @@ public static class FeedEndpoints
                     hero = Array.Empty<object>(),
                     rows = Array.Empty<object>(),
                     degradedReason = (string?)null,
+                    expectedAbsoluteError,
                 });
             }
 
@@ -495,6 +503,7 @@ public static class FeedEndpoints
                     // Why this build is not literally what the settings asked for (null when it is).
                     // A blank feed must always arrive with the reason attached.
                     degradedReason,
+                    expectedAbsoluteError,
                 });
             }
 
@@ -546,6 +555,7 @@ public static class FeedEndpoints
                 rows,
                 lockedRowCount = 0,
                 degradedReason,
+                expectedAbsoluteError,
             });
         });
 

@@ -251,6 +251,98 @@ public class FastTreeModelEngine : IModelEngine
             .ToArray();
     }
 
+    /// <summary>
+    /// An exact additive decomposition by walking the ensemble (the tree-path method): each tree's
+    /// output is its root value plus the change in node value at every split on the way to the leaf,
+    /// and each change is credited to the feature the split tested. A node's value is the mean of the
+    /// leaf values beneath it. The roots and the bias are the same for every title, so
+    /// <c>score − Σ contributions</c> is one shared start; that telescoping is what makes the walk add
+    /// up. ML.NET's own contribution transform is not additive (it scores the opposite sub-tree at
+    /// each split), which is why this walks the trees itself. Null for a model it cannot walk: not a
+    /// FastTree regressor, a categorical split, or a missing feature value.
+    /// </summary>
+    public ScoredRow? ExplainCached(Guid modelKey, byte[] artifactBytes, float[] features, string[] featureNames)
+    {
+        if (GetOrLoadModel(modelKey, artifactBytes) is not RegressionPredictionTransformer<FastTreeRegressionModelParameters> { Model: { } parameters }
+            || features.Any(float.IsNaN))
+        {
+            return null;
+        }
+
+        var ensemble = parameters.TrainedTreeEnsemble;
+        var contributions = new double[features.Length];
+        var start = ensemble.Bias;
+        for (var t = 0; t < ensemble.Trees.Count; t++)
+        {
+            var tree = ensemble.Trees[t];
+            var weight = ensemble.TreeWeights[t];
+            if (tree.NumberOfNodes == 0)
+            {
+                start += weight * tree.LeafValues[0];
+                continue;
+            }
+
+            if (tree.CategoricalSplitFlags.Any(f => f))
+            {
+                return null;
+            }
+
+            var nodeValues = NodeValues(tree);
+            start += weight * nodeValues[0];
+            var node = 0;
+            while (true)
+            {
+                var feature = tree.NumericalSplitFeatureIndexes[node];
+                if (feature >= features.Length)
+                {
+                    return null;
+                }
+
+                var next = features[feature] <= tree.NumericalSplitThresholds[node] ? tree.LeftChild[node] : tree.RightChild[node];
+                var child = next < 0 ? tree.LeafValues[~next] : nodeValues[next];
+                contributions[feature] += weight * (child - nodeValues[node]);
+                if (next < 0)
+                {
+                    break;
+                }
+
+                node = next;
+            }
+        }
+
+        return new ScoredRow(
+            (float)(start + contributions.Sum()),
+            contributions
+                .Select((value, index) => (Feature: index < featureNames.Length ? featureNames[index] : $"f{index}", Contribution: (float)value))
+                .Where(c => c.Contribution != 0f)
+                .OrderByDescending(c => Math.Abs(c.Contribution))
+                .ToList());
+    }
+
+    /// <summary>Each internal node's value: the mean of the leaf values in its subtree.</summary>
+    private static double[] NodeValues(RegressionTree tree)
+    {
+        var sums = new double[tree.NumberOfNodes];
+        var counts = new int[tree.NumberOfNodes];
+
+        (double Sum, int Count) Walk(int node)
+        {
+            if (node < 0)
+            {
+                return (tree.LeafValues[~node], 1);
+            }
+
+            var (leftSum, leftCount) = Walk(tree.LeftChild[node]);
+            var (rightSum, rightCount) = Walk(tree.RightChild[node]);
+            sums[node] = leftSum + rightSum;
+            counts[node] = leftCount + rightCount;
+            return (sums[node], counts[node]);
+        }
+
+        Walk(0);
+        return [.. sums.Select((sum, i) => sum / counts[i])];
+    }
+
     private static SchemaDefinition SchemaDefinitionFor(int width)
     {
         var schema = SchemaDefinition.Create(typeof(Row));
