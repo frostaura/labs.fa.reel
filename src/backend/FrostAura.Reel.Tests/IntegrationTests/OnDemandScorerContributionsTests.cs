@@ -229,6 +229,30 @@ public class OnDemandScorerContributionsTests(PostgresFixture fixture)
         Assert.InRange(starts.Max() - starts.Min(), 0f, 1e-3f);
     }
 
+    [Fact]
+    public void The_card_bars_are_the_walk_scaled_to_its_largest_push()
+    {
+        // One decomposition on the title page: a bar may not credit a feature the walk beside it
+        // takes points away for (Men of Honor, 2026-10-26: "+0.1 your contrarian lens" over "-0.1").
+        var engine = new FastTreeModelEngine();
+        var bytes = TrainedBytes();
+        var key = Guid.NewGuid();
+        var rng = new Random(9);
+        var v = new float[FeatureSchema.VectorLength];
+        for (var j = 0; j < v.Length; j++)
+        {
+            v[j] = (float)rng.NextDouble();
+        }
+
+        var walk = engine.ExplainCached(key, bytes, v, FeatureSchema.AllNames())!.TopContributions;
+        var bars = engine.ScoreWithContributionsCached(key, bytes, [v], FeatureSchema.AllNames(), topK: 5)[0].TopContributions;
+        var largest = Math.Abs(walk[0].Contribution);
+
+        Assert.Equal(walk.Take(5).Select(c => c.Feature), bars.Select(c => c.Feature));
+        Assert.All(bars.Zip(walk), pair => Assert.Equal(pair.Second.Contribution / largest, pair.First.Contribution, 4));
+        Assert.Equal(1f, Math.Abs(bars[0].Contribution), 4);
+    }
+
     // ── Harness ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
