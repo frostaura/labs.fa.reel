@@ -54,8 +54,15 @@ public sealed class AskReelEngine(
     FilterCostMeter costMeter,
     IServiceScopeFactory scopes,
     IMemoryCache cache,
+    ConceptEmbeddings conceptEmbeddings,
     ILogger<AskReelEngine> logger)
 {
+    /// <summary>
+    /// How long a mood request waits for its text's embedding before retrieval (§4.7: an uncached text
+    /// takes 1.2–2.7 s, while the semantic arm itself waits only 1.0 s). See <see cref="WarmMoodAsync"/>.
+    /// </summary>
+    public static readonly TimeSpan MoodEmbedBudget = TimeSpan.FromSeconds(2.5);
+
     /// <summary>
     /// How long one account's persona is reused across turns. Building it reads the whole taste state
     /// (0.4–1.8 s measured on the founder snapshot, all of it ahead of the plan call on the critical
@@ -545,6 +552,7 @@ public sealed class AskReelEngine(
             Message = turn.Input.Message,
             Region = turn.Input.Region,
         };
+        await WarmMoodAsync(turn, hard, soft, ct);
         RetrievalResult retrieval;
         using (turn.Timings.Stage(AskStageTimings.Retrieve))
         {
@@ -713,6 +721,37 @@ public sealed class AskReelEngine(
         var saved = ConversationStateReducer.Presented(next, presented) with { Version = turn.Input.AnswerNumber };
         var all = picks.Concat(placedTrays.SelectMany(t => t.Cards)).ToList();
         return Outcome(turn, plan, saved, composed.Reply, composed.Reason, mode, all, IntentJsonOf(hard, next));
+    }
+
+    /// <summary>
+    /// A request with no concept and no person — a mood ("feel-good", "something quiet") — has the
+    /// semantic arm as its ONLY topical arm, and that arm waits 1.0 s for an embedding a new text takes
+    /// 1.2–2.7 s to make: on the founder slot it was skipped on nearly every first ask, so the judge was
+    /// handed the catalogue's best-regarded titles with no reading of the mood at all. The text the arm
+    /// will embed is embedded here first, waiting up to <see cref="MoodEmbedBudget"/>, into the shared
+    /// cache the arm reads. A request with a concept is left alone: its semantic arm only re-ranks titles
+    /// the catalogue evidence already admitted, and is not worth the wait.
+    /// </summary>
+    private async Task WarmMoodAsync(Turn turn, HardConstraints hard, SoftPreferences soft, CancellationToken ct)
+    {
+        if (hard.HasConcepts || hard.People.Count > 0 || !conceptEmbeddings.IsAvailable)
+        {
+            return;
+        }
+
+        var text = HybridRetriever.SemanticText(hard, soft);
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        var clock = Stopwatch.StartNew();
+        var vector = await conceptEmbeddings.EmbedAsync(text, MoodEmbedBudget, ct);
+        turn.Timings.Mark(AskStageTimings.RetrieveEmbed, clock.Elapsed.TotalMilliseconds);
+        if (vector is null)
+        {
+            turn.Note(SearchTurnDegraded.ArmPrefix + "mood-embed-late");
+        }
     }
 
     /// <summary>

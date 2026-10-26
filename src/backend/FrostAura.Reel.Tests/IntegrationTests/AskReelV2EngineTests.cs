@@ -10,6 +10,7 @@ using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Search.AskReel.Engine;
 using FrostAura.Reel.Application.Search.Retrieval;
+using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -243,6 +244,35 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.All(done.GetProperty("belowFloor").EnumerateArray(), c => Assert.Equal(JsonValueKind.Null, c.GetProperty("satisfies").ValueKind));
         Assert.All(outcome.Cards, c => Assert.Equal(SearchTurnCardTier.BelowFloor, c.Tier));
         Assert.DoesNotContain(events, e => e.Event == "picks");
+    }
+
+    /// <summary>
+    /// A mood request's text is embedded before retrieval, so the semantic arm — its only topical arm —
+    /// has the vector; a request with a concept is not held up for it.
+    /// </summary>
+    [Fact]
+    public async Task A_mood_request_is_embedded_before_retrieval_and_a_concept_request_is_not()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var mood = $"cosy{Guid.NewGuid():N}"[..12];
+        var accountId = await SeedAccountAsync();
+        await SeedTopicalAsync(topic, ("V2 Yes", 1));
+        var embeddings = new RecordingEmbeddings();
+        var planner = new ScriptedPlanner(input => input.Message.StartsWith(mood, StringComparison.Ordinal)
+            ? Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Moods = [mood] })
+            : Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        var (engine, _, emit) = Build(accountId, planner, new NameJudge(), embeddings: embeddings);
+
+        var moodTurn = await engine.StreamAsync(Input($"{mood} please"), accountId, emit, CancellationToken.None);
+        await engine.StreamAsync(Input($"{topic} movies"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal([mood], embeddings.Asked);
+        Assert.Contains(AskStageTimings.RetrieveEmbed, moodTurn.StageTimingsJson, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -526,7 +556,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The catalogue arms these tests read match a concept by its own words; nothing to resolve.</summary>
-    private sealed class PassThroughResolver : Application.Search.Retrieval.Concepts.IConceptResolver
+    private sealed class PassThroughResolver : IConceptResolver
     {
         public Task<HardConstraints> ResolveAsync(HardConstraints hard, CancellationToken ct) => Task.FromResult(hard);
 
@@ -544,7 +574,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
     private (AskReelEngine Engine, List<(string Event, JsonElement Data)> Events, LiveSearchExpansionService.Emit Emit) Build(
         Guid accountId, IAskReelPlanner planner, IRequestJudgeModel judge, IAskReelAnswerer? answerer = null,
-        Func<IAskReelRetriever, IAskReelRetriever>? wrap = null)
+        Func<IAskReelRetriever, IAskReelRetriever>? wrap = null, IEmbeddingProvider? embeddings = null)
     {
         var scoped = new AccountContext();
         scoped.SetAccount(accountId);
@@ -563,7 +593,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             new ExposureLog(db, NullLogger<ExposureLog>.Instance), features, new PersonalisationContext(db, new DislikeSignal(db, cache)),
             new TurnComposer(), new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
-            cache, NullLogger<AskReelEngine>.Instance);
+            cache, new ConceptEmbeddings(embeddings ?? new NoEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            NullLogger<AskReelEngine>.Instance);
 
         var events = new List<(string, JsonElement)>();
         LiveSearchExpansionService.Emit emit = (name, payload) =>
@@ -844,6 +875,33 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
                     ResultSource.Llm, ResultSource.Llm);
             }).ToList();
             return Task.FromResult(new JudgeBatchResult(verdicts, new LlmCallMeta("name-judge", "none", false, 1, 3), false));
+        }
+    }
+
+    /// <summary>No embedding provider: the default for these tests, whose retriever never embeds.</summary>
+    private sealed class NoEmbeddings : IEmbeddingProvider
+    {
+        public bool IsAvailable => false;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            throw new InvalidOperationException("No embedding provider in this fixture.");
+    }
+
+    /// <summary>Records what it was asked to embed and answers with a constant unit vector.</summary>
+    private sealed class RecordingEmbeddings : IEmbeddingProvider
+    {
+        public List<string> Asked { get; } = [];
+
+        public bool IsAvailable => true;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
+        {
+            lock (Asked)
+            {
+                Asked.AddRange(texts);
+            }
+
+            return Task.FromResult(texts.Select(_ => Enumerable.Repeat(1f / MathF.Sqrt(1536), 1536).ToArray()).ToArray());
         }
     }
 

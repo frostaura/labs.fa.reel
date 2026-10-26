@@ -158,6 +158,24 @@ public class AskReelV2UnitTests
         Assert.Empty(clean.Delta.Negations);
     }
 
+    /// <summary>
+    /// The live "survival at sea" turn: the planner's one concept was the message itself, the v1 echo
+    /// rule threw it away, and an empty request judged sixteen random titles to a none-found. A short
+    /// message that IS its topic keeps it; a sentence echoed back as a keyword still does not.
+    /// </summary>
+    [Theory]
+    [InlineData("survival at sea", "survival at sea", true)]
+    [InlineData("Survival at sea", "survival at sea", true)]
+    [InlineData("something brooding and futuristic for tonight", "something brooding and futuristic for tonight", false)]
+    [InlineData("no superheroes please", "no superheroes please", false)]
+    public void A_short_message_that_is_its_own_topic_keeps_it_as_the_concept(string message, string concept, bool kept)
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [concept] });
+        var clean = PlanSanitizer.Clean(plan, message, ConversationState.Empty, FilterRuleSet.FromRows([]));
+
+        Assert.Equal(kept, clean.Delta.Concepts.Count == 1);
+    }
+
     [Fact]
     public void Only_one_clarifying_question_is_asked_per_conversation()
     {
