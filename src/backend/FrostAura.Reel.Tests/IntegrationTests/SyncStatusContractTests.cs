@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using FrostAura.Reel.Application.Jobs;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Sync;
@@ -488,6 +489,8 @@ public class SyncStatusContractTests(PostgresFixture fixture, ReelApiFactory api
     private async Task WithDbAsync(Func<ReelDbContext, Task> work)
     {
         using var scope = api.Services.CreateScope();
+        // Fixture work reads and writes across accounts on purpose (J-11).
+        using var system = scope.ServiceProvider.GetRequiredService<IAccountContext>().EnterSystemScope();
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         await work(db);
         await db.SaveChangesAsync();
@@ -558,6 +561,8 @@ public class SyncStatusContractTests(PostgresFixture fixture, ReelApiFactory api
     private async Task<SyncJob> LatestJobAsync(Guid accountId, JobKind kind)
     {
         using var scope = api.Services.CreateScope();
+        // The host's own context: pinned to the account it reads, so it holds under Tenancy:UnscopedReads=Throw.
+        scope.ServiceProvider.GetRequiredService<IAccountContext>().SetAccount(accountId);
         var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
         return await db.SyncJobs.AsNoTracking()
             .Where(j => j.AccountId == accountId && j.Kind == kind)

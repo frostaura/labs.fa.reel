@@ -112,14 +112,25 @@ public sealed class UnscopedReadPolicy(UnscopedReadMode mode, ILogger<UnscopedRe
                 continue;
             }
 
-            // MoveNext of <Method>d__12 nested in the real class.
+            // Compiler-generated frames — MoveNext of <Method>d__12, a lambda <Method>b__0 on a
+            // <>c__DisplayClass, an async lambda <<Method>b__0>d — are named after the method that
+            // wrote them, on the first real class that encloses them.
             var owner = type;
             var name = method!.Name;
-            if (type.Name.StartsWith('<') && type.DeclaringType is { } outer)
+            var generated = name.StartsWith('<') ? name : type.Name.StartsWith('<') ? type.Name : null;
+            while (owner.Name.StartsWith('<') && owner.DeclaringType is { } outer)
             {
                 owner = outer;
-                var close = type.Name.IndexOf('>', StringComparison.Ordinal);
-                name = close > 1 ? type.Name[1..close] : name;
+            }
+
+            if (generated is not null)
+            {
+                var trimmed = generated.TrimStart('<');
+                var close = trimmed.IndexOf('>', StringComparison.Ordinal);
+                if (close > 0)
+                {
+                    name = trimmed[..close];
+                }
             }
 
             var ns = owner.Namespace ?? string.Empty;

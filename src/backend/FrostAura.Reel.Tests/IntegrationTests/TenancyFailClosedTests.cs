@@ -31,7 +31,16 @@ public class TenancyFailClosedTests(PostgresFixture fixture)
         // Unpinned, outside system scope: refused — the generic filter, SyncJob's and ModelArtifact's.
         var refused = await Assert.ThrowsAsync<UnscopedTenantQueryException>(() =>
             db.ContentFilters.Where(f => f.AccountId == a || f.AccountId == b).ToListAsync());
-        Assert.Contains(nameof(Under_Throw_an_unpinned_scoped_query_is_refused_while_pinned_system_and_catalogue_reads_work), refused.CallSite);
+        // Named after the method that wrote the query, not the compiler's lambda or state machine.
+        Assert.Equal(
+            $"{typeof(TenancyFailClosedTests).FullName}.{nameof(Under_Throw_an_unpinned_scoped_query_is_refused_while_pinned_system_and_catalogue_reads_work)}",
+            refused.CallSite);
+        var inAsyncLambda = await Assert.ThrowsAsync<UnscopedTenantQueryException>(async () =>
+        {
+            await Task.Yield();
+            await db.ContentFilters.CountAsync(f => f.AccountId == a);
+        });
+        Assert.Equal(refused.CallSite, inAsyncLambda.CallSite);
         await Assert.ThrowsAsync<UnscopedTenantQueryException>(() => db.SyncJobs.CountAsync(j => j.AccountId == a));
         await Assert.ThrowsAsync<UnscopedTenantQueryException>(() => db.ModelArtifacts.AnyAsync(m => m.AccountId == a));
         // A write through the filters is a query too.
