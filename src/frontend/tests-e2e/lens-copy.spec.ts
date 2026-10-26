@@ -57,7 +57,7 @@ const LENS = {
   generatedAt: "2026-09-09T20:00:00Z",
 };
 
-async function bootTitle(page: Page, lens: unknown) {
+async function bootTitle(page: Page, lens: unknown, { mockLens = true }: { mockLens?: boolean } = {}) {
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
@@ -65,8 +65,8 @@ async function bootTitle(page: Page, lens: unknown) {
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
   await mockJson(page, "**/api/titles/movie/4242", { ...TITLE, lens });
-  await mockJson(page, "**/api/titles/movie/4242/lens", lens);
-  await mockJson(page, "**/api/providers/4242", { region: "US", providers: [] });
+  if (mockLens) await mockJson(page, "**/api/titles/movie/4242/lens", lens);
+  await mockJson(page, "**/api/titles/movie/4242/providers", { region: "US", providers: [] });
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await page.goto("/title/movie/4242");
   // The lens sits behind "More" under the one pitch line (F-14); these tests are about what it
@@ -84,6 +84,7 @@ test.describe("through your lens", () => {
     });
     await mockJson(page, "**/api/titles/movie/4242", { ...TITLE, lens: LENS });
     await mockJson(page, "**/api/titles/movie/4242/lens", LENS);
+    await mockJson(page, "**/api/titles/movie/4242/providers", { region: "US", providers: [] });
     await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
     await page.goto("/title/movie/4242");
     await expect(page.getByTestId("why-this")).toContainText("Taylor Sheridan");
@@ -171,5 +172,47 @@ test.describe("through your lens", () => {
 
     await expect(page.getByTestId("lens-text")).toBeVisible();
     await expect(page.getByTestId("lens-caution-toggle")).toHaveCount(0);
+  });
+
+  // WS-1 task 7 moved the lens off the read path: the GET answers from storage and queues the pass,
+  // saying so with `pending`. A modal that is already open must pick the note up when it lands.
+  test("a queued pass shows one quiet line, then the note lands without reopening the title", async ({ page }) => {
+    const NONE_PENDING = {
+      source: "none", lens: null, hook: null, caution: null, anchors: [],
+      mood: null, whenToWatch: null, generatedAt: null, pending: true,
+    };
+    // The first answer says "pending"; the first re-ask finds the note.
+    let lensCalls = 0;
+    await page.route("**/api/titles/movie/4242/lens", async (route) => {
+      lensCalls += 1;
+      return route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify(lensCalls === 1 ? NONE_PENDING : { ...LENS, pending: false }),
+      });
+    });
+    await bootTitle(page, NONE_PENDING, { mockLens: false });
+
+    await expect(page.getByTestId("lens-pending")).toHaveText("Your note for this title is being written.");
+    await expect(page.getByTestId("lens-more")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("lens-pending")).toHaveCount(0);
+    await page.getByTestId("lens-more").click();
+    await expect(page.getByTestId("lens-text")).toContainText("moral flatness");
+    // A fresh answer stops the re-asking.
+    const settled = lensCalls;
+    await page.waitForTimeout(6_000);
+    expect(lensCalls).toBe(settled);
+  });
+
+  test("nothing queued means no re-asking and no pending line", async ({ page }) => {
+    let lensCalls = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/titles/movie/4242/lens") lensCalls += 1;
+    });
+    await bootTitle(page, { ...LENS, source: "stale", pending: false });
+    await expect(page.getByTestId("lens-stale")).toBeVisible();
+    await expect(page.getByTestId("lens-pending")).toHaveCount(0);
+    const settled = lensCalls;
+    await page.waitForTimeout(6_000);
+    expect(lensCalls).toBe(settled);
   });
 });

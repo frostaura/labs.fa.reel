@@ -68,6 +68,11 @@ export interface LensPayload {
   mood: string | null;
   whenToWatch: string | null;
   generatedAt: string | null;
+  /**
+   * True when a lens pass that writes this title is queued (WS-1 task 7: the GET only reads, and
+   * queues the pass when the note is not current). Optional: an older server never sends it.
+   */
+  pending?: boolean;
 }
 
 /** The account's taste narrative — what Reel believes about you, and your correction to it. */
