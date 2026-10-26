@@ -144,6 +144,13 @@ public sealed record TmdbDiscoveryResult(
 /// provisional new ones — short of the 50% gate. 535 of the pulled titles are ones he has already
 /// seen or rated, which no TMDB parameter can express, so the share cannot pass 56% for him
 /// whatever is sent. Cold-cache p95 under the 1.5 s deadline: 1.0 s, no probe timed out.</para>
+///
+/// <para>Re-measured 2026-10-26 on the wave-A merge (warm keyword cache): 1,214 pulled, 515 eligible
+/// (42.4%), 112 provisional (usable 51.6%), 535 rejected as already seen or rated. Every sort
+/// (popularity, vote count, vote average, newest) pulls the same 1,214 titles to within 3: for most
+/// concepts three pages are the WHOLE result set, so no ordering keeps his seen titles out. Of the
+/// titles he has not seen, 75.8% are eligible. The 50% gate is unreachable for this account by any
+/// fetch; whether to measure it over the non-footprint pulls is the integrator's call.</para>
 /// </summary>
 public sealed class TmdbDiscoveryArm(
     ITmdbClient tmdb, IReelDbContext db, EligibilityQueryBuilder eligibility, IMemoryCache cache)
