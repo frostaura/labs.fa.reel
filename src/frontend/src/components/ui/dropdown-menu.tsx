@@ -176,7 +176,7 @@ const DropdownMenuShortcut = ({
 }: React.HTMLAttributes<HTMLSpanElement>) => {
   return (
     <span
-      className={cn("ml-auto fa-caption tracking-widest text-fa-frost-dim/70", className)}
+      className={cn("ml-auto fa-caption tracking-widest text-3", className)}
       {...props}
     />
   );

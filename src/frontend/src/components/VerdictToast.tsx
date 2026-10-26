@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import type { AppDispatch, RootState } from "../store";
 import { verdictDismissed } from "../store/verdictSlice";
 import { verdictBand, verdictCopy } from "../lib/verdictCopy";
+import { Button } from "./ui/button";
 
 /** Long enough to read a two-clause sentence, short enough not to sit on top of the page. */
 const DISMISS_AFTER_MS = 9000;
@@ -82,14 +83,15 @@ export default function VerdictToast() {
     >
       <div className="flex items-start gap-3">
         <p className="fa-body text-fa-frost-bright flex-1">{verdictCopy(verdict, verdict.actual)}</p>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={() => dispatch(verdictDismissed())}
           aria-label="Dismiss"
-          className="text-fa-frost-dim hover:text-fa-frost-bright transition shrink-0"
+          className="-mr-1.5 -mt-1 shrink-0 text-fa-frost-dim"
         >
           <X className="h-4 w-4" />
-        </button>
+        </Button>
       </div>
       <Link
         to="/track-record"

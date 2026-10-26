@@ -1,5 +1,6 @@
 import { NavLink } from "react-router";
 import { Fingerprint, Home, Search, Bookmark } from "lucide-react";
+import { Button } from "./ui/button";
 
 /**
  * Mobile primary navigation. The media feed wants full-width rows, so on small screens the
@@ -29,18 +30,18 @@ export default function MobileTabBar({
           <Home className="h-5 w-5" />
           <span className="fa-overline">Home</span>
         </NavLink>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           onClick={onToggleSearch}
           aria-pressed={searchOpen}
-          className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition ${
+          className={`h-auto flex-1 flex-col gap-0.5 rounded-none px-0 py-2 font-normal hover:bg-transparent ${
             searchOpen ? "text-fa-frost-bright" : "text-fa-frost-dim hover:text-fa-frost"
           }`}
           data-testid="mobile-search-tab"
         >
           <Search className="h-5 w-5" />
           <span className="fa-overline">Search</span>
-        </button>
+        </Button>
         <NavLink to="/saved" className={tabClass}>
           <Bookmark className="h-5 w-5" />
           <span className="fa-overline">Saved</span>

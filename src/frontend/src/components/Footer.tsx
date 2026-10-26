@@ -11,7 +11,7 @@ export default function Footer() {
       <p className="fa-caption text-fa-frost-dim">
         Reel by <span className="text-fa-frost">FrostAura</span>
       </p>
-      <p className="fa-caption text-fa-frost-dim/70">
+      <p className="fa-caption text-3">
         This product uses the TMDB API but is not endorsed or certified by TMDB. Watch-provider
         data powered by JustWatch via TMDB.
       </p>
