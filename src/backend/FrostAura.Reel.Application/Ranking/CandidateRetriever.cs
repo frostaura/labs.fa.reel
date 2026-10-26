@@ -344,6 +344,56 @@ public sealed class CandidateRetriever(
         return ordered;
     }
 
+    /// <summary>
+    /// The keyword arm of the "more like this" window (WS-5 task 10): eligible titles in the lane
+    /// that share at least one of <paramref name="keywords"/> with the anchor, nearest the anchor's
+    /// embedding first. The ANN window alone is the anchor's plot neighbourhood; titles that share a
+    /// concrete keyword are the ones the evidence gate can admit, so they are offered beside it.
+    /// </summary>
+    public async Task<IReadOnlyList<Title>> RetrieveSharingKeywordsAsync(
+        Guid accountId,
+        Vector anchor,
+        IReadOnlyCollection<string> keywords,
+        Func<IQueryable<Title>, IQueryable<Title>>? lane,
+        int count,
+        string? maturityCeiling,
+        CancellationToken ct)
+    {
+        if (keywords.Count == 0 || count <= 0)
+        {
+            return [];
+        }
+
+        var wanted = keywords.ToArray();
+        var q = eligibility.EligibleTitles(accountId).Where(t => t.Keywords.Any(k => wanted.Contains(k)));
+        var laneIds = (lane is null ? q : lane(q)).Select(t => t.Id);
+        var hits = await AnnPullAsync(laneIds, anchor, OverFetch(count), ct);
+        return [.. hits.Where(t => EligibilityQueryBuilder.PassesMaturity(t, maturityCeiling)).Take(count)];
+    }
+
+    /// <summary>
+    /// Which of <paramref name="titleIds"/> are STILL eligible for the account right now — the
+    /// serve-time re-check (WS-5 task 10). A window is read, scored, curated and claimed over
+    /// seconds; a title rated, watched or set aside in that time (another tab, a sync landing) must
+    /// not be served. Same composition as the window: eligibility (with the genre rail's include-
+    /// genre waiver when asked) and the maturity ceiling.
+    /// </summary>
+    public async Task<HashSet<Guid>> StillEligibleAsync(
+        Guid accountId, IReadOnlyCollection<Guid> titleIds, bool ignoreGenreFilters, string? maturityCeiling, CancellationToken ct)
+    {
+        if (titleIds.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = titleIds.ToList();
+        var rows = await eligibility.EligibleTitles(accountId, ignoreGenreFilters)
+            .Where(t => ids.Contains(t.Id))
+            .Select(t => new Title { Id = t.Id, Certification = t.Certification })
+            .ToListAsync(ct);
+        return [.. rows.Where(t => EligibilityQueryBuilder.PassesMaturity(t, maturityCeiling)).Select(t => t.Id)];
+    }
+
     /// <summary>Nearest eligible titles to <paramref name="centroid"/> by cosine distance (HNSW index).
     /// Ties broken by id for the same reason as the popularity arm: identical inputs, identical pool.
     ///

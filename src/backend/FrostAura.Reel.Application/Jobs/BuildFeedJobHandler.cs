@@ -86,6 +86,15 @@ public class BuildFeedJobHandler(
     private const int FirstPassPopPool = 700;
     private const int FirstPassAnnPool = 500;
     private const int ShortlistSize = 220;
+
+    /// <summary>
+    /// The quality arm's head that enters the shortlist whatever its first-pass score (WS-5 task 9):
+    /// the best vote-shrunk crowd titles the retriever found. Without the reserve the top-220 cut
+    /// was taken on FastTree's score alone, so head titles the crowd rates highly were cut before
+    /// they were ever fully scored — under either FD-4 answer they now reach final scoring, and the
+    /// account's own floors still decide whether they are shown.
+    /// </summary>
+    internal const int QualityReserve = 40;
     private const int HeroSize = 5;
     // Single-sourced with the serve path: FeedEndpoints derives each hero card's confidence label
     // from this same bar, so a card can never be labelled against a threshold the build did not use.
@@ -268,6 +277,10 @@ public class BuildFeedJobHandler(
             .Take(ShortlistSize)
             .Select(x => x.id)
             .ToHashSet();
+        shortlistIds.UnionWith(retrieval.Hits
+            .Where(hit => hit.Arm == RetrievalArm.Popularity && poolVectors.ContainsKey(hit.Title.Id))
+            .Take(QualityReserve)
+            .Select(hit => hit.Title.Id));
         var shortlist = pool.Where(t => shortlistIds.Contains(t.Id)).ToList();
 
         // ── Phase 3: hydrate the shortlist (credits → affinity features) ────────────────
@@ -1322,8 +1335,13 @@ public class BuildFeedJobHandler(
         // predicate is deliberately still c.Predicted: the confidence floor is a claim about what
         // the model believes, and a title must not be admitted to the hero's own bar by a prior or
         // an LLM opinion the label "confident" was never measured against.
+        // The crowd half of the bar (WS-5 task 9): a confident hero pick also clears its media
+        // type's crowd floor on the SHRUNK score. The backfill below may still reach past it, but it
+        // reaches for crowd-backed titles first.
+        static bool CrowdBacked(Candidate c) =>
+            Domain.Feed.HeroConfidence.ClearsCrowdFloor(c.Title.MediaType, CrowdPrior.ShrunkScoreOf(c.Title));
         var heroPool = candidates
-            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null)
+            .Where(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor) && c.Title.PosterPath != null && CrowdBacked(c))
             .OrderByDescending(HeroKey)
             .ToList();
         // Recorded here, before the backfill below can relax the floor: a full hero with a zero here
@@ -1347,8 +1365,9 @@ public class BuildFeedJobHandler(
                     .Where(c => c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
                     .Select(c => (Candidate: c, Fresh: Freshness(c.Title), Affinity: 1d))],
                 HeroSize,
-                (c, chosen) => c.Predicted >= heroFloor
+                (c, chosen) => c.Predicted >= heroFloor && CrowdBacked(c)
                     && (chosen.Count == 0 || chosen.Max(h => Similarity(h.Title, c.Title)) < 0.8d),
+                (c, _) => c.Predicted >= heroFloor && CrowdBacked(c),
                 (c, _) => c.Predicted >= heroFloor,
                 (_, _) => true);
         }
@@ -1401,7 +1420,9 @@ public class BuildFeedJobHandler(
             var chosen = hero.Select(h => h.Title.Id).ToHashSet();
             hero.AddRange(candidates
                 .Where(c => !chosen.Contains(c.Title.Id) && c.Title.PosterPath != null && c.Predicted >= effectiveFloor)
-                .OrderByDescending(HeroKey)
+                .OrderByDescending(c => c.Predicted >= Math.Max(HeroConfidenceFloor, effectiveFloor))
+                .ThenByDescending(CrowdBacked)
+                .ThenByDescending(HeroKey)
                 .Take(HeroSize - hero.Count));
         }
 

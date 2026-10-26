@@ -1,3 +1,5 @@
+using FrostAura.Reel.Domain.Catalog;
+
 namespace FrostAura.Reel.Domain.Feed;
 
 /// <summary>
@@ -45,4 +47,32 @@ public static class HeroConfidence
     /// </summary>
     public static string For(decimal predictedRating, decimal bar) =>
         predictedRating >= bar ? Confident : Reaching;
+
+    /// <summary>
+    /// The crowd's half of the hero bar for a movie: the vote-shrunk crowd score a movie must reach
+    /// to lead on its own merits. About the upper quartile of the catalogue's shrunk movie scores
+    /// (median 6.44, 75th percentile 6.82 on the founder's copy, 2026-10-26).
+    /// </summary>
+    public const decimal MovieCrowdFloor = 6.8m;
+
+    /// <summary>
+    /// The same bar for a show. Per media type because shows' crowd scores run about 0.7 higher
+    /// (median 7.16, 75th percentile 7.58): one shared number would wave every show through while
+    /// holding movies to their upper quartile — which is how a 91%-movie account's headline fills
+    /// with network procedurals.
+    /// </summary>
+    public const decimal ShowCrowdFloor = 7.5m;
+
+    /// <summary>The crowd floor for <paramref name="mediaType"/>.</summary>
+    public static decimal CrowdFloorFor(MediaType mediaType) =>
+        mediaType == MediaType.Show ? ShowCrowdFloor : MovieCrowdFloor;
+
+    /// <summary>
+    /// Whether a title's crowd backs it as a headline: its SHRUNK crowd score (the badge's own
+    /// number, so 10.0 on 2 votes reads 6.6 and fails) is at or above its media type's floor. No
+    /// crowd score is not evidence — it does not clear. Applied through the shrunk prior so a thin
+    /// vote count cannot carry a title into the hero that a real crowd would not.
+    /// </summary>
+    public static bool ClearsCrowdFloor(MediaType mediaType, decimal? shrunkCrowdScore) =>
+        shrunkCrowdScore is { } score && score >= CrowdFloorFor(mediaType);
 }

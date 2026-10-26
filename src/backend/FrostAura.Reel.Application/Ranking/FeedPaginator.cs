@@ -145,6 +145,12 @@ public sealed class FeedPaginator(
     private static readonly TimeSpan CurationCeiling = TimeSpan.FromSeconds(20);
     private const int MaxDeepenPage = 25;
     private const int CurationBuffer = 8; // model-rank this many extra so the LLM has room to re-order
+
+    /// <summary>The most a Similar (or because-you-loved) window may spend retrieving before it serves what it has.</summary>
+    private static readonly TimeSpan SimilarWindowBudget = TimeSpan.FromSeconds(2);
+
+    /// <summary>Keyword-sharing titles offered beside an anchored window's plot neighbourhood.</summary>
+    private const int KeywordArmCount = 40;
     private const int RerankBatch = 9;
     private static readonly TimeSpan FitTtl = TimeSpan.FromHours(6);
 
@@ -320,6 +326,15 @@ public sealed class FeedPaginator(
             }
         }
 
+        // The account's media mix, on every unanchored page with no medium picked (WS-5 task 9):
+        // the build balanced the hero and its rails, and the pages that follow them did not.
+        var balanceMedia = !IsAnchored(req) && ParseMedia(req.MediaType) is null;
+        if (balanceMedia)
+        {
+            ranked = MediaMix.BalanceOrder(
+                ranked, req.Limit + CurationBuffer, r => r.Title.MediaType == MediaType.Movie, taste.MovieRatedShare);
+        }
+
         // LLM curation pass over the top slice: the model gives the personalised rating, the agent
         // re-orders by hyper-personal fit and supplies the natural "why this fits you" line.
         var curationPool = ranked.Take(Math.Min(ranked.Count, req.Limit + CurationBuffer)).ToList();
@@ -341,6 +356,25 @@ public sealed class FeedPaginator(
         foreach (var r in ranked)
         {
             rankedById.TryAdd(r.Title.Id, r);
+        }
+
+        // The curator re-orders by fit and may lead with one medium; the claim order keeps the mix.
+        if (balanceMedia)
+        {
+            claimOrder = MediaMix.BalanceOrder(
+                claimOrder, req.Limit, id => rankedById[id].Title.MediaType == MediaType.Movie, taste.MovieRatedShare);
+        }
+
+        // Serve-time eligibility (WS-5 task 10): the window was read seconds ago, and a title rated,
+        // watched or set aside since (another tab, a sync landing) must not be claimed and served.
+        var stillEligible = await candidateRetriever.StillEligibleAsync(
+            account.Id, claimOrder, IgnoresGenreFilters(req), account.Settings.MaturityCeiling, ct);
+        if (stillEligible.Count < claimOrder.Count)
+        {
+            logger.LogInformation(
+                "Feed page {Row}: {Count} candidate(s) stopped being eligible between the window read and the serve.",
+                rowKey, claimOrder.Count - stillEligible.Count);
+            claimOrder = [.. claimOrder.Where(stillEligible.Contains)];
         }
 
         var claimedIds = await FeedPageClaims.ClaimAsync(
@@ -718,7 +752,7 @@ public sealed class FeedPaginator(
     {
         var anchor = await db.Titles
             .Where(t => t.Id == anchorId)
-            .Select(t => new { t.MediaType, t.Genres })
+            .Select(t => new { t.MediaType, t.Genres, t.Keywords })
             .FirstOrDefaultAsync(ct);
         if (anchor is null)
         {
@@ -754,10 +788,36 @@ public sealed class FeedPaginator(
             .FirstOrDefaultAsync(ct);
         if (anchorEmbedding is not null)
         {
-            return await candidateRetriever.RetrieveSimilarAsync(
-                account.Id, anchorEmbedding, lane,
-                count: WindowPopCount + WindowAnnCount,
-                account.Settings.MaturityCeiling, ct);
+            // Time-boxed (WS-5 task 10): the Similar rail sits under a title the user is reading, so
+            // a slow pgvector scan serves what already returned rather than holding the page.
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            budget.CancelAfter(SimilarWindowBudget);
+            var window = new List<Title>();
+            try
+            {
+                window.AddRange(await candidateRetriever.RetrieveSimilarAsync(
+                    account.Id, anchorEmbedding, lane,
+                    count: WindowPopCount + WindowAnnCount,
+                    account.Settings.MaturityCeiling, budget.Token));
+
+                // The keyword arm: titles sharing a distinctive keyword with the anchor, nearest
+                // first — the ones the evidence gate can actually admit — offered beside the plot
+                // neighbourhood rather than only when it happens to contain them.
+                var keywords = anchor.Keywords.Where(AnchorRowGate.IsDistinctiveKeyword).ToList();
+                var seen = window.Select(t => t.Id).ToHashSet();
+                window.AddRange((await candidateRetriever.RetrieveSharingKeywordsAsync(
+                        account.Id, anchorEmbedding, keywords, lane, KeywordArmCount,
+                        account.Settings.MaturityCeiling, budget.Token))
+                    .Where(t => seen.Add(t.Id)));
+            }
+            catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                logger.LogInformation(
+                    "Similar window for {AnchorId} exceeded {Budget}s; serving the {Count} titles already retrieved.",
+                    anchorId, SimilarWindowBudget.TotalSeconds, window.Count);
+            }
+
+            return window;
         }
 
         // No embedding on the anchor yet → genre-overlap by popularity. Reuses RetrieveAsync with the
