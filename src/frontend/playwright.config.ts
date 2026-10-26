@@ -16,14 +16,20 @@ const isCI = !!process.env.CI;
  *   or the production container whose service worker bypasses `page.route`. Pick a free port with
  *   PW_PORT (default 5173); the tripwire takes PW_PORT + 10000 unless PW_TRIPWIRE_PORT is set.
  * - Service workers stay blocked for the same reason.
- * - Chromium and WebKit run the same specs (`make ci-e2e` runs both projects).
+ * - Chromium and WebKit run the same specs, both through `npm run test:e2e`.
  * - **127.0.0.1, never "localhost".** Vite binds 127.0.0.1 (vite.config.ts), and on macOS
  *   "localhost" resolves to IPv6 ::1 first, so every navigation began with a refused connection.
- * - **WebKit alone gets 1 retry** (IREV3S-03). About 1 WebKit test in 75 hangs in `page.goto`
- *   "waiting until load" with not one request in its trace — not even the document — so the stall
- *   is inside the engine before the navigation reaches the network, and no app or spec change can
- *   remove it. The list reporter prints a pass-on-retry as "flaky", so it stays visible; a test that
- *   fails twice still fails the run.
+ * - **WebKit runs in shards** (IREV3S-03): `npm run test:e2e` runs Chromium as one process and
+ *   WebKit through scripts/e2e/webkitShards.ts, at most 40 tests per process. One WebKit browser
+ *   can create only 63 pages; the 64th never attaches and its `page.goto` hangs waiting for "load"
+ *   with no request sent (the measurements are in that script's header). The WebKit project is
+ *   `fullyParallel` so a shard can split by test rather than by file. Running the webkit project
+ *   unsharded (`npx playwright test` with no --project) still loses about one test in 64.
+ * - **No retries, WebKit included.** Both causes of the WebKit flakes are found and fixed, so a
+ *   flake is news again: the page limit above, and a real app bug — a navigation away cancels the
+ *   old page's in-flight lazy-chunk import, WebKit rejects it with the words a redeploy's missing
+ *   chunk produces, and the one-shot "new build" reload then cancelled the navigation
+ *   (lib/deployReload.ts `isLeaving`; shell-router.spec pins it).
  */
 const port = Number(process.env.PW_PORT ?? 5173);
 const tripwire = tripwirePort(port);
@@ -63,7 +69,7 @@ export default defineConfig({
     },
     {
       name: "webkit",
-      retries: 1,
+      fullyParallel: true,
       use: { ...devices["Desktop Safari"] },
     },
   ],

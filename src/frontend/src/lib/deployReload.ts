@@ -23,14 +23,46 @@ export function isChunkLoadError(error: unknown): boolean {
 }
 
 /**
- * Reloads the page unless it already reloaded for this reason within {@link RELOAD_GUARD_MS}.
- * Returns true when a reload was started. Storage failures (private mode) fail closed — no reload —
- * because an unguarded reload is a potential loop.
+ * How long after `beforeunload` a failed import is taken to be the departure's doing, not a
+ * deploy's. Long enough for a slow navigation to commit; a leave the user cancels (the unsaved-draft
+ * prompt) holds back the automatic reload for this long, and the boundary's manual reload remains.
+ */
+export const LEAVING_WINDOW_MS = 10_000;
+
+let leavingSince: number | null = null;
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    leavingSince = Date.now();
+  });
+  // Back in from the back/forward cache: this document is live again.
+  window.addEventListener("pageshow", () => {
+    leavingSince = null;
+  });
+}
+
+/**
+ * True while the document is on its way out. A navigation away cancels the old document's
+ * in-flight lazy-chunk imports, and WebKit rejects each with "Importing a module script failed" —
+ * the same words as a chunk a redeploy removed. Reloading then cancels the navigation the user
+ * asked for and puts them back where they were (IREV3S-03's last WebKit flake: `page.goto("/search")`
+ * "interrupted by another navigation" to the page it was leaving).
+ */
+export function isLeaving(now: number = Date.now()): boolean {
+  return leavingSince != null && now - leavingSince < LEAVING_WINDOW_MS;
+}
+
+/**
+ * Reloads the page unless it already reloaded for this reason within {@link RELOAD_GUARD_MS}, or
+ * the document is leaving anyway ({@link isLeaving}). Returns true when a reload was started.
+ * Storage failures (private mode) fail closed — no reload — because an unguarded reload is a
+ * potential loop.
  */
 export function reloadOnceForNewBuild(
   now: number = Date.now(),
-  reload: () => void = () => window.location.reload()
+  reload: () => void = () => window.location.reload(),
+  leaving: boolean = isLeaving(now)
 ): boolean {
+  if (leaving) return false;
   try {
     const stored = sessionStorage.getItem(KEY);
     const last = stored == null ? null : Number(stored);
