@@ -1,10 +1,13 @@
 using FrostAura.Reel.Application.Jobs;
+using FrostAura.Reel.Application.Llm;
+using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Pipeline;
 using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Feed;
 using FrostAura.Reel.Domain.Library;
+using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
@@ -1083,6 +1086,265 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
     }
 
     /// <summary>
+    /// R1-47 (CR-8): extraction waits behind an open breaker. The runner already declines to claim
+    /// an enrich job while the breaker is open; this is the breaker that is open when the run reaches
+    /// extraction. Nothing is asked, nothing is claimed, nothing is charged, and the pill says why.
+    /// One fixture field varies: whose breaker is open. A breaker on another purpose must not pause
+    /// extraction — only the provider's or extraction's own.
+    /// </summary>
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData(ApiUsagePurpose.ExtractAttributes, true)]
+    [InlineData(ApiUsagePurpose.Lens, false)]
+    public async Task An_open_breaker_pauses_extraction_before_anything_is_asked_or_charged(string? breakerPurpose, bool paused)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(3);
+        var health = new FakeProviderHealth();
+        health.Open(breakerPurpose, ProviderBreakerReasons.PaymentRequired);
+        var extractor = new RenamingExtractor("breaker/test-model");
+
+        var job = await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), extractor, cap: 3, health: health);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+        if (paused)
+        {
+            Assert.Empty(extractor.TitlesSeen);
+            Assert.Empty(rows); // never claimed: no placeholder, no attempt, no backoff
+            Assert.Equal("Reading the mood · paused: the model provider account is out of credit", job.ProgressMessage);
+        }
+        else
+        {
+            Assert.Equal(titleIds.Order(), extractor.TitlesSeen.Order());
+            Assert.All(rows, r => Assert.Equal(AttributeExtractionStatus.Done, r.Status));
+            Assert.Equal(3, rows.Count);
+        }
+    }
+
+    /// <summary>
+    /// R1-47: a breaker that opens DURING a run. The first call comes back 402 and every later call
+    /// in the batch is refused before it is sent; the live adapter reports each as a bare "no answer".
+    /// Those used to be charged as parse failures — 24 attempts burned on a credit outage, and the
+    /// next 24 in the next batch. Now the batch is booked as transport (backed off, charged nothing)
+    /// and the run pauses before the second batch. The control row runs the identical fixture with
+    /// the breaker staying shut, and charges, so the test is not green by construction.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Refusals_in_the_batch_that_opened_the_breaker_are_transport_and_the_rest_waits(bool breakerOpens)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(30);
+        var health = new FakeProviderHealth();
+        var refusing = new RefusingExtractor("refusal/test-model", () =>
+        {
+            if (breakerOpens)
+            {
+                health.Open(null, ProviderBreakerReasons.PaymentRequired);
+            }
+        });
+        var log = new CapturingLogger();
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), refusing, cap: 30, logger: log, health: health);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var rows = await db.TitleAttributes.Where(a => titleIds.Contains(a.TitleId)).ToListAsync();
+        if (breakerOpens)
+        {
+            Assert.Equal(1, refusing.Calls);
+            Assert.Equal(24, rows.Count); // the first batch only; the second was never claimed
+            Assert.All(rows, r =>
+            {
+                Assert.Equal(AttributeExtractionStatus.Pending, r.Status);
+                Assert.Equal(0, r.AttemptCount);
+                Assert.Equal(1, r.TransportFailures);
+                Assert.NotNull(r.RetryAfter);
+                Assert.Null(r.ClaimedBy);
+            });
+            Assert.Contains(log.Lines, l => l.Contains("24 transport failure(s)", StringComparison.Ordinal)
+                && l.Contains("0 unclassified failure(s)", StringComparison.Ordinal)
+                && l.Contains("paused behind the provider breaker: True", StringComparison.Ordinal));
+        }
+        else
+        {
+            Assert.Equal(2, refusing.Calls);
+            Assert.Equal(30, rows.Count);
+            Assert.All(rows, r =>
+            {
+                Assert.Equal(AttributeExtractionStatus.Failed, r.Status);
+                Assert.Equal(1, r.AttemptCount);
+                Assert.Equal(0, r.TransportFailures);
+            });
+        }
+    }
+
+    /// <summary>
+    /// A failure the extractor DID classify keeps its class when the breaker opens in its batch: a
+    /// completion came back and was unusable, which no refusal explains. Only the unexplained
+    /// no-answers move to transport.
+    /// </summary>
+    [Fact]
+    public async Task A_classified_parse_failure_is_still_charged_when_the_breaker_opens_in_its_batch()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(2);
+        var health = new FakeProviderHealth();
+        var malformed = titleIds[0];
+        var classifying = new ClassifyingExtractor(
+            "classified-refusal/test-model",
+            id => id == malformed ? AttributeFailureClass.Parse : AttributeFailureClass.Unclassified)
+        {
+            DuringCall = () =>
+            {
+                health.Open(null, ProviderBreakerReasons.Unauthorized);
+                return Task.CompletedTask;
+            },
+        };
+
+        await RunEnrichAsync(accountId, new StubEmbeddingProvider(false), classifying, cap: 2, health: health);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var parse = await db.TitleAttributes.SingleAsync(a => a.TitleId == malformed);
+        Assert.Equal(AttributeExtractionStatus.Failed, parse.Status);
+        Assert.Equal(1, parse.AttemptCount);
+        var refused = await db.TitleAttributes.SingleAsync(a => a.TitleId == titleIds[1]);
+        Assert.Equal(0, refused.AttemptCount);
+        Assert.Equal(1, refused.TransportFailures);
+    }
+
+    /// <summary>
+    /// R1-48, the early-stop declaration. EnrichCatalog is declared <c>StopsEarlyOnCancellation</c>,
+    /// so a deadline is honoured by RETURNING at a checkpoint. The deadline here lands while the model
+    /// is answering the first batch: those answers were bought and are kept, the second batch is never
+    /// asked, and none of a finished run's work happens — no Train for an account with no model (which
+    /// a finished run WOULD chain; the control row proves it) and no completion event.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_deadline_mid_batch_keeps_what_was_bought_and_stops_without_finishing(bool deadline)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(30);
+        using var slice = new CancellationTokenSource();
+        var extractor = new DeadlineExtractor("deadline/test-model", () =>
+        {
+            if (deadline)
+            {
+                slice.Cancel();
+            }
+        });
+        var events = new CapturingEventHub();
+
+        // Returns normally either way: an early stop is not an exception.
+        await RunEnrichAsync(
+            accountId, new StubEmbeddingProvider(false), extractor, cap: 30, events: events, ct: slice.Token);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var done = await db.TitleAttributes.CountAsync(a => titleIds.Contains(a.TitleId) && a.Status == AttributeExtractionStatus.Done);
+        var train = await db.SyncJobs.AnyAsync(j => j.AccountId == accountId && j.Kind == JobKind.Train);
+        var completed = events.Types.Contains(PipelineEventTypes.JobCompleted);
+        if (deadline)
+        {
+            Assert.Equal(1, extractor.Calls);
+            Assert.Equal(24, done);
+            Assert.Equal(0, await db.TitleAttributes.CountAsync(a => titleIds.Contains(a.TitleId) && a.ClaimedBy != null));
+            Assert.False(train);
+            Assert.False(completed);
+        }
+        else
+        {
+            Assert.Equal(2, extractor.Calls);
+            Assert.Equal(30, done);
+            Assert.True(train);
+            Assert.True(completed);
+        }
+    }
+
+    /// <summary>
+    /// R1-48: Train is chained only when it has something to learn from. One fixture field at a time:
+    /// whether the account has a model, whether a rating landed after it, and what the run wrote.
+    /// An empty enrich behind every feed build used to queue a Train that then skipped itself.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false, "nothing", false)]
+    [InlineData(true, false, "only-failures", false)]
+    [InlineData(true, true, "nothing", true)]
+    [InlineData(true, false, "answers", true)]
+    [InlineData(true, false, "vectors", true)]
+    [InlineData(false, false, "nothing", true)]
+    public async Task Train_is_chained_only_when_the_run_or_the_ratings_gave_it_something_new(
+        bool hasModel, bool ratingSinceModel, string wrote, bool chainsTrain)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var (accountId, titleIds) = await SeedLibraryAsync(2);
+        var trainedAt = DateTime.UtcNow.AddDays(-1);
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            // The library's ratings predate the model.
+            await seed.UserRatings.Where(r => r.AccountId == accountId)
+                .ExecuteUpdateAsync(set => set.SetProperty(r => r.FirstRatedAt, trainedAt.AddDays(-1)));
+            if (hasModel)
+            {
+                seed.ModelArtifacts.Add(new ModelArtifact
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    Version = 1,
+                    TrainingRunId = Guid.NewGuid(),
+                    Status = ArtifactStatus.Active,
+                    TrainedAt = trainedAt,
+                    FeatureSchemaJson = System.Text.Json.JsonSerializer.Serialize(new { version = FeatureSchema.Version }),
+                });
+            }
+
+            if (ratingSinceModel)
+            {
+                await seed.UserRatings.Where(r => r.AccountId == accountId && r.TitleId == titleIds[0])
+                    .ExecuteUpdateAsync(set => set.SetProperty(r => r.FirstRatedAt, DateTime.UtcNow));
+            }
+
+            await seed.SaveChangesAsync();
+        }
+
+        var (embeddings, extractor) = wrote switch
+        {
+            "nothing" => ((IEmbeddingProvider)new StubEmbeddingProvider(false), (ITitleAttributeExtractor)new UnavailableExtractor()),
+            "only-failures" => (new StubEmbeddingProvider(false), new AlwaysFailingExtractor("train-chain/failing")),
+            "answers" => (new StubEmbeddingProvider(false), new RenamingExtractor("train-chain/answering")),
+            "vectors" => (new StubEmbeddingProvider(true), new UnavailableExtractor()),
+            _ => throw new ArgumentOutOfRangeException(nameof(wrote), wrote, null),
+        };
+
+        await RunEnrichAsync(accountId, embeddings, extractor, cap: 2);
+
+        await using var db = Fixture.CreateContext(new AccountContext());
+        Assert.Equal(chainsTrain, await db.SyncJobs.AnyAsync(j => j.AccountId == accountId && j.Kind == JobKind.Train));
+    }
+
+    /// <summary>
     /// Runs one enrich pass exactly as JobRunnerService would.
     /// <para>
     /// <paramref name="cap"/> sets <c>ENRICH_MAX_TITLES_PER_RUN</c>. Tests that assert on WHICH
@@ -1096,9 +1358,12 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
     /// queues — no account pinned, so no priority tiers, no SSE and no Train chain.
     /// </para>
     /// </summary>
-    private async Task RunEnrichAsync(
+    private async Task<SyncJob> RunEnrichAsync(
         Guid? accountId, IEmbeddingProvider embeddings, ITitleAttributeExtractor extractor, int? cap = null,
-        Microsoft.Extensions.Logging.ILogger<EnrichCatalogJobHandler>? logger = null)
+        Microsoft.Extensions.Logging.ILogger<EnrichCatalogJobHandler>? logger = null,
+        IProviderHealth? health = null,
+        IPipelineEventHub? events = null,
+        CancellationToken ct = default)
     {
         var scoped = new AccountContext();
         if (accountId is { } pinned)
@@ -1109,9 +1374,10 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
         await using var db = Fixture.CreateContext(scoped);
         var configuration = Config(cap);
         var handler = new EnrichCatalogJobHandler(
-            db, embeddings, extractor, new NoopEventHub(), configuration,
+            db, embeddings, extractor, events ?? new NoopEventHub(), configuration,
             new CatalogEnrichmentBudget(db, configuration),
-            logger ?? NullLogger<EnrichCatalogJobHandler>.Instance);
+            logger ?? NullLogger<EnrichCatalogJobHandler>.Instance,
+            health);
         var job = new SyncJob
         {
             Id = Guid.NewGuid(),
@@ -1122,13 +1388,14 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
         };
         db.SyncJobs.Add(job);
         await db.SaveChangesAsync();
-        await handler.ExecuteAsync(job, CancellationToken.None);
+        await handler.ExecuteAsync(job, ct);
 
         // The runner owns status transitions; mirror it so the in-flight unique index
         // (AccountId, Kind) releases and a second enrich run can be enqueued.
         job.Status = JobStatus.Succeeded;
         job.CompletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
+        return job;
     }
 
     /// <summary>
@@ -1473,6 +1740,104 @@ public class EnrichCatalogJobHandlerTests(PostgresFixture fixture) : EmbeddedCat
             TState state,
             Exception? exception,
             Func<TState, Exception?, string> formatter) => _lines.Enqueue(formatter(state, exception));
+    }
+
+    /// <summary>
+    /// A live extractor at the moment the provider starts refusing: <paramref name="onCall"/> runs
+    /// as the batch is sent (the first call's 402 opens the breaker there), and every title comes back
+    /// as a bare null, which is all the plain port can say about a refusal.
+    /// </summary>
+    private sealed class RefusingExtractor(string modelId, Action onCall) : ITitleAttributeExtractor
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => modelId;
+
+        public int Version => 1;
+
+        public int Calls { get; private set; }
+
+        public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
+        {
+            Calls++;
+            onCall();
+            IReadOnlyList<ExtractedTitleAttributes?> result = inputs.Select(_ => (ExtractedTitleAttributes?)null).ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    /// <summary>An extractor that answers every title, running <paramref name="onCall"/> while it does.</summary>
+    private sealed class DeadlineExtractor(string modelId, Action onCall) : ITitleAttributeExtractor
+    {
+        public bool IsAvailable => true;
+
+        public string ModelId => modelId;
+
+        public int Version => 1;
+
+        public int Calls { get; private set; }
+
+        public Task<IReadOnlyList<ExtractedTitleAttributes?>> ExtractAsync(
+            IReadOnlyList<TitleAttributeInput> inputs, CancellationToken ct = default)
+        {
+            Calls++;
+            onCall();
+            IReadOnlyList<ExtractedTitleAttributes?> result = inputs
+                .Select(_ => (ExtractedTitleAttributes?)new ExtractedTitleAttributes(
+                    0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, 0.5m, "neutral", "contemporary", ["t"], "{}"))
+                .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    /// <summary>
+    /// Provider health with one breaker the test opens by hand: the provider's own (a null purpose)
+    /// or one purpose's. Only <see cref="OpenBreakerFor"/> is read by the handler.
+    /// </summary>
+    private sealed class FakeProviderHealth : IProviderHealth
+    {
+        private volatile ProviderBreaker? _open;
+
+        public void Open(string? purpose, string reasonCode) =>
+            _open = new ProviderBreaker(ApiProvider.OpenRouter, purpose, ProviderBreakerState.Open, reasonCode, DateTime.UtcNow, DateTime.UtcNow.AddHours(1));
+
+        public ProviderBreaker? OpenBreakerFor(ApiProvider provider, string purpose) =>
+            _open is { } open && open.Provider == provider && (open.Purpose is null || open.Purpose == purpose) ? open : null;
+
+        public bool TryAdmit(ApiProvider provider, string purpose, out ProviderBreaker? breaker, out bool probe)
+        {
+            breaker = OpenBreakerFor(provider, purpose);
+            probe = false;
+            return breaker is null;
+        }
+
+        public void ReportRefused(ApiProvider provider, int httpStatus) => Open(null, ProviderBreakerReasons.ForStatus(httpStatus));
+
+        public void ReportAnswered(ApiProvider provider) => _open = null;
+
+        public void ReportInconclusive(ApiProvider provider)
+        {
+        }
+
+        public void OpenPurpose(ApiProvider provider, string purpose, string reasonCode, DateTime until) => Open(purpose, reasonCode);
+    }
+
+    /// <summary>Records the event types published, so a run's completion event can be asserted.</summary>
+    private sealed class CapturingEventHub : IPipelineEventHub
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _types = new();
+
+        public IReadOnlyList<string> Types => _types.ToList();
+
+        public void Publish(Guid accountId, string type, IReadOnlyDictionary<string, object?> data) => _types.Enqueue(type);
+
+        public async IAsyncEnumerable<PipelineSseEvent> SubscribeAsync(
+            Guid accountId, long? lastEventId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
     }
 
     private sealed class NoopEventHub : IPipelineEventHub

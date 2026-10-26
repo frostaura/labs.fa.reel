@@ -1,4 +1,6 @@
+using System.Globalization;
 using FrostAura.Reel.Application.Saved;
+using FrostAura.Reel.Domain.Feed;
 
 namespace FrostAura.Reel.Tests.Saved;
 
@@ -190,14 +192,54 @@ public class SavedQueueTests
     [Fact]
     public void The_pinned_reason_states_the_error_band_and_omits_it_when_unmeasured()
     {
-        var measured = SavedQueue.WatchTonightReason(8.4m, 1.9d, 118, 150, "Netflix");
-        Assert.Contains("8.4 for you (±1.9)", measured, StringComparison.Ordinal);
-        Assert.Contains("1h 58m against your 2h 30m", measured, StringComparison.Ordinal);
-        Assert.Contains("on Netflix", measured, StringComparison.Ordinal);
+        var measured = SavedQueue.WatchTonightReason(8.4m, 1.9d, 118, 150, "Netflix", HeroConfidence.Floor, candidateCount: 3);
+        Assert.Equal(
+            "Highest-predicted thing in your queue that's on Netflix and fits tonight — 8.4 for you (±1.9), 1h 58m against your 2h 30m.",
+            measured);
 
         // No pairs yet ⇒ no band. "±0.0" would be the most dishonest number on the screen.
-        var unmeasured = SavedQueue.WatchTonightReason(8.4m, null, 118, 150, null);
+        var unmeasured = SavedQueue.WatchTonightReason(8.4m, null, 118, 150, null, HeroConfidence.Floor, candidateCount: 3);
         Assert.DoesNotContain("±", unmeasured, StringComparison.Ordinal);
         Assert.Contains("streaming now", unmeasured, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// R1-18: the walk's Seized pin read "Highest-predicted thing in your queue that's on Philo…" at
+    /// 5.0 for you under a 7.5 bar. A pick under the bar opens by saying so, and never with the
+    /// language of a recommendation.
+    /// </summary>
+    [Theory]
+    [InlineData(5.0, 7.5, 4)]
+    [InlineData(7.4, 7.5, 2)]
+    [InlineData(8.1, 8.5, 9)]
+    public void A_pick_under_the_bar_says_so_first(double rating, double bar, int candidates)
+    {
+        var reason = SavedQueue.WatchTonightReason((decimal)rating, 1.2d, 109, 150, null, (decimal)bar, candidates);
+
+        Assert.StartsWith(
+            string.Create(CultureInfo.InvariantCulture, $"Nothing in your queue that's streaming and fits tonight reaches {bar:0.0} for you."),
+            reason,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Highest-predicted", reason, StringComparison.Ordinal);
+        Assert.Contains(string.Create(CultureInfo.InvariantCulture, $"{rating:0.0} for you (±1.2)"), reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_bar_itself_counts_as_cleared()
+    {
+        // Inclusive, exactly as the hero's own confidence test: a pick AT the bar met it.
+        var reason = SavedQueue.WatchTonightReason(7.5m, null, 109, 150, null, HeroConfidence.Floor, candidateCount: 2);
+
+        Assert.StartsWith("Highest-predicted thing in your queue", reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(8.4, "The only thing in your queue that's on Netflix and fits tonight — 8.4 for you, 1h 49m against your 2h 30m.")]
+    [InlineData(5.0, "The only thing in your queue that's on Netflix and fits tonight is under 7.5 for you — 5.0, 1h 49m against your 2h 30m.")]
+    public void A_single_candidate_is_never_called_the_highest(double rating, string expected)
+    {
+        var reason = SavedQueue.WatchTonightReason((decimal)rating, null, 109, 150, "Netflix", HeroConfidence.Floor, candidateCount: 1);
+
+        Assert.Equal(expected, reason);
     }
 }
