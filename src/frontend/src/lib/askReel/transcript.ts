@@ -1,4 +1,4 @@
-import type { AskCard } from "../askReelStream";
+import { isCard, judgeDegraded, type AskCard } from "../askReelStream";
 import { excludedTerms } from "./copy";
 import type { ChatStatus } from "./reducer";
 
@@ -38,6 +38,37 @@ export interface ChatTurn {
   failed?: boolean;
   /** The server's `FailureCode` for a {@link ChatTurn.failed} row. See {@link failedTurnMessage}. */
   failureCode?: string | null;
+  /**
+   * Assistant rows only: the cards this turn showed, when it is NOT the answer the live grid holds.
+   * Chat UI v2 keeps every answer under the reply that produced it — collapsed, labelled as an
+   * earlier answer — rather than letting the newest question erase what the thread already found.
+   * The live answer's cards are never copied here; they are the grid.
+   */
+  answer?: TurnAnswer;
+  /**
+   * Assistant rows only: the readings a clarifying question offers (§4.9 `clarify`). Each is a
+   * button that asks it; absent on every other reply.
+   */
+  clarifyOptions?: string[];
+}
+
+/** One earlier answer, as it stood when the thread moved past it. Same card shape as the grid. */
+export interface TurnAnswer {
+  cards: AskCard[];
+  nearMiss: AskCard[];
+  belowFloor: AskCard[];
+  unchecked: AskCard[];
+  mode: string | null;
+}
+
+/** A card list from an untrusted payload: every entry through {@link isCard}, junk dropped. */
+export function cardsOf(value: unknown): AskCard[] {
+  return Array.isArray(value) ? value.filter(isCard) : [];
+}
+
+/** Whether an earlier answer has anything to show. An empty one is not worth a disclosure. */
+export function answerHasCards(answer: TurnAnswer | undefined): answer is TurnAnswer {
+  return !!answer && answer.cards.length + answer.nearMiss.length + answer.belowFloor.length + answer.unchecked.length > 0;
 }
 
 /**
@@ -94,6 +125,15 @@ export interface ConversationPayload {
     /** Both spellings accepted: the payload has never carried one, and the SSE frame calls it `turnId`. */
     id?: string | null;
     turnId?: string | null;
+    /**
+     * Chat UI v2: this row's own cards and trays, so every answer can be restored under its own
+     * reply (WS-2 task 3, "resume returns turns[].cards"). Optional — a server without per-turn
+     * cards still restores the newest answer from the top-level lists below.
+     */
+    cards?: AskCard[];
+    /** The same row's trays, nested so their names cannot collide with the row's own flags. */
+    trays?: { nearMiss?: AskCard[]; belowFloor?: AskCard[]; unchecked?: AskCard[] } | null;
+    mode?: string | null;
   }[];
   /** The answer, in the order the server committed to storage as `Rank`. Never re-sorted. */
   cards?: AskCard[];
@@ -208,25 +248,94 @@ export function resumedConflict(payload: { conflict?: PersistedConflict | null }
  * itself differently is still an answer to a question two bubbles up.
  */
 export function transcriptOf(rows: ConversationPayload["turns"]): ChatTurn[] {
+  // A page's cards belong to the answer it extended — the nearest `ask` assistant row above it —
+  // so they are folded in before the page row itself is dropped below.
+  const answers = new Map<number, TurnAnswer>();
+  let lastAsk = -1;
+  rows.forEach((t, i) => {
+    if (t.role !== "assistant") return;
+    const own = rowAnswer(t);
+    if (t.kind === "page") {
+      if (lastAsk >= 0 && own) answers.set(lastAsk, mergeAnswers(answers.get(lastAsk), own));
+      return;
+    }
+    lastAsk = i;
+    if (own) answers.set(i, own);
+  });
   return rows
-    .filter((t) => t.kind !== "page")
-    .filter((t) => t.role === "user" || t.role === "assistant")
+    .map((t, i) => ({ t, answer: answers.get(i) }))
+    .filter(({ t }) => t.kind !== "page")
+    .filter(({ t }) => t.role === "user" || t.role === "assistant")
     // …and a FAILED assistant row survives the empty-text filter, because its emptiness is the
     // fact rather than an artefact of timing (R5-02). A `Pending` one does not: it has no text
     // YET, and rendering it would put a blank bubble under a question the server is still working
     // on — which `resumedTail` says out loud instead.
-    .filter((t) => t.text.trim().length > 0 || (t.role === "assistant" && t.status === "Failed"))
-    .map((t) =>
-      t.role === "assistant" && t.status === "Failed"
-        ? { role: "assistant" as const, text: "", failed: true, failureCode: t.failureCode ?? null }
-        : t.role === "assistant" && (t.degraded || t.judgeDegraded)
-          ? {
-            role: "assistant" as const, text: t.text,
-            ...(t.degraded ? { degraded: true } : {}),
-            ...(t.judgeDegraded ? { unchecked: true } : {}),
-          }
-          : { role: t.role as "user" | "assistant", text: t.text },
-    );
+    .filter(({ t }) => t.text.trim().length > 0 || (t.role === "assistant" && t.status === "Failed"))
+    .map(({ t, answer }): ChatTurn => {
+      const row: ChatTurn =
+        t.role === "assistant" && t.status === "Failed"
+          ? { role: "assistant", text: "", failed: true, failureCode: t.failureCode ?? null }
+          : t.role === "assistant" && (t.degraded || t.judgeDegraded)
+            ? {
+              role: "assistant", text: t.text,
+              ...(t.degraded ? { degraded: true } : {}),
+              ...(t.judgeDegraded ? { unchecked: true } : {}),
+            }
+            : { role: t.role as "user" | "assistant", text: t.text };
+      return answer ? { ...row, answer } : row;
+    });
+}
+
+/** A stored row's own cards, or undefined when it carries none. */
+function rowAnswer(t: ConversationPayload["turns"][number]): TurnAnswer | undefined {
+  const answer: TurnAnswer = {
+    cards: cardsOf(t.cards), nearMiss: cardsOf(t.trays?.nearMiss), belowFloor: cardsOf(t.trays?.belowFloor),
+    unchecked: cardsOf(t.trays?.unchecked), mode: typeof t.mode === "string" ? t.mode : null,
+  };
+  return answerHasCards(answer) ? answer : undefined;
+}
+
+/** `b` appended to `a`, each list de-duplicated by title — a page never repeats its answer's cards. */
+export function mergeAnswers(a: TurnAnswer | undefined, b: TurnAnswer): TurnAnswer {
+  if (!a) return b;
+  return {
+    cards: mergeCards(a.cards, b.cards), nearMiss: mergeCards(a.nearMiss, b.nearMiss),
+    belowFloor: mergeCards(a.belowFloor, b.belowFloor), unchecked: mergeCards(a.unchecked, b.unchecked),
+    mode: a.mode ?? b.mode,
+  };
+}
+
+/** `extra` appended to `cards`, skipping any title already there. Order of both is kept. */
+export function mergeCards(cards: AskCard[], extra: AskCard[]): AskCard[] {
+  if (extra.length === 0) return cards;
+  const seen = new Set(cards.map((c) => c.titleId));
+  const out = cards.slice();
+  for (const c of extra) {
+    if (seen.has(c.titleId)) continue;
+    seen.add(c.titleId);
+    out.push(c);
+  }
+  return out;
+}
+
+/**
+ * The current turn's reply, marked with what this turn's degraded flags say about it — "couldn’t
+ * read that fully" when the plan fell back (§4.10), "some cards unchecked" when a judge batch or
+ * the model itself did not run. Only the reply BELOW the last question is touched: an earlier
+ * answer's bubble describes an earlier turn, and a v2 `degraded` frame is about this one. With no
+ * reply yet, nothing changes — the reducer re-applies the flags when the reply lands.
+ */
+export function markTurnReply(turns: ChatTurn[], flags: readonly string[]): ChatTurn[] {
+  const plan = flags.includes("plan");
+  const unchecked = judgeDegraded(flags);
+  if (!plan && !unchecked) return turns;
+  const i = turns.length - 1;
+  const row = turns[i];
+  if (!row || row.role !== "assistant" || row.failed) return turns;
+  if ((!plan || row.degraded) && (!unchecked || row.unchecked)) return turns;
+  const next = turns.slice();
+  next[i] = { ...row, ...(plan ? { degraded: true } : {}), ...(unchecked ? { unchecked: true } : {}) };
+  return next;
 }
 
 /**

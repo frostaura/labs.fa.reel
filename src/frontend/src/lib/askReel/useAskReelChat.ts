@@ -3,7 +3,7 @@ import { useSelector } from "react-redux";
 import { applyScoreOverrides, selectScoreOverrides } from "../../store/scoreOverridesSlice";
 import { streamAskReel, type AskReelRequest, type PhaseData } from "../askReelStream";
 import { canPage } from "./paging";
-import { chatReducer, failureFor, initialChatState, mintStreamId, type ChatAction, type StreamTag } from "./reducer";
+import { chatReducer, failureFor, gridRowOf, initialChatState, mintStreamId, type ChatAction, type StreamTag } from "./reducer";
 import type { ConversationPayload } from "./transcript";
 
 /**
@@ -556,6 +556,15 @@ export function useAskReelChat() {
           sawDone = true;
           dispatch({ type: "done", data: ev.data, stream });
           break;
+        // §4.9's v2 frames. Each has its own action so the reducer, not the transport, decides
+        // what it means for the screen.
+        case "plan": dispatch({ type: "plan", data: ev.data, stream }); break;
+        case "picks": dispatch({ type: "picks", data: ev.data, stream }); break;
+        case "tray": dispatch({ type: "tray", data: ev.data, stream }); break;
+        case "answer": dispatch({ type: "answer", data: ev.data, stream }); break;
+        case "clarify": dispatch({ type: "clarify", data: ev.data, stream }); break;
+        case "none-found": dispatch({ type: "noneFound", data: ev.data, stream }); break;
+        case "degraded": dispatch({ type: "degraded", data: ev.data, stream }); break;
         default: break;
       }
     }, controller.signal, armWatchdog)
@@ -890,5 +899,17 @@ export function useAskReelChat() {
      * starts until a resume or a `+ New` clears it — which is exactly "this visit owns the screen".
      */
     hasLocalTurn: state.stream !== 0,
+    /**
+     * The transcript row the live grid renders under — the reply that produced it (chat UI v2).
+     * Every other reply carries its own earlier answer, collapsed, in `turns[i].answer`.
+     */
+    gridRow: gridRowOf(state),
+    /** The planner's reading of the newest turn, where the v2 engine sent one. Refine chips read it. */
+    plan: state.plan,
+    /**
+     * The ids the client's own floor may touch: neither finished work (`settled`) nor a v2 pick the
+     * server already gated (`pinned`).
+     */
+    clientFloorable: state.order.slice(Math.max(state.settled, state.pinned)),
   };
 }

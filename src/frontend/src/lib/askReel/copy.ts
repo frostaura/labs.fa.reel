@@ -265,3 +265,46 @@ export function removedNote(removed: number, removedEarlier: number): string | n
   if (since === 0) return `${head} — you’d already ${acts} ${removed === 1 ? "it" : "them"} when it was given.`;
   return `${head} — you’d already ${acts} ${earlier} of them when it was given, and you’ve acted on ${since} since.`;
 }
+
+/**
+ * What the refine chips are built from: the planner's reading of the answer on screen (its
+ * concepts — the user's own topic words, §4.9 `plan`) and the account's standing conditions.
+ */
+export interface RefineInputs {
+  concepts: string[];
+  /** Whether there is a card on screen for "the first one" to point at. */
+  hasCards: boolean;
+  excludedGenres: string[];
+  minYear: number | null;
+  maxYear: number | null;
+}
+
+/**
+ * The refine chips — generated, not a fixed list (WS-2 task 3, A-15).
+ *
+ * The fixed three ("Something lighter", "More intense", "More like the first one") were the same
+ * under a ninja answer and a rom-com one, and two of them could be offered against a standing
+ * condition that guaranteed a conflict notice: "lighter" reads as comedy (deterministically, WS-2
+ * 1f), so on an account that excludes comedy the chip asked for the one thing the account had ruled
+ * out. Chips now name the topic the user asked about, and a direction a condition rules out is not
+ * offered at all: lighter against an excluded comedy, newer against a standing latest year, older
+ * against a standing earliest one. "More like the first one" needs a first one.
+ *
+ * Deterministic and capped at four, so the row's height is stable from one answer to the next.
+ */
+export function refineChips(input: RefineInputs): string[] {
+  const excluded = new Set(input.excludedGenres.map((g) => g.trim().toLowerCase()));
+  const lighterAllowed = !excluded.has("comedy");
+  const topic = input.concepts.map((c) => c.trim()).filter(Boolean).slice(0, 2).join(" ");
+  const chips: string[] = [];
+  if (topic) {
+    if (lighterAllowed) chips.push(`Lighter ${topic} picks`);
+    if (input.maxYear == null) chips.push(`Newer ${topic} picks`);
+    if (input.minYear == null) chips.push(`Older ${topic} picks`);
+  } else {
+    if (lighterAllowed) chips.push("Something lighter");
+    chips.push("More intense");
+  }
+  if (input.hasCards) chips.push("More like the first one");
+  return chips.slice(0, 4);
+}
