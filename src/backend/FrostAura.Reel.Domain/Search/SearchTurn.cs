@@ -170,6 +170,16 @@ public static class SearchTurnDegraded
     public const string Plan = "plan";
 
     /// <summary>
+    /// The prefix of the plan-cause flag, written as <c>plan-cause:{code}</c> beside <see cref="Plan"/>
+    /// — the status-API code of the failure that degraded the plan (<c>budget_spent</c>,
+    /// <c>payment_required</c>, <c>unauthorized</c> …), so a turn record joins the status panel on one
+    /// code (IREV2-SYS-02). A separate token on purpose: <see cref="PlanFailed"/> and the frontend
+    /// match the exact <c>plan</c> token, and folding the cause into it would let a degraded turn back
+    /// into history.
+    /// </summary>
+    public const string PlanCausePrefix = "plan-cause:";
+
+    /// <summary>
     /// The prefix of the judge flag, written as <c>judge:{failed}/{total}</c> — how many judge
     /// batches produced no model verdict, out of how many ran.
     /// </summary>

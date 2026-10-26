@@ -24,7 +24,7 @@ const heroCard = (n: number, extra: Record<string, unknown>) => ({
   genres: ["drama"],
   crowdRating: 7.5,
   crowdVotes: 9000,
-  whyThis: "Strong fit with your taste profile.",
+  whyThis: "Explores a heist crew coming apart, like Heat.",
   isReleased: true,
   ...extra,
 });

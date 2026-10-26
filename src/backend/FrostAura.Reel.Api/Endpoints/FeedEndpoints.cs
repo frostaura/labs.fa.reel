@@ -385,7 +385,7 @@ public static class FeedEndpoints
                     // hero bar, so "reaching" would be measuring them against a rule they never had.
                     hero ? HeroConfidence.For(item.PredictedRating, heroBar) : null,
                     hero ? heroBar : null,
-                    note?.Hook,
+                    LensGuards.ServableHook(note),
                     note?.FirstClause(),
                     note?.Mood,
                     textures.GetValueOrDefault(title.Id),

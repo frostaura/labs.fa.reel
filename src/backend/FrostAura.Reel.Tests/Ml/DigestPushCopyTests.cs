@@ -40,9 +40,15 @@ public class DigestPushCopyTests
         Assert.Equal(
             "New this week",
             BuildDigestJobHandler.BuildPushPayload("A", "Movie", 1, Item(reason: DigestReasons.NewRelease), 3).Body);
+        // IR2S-02: an arrival names the provider it arrived on, never "your services"; one with no
+        // recorded provider claims only that it streams now.
         Assert.Equal(
-            "Just landed on your services",
+            "Streaming now",
             BuildDigestJobHandler.BuildPushPayload("A", "Movie", 1, Item(reason: DigestReasons.NewOnProvider), 3).Body);
+        Assert.Equal(
+            "Streaming on Netflix",
+            BuildDigestJobHandler.BuildPushPayload(
+                "A", "Movie", 1, Item(reason: DigestReasons.NewOnProvider) with { Provider = "Netflix" }, 3).Body);
     }
 
     [Fact]

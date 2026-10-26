@@ -464,6 +464,14 @@ public sealed class LiveSearchExpansionService(
             {
                 degraded.Add(SearchTurnDegraded.Plan);
                 progress.Degrade(SearchTurnDegraded.Plan);
+
+                // The cause rides beside the plan flag, never inside it: PlanFailed and the frontend
+                // match the exact "plan" token, so "plan:budget_spent" would let the turn into history.
+                if (agentReply.FailureCode is { Length: > 0 } cause)
+                {
+                    degraded.Add(SearchTurnDegraded.PlanCausePrefix + cause);
+                    progress.Degrade(SearchTurnDegraded.PlanCausePrefix + cause);
+                }
             }
 
             // The server's correction of the model's reading: no negation phrase or ordinal as a
@@ -499,9 +507,11 @@ public sealed class LiveSearchExpansionService(
                 : System.Text.Json.JsonSerializer.Serialize(conflict, ConflictJsonOptions);
 
             // The model's sentence, plain text, qualified by the conditions it is about to meet. A
-            // degraded reading carries the degraded copy, which claims nothing and quotes nobody.
+            // degraded reading carries the degraded copy for ITS cause (IREV2-SYS-02), which claims
+            // nothing and quotes nobody. Re-derived from the failure rather than read from Reply, so a
+            // degraded reply built anywhere else still can never echo the request.
             var modelSentence = agentReply.Degraded
-                ? AgentReply.DegradedReply
+                ? LlmFailureCodes.DegradedReply(agentReply.Failure, agentReply.FailureCode)
                 : AskReelText.StripMarkdown(agentReply.Reply) ?? string.Empty;
             var pickReply = hasConflict && !agentReply.Degraded
                 ? AskReelStandingFilters.Qualify(
@@ -699,7 +709,7 @@ public sealed class LiveSearchExpansionService(
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligibleCount: 0, eligiblePoolSize, discovered.Count,
                     underBar: [], nearMiss: [], belowFloor: [], floor: MinPredictedFloor(filterRows),
-                    agentReply.Degraded, ReplyAsync, degraded, timings, input, emit, conflictJson, conflict?.Message,
+                    agentReply.Degraded ? modelSentence : null, ReplyAsync, degraded, timings, input, emit, conflictJson, conflict?.Message,
                     judged: 0, judge: null, effort, ct);
             }
 
@@ -947,7 +957,7 @@ public sealed class LiveSearchExpansionService(
                     .ToList();
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
-                    underBar, nearMiss, belowFloor, floor, agentReply.Degraded, ReplyAsync, degraded, timings, input,
+                    underBar, nearMiss, belowFloor, floor, agentReply.Degraded ? modelSentence : null, ReplyAsync, degraded, timings, input,
                     emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld,
                     judgedIds);
             }
@@ -1235,7 +1245,7 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyList<GatedCard> nearMiss,
         IReadOnlyList<GatedCard> belowFloor,
         decimal floor,
-        bool planDegraded,
+        string? planDegradedReply,
         Func<string, Task> replyAsync,
         IReadOnlyList<string> degraded,
         AskStageTimings timings,
@@ -1298,9 +1308,11 @@ public sealed class LiveSearchExpansionService(
             text = $"{conflictMessage} {text}";
         }
 
-        if (planDegraded)
+        // A degraded plan leads with the reply for its cause (IREV2-SYS-02), not the transient
+        // "in a moment" sentence: a spent allowance or a refused key does not recover by waiting.
+        if (planDegradedReply is { Length: > 0 })
         {
-            text = $"{AgentReply.DegradedReply} {text}";
+            text = $"{planDegradedReply} {text}";
         }
 
         await replyAsync(text);

@@ -14,7 +14,7 @@ const card = (n: number) => ({
   predictedRating: 8.1,
   crowdRating: 7.9,
   crowdVotes: 40000,
-  whyThis: "Strong fit with your taste profile.",
+  whyThis: "Explores a heist crew coming apart, like Heat.",
 });
 
 test.describe("entitlement gating", () => {

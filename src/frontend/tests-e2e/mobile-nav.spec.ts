@@ -15,7 +15,7 @@ const FEED = {
       backdropPath: null,
       genres: ["drama"],
       predictedRating: 8.4,
-      whyThis: "Strong fit with your taste profile.",
+      whyThis: "Explores a heist crew coming apart, like Heat.",
     },
   ],
   rows: [],

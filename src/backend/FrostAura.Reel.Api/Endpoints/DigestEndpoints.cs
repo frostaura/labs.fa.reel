@@ -79,7 +79,7 @@ public static class DigestEndpoints
                 // The lens's hook where one exists, and the reason copy where it does not. Both are
                 // true statements about why the card is here; the hook is simply the one written
                 // for this reader.
-                var (whyThis, whySource) = DigestWhyLine(note?.Hook, reasonCopy);
+                var (whyThis, whySource) = DigestWhyLine(LensGuards.ServableHook(note), reasonCopy);
                 whySources.Add(whySource);
                 cards.Add(new(
                     title.Id, title.MediaType.ToString(), title.TmdbId, title.Name, title.Year, title.RuntimeMinutes,
@@ -87,7 +87,7 @@ public static class DigestEndpoints
                     Math.Round(item.PredictedRating, 1), crowd, crowdVotes, whyThis, isReleased,
                     shown,
                     Confidence: null, FloorUsed: null,
-                    Hook: note?.Hook, LensClause: note?.FirstClause(), Mood: note?.Mood));
+                    Hook: LensGuards.ServableHook(note), LensClause: note?.FirstClause(), Mood: note?.Mood));
             }
 
             // The digest is the one surface whose picks were frozen days ago by a job that did not

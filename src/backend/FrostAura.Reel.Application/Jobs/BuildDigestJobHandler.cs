@@ -215,14 +215,16 @@ public sealed class BuildDigestJobHandler(
 
     /// <summary>
     /// The lens's hook out of a stored note, or null when the row cannot be read. A push is not
-    /// worth failing over a JSON shape that has moved on.
+    /// worth failing over a JSON shape that has moved on. Read through the same serving rule as every
+    /// other surface (WS-1 CR-2, IR2S-03): a hedged note or a cut-off hook is no hook, so the push
+    /// falls back to the item's own why rather than carrying a sentence the app would not show.
     /// </summary>
     private static string? ReadHook(string lensJson)
     {
         try
         {
-            return JsonSerializer.Deserialize<Domain.Lens.LensNote>(
-                lensJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))?.Hook;
+            return FrostAura.Reel.Application.Lens.LensGuards.ServableHook(JsonSerializer.Deserialize<Domain.Lens.LensNote>(
+                lensJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         }
         catch (JsonException)
         {

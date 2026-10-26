@@ -44,7 +44,7 @@ async function bootHome(page: Page) {
       titleId: "00000000-0000-0000-0000-000000000001", mediaType: "Movie", tmdbId: 1001,
       name: "Hero Pick", year: 2026, runtimeMinutes: 110, posterPath: null, backdropPath: null,
       genres: ["drama"], predictedRating: 8.4, crowdRating: null, crowdVotes: null,
-      whyThis: "Strong fit with your taste profile.", isReleased: true,
+      whyThis: "Explores a heist crew coming apart, like Heat.", isReleased: true,
     }],
     rows: [], lockedRowCount: 0,
   });

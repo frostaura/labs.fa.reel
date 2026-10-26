@@ -27,7 +27,7 @@ const hero = (n: number) => ({
   predictedRating: 8.2,
   crowdRating: 7.5,
   crowdVotes: 9000,
-  whyThis: "Strong fit with your taste profile.",
+  whyThis: "Explores a heist crew coming apart, like Heat.",
   isReleased: true,
   confidence: "confident",
   floorUsed: 7.5,

@@ -149,7 +149,7 @@ public static class SavedEndpoints
             return Results.Ok(queue with
             {
                 Items = queue.Items
-                    .Select(i => i with { Hook = notes.GetValueOrDefault(i.TitleId)?.Note?.Hook })
+                    .Select(i => i with { Hook = LensGuards.ServableHook(notes.GetValueOrDefault(i.TitleId)?.Note) })
                     .ToList(),
             });
         });
