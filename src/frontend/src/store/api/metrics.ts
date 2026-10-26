@@ -249,10 +249,47 @@ export interface AccuracyPayload {
     newRatings: number;
     calibrationBias: number | null;
     calibrationMae: number | null;
-    maeImprovement: number | null;
     spearman: number | null;
     picksChanged: number;
   } | null;
+  /**
+   * DEPRECATED here (WS-5 task 11): served at /api/metrics/cross-reference and dropped from this
+   * payload once nothing reads it. The track record and the lab read the new endpoint.
+   */
+  crossReference?: CrossReferenceAccuracy;
+  /**
+   * Who each block is about and how the account's own choices selected that group (G-8). Optional:
+   * a server from before WS-5 task 11 sends none, and the page then shows only its source note.
+   */
+  populations?: {
+    headline: PopulationNote;
+    counterfactual: PopulationNote;
+    conversion: PopulationNote;
+    crossReference: PopulationNote;
+  } | null;
+  /**
+   * Every accepted window with its pair count, narrowest first. A wider window holding exactly a
+   * narrower one's pairs names it in `sameAs`, and the page offers only windows that differ (G-9).
+   */
+  windows?: AccuracyWindow[];
+}
+
+/** One population on the track record, in plain words, with the selection effect behind it. */
+export interface PopulationNote {
+  name: string;
+  selectionNote: string;
+}
+
+export interface AccuracyWindow {
+  key: string;
+  pairs: number;
+  sameAs: string | null;
+}
+
+/** GET /api/metrics/cross-reference — the cross-reference block, moved off /api/accuracy (G-10). */
+export interface CrossReferencePayload {
+  window: string;
+  population: PopulationNote;
   crossReference: CrossReferenceAccuracy;
 }
 
@@ -310,6 +347,14 @@ export const metricsApi = api.injectEndpoints({
       query: (args) => `accuracy?window=${args && args.window ? args.window : "90d"}`,
       providesTags: ["Accuracy"],
     }),
+    /**
+     * The cross-reference outcomes and backtests (WS-5 task 11). The track record reads it for the
+     * plain-words half; the lab reads it for the statistics (AUC, intervals, prompt generations).
+     */
+    getCrossReferenceStats: b.query<CrossReferencePayload, { window?: string } | void>({
+      query: (args) => `metrics/cross-reference?window=${args && args.window ? args.window : "90d"}`,
+      providesTags: ["Accuracy"],
+    }),
     getModelMetrics: b.query<ModelMetrics, void>({
       query: () => "metrics/model",
       providesTags: ["Lab"],
@@ -334,4 +379,5 @@ export const {
   useGetInterleaveQuery,
   useTrainModelMutation,
   useGetAccuracyQuery,
+  useGetCrossReferenceStatsQuery,
 } = metricsApi;

@@ -70,7 +70,7 @@ function Ticker({ kind, value }: { kind: IngestKind; value: number }) {
   const display = useCountUp(value);
   return (
     <div className="fa-card px-4 py-3 text-center reel-rise">
-      <div className="fa-stat-value">{display.toLocaleString()}</div>
+      <div className="fa-stat-value">{display.toLocaleString("en-US")}</div>
       <div className="fa-stat-label">{COUNTER_LABELS[kind]}</div>
     </div>
   );
@@ -220,7 +220,7 @@ export default function Onboarding() {
           <p className="fa-caption text-fa-frost-dim text-center">
             {onboarding.modelProgress.phase}
             {onboarding.modelProgress.total > 0 &&
-              ` · ${onboarding.modelProgress.processed.toLocaleString()} / ${onboarding.modelProgress.total.toLocaleString()}`}
+              ` · ${onboarding.modelProgress.processed.toLocaleString("en-US")} / ${onboarding.modelProgress.total.toLocaleString("en-US")}`}
           </p>
         )}
 

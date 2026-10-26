@@ -1,6 +1,7 @@
 import { FlaskConical, Play } from "lucide-react";
 import { useGetModelMetricsQuery, useTrainModelMutation, useGetSyncStatusQuery, useGetInterleaveQuery } from "../store/api";
 import InterleavePanel from "../components/lab/InterleavePanel";
+import CrossReferenceStats from "../components/lab/CrossReferenceStats";
 import type { CounterfactualWindow } from "../store/api";
 
 function pct(value: number | null | undefined, digits = 0): string {
@@ -265,6 +266,9 @@ export default function Lab() {
           )}
         </section>
       )}
+
+      {/* The cross-reference statistics, moved here from the track record (G-10). */}
+      <CrossReferenceStats />
 
       {/* Interleaving — the online instrument. Below the retro loop because that answers "is the
           number honest" and this answers "is this ranker better than that one", which is only
