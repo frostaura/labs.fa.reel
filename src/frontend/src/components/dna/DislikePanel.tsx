@@ -7,9 +7,9 @@ import {
   useUndropMutation,
   type DislikeEntry,
 } from "../../store/api";
-import LoadFailed from "../settings/LoadFailed";
-import SaveStatus from "../settings/SaveStatus";
-import { saveFailureMessage, type SaveMessage } from "../settings/saveOutcome";
+import LoadFailed from "../ui/load-failed";
+import SaveStatus from "../ui/save-status";
+import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
 
 const PAGE_SIZE = 20;
 

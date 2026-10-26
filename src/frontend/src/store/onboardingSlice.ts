@@ -8,6 +8,7 @@ import {
   type RatingsFloor,
   type StatusFailure,
 } from "../lib/modelReadiness";
+import { UNRECOGNISED_STATE_COPY } from "../lib/syncCopy";
 
 export { FIRST_MODEL_TIMING, ratingsNeededCopy } from "../lib/modelReadiness";
 export type { RatingsFloor, StatusFailure } from "../lib/modelReadiness";
@@ -296,6 +297,8 @@ export function failureCopy(degradedReason: string | null, error: string | null)
       return "Reel couldn't write your changes back to Trakt after several tries.";
     case "ProviderDown":
       return "The model service Reel uses is refusing requests, so your profile can't be built right now. Nothing is lost — it resumes when the service is back.";
+    case "UnrecognisedState":
+      return UNRECOGNISED_STATE_COPY;
     default:
       if (error && error.trim().length > 0) return error.trim();
       return "Building your profile stopped on Reel's side. Nothing is lost — try again.";

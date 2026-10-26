@@ -1,5 +1,5 @@
-import { Button } from "../ui/button";
-import type { SaveMessage } from "./saveOutcome";
+import { Button } from "./button";
+import type { SaveMessage } from "./save-outcome";
 
 interface Props {
   message: SaveMessage | null;

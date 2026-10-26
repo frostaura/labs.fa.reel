@@ -54,13 +54,6 @@ export function yearCeiling(now: Date = new Date()): number {
 
 export type GenreState = "neutral" | "include" | "exclude";
 
-/** Human wording for each state — the same words the editor and its legend use. */
-export const GENRE_STATE_LABEL: Record<GenreState, string> = {
-  neutral: "not considered",
-  include: "must have at least one of these",
-  exclude: "must have none of these",
-};
-
 type GenreLists = Pick<FiltersPayload, "includeGenres" | "excludeGenres">;
 
 export function genreState(filters: GenreLists, genre: string): GenreState {

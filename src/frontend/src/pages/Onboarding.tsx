@@ -26,7 +26,7 @@ import {
   type Insight,
   type StatusSnapshot,
 } from "../store/onboardingSlice";
-import { saveFailureMessage } from "../components/settings/saveOutcome";
+import { saveFailureMessage } from "../components/ui/save-outcome";
 import type { AppDispatch, RootState } from "../store";
 
 /**

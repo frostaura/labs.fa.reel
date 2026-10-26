@@ -5,8 +5,8 @@ import PreferencesSection from "../components/settings/PreferencesSection";
 import PreferenceTags from "../components/settings/PreferenceTags";
 import BillingCard from "../components/settings/BillingCard";
 import PushOptIn from "../components/settings/PushOptIn";
-import LoadFailed from "../components/settings/LoadFailed";
-import SaveStatus from "../components/settings/SaveStatus";
+import LoadFailed from "../components/ui/load-failed";
+import SaveStatus from "../components/ui/save-status";
 import { useLeaveGuard } from "../components/settings/useLeaveGuard";
 import { pipelineLabel } from "../lib/modelReadiness";
 import {
@@ -14,7 +14,7 @@ import {
   saveFailureMessage,
   savedMessage,
   type SaveMessage,
-} from "../components/settings/saveOutcome";
+} from "../components/ui/save-outcome";
 import {
   useGetBillingStatusQuery,
   useGetSessionQuery,

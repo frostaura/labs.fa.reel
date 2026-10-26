@@ -22,7 +22,7 @@ import ShareCard from "../components/dna/ShareCard";
 import DislikePanel from "../components/dna/DislikePanel";
 import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
 import TastePockets from "../components/dna/TastePockets";
-import LoadFailed from "../components/settings/LoadFailed";
+import LoadFailed from "../components/ui/load-failed";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";

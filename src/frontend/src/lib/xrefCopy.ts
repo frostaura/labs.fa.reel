@@ -24,8 +24,10 @@ const count = (value: number) => value.toLocaleString("en-US");
 
 const plural = (value: number, singular: string) => (value === 1 ? singular : `${singular}s`);
 
-/** The gating decisions the server can send. `unmeasured` means no backtest has ever run. */
-export const GATING_DEMOTE_ONLY = "demote-only";
+/**
+ * The gating decisions the server can send (it also sends `demote-only`, which needs no constant
+ * here). `unmeasured` means no backtest has ever run.
+ */
 export const GATING_GATING = "gating";
 export const GATING_UNMEASURED = "unmeasured";
 

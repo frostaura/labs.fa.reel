@@ -11,7 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import { Target } from "lucide-react";
-import LoadFailed from "../components/settings/LoadFailed";
+import LoadFailed from "../components/ui/load-failed";
 import { useGetAccuracyQuery, useGetSyncStatusQuery, type AccuracyMoment } from "../store/api";
 import { modelReadiness, noModelSentence } from "../lib/modelReadiness";
 import { posterUrl } from "../lib/tmdbImages";

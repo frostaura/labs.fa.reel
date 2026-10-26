@@ -17,7 +17,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import ConditionsEditor from "./ConditionsEditor";
-import { pinFailureText } from "./saveOutcome";
+import { pinFailureText } from "../ui/save-outcome";
 
 /**
  * Content preferences on the Settings screen: the shared {@link ConditionsEditor} plus the PIN that

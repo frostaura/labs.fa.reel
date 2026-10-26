@@ -37,9 +37,9 @@ import {
   type GenreState,
 } from "../../lib/pickConditions";
 import ConditionSummary from "./ConditionSummary";
-import LoadFailed from "./LoadFailed";
-import SaveStatus from "./SaveStatus";
-import { saveFailureMessage, savedMessage, type SaveMessage } from "./saveOutcome";
+import LoadFailed from "../ui/load-failed";
+import SaveStatus from "../ui/save-status";
+import { saveFailureMessage, savedMessage, type SaveMessage } from "../ui/save-outcome";
 import { useLeaveGuard } from "./useLeaveGuard";
 
 interface Props {

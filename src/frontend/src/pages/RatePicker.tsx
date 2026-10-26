@@ -7,8 +7,8 @@ import {
   type RateSuggestion,
 } from "../store/api";
 import PosterImage from "../components/rec/PosterImage";
-import LoadFailed from "../components/settings/LoadFailed";
-import { refusedOutright } from "../components/settings/saveOutcome";
+import LoadFailed from "../components/ui/load-failed";
+import { refusedOutright } from "../components/ui/save-outcome";
 import { Button } from "../components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 

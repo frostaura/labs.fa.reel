@@ -288,6 +288,16 @@ describe("failureCopy — never the blank 'Something went wrong.'", () => {
     },
   );
 
+  it.each([null, "DeltaSync failed after 3 attempts."])(
+    "UnrecognisedState says a newer version wrote it, claims no failure and offers no reconnect (error %s)",
+    (error) => {
+      const text = failureCopy("UnrecognisedState", error);
+      expect(text).toMatch(/^A newer version of Reel/);
+      expect(text).not.toMatch(/stopped|fail|try again/i);
+      expect(needsReconnect("UnrecognisedState")).toBe(false);
+    },
+  );
+
   it("only the Trakt access reasons offer a reconnect", () => {
     expect(["TraktRevoked", "TraktRefreshFailed", "ProviderDown", "PipelineFailed", null].map(needsReconnect)).toEqual([
       true, true, false, false, false,

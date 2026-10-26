@@ -9,7 +9,7 @@ import {
   refusedOutright,
   saveFailureMessage,
   savedMessage,
-} from "./saveOutcome";
+} from "./save-outcome";
 
 describe("saveFailureMessage", () => {
   it("a 423 is the PIN message, in danger tone, with no retry (retrying cannot unlock)", () => {

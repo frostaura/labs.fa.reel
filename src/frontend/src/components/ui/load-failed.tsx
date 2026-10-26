@@ -1,5 +1,5 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { Button } from "../ui/button";
+import { Button } from "./button";
 
 interface Props {
   /** What failed to arrive, in the page's own words — "your taste DNA", "the track record". */

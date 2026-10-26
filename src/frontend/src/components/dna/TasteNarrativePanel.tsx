@@ -5,9 +5,9 @@ import {
   useRegenerateNarrativeMutation,
   useSaveNarrativeMutation,
 } from "../../store/api";
-import LoadFailed from "../settings/LoadFailed";
-import SaveStatus from "../settings/SaveStatus";
-import { saveFailureMessage, type SaveMessage } from "../settings/saveOutcome";
+import LoadFailed from "../ui/load-failed";
+import SaveStatus from "../ui/save-status";
+import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
 
 /**
  * What Reel believes about your taste, in words — and your correction to it.

@@ -387,8 +387,13 @@ for (const [viewport, budget] of [
         }
         const top = await heroCard.evaluate((el) => el.getBoundingClientRect().top);
         expect(top).toBeLessThanOrEqual(budget - HEADROOM_PX);
-        // And nothing above it made the page wider than the phone.
-        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width);
+        // And nothing above it made the page scroll sideways. Measured against the layout width
+        // rather than the viewport: WebKit's classic scrollbar takes its width out of the page.
+        const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+          scrollWidth: document.documentElement.scrollWidth,
+          clientWidth: document.documentElement.clientWidth,
+        }));
+        expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
         // Every request the page made was answered by a fixture above.
         expect(unmocked).toEqual([]);
       });

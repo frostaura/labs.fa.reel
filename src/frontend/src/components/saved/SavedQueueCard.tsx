@@ -97,7 +97,7 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
           {item.availableNow ? (
             <span className="text-fa-frost/80">streaming now</span>
           ) : (
-            <span title="Not on one of your flatrate services in your region right now.">not streaming</span>
+            <span title="Not on a subscription or free service in your region right now.">not streaming</span>
           )}
         </p>
         {/* The list line says "syncing…" only while a write-back is genuinely waiting — see

@@ -5,8 +5,8 @@ import {
   useGetPreferenceTagsQuery,
   useRemovePreferenceTagMutation,
 } from "../../store/api";
-import SaveStatus from "./SaveStatus";
-import { saveFailureMessage, type SaveMessage } from "./saveOutcome";
+import SaveStatus from "../ui/save-status";
+import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
 
 /**
  * "Things you're into" — positive preference tags (e.g. "magical serial killer mysteries"). The
