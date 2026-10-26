@@ -145,6 +145,34 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(answerer.Text, outcome.AssistantText);
     }
 
+    /// <summary>Task 4: "how many X are left?" is the supply tool — counts only, no cards, no judge.</summary>
+    [Fact]
+    public async Task A_how_many_question_is_answered_from_the_supply_with_no_cards()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var accountId = await SeedAccountAsync();
+        var ids = await SeedTopicalAsync(topic, ("V2 Yes", 5));
+        await MarkSeenAsync(accountId, ids.Take(2));
+        var planner = new ScriptedPlanner(_ => Plan(TurnAct.ItemQuestion, ConversationStateDelta.None with { Concepts = [topic] }) with
+        {
+            Tools = [new ToolRequest(AskTool.Supply)],
+        });
+        var judge = new NameJudge();
+        var (engine, events, emit) = Build(accountId, planner, judge);
+
+        var outcome = await engine.StreamAsync(Input($"how many {topic} movies are left?"), accountId, emit, CancellationToken.None);
+
+        Assert.Equal($"You have 3 unseen {topic} titles left inside your conditions; you've seen 2.", outcome.AssistantText);
+        Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
+        Assert.Equal(0, judge.Batches);
+        Assert.DoesNotContain(events, e => e.Event is "picks" or "tray");
+    }
+
     [Fact]
     public async Task A_spent_plan_allowance_is_a_coded_refusal_before_any_work()
     {

@@ -86,6 +86,9 @@ public sealed class AskStageTimings
     /// <summary>Ask Reel v2: the planner call (§4.2 step 1).</summary>
     public const string Plan = "plan";
 
+    /// <summary>Ask Reel v2: building the planner's context (taste summary, persona), inside <see cref="Plan"/>.</summary>
+    public const string PlanContext = "plan.context";
+
     /// <summary>Ask Reel v2: the retrieval tool (§4.2 step 2).</summary>
     public const string Retrieve = "retrieve";
 
@@ -110,7 +113,7 @@ public sealed class AskStageTimings
         [
             Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
             Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
-            Plan, Retrieve, Judge, JudgeFirstBatch, Answer, Compose,
+            Plan, PlanContext, Retrieve, Judge, JudgeFirstBatch, Answer, Compose,
         ];
 
     /// <summary>

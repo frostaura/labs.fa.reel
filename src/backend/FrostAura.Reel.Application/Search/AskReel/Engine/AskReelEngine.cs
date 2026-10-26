@@ -90,11 +90,16 @@ public sealed class AskReelEngine(
 
         public FilterRuleSet Standing { get; set; } = FilterRuleSet.FromRows([]);
 
+        public MediaScope MediaFilter { get; set; }
+
         public string? ConflictJson { get; set; }
 
         public Stopwatch Clock { get; } = Stopwatch.StartNew();
 
         public bool FirstCardMarked { get; set; }
+
+        /// <summary>The viewer's persona line, built once for the planner and reused by the judge.</summary>
+        public string? Persona { get; set; }
 
         public void Degrade(string flag)
         {
@@ -119,6 +124,7 @@ public sealed class AskReelEngine(
         turn.Standing = FilterRuleSet.FromRows(filterRows);
         turn.Floor = Floor(filterRows);
         var mediaFilter = MediaScopes.From(input.MediaFilter);
+        turn.MediaFilter = mediaFilter;
         var state = await LoadStateAsync(input, ct);
 
         await PhaseAsync(turn, "planning", "Reading your request");
@@ -170,10 +176,12 @@ public sealed class AskReelEngine(
         }
 
         var accountId = turn.AccountId;
-        var now = DateTime.UtcNow;
-        var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
+        var contextClock = Stopwatch.StartNew();
+        var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
         var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
+        turn.Timings.Mark(AskStageTimings.PlanContext, contextClock.Elapsed.TotalMilliseconds);
         var tasteSummary = persona.Declined is { Length: > 0 } declined ? $"{persona.Taste}. {declined}" : persona.Taste;
+        turn.Persona = persona.Taste.Length <= 300 ? persona.Taste : persona.Taste[..300];
 
         var plan = await planner.PlanAsync(
             new PlanInput(
@@ -264,7 +272,12 @@ public sealed class AskReelEngine(
         // "How many ninja movies are left?" — the supply tool, counts only.
         if (tools.Contains(AskTool.Supply) && plan.References.Count == 0)
         {
-            var hard = next.Hard.HasConcepts || next.Hard.People.Count > 0 ? next.Hard : state.Hard;
+            // The shelf the question names ("how many ninja movies…"), read as a request of its own;
+            // a question that names none ("how many are left?") counts the conversation's current one.
+            var delta = plan.Delta;
+            var hard = delta.Concepts.Count > 0 || delta.Genres.Count > 0 || delta.People.Count > 0
+                ? ConversationStateReducer.Apply(state, plan with { Act = TurnAct.NewRequest }, turn.MediaFilter).Hard
+                : state.Hard;
             await PhaseAsync(turn, "searching", "Counting what's left");
             var report = await supplyReporter.ReportAsync(turn.AccountId, hard, turn.Input.ShownTitleIds, ct);
             return await AnswerAsync(turn, plan, next, SupplyAnswer(report, hard), null, ct);
@@ -360,18 +373,37 @@ public sealed class AskReelEngine(
         return string.Join(", ", parts) + ". That's what I know about it — I can't say more than that.";
     }
 
-    private static string SupplyAnswer(SupplyReport report, HardConstraints hard)
+    /// <summary>
+    /// "How many X are left?" from the supply alone (§4.4 <c>supply</c>). With a bar set, "left" is
+    /// what clears it and has not been shown here; titles with no score yet are counted separately,
+    /// because a set bar holds them back. With no bar, every eligible unshown title is left.
+    /// </summary>
+    internal static string SupplyAnswer(SupplyReport report, HardConstraints hard)
     {
         var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords + " " : string.Empty;
         var noun = hard.Media switch { MediaScope.Movies => "movies", MediaScope.Shows => "shows", _ => "titles" };
-        var offerable = Math.Max(0, report.Offerable);
-        var lead = FormattableString.Invariant(
-            $"You have {offerable} unseen {topic}{noun} left that clear your conditions and your bar");
-        var seen = report.AlreadySeen > 0 ? FormattableString.Invariant($"; you've seen {report.AlreadySeen}") : string.Empty;
-        var held = report.ExcludedByConditions > 0
-            ? FormattableString.Invariant($", and your conditions hold back {report.ExcludedByConditions}")
-            : string.Empty;
-        return $"{lead}{seen}{held}.";
+        var barred = report.PredictedFloor is > 0m;
+        var left = Math.Max(0, barred ? report.Offerable : report.Eligible - report.AlreadyShown);
+        var lead = barred
+            ? FormattableString.Invariant($"You have {left} unseen {topic}{noun} left that clear your conditions and your bar")
+            : FormattableString.Invariant($"You have {left} unseen {topic}{noun} left inside your conditions");
+        var parts = new List<string> { lead };
+        if (report.AlreadySeen > 0)
+        {
+            parts.Add(FormattableString.Invariant($"you've seen {report.AlreadySeen}"));
+        }
+
+        if (barred && report.Unscored > 0)
+        {
+            parts.Add(FormattableString.Invariant($"{report.Unscored} more have no score from your model yet"));
+        }
+
+        if (report.ExcludedByConditions > 0)
+        {
+            parts.Add(FormattableString.Invariant($"your conditions hold back {report.ExcludedByConditions}"));
+        }
+
+        return string.Join("; ", parts) + ".";
     }
 
     // ── Search ──────────────────────────────────────────────────────────────────────────────
@@ -425,22 +457,16 @@ public sealed class AskReelEngine(
 
         var personOnly = hard.People.Count > 0 && !hard.HasConcepts;
         var judgedSlice = candidates.Take(RequestJudge.MaxJudged).ToList();
-        IReadOnlyDictionary<Guid, decimal> predictions;
-        using (turn.Timings.Stage(AskStageTimings.Score))
-        {
-            predictions = judgedSlice.Count == 0
-                ? new Dictionary<Guid, decimal>()
-                : await scorer.ScoreAsync(accountId, judgedSlice.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
-        }
-
         int? personSeen = null;
         if (personOnly)
         {
+            var predictions = await ScoreAsync(turn, judgedSlice, ct);
             personSeen = await SeenCreditsAsync(accountId, hard.People, hard.Media, ct);
             await PlacePersonCreditsAsync(turn, plan, judgedSlice, titles, predictions, hard.People[0]);
         }
         else if (!judgeModel.IsAvailable)
         {
+            var predictions = await ScoreAsync(turn, judgedSlice, ct);
             // No model to judge with: what was found is shown as found, unchecked, never as a pick.
             if (!turn.Degraded.Contains(SearchTurnDegraded.NoModel))
             {
@@ -456,7 +482,7 @@ public sealed class AskReelEngine(
         }
         else
         {
-            await JudgeAsync(turn, plan, next, judgedSlice, titles, predictions, ct);
+            await JudgeAsync(turn, next, judgedSlice, titles, ct);
         }
 
         // Trays, in the order the screen renders them: the floor tray, the near misses, the unchecked.
@@ -549,13 +575,22 @@ public sealed class AskReelEngine(
         return Outcome(turn, plan, saved, composed.Reply, composed.Reason, mode, all, IntentJsonOf(hard, next));
     }
 
+    /// <summary>The account's predictions for <paramref name="slice"/>, scored on demand where missing (§4.7).</summary>
+    private async Task<IReadOnlyDictionary<Guid, decimal>> ScoreAsync(Turn turn, IReadOnlyList<Candidate> slice, CancellationToken ct)
+    {
+        using (turn.Timings.Stage(AskStageTimings.Score))
+        {
+            return slice.Count == 0
+                ? new Dictionary<Guid, decimal>()
+                : await scorer.ScoreAsync(turn.AccountId, slice.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
+        }
+    }
+
     private async Task JudgeAsync(
         Turn turn,
-        PlanResult plan,
         ConversationState next,
         IReadOnlyList<Candidate> slice,
         IReadOnlyDictionary<Guid, Title> titles,
-        IReadOnlyDictionary<Guid, decimal> predictions,
         CancellationToken ct)
     {
         if (slice.Count == 0)
@@ -569,8 +604,25 @@ public sealed class AskReelEngine(
         var pending = batches.Select(b => b.Count).ToArray();
         var verdicts = new Dictionary<Guid, JudgeVerdict>();
         var candidates = slice.ToDictionary(c => c.TitleId);
-        var persona = await PersonaLineAsync(turn.AccountId, ct);
+        var persona = turn.Persona ?? await PersonaLineAsync(turn.AccountId, ct);
         turn.Models["judge"] = judgeModel.ModelId;
+
+        // Scored WHILE the judge runs: the predictions are needed only to place a returned batch, and
+        // the judge's calls never touch the database, so the scorer has the context to itself. Every
+        // database read the judging needs (the titles, the persona) is done above, before it starts.
+        // The timings are recorded from this flow only (AskStageTimings is not thread-safe), so the
+        // scorer's elapsed time is captured and marked once it has been awaited.
+        var scoreMs = 0d;
+        var scoring = TimedScoreAsync();
+        async Task<IReadOnlyDictionary<Guid, decimal>> TimedScoreAsync()
+        {
+            var clock = Stopwatch.StartNew();
+            var scored = await scorer.ScoreAsync(turn.AccountId, slice.Select(c => c.TitleId).ToList(), DateTime.UtcNow, ct);
+            scoreMs = clock.Elapsed.TotalMilliseconds;
+            return scored;
+        }
+
+        IReadOnlyDictionary<Guid, decimal>? predictions = null;
 
         await PhaseAsync(turn, "judging", FormattableString.Invariant(
             $"Checking {judgeTitles.Count} {(judgeTitles.Count == 1 ? "title" : "titles")} against your request"));
@@ -579,56 +631,78 @@ public sealed class AskReelEngine(
         var unjudgedYes = new List<Placed>();
         var judgeClock = Stopwatch.StartNew();
         var firstBatchMarked = false;
-        await foreach (var verdict in judge.JudgeAsync(
-                           new JudgeInput(turn.AccountId, JudgeRequest(turn.Input.Message, next), persona, judgeTitles), ct))
+        try
         {
-            verdicts[verdict.TitleId] = verdict;
-            var index = batchOf[verdict.TitleId];
-            if (--pending[index] > 0)
+            await foreach (var verdict in judge.JudgeAsync(
+                               new JudgeInput(turn.AccountId, JudgeRequest(turn.Input.Message, next), persona, judgeTitles), ct))
             {
-                continue;
-            }
+                verdicts[verdict.TitleId] = verdict;
+                var index = batchOf[verdict.TitleId];
+                if (--pending[index] > 0)
+                {
+                    continue;
+                }
 
-            if (!firstBatchMarked)
-            {
-                firstBatchMarked = true;
-                turn.Timings.Mark(AskStageTimings.JudgeFirstBatch, judgeClock.Elapsed.TotalMilliseconds);
-            }
+                if (!firstBatchMarked)
+                {
+                    firstBatchMarked = true;
+                    turn.Timings.Mark(AskStageTimings.JudgeFirstBatch, judgeClock.Elapsed.TotalMilliseconds);
+                }
 
-            // The whole batch is in: place it, rank its picks by the blend, and emit them appended.
-            var batch = batches[index].Select(id => verdicts[id]).ToList();
-            if (batch.All(v => !v.Judged))
-            {
-                failedBatches++;
-            }
+                // The whole batch is in: place it, rank its picks by the blend, and emit them appended.
+                predictions ??= await scoring;
+                var batch = batches[index].Select(id => verdicts[id]).ToList();
+                if (batch.All(v => !v.Judged))
+                {
+                    failedBatches++;
+                }
 
-            var placed = batch
-                .Select(v => Place(titles[v.TitleId], candidates[v.TitleId], v, predictions.GetValueOrDefault(v.TitleId), turn.Floor))
-                .Where(p => p is not null)
-                .Select(p => p!)
-                .ToList();
-            unjudgedYes.AddRange(placed.Where(p => p.Tier == "unjudged"));
-            var batchPicks = placed
-                .Where(p => p.Tier == SearchTurnCardTier.Pick)
-                .OrderByDescending(p => p.Blend)
-                .ThenBy(p => p.Title.Id)
-                .Select(p => p with { Rank = turn.Shown.Count(s => s.Tier == SearchTurnCardTier.Pick) })
-                .ToList();
-            var ranked = new List<Placed>(batchPicks.Count);
-            foreach (var pick in batchPicks)
-            {
-                var withRank = pick with { Rank = turn.Shown.Count(s => s.Tier == SearchTurnCardTier.Pick) };
-                turn.Shown.Add(withRank);
-                ranked.Add(withRank);
-            }
+                var placed = batch
+                    .Select(v => Place(titles[v.TitleId], candidates[v.TitleId], v, predictions.GetValueOrDefault(v.TitleId), turn.Floor))
+                    .Where(p => p is not null)
+                    .Select(p => p!)
+                    .ToList();
+                unjudgedYes.AddRange(placed.Where(p => p.Tier == "unjudged"));
+                var batchPicks = placed
+                    .Where(p => p.Tier == SearchTurnCardTier.Pick)
+                    .OrderByDescending(p => p.Blend)
+                    .ThenBy(p => p.Title.Id)
+                    .Select(p => p with { Rank = turn.Shown.Count(s => s.Tier == SearchTurnCardTier.Pick) })
+                    .ToList();
+                var ranked = new List<Placed>(batchPicks.Count);
+                foreach (var pick in batchPicks)
+                {
+                    var withRank = pick with { Rank = turn.Shown.Count(s => s.Tier == SearchTurnCardTier.Pick) };
+                    turn.Shown.Add(withRank);
+                    ranked.Add(withRank);
+                }
 
-            turn.Shown.AddRange(placed.Where(p => p.Tier is SearchTurnCardTier.NearMiss or SearchTurnCardTier.BelowFloor));
-            if (ranked.Count > 0)
+                turn.Shown.AddRange(placed.Where(p => p.Tier is SearchTurnCardTier.NearMiss or SearchTurnCardTier.BelowFloor));
+                if (ranked.Count > 0)
+                {
+                    await EmitPicksAsync(turn, index, ranked);
+                }
+            }
+        }
+        finally
+        {
+            // Never leave the scorer running on this turn's context: a judge that threw or a turn
+            // that was cancelled still waits for it, and its outcome is then irrelevant.
+            if (predictions is null)
             {
-                await EmitPicksAsync(turn, index, ranked);
+                try
+                {
+                    await scoring;
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    logger.LogDebug(ex, "Ask Reel v2: scoring abandoned with the judge.");
+                }
             }
         }
 
+        predictions ??= await scoring;
+        turn.Timings.Mark(AskStageTimings.Score, scoreMs);
         turn.Timings.Mark(AskStageTimings.Judge, judgeClock.Elapsed.TotalMilliseconds);
         turn.Calls.Add(new LlmCallMeta(judgeModel.ModelId, null, false, batches.Count, (long)judgeClock.Elapsed.TotalMilliseconds));
 
