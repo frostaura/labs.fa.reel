@@ -4,6 +4,7 @@ using FrostAura.Reel.Application.Lens;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Providers;
 using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Application.Tenancy;
@@ -332,12 +333,10 @@ public static class FeedEndpoints
             var nowUtc = DateTime.UtcNow;
 
             // Best-effort streaming strips from the shared availability cache (populated as titles
-            // are viewed; no extra TMDB calls here). Stream/flatrate providers only, top 3 by priority.
+            // are viewed; no extra TMDB calls here). Streaming-now offers only (StreamingNowPolicy:
+            // subscription, free or ads, 7-day freshness), top 3 by priority.
             var feedTitleIds = items.Select(x => x.Title.Id).ToList();
-            var availCutoff = nowUtc.AddDays(-7);
-            var providersByTitle = (await db.TitleAvailabilities
-                    .Where(a => feedTitleIds.Contains(a.TitleId) && a.Region == account.Region
-                        && a.Kind == Domain.Providers.AvailabilityKind.Flatrate && a.FetchedAt > availCutoff)
+            var providersByTitle = (await StreamingNowPolicy.Offers(db.TitleAvailabilities, feedTitleIds, account.Region, nowUtc)
                     .Join(db.StreamingProviders, a => a.ProviderId, p => p.Id, (a, p) => new { a.TitleId, p.Name, p.LogoPath, p.DisplayPriority })
                     .ToListAsync(ct))
                 .GroupBy(x => x.TitleId)
@@ -902,8 +901,8 @@ public static class FeedEndpoints
             .Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
 
     /// <summary>
-    /// Flatrate provider strip (top 3 by display priority, 7-day freshness) for a batch of
-    /// titles. Internal because the digest and blend surfaces reuse the exact same read —
+    /// Streaming-now provider strip (<see cref="StreamingNowPolicy"/>: subscription, free or ads,
+    /// 7-day freshness; top 3 by display priority) for a batch of titles. Internal because the digest and blend surfaces reuse the exact same read —
     /// a second copy of this query is how the read-side TTL and the write-side TTL drift.
     /// </summary>
     internal static async Task<Dictionary<Guid, IReadOnlyList<CardProvider>>> ProvidersForAsync(
@@ -914,10 +913,7 @@ public static class FeedEndpoints
             return new Dictionary<Guid, IReadOnlyList<CardProvider>>();
         }
 
-        var cutoff = nowUtc.AddDays(-7);
-        return (await db.TitleAvailabilities
-                .Where(a => titleIds.Contains(a.TitleId) && a.Region == region
-                    && a.Kind == Domain.Providers.AvailabilityKind.Flatrate && a.FetchedAt > cutoff)
+        return (await StreamingNowPolicy.Offers(db.TitleAvailabilities, titleIds, region, nowUtc)
                 .Join(db.StreamingProviders, a => a.ProviderId, p => p.Id, (a, p) => new { a.TitleId, p.Name, p.LogoPath, p.DisplayPriority })
                 .ToListAsync(ct))
             .GroupBy(x => x.TitleId)

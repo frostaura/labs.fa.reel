@@ -173,10 +173,12 @@ ci-knip:
 ci-vite-proxy:
 	cd src/frontend && node ../../deploy/ci/vite-proxy-probe.mjs
 
-# Both engines: Safari is where the founder's installed PWA runs. Service workers are blocked by the
-# Playwright config; PW_PORT keeps parallel runs apart.
+# The dev-server specs in both engines (Safari is where the founder's installed PWA runs), with service
+# workers blocked by the Playwright config; then the *.preview.spec.ts specs against the production
+# build (Chromium), which test the real service worker (WS-9 CR-3). PW_PORT keeps parallel runs apart.
 ci-e2e:
 	cd src/frontend && CI=1 npx --no-install playwright test --project=chromium --project=webkit
+	cd src/frontend && CI=1 npx --no-install playwright test -c playwright.preview.config.ts
 
 # Known-vulnerable dependencies and committed secrets across the whole tree. HIGH and CRITICAL with
 # a fix available fail the gate. (Misconfiguration scanning joins once the images run non-root.)
