@@ -228,6 +228,58 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
         }
     }
 
+    /// <summary>
+    /// IR1S-05: a resumed thread shows a stored why-line only where a new turn would. Lines written
+    /// before today's guards carried hedges on pick cards ("…, though the show leans on mystery"),
+    /// and opening Recent rendered them. Varied over the verdict and the tray: a hedged line on a
+    /// "yes" pick, on a row older than verdicts, and on a held-back match is blanked; a clean line
+    /// stays; a partial verdict's honest negative stays in the near-miss tray; a third-person leak
+    /// goes whatever the verdict. Both resume routes are asserted, since both project the same rows.
+    /// </summary>
+    [Fact]
+    public async Task A_resumed_thread_never_replays_a_line_a_new_turn_would_discard()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        const string Hedged = "A slow-burn mystery with your kind of payoff, though the show leans on procedure.";
+        const string Clean = "A slow-burn sci-fi mystery that rewards your patience.";
+        const string Leak = "A slow-burn mystery that fits their taste for puzzles.";
+        var (accountId, client) = await SignInAsync($"replay-hedge-{Guid.NewGuid():N}");
+        using (client)
+        {
+            var (conversationId, _) = await SeedCompletedTurnAsync(accountId, cards: 0, shaped:
+            [
+                (Hedged, "yes", SearchTurnCardTier.Pick),
+                (Clean, "yes", SearchTurnCardTier.Pick),
+                (Hedged, null, SearchTurnCardTier.Pick),
+                (Hedged, "yes", SearchTurnCardTier.BelowFloor),
+                (Hedged, "partial", SearchTurnCardTier.NearMiss),
+                (Leak, "partial", SearchTurnCardTier.NearMiss),
+            ]);
+
+            using var resume = await client.GetAsync($"/api/search/conversations/{conversationId}");
+            Assert.Equal(HttpStatusCode.OK, resume.StatusCode);
+            using var resumed = JsonDocument.Parse(await resume.Content.ReadAsStringAsync());
+            var turnId = await NewestAssistantTurnIdAsync(accountId, conversationId);
+            using var reconnect = await client.GetAsync($"/api/search/turns/{turnId}");
+            Assert.Equal(HttpStatusCode.OK, reconnect.StatusCode);
+            using var turn = JsonDocument.Parse(await reconnect.Content.ReadAsStringAsync());
+
+            foreach (var root in new[] { resumed.RootElement, turn.RootElement })
+            {
+                Assert.Equal([null, Clean, null], Whys(root.GetProperty("cards")));
+                Assert.Equal([null], Whys(root.GetProperty("belowFloor")));
+                Assert.Equal([Hedged, null], Whys(root.GetProperty("nearMiss")));
+            }
+        }
+
+        static List<string?> Whys(JsonElement cards) =>
+            cards.EnumerateArray().Select(c => c.GetProperty("why").GetString()).ToList();
+    }
+
     /// <summary>The notice as a turn would have stored it — genres, keywords, year bounds, prose.</summary>
     private const string StoredConflict =
         """
@@ -300,8 +352,11 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
     /// what is under test is the replay branch and the harness reaches no catalogue.
     /// </summary>
     private async Task<(Guid ConversationId, Guid ClientTurnId)> SeedCompletedTurnAsync(
-        Guid accountId, int cards, string? conflict = null)
+        Guid accountId, int cards, string? conflict = null,
+        IReadOnlyList<(string? Why, string? Satisfies, string? Tier)>? shaped = null)
     {
+        shaped ??= [.. Enumerable.Range(0, cards).Select(_ => ((string?)null, (string?)null, (string?)null))];
+        cards = shaped.Count;
         await using var db = fixture.CreateContext(new AccountContext());
         var now = DateTime.UtcNow;
         var clientTurnId = Guid.NewGuid();
@@ -376,6 +431,10 @@ public class AskReelReplayContractTests(PostgresFixture fixture, ReelApiFactory 
                 Rank = rank,
                 PredictedRating = 7.1m,
                 Blend = 0.5m,
+                Why = shaped[rank].Why,
+                Satisfies = shaped[rank].Satisfies,
+                Tier = shaped[rank].Tier,
+                BelowFloor = shaped[rank].Tier == SearchTurnCardTier.BelowFloor,
                 CreatedAt = now,
             });
         }

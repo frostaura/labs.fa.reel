@@ -897,6 +897,65 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     /// <summary>
+    /// IREV1-SYS-04: a keyless turn searches only what the user asked FOR. It used to search the raw
+    /// sentence, so "no superheroes please" answered 17 superhero titles and a question about a card
+    /// on screen matched 14 unrelated titles on its stop words. Varied over a message that only
+    /// rules something out (nothing searched), a request with a negation riding along (searched,
+    /// with the ruled-out titles dropped from the hits — a word no vocabulary lists included), and a
+    /// pointer at a card on screen (a question about that card — nothing searched, even though its
+    /// words would match).
+    /// </summary>
+    [Theory]
+    [InlineData("no superheroes please", 0, 0, "only names what to skip")]
+    [InlineData("{0} but no superheroes", 0, 1, null)]
+    [InlineData("I want {0}, not superheroes", 0, 1, null)]
+    [InlineData("{0} but no caped", 0, 1, null)]
+    [InlineData("how long is the second one? {0}", 2, 0, "a question about “the second one”")]
+    public async Task A_keyless_turn_searches_what_was_asked_for_and_never_what_was_ruled_out(
+        string messageShape, int presentedCards, int shown, string? replyPart)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var word = $"keylessn{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        await SeedTopicalTitleAsync("unrelated", t => t.Name = $"{word} plain");
+        await SeedTopicalTitleAsync("superhero", t => t.Name = $"{word} caped");
+        await SeedTopicalTitleAsync("superhero", t => t.Name = "A superhero team-up");
+        var agent = new VerdictAgent();
+        var (service, events) = BuildService(
+            accountId, new ScriptedTmdbClient([]), agent, out var emit, embeddings: new UnavailableEmbeddingProvider());
+        var presented = Enumerable.Range(1, presentedCards)
+            .Select(rank => new PresentedCard(1, rank, Guid.NewGuid(), $"Shown {rank}", 2012, MediaType.Movie))
+            .ToList();
+
+        var outcome = await service.StreamAsync(
+            new LiveSearchExpansionService.AskTurnInput(
+                string.Format(System.Globalization.CultureInfo.InvariantCulture, messageShape, word), [], [], presented, "US", [],
+                ApiUsagePurpose.RerankAsk),
+            emit, CancellationToken.None);
+
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        var cards = Names(done.GetProperty("unchecked"));
+        Assert.Equal(shown, cards.Count);
+        Assert.All(cards, n => Assert.Equal($"{word} plain", n));
+        Assert.Equal(["no-model"], done.GetProperty("degraded").EnumerateArray().Select(d => d.GetString()));
+        Assert.StartsWith("Ask Reel has no language model connected right now", outcome.AssistantText, StringComparison.Ordinal);
+        if (replyPart is not null)
+        {
+            Assert.Contains(replyPart, outcome.AssistantText, StringComparison.Ordinal);
+            Assert.Contains("I haven’t searched", outcome.AssistantText, StringComparison.Ordinal);
+            Assert.DoesNotContain("found nothing", outcome.AssistantText, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(0, agent.Interprets);
+        Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
+    }
+
+    /// <summary>
     /// R1-07: a request with a hard concept never widens past it — one discovery pass, no
     /// popularity last resort — so a topic with nothing eligible answers none-found without judging
     /// filler. A request with no concept (a mood) still widens.
@@ -964,6 +1023,89 @@ public class AskReelGateTurnTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Equal(new DateTime(1990, 1, 1, 0, 0, 0, DateTimeKind.Utc), tmdb.ReleasedAfter);
         Assert.Equal(titleSearched, tmdb.TitleSearches.Count > 0);
         Assert.Contains("zombies", tmdb.KeywordSearches);
+    }
+
+    /// <summary>
+    /// IREV1-SYS-01: titles the catalogue tags with the user's concept are judged FIRST, whatever
+    /// their similarity. The pool used to be cut to its 24 nearest titles before the evidence-first
+    /// order was applied, and the seed is the very vector the kNN arm pulled its neighbours with —
+    /// so a tagged title survived only if it was also among the nearest, and the reply counted "5
+    /// unseen heist movies tagged that way" that no judge ever saw. Here every tagged title sits at
+    /// the BOTTOM of the similarity order, under more distractors than the cut keeps; varied over
+    /// several tagged matches (an answer) and a lone one held back by the bar (the samurai turn,
+    /// which must name it under the bar rather than count it and show nothing).
+    /// </summary>
+    [Theory]
+    [InlineData(5, "0", 30)]
+    [InlineData(1, "9.9", 30)]
+    [InlineData(3, "0", 26)]
+    public async Task Tagged_titles_are_judged_before_any_similarity_cut(int tagged, string floor, int distractors)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = $"evfirst{Guid.NewGuid():N}"[..16];
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+        if (floor != "0")
+        {
+            await SeedScoresAsync(accountId, [], 0m);
+            await SetRatingFloorAsync(accountId, floor);
+        }
+
+        var taggedIds = new List<Guid>();
+        for (var i = 0; i < tagged; i++)
+        {
+            taggedIds.Add(await SeedTopicalTitleAsync(topic, t => t.Name = $"Gate Yes {TaggedMarker} {i}"));
+        }
+
+        var tmdb = new ScriptedTmdbClient(Discoverable(TmdbIdFirst + 1900 + (tagged * 40) + distractors, ("No", distractors)));
+        var agent = new VerdictAgent(keywords: [topic]);
+        var (service, events) = BuildService(
+            accountId, tmdb, agent, out var emit, withRetrieval: true, embeddings: new TaggedFarEmbeddingProvider());
+
+        var outcome = await service.StreamAsync(
+            $"{topic} movies", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit, CancellationToken.None);
+
+        // Every tagged title reached the judge, though each was the LEAST similar title in the pool.
+        Assert.All(taggedIds, id => Assert.Contains(id, agent.Judged));
+        var done = Assert.Single(events, e => e.Event == "done").Data;
+        var taggedNames = Enumerable.Range(0, tagged).Select(i => $"Gate Yes {TaggedMarker} {i}").ToList();
+        if (floor == "0")
+        {
+            Assert.Equal("Picks", done.GetProperty("mode").GetString());
+            Assert.Equal(taggedNames.Order(StringComparer.Ordinal), Names(done.GetProperty("results")).Order(StringComparer.Ordinal));
+        }
+        else
+        {
+            Assert.Equal("NoneFound", done.GetProperty("mode").GetString());
+            Assert.Equal(taggedNames, Names(done.GetProperty("belowFloor")));
+            Assert.Contains($"Under your {floor} bar: {taggedNames[0]}", outcome.AssistantText, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("none of the ones I checked", outcome.AssistantText, StringComparison.Ordinal);
+    }
+
+    private const string TaggedMarker = "tagged-far";
+
+    /// <summary>
+    /// Puts every title named with <see cref="TaggedMarker"/> orthogonal to everything else — the
+    /// ranking seed and the distractors share one direction — so a cosine cut always drops the
+    /// tagged titles first.
+    /// </summary>
+    private sealed class TaggedFarEmbeddingProvider : IEmbeddingProvider
+    {
+        public bool IsAvailable => true;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            Task.FromResult(texts.Select(t =>
+            {
+                var v = new float[1536];
+                v[t.Contains(TaggedMarker, StringComparison.Ordinal) ? 1 : 0] = 1f;
+                return v;
+            }).ToArray());
     }
 
     /// <summary>A TMDB client with nothing to give, recording what each call asked for.</summary>

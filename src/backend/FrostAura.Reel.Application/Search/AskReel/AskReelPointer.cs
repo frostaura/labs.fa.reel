@@ -113,7 +113,7 @@ public static class AskReelPointer
     /// </summary>
     public static string NothingToPointAt(int position, IReadOnlyList<PresentedCard> presented)
     {
-        var named = position == Last ? "the last one" : $"the {Place(position)}";
+        var named = Named(position);
         if (presented.Count == 0)
         {
             return $"There’s nothing on screen yet for “{named}” to point at — I haven’t shown you any titles in this conversation. Tell me what you’re in the mood for and I’ll look.";
@@ -124,6 +124,9 @@ public static class AskReelPointer
             CultureInfo.InvariantCulture,
             $"My answers here have shown at most {most} {(most == 1 ? "title" : "titles")} at a time, so there’s no {Place(position)} to point at. Which title did you mean?");
     }
+
+    /// <summary>The pointer as the user would say it: "the second one", "the last one", "the title #12".</summary>
+    public static string Named(int position) => position == Last ? "the last one" : $"the {Place(position)}";
 
     private static int? SmallNumber(string? text) =>
         int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n is >= 1 and <= 40 ? n : null;

@@ -219,6 +219,56 @@ public class OutsideRequestChannelTests
         Assert.Empty(LiveSearchExpansionService.NegationMatches(pool[0].Item1, AskReelNegations.None));
     }
 
+    /// <summary>
+    /// IREV1-SYS-01: titles carrying catalogue evidence for the concept lead the partition BEFORE the
+    /// ReturnCount cut. The cut used to run on similarity alone, and the seed is the kNN arm's own
+    /// vector, so the nearest 24 were kNN titles by construction and a tagged heist film the reply
+    /// counted never reached the judge. Varied over where the evidence sits, how much of it there is,
+    /// and a soft negation on top.
+    /// </summary>
+    [Theory]
+    [InlineData(30, 5, false)]
+    [InlineData(40, 1, false)]
+    [InlineData(30, 24, false)]
+    [InlineData(30, 5, true)]
+    public void Evidence_titles_lead_the_partition_before_any_cut(int nearer, int tagged, bool negated)
+    {
+        var pool = Pool(clean: nearer + tagged, contradicting: 0);
+        var evidence = pool.Skip(nearer).Select(x => x.Title.Id).ToHashSet();
+        var negations = negated ? NoHorrorAsked : AskReelNegations.None;
+
+        var (ranked, outside) = LiveSearchExpansionService.PartitionByNegation(pool, negations, evidence.Contains);
+
+        Assert.Equal(24, ranked.Count);
+        Assert.Empty(outside);
+        Assert.Equal(pool.Skip(nearer).Take(24).Select(x => x.Title.Id), ranked.Take(Math.Min(tagged, 24)).Select(x => x.Title.Id));
+        // Equal footing keeps the similarity order behind them.
+        Assert.Equal(pool.Take(24 - Math.Min(tagged, 24)).Select(x => x.Title.Id), ranked.Skip(tagged).Select(x => x.Title.Id));
+    }
+
+    [Fact]
+    public void Without_evidence_the_partition_keeps_the_similarity_order()
+    {
+        var pool = Pool(clean: 30, contradicting: 0);
+
+        var (ranked, _) = LiveSearchExpansionService.PartitionByNegation(pool, AskReelNegations.None, _ => false);
+
+        Assert.Equal(pool.Take(24).Select(x => x.Title.Id), ranked.Select(x => x.Title.Id));
+    }
+
+    [Fact]
+    public void Contradicting_evidence_titles_still_go_to_the_outside_channel_first()
+    {
+        var pool = Pool(clean: 3, contradicting: 20);
+        var tagged = pool.Skip(3 + 15).Select(x => x.Title.Id).ToHashSet();
+
+        var (ranked, outside) = LiveSearchExpansionService.PartitionByNegation(pool, NoHorrorAsked, tagged.Contains);
+
+        Assert.Equal(3, ranked.Count);
+        Assert.Equal(9, outside.Count);
+        Assert.Equal(tagged, outside.Take(5).Select(x => x.Title.Id).ToHashSet());
+    }
+
     /// <summary>A similarity-ordered pool: clean thrillers first, then horror contradictions.</summary>
     private static List<(Title Title, double Sim)> Pool(int clean, int contradicting)
     {
