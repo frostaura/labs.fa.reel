@@ -35,8 +35,31 @@ async function bootAuthed(page: Page) {
   });
 }
 
+/**
+ * Everything else Home asks for on mount, answered empty, so no test here reaches the unmocked API
+ * (the unmocked-api reporter fails the run on it): the accuracy strip, the learned and cross-reference
+ * bands (204 = nothing to show), the recently-watched strip and the saved conditions.
+ */
+async function mockHomeShell(page: Page) {
+  await mockJson(page, "**/api/accuracy", {
+    window: "90d", from: "2026-07-27T00:00:00Z", to: "2026-10-25T00:00:00Z", source: "none",
+    headline: { withinOnePoint: 0, n: 0, meanAbsoluteError: 0, bias: 0, correlation: null, meanPredicted: 0, meanActual: 0 },
+    calibration: [], moments: [],
+    conversion: { shown: 0, saved: 0, watched: 0, rated: 0, shownToSaved: null, savedToWatched: null, shownToRated: null, medianDaysToWatch: null },
+    counterfactual: [], learnedThisWeek: null,
+  });
+  await page.route((url) => url.pathname === "/api/feed/learned", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route((url) => url.pathname === "/api/feed/cross-reference", (route) => route.fulfill({ status: 204, body: "" }));
+  await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: 1.9, items: [] });
+  await mockJson(page, "**/api/settings/filters", {
+    excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+    minPredictedRating: null, languages: ["en"], minCrowdRating: null, minYear: null, maxYear: null,
+  });
+}
+
 async function bootHome(page: Page, digestItems: unknown[], degradedReason: string | null = null) {
   await bootAuthed(page);
+  await mockHomeShell(page);
   await mockJson(page, "**/api/feed/continue-watching", []);
   await mockJson(page, "**/api/feed/more", { items: [], exhausted: true });
   await mockJson(page, "**/api/feed/genres", []);
