@@ -100,8 +100,11 @@ public sealed class InterleaveSummaryQuery(IReelDbContext db, InterleaveOptions 
     /// <summary>Computes the reading for one account.</summary>
     public async Task<InterleaveSummary> ComputeAsync(Guid accountId, DateTime now, CancellationToken ct)
     {
+        // The experiment's window (INTERLEAVE_SINCE): slates served before the ranker and pool were
+        // frozen belong to another experiment.
+        var since = options.Since ?? DateTime.MinValue;
         var exposures = await db.ExposureEvents
-            .Where(e => e.AccountId == accountId && e.InterleaveGroup != null && e.PolicyId != null)
+            .Where(e => e.AccountId == accountId && e.InterleaveGroup != null && e.PolicyId != null && e.OccurredAt >= since)
             .Select(e => new { e.Id, e.InterleaveGroup, e.PolicyId, e.OccurredAt })
             .ToListAsync(ct);
 

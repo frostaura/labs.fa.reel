@@ -981,9 +981,13 @@ public class BuildFeedJobHandler(
             return null;
         }
 
+        // Frozen at the experiment's start when one is set (INTERLEAVE_SINCE): the newest fit at or
+        // before it, so the arm does not move under the comparison. None by then ⇒ the policy's
+        // default weights, which are fixed too.
+        var since = _interleave.Since ?? DateTime.MaxValue;
         var ledger = await db.EvaluationResults
             .AsNoTracking()
-            .Where(r => r.AccountId == accountId && r.BaselinesJson != null)
+            .Where(r => r.AccountId == accountId && r.BaselinesJson != null && r.ComputedAt <= since)
             .OrderByDescending(r => r.ComputedAt)
             .Select(r => r.BaselinesJson)
             .FirstOrDefaultAsync(ct);
