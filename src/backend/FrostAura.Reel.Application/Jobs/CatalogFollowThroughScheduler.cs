@@ -8,12 +8,15 @@ namespace FrostAura.Reel.Application.Jobs;
 /// What one follow-through pass found and what it queued. Returned rather than logged so the
 /// decision is assertable without a timer, a background host or a log scrape.
 /// </summary>
+/// <param name="HydrationBacklog">Rows never hydrated.</param>
+/// <param name="RefreshDue">Hydrated rows due a metadata refresh (<see cref="Ingestion.MetadataRefreshPolicy.Due"/>).</param>
 public sealed record CatalogFollowThrough(
     int HydrationBacklog,
     DailyAllowance HydrationAllowance,
     bool QueuedHydration,
     bool QueuedEnrichment,
-    EnrichmentBacklog Enrichment);
+    EnrichmentBacklog Enrichment,
+    int RefreshDue = 0);
 
 /// <summary>
 /// Keeps the two expensive stages behind the seed actually running.
@@ -94,8 +97,11 @@ public static class CatalogFollowThroughScheduler
         CatalogEnrichmentBudget? enrichmentBudget = null)
     {
         var backlog = await PendingHydration(db).CountAsync(ct);
+        // The metadata refresh sweep (E-11) rides the same global job and the same daily ceiling:
+        // a refresh is one TMDB call, exactly like a first hydration.
+        var refreshDue = await Ingestion.MetadataRefreshPolicy.Due(db, now).CountAsync(ct);
         var allowance = await hydration.AllowanceAsync(now, ct);
-        var queuedHydration = backlog > 0
+        var queuedHydration = (backlog > 0 || refreshDue > 0)
             && allowance.HasHeadroom
             && await EnqueueHydrationAsync(db, now, ct);
 
@@ -110,6 +116,6 @@ public static class CatalogFollowThroughScheduler
             }
         }
 
-        return new CatalogFollowThrough(backlog, allowance, queuedHydration, queuedEnrichment, enrichment);
+        return new CatalogFollowThrough(backlog, allowance, queuedHydration, queuedEnrichment, enrichment, refreshDue);
     }
 }

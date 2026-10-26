@@ -87,4 +87,37 @@ public record TraktHistoryItem(
 /// <summary>GET shows/{id}/progress/watched essentials.</summary>
 public record TraktShowProgress(int Aired, int Completed, TraktNextEpisode? NextEpisode);
 
-public record TraktNextEpisode(int Season, int Number, string? Title);
+/// <summary>
+/// The next episode to watch. <paramref name="FirstAired"/> is Trakt's <c>first_aired</c>, present
+/// when the progress call asks for <c>extended=full</c>; null when Trakt has no air date for it.
+/// </summary>
+public record TraktNextEpisode(int Season, int Number, string? Title, DateTime? FirstAired = null);
+
+/// <summary>
+/// One /sync/watchlist item. <paramref name="ListedAt"/> is when it was put on the watchlist — by
+/// the user on Trakt, or by Reel's own write-back. Exactly one of movie/show is set for the two types
+/// Reel reads ("movie", "show").
+/// </summary>
+public record TraktWatchlistItem(
+    long Id,
+    DateTime ListedAt,
+    string Type,
+    TraktMovie? Movie,
+    TraktShow? Show);
+
+/// <summary>
+/// One /users/hidden/{section} item. <paramref name="Section"/> is filled by the adapter (Trakt
+/// does not echo it); a season or user entry carries neither movie nor show.
+/// </summary>
+public record TraktHiddenItem(
+    DateTime HiddenAt,
+    string Type,
+    TraktMovie? Movie,
+    TraktShow? Show,
+    string? Section = null);
+
+/// <summary>
+/// Trakt's community rating for one catalogue title, found by its TMDB id. Null
+/// <paramref name="Rating"/> means Trakt knows the title but has no rating for it yet.
+/// </summary>
+public record TraktCatalogRating(long TraktId, string? Slug, string? ImdbId, decimal? Rating, int Votes);

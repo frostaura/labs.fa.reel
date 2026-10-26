@@ -49,6 +49,13 @@ public class Title
 
     public int TraktVotes { get; set; }
 
+    /// <summary>
+    /// When the catalogue back-fill last asked Trakt for this title's community rating (by TMDB id),
+    /// whatever it found. Null = never asked. It is what makes the back-fill resumable and keeps a
+    /// title Trakt does not know from being asked again on every pass.
+    /// </summary>
+    public DateTime? TraktRatingCheckedAt { get; set; }
+
     /// <summary>TMDB popularity — the ranking key of the M2 popularity baseline.</summary>
     public decimal? TmdbPopularity { get; set; }
 

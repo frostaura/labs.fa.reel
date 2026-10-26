@@ -137,6 +137,11 @@ public static class SavedEndpoints
             var now = DateTime.UtcNow;
             var queue = await QueueAsync(sort, account, db, scorer, calibration, now, ct);
 
+            // Opening Saved is the moment its streaming facts matter, and saves have no other route
+            // to a refetch: queue one (debounced to a day) when a live save's snapshot is stale. The
+            // facts land for the next open; this GET never waits on TMDB.
+            await SavedAvailabilityRefresh.RequestAsync(db, account, now, ct);
+
             // Read-only, like the feed: a page load must never be able to start a generation. The
             // nightly pass pre-fetches the queue's top twenty, so in steady state most of these are
             // already warm and the rest simply render without a hook.

@@ -174,6 +174,24 @@ public class TitleHydrator(IReelDbContext db, ITmdbClient tmdb, ILogger<TitleHyd
         {
             title.Keywords = details.Keywords;
         }
+
+        // TMDB's "TV Movie" genre, which nothing else in Reel can see (ADD-18). Set and cleared
+        // only from TMDB's own list, so the refresh sweep keeps it current.
+        if (title.MediaType == MediaType.Movie)
+        {
+            title.Genres = TvMovieGenre.Apply(title.Genres, details.GenreIds);
+        }
+
+        // Release dates for TMDB-discovered rows, which Trakt never described. Trakt stays
+        // authoritative where it has spoken; the refresh sweep reads these to find recent releases.
+        if (title.MediaType == MediaType.Movie)
+        {
+            title.ReleasedAt ??= details.ReleasedAt;
+        }
+        else
+        {
+            title.FirstAiredAt ??= details.ReleasedAt;
+        }
         if (details.TrailerYouTubeKey is not null)
         {
             title.TrailerUrl = $"https://youtube.com/watch?v={details.TrailerYouTubeKey}";

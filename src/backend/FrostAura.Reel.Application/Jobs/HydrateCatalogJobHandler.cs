@@ -278,6 +278,7 @@ public class HydrateCatalogJobHandler(
         // on the next iteration and burns its whole attempt budget inside one run, which turns a
         // transient TMDB blip into a wholesale retirement.
         var skip = failures.Keys.Select(Guid.Parse).ToList();
+        var now = DateTime.UtcNow;
 
         IQueryable<Title> Pending() => CatalogFollowThroughScheduler.PendingHydration(db)
             .Where(t => !skip.Contains(t.Id))
@@ -285,13 +286,44 @@ public class HydrateCatalogJobHandler(
             .ThenByDescending(t => t.Year ?? 0)
             .ThenBy(t => t.Id);
 
-        var backlog = await Pending().CountAsync(ct);
+        // The metadata refresh sweep (E-11, FD-9) shares this run and this ceiling. The day's
+        // allowance goes first to rows past the rolling interval — oldest first, because they are
+        // the ones closing on TMDB's six-month cache limit — then to recent releases due their weekly
+        // refresh, and only then to rows never hydrated. The refresh load is bounded (see
+        // MetadataRefreshPolicy.Project), so the seed backlog still gets most of every day.
+        IQueryable<Title> Overdue() => MetadataRefreshPolicy.Overdue(db, now)
+            .Where(t => !skip.Contains(t.Id))
+            .OrderBy(t => t.LastMetadataRefreshAt)
+            .ThenBy(t => t.Id);
+        IQueryable<Title> RecentDue() => MetadataRefreshPolicy.RecentDue(db, now)
+            .Where(t => !skip.Contains(t.Id))
+            .OrderBy(t => t.LastMetadataRefreshAt)
+            .ThenBy(t => t.Id);
+
+        async Task<List<Title>> NextBatchAsync(int size)
+        {
+            var batch = await Overdue().Take(size).ToListAsync(ct);
+            if (batch.Count < size)
+            {
+                batch.AddRange(await RecentDue().Take(size - batch.Count).ToListAsync(ct));
+            }
+
+            if (batch.Count < size)
+            {
+                batch.AddRange(await Pending().Take(size - batch.Count).ToListAsync(ct));
+            }
+
+            return batch;
+        }
+
+        var refreshDue = await MetadataRefreshPolicy.Due(db, now).CountAsync(ct);
+        var backlog = await Pending().CountAsync(ct) + refreshDue;
         var processed = 0;
         var deadBatches = 0;
 
         while (!ct.IsCancellationRequested && processed < remaining)
         {
-            var batch = await Pending().Take(Math.Min(SaveBatchSize, remaining - processed)).ToListAsync(ct);
+            var batch = await NextBatchAsync(Math.Min(SaveBatchSize, remaining - processed));
             if (batch.Count == 0)
             {
                 break;
@@ -330,9 +362,24 @@ public class HydrateCatalogJobHandler(
             await db.SaveChangesAsync(ct);
         }
 
+        // Whether the configured ceiling can keep every cached TMDB record inside the six-month
+        // limit, said out loud on every run so a cap lowered in the environment is visible at once.
+        var projection = MetadataRefreshPolicy.Project(
+            await db.Titles.CountAsync(t => t.TmdbId != null, ct),
+            await MetadataRefreshPolicy.Recent(db, now).CountAsync(ct),
+            budget.DailyTitles);
+        if (projection.InsideCacheLimit)
+        {
+            logger.LogInformation("Metadata refresh sweep: {Projection}.", projection.Describe());
+        }
+        else
+        {
+            logger.LogWarning("Metadata refresh sweep: {Projection}.", projection.Describe());
+        }
+
         logger.LogInformation(
-            "Global HydrateCatalog: {Processed} title(s) hydrated of a {Backlog} backlog; "
+            "Global HydrateCatalog: {Processed} title(s) hydrated or refreshed of a {Backlog} backlog ({RefreshDue} due a refresh); "
             + "daily allowance {Used}/{Limit}, {Failing} title(s) carrying failures.",
-            processed, backlog, allowance.Used, allowance.Limit, failures.Count);
+            processed, backlog, refreshDue, allowance.Used, allowance.Limit, failures.Count);
     }
 }

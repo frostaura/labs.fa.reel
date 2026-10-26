@@ -137,8 +137,11 @@ public class TraktClient(
         return await GetAllPagesAsync<TraktHistoryItem>(path, HistoryPageLimit, accessToken, priority, ct);
     }
 
+    // extended=full is what puts first_aired on next_episode: without it the episode object is the
+    // minimal one (season, number, title, ids) and Continue Watching had no air date for any show —
+    // NextEpisodeAiredAt was null on 123 of 123 progress rows (N+5). Still one call per show.
     public async Task<TraktShowProgress?> GetShowProgressAsync(string accessToken, long showTraktId, RatePriority priority, CancellationToken ct = default) =>
-        await GetApiAsync<TraktShowProgress>($"shows/{showTraktId}/progress/watched?hidden=false&specials=false", accessToken, priority, ct);
+        await GetApiAsync<TraktShowProgress>($"shows/{showTraktId}/progress/watched?hidden=false&specials=false&extended=full", accessToken, priority, ct);
 
     public async Task<string> GetLastActivitiesRawAsync(string accessToken, RatePriority priority, CancellationToken ct = default)
     {
@@ -187,7 +190,7 @@ public class TraktClient(
             && int.TryParse(values.FirstOrDefault(), out value);
     }
 
-    private async Task<T?> GetApiAsync<T>(string path, string accessToken, RatePriority priority, CancellationToken ct)
+    private async Task<T?> GetApiAsync<T>(string path, string? accessToken, RatePriority priority, CancellationToken ct)
         where T : class
     {
         using var response = await SendGetAsync(path, accessToken, priority, ct);
@@ -258,6 +261,62 @@ public class TraktClient(
         var match = results?.FirstOrDefault();
         return movie ? match?.Movie?.Ids?.Trakt : match?.Show?.Ids?.Trakt;
     }
+
+    // /sync/watchlist/{type} is paginated like every other collection. Movies and shows are read
+    // separately: Saved holds titles, so seasons and episodes on the watchlist are not Reel's.
+    public async Task<IReadOnlyList<TraktWatchlistItem>> GetWatchlistAsync(string accessToken, RatePriority priority, CancellationToken ct = default)
+    {
+        var movies = await GetAllPagesAsync<TraktWatchlistItem>("sync/watchlist/movies", WatchedPageLimit, accessToken, priority, ct);
+        var shows = await GetAllPagesAsync<TraktWatchlistItem>("sync/watchlist/shows", WatchedPageLimit, accessToken, priority, ct);
+        return [.. movies, .. shows];
+    }
+
+    public async Task<IReadOnlyList<TraktHiddenItem>> GetHiddenItemsAsync(string accessToken, string section, RatePriority priority, CancellationToken ct = default)
+    {
+        var items = await GetAllPagesAsync<TraktHiddenItem>(
+            $"users/hidden/{Uri.EscapeDataString(section)}", WatchedPageLimit, accessToken, priority, ct);
+        return items.Select(i => i with { Section = section }).ToList();
+    }
+
+    // One call where Trakt honours extended=full on search (the subject then carries rating and
+    // votes); a second, /{type}/{id}/ratings, only when it does not. No user token: this is public
+    // catalogue data, and reading it must never touch an account's single-use refresh token.
+    public async Task<TraktCatalogRating?> GetCatalogRatingAsync(long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default)
+    {
+        var type = movie ? "movie" : "show";
+        var results = await GetApiAsync<List<RatedSearchResultDto>>($"search/tmdb/{tmdbId}?type={type}&extended=full", null, priority, ct);
+        var subject = results?.Select(r => movie ? r.Movie : r.Show).FirstOrDefault(s => s?.Ids?.Trakt is not null);
+        if (subject?.Ids?.Trakt is not { } traktId)
+        {
+            return null;
+        }
+
+        if (subject.Rating is null && subject.Votes is null)
+        {
+            var ratings = await GetApiAsync<RatingsDto>($"{type}s/{traktId}/ratings", null, priority, ct);
+            return new TraktCatalogRating(traktId, subject.Ids.Slug, subject.Ids.Imdb, ratings?.Rating, ratings?.Votes ?? 0);
+        }
+
+        return new TraktCatalogRating(traktId, subject.Ids.Slug, subject.Ids.Imdb, subject.Rating, subject.Votes ?? 0);
+    }
+
+    private sealed record RatedSearchResultDto(
+        [property: JsonPropertyName("movie")] RatedSubjectDto? Movie,
+        [property: JsonPropertyName("show")] RatedSubjectDto? Show);
+
+    private sealed record RatedSubjectDto(
+        [property: JsonPropertyName("ids")] RatedIdsDto? Ids,
+        [property: JsonPropertyName("rating")] decimal? Rating,
+        [property: JsonPropertyName("votes")] int? Votes);
+
+    private sealed record RatedIdsDto(
+        [property: JsonPropertyName("trakt")] long? Trakt,
+        [property: JsonPropertyName("slug")] string? Slug,
+        [property: JsonPropertyName("imdb")] string? Imdb);
+
+    private sealed record RatingsDto(
+        [property: JsonPropertyName("rating")] decimal? Rating,
+        [property: JsonPropertyName("votes")] int? Votes);
 
     public async Task PostSyncBatchAsync(string accessToken, string endpoint, object payload, RatePriority priority, CancellationToken ct = default)
     {

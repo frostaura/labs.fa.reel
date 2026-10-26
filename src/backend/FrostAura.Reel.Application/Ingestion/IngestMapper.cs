@@ -24,10 +24,10 @@ public static class IngestMapper
         title.Certification = movie.Certification ?? title.Certification;
         title.Country = movie.Country ?? title.Country;
         title.Language = movie.Language ?? title.Language;
-        title.Genres = movie.Genres ?? title.Genres;
+        title.Genres = movie.Genres is { } genres ? TvMovieGenre.Preserve(title.Genres, genres) : title.Genres;
         title.Subgenres = movie.Subgenres ?? title.Subgenres;
         title.TraktRating = movie.Rating ?? title.TraktRating;
-        title.TraktVotes = movie.Votes;
+        title.TraktVotes = CarriesCommunityRating(movie.Rating, movie.Votes) ? movie.Votes : title.TraktVotes;
         title.ReleasedAt = movie.Released ?? title.ReleasedAt;
         title.Status = movie.Status ?? title.Status;
         title.TrailerUrl = movie.Trailer ?? title.TrailerUrl;
@@ -51,13 +51,21 @@ public static class IngestMapper
         title.Genres = show.Genres ?? title.Genres;
         title.Subgenres = show.Subgenres ?? title.Subgenres;
         title.TraktRating = show.Rating ?? title.TraktRating;
-        title.TraktVotes = show.Votes;
+        title.TraktVotes = CarriesCommunityRating(show.Rating, show.Votes) ? show.Votes : title.TraktVotes;
         title.FirstAiredAt = show.FirstAired ?? title.FirstAiredAt;
         title.Status = show.Status ?? title.Status;
         title.Network = show.Network ?? title.Network;
         title.AiredEpisodes = show.AiredEpisodes ?? title.AiredEpisodes;
         title.TrailerUrl = show.Trailer ?? title.TrailerUrl;
     }
+
+    /// <summary>
+    /// Whether a Trakt media object carries community-rating data at all. The watched and watchlist
+    /// collections return the minimal object (title, year, ids) since Trakt stopped honouring
+    /// <c>extended=full</c> there, so their <c>votes</c> deserialises as 0 — and writing that 0 over a
+    /// real count on every sync zeroed the crowd evidence the catalogue back-fill had just bought.
+    /// </summary>
+    public static bool CarriesCommunityRating(decimal? rating, int votes) => rating is not null || votes > 0;
 
     /// <summary>Distinct watched episodes — plays only count once per (season, episode).</summary>
     public static int CountDistinctWatchedEpisodes(TraktWatchedShow watched) =>

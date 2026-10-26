@@ -224,6 +224,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal?>("TraktRating")
                         .HasColumnType("numeric");
 
+                    b.Property<DateTime?>("TraktRatingCheckedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("TraktSlug")
                         .IsRequired()
                         .HasColumnType("text");
@@ -2380,6 +2383,12 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("HiddenItemsJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("HiddenItemsSyncedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("LastActivitiesJson")
