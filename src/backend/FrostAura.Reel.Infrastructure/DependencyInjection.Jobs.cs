@@ -31,6 +31,7 @@ public static partial class DependencyInjection
         services.AddSingleton<IPipelineEventHub, PipelineEventHub>();
         services.TryAddSingleton(JobRunnerOptions.Default);
         services.AddHostedService<JobRunnerService>();
+        services.AddHostedService<RetentionPurgeService>();
 
         // ── Status API v2 ───────────────────────────────────────────────────────────────────
         // TryAdd: the provider-health service (WS-1) registers its breaker as the reader and wins
