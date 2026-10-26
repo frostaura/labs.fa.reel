@@ -38,4 +38,26 @@ public static class LlmFailureCodes
         AgentFailureKind.ProviderUnavailable => breakerReason ?? JobFailureReason.Error,
         _ => JobFailureReason.Error,
     };
+
+    /// <summary>
+    /// The sentence a degraded Ask turn replies with, chosen by WHY it degraded (IREV2-SYS-02).
+    /// <paramref name="reasonCode"/> is <see cref="ReasonCode"/>'s answer for the same failure
+    /// (<see cref="AgentReply.FailureCode"/>), which is what tells a 402 from a 401 and names what
+    /// opened a breaker.
+    ///
+    /// <para>Total: an unknown kind, or none, gets the transient sentence — the one that was always
+    /// shown — so a value a later build adds can never produce no reply at all.</para>
+    /// </summary>
+    public static string DegradedReply(AgentFailureKind? kind, string? reasonCode) => kind switch
+    {
+        AgentFailureKind.BudgetSpent => AgentReply.BudgetSpentReply,
+        AgentFailureKind.NoModel => AgentReply.NoModelReply,
+        AgentFailureKind.ProviderRefused or AgentFailureKind.ProviderUnavailable => reasonCode switch
+        {
+            JobFailureReason.PaymentRequired => AgentReply.OutOfCreditReply,
+            JobFailureReason.Unauthorized => AgentReply.KeyRejectedReply,
+            _ => AgentReply.ProviderRefusedReply,
+        },
+        _ => AgentReply.DegradedReply,
+    };
 }

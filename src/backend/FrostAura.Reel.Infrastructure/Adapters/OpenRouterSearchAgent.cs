@@ -117,7 +117,9 @@ public class OpenRouterSearchAgent(
             // now refuses — its reply is degraded and says so.
             return TestStubMode
                 ? new AgentReply(StubModeReply, intentFallback, intentFallback)
-                : new AgentReply(AgentReply.DegradedReply, intentFallback, intentFallback, Degraded: true, AgentFailureKind.NoModel);
+                : new AgentReply(
+                    LlmFailureCodes.DegradedReply(AgentFailureKind.NoModel, null), intentFallback, intentFallback,
+                    Degraded: true, AgentFailureKind.NoModel);
         }
 
         var user = BuildInterpretPrompt(history, message, tasteSummary, shownTitles, standingFilters);
@@ -149,6 +151,7 @@ public class OpenRouterSearchAgent(
         // degraded copy, never a sentence built around the user's own words. What is left to
         // decide is only the best intent for the plain search underneath.
         var failure = last.Failure ?? AgentFailureKind.MalformedAnswer;
+        var failureCode = last.FailureCode ?? LlmFailureCodes.ReasonCode(failure);
         SearchIntent intent;
         if ((last.ParsedIntent ?? first.ParsedIntent) is { } parsed)
         {
@@ -169,8 +172,13 @@ public class OpenRouterSearchAgent(
             intent = intentFallback;
         }
 
-        logger.LogWarning("Agent interpret degraded ({Failure}) for this turn; the reply says so.", failure);
-        return new AgentReply(AgentReply.DegradedReply, intent, intentFallback, Degraded: true, failure);
+        // The reply names the cause where waiting cannot fix it: a spent day's allowance or a
+        // refused account is not "try again in a moment" (IREV2-SYS-02).
+        logger.LogWarning(
+            "Agent interpret degraded ({Failure}, {FailureCode}) for this turn; the reply says so.", failure, failureCode);
+        return new AgentReply(
+            LlmFailureCodes.DegradedReply(failure, failureCode), intent, intentFallback, Degraded: true, failure,
+            failureCode);
     }
 
     /// <summary>
@@ -197,7 +205,8 @@ public class OpenRouterSearchAgent(
             // Only an empty answer is worth another try; everything else either already had its
             // retry inside the client or cannot succeed on a second identical request.
             return InterpretAttempt.Failed(
-                completion.AgentFailure!.Value, retryable: completion.Failure == LlmCallFailure.EmptyAnswer);
+                completion.AgentFailure!.Value, retryable: completion.Failure == LlmCallFailure.EmptyAnswer,
+                failureCode: completion.ReasonCode);
         }
 
         using var doc = ReadObject(ApiUsagePurpose.SearchAgent, completion.Content);
@@ -879,6 +888,13 @@ public class OpenRouterSearchAgent(
         public bool Retryable { get; private init; }
 
         /// <summary>
+        /// The transport's status-API code for the failure (<see cref="LlmChatResult.ReasonCode"/>),
+        /// which alone knows the HTTP status and the open breaker's reason. Null for a failure found
+        /// in the content, whose code follows from its kind.
+        /// </summary>
+        public string? FailureCode { get; private init; }
+
+        /// <summary>
         /// False where a second prompt can only fail the same way or must not be sent at all: the
         /// provider refused the key, the clock ran out, a breaker is open, or the day's allowance is
         /// spent.
@@ -886,10 +902,12 @@ public class OpenRouterSearchAgent(
         public bool RecoverWithInterpreter => Failure is not (AgentFailureKind.ProviderRefused
             or AgentFailureKind.TimedOut or AgentFailureKind.ProviderUnavailable or AgentFailureKind.BudgetSpent);
 
-        public static InterpretAttempt Failed(AgentFailureKind failure, SearchIntent? parsed = null, bool retryable = true) =>
+        public static InterpretAttempt Failed(
+            AgentFailureKind failure, SearchIntent? parsed = null, bool retryable = true, string? failureCode = null) =>
             new(null, failure, parsed)
             {
                 Retryable = retryable && failure is AgentFailureKind.EmptyAnswer or AgentFailureKind.MalformedAnswer,
+                FailureCode = failureCode,
             };
     }
 }

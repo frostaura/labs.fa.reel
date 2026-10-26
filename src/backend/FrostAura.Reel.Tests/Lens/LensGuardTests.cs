@@ -27,6 +27,72 @@ public class LensGuardTests
         Assert.Null(LensGuards.Inspect(Note(), "Sicario: Day of the Soldado"));
     }
 
+    // ── A cut-off hook is never served (IR2S-03) ────────────────────────────────────────────
+
+    [Theory]
+    // The two the eval's Home rail rendered, verbatim, and two stored shapes from its database.
+    [InlineData("You get a heavy family drama where grief and pregnancy bring strangers into one…")]
+    [InlineData("Give this a quiet evening if you want friendship and emotional weight over…")]
+    [InlineData("You get the long con played straight to the…")]
+    [InlineData("You get a crew with nothing left in…  ")]
+    // A written-out ellipsis trails off just the same.
+    [InlineData("You get a quiet heist that never quite...")]
+    // A row stored before the repair: it sits on its cap, mid-word, with no terminal at all.
+    [InlineData("You get a heavy family drama where grief and pregnancy bring strangers into one ro")]
+    public void A_hook_cut_off_is_dropped_and_the_rest_of_the_note_is_served(string hook)
+    {
+        var note = Note(hook: hook);
+
+        Assert.True(LensGuards.IsCutOff(hook));
+        var served = LensGuards.ForServing(note);
+        Assert.NotNull(served);
+        Assert.Equal(string.Empty, served.Hook);
+        Assert.Equal(note.Lens, served.Lens); // the lens is complete prose and stays on every surface
+        Assert.Equal(note.Mood, served.Mood);
+        Assert.Null(LensGuards.ServableHook(note));
+    }
+
+    [Theory]
+    [InlineData("The bleak crime piece you have been circling.")]
+    [InlineData("Expect a slow hour that earns its last ten minutes!")]
+    [InlineData("You'll want to know who's lying?")]
+    [InlineData("Give this an evening alone")] // a short headline without a stop: nothing was lost
+    [InlineData("You get the \"one more job\" story, done properly.\u201D")]
+    public void A_finished_hook_is_served_untouched(string hook)
+    {
+        var note = Note(hook: hook);
+
+        Assert.False(LensGuards.IsCutOff(hook));
+        Assert.Same(note, LensGuards.ForServing(note));
+        Assert.Equal(hook, LensGuards.ServableHook(note));
+    }
+
+    [Fact]
+    public void A_hedged_hook_still_takes_the_whole_note_off_the_ladder()
+    {
+        // The cut-off rule must not soften the hedge rule: a hook that argues against its pick is
+        // a reason to fall back to an older note, not to show this one's lens.
+        var note = Note(hook: "A quieter, heavier detour you might still take.");
+
+        Assert.Null(LensGuards.ForServing(note));
+        Assert.Null(LensGuards.ServableHook(note));
+        Assert.Null(LensGuards.ServableHook(null));
+    }
+
+    [Fact]
+    public void What_tidy_leaves_on_a_capped_hook_is_what_serving_drops()
+    {
+        // The repair and the serve rule agree by construction: a hook the schema cut at its cap
+        // is tidied to an ellipsis at write time, and that ellipsis is what keeps it off the card.
+        const string written = "You get a heavy family drama where grief and pregnancy bring strangers into one room together.";
+        var capped = written[..LensNote.RequestHookChars];
+
+        var tidied = LensGuards.Tidy(Note(hook: capped));
+
+        Assert.EndsWith("…", tidied.Hook, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, LensGuards.ForServing(tidied)!.Hook);
+    }
+
     // ── Spoilers ────────────────────────────────────────────────────────────────────────────
 
     [Theory]

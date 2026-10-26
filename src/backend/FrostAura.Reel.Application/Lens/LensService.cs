@@ -389,8 +389,9 @@ public sealed class LensService(
         {
             // A note the current guards would refuse (a hedged hook, written before that rule)
             // reads as no note: the ladder steps past it exactly as it steps past an unreadable one.
-            return JsonSerializer.Deserialize<LensNote>(row.LensJson, JsonOptions) is { } note && LensGuards.IsServable(note)
-                ? note
+            // A note whose hook was cut off reads with no hook and its lens intact (IR2S-03).
+            return JsonSerializer.Deserialize<LensNote>(row.LensJson, JsonOptions) is { } note
+                ? LensGuards.ForServing(note)
                 : null;
         }
         catch (JsonException ex)
