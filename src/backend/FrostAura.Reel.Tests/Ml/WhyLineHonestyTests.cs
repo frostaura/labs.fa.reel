@@ -86,12 +86,27 @@ public class WhyLineHonestyTests
     [InlineData("A adventure pick aligned with your taste.")]
     [InlineData("An action pick aligned with your taste.")]
     [InlineData("A thriller pick aligned with your taste")]
+    [InlineData("Strong fit with your taste profile.")]
+    [InlineData("strong fit with your taste profile")]
+    [InlineData("STRONG FIT WITH YOUR TASTE PROFILE. ")]
     public void The_stub_sentence_is_refused_in_every_spelling(string why)
     {
         Assert.True(FeedWhyGuard.IsStub(why));
         Assert.False(FeedWhyGuard.IsServable(why));
         Assert.False(FeedWhyGuard.Accepts(why));
         Assert.Equal(string.Empty, FeedWhyGuard.Servable(why));
+    }
+
+    [Theory]
+    [InlineData("Strong fit with your taste for heists, and you rate Michael Mann 8.1.")]
+    [InlineData("A strong fit for your taste profile's love of noir.")]
+    [InlineData("Strong fit with your taste profile, and you rate Michael Mann 8.1.")]
+    public void A_real_line_that_mentions_taste_is_not_the_generic_stub(string why)
+    {
+        // Only the sentence as a whole line or a tail is the stub; a line that merely opens on the
+        // same words and then cites something is not.
+        Assert.False(FeedWhyGuard.IsStub(why));
+        Assert.Equal(why, FeedWhyGuard.Servable(why));
     }
 
     [Theory]

@@ -77,6 +77,8 @@ public class TitleWhyLineTests(PostgresFixture fixture)
     [InlineData("A adventure for a quiet night.")]
     [InlineData("Sharp legal drama, though the series format is a weaker fit for you.")]
     [InlineData("Shares the anchor's gothic dread.")]
+    [InlineData("Strong fit with your taste profile.")]
+    [InlineData("strong fit with your taste profile")]
     public async Task A_line_the_feed_refuses_to_show_does_not_reappear_in_the_modal(string refused)
     {
         if (!fixture.Available)
@@ -93,6 +95,32 @@ public class TitleWhyLineTests(PostgresFixture fixture)
 
         await using var db = fixture.CreateContext(new AccountContext());
         Assert.Null(await TitleEndpoints.SnapshotWhyAsync(db, accountId, titleId, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(
+        "Written by Arthur Conan Doyle, like Sherlock: The Abominable Bride, and Strong fit with your taste profile.",
+        "Written by Arthur Conan Doyle, like Sherlock: The Abominable Bride.")]
+    [InlineData(
+        "Shares Twitches Too's theme of magic, and strong fit with your taste profile",
+        "Shares Twitches Too's theme of magic.")]
+    [InlineData("Shares the anchor's gothic dread, and Strong fit with your taste profile.", null)]
+    public async Task A_spliced_generic_tail_is_cut_back_to_the_anchor_clause_the_card_shows(string persisted, string? shown)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // The card and the modal read the same persisted line through the same guard, so they agree:
+        // the anchor clause alone, or nothing when the clause itself is refused.
+        var accountId = await SeedAccountAsync();
+        var titleId = await SeedTitleAsync();
+        await SeedSnapshotAsync(accountId, titleId, SnapshotStatus.Active, persisted);
+
+        await using var db = fixture.CreateContext(new AccountContext());
+        Assert.Equal(shown, await TitleEndpoints.SnapshotWhyAsync(db, accountId, titleId, CancellationToken.None));
+        Assert.Equal(shown ?? string.Empty, Application.Ranking.FeedWhyGuard.Servable(persisted));
     }
 
     [Fact]

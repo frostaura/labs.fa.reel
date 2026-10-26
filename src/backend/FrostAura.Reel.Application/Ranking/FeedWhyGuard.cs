@@ -14,7 +14,7 @@ namespace FrostAura.Reel.Application.Ranking;
 /// <see cref="IsServable"/> refuses, plus the shared voice guard and the anti-recommendation and
 /// hedge guards.</item>
 /// <item><see cref="IsServable"/> — may a line that is ALREADY persisted on a snapshot be shown?
-/// The shapes known to be invented, broken or self-undermining: the stub sentence, the retired era
+/// The shapes known to be invented, broken or self-undermining: the two stub sentences, the retired era
 /// template, the retired contrarian and "trending" boilerplate, the a/an grammar defect, a hedge
 /// against the pick, and the prompt's "the anchor" jargon. A persisted line failing it is served as no line at all, which is the honest rendering
 /// of "nothing verifiable to say".</item>
@@ -33,6 +33,15 @@ public static partial class FeedWhyGuard
     /// </summary>
     [GeneratedRegex(@"\bpick aligned with your taste\.?\s*$", RegexOptions.IgnoreCase)]
     private static partial Regex StubRegex();
+
+    /// <summary>
+    /// The templater's retired generic sentence (<see cref="ExplanationTemplater.GenericFallback"/>),
+    /// alone or spliced after an anchor clause ("Shares Twitches Too's theme of magic, and Strong fit
+    /// with your taste profile."). Matched on its tail for the same reason as <see cref="StubRegex"/>:
+    /// snapshots built before 2026-10-26 persisted both shapes, and neither cites anything.
+    /// </summary>
+    [GeneratedRegex(@"\bstrong fit with your taste profile\.?\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex GenericStubRegex();
 
     /// <summary>
     /// The two retired era templates ("peak 1990s — your era", "from the 2010s, a decade you rate
@@ -70,8 +79,12 @@ public static partial class FeedWhyGuard
     [GeneratedRegex(@"\bthe anchor(?:'s|’s)?\b", RegexOptions.IgnoreCase)]
     private static partial Regex AnchorJargonRegex();
 
-    /// <summary>True when <paramref name="why"/> is the stub sentence a failed rerank batch produced.</summary>
-    public static bool IsStub(string? why) => !string.IsNullOrWhiteSpace(why) && StubRegex().IsMatch(why);
+    /// <summary>
+    /// True when <paramref name="why"/> is a stub: the sentence a failed rerank batch produced, or the
+    /// templater's retired generic sentence, alone or as a tail.
+    /// </summary>
+    public static bool IsStub(string? why) =>
+        !string.IsNullOrWhiteSpace(why) && (StubRegex().IsMatch(why) || GenericStubRegex().IsMatch(why));
 
     /// <summary>True when <paramref name="why"/> carries one of the retired era templates.</summary>
     public static bool IsEraTemplate(string? why) => !string.IsNullOrWhiteSpace(why) && EraTemplateRegex().IsMatch(why);
@@ -102,6 +115,35 @@ public static partial class FeedWhyGuard
         && !SecondPersonVoice.Rejects(why)
         && !SecondPersonVoice.SoundsAntiRecommendation(why);
 
-    /// <summary>The persisted line as it may be served: itself, or empty when it fails <see cref="IsServable"/>.</summary>
-    public static string Servable(string? why) => why is not null && IsServable(why) ? why : string.Empty;
+    /// <summary>
+    /// The persisted line as it may be served: itself; or, for a line that is an anchor clause with the
+    /// retired generic sentence spliced after it, the anchor clause alone (the line the templater now
+    /// writes for that card) when that clause is itself servable; or empty when it fails
+    /// <see cref="IsServable"/>.
+    /// </summary>
+    public static string Servable(string? why)
+    {
+        if (why is null)
+        {
+            return string.Empty;
+        }
+
+        if (IsServable(why))
+        {
+            return why;
+        }
+
+        var tail = GenericTailRegex().Match(why);
+        if (tail.Success)
+        {
+            var anchorClause = why[..tail.Index].TrimEnd() + ".";
+            return IsServable(anchorClause) ? anchorClause : string.Empty;
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>The retired generic sentence as a tail spliced after a clause: ", and Strong fit with your taste profile."</summary>
+    [GeneratedRegex(@",\s+and\s+strong fit with your taste profile\.?\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex GenericTailRegex();
 }

@@ -291,7 +291,7 @@ public static class FeedEndpoints
                                 // its base/residual/calibration decomposition is not recoverable
                                 // here — it was discarded when the score was written. The breakdown
                                 // is left NULL (unknown), never zero; the prediction itself is exact.
-                                WhySource: ExposureWhySource.Templater,
+                                WhySource: backfillWhy.Length == 0 ? ExposureWhySource.None : ExposureWhySource.Templater,
                                 RowKey: FeedPaginator.RowKeyFor(row, anchorId)));
                         }
                     }
@@ -299,12 +299,6 @@ public static class FeedEndpoints
                     items = items.OrderBy(x => x.Item.Row).ThenBy(x => x.Item.Rank).ToList();
                 }
             }
-
-            // The generic fallback may appear at most once per response payload: a second card with
-            // nothing verifiable to say shows no caption rather than parroting the same boilerplate
-            // (observed three times in one view, 2026-08-10). Runs over display order so the first
-            // card shown keeps the sentence. Read-only request — the mutation is never saved.
-            ExplanationTemplater.EnforceGenericOnce(items.Select(x => x.Item));
 
             // The chips on anchored cards: the evidence each card was admitted on, as the build
             // stored it on the row — no catalogue reads on the Home path, and a chip cannot drift

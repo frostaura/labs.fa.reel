@@ -440,7 +440,7 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
                 Rank = i,
                 TitleId = heroTitleIds[i],
                 PredictedRating = 7m,
-                WhyThisSentence = "Strong fit with your taste profile.",
+                WhyThisSentence = "You rate Tony Gilroy 7.8 on average.",
             });
         }
 

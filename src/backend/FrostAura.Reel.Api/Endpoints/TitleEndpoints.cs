@@ -507,8 +507,9 @@ public static class TitleEndpoints
         // The same serve-time gate the feed applies to the same persisted line: a stub, era,
         // a/an, hedged or "the anchor" sentence the Home card no longer shows must not reappear
         // in the modal. It is treated exactly like an empty caption — the modal's templater
-        // fallback, built from verified contributions, answers instead.
-        return FeedWhyGuard.IsServable(why) ? why : null;
+        // fallback, built from verified contributions, answers instead. A line carrying the retired
+        // generic tail is cut back to its anchor clause, exactly as the card renders it.
+        return FeedWhyGuard.Servable(why) is { Length: > 0 } servable ? servable : null;
     }
 
     /// <summary>
@@ -548,9 +549,8 @@ public static class TitleEndpoints
             Tone: tone,
             AccountContrarianOffset: taste.OverallContrarianOffset));
 
-        // The generic fallback is not personalisation — it is the templater admitting it found
-        // nothing. Never worth pushing above the synopsis.
-        return sentence == ExplanationTemplater.GenericFallback ? null : sentence;
+        // Nothing verifiable to cite: the templater says nothing, and so does the modal.
+        return sentence.Length == 0 ? null : sentence;
     }
 
     /// <summary>Persisted ContributionsJson → the templater's (feature, contribution) pairs.</summary>

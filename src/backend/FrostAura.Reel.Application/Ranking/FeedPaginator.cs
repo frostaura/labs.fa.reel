@@ -358,7 +358,6 @@ public sealed class FeedPaginator(
         // card on this page is discarded for the deterministic templater sentence — which itself
         // re-seeds until distinct.
         var takenWhys = new HashSet<string>(StringComparer.Ordinal);
-        var genericUsed = false;
         var items = new List<ScoredFeedItem>(taken.Count);
         foreach (var c in taken)
         {
@@ -376,8 +375,10 @@ public sealed class FeedPaginator(
             }
             else
             {
-                why = ExplanationTemplater.GenericFallback;
-                source = c.Attempted ? ExposureWhySource.Fallback : ExposureWhySource.Templater;
+                // No context, nothing verifiable to cite: no line. The source still says whether a
+                // model pass was attempted and failed for this card.
+                why = string.Empty;
+                source = c.Attempted ? ExposureWhySource.Fallback : ExposureWhySource.None;
             }
 
             // A card whose model pass was attempted and failed shows the templated ANCHORED line
@@ -390,17 +391,11 @@ public sealed class FeedPaginator(
                 why = string.Empty;
             }
 
-            // The generic fallback may appear at most once per page: a later card with nothing
-            // verifiable to say ships an empty why rather than repeating boilerplate.
-            if (string.Equals(why, ExplanationTemplater.GenericFallback, StringComparison.Ordinal))
+            // The templater found nothing to cite and wrote no line: the card shows none, and the
+            // log records that no line was rendered rather than crediting the templater with one.
+            if (why.Length == 0 && source == ExposureWhySource.Templater)
             {
-                if (genericUsed)
-                {
-                    why = string.Empty;
-                    source = ExposureWhySource.None;
-                }
-
-                genericUsed = true;
+                source = ExposureWhySource.None;
             }
 
             // 2 dp, matching BuildFeedJobHandler.DisplayRating and the exposure log. Page 2+ is the
