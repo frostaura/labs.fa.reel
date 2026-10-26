@@ -16,8 +16,8 @@ namespace FrostAura.Reel.Api.Middleware;
 /// Several of those routes start or read whole-catalogue work; two terminals hammering them should
 /// queue on the founder, not on the database.</item>
 /// </list>
-/// Both refusals are 429 with <c>Retry-After</c> and the house error shape plus a stable
-/// <c>code</c>. Runs after <see cref="AccountResolutionMiddleware"/> (it partitions by account) and
+/// Every refusal carries <c>Retry-After</c> and the house error shape plus a stable <c>code</c>:
+/// 429 for a rate window, 409 <c>turn_in_progress</c> for a turn already in flight. Runs after <see cref="AccountResolutionMiddleware"/> (it partitions by account) and
 /// before routing's endpoint executes; an anonymous ask passes through to the route's own 401.
 ///
 /// <para>The PIN limiter is not here: a wrong PIN is only known inside the handler, so
@@ -53,7 +53,7 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
             var (lease, refusal) = askTurns.TryStart(accountId, tier.Value);
             if (refusal is not null)
             {
-                await RefuseAsync(context, refusal.Code, refusal.Message, refusal.RetryAfter);
+                await RefuseAsync(context, refusal.Status, refusal.Code, refusal.Message, refusal.RetryAfter);
                 return;
             }
 
@@ -71,6 +71,7 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
             {
                 await RefuseAsync(
                     context,
+                    StatusCodes.Status429TooManyRequests,
                     "dev_busy",
                     $"{DevConcurrency.ToString(CultureInfo.InvariantCulture)} diagnostic requests are already running; retry when one finishes.",
                     TimeSpan.FromSeconds(5));
@@ -92,10 +93,10 @@ public sealed class InboundLimits(RequestDelegate next, AskTurnLimiter askTurns)
         await next(context);
     }
 
-    private static Task RefuseAsync(HttpContext context, string code, string message, TimeSpan retryAfter)
+    private static Task RefuseAsync(HttpContext context, int status, string code, string message, TimeSpan retryAfter)
     {
         var seconds = (int)Math.Ceiling(retryAfter.TotalSeconds);
-        context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.Response.StatusCode = status;
         context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
         return context.Response.WriteAsJsonAsync(new { error = message, code, retryAfterSeconds = seconds }, context.RequestAborted);
     }

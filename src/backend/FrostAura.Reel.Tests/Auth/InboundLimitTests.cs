@@ -46,6 +46,7 @@ public class InboundLimitTests
 
         Assert.NotNull(refused);
         Assert.Equal("ask_rate_minute", refused.Code);
+        Assert.Equal(429, refused.Status);
         // The first of the six was 30 s ago, so its slot frees in 30 s.
         Assert.Equal(TimeSpan.FromSeconds(30), refused.RetryAfter);
 
@@ -97,7 +98,7 @@ public class InboundLimitTests
         // While the first streams, every further ask is "in flight" — and none of them is counted.
         for (var i = 0; i < 5; i++)
         {
-            Assert.Equal("ask_turn_in_flight", Ask(limiter, account, AccountTier.Paid)?.Code);
+            Assert.Equal("turn_in_progress", Ask(limiter, account, AccountTier.Paid)?.Code);
         }
 
         // Another account is a different partition.

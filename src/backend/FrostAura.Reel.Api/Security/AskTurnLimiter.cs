@@ -32,8 +32,13 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
     private readonly Dictionary<Guid, AccountLog> logs = [];
     private readonly Lock gate = new();
 
-    /// <summary>A refusal: the stable code the client switches on, and how long until a slot frees.</summary>
-    public sealed record Refusal(string Code, TimeSpan RetryAfter, string Message);
+    /// <summary>
+    /// A refusal: the HTTP status, the stable code the client switches on, and how long until a slot
+    /// frees. A turn already in flight is <c>409 turn_in_progress</c> — the same answer the Ask
+    /// handler gives a second question on a busy thread, which the client already turns into "one
+    /// moment" with a check-again — and every window limit is <c>429</c>.
+    /// </summary>
+    public sealed record Refusal(int Status, string Code, TimeSpan RetryAfter, string Message);
 
     /// <summary>
     /// Admits one turn for <paramref name="accountId"/> or says why not. An admitted turn holds an
@@ -60,9 +65,10 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
             if (log.InFlight >= limits.Concurrent)
             {
                 return (null, new Refusal(
-                    "ask_turn_in_flight",
+                    StatusCodes.Status409Conflict,
+                    "turn_in_progress",
                     InFlightRetryAfter,
-                    "Another question is still being answered on this account — wait for it to finish, then ask again."));
+                    "Another question is still being answered — one moment."));
             }
 
             var refusal = Check(log, now, Minute, limits.PerMinute, "ask_rate_minute", "a minute")
@@ -91,6 +97,7 @@ public sealed class AskTurnLimiter(IOptions<AskTurnLimitOptions> options, TimePr
         var frees = inWindow[inWindow.Count - limit] + window;
         var wait = frees - now;
         return new Refusal(
+            StatusCodes.Status429TooManyRequests,
             code,
             wait < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : wait,
             $"That's the most questions Reel answers in {per} ({limit.ToString(System.Globalization.CultureInfo.InvariantCulture)}).");
