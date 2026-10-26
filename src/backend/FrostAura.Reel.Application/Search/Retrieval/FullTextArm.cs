@@ -82,15 +82,30 @@ public sealed class FullTextArm(IReelDbContext db)
             return [];
         }
 
-        var poolIds = pool.Select(t => t.Id);
-        return await db.Database
+        // Hits first, then eligibility by id. Composing the pool INTO the ranked query made Postgres
+        // evaluate the whole eligibility predicate (~230 ms for the founder) before ranking ~150
+        // hits; checking the ranked hits by primary key costs a few milliseconds.
+        var hits = await db.Database
             .SqlQueryRaw<FullTextHit>(built.Sql, built.Parameters)
-            .Where(h => poolIds.Contains(h.TitleId))
             .OrderByDescending(h => h.Rank)
             .ThenBy(h => h.TitleId)
-            .Take(take)
+            .Take(ReadDepth)
             .ToListAsync(ct);
+        if (hits.Count == 0)
+        {
+            return [];
+        }
+
+        var hitIds = hits.Select(h => h.TitleId).ToList();
+        var allowed = (await pool.Where(t => hitIds.Contains(t.Id)).Select(t => t.Id).ToListAsync(ct)).ToHashSet();
+        return [.. hits.Where(h => allowed.Contains(h.TitleId)).Take(take)];
     }
+
+    /// <summary>
+    /// How many ranked hits are read before eligibility: generous, because a heavy watcher has seen
+    /// most of the famous matches and they rank highest.
+    /// </summary>
+    public const int ReadDepth = 600;
 
     /// <summary>
     /// The raw statement and its parameters for <paramref name="concepts"/>, or null when there is

@@ -94,6 +94,17 @@ public class EligibilityQueryBuilder(IReelDbContext db)
         return t => watched.Contains(t.Id) || rated.Contains(t.Id) || setAside.Contains(t.Id);
     }
 
+    /// <summary>
+    /// True when the account has watched (even partly) or rated the title — the part of the footprint
+    /// a reply may name as "you've seen". Same id lists, and so the same hashed subplans, as
+    /// <see cref="Footprint"/>.
+    /// </summary>
+    public Expression<Func<Title, bool>> Seen(Guid accountId)
+    {
+        var (watched, rated, _) = FootprintLists(accountId);
+        return t => watched.Contains(t.Id) || rated.Contains(t.Id);
+    }
+
     private (IQueryable<Guid> Watched, IQueryable<Guid> Rated, IQueryable<Guid> SetAside) FootprintLists(Guid accountId)
     {
         var watched = db.WatchedTitles.Where(w => w.AccountId == accountId).Select(w => w.TitleId);

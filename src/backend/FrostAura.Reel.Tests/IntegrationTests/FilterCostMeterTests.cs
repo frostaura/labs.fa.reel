@@ -434,10 +434,15 @@ public class FilterCostMeterTests(PostgresFixture fixture)
             2000,
             2023);
 
-        var report = await MeasureAsync(accountId, rules);
-
-        await using var check = fixture.CreateContext(new AccountContext());
+        // One context, one REPEATABLE READ snapshot for the meter and every subtractive count: the
+        // catalogue is shared with test classes running in parallel, and a title inserted between
+        // the two readings would make two correct counts disagree.
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var check = fixture.CreateContext(scoped);
+        await using var snapshot = await check.Database.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead);
         var builder = new EligibilityQueryBuilder(check);
+        var report = await new FilterCostMeter(check, builder, scoped, new MemoryCache(new MemoryCacheOptions())).MeasureAsync(rules);
         var eligible = await builder.EligibleTitles(accountId, rules).CountAsync();
         Assert.Equal(await check.Titles.CountAsync(), report.Total);
         Assert.Equal(eligible, report.Eligible);

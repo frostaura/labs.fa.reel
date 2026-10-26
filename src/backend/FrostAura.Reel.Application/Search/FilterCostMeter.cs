@@ -85,12 +85,12 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
     /// rule beyond the cap still binds the eligible count (they share the last bit) but is reported
     /// with a marginal of 0 rather than dropped, so nothing silently disappears from the editor.
     /// </summary>
-    public const int MaxCostedRules = (2 * BitsPerMask) - 1;
+    public const int MaxCostedRules = FilterBreaches.MaxOwnBits;
 
     /// <summary>How many relaxations to offer. Three fits the editor and forces a real ranking.</summary>
     public const int SuggestionCount = 3;
 
-    private const int BitsPerMask = 63;
+    private const int BitsPerMask = FilterBreaches.BitsPerMask;
 
     /// <summary>
     /// Costs <paramref name="rules"/> for the account this unit of work is scoped to.
@@ -148,7 +148,7 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
         int? underShrunkFloor = null;
         if (rules.MinCrowdRating is not null)
         {
-            var crowdBit = BitOf(all, all.ToList().FindIndex(r => r.Kind == FilterKind.MinCrowdRating));
+            var crowdBit = FilterBreaches.BitOf(all, all.ToList().FindIndex(r => r.Kind == FilterKind.MinCrowdRating));
             underShrunkFloor = free
                 .Where(g => !g.ShrunkBreach && WithoutBit(g, crowdBit) is (0, 0))
                 .Sum(g => g.Count);
@@ -179,8 +179,8 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
             return 0;
         }
 
-        var bit = BitOf(all, index);
-        return free.Where(g => g.Has(bit) && WithoutBit(g, bit) is (0, 0)).Sum(g => g.Count);
+        var bit = FilterBreaches.BitOf(all, index);
+        return free.Where(g => FilterBreaches.Only(g.M0, g.M1, bit)).Sum(g => g.Count);
     }
 
     /// <summary>
@@ -192,34 +192,7 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
         Guid accountId, FilterRuleSet rules, IReadOnlyList<FilterRule> all, CancellationToken ct)
     {
         var t = Expression.Parameter(typeof(Title), "t");
-        Expression m0 = Expression.Constant(0L);
-        Expression m1 = Expression.Constant(0L);
-        var firstInclude = -1;
-        for (var i = 0; i < all.Count; i++)
-        {
-            var rule = all[i];
-            if (rule.Kind == FilterKind.IncludeGenre)
-            {
-                if (firstInclude >= 0)
-                {
-                    continue;
-                }
-
-                firstInclude = i;
-            }
-
-            var bit = BitOf(all, i);
-            var breach = FilterBreaches.BodyOn(FilterBreaches.Breaks(rules, rule), t);
-            var term = Expression.Condition(breach, Expression.Constant(1L << (bit % BitsPerMask)), Expression.Constant(0L));
-            if (bit < BitsPerMask)
-            {
-                m0 = Expression.Or(m0, term);
-            }
-            else
-            {
-                m1 = Expression.Or(m1, term);
-            }
-        }
+        var (m0, m1) = FilterBreaches.Masks(rules, all, t);
 
         var shrunk = FilterBreaches.BodyOn(FilterBreaches.UnderCrowdFloor(rules.MinCrowdRating, CrowdFloorMeasure.Shrunk), t);
         var footprint = FilterBreaches.BodyOn(eligibility.Footprint(accountId), t);
@@ -240,20 +213,6 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
             .ToListAsync(ct);
     }
 
-    /// <summary>
-    /// The bit rule <paramref name="index"/> owns. Allow-list values share their list's bit; rules past
-    /// the cap share the last bit, so they still bind the pool without a marginal of their own.
-    /// </summary>
-    private static int BitOf(IReadOnlyList<FilterRule> all, int index)
-    {
-        if (all[index].Kind == FilterKind.IncludeGenre)
-        {
-            index = all.ToList().FindIndex(r => r.Kind == FilterKind.IncludeGenre);
-        }
-
-        return Math.Min(index, MaxCostedRules);
-    }
-
     private static (long, long) WithoutBit(ShapeCount g, int bit) =>
         bit < BitsPerMask
             ? (g.M0 & ~(1L << bit), g.M1)
@@ -272,9 +231,5 @@ public sealed class FilterCostMeter(IReelDbContext db, EligibilityQueryBuilder e
     }
 
     /// <summary>How many titles share one shape.</summary>
-    private sealed record ShapeCount(bool Footprint, long M0, long M1, bool ShrunkBreach, int Count)
-    {
-        public bool Has(int bit) =>
-            bit < BitsPerMask ? (M0 & (1L << bit)) != 0 : (M1 & (1L << (bit - BitsPerMask))) != 0;
-    }
+    private sealed record ShapeCount(bool Footprint, long M0, long M1, bool ShrunkBreach, int Count);
 }

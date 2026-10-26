@@ -155,6 +155,84 @@ public static class FilterBreaches
             && (t.Year ?? (t.ReleasedAt != null ? t.ReleasedAt.Value.Year : t.FirstAiredAt!.Value.Year)) > max;
     }
 
+    /// <summary>Bits per mask column (the sign bit is never used).</summary>
+    public const int BitsPerMask = 63;
+
+    /// <summary>The most rules that get a bit of their own across the two mask columns; later rules share the last bit.</summary>
+    public const int MaxOwnBits = (2 * BitsPerMask) - 1;
+
+    /// <summary>
+    /// The bit rule <paramref name="index"/> of <paramref name="all"/> owns in a breach mask. Every
+    /// IncludeGenre value shares the first IncludeGenre's bit (the allow-list breaches as a whole);
+    /// rules past <see cref="MaxOwnBits"/> share the last bit, so they still bind without a bit of
+    /// their own.
+    /// </summary>
+    public static int BitOf(IReadOnlyList<FilterRule> all, int index)
+    {
+        if (all[index].Kind == FilterKind.IncludeGenre)
+        {
+            for (var i = 0; i < all.Count; i++)
+            {
+                if (all[i].Kind == FilterKind.IncludeGenre)
+                {
+                    index = i;
+                    break;
+                }
+            }
+        }
+
+        return Math.Min(index, MaxOwnBits);
+    }
+
+    /// <summary>
+    /// The two bigint mask expressions over <paramref name="parameter"/>: bit <see cref="BitOf"/> of a
+    /// rule is set when the title breaks it. Computed once per title in SQL, so every count that
+    /// relaxes one rule can be read off the masks instead of re-scanning.
+    /// </summary>
+    public static (Expression M0, Expression M1) Masks(
+        FilterRuleSet rules, IReadOnlyList<FilterRule> all, ParameterExpression parameter, CrowdFloorMeasure measure = CrowdFloorMeasure.Raw)
+    {
+        Expression m0 = Expression.Constant(0L);
+        Expression m1 = Expression.Constant(0L);
+        var includeSeen = false;
+        for (var i = 0; i < all.Count; i++)
+        {
+            if (all[i].Kind == FilterKind.IncludeGenre)
+            {
+                if (includeSeen)
+                {
+                    continue;
+                }
+
+                includeSeen = true;
+            }
+
+            var bit = BitOf(all, i);
+            var breach = BodyOn(Breaks(rules, all[i], measure), parameter);
+            var term = Expression.Condition(breach, Expression.Constant(1L << (bit % BitsPerMask)), Expression.Constant(0L));
+            if (bit < BitsPerMask)
+            {
+                m0 = Expression.Or(m0, term);
+            }
+            else
+            {
+                m1 = Expression.Or(m1, term);
+            }
+        }
+
+        return (m0, m1);
+    }
+
+    /// <summary>True when bit <paramref name="bit"/> is set in the masks.</summary>
+    public static bool Has(long m0, long m1, int bit) =>
+        bit < BitsPerMask ? (m0 & (1L << bit)) != 0 : (m1 & (1L << (bit - BitsPerMask))) != 0;
+
+    /// <summary>True when bit <paramref name="bit"/> is the ONLY bit set — the title breaks that rule and no other.</summary>
+    public static bool Only(long m0, long m1, int bit) =>
+        bit < BitsPerMask
+            ? m0 == (1L << bit) && m1 == 0
+            : m0 == 0 && m1 == (1L << (bit - BitsPerMask));
+
     /// <summary>The OR of <paramref name="arms"/> over one shared parameter; false for none.</summary>
     public static Expression<Func<Title, bool>> AnyOf(IReadOnlyList<Expression<Func<Title, bool>>> arms)
     {

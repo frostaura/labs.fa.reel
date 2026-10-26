@@ -29,6 +29,7 @@ public sealed class KeywordLabelRefreshService(
     /// <summary>The configuration key for the per-run embedding cap.</summary>
     public const string EmbedsPerRunKey = "Retrieval:VocabularyEmbedsPerRun";
 
+    private static readonly TimeSpan WarmDelay = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan StartDelay = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan Interval = TimeSpan.FromHours(24);
 
@@ -43,6 +44,19 @@ public sealed class KeywordLabelRefreshService(
         var perRun = Math.Max(0, configuration.GetValue(EmbedsPerRunKey, 2_000));
         try
         {
+            // Warm the in-memory vocabulary first (one ~175 ms aggregate), so the first Ask turn
+            // after a deploy does not pay for it.
+            await Task.Delay(WarmDelay, stoppingToken);
+            try
+            {
+                using var warm = scopeFactory.CreateScope();
+                await warm.ServiceProvider.GetRequiredService<KeywordVocabulary>().LabelsAsync(stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Keyword vocabulary warm-up failed; the first concept request will read it instead.");
+            }
+
             await Task.Delay(StartDelay, stoppingToken);
             while (!stoppingToken.IsCancellationRequested)
             {

@@ -1,11 +1,16 @@
 using System.Diagnostics;
 using System.Globalization;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.Retrieval;
+using FrostAura.Reel.Application.Search.Retrieval.Concepts;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Filters;
 using FrostAura.Reel.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit.Abstractions;
 
 namespace FrostAura.Reel.Tests.Filters;
@@ -66,6 +71,177 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         output.WriteLine(Summary("cost meter", elapsed));
     }
 
+    /// <summary>The concepts the acceptance names, plus the golden facet scenarios'.</summary>
+    private static readonly string[] Concepts =
+    [
+        "ninja", "samurai", "heist", "time loop", "courtroom", "survival at sea",
+        "martial arts", "mafia", "hitman", "kaiju", "spy", "zombie", "vampire", "werewolf", "shark", "space",
+        "cyberpunk", "dinosaur", "submarine", "chess", "boxing", "time travel", "found footage", "serial killer",
+    ];
+
+    [Fact]
+    public async Task Concepts_resolve_and_the_facet_arm_answers_inside_its_budget()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var (accountId, _) = await AccountAsync();
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        await using var db = Context();
+        var resolver = new ConceptResolver(
+            new KeywordVocabulary(db, cache),
+            new ConceptEmbeddings(new UnavailableEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            db,
+            NullLogger<ConceptResolver>.Instance);
+        var eligibility = new EligibilityQueryBuilder(db);
+
+        await resolver.ResolveAsync(new ConceptTerm("warm-up", [], []), default);
+        var facet = new List<double>();
+        foreach (var words in Concepts)
+        {
+            var concept = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
+            var hard = new HardConstraints([concept], [], null, null, MediaScope.Any);
+            var clock = Stopwatch.StartNew();
+            var ids = await CrowdVotes.MostVotedFirst(HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard))
+                .Select(t => t.Id).Take(HybridRetriever.ArmDepth).ToListAsync();
+            facet.Add(clock.Elapsed.TotalMilliseconds);
+            output.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{words,-16} labels {concept.ExactLabels?.Count.ToString(CultureInfo.InvariantCulture) ?? "regex",5}  stems [{string.Join(", ", concept.CatalogueLabels)}]  genres [{string.Join(", ", concept.Genres)}]  eligible facet hits {ids.Count,3}  {clock.Elapsed.TotalMilliseconds,6:F1} ms"));
+        }
+
+        output.WriteLine(Summary("facet SQL", facet));
+    }
+
+    [Fact]
+    public async Task Founder_ninja_supply_for_the_sql_fixture()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var (accountId, _) = await AccountAsync();
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        await using var db = Context();
+        var eligibility = new EligibilityQueryBuilder(db);
+        var resolver = new ConceptResolver(
+            new KeywordVocabulary(db, cache),
+            new ConceptEmbeddings(new UnavailableEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            db,
+            NullLogger<ConceptResolver>.Instance);
+        var concept = await resolver.ResolveAsync(new ConceptTerm("ninja movies", [], []), default);
+        var hard = new HardConstraints([concept], [], null, null, MediaScope.Movies);
+        var clock = Stopwatch.StartNew();
+        var report = await new SupplyReporter(db, eligibility).ReportAsync(accountId, hard, default);
+        output.WriteLine($"labels: {string.Join(" | ", concept.ExactLabels ?? [])}");
+        output.WriteLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"matching {report.MatchingInCatalogue} seen {report.AlreadySeen} savedOrDismissed {report.SavedOrDismissed} excluded {report.ExcludedByConditions} eligible {report.Eligible} belowFloor {report.BelowFloor} unscored {report.Unscored} lowVote {report.LowVoteMatches} ({clock.Elapsed.TotalMilliseconds:F0} ms)"));
+        foreach (var k in report.Knockouts)
+        {
+            output.WriteLine($"knockout {k.Kind}/{k.Value}: {k.WouldUnlock}");
+        }
+    }
+
+    [Fact]
+    public async Task Semantic_arm_returns_the_full_k_under_selective_filters()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        // The anchor is a real title's stored embedding (a reference), so no paid call is made; the
+        // question is only whether a filtered HNSW search returns min(k, pool) rows.
+        var (accountId, _) = await AccountAsync();
+        await using var db = Context();
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var eligibility = new EligibilityQueryBuilder(db);
+        var reference = await db.UserRatings.Where(r => r.AccountId == accountId).OrderByDescending(r => r.Rating)
+            .Select(r => r.TitleId).FirstAsync();
+        var embeddings = new ConceptEmbeddings(new UnavailableEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance);
+        var retriever = new HybridRetriever(
+            db, eligibility, new SupplyReporter(db, eligibility),
+            new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
+            new FullTextArm(db), embeddings,
+            new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<HybridRetriever>.Instance);
+
+        HardConstraints[] filters =
+        [
+            new([], [], new YearRange(1980, 1989), null, MediaScope.Movies),
+            new([], [], new YearRange(2000, 2003), 30, MediaScope.Shows),
+            new([], [], new YearRange(2024, 2026), 85, MediaScope.Movies),
+            new([], [], new YearRange(1990, 1995), null, MediaScope.Shows),
+            new([], [], null, null, MediaScope.Any),
+        ];
+        foreach (var hard in filters)
+        {
+            var pool = await HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard)
+                .Where(t => db.TitleEmbeddings.Any(e => e.TitleId == t.Id) && t.Id != reference).CountAsync();
+            var clock = Stopwatch.StartNew();
+            var result = await retriever.RetrieveAsync(
+                new RetrievalQuery(accountId, hard, new SoftPreferences([], [], [reference]), [reference], 200) { Arms = RetrievalArms.Semantic },
+                default);
+            output.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"years {hard.Years?.From}-{hard.Years?.To} runtime<={hard.MaxRuntimeMinutes} {hard.Media}: pool {pool,5}  returned {result.Candidates.Count,3} (k={HybridRetriever.SemanticK}, want min {Math.Min(pool, HybridRetriever.SemanticK)})  {clock.Elapsed.TotalMilliseconds:F0} ms  [{string.Join(", ", result.Timings.ElapsedMs.Select(kv => $"{kv.Key} {kv.Value}"))}]"));
+        }
+    }
+
+    /// <summary>
+    /// The hybrid retriever end to end through the REAL container (all four arms, live TMDB — free —
+    /// and real concept embeddings, cached after the first call per text). Opt in separately with
+    /// <c>REEL_RETRIEVAL_PROBE_LIVE=1</c> and the lane environment sourced, because it makes paid
+    /// embedding calls (one per distinct concept text; 24 here).
+    /// </summary>
+    [Fact]
+    public async Task Hybrid_retrieval_end_to_end_over_the_golden_concepts()
+    {
+        if (!Enabled || Environment.GetEnvironmentVariable("REEL_RETRIEVAL_PROBE_LIVE") != "1")
+        {
+            return;
+        }
+
+        var (accountId, _) = await AccountAsync();
+        // The process environment as configuration (the lane env sourced by the caller), the way the
+        // host reads it: "__" separates sections. Values stay in memory; nothing is printed.
+        var settings = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+            .ToDictionary(e => ((string)e.Key).Replace("__", ":", StringComparison.Ordinal), e => (string?)e.Value);
+        settings["ConnectionStrings:Postgres"] = ConnectionString;
+        settings["Background:KeywordVocabulary"] = "false";
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        var services = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton<IConfiguration>(configuration);
+        FrostAura.Reel.Infrastructure.DependencyInjection.AddReelInfrastructure(services, configuration);
+        await using var provider = services.BuildServiceProvider();
+
+        var total = new List<double>();
+        var warm = new List<double>();
+        var concepts = Concepts.Take(Environment.GetEnvironmentVariable("REEL_PROBE_CONCEPTS") is { } n ? int.Parse(n, CultureInfo.InvariantCulture) : Concepts.Length).ToList();
+        foreach (var (words, round) in concepts.Select(c => (c, 1)).Concat(concepts.Select(c => (c, 2))))
+        {
+            using var scope = provider.CreateScope();
+            ((AccountContext)scope.ServiceProvider.GetRequiredService<IAccountContext>()).SetAccount(accountId);
+            var retriever = scope.ServiceProvider.GetRequiredService<IAskReelRetriever>();
+            var hard = new HardConstraints([new ConceptTerm($"{words} movies", [], [])], [], null, null, MediaScope.Any);
+            var clock = Stopwatch.StartNew();
+            var result = await retriever.RetrieveAsync(
+                new RetrievalQuery(accountId, hard, SoftPreferences.None, [], 60) { Message = $"{words} movies" }, default);
+            (round == 1 ? total : warm).Add(clock.Elapsed.TotalMilliseconds);
+            output.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"r{round} {words,-16} {clock.Elapsed.TotalMilliseconds,6:F0} ms  cands {result.Candidates.Count,3}  prov {result.Provisional.Count,3}  offerable {result.Supply.Offerable,4}  skipped [{string.Join(",", result.SkippedArms)}]  [{string.Join(", ", result.Timings.ElapsedMs.Select(kv => $"{kv.Key} {kv.Value}"))}]"));
+        }
+
+        output.WriteLine(Summary("hybrid retrieve, round 1 (cold TMDB, first embed per text)", total));
+        output.WriteLine(Summary("hybrid retrieve, round 2 (warm)", warm));
+    }
+
     internal static string Summary(string what, IReadOnlyList<double> elapsed)
     {
         var sorted = elapsed.Order().ToList();
@@ -114,5 +290,14 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         context.SetAccount(accountId);
         var meter = new FilterCostMeter(db, new EligibilityQueryBuilder(db), context, new MemoryCache(new MemoryCacheOptions()));
         return await meter.MeasureAsync(rules);
+    }
+
+    /// <summary>An embedding provider that is not configured: the probe never pays for a call.</summary>
+    private sealed class UnavailableEmbeddings : FrostAura.Reel.Domain.Ports.IEmbeddingProvider
+    {
+        public bool IsAvailable => false;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            Task.FromResult(Array.Empty<float[]>());
     }
 }

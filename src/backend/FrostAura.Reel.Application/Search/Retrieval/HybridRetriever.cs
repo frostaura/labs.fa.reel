@@ -26,7 +26,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 /// <see cref="RetrievalResult.SkippedArms"/>. <c>hnsw.iterative_scan</c> is on for every connection
 /// (<c>HnswFilteredSearchInterceptor</c>), so a filtered search returns the full k.</item>
 /// <item><b>TMDB</b> — <see cref="TmdbDiscoveryArm"/>, the standing conditions sent with the fetch,
-/// its own 1.5 s deadline, run on its own database context so it overlaps the catalogue arms. Titles
+/// its own 1.5 s deadline (retrieval waits at most <see cref="TmdbWait"/>), run on its own database
+/// context so it overlaps the catalogue arms. Titles
 /// not yet in the catalogue come back as <see cref="RetrievalResult.Provisional"/>.</item>
 /// </list>
 ///
@@ -62,6 +63,14 @@ public sealed class HybridRetriever(
     /// <summary>Neighbours the semantic arm asks for.</summary>
     public const int SemanticK = 60;
 
+    /// <summary>
+    /// How long, from the start of the call, retrieval waits for the TMDB arm before fusing without it.
+    /// The arm has its own 1.5 s deadline, but the retrieve stage's budget is 1.0 s at p95 (§4.11), and
+    /// for a heavy watcher most of what TMDB returns is already seen; a late arm finishes in the
+    /// background and its keyword ids are cached for the next turn.
+    /// </summary>
+    public static readonly TimeSpan TmdbWait = TimeSpan.FromMilliseconds(900);
+
     /// <summary>How long the semantic arm waits for its embedding (§4.7: 1.0 s, then fuse without it).</summary>
     public static readonly TimeSpan SemanticBudget = TimeSpan.FromSeconds(1);
 
@@ -72,6 +81,7 @@ public sealed class HybridRetriever(
         var timings = new Dictionary<string, long>();
         var skipped = new List<string>();
         var clock = Stopwatch.StartNew();
+        var started = Stopwatch.StartNew();
 
         var hard = await resolver.ResolveAsync(q.Hard, ct);
         timings["resolve"] = clock.ElapsedMilliseconds;
@@ -86,15 +96,16 @@ public sealed class HybridRetriever(
             ? TmdbAsync(q, hard, ct)
             : Task.FromResult<TmdbDiscoveryResult?>(null);
 
-        clock.Restart();
-        var report = await supply.ReportAsync(q.AccountId, hard, q.Exclude, ct);
-        timings["supply"] = clock.ElapsedMilliseconds;
+        // Supply runs on its own context, beside the catalogue arms: it is several counts over the
+        // concept's population (300-650 ms for the founder), and nothing below waits on it.
+        var supplyTask = StartScopedSupply(q, hard, ct);
 
         var want = Math.Clamp(q.Want, 0, MaxWant);
         if (want == 0)
         {
             await DrainAsync(embedding, tmdb);
-            return new RetrievalResult([], report, new StageTimings(timings)) { SkippedArms = skipped };
+            var only = await FinishSupplyAsync(supplyTask, q, hard, timings, ct);
+            return new RetrievalResult([], only, new StageTimings(timings)) { SkippedArms = skipped };
         }
 
         var exclude = q.Exclude.Distinct().ToList();
@@ -169,11 +180,24 @@ public sealed class HybridRetriever(
         if (q.Arms.HasFlag(RetrievalArms.Tmdb))
         {
             clock.Restart();
-            var discovered = await tmdb;
+            var remaining = TmdbWait - started.Elapsed;
+            if (!tmdb.IsCompleted && remaining > TimeSpan.Zero)
+            {
+                await Task.WhenAny(tmdb, Task.Delay(remaining, ct));
+                ct.ThrowIfCancellationRequested();
+            }
+
+            var discovered = tmdb.IsCompletedSuccessfully ? tmdb.Result : null;
             timings["tmdb-wait"] = clock.ElapsedMilliseconds;
             if (discovered is null)
             {
-                if (hard.HasConcepts || q.Message is not null)
+                if ((hard.HasConcepts || q.Message is not null) && !tmdb.IsCompleted)
+                {
+                    // Still running: it finishes on its own scope (and warms TMDB's keyword-id cache
+                    // for the next turn), but this turn does not wait past the retrieve budget.
+                    skipped.Add("tmdb-late");
+                }
+                else if (hard.HasConcepts || q.Message is not null)
                 {
                     skipped.Add("tmdb");
                 }
@@ -216,6 +240,7 @@ public sealed class HybridRetriever(
             .ToList();
         timings["fuse"] = clock.ElapsedMilliseconds;
 
+        var report = await FinishSupplyAsync(supplyTask, q, hard, timings, ct);
         return new RetrievalResult(candidates, report, new StageTimings(timings))
         {
             Provisional = provisional,
@@ -350,6 +375,51 @@ public sealed class HybridRetriever(
             .Select(e => new { e.TitleId, Distance = e.Embedding.CosineDistance(vector) })
             .ToListAsync(ct);
         return [.. rows.Select(r => (r.TitleId, r.Distance))];
+    }
+
+    /// <summary>
+    /// The supply report on its own scope (its own context), so it overlaps the arms; null when the
+    /// container cannot give one (a hand-built retriever in a test), and the caller then counts it on
+    /// this context after the arms — never concurrently with them.
+    /// </summary>
+    private Task<(SupplyReport Report, long ElapsedMs)>? StartScopedSupply(RetrievalQuery q, HardConstraints hard, CancellationToken ct)
+    {
+        var scope = scopes.CreateScope();
+        if (scope.ServiceProvider.GetService<ISupplyReporter>() is not { } scoped)
+        {
+            scope.Dispose();
+            return null;
+        }
+
+        return RunAsync();
+
+        async Task<(SupplyReport Report, long ElapsedMs)> RunAsync()
+        {
+            using (scope)
+            {
+                var clock = Stopwatch.StartNew();
+                var report = await scoped.ReportAsync(q.AccountId, hard, q.Exclude, ct);
+                return (report, clock.ElapsedMilliseconds);
+            }
+        }
+    }
+
+    /// <summary>The supply report — the overlapped one when it was started, else counted now — with its own time recorded.</summary>
+    private async Task<SupplyReport> FinishSupplyAsync(
+        Task<(SupplyReport Report, long ElapsedMs)>? started, RetrievalQuery q, HardConstraints hard,
+        Dictionary<string, long> timings, CancellationToken ct)
+    {
+        if (started is not null)
+        {
+            var (report, elapsed) = await started;
+            timings["supply"] = elapsed;
+            return report;
+        }
+
+        var clock = Stopwatch.StartNew();
+        var counted = await supply.ReportAsync(q.AccountId, hard, q.Exclude, ct);
+        timings["supply"] = clock.ElapsedMilliseconds;
+        return counted;
     }
 
     /// <summary>The TMDB arm on its own scope (its own database context), so it overlaps the catalogue arms.</summary>
