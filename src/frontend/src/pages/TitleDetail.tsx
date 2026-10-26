@@ -485,17 +485,18 @@ export default function TitleDetail() {
                                   style={{ width: `${Math.max(5, (Math.abs(contribution.value) / max) * 100)}%` }}
                                 />
                               </div>
-                              <span className="fa-caption text-3 tabular-nums w-12 text-right">
-                                {contribution.value >= 0 ? "+" : ""}
-                                {contribution.value.toFixed(1)}
-                              </span>
+                              {/* No number: a bar is its push scaled to the largest one, not rating
+                                  points, and a signed decimal here read as points and contradicted
+                                  the walk above it. Length and colour carry it; the walk carries the
+                                  points. */}
+                              <span className="sr-only">{positive ? "pushed it up" : "pushed it down"}</span>
                             </>
                           );
                           // A bar with nothing verified behind it stays a plain row — no chevron
                           // that opens onto an empty panel.
                           if (!detail) {
                             return (
-                              <div key={contribution.feature} className="flex items-center gap-3 pr-[1.375rem]">
+                              <div key={contribution.feature} className="flex items-center gap-3 pr-[1.375rem]" data-testid="contribution-bar">
                                 {bar}
                               </div>
                             );
@@ -504,6 +505,7 @@ export default function TitleDetail() {
                             <div key={contribution.feature}>
                               <Button
                                 variant="ghost"
+                                data-testid="contribution-bar"
                                 onClick={() => setExpandedFeature(expanded ? null : contribution.feature)}
                                 aria-expanded={expanded}
                                 className="h-auto w-full justify-start gap-3 whitespace-normal rounded-md -mx-1 px-1 py-0 font-normal text-fa-frost hover:bg-fa-frost/5 hover:text-fa-frost"
