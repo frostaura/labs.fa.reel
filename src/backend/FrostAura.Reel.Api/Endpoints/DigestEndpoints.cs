@@ -18,6 +18,8 @@ public static class DigestEndpoints
 
         // The current ISO week's digest as feed-shaped cards; { items: [] } until the weekly
         // build has run — the Home rail hides itself on empty rather than erroring.
+        // degradedReason is non-null exactly when the build relaxed the "high for you" floor, so
+        // the rail can stop claiming a bar its cards did not clear.
         group.MapGet("/current", async (IReelDbContext db, ExposureLog exposures, LensService lens, TasteFactsBuilder tasteFacts, HttpContext http, CancellationToken ct) =>
         {
             var account = await http.GetCurrentAccountAsync(db, ct);
@@ -36,6 +38,7 @@ public static class DigestEndpoints
                 {
                     weekStart = (DateOnly?)null,
                     generatedAt = (DateTime?)null,
+                    degradedReason = (string?)null,
                     items = Array.Empty<object>(),
                 });
             }
@@ -106,10 +109,22 @@ public static class DigestEndpoints
             {
                 weekStart = (DateOnly?)digest.WeekStart,
                 generatedAt = (DateTime?)digest.GeneratedAt,
+                degradedReason = DigestDegradedReason(digestItems),
                 items = cards,
             });
         });
     }
+
+    /// <summary>
+    /// The digest-level "the floor was relaxed" sentence, read back out of the per-item field the
+    /// build writes it into (<see cref="DigestItem.DegradedReason"/>: identical on every item of a
+    /// relaxed digest, null on an honest one). Taken from ANY item, not the first rendered card,
+    /// because it describes the whole build: a relaxed digest whose first title has since left the
+    /// catalogue is still relaxed. Blank is no reason. Dropping it here is what let Home title a
+    /// rail of 6.5s "New &amp; high for you this week" under a 7 bar the build had already given up.
+    /// </summary>
+    public static string? DigestDegradedReason(IEnumerable<DigestItem> items) =>
+        items.Select(i => i.DegradedReason).FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
 
     /// <summary>
     /// A digest card's why-line and how it came to be, decided by ONE predicate so the logged source
