@@ -69,6 +69,20 @@ async function shell(page: Page, status: unknown, session: Record<string, unknow
   await mockJson(page, "**/api/sync/status", status);
 }
 
+/**
+ * The two panels Taste DNA loads beside the charts, answered as an account with nothing in them yet
+ * would see them: no dislikes and no narrative written. Unanswered, they reach the e2e tripwire.
+ */
+async function tastePanels(page: Page) {
+  await mockJson(page, "**/api/taste/dislikes", {
+    total: 0, windowed: 0, items: [], profile: { genres: [], tones: [], seenEnoughCount: 0 },
+  });
+  await mockJson(page, "**/api/taste/narrative", {
+    text: null, isEdited: false, version: null, ratingsCount: 0, generatedAt: null,
+    isStale: false, regenerating: false, writerAvailable: true,
+  });
+}
+
 /** Text no surface may show for the wait. */
 async function expectNoFailure(page: Page) {
   await expect(page.getByText(/something went wrong/i)).toHaveCount(0);
@@ -130,6 +144,7 @@ test.describe("taste DNA with no model yet", () => {
   test("renders in full and says none of it waits for the model", async ({ page }) => {
     await shell(page, AWAITING_TODAY);
     await mockJson(page, "**/api/taste", DNA);
+    await tastePanels(page);
     await page.goto("/dna");
 
     await expect(page.getByTestId("dna-no-model")).toHaveText(
@@ -151,6 +166,7 @@ test.describe("taste DNA with no model yet", () => {
       })
     );
     await mockJson(page, "**/api/taste", DNA);
+    await tastePanels(page);
     await page.goto("/dna");
 
     await expect(page.getByTestId("dna-no-model")).toContainText(
@@ -161,6 +177,7 @@ test.describe("taste DNA with no model yet", () => {
   test("an account with a model sees no line about it", async ({ page }) => {
     await shell(page, syncStatus());
     await mockJson(page, "**/api/taste", DNA);
+    await tastePanels(page);
     await page.goto("/dna");
 
     await expect(page.getByRole("heading", { name: "Genre fingerprint" })).toBeVisible();

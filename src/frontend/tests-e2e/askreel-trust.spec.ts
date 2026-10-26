@@ -34,6 +34,12 @@ async function bootSearch(page: Page) {
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
   await mockJson(page, "**/api/search/conversations/latest", {}, 404);
+  // No saved conditions. The Clarify and floor-tray answers read them; unanswered, the call reaches
+  // the e2e tripwire.
+  await mockJson(page, "**/api/settings/filters", {
+    excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null,
+    minPredictedRating: null, languages: [], minCrowdRating: null, minYear: null, maxYear: null,
+  });
   await page.goto("/search");
 }
 
