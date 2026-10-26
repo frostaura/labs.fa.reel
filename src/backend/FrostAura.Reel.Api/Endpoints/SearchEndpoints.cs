@@ -980,14 +980,21 @@ public static class SearchEndpoints
             .OrderBy(t => t.Sequence)
             .ToListAsync(ct);
 
+        // The grid a resume restores is the newest SEARCH answer and its pages. An item question, a
+        // count or a clarifying question (v2 `Answer` / `Clarify`) answers beside the grid and shows no
+        // cards, so it never becomes the grid: resuming after "is the first one violent?" restores the
+        // answer the question was about, exactly as the live screen kept it — not an empty grid.
         var lastAsk = turns.FindLastIndex(t =>
             t.Role == "assistant"
             && t.Kind == Domain.Search.SearchTurnKind.Ask
-            && t.Status == Domain.Search.SearchTurnStatus.Completed);
+            && t.Status == Domain.Search.SearchTurnStatus.Completed
+            && !Domain.Search.SearchTurnMode.LeavesGrid(t.Mode));
         var block = lastAsk < 0
             ? []
             : turns.Skip(lastAsk)
-                .Where(t => t.Role == "assistant" && t.Status == Domain.Search.SearchTurnStatus.Completed)
+                .Where(t => t.Role == "assistant"
+                            && t.Status == Domain.Search.SearchTurnStatus.Completed
+                            && !Domain.Search.SearchTurnMode.LeavesGrid(t.Mode))
                 .ToList();
 
         var replay = await ReplayAsync(db, eligibility, scorer, accountId, block, ct);

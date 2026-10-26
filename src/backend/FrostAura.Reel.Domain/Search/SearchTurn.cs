@@ -156,6 +156,13 @@ public static class SearchTurnMode
     /// <summary>Ask Reel v2: an answer in words — an item question, a count, small talk — with the grid untouched.</summary>
     public const string Answer = "Answer";
 
+    /// <summary>
+    /// Whether a turn of this mode answers BESIDE the grid rather than replacing it — an
+    /// <see cref="Answer"/> or a <see cref="Clarify"/> shows no cards, so the answer on screen is
+    /// still the search before it (the live client's rule, and the resume's).
+    /// </summary>
+    public static bool LeavesGrid(string? stored) => Parse(stored) is Answer or Clarify;
+
     /// <summary>The stored mode, or <see cref="Picks"/> for null and anything unknown.</summary>
     public static string Parse(string? stored) =>
         string.Equals(stored, NoneFound, StringComparison.Ordinal) ? NoneFound

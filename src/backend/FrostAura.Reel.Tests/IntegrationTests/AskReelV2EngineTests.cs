@@ -474,6 +474,55 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         }
     }
 
+    /// <summary>
+    /// An item question answers BESIDE the grid, and a resume keeps it that way: the restored grid is
+    /// the search the question was about — its cards, its mode — not the question's empty answer.
+    /// </summary>
+    [Fact]
+    public async Task A_resume_after_an_item_question_restores_the_answer_it_was_about()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var topic = Topic();
+        var planner = new ScriptedPlanner(input => input.Message.StartsWith("is the first", StringComparison.Ordinal)
+            ? Plan(TurnAct.ItemQuestion, references: new TurnHandle(1, 1)) with { Tools = [new ToolRequest(AskTool.TitleFacts)] }
+            : Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Concepts = [topic] }));
+        using var factory = api.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting(AskReelEngineOptions.Setting, AskReelEngineOptions.V2);
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IAskReelPlanner>();
+                services.AddSingleton<IAskReelPlanner>(planner);
+                services.RemoveAll<IRequestJudgeModel>();
+                services.AddSingleton<IRequestJudgeModel>(new NameJudge());
+                services.RemoveAll<ITmdbClient>();
+                services.AddSingleton<ITmdbClient, SilentTmdbClient>();
+            });
+        });
+        var (_, client) = await SignInAsync(factory, $"ask-v2-iq-{Guid.NewGuid():N}");
+        using (client)
+        {
+            var ids = await SeedTopicalAsync(topic, ("V2 Yes", 3));
+            var first = await AskAsync(client, new { query = $"{topic} movies", clientTurnId = Guid.NewGuid() });
+            var conversationId = first.Single(f => f.Event == "conversation").Data.GetProperty("id").GetGuid();
+            var question = await AskAsync(client, new { query = "is the first one violent?", conversationId, clientTurnId = Guid.NewGuid() });
+            Assert.Single(question, f => f.Event == "answer");
+            Assert.DoesNotContain(question, f => f.Event == "assistant-message");
+
+            var resumed = await client.GetFromJsonAsync<JsonElement>($"/api/search/conversations/{conversationId}");
+
+            Assert.Equal(ids.Order(), resumed.GetProperty("cards").EnumerateArray().Select(c => c.GetProperty("titleId").GetGuid()).Order());
+            Assert.Equal("Picks", resumed.GetProperty("mode").GetString());
+            var answers = resumed.GetProperty("turns").EnumerateArray().Where(t => t.GetProperty("role").GetString() == "assistant").ToList();
+            Assert.Equal(["Picks", "Answer"], answers.Select(t => t.GetProperty("mode").GetString()));
+            Assert.Equal(0, answers[1].GetProperty("cards").GetArrayLength());
+        }
+    }
+
     // ── Fixture ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The catalogue arms these tests read match a concept by its own words; nothing to resolve.</summary>
