@@ -232,11 +232,19 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         {
             seed.ContentFilters.Add(new Domain.Filters.ContentFilter
             {
-                Id = Guid.NewGuid(), AccountId = accountId, Kind = Domain.Filters.FilterKind.IncludeGenre, Value = "drama", CreatedAt = DateTime.UtcNow,
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.IncludeGenre,
+                Value = "drama",
+                CreatedAt = DateTime.UtcNow,
             });
             seed.ContentFilters.Add(new Domain.Filters.ContentFilter
             {
-                Id = Guid.NewGuid(), AccountId = accountId, Kind = Domain.Filters.FilterKind.ExcludeGenre, Value = "horror", CreatedAt = DateTime.UtcNow.AddSeconds(1),
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.ExcludeGenre,
+                Value = "horror",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1),
             });
             await seed.SaveChangesAsync();
         }
@@ -350,8 +358,12 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         {
             seed.KeywordLabels.Add(new KeywordLabel
             {
-                Label = label, TitleCount = 1, Embedding = new Vector(vector), EmbeddingModel = "text-embedding-3-small",
-                CountedAt = DateTime.UtcNow, EmbeddedAt = DateTime.UtcNow,
+                Label = label,
+                TitleCount = 1,
+                Embedding = new Vector(vector),
+                EmbeddingModel = "text-embedding-3-small",
+                CountedAt = DateTime.UtcNow,
+                EmbeddedAt = DateTime.UtcNow,
             });
             await seed.SaveChangesAsync();
         }
