@@ -104,7 +104,7 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
         }
 
         var (accountId, client) = await api.CreateSignedInAccountAsync($"empty-why-{Guid.NewGuid():N}");
-        Guid emptyId, retiredId, keptId;
+        Guid emptyId, retiredId, keptId, genericId, splicedId;
         await using (var db = fixture.CreateContext(new AccountContext()))
         {
             var account = await db.Accounts.SingleAsync(a => a.Id == accountId);
@@ -114,19 +114,27 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
             var empty = NewTitle("Repaired stub");
             var retired = NewTitle("Retired boilerplate");
             var kept = NewTitle("Honest line");
-            db.Titles.AddRange(empty, retired, kept);
+            var generic = NewTitle("Generic stub");
+            var spliced = NewTitle("Spliced generic stub");
+            db.Titles.AddRange(empty, retired, kept, generic, spliced);
             db.FeedItems.Add(Item(snapshot, empty, FeedRowKind.Hero, 0, 7.6m, string.Empty, "Fallback"));
             db.FeedItems.Add(Item(snapshot, retired, FeedRowKind.Hero, 1, 7.4m, "Scores well even by your contrarian standards."));
             db.FeedItems.Add(Item(snapshot, kept, FeedRowKind.Hero, 2, 7.2m, "You rate Tony Gilroy 7.8 on average."));
+
+            // IR2S-01: the templater's retired generic sentence as persisted by a pre-fix build —
+            // alone (lower-cased, no full stop) and spliced after an anchor clause.
+            db.FeedItems.Add(Item(snapshot, generic, FeedRowKind.Hero, 3, 7.1m, "strong fit with your taste profile"));
+            db.FeedItems.Add(Item(snapshot, spliced, FeedRowKind.Hero, 4, 7.0m,
+                "Explores murder mystery, like Sherlock: The Abominable Bride, and Strong fit with your taste profile."));
             await db.SaveChangesAsync();
-            (emptyId, retiredId, keptId) = (empty.Id, retired.Id, kept.Id);
+            (emptyId, retiredId, keptId, genericId, splicedId) = (empty.Id, retired.Id, kept.Id, generic.Id, spliced.Id);
         }
 
         using var body = await GetJsonAsync(client, "/api/feed");
         var hero = body.RootElement.GetProperty("hero").EnumerateArray()
             .ToDictionary(c => c.GetProperty("titleId").GetGuid());
 
-        foreach (var blank in new[] { emptyId, retiredId })
+        foreach (var blank in new[] { emptyId, retiredId, genericId })
         {
             var card = hero[blank];
             // An empty STRING — never null, never the generic sentence, never a placeholder — so
@@ -139,6 +147,9 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
         }
 
         Assert.Equal("You rate Tony Gilroy 7.8 on average.", hero[keptId].GetProperty("whyThis").GetString());
+        Assert.Equal(
+            "Explores murder mystery, like Sherlock: The Abominable Bride.",
+            hero[splicedId].GetProperty("whyThis").GetString());
     }
 
     // ── R1-51: the CR-9 repair script, exactly as shipped ─────────────────────────────────────
@@ -154,7 +165,10 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
         var accountId = await api.SeedAccountAsync($"cr9-{Guid.NewGuid():N}");
         const string Stub = "A action pick aligned with your taste.";
         const string Real = "A tense heist pick that the crowd backs too.";
-        Guid activeStub, activeReal, oldStub, exposureId;
+        const string Generic = "Strong fit with your taste profile.";
+        const string SplicedGeneric = "Written by Arthur Conan Doyle, like Sherlock, and Strong fit with your taste profile.";
+        const string TasteReal = "Strong fit with your taste for heists, and you rate Michael Mann 8.1.";
+        Guid activeStub, activeReal, oldStub, exposureId, activeGeneric, activeSpliced, activeTasteReal;
         await using (var db = fixture.CreateContext(new AccountContext()))
         {
             var active = Snapshot(accountId, SnapshotStatus.Active);
@@ -167,7 +181,15 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
             var stubItem = Item(active, a, FeedRowKind.Hero, 0, 7.1m, Stub, "Fallback");
             var realItem = Item(active, b, FeedRowKind.Hero, 1, 7.0m, Real, "Llm");
             var oldItem = Item(superseded, c, FeedRowKind.Hero, 0, 6.9m, Stub, "Fallback");
-            db.FeedItems.AddRange(stubItem, realItem, oldItem);
+            var d = NewTitle("Generic");
+            var e = NewTitle("Spliced generic");
+            var f = NewTitle("Real line about taste");
+            db.Titles.AddRange(d, e, f);
+            var genericItem = Item(active, d, FeedRowKind.Hero, 2, 6.8m, Generic);
+            var splicedItem = Item(active, e, FeedRowKind.Hero, 3, 6.7m, SplicedGeneric);
+            var tasteRealItem = Item(active, f, FeedRowKind.Hero, 4, 6.6m, TasteReal, "Llm");
+            db.FeedItems.AddRange(stubItem, realItem, oldItem, genericItem, splicedItem, tasteRealItem);
+            (activeGeneric, activeSpliced, activeTasteReal) = (genericItem.Id, splicedItem.Id, tasteRealItem.Id);
             var exposure = new ExposureEvent
             {
                 Id = Guid.NewGuid(),
@@ -198,6 +220,12 @@ public class FeedSurfaceHonestyTests(PostgresFixture fixture, ReelApiFactory api
             Assert.Equal("Fallback", items[activeStub].WhySource); // provenance is kept
             Assert.Equal(Real, items[activeReal].WhyThisSentence);
             Assert.Equal(Stub, items[oldStub].WhyThisSentence);    // superseded: never served, never touched
+
+            // The retired generic sentence: blanked alone, cut back to its anchor clause when spliced,
+            // and a real line that merely opens "Strong fit with your taste …" is left alone.
+            Assert.Equal(string.Empty, items[activeGeneric].WhyThisSentence);
+            Assert.Equal("Written by Arthur Conan Doyle, like Sherlock.", items[activeSpliced].WhyThisSentence);
+            Assert.Equal(TasteReal, items[activeTasteReal].WhyThisSentence);
 
             // The append-only log is never edited.
             Assert.Equal(Stub, (await db.ExposureEvents.SingleAsync(e => e.Id == exposureId)).WhySentence);

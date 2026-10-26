@@ -91,7 +91,7 @@ public class WhyLineBoilerplateTests
         {
             var sentence = ExplanationTemplater.BuildSentence(Context(title, [(feature, 1.2f)], -0.31m));
 
-            Assert.Equal(fires, sentence != ExplanationTemplater.GenericFallback);
+            Assert.Equal(fires, sentence.Length > 0);
         }
     }
 
@@ -118,7 +118,7 @@ public class WhyLineBoilerplateTests
         // TMDB 7.0 on 400 votes shrinks to 6.94 — at the catalogue's average, not behind the pick.
         var title = Title(tmdbAverage: 7.0m, tmdbVotes: 400);
 
-        Assert.Equal(ExplanationTemplater.GenericFallback, ExplanationTemplater.BuildSentence(Context(title, [("traktRating", 1f)])));
+        Assert.Equal(string.Empty, ExplanationTemplater.BuildSentence(Context(title, [("traktRating", 1f)])));
     }
 
     // ── "Trending": a popularity level is not a trend ─────────────────────────────────────────

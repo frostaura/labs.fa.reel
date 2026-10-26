@@ -1827,7 +1827,7 @@ public class BuildFeedJobHandler(
                 FinalScore = FinalScoreOf(item.Candidate, Freshness, OrderPrior),
                 WhyThisSentence = item.WhyThis,
                 ExplanationJson = ExplanationOf(item.Candidate, PriorOf(item.Candidate.Title)),
-                WhySource = item.WhySource.Name,
+                WhySource = item.RecordedWhySource.Name,
                 EvidenceJson = item.AnchorTitleId is null ? null : AnchorRowGate.Serialize(item.WhyContext.AnchorEvidence ?? []),
             });
         }
@@ -1944,6 +1944,14 @@ public class BuildFeedJobHandler(
         /// because that is what the constructor just wrote; every upgrade path re-stamps it.
         /// </summary>
         public ExposureWhySource WhySource { get; set; } = ExposureWhySource.Templater;
+
+        /// <summary>
+        /// The source as the row and the exposure log record it: <see cref="ExposureWhySource.None"/>
+        /// when the templater found nothing to cite and wrote no line — the card shows none, and the
+        /// log must never credit the templater with a line nobody read.
+        /// </summary>
+        public ExposureWhySource RecordedWhySource =>
+            WhyThis.Length == 0 && WhySource == ExposureWhySource.Templater ? ExposureWhySource.None : WhySource;
 
         /// <summary>The agent's fit verdict for this card where one was observed — otherwise discarded.</summary>
         public decimal? LlmFit { get; set; }
@@ -2596,7 +2604,7 @@ public class BuildFeedJobHandler(
         item.Candidate.BaseScore + item.Candidate.CalibrationDelta - item.Candidate.Predicted,
         item.LlmFit,
         item.WhyThis,
-        item.WhySource,
+        item.RecordedWhySource,
         FeedPaginator.RowKeyFor(item.Row, item.AnchorTitleId),
         0,
         item.PolicyId,

@@ -24,8 +24,8 @@ public class ExplanationTemplaterTests
 
         var sentence = ExplanationTemplater.BuildSentence(context);
 
-        // The clause is skipped entirely — with nothing else to say, only the neutral floor remains.
-        Assert.Equal("Strong fit with your taste profile.", sentence);
+        // The clause is skipped entirely — and with nothing else to say, the card says nothing.
+        Assert.Equal(string.Empty, sentence);
     }
 
     [Fact]
@@ -213,6 +213,14 @@ public class ExplanationTemplaterTests
                         [(feature, 1.0f)], persons: persons,
                         titleId: new Guid(i + 1, 0, 0, [0, 0, 0, 0, 0, 0, 0, 0])), seed);
 
+                    // A feature with no clause by design (decadeAffinity, tmdbPopularityLog) leaves
+                    // the card with no line at all — nothing to capitalise.
+                    if (sentence.Length == 0)
+                    {
+                        Assert.Contains(feature, new[] { "decadeAffinity", "tmdbPopularityLog" });
+                        continue;
+                    }
+
                     Assert.True(
                         char.IsUpper(sentence[0]),
                         $"{feature} seed {seed} title {i} produced a lowercase opener: '{sentence}'");
@@ -222,43 +230,123 @@ public class ExplanationTemplaterTests
         }
     }
 
-    // ── Generic-fallback dedupe (live regression, 2026-08-10) ────────────────────────────────
-    // "Strong fit with your taste profile." rendered three times in one view: the fallback has a
-    // single phrasing, so the per-rail variant re-seed can never make it distinct. The response-
-    // level guard blanks every occurrence after the first.
+    // ── No stub, ever (IREV1-SYS-05 / IR1S-01, 2026-10-26) ───────────────────────────────────
+    // The generic sentence came back on 16 of 169 keyless why-lines: 12 alone, and 4 spliced after an
+    // anchor clause as "…, and Strong fit with your taste profile." with its capital S mid-sentence.
 
-    [Fact]
-    public void The_generic_fallback_appears_at_most_once_per_response()
+    public static TheoryData<string, float> NothingCitable => new()
     {
-        var items = new List<FeedItem>
+        { "decadeAffinity", 1.4f },        // the retired era template: no clause by design
+        { "tmdbPopularityLog", 0.9f },     // a popularity level is not a trend: no clause
+        { "directorAffinity", 0.27f },     // positive, but no verified director to name
+        { "writerAffinity", 0.17f },       // positive, but no verified writer to name
+        { "userGenreAffinity", -0.6f },    // negative: never a reason on a pick
+        { "era:timeless", 0.8f },          // the era one-hots have no clause
+    };
+
+    [Theory]
+    [MemberData(nameof(NothingCitable))]
+    public void An_unanchored_card_with_nothing_citable_says_nothing(string feature, float contribution)
+    {
+        for (var seed = 0; seed < 4; seed++)
         {
-            new() { WhyThisSentence = ExplanationTemplater.GenericFallback },
-            new() { WhyThisSentence = "You rate Tony Gilroy 7.8 on average." },
-            new() { WhyThisSentence = ExplanationTemplater.GenericFallback },
-            new() { WhyThisSentence = ExplanationTemplater.GenericFallback },
+            Assert.Equal(string.Empty, ExplanationTemplater.BuildSentence(Context([(feature, contribution)]), seed));
+        }
+
+        Assert.Equal(string.Empty, ExplanationTemplater.BuildSentence(Context([])));
+    }
+
+    [Theory]
+    [MemberData(nameof(NothingCitable))]
+    public void An_anchored_card_with_nothing_citable_says_its_anchor_link_alone(string feature, float contribution)
+    {
+        // Vary the anchor side too: the admitting evidence of each kind, then the softer genre/tone
+        // link, then nothing at all — every one must stand alone as a whole sentence.
+        var anchorShapes = new (IReadOnlyList<SharedEvidence>? Evidence, string? Genre, string? Tone)[]
+        {
+            ([new SharedEvidence("person", "Arthur Conan Doyle", "writer")], null, null),
+            ([new SharedEvidence("person", "Peter Weir", "director")], null, null),
+            ([new SharedEvidence("person", "Russell Crowe", "cast")], null, null),
+            ([new SharedEvidence("keyword", "naval warfare")], null, null),
+            ([new SharedEvidence("theme", "magic")], null, null),
+            (null, "action", "gritty"),
+            (null, "drama", null),
+            (null, null, null),
         };
 
-        ExplanationTemplater.EnforceGenericOnce(items);
+        for (var i = 0; i < 40; i++)
+        {
+            var titleId = new Guid(i, 7, 9, 1, 2, 3, 4, 5, 6, 7, (byte)(i * 37));
+            foreach (var (evidence, genre, tone) in anchorShapes)
+            {
+                for (var seed = 0; seed < 4; seed++)
+                {
+                    var context = Context([(feature, contribution)], titleId: titleId, anchorName: "Sherlock",
+                        sharedGenre: genre, tone: tone) with
+                    {
+                        AnchorEvidence = evidence,
+                    };
+                    var sentence = ExplanationTemplater.BuildSentence(context, seed);
 
-        Assert.Equal(ExplanationTemplater.GenericFallback, items[0].WhyThisSentence);
-        Assert.Equal("You rate Tony Gilroy 7.8 on average.", items[1].WhyThisSentence);
-        Assert.Equal(string.Empty, items[2].WhyThisSentence);
-        Assert.Equal(string.Empty, items[3].WhyThisSentence);
+                    Assert.Contains("Sherlock", sentence);
+                    Assert.DoesNotContain("taste profile", sentence, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain(", and ", sentence, StringComparison.Ordinal);
+                    Assert.True(char.IsUpper(sentence[0]), sentence);
+                    Assert.EndsWith(".", sentence);
+                    Assert.False(FeedWhyGuard.IsStub(sentence), sentence);
+                }
+            }
+        }
     }
 
     [Fact]
-    public void Distinct_sentences_are_left_alone_by_the_generic_dedupe()
+    public void The_writer_evidence_card_from_the_review_reads_as_its_anchor_clause()
     {
-        var items = new List<FeedItem>
+        // The exact card IR1S-01 saw: a Sherlock rail member admitted on Conan Doyle, no clause.
+        var context = Context([("directorAffinity", 0.2f)], anchorName: "Sherlock: The Abominable Bride")
+            with
         {
-            new() { WhyThisSentence = "Right in your horror wheelhouse." },
-            new() { WhyThisSentence = "Trending right now." },
+            AnchorEvidence = [new SharedEvidence("person", "Arthur Conan Doyle", "writer")],
         };
 
-        ExplanationTemplater.EnforceGenericOnce(items);
+        var sentences = Enumerable.Range(0, 2).Select(seed => ExplanationTemplater.BuildSentence(context, seed)).ToHashSet();
 
-        Assert.Equal("Right in your horror wheelhouse.", items[0].WhyThisSentence);
-        Assert.Equal("Trending right now.", items[1].WhyThisSentence);
+        Assert.Equal(
+            new HashSet<string>
+            {
+                "Written by Arthur Conan Doyle, like Sherlock: The Abominable Bride.",
+                "Same writer as Sherlock: The Abominable Bride: Arthur Conan Doyle.",
+            },
+            sentences);
+    }
+
+    [Fact]
+    public void A_card_with_a_real_clause_still_gets_it_after_the_anchor()
+    {
+        var context = Context([("traktRating", 0.4f)], anchorName: "Sherlock")
+            with
+        {
+            AnchorEvidence = [new SharedEvidence("keyword", "detective")],
+        };
+
+        var sentence = ExplanationTemplater.BuildSentence(context);
+
+        Assert.Contains("Sherlock", sentence);
+        Assert.Contains(", and ", sentence);
+        Assert.Contains("7.8 on Trakt", sentence);
+    }
+
+    [Fact]
+    public void An_empty_line_is_never_counted_as_a_line_shown()
+    {
+        // Two silent cards on one rail: neither is a "repeat" of the other, and neither counts toward
+        // a phrase family's share of what the rail shows.
+        var taken = new HashSet<string>(StringComparer.Ordinal);
+
+        Assert.Equal(string.Empty, ExplanationTemplater.BuildDistinctSentence(Context([("decadeAffinity", 1f)]), taken));
+        Assert.Equal(string.Empty, ExplanationTemplater.BuildDistinctSentence(
+            Context([("tmdbPopularityLog", 1f)], titleId: Guid.NewGuid()), taken));
+        Assert.Empty(taken);
     }
 
     private static ExplanationTemplater.Context Context(

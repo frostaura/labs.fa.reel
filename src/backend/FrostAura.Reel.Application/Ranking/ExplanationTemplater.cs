@@ -13,9 +13,12 @@ namespace FrostAura.Reel.Application.Ranking;
 public static partial class ExplanationTemplater
 {
     /// <summary>
-    /// The ultimate fallback sentence, emitted when nothing verifiable can be cited. Single-sourced
-    /// so every surface that special-cases it (the once-per-response guard, the paginator's and the
-    /// feed endpoint's fallback paths) compares against the exact sentence this templater builds.
+    /// The RETIRED generic sentence. The templater wrote it whenever no clause survived, and it
+    /// came back as 9.5% of a keyless build's why-lines — alone, and spliced after an anchor
+    /// clause as "…, and Strong fit with your taste profile." (2026-10-26). It cites nothing, so
+    /// the templater no longer writes it anywhere: nothing verifiable ⇒ no line, and an anchored
+    /// card says its anchor link alone. Kept only so <see cref="FeedWhyGuard"/> can recognise a
+    /// persisted copy, alone or as a tail, and refuse to serve it.
     /// </summary>
     public const string GenericFallback = "Strong fit with your taste profile.";
 
@@ -88,6 +91,11 @@ public static partial class ExplanationTemplater
     /// Builds the deterministic why-sentence. <paramref name="variantSeed"/> shifts every phrasing
     /// pick by that many variants — 0 is the title's canonical sentence; the no-repeat guard bumps
     /// it when two cards on one rail would otherwise render identical text.
+    ///
+    /// <para><b>Never a stub.</b> When no contribution yields a citable clause, an anchored card
+    /// gets its anchor clause alone ("Written by Arthur Conan Doyle, like Sherlock.") and an
+    /// unanchored card gets <see cref="string.Empty"/> — the card shows no line, which is the honest
+    /// rendering of "nothing verifiable to say".</para>
     /// </summary>
     public static string BuildSentence(Context context, int variantSeed = 0) =>
         BuildSentence(context, variantSeed, NoSuppression);
@@ -116,17 +124,17 @@ public static partial class ExplanationTemplater
             }
         }
 
-        if (clauses.Count == 0)
-        {
-            clauses.Add(GenericFallback.TrimEnd('.'));
-        }
-
         if (context.AnchorName is { Length: > 0 } anchor)
         {
             // The anchor clause names what links the two titles (shared genre, tone) whenever
             // something verifiable is on hand — never the vague "Because you loved {anchor}"
-            // template the founder rejected.
+            // template the founder rejected. With no reason clause behind it, it stands alone.
             clauses.Insert(0, AnchorClause(context, anchor, variantSeed));
+        }
+
+        if (clauses.Count == 0)
+        {
+            return string.Empty;
         }
 
         var sentence = string.Join(", and ", clauses.Take(2)).TrimEnd('.') + ".";
@@ -171,14 +179,20 @@ public static partial class ExplanationTemplater
             sentence = Distinct(context, takenWhys, suppressed);
         }
 
-        takenWhys.Add(sentence);
+        // An empty line is not something a later card can repeat, and it is not a line shown: it
+        // stays out of the set the no-repeat guard and the family share count.
+        if (sentence.Length > 0)
+        {
+            takenWhys.Add(sentence);
+        }
+
         return sentence;
     }
 
     private static string Distinct(Context context, ISet<string> takenWhys, IReadOnlySet<string> suppressed)
     {
         var sentence = BuildSentence(context, 0, suppressed);
-        for (var seed = 1; seed <= 3 && takenWhys.Contains(sentence); seed++)
+        for (var seed = 1; seed <= 3 && sentence.Length > 0 && takenWhys.Contains(sentence); seed++)
         {
             sentence = BuildSentence(context, seed, suppressed);
         }
@@ -244,7 +258,7 @@ public static partial class ExplanationTemplater
     /// The capped families. Only the contrarian one: the crowd clause ("the crowd backs it too (7.9
     /// on TMDB)") took its place on 46 of 96 rail cards in the 2026-10-25 slot measurement, but every
     /// one of those lines is true and quotes the badge, and capping it blanked 26 more cards (a
-    /// capped card whose next clause is the generic sentence ships no line). Whether a true,
+    /// capped card with no other true clause ships no line). Whether a true,
     /// badge-repeating line at that share is boilerplate is the surface harness's call to measure.
     /// </summary>
     private static readonly PhraseFamily[] Families = [Contrarian];
@@ -253,35 +267,6 @@ public static partial class ExplanationTemplater
 
     [GeneratedRegex(@"\b(?:contrarian standards|tougher-than-the-crowd standards|harsher-than-the-crowd scale|marked down to your scale)\b", RegexOptions.IgnoreCase)]
     private static partial Regex ContrarianFamilyRegex();
-
-    /// <summary>
-    /// The response-level guard on <see cref="GenericFallback"/>: the generic sentence may appear
-    /// at most once per served payload. The per-rail no-repeat guard cannot help here — the
-    /// fallback has a single phrasing, so every seed collides and the same boilerplate rendered
-    /// three times in one view (observed live, 2026-08-10). Later occurrences are blanked: an
-    /// empty caption reads better than repeated filler. Items must arrive in display order so the
-    /// first card shown is the one that keeps the sentence.
-    /// </summary>
-    public static void EnforceGenericOnce(IEnumerable<Domain.Feed.FeedItem> orderedItems)
-    {
-        var seen = false;
-        foreach (var item in orderedItems)
-        {
-            if (!string.Equals(item.WhyThisSentence, GenericFallback, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (seen)
-            {
-                item.WhyThisSentence = string.Empty;
-            }
-            else
-            {
-                seen = true;
-            }
-        }
-    }
 
     /// <summary>
     /// The opening clause of an anchored card: the concrete link to the anchor. Prefers the richest
