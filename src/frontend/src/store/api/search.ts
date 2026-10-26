@@ -1,6 +1,6 @@
 // Type-only, so nothing at runtime depends on the hook module: the resume payload is defined
 // beside the reducer that consumes it, and duplicating its shape here is how the two drift.
-import type { ConversationPayload } from "../../lib/useAskReelChat";
+import type { ConversationPayload } from "../../lib/askReel/transcript";
 import type { AskCard } from "../../lib/askReelStream";
 import { api } from "./base";
 

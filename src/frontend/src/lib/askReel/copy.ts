@@ -1,0 +1,267 @@
+import type { ChatStatus } from "./reducer";
+
+/** What the Ask Reel page says, and when — every sentence built on the client, in one place. */
+/**
+ * Whether the preset mood chips ("Under 90 minutes, feel-good", …) should show: only on a
+ * genuinely fresh Ask Reel — no transcript, no cards on screen, nothing streaming. The moment a
+ * conversation exists (including one resumed from a previous visit) the presets yield to the
+ * refine chips, which are about THIS thread rather than a cold start.
+ */
+export function showMoodPresets(turnCount: number, cardCount: number, streaming: boolean): boolean {
+  return turnCount === 0 && cardCount === 0 && !streaming;
+}
+
+/**
+ * The plural of `word` for `n` — the noun only, so call sites read `${n} ${plural(n, "pick")}`.
+ *
+ * One helper rather than a ternary per site: the count copy on this page is written in four
+ * places and only some of them agreed, so the live region announced "1 picks ready." to a screen
+ * reader while the server's own sentence beside it was correctly singular. Regular -s plurals are
+ * all this page has; anything irregular gets written out longhand rather than taught to a helper
+ * that would then be trusted with words it cannot handle.
+ */
+export function plural(n: number, word: string): string {
+  return n === 1 ? word : `${word}s`;
+}
+
+/**
+ * How many the quality floor held back, as the tray must state it.
+ *
+ * The tray's contents are the truth when it HAS contents. It used to be labelled from
+ * `droppedByFloor`, a scalar the server sends beside the cards, so a `done` carrying
+ * `droppedByFloor: 2` and one card put "Show the 2 under your 6 bar" over a tray holding one
+ * title. The two happened to agree on live turns, which is exactly why it survived: any server
+ * path that sets one without the other prints a number the user can count and disprove.
+ *
+ * The scalar is still the answer when the tray is empty — a turn can report a cut without sending
+ * the cards down, and "3 held back" is honest there. `null` means the server said nothing at all,
+ * which is not the same as a zero.
+ */
+export function floorHeldBack(belowFloorCount: number, droppedByFloor: number | null): number {
+  if (belowFloorCount > 0) return belowFloorCount;
+  return typeof droppedByFloor === "number" && droppedByFloor > 0 ? droppedByFloor : 0;
+}
+
+/**
+ * What separates clauses in an accounting line. The server's own `AskReelReason.Separator`, so a
+ * client-composed clause sits in the same list as the server's without changing punctuation
+ * halfway through the sentence.
+ */
+const REASON_SEPARATOR = " · ";
+
+/**
+ * The provenance line under the grid.
+ *
+ * The server's sentence describes ONE turn — "13 picks ranked for you, from 65 pulled". On an
+ * un-paged answer that is the whole truth and it is rendered verbatim. On a paged one it is true
+ * of the last page and false of the grid: R1-03 watched "24 picks ranked for you, from 60 pulled"
+ * sit under 37 cards, and the alternative (the newest page's sentence) would have claimed 13 of
+ * the same 37. Neither is the accumulated set, so the line says both — what is on screen, and
+ * where the last of it came from.
+ *
+ * A count of zero falls back to the sentence alone: "0 picks so far" is a claim about a screen
+ * with no grid on it, and the branch that renders this only fires when there are cards anyway.
+ *
+ * The count is PICKS — see {@link pickSummary}. It folded in the outside-request channel until
+ * F4-05, so the accumulated line claimed as matching the very cards the server's own sentence,
+ * forty pixels to its right, had just called closest-but-outside.
+ */
+export function footnote(reason: string | null, pickCount: number, paged: boolean): string | null {
+  if (!reason) return null;
+  if (!paged || pickCount <= 0) return reason;
+  return `${pickCount} ${plural(pickCount, "pick")} so far${REASON_SEPARATOR}last page: ${reason}`;
+}
+
+/**
+ * What the settled live region announces, and the vocabulary the footnote counts in.
+ *
+ * F4-05. "N picks so far" folded in the outside-request cards — the ones the sentence beside it has
+ * just called not-matching. Turn 10 read
+ *
+ *   12 picks so far · last page: 3 picks matched everything you asked ·
+ *   3 closest-but-outside shown separately · 6 under your 6.0 bar
+ *
+ * over 9 picks and 3 outside cards: the 12 is 9 + 3, in the same line as "3 picks matched
+ * everything you asked". A **pick** is a card that matched, which is the server's own `kept`; a
+ * closest-but-outside card is shown precisely because it did not, and is counted where it is named.
+ *
+ * Zero picks and zero outside is the honest empty answer. Zero picks WITH an outside channel is
+ * not — "No matches" over three cards on screen is the same conflation in reverse.
+ */
+export function pickSummary(pickCount: number, outsideCount: number): string {
+  const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
+  if (pickCount === 0 && outsideCount === 0) return "No matches for that one.";
+  if (pickCount === 0) return `No picks matched everything you asked.${outside}`;
+  return `${pickCount} ${plural(pickCount, "pick")} ready.${outside}`;
+}
+
+/**
+ * What the live region says when a thread is RESTORED rather than answered. F6-15.
+ *
+ * `askreel-status` was the empty string on every resumed landing — cold open, thread switch, hard
+ * reload, second tab — while a seam, a grid, a tray, a footnote, three refine chips and a conflict
+ * notice were all on screen. The same region is correct on a completed turn ("14 picks ready.") and
+ * after a Stop, so a screen-reader user was told about every state of this page except the one
+ * where the most appeared without them doing anything.
+ *
+ * It says what the seam says, because the seam IS the sighted version of this: "picked up where you
+ * left off", and then how much came back. A thread with nothing stored says so rather than
+ * announcing a silent zero — that is the transcript-only state, and it is a fact about the thread
+ * rather than an empty answer.
+ */
+export function resumeAnnouncement(pickCount: number, outsideCount: number): string {
+  if (pickCount === 0 && outsideCount === 0) return "Picked up where you left off · no saved picks.";
+  const outside = outsideCount > 0 ? ` ${outsideCount} closest-but-outside shown separately.` : "";
+  return `Picked up where you left off · ${pickCount} ${plural(pickCount, "pick")}.${outside}`;
+}
+
+/**
+ * Whether the provenance line belongs on screen.
+ *
+ * `resumed` is in, and SB-06 is what happened when it was not. The resume payload carries the
+ * turn's `reason` verbatim — "24 picks ranked for you, from 81 pulled · widened to find enough ·
+ * only 5 picks cleared your 6.0 bar, so it was relaxed" — the reducer stores it, and the page then
+ * gated the render on `status === "done"`. A resume is deliberately NOT `done` (see the status
+ * doc-comment), so a restored answer lost the only on-screen account of how it was assembled,
+ * including the fact that the quality floor had been relaxed to fill it.
+ *
+ * The other two conditions are unchanged and are about honesty of a different kind: mid-page the
+ * sentence describes a turn that has not finished, and with nothing on screen it is a claim about
+ * a grid that is not there.
+ */
+export function showsFootnote(
+  status: ChatStatus,
+  appending: boolean,
+  shownCount: number,
+  settledAnswer = false,
+): boolean {
+  if (appending || shownCount <= 0) return false;
+  if (status === "done" || status === "resumed") return true;
+  // F6-06's third casualty. A Stop over a held answer withdrew the provenance line along with the
+  // tray and the paging, leaving a grid with no account of where it came from — for an answer
+  // nothing had replaced and whose sentence was still perfectly true. Offered only over a settled
+  // answer: a stopped turn's own partial has no finished sentence to print, and `reason` is null
+  // there in any case.
+  return status === "stopped" && settledAnswer;
+}
+
+/**
+ * The floor, formatted for the tray label — always one decimal, always the same string.
+ *
+ * `toLocaleString(undefined, { maximumFractionDigits: 1 })` printed "6" in the tray while the
+ * server's own sentence forty pixels below it read "6.0 bar", and on a comma-decimal locale it
+ * printed "6,5" beside the server's "6.5". Both halves of that are fixed by pinning the locale
+ * and the fraction digits: this is chrome, but it is chrome quoting the SAME number the server
+ * quotes, so it renders as an invariant one-decimal string. Display only — it is never sent
+ * anywhere, never a cache key, never a filter row.
+ */
+const FLOOR_FORMAT = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+export function formatFloor(floor: number | null | undefined): string | null {
+  return typeof floor === "number" && Number.isFinite(floor) ? FLOOR_FORMAT.format(floor) : null;
+}
+
+/**
+ * What a failed turn says for itself, in one line.
+ *
+ * Three cases, not two, and the first of them is narrower than it looks. `client_aborted` is what
+ * the server writes when the client's connection went away — and it goes away identically for a
+ * Stop, a reload, a slept phone and a discarded tab. The server cannot tell those apart, so
+ * neither can this sentence.
+ *
+ * F6-09 is what saying otherwise cost: a finder hard-reloaded a running turn and the resumed
+ * transcript told them "you stopped it", permanently, across two further reloads. The wording was
+ * ACCURATE for a real Stop — verified in the same session — which is exactly what makes the class
+ * dangerous: copy that is right most of the time and asserts a cause the client cannot know. "You
+ * left" is true of all four, and it is still specific enough to be worth reading.
+ *
+ * Any other code is a thing that happened TO them; no code at all is neither, so it claims
+ * neither. The silent case is not hypothetical: the resume payload projects `sequence`, `role`,
+ * `text`, `kind` and `status` and no `failureCode`, so today every resumed failure arrives
+ * unattributed. The wording lights up the moment the field does.
+ */
+export function failedTurnMessage(failureCode: string | null): string {
+  if (failureCode === "client_aborted") return "That one didn’t finish before you left.";
+  if (failureCode) return "That one hit a snag.";
+  return "That one didn’t finish.";
+}
+
+/**
+ * The excluded terms a conflict is about — the account's excluded genres and its avoid-keywords,
+ * as one list for one sentence.
+ *
+ * They are two lists server-side and one fact to a reader: "your conditions rule out comedy and
+ * anime" does not care which list a term came from. A term can legitimately be in both (a genre
+ * the account excludes AND an avoid-keyword it lists), and naming it twice reads as a bug in the
+ * very place the product is explaining itself — so the merge is case-insensitively deduplicated,
+ * keeping the first spelling. Blanks are dropped: "rules out  and anime" is worse than saying less.
+ */
+export function excludedTerms(genres: string[] | undefined, keywords: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of [...(genres ?? []), ...(keywords ?? [])]) {
+    const term = raw.trim();
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+  }
+  return out;
+}
+
+/**
+ * The clause the server writes into a reply it has qualified — and the whole reason the pill is
+ * conditional.
+ *
+ * `AskReelStandingFilters` rewrites the model's sentence as "… — under your conditions that means
+ * no comedy and titles from 2000 on." and sets `conflict` on the same frame. The pill renders off
+ * that flag, so the bubble read, verbatim:
+ *
+ *   … under your conditions that means no comedy and titles from 2000 on.**under your conditions**
+ *
+ * — the annotation repeating the sentence it annotates, with no space between them.
+ */
+const CONFLICT_CLAUSE = /under your conditions/i;
+
+/**
+ * Should the qualified-reply pill render on THIS bubble? F4-06's first half.
+ *
+ * The flag says the server rewrote the sentence; it does not say what the rewrite looks like. When
+ * the sentence already carries the clause, the pill is a second copy of it and the reader gets the
+ * same three words twice in a row — so the sentence keeps it and the pill stands down. The pill
+ * survives for the case it was actually useful in: a reply that is marked as qualified without
+ * saying so in its own words, which is what an older server and a stored row from before the
+ * rewrite both look like. Scanning the reply rather than dropping the pill outright is what keeps
+ * THAT bubble marked.
+ *
+ * Case-insensitive and position-free on purpose: the clause is mid-sentence today ("— under your
+ * conditions that means …") and was sentence-final before, and a rule that only recognised one of
+ * those would put the duplicate back the next time the copy moves.
+ */
+export function showsConflictPill(text: string): boolean {
+  return !CONFLICT_CLAUSE.test(text);
+}
+
+/** "comedy" · "comedy and anime" · "comedy, anime and musical". A list a person can read. */
+export function listPhrase(items: string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The resume note for cards that left a stored answer (R1-11). "Since" is said only of the cards
+ * the account acted on AFTER the answer was given: a resumed Nolan answer (a person query shows
+ * seen titles) lost cards rated in 2020–2025 under a 2026 answer, and "you’ve since rated…" about
+ * them was false. Null when nothing left.
+ */
+export function removedNote(removed: number, removedEarlier: number): string | null {
+  if (removed <= 0) return null;
+  const earlier = Math.max(0, Math.min(removedEarlier, removed));
+  const since = removed - earlier;
+  const head = `${removed} ${removed === 1 ? "pick is" : "picks are"} gone from this answer`;
+  const acts = "rated, watched, saved or dismissed";
+  if (earlier === 0) return `${head} — you’ve since ${acts} ${removed === 1 ? "it" : "them"}.`;
+  if (since === 0) return `${head} — you’d already ${acts} ${removed === 1 ? "it" : "them"} when it was given.`;
+  return `${head} — you’d already ${acts} ${earlier} of them when it was given, and you’ve acted on ${since} since.`;
+}

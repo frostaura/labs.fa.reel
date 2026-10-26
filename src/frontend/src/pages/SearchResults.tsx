@@ -19,19 +19,14 @@ import UndoToast from "../components/search/UndoToast";
 import { type BrowseFilter } from "../lib/browseFilter";
 import { relTime } from "../lib/format";
 import { selectRemovedKeys } from "../store/removedTitlesSlice";
-import {
-  claimHandoff, floorHeldBack, floorPartition, footnote, formatFloor, listPhrase, mediaFilterFor,
-  nextBootstrap,
-  plural, readStoredConversationId, resumeTarget, showMoodPresets, storeConversationId,
-  useAskReelChat, showsFootnote, failedTurnMessage, FRESH_CONVERSATION, NO_RESUME,
-  PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, bubbleOverflows, prefersReducedMotion,
-  pickSummary, resumeAnnouncement, scrollTargetFor, showsConflictPill, skeletonCount, turnSettled,
-  COMPOSER_MIN_PX, composerHeight, composerSends, pageRefusalMessage, showsInlineFailure,
-  questionFor, answerRowIndex, removedNote,
-} from "../lib/useAskReelChat";
+import { claimHandoff, mediaFilterFor, nextBootstrap, readStoredConversationId, resumeTarget, storeConversationId, useAskReelChat, FRESH_CONVERSATION, NO_RESUME, PENDING_TURN_POLL_MS, PENDING_TURN_BUDGET_MS, prefersReducedMotion, skeletonCount, COMPOSER_MIN_PX, composerHeight, composerSends } from "../lib/askReel/useAskReelChat";
+import { floorHeldBack, footnote, formatFloor, listPhrase, plural, showMoodPresets, showsFootnote, failedTurnMessage, pickSummary, resumeAnnouncement, showsConflictPill, removedNote } from "../lib/askReel/copy";
+import { floorPartition, scrollTargetFor, turnSettled } from "../lib/askReel/reducer";
+import { bubbleOverflows, showsInlineFailure, questionFor, answerRowIndex } from "../lib/askReel/transcript";
+import { pageRefusalMessage } from "../lib/askReel/paging";
 import { useSpeech } from "../lib/useSpeech";
 import type { AskCard, PhaseData } from "../lib/askReelStream";
-import type { ConversationPayload } from "../lib/useAskReelChat";
+import type { ConversationPayload } from "../lib/askReel/transcript";
 
 /**
  * "Ask Reel" — a conversational discovery agent. The first turn comes from the search box (?q=);
