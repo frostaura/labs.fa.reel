@@ -377,6 +377,9 @@ public sealed class JobRunnerService(
     {
         public Guid? AccountId { get; set; }
 
+        /// <summary>The handler's tracked row, once read: the slow-run watch reads its progress fields.</summary>
+        public SyncJob? Job { get; set; }
+
         /// <summary>The handler returned as finished and its unsaved changes were flushed through the fence.</summary>
         public bool Finished { get; set; }
 
@@ -384,6 +387,40 @@ public sealed class JobRunnerService(
 
         /// <summary>The failure is deterministic (typed by the handler): fail now, keep the remaining attempts unspent.</summary>
         public bool NonRetryable { get; set; }
+    }
+
+    /// <summary>
+    /// Tracks when a running job's progress last moved and says, once, when the run has gone past its
+    /// kind's <see cref="JobKindPolicy.SlowAfter"/>. Reads the handler's in-memory progress fields —
+    /// a progress report is not saved until the handler next saves, and the point is to see the gap.
+    /// </summary>
+    internal sealed class SlowRunWatch(TimeSpan? slowAfter)
+    {
+        private (decimal? Pct, string? Message) _last;
+        private TimeSpan _movedAt;
+        private bool _seen;
+        private bool _warned;
+
+        public sealed record Slow(TimeSpan SlowAfter, decimal? Pct, string? Message, TimeSpan Unchanged);
+
+        public Slow? Observe(SyncJob? job, TimeSpan elapsed)
+        {
+            var progress = (job?.ProgressPct, job?.ProgressMessage);
+            if (!_seen || progress != _last)
+            {
+                _last = progress;
+                _movedAt = elapsed;
+                _seen = true;
+            }
+
+            if (_warned || slowAfter is not { } threshold || elapsed < threshold)
+            {
+                return null;
+            }
+
+            _warned = true;
+            return new Slow(threshold, _last.Pct, _last.Message, elapsed - _movedAt);
+        }
     }
 
     /// <summary>
@@ -414,8 +451,10 @@ public sealed class JobRunnerService(
             ["JobAttempt"] = claim.Attempt,
         });
 
+        // Names the job on anything slow the database does for it (SlowCommandDiagnostics).
+        using var jobContext = JobRunContext.Enter(claim.Id, claim.Kind, claim.Attempt);
         var state = new Execution();
-        var heartbeat = HeartbeatLoopAsync(claim, lease, beatStop.Token);
+        var heartbeat = HeartbeatLoopAsync(claim, lease, beatStop.Token, policy, state, clock);
         var execution = ExecuteHandlerAsync(claim, policy, state, handlerToken.Token, lease.Token);
         bool returned;
         try
@@ -459,6 +498,7 @@ public sealed class JobRunnerService(
             job = await Fenced(db, claim).FirstOrDefaultAsync(handlerToken)
                 ?? throw new InvalidOperationException("The job no longer belongs to this execution.");
             state.AccountId = job.AccountId;
+            state.Job = job;
             if (job.AccountId is { } owner)
             {
                 // An account job runs pinned to its account and nothing else (J-11).
@@ -842,9 +882,11 @@ public sealed class JobRunnerService(
         return await write(scope.ServiceProvider.GetRequiredService<ReelDbContext>());
     }
 
-    private async Task HeartbeatLoopAsync(ClaimedJob claim, CancellationTokenSource lease, CancellationToken stop)
+    private async Task HeartbeatLoopAsync(
+        ClaimedJob claim, CancellationTokenSource lease, CancellationToken stop, JobKindPolicy policy, Execution state, Stopwatch clock)
     {
         using var timer = new PeriodicTimer(options.HeartbeatInterval);
+        var watch = new SlowRunWatch(policy.SlowAfter);
         while (true)
         {
             try
@@ -855,6 +897,15 @@ public sealed class JobRunnerService(
                 }
 
                 var now = DateTime.UtcNow;
+                if (watch.Observe(state.Job, clock.Elapsed) is { } slow)
+                {
+                    logger.LogWarning(
+                        "Job {JobId} ({Kind}) attempt {Attempt} has run {Minutes} min, past the {SlowAfter} min its work normally ends well inside; "
+                        + "last progress {Pct}% \"{Message}\", unchanged for {Unchanged} min.",
+                        claim.Id, claim.Kind, claim.Attempt, Minutes(clock.Elapsed), Minutes(slow.SlowAfter),
+                        slow.Pct?.ToString(CultureInfo.InvariantCulture) ?? "-", slow.Message ?? "-", Minutes(slow.Unchanged));
+                }
+
                 var rows = await WithContextAsync(db => Fenced(db, claim)
                     .ExecuteUpdateAsync(s => s.SetProperty(j => j.HeartbeatAt, (DateTime?)now), stop));
                 if (rows == 0)

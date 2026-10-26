@@ -23,8 +23,12 @@ public static partial class DependencyInjection
             sp.GetService<IConfiguration>(), sp.GetService<ILogger<UnscopedReadPolicy>>()));
         services.AddScoped<IAccountContext, AccountContext>();
 
-        services.AddDbContext<ReelDbContext>(options =>
-            options.UseNpgsql(connectionString, npgsql => npgsql.UseVector()));
+        // Names a statement that stalls while it is stalled, with whatever is blocking it (F+1).
+        services.TryAddSingleton(sp => new SlowCommandDiagnostics(
+            sp.GetRequiredService<ILogger<SlowCommandDiagnostics>>(), connectionString));
+        services.AddDbContext<ReelDbContext>((sp, options) => options
+            .UseNpgsql(connectionString, npgsql => npgsql.UseVector())
+            .AddInterceptors(sp.GetRequiredService<SlowCommandDiagnostics>()));
         services.AddScoped<IReelDbContext>(sp => sp.GetRequiredService<ReelDbContext>());
 
         // ── Pipeline: event hub and the job runner ─────────────────────────────────────────

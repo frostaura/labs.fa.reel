@@ -43,6 +43,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
     /// <see cref="UnscopedReadPolicy"/>'s call — which under <c>Throw</c> throws out of the query.
     /// A query that ignores the filters never evaluates it.
     /// </summary>
+    /// <summary>The account this context is pinned to, if any — for diagnostics that name whose work a statement was.</summary>
+    internal Guid? PinnedAccountId => _accountContext.AccountId;
+
     private bool UnscopedReadPermitted => _accountContext.AccountId is null && _accountContext.PermitUnscopedRead();
 
     // Tenancy & auth
