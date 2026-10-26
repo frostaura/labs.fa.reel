@@ -111,7 +111,8 @@ public sealed class FeedPaginator(
     CrossReference.RerankBudget rerankBudget,
     IMemoryCache cache,
     ILogger<FeedPaginator> logger,
-    IServiceScopeFactory? scopeFactory = null)
+    IServiceScopeFactory? scopeFactory = null,
+    Search.Retrieval.KeywordNeighbours? keywordNeighbours = null)
 {
     /// <summary>
     /// Pages whose cold curation pass is running off the request right now, keyed by account and
@@ -745,6 +746,30 @@ public sealed class FeedPaginator(
         });
     }
 
+    /// <summary>
+    /// The Similar keyword arm through <see cref="Search.Retrieval.KeywordNeighbours"/>: the anchor's
+    /// most specific eligible neighbours by shared keyword and theme, best first, narrowed to the rail's
+    /// lane (medium, renderable card, page exclusions) and the maturity ceiling.
+    /// </summary>
+    private async Task<IReadOnlyList<Title>> KeywordNeighbourWindowAsync(
+        Account account, Guid anchorId, Func<IQueryable<Title>, IQueryable<Title>> lane,
+        IReadOnlyCollection<Guid> exclude, CancellationToken ct)
+    {
+        var neighbours = await keywordNeighbours!.ForAsync(account.Id, anchorId, KeywordArmCount * 2, exclude, ct);
+        if (neighbours.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = neighbours.Select(n => n.TitleId).ToList();
+        var titles = await lane(db.Titles.Where(t => ids.Contains(t.Id))).ToListAsync(ct);
+        var rank = ids.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
+        return [.. titles
+            .Where(t => EligibilityQueryBuilder.PassesMaturity(t, account.Settings.MaturityCeiling))
+            .OrderBy(t => rank[t.Id])
+            .Take(KeywordArmCount)];
+    }
+
     private static List<Scored> WithoutExcluded(IReadOnlyList<Scored> window, IReadOnlyCollection<Guid> excluded)
     {
         if (excluded.Count == 0)
@@ -972,14 +997,18 @@ public sealed class FeedPaginator(
                     count: WindowPopCount + WindowAnnCount,
                     account.Settings.MaturityCeiling, budget.Token));
 
-                // The keyword arm: titles sharing a distinctive keyword with the anchor, nearest
-                // first — the ones the evidence gate can actually admit — offered beside the plot
-                // neighbourhood rather than only when it happens to contain them.
-                var keywords = anchor.Keywords.Where(AnchorRowGate.IsDistinctiveKeyword).ToList();
+                // The keyword arm: titles sharing specific evidence with the anchor — the ones the
+                // evidence gate can actually admit — offered beside the plot neighbourhood rather
+                // than only when it happens to contain them. WS-3's KeywordNeighbours seeds it (WS-3
+                // CR-6): keywords AND themes, scored by how specific the shared label is, so two
+                // films sharing "heist" and "safecracker" lead two sharing "based on novel or book".
+                // Without it (a test-built paginator), the distinctive-keyword ANN arm.
                 var seen = window.Select(t => t.Id).ToHashSet();
-                window.AddRange((await candidateRetriever.RetrieveSharingKeywordsAsync(
-                        account.Id, anchorEmbedding, keywords, lane, KeywordArmCount,
-                        account.Settings.MaturityCeiling, budget.Token))
+                window.AddRange((keywordNeighbours is not null
+                        ? await KeywordNeighbourWindowAsync(account, anchorId, lane, exclude, budget.Token)
+                        : await candidateRetriever.RetrieveSharingKeywordsAsync(
+                            account.Id, anchorEmbedding, anchor.Keywords.Where(AnchorRowGate.IsDistinctiveKeyword).ToList(),
+                            lane, KeywordArmCount, account.Settings.MaturityCeiling, budget.Token))
                     .Where(t => seen.Add(t.Id)));
             }
             catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)

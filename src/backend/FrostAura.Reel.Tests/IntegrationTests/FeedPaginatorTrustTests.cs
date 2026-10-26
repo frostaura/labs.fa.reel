@@ -305,7 +305,10 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
     [InlineData(FeedRowContext.BecauseYouLoved)]
     // The title page's "More like this" (WS-10A's Similar evidence): the same gate, the same chips.
     [InlineData(FeedRowContext.Similar)]
-    public async Task An_anchored_page_serves_only_cards_with_shared_evidence_and_carries_it(FeedRowContext context)
+    // Seeded through WS-3's KeywordNeighbours, as the host wires it (WS-3 CR-6).
+    [InlineData(FeedRowContext.Similar, true)]
+    public async Task An_anchored_page_serves_only_cards_with_shared_evidence_and_carries_it(
+        FeedRowContext context, bool keywordNeighbours = false)
     {
         if (!Fixture.Available)
         {
@@ -326,7 +329,8 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
         var items = await MoreAsync(
             accountId,
             new MoreFeedRequest(context, anchor[0], null, [], 12),
-            new UnavailableSearchAgent());
+            new UnavailableSearchAgent(),
+            keywordNeighbours: keywordNeighbours);
 
         Assert.NotEmpty(items);
         Assert.All(items, i => Assert.Contains(i.Title.Id, withEvidence));
@@ -410,7 +414,8 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
         new(FeedRowContext.Genre, AnchorTitleId: null, Genre: genre, ExcludeTitleIds: [], Limit: 10);
 
     private async Task<IReadOnlyList<ScoredFeedItem>> MoreAsync(
-        Guid accountId, MoreFeedRequest request, ISearchAgent agent, IMemoryCache? sharedCache = null, bool offRequestCuration = false)
+        Guid accountId, MoreFeedRequest request, ISearchAgent agent, IMemoryCache? sharedCache = null, bool offRequestCuration = false,
+        bool keywordNeighbours = false)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var account = await db.Accounts.FirstAsync(a => a.Id == accountId);
@@ -427,7 +432,11 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
             new PersonalisationContext(db, new DislikeSignal(db, cache)),
             new FrostAura.Reel.Application.CrossReference.RerankBudget(
                 db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
-            cache, NullLogger<FeedPaginator>.Instance, offRequestCuration ? ScopesFor(agent, cache) : null);
+            cache, NullLogger<FeedPaginator>.Instance, offRequestCuration ? ScopesFor(agent, cache) : null,
+            keywordNeighbours
+                ? new FrostAura.Reel.Application.Search.Retrieval.KeywordNeighbours(
+                    db, eligibility, new FrostAura.Reel.Application.Search.Retrieval.Concepts.KeywordVocabulary(db, cache))
+                : null);
         return await paginator.MoreAsync(account, request, CancellationToken.None);
     }
 

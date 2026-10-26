@@ -817,7 +817,7 @@ public static class FeedEndpoints
             // eligibility builder that serves the titles — and only when the rail is short.
             var railIsShort = cards.Count < limit;
             var railSupply = railIsShort && context == FeedRowContext.Genre && !string.IsNullOrWhiteSpace(body.Genre)
-                ? await GenreRailSupplyAsync(db, supply, account.Id, body.Genre!, body.MediaType, ct)
+                ? await GenreRailSupplyAsync(db, supply, account.Id, body.Genre!, body.MediaType, [.. cards.Select(c => c.TitleId)], ct)
                 : null;
             return Results.Ok(new { items = cards, exhausted = cards.Count == 0, supply = railSupply });
         });
@@ -893,7 +893,8 @@ public static class FeedEndpoints
     /// so the number would overstate what the conditions hide on this rail.
     /// </summary>
     internal static async Task<RailSupply?> GenreRailSupplyAsync(
-        IReelDbContext db, ISupplyReporter supply, Guid accountId, string genre, string? mediaType, CancellationToken ct)
+        IReelDbContext db, ISupplyReporter supply, Guid accountId, string genre, string? mediaType,
+        IReadOnlyCollection<Guid> shown, CancellationToken ct)
     {
         var waivesIncludeGenre = await db.ContentFilters
             .AnyAsync(f => f.AccountId == accountId && f.Kind == FilterKind.IncludeGenre, ct);
@@ -908,8 +909,10 @@ public static class FeedEndpoints
             "show" => MediaScope.Shows,
             _ => MediaScope.Any,
         };
-        var report = await supply.ReportAsync(
-            accountId, new HardConstraints([new ConceptTerm(genre, [], [genre])], [], null, null, media), ct);
+        // WS-3's rail form (CR-6): the genre as the slug alone — its aliases, the anime composite and
+        // the TV stand-ins, never a title whose NAME contains the word — with the rail's own cards
+        // counted as shown rather than as supply still to come.
+        var report = await supply.ForGenreRailAsync(accountId, genre, media, shown, ct);
         return new RailSupply(report.ExcludedByConditions, report.AlreadySeen, report.ClearingFloor);
     }
 
