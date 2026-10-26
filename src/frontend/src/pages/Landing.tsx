@@ -4,74 +4,40 @@ import { useGetSessionQuery, useStartTraktAuthMutation } from "../store/api";
 import { hasSessionFlag } from "../lib/sessionFlag";
 import { rememberOauthState } from "../lib/traktOauth";
 import Footer from "../components/Footer";
-import ScoreBadges from "../components/rec/ScoreBadges";
-
-/** The fanned side cards: pure-CSS gradient posters + a genre label. No assets, no network. */
-const MOCK_POSTERS: { genre: string; gradient: string; tilt: string }[] = [
-  { genre: "Sci-fi", gradient: "linear-gradient(160deg, #12304b 0%, #0a1a2c 55%, #251d3d 100%)", tilt: "-rotate-6 translate-y-3" },
-  { genre: "Thriller", gradient: "linear-gradient(160deg, #2b1d33 0%, #131020 60%, #06121f 100%)", tilt: "-rotate-3 translate-y-1" },
-  { genre: "Drama", gradient: "linear-gradient(160deg, #3b2a1c 0%, #1d1410 60%, #0a0c14 100%)", tilt: "rotate-3 translate-y-1" },
-  { genre: "Comedy", gradient: "linear-gradient(160deg, #1c3b32 0%, #0f2019 60%, #071019 100%)", tilt: "rotate-6 translate-y-3" },
-];
 
 /**
- * The visual sell: what a Reel pick actually looks like, before asking anyone to sign in — a fan
- * of poster-style mock cards with one fully-rendered card (real ScoreBadges, an example why-line)
- * in front, captioned as an illustration. Entirely local CSS/DOM; deliberately no TMDB art on a page that exists to earn trust.
+ * What happens after "Sign in", in three plain steps. This replaces the fanned mock posters and the
+ * invented "Neon Static" pick (8.4 for you, 7.9 crowd, "streaming now"): every title and number in
+ * that card was made up, which is exactly the kind of claim this product exists not to make
+ * (KILL-10). The brand mark and real app screenshots are a parent-level deliverable (P2); until they
+ * arrive, the page says what Reel does instead of drawing a pick that does not exist.
  */
-function PosterMockRow() {
+const STEPS: { title: string; body: string }[] = [
+  {
+    title: "Link Trakt",
+    body: "Your watch history and ratings come across. Your Trakt account is your Reel account.",
+  },
+  {
+    title: "Reel reads your taste",
+    body: "From what you've rated — what you love, what you don't, and the conditions you set.",
+  },
+  {
+    title: "Picks you haven't seen",
+    body: "Each with a predicted rating for you, why it was picked, and where to watch it.",
+  },
+];
+
+function HowItWorks() {
   return (
-    // A <figure> with a visible caption, because every title and number in it is made up: until the
-    // brand art and real app screenshots replace it (P2, a parent-level deliverable — KILL-10's
-    // landing half), the row must never read as a real pick with real scores.
-    // The row: `overflow-hidden` is the backstop, not the fix. Below `sm` the two outer posters drop out
-    // (MockPoster's `outer`) and the inner pair narrows to w-16, which takes the row from ~440 px
-    // (all five) to ~248 px, inside a 320 px phone's column. Before, the row pushed the column
-    // 32 px off the left edge at 375 px and clipped the pitch ("nk your Trakt profile").
-    <figure className="space-y-1" data-testid="landing-illustration">
-      <div className="w-full max-w-3xl mx-auto flex items-end justify-center overflow-hidden pt-2 pb-4" aria-hidden>
-        {MOCK_POSTERS.slice(0, 2).map((p, i) => (
-          <MockPoster key={p.genre} poster={p} outer={i === 0} />
-        ))}
-
-        {/* The featured card — a real pick's anatomy: badges up top, why-line below. */}
-        <div className="relative z-10 w-36 sm:w-40 shrink-0 -mx-3 rounded-lg bg-fa-ink-2 p-1.5 pb-2 shadow-fa-glass ring-1 ring-fa-edge text-left">
-          <div
-            className="relative aspect-[2/3] rounded-md overflow-hidden"
-            style={{ backgroundImage: "linear-gradient(155deg, #14385a 0%, #0e2038 45%, #38214a 100%)" }}
-          >
-            <ScoreBadges predictedRating={8.4} crowdRating={7.9} />
-            <div className="absolute inset-x-0 bottom-0 h-1/2 reel-scrim" />
-            <p className="absolute bottom-2 left-2 right-2 fa-caption text-fa-frost-bright font-medium">
-              Neon Static
-            </p>
-          </div>
-          <p className="mt-1.5 px-0.5 fa-caption text-fa-frost/80 leading-snug">
-            Shares Blade Runner&apos;s neon melancholy — and it&apos;s streaming now.
-          </p>
-        </div>
-
-        {MOCK_POSTERS.slice(2).map((p, i, rest) => (
-          <MockPoster key={p.genre} poster={p} outer={i === rest.length - 1} />
-        ))}
-      </div>
-      <figcaption className="fa-caption text-fa-frost-dim" data-testid="landing-illustration-caption">
-        An illustration of how a pick reads — the title and its numbers are made up.
-      </figcaption>
-    </figure>
-  );
-}
-
-function MockPoster({ poster, outer }: { poster: (typeof MOCK_POSTERS)[number]; outer: boolean }) {
-  return (
-    <div
-      className={`relative w-16 sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden ring-1 ring-fa-edge shadow-fa-glass ${poster.tilt} ${
-        outer ? "hidden sm:block" : ""
-      }`}
-      style={{ backgroundImage: poster.gradient }}
-    >
-      <span className="absolute bottom-1.5 left-2 fa-overline text-fa-frost-dim">{poster.genre}</span>
-    </div>
+    <ol className="grid gap-3 text-left sm:grid-cols-3" data-testid="landing-steps">
+      {STEPS.map((step, index) => (
+        <li key={step.title} className="fa-card min-w-0 px-4 py-3 space-y-1" data-testid="landing-step">
+          <p className="fa-overline text-fa-frost-dim">step {index + 1}</p>
+          <p className="fa-body text-fa-frost-bright">{step.title}</p>
+          <p className="fa-caption text-fa-frost">{step.body}</p>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -112,7 +78,7 @@ export default function Landing() {
               with a predicted rating for <em>you</em>, and where to watch.
             </p>
           </div>
-          <PosterMockRow />
+          <HowItWorks />
           <div className="space-y-3">
             <button
               onClick={handleSignIn}
