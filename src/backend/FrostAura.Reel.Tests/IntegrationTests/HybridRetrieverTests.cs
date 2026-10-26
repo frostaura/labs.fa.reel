@@ -108,7 +108,7 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
             return;
         }
 
-        await SeedTitleAsync(t => t.Keywords = ["shinobi no mono", "ninja warrior", "time loop", "courtroom drama", "shipwreck", "heist"]);
+        await SeedTitleAsync(t => t.Keywords = ["shinobi no mono", "ninja warrior", "time loop", "courtroom drama", "shipwreck", "heist", "android", "volcano"]);
         await using var db = Fixture.CreateContext(new AccountContext());
         var cache = new MemoryCache(new MemoryCacheOptions());
         var resolver = new ConceptResolver(
@@ -128,6 +128,10 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.Contains("time loop", (await resolver.ResolveAsync(new ConceptTerm("a time loop film", [], []), default)).ExactLabels!);
         Assert.Contains("courtroom drama", (await resolver.ResolveAsync(new ConceptTerm("courtroom", [], []), default)).ExactLabels!);
         Assert.Contains("shipwreck", (await resolver.ResolveAsync(new ConceptTerm("survival at sea", [], []), default)).ExactLabels!);
+
+        // A phrase no label carries falls back to its words and their synonyms.
+        Assert.Contains("android", (await resolver.ResolveAsync(new ConceptTerm("ai robot movies", [], []), default)).ExactLabels!);
+        Assert.Contains("volcano", (await resolver.ResolveAsync(new ConceptTerm("disaster", [], []), default)).ExactLabels!);
 
         var scifi = await resolver.ResolveAsync(new ConceptTerm("Sci-Fi & Fantasy", [], []), default);
         Assert.Equal(["science-fiction", "fantasy"], scifi.Genres);

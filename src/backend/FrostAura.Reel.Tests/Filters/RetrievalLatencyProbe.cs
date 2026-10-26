@@ -363,6 +363,72 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         Assert.True(recall >= 0.9, $"ninja recall {recall:F2} < 0.9");
     }
 
+    /// <summary>
+    /// Recall@60 of the catalogue arms (facet + full text; the semantic and TMDB arms only re-rank
+    /// or add admitted titles) against each open-set concept scenario's SQL truth, restricted to the
+    /// titles the founder may be shown. The truth bounds precision and is not a judged recall set, so
+    /// this approximates the program's "judged golden facet queries" until the founder's labels exist.
+    /// </summary>
+    [Fact]
+    public async Task Facet_recall_at_60_against_the_open_concept_truth()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var (accountId, _) = await AccountAsync();
+        var truthDir = Path.GetFullPath(Path.Combine(SourceDirectory(), "../../../../eval/askreel/truth"));
+        var skip = new[] { "_eligible", "french", "korean", "low-rated", "scifi-1980s", "heist-2010s", "title-scooby" };
+        var recalls = new List<double>();
+        foreach (var file in Directory.GetFiles(truthDir, "*.sql").Order(StringComparer.Ordinal))
+        {
+            var key = Path.GetFileNameWithoutExtension(file);
+            if (skip.Contains(key) || key.StartsWith("genre-", StringComparison.Ordinal) || key.StartsWith("person-", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var truthSql = string.Join('\n', (await File.ReadAllLinesAsync(file)).Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal))).Trim().TrimEnd(';');
+            await using var db = Context();
+            var eligibleIds = new EligibilityQueryBuilder(db).EligibleTitles(accountId).Select(t => t.Id);
+            // The truth file is a committed eval fixture, not input: concatenated, not interpolated.
+            var wrapped = "SELECT x.\"Id\" AS \"Value\" FROM (" + truthSql + ") AS x";
+            var truth = (await db.Database.SqlQueryRaw<Guid>(wrapped)
+                    .Where(id => eligibleIds.Contains(id))
+                    .ToListAsync())
+                .ToHashSet();
+            if (truth.Count == 0)
+            {
+                output.WriteLine($"{key,-16} no eligible truth titles");
+                continue;
+            }
+
+            var cache = new MemoryCache(new MemoryCacheOptions());
+            var embeddings = new ConceptEmbeddings(new UnavailableEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance);
+            var eligibility = new EligibilityQueryBuilder(db);
+            var retriever = new HybridRetriever(
+                db, eligibility, new SupplyReporter(db, eligibility),
+                new ConceptResolver(new KeywordVocabulary(db, cache), embeddings, db, NullLogger<ConceptResolver>.Instance),
+                new FullTextArm(db), embeddings,
+                new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+                NullLogger<HybridRetriever>.Instance);
+            var words = key.Replace('-', ' ');
+            var result = await retriever.RetrieveAsync(
+                new RetrievalQuery(accountId, new HardConstraints([new ConceptTerm(words, [], [])], [], null, null, MediaScope.Any), SoftPreferences.None, [], 60)
+                {
+                    Arms = RetrievalArms.Catalogue,
+                },
+                default);
+            var hits = result.Candidates.Count(c => truth.Contains(c.TitleId));
+            var recall = (double)hits / Math.Min(60, truth.Count);
+            recalls.Add(recall);
+            output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{key,-16} truth {truth.Count,4}  returned {result.Candidates.Count,3}  in truth {hits,3}  recall@60 {recall:F2}"));
+        }
+
+        output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"mean recall@60 {recalls.Average():F3} over {recalls.Count} concepts; {recalls.Count(r => r >= 0.85)} at or above 0.85"));
+    }
+
     private static string SourceDirectory([System.Runtime.CompilerServices.CallerFilePath] string path = "") =>
         Path.GetDirectoryName(path)!;
 

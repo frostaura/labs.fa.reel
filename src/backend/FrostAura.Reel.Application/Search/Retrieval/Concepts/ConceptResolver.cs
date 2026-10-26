@@ -33,7 +33,8 @@ public interface IConceptResolver
 /// <item>Stems: the words, the planner's labels, and every <see cref="ConceptSynonyms"/> group either
 /// belongs to. Genre words ("horror", "sci-fi", "Sci-Fi &amp; Fantasy") add genre slugs.</item>
 /// <item>Expand through <see cref="KeywordVocabulary"/>. A stem that reaches nothing is retried
-/// singular ("heists" → "heist", "witches" → "witch").</item>
+/// singular ("heists" → "heist", "witches" → "witch"); a phrase that reaches nothing falls back to
+/// its words, each with its synonyms ("ai robot" → AI, robot, android), OR-ed.</item>
 /// <item>Only when no stem reached any label and no genre was named: the nearest labels by
 /// embedding (the precomputed <c>KeywordLabels</c> table), within <see cref="NearestLabelDistance"/>,
 /// bounded by <see cref="EmbedBudget"/>.</item>
@@ -67,6 +68,11 @@ public sealed partial class ConceptResolver(
     private static readonly HashSet<string> MediaWords = new(StringComparer.Ordinal)
     {
         "movie", "movies", "film", "films", "show", "shows", "series", "tv", "television", "flick", "flicks",
+    };
+
+    private static readonly HashSet<string> PhraseFiller = new(StringComparer.Ordinal)
+    {
+        "and", "or", "of", "in", "on", "at", "for", "from", "to", "into", "set", "like", "where", "who", "that", "but",
     };
 
     private static readonly HashSet<string> LeadingFiller = new(StringComparer.Ordinal)
@@ -120,6 +126,28 @@ public sealed partial class ConceptResolver(
             var reached = ReachedOrSingular(labels, stem, out var used);
             matchedStems.Add(used);
             exact.UnionWith(reached);
+        }
+
+        // A phrase no label carries ("ai robot", "haunted lighthouse") falls back to its words, each
+        // with its synonym group, OR-ed: the facet arm then finds titles about any of them and the
+        // judge decides which answer the whole phrase. Only words of three or more letters that are
+        // not filler; never a single-word concept, which has nothing to split.
+        if (exact.Count == 0 && genres.Count == 0 && words.Contains(' ', StringComparison.Ordinal))
+        {
+            foreach (var word in words.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                         .Where(w => (w.Length >= 3 || ConceptSynonyms.Groups.Any(g => g.Contains(w, StringComparer.Ordinal)))
+                             && !LeadingFiller.Contains(w) && !PhraseFiller.Contains(w)))
+            {
+                foreach (var stem in ConceptSynonyms.GroupOf(word))
+                {
+                    var reached = ReachedOrSingular(labels, stem, out var used);
+                    if (reached.Count > 0)
+                    {
+                        matchedStems.Add(used);
+                        exact.UnionWith(reached);
+                    }
+                }
+            }
         }
 
         if (exact.Count == 0 && genres.Count == 0 && words.Length > 0)

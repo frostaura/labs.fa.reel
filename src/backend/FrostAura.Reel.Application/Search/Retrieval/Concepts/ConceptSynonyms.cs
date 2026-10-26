@@ -31,7 +31,7 @@ public static class ConceptSynonyms
         ["artificial intelligence", "ai", "robot", "android"],
         ["alien", "extraterrestrial", "alien invasion"],
         ["pandemic", "epidemic", "virus outbreak"],
-        ["natural disaster", "volcano", "earthquake", "tornado", "tsunami"],
+        ["natural disaster", "disaster", "volcano", "earthquake", "tornado", "tsunami"],
         ["space", "outer space", "astronaut", "space station", "space travel", "spaceship", "space mission"],
         ["superhero", "superpower", "super power"],
         ["ghost", "haunting", "haunted"],
