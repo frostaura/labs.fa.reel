@@ -141,10 +141,20 @@ public sealed class OperatorAlertMonitorTests(JobRunnerDatabaseFixture fixture)
             {
                 Assert.Equal(LogOperatorAlertSink.Category, l.Category);
                 Assert.Equal(LogLevel.Error, l.Level);
-                Assert.StartsWith("ALERT raised provider_refused", l.Message, StringComparison.Ordinal);
-                Assert.Contains("payment_required", l.Message, StringComparison.Ordinal);
+                Assert.StartsWith("ALERT raised provider_refused: OpenRouter refuses every call (payment_required)", l.Message, StringComparison.Ordinal);
+                Assert.DoesNotContain("(null)", l.Message, StringComparison.Ordinal);
             },
-            l => Assert.StartsWith("ALERT resolved provider_refused", l.Message, StringComparison.Ordinal));
+            l =>
+            {
+                Assert.Equal(LogLevel.Warning, l.Level);
+                Assert.StartsWith("ALERT resolved provider_refused", l.Message, StringComparison.Ordinal);
+            });
+
+        lines.Clear();
+        var failures = new OperatorAlert(OperatorAlertCodes.JobFailures, Opened, Opened, null, null, 6, 5, [new AlertKindCount(JobKind.EnrichCatalog, 6)]);
+        await sink.DeliverAsync(failures, OperatorAlertEvent.Reminder, CancellationToken.None);
+        var line = Assert.Single(lines);
+        Assert.StartsWith("ALERT still active job_failures: 6 failed job attempt(s) in the hour, threshold 5 (EnrichCatalog 6)", line.Message, StringComparison.Ordinal);
     }
 
     [Fact]

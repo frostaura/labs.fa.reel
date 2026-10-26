@@ -61,22 +61,27 @@ public sealed class LogOperatorAlertSink(ILoggerFactory loggers) : IOperatorAler
 
     public Task DeliverAsync(OperatorAlert alert, OperatorAlertEvent kind, CancellationToken ct)
     {
-        var kinds = alert.Kinds is { Count: > 0 } k
-            ? string.Join(", ", k.Select(x => $"{x.Kind} {x.Count}"))
-            : null;
-        switch (kind)
+        var verb = kind switch
         {
-            case OperatorAlertEvent.Resolved:
-                _logger.LogWarning(
-                    "ALERT resolved {Code}: provider {Provider}, reason {Reason}; active since {Since:o}.",
-                    alert.Code, alert.Provider, alert.ReasonCode, alert.Since);
-                break;
-            default:
-                _logger.LogError(
-                    "ALERT {Event} {Code}: provider {Provider}, reason {Reason}, {Count} failed attempt(s) against a threshold of {Threshold} ({Kinds}); since {Since:o}.",
-                    kind == OperatorAlertEvent.Raised ? "raised" : "reminder",
-                    alert.Code, alert.Provider, alert.ReasonCode, alert.Count, alert.Threshold, kinds, alert.Since);
-                break;
+            OperatorAlertEvent.Raised => "raised",
+            OperatorAlertEvent.Reminder => "still active",
+            _ => "resolved",
+        };
+        var level = kind == OperatorAlertEvent.Resolved ? LogLevel.Warning : LogLevel.Error;
+        if (alert.Code == OperatorAlertCodes.ProviderRefused)
+        {
+            _logger.Log(
+                level,
+                "ALERT {Event} {Code}: {Provider} refuses every call ({Reason}); every model purpose is off. Since {Since:o}.",
+                verb, alert.Code, alert.Provider, alert.ReasonCode, alert.Since);
+        }
+        else
+        {
+            var kinds = alert.Kinds is { Count: > 0 } k ? string.Join(", ", k.Select(x => $"{x.Kind} {x.Count}")) : "none";
+            _logger.Log(
+                level,
+                "ALERT {Event} {Code}: {Count} failed job attempt(s) in the hour, threshold {Threshold} ({Kinds}). Since {Since:o}.",
+                verb, alert.Code, alert.Count, alert.Threshold, kinds, alert.Since);
         }
 
         return Task.CompletedTask;

@@ -52,16 +52,29 @@ public static class JobRunContext
 /// past the threshold logs its total. Each line names the job (<see cref="JobRunContext"/>) and the
 /// pinned account.</para>
 ///
+/// <para><b>What it has already ruled out.</b> No connection string here sets a command timeout, so
+/// Npgsql's 30-second default ends any one statement that waits longer, lock waits included, with an
+/// error and a failed attempt — which the stalled builds never had (all ended Succeeded). An
+/// hours-long stall is therefore many statements, or time spent outside the database; this names
+/// the first kind, and the runner's slow-run warning (<c>JobKindPolicy.SlowAfter</c>) dates the
+/// second by its last progress report. Reproduced on a slot: a lock held on the account row for
+/// 75 s made a fresh build's final save time out at 30 s, the attempt was retried, and the retry
+/// committed when the lock was released.</para>
+///
 /// <para>Statement heads are clipped to <see cref="HeadLength"/> characters. EF and the raw SQL in
 /// this codebase are parameterised, so heads carry no values.</para>
 /// </summary>
 public sealed class SlowCommandDiagnostics : DbCommandInterceptor, IDisposable
 {
-    public static readonly TimeSpan Threshold = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// Well under Npgsql's 30-second command timeout, which ends any single statement (a lock wait
+    /// included) with an error: a statement worth naming has to be named before that.
+    /// </summary>
+    public static readonly TimeSpan Threshold = TimeSpan.FromSeconds(10);
 
     public static readonly TimeSpan Repeat = TimeSpan.FromMinutes(5);
 
-    public static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(5);
 
     public const int HeadLength = 160;
 
