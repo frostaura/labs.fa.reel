@@ -8,7 +8,10 @@ import PushOptIn from "../components/settings/PushOptIn";
 import LoadFailed from "../components/ui/load-failed";
 import SaveStatus from "../components/ui/save-status";
 import { useLeaveGuard } from "../components/settings/useLeaveGuard";
-import { pipelineLabel } from "../lib/modelReadiness";
+import { modelReadiness, pipelineSentence } from "../lib/modelReadiness";
+import { relTime } from "../lib/format";
+import { rememberOauthState } from "../lib/traktOauth";
+import RegionPicker from "../components/settings/RegionPicker";
 import {
   emailSaveMessage,
   saveFailureMessage,
@@ -20,12 +23,61 @@ import {
   useGetSessionQuery,
   useGetSettingsQuery,
   useGetSyncStatusQuery,
+  useStartTraktAuthMutation,
   useTriggerSyncMutation,
   useUpdateSettingsMutation,
+  type SyncStatus,
 } from "../store/api";
 
-/** Minimal ISO-3166 alpha-2 set for v0; replaced by a full searchable list with the M3 surface. */
-const REGIONS = ["US", "GB", "DE", "FR", "NL", "ZA", "AU", "CA", "ES", "IT", "PT", "BR", "JP"];
+/**
+ * Reconnect Trakt (H-2): the same sign-in the landing page starts, from the one screen a user with a
+ * broken link actually visits. Prominent when the link is broken, quiet otherwise — it is also the
+ * way to refresh a link that is technically active but stuck.
+ */
+function ReconnectTrakt({ sync }: { sync: SyncStatus | undefined }) {
+  const [startTraktAuth, { isLoading, isError }] = useStartTraktAuthMutation();
+  const broken =
+    (sync?.connectionStatus != null && sync.connectionStatus !== "Active") || modelReadiness(sync)?.kind === "reconnect";
+
+  const reconnect = async () => {
+    try {
+      const { authorizeUrl, state } = await startTraktAuth().unwrap();
+      rememberOauthState(state);
+      window.location.assign(authorizeUrl);
+    } catch {
+      // isError renders the failure below; nothing awaits this handler.
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 border-t border-fa-edge/50 pt-3" data-testid="trakt-reconnect">
+      {broken ? (
+        <p className="fa-caption text-fa-danger" role="status" data-testid="trakt-connection-broken">
+          Reel has lost access to your Trakt account, so nothing new comes across until you reconnect.
+        </p>
+      ) : (
+        <p className="fa-caption text-fa-frost-dim">
+          If picks stop following what you watch on Trakt, reconnecting signs you in to Trakt again. Nothing you&apos;ve
+          rated is lost.
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={reconnect}
+        disabled={isLoading}
+        className={broken ? "fa-button-primary" : "fa-button-ghost"}
+        data-testid="trakt-reconnect-button"
+      >
+        {isLoading ? "Opening Trakt…" : "Reconnect Trakt"}
+      </button>
+      {isError && (
+        <p role="alert" className="fa-caption text-fa-danger" data-testid="trakt-reconnect-error">
+          Couldn&apos;t reach Trakt&apos;s sign-in. Nothing changed — try again in a moment.
+        </p>
+      )}
+    </div>
+  );
+}
 
 /**
  * The stored email, shown and editable. It exists for Stripe receipts, so it is offered only while
@@ -157,71 +209,60 @@ export default function Settings() {
     <div className="max-w-2xl space-y-6 lg:max-w-5xl lg:grid lg:grid-cols-2 lg:gap-6 lg:space-y-0 lg:items-start">
       <h1 className="text-2xl font-light text-fa-frost-bright lg:col-span-2">Settings</h1>
 
-      <section className="fa-card p-5 space-y-4">
+      {/* Conditions first (H-6): they decide what every pick is drawn from, and they are what people
+          come to this page to change. Wide, dense content that needs the full row. */}
+      <div className="lg:col-span-2" data-testid="settings-conditions">
+        <PreferencesSection />
+      </div>
+
+      <section className="fa-card p-5 space-y-4" data-testid="settings-trakt">
         <h2 className="fa-section-title">Trakt account</h2>
         <div className="flex items-center gap-3">
           {session?.avatarUrl && (
             <img src={session.avatarUrl} alt="" className="h-10 w-10 rounded-full object-cover" />
           )}
-          <div>
+          <div className="min-w-0">
             <p className="fa-body text-fa-frost-bright">{session?.displayName}</p>
             <a
               href={`https://trakt.tv/users/${session?.traktSlug}`}
               target="_blank"
               rel="noreferrer"
-              className="fa-caption fa-link"
+              className="fa-caption fa-link break-all"
             >
               trakt.tv/users/{session?.traktSlug}
             </a>
           </div>
         </div>
-        <div className="flex items-center justify-between border-t border-fa-edge/50 pt-3">
-          <div className="fa-caption text-fa-frost-dim">
-            {/* In words, from the status that explains it: the raw stage read "Degraded" to an
-                account that had rated enough and was only waiting for its first model (R1-57). */}
-            <p data-testid="settings-pipeline">Pipeline: {pipelineLabel(sync) ?? session?.pipelineStage ?? "…"}</p>
-            <p>
-              Last sync:{" "}
-              {sync?.lastDeltaSyncAt ? new Date(sync.lastDeltaSyncAt).toLocaleString() : "never"}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-fa-edge/50 pt-3">
+          <div className="fa-caption text-fa-frost-dim min-w-0 flex-1">
+            {/* A sentence, from the status that explains it (KILL-11): never the raw stage. */}
+            <p className="text-fa-frost" data-testid="settings-pipeline">
+              {pipelineSentence(sync) ?? "Checking what Reel is doing…"}
             </p>
-            {sync?.connectionStatus && sync.connectionStatus !== "Active" && (
-              <p className="text-fa-danger">Connection: {sync.connectionStatus} — re-link from the landing page.</p>
-            )}
+            <p data-testid="settings-last-sync">
+              {sync?.lastDeltaSyncAt ? `Last synced with Trakt ${relTime(sync.lastDeltaSyncAt)}.` : "Not synced with Trakt yet."}
+            </p>
           </div>
           <button onClick={() => triggerSync()} disabled={syncing} className="fa-button">
             <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
             Sync now
           </button>
         </div>
+        <ReconnectTrakt sync={sync} />
       </section>
 
-      <section className="fa-card p-5 space-y-3">
+      <section className="fa-card p-5 space-y-3" data-testid="settings-region">
         <h2 className="fa-section-title">Region</h2>
         <p className="fa-caption text-fa-frost-dim">
-          Drives where-to-watch availability and provider badges.
+          Where you watch. It decides which streaming, rental and purchase options Reel shows for each title.
         </p>
-        <div className="flex items-center gap-3">
-          <select
-            className="fa-input fa-select"
-            aria-label="Region"
-            value={session?.region ?? "US"}
-            onChange={(e) => handleRegionChange(e.target.value)}
-            disabled={savingRegion}
-            data-testid="region-select"
-          >
-            {REGIONS.map((r) => (
-              <option key={r} value={r} className="bg-fa-ink-2">
-                {r}
-              </option>
-            ))}
-          </select>
-          <SaveStatus
-            message={regionStatus}
-            onRetry={lastRegion ? () => void handleRegionChange(lastRegion) : undefined}
-            retrying={savingRegion}
-            testId="region-save-status"
-          />
-        </div>
+        <RegionPicker value={session?.region ?? null} onSelect={(code) => void handleRegionChange(code)} disabled={savingRegion} />
+        <SaveStatus
+          message={regionStatus}
+          onRetry={lastRegion ? () => void handleRegionChange(lastRegion) : undefined}
+          retrying={savingRegion}
+          testId="region-save-status"
+        />
       </section>
 
       {/* Router Link, not <a href> — a full document reload just to reach /rate threw away the
@@ -244,11 +285,6 @@ export default function Settings() {
 
       <div className="lg:col-span-2">
         <PreferenceTags />
-      </div>
-
-      {/* Conditions editor + PIN — wide, dense content that needs the full row. */}
-      <div className="lg:col-span-2">
-        <PreferencesSection />
       </div>
     </div>
   );

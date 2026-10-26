@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Lock, Minus, Plus, X } from "lucide-react";
+import { Check, Lock, X } from "lucide-react";
 import {
-  useFilterCostQuery,
+  useGetFilterChipsQuery,
   useGetFiltersQuery,
   useGetSessionQuery,
   useUpdateFiltersMutation,
@@ -21,10 +21,9 @@ import {
 } from "../../lib/filterCost";
 import {
   ALL_LANGUAGES,
-  cycleGenre,
+  genreChips,
+  genreReach,
   genreState,
-  GENRES,
-  DEFAULT_FILTERS,
   isInvertedYearRange,
   LANGUAGES,
   MATURITY_LEVELS,
@@ -33,6 +32,7 @@ import {
   parseYearInput,
   sameConditions,
   YEAR_FLOOR,
+  toggleGenre,
   yearCeiling,
   type GenreState,
 } from "../../lib/pickConditions";
@@ -41,6 +41,7 @@ import LoadFailed from "../ui/load-failed";
 import SaveStatus from "../ui/save-status";
 import { saveFailureMessage, savedMessage, type SaveMessage } from "../ui/save-outcome";
 import { useLeaveGuard } from "./useLeaveGuard";
+import { useFilterCostMeter } from "./useFilterCostMeter";
 import { CONDITIONS_SCOPE_COPY } from "../../lib/conditionsCopy";
 
 interface Props {
@@ -57,14 +58,8 @@ interface Props {
   testIds?: { editor?: string; locked?: string; loading?: string };
 }
 
-/**
- * How long the editor waits before costing a draft. Long enough that a chip-tapping burst is one
- * request, short enough that the number feels attached to the tap that changed it.
- */
-const COST_DEBOUNCE_MS = 350;
-
 const GENRE_TONE: Record<GenreState, string> = {
-  neutral: "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/40",
+  neutral: "border-fa-edge bg-fa-glass text-fa-frost",
   include: "border-fa-success/50 bg-fa-success/15 text-fa-success",
   exclude: "border-fa-danger/50 bg-fa-danger/15 text-fa-danger",
 };
@@ -74,6 +69,10 @@ const GENRE_ARIA: Record<GenreState, string> = {
   include: "required",
   exclude: "excluded",
 };
+
+/** Each ✓/✕ is a full 44 px target on a coarse pointer (touch), compact under a mouse. */
+const GENRE_BUTTON =
+  "inline-flex items-center justify-center px-2 transition border-l border-fa-edge hover:bg-fa-glass-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fa-frost/50 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11";
 
 /**
  * The conditions behind tonight's picks — genres (three-state), the two rating floors, release
@@ -146,21 +145,15 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
 
   const shell = bare ? "space-y-5" : "fa-card p-5 space-y-5";
 
-  // The costed draft trails the edited one. Serialising it is what makes the effect stable: a fresh
-  // object identity on every keystroke would re-arm the timer for ever and the request would never
-  // fire, and RTK Query keys its cache on the serialised arg anyway.
-  const [costDraft, setCostDraft] = useState<FiltersPayload | null>(null);
-  const draftKey = draft ? JSON.stringify(draft) : "";
-  useEffect(() => {
-    if (draftKey === "") return;
-    const handle = window.setTimeout(() => setCostDraft(JSON.parse(draftKey) as FiltersPayload), COST_DEBOUNCE_MS);
-    return () => window.clearTimeout(handle);
-  }, [draftKey]);
-  // Errors are swallowed on purpose: the meter is an aid, and an editor that refuses to render
-  // because a count failed would be a worse screen than one that quietly shows no counts.
-  const { data: cost } = useFilterCostQuery(costDraft ?? DEFAULT_FILTERS, {
-    skip: costDraft === null || locked,
-  });
+  // The cost of the draft, debounced, with any request for an older draft aborted (H-6).
+  const cost = useFilterCostMeter(draft, locked);
+  // The catalogue's genre chips (H-7). A failed read is its own state below, never a missing list.
+  const {
+    data: chipReport,
+    isError: chipsFailed,
+    isFetching: chipsLoading,
+    refetch: refetchChips,
+  } = useGetFilterChipsQuery();
 
   const unlock = async () => {
     const result = await verifyPin({ pin: pinEntry }).unwrap().catch(() => null);
@@ -338,59 +331,85 @@ export default function ConditionsEditor({ onSaved, saveLabel = "Save conditions
       </div>
 
       {/* ── Genres ──────────────────────────────────────────────────────────────────────────
-          Three states, not two. The list has always had an `includeGenres` half; it simply had no
-          UI, so "give me horror" was inexpressible and only "never horror" could be said. */}
+          Each genre carries an explicit ✓ (require) and ✕ (exclude); tapping the lit one clears it.
+          The chips come from the catalogue (H-7), so every chip offered removes something. */}
       <div className="space-y-2">
         <p className="fa-overline text-fa-frost-dim">genres</p>
         <p className="fa-caption text-fa-frost-dim">
-          Tap once to require, twice to exclude, a third time to clear.
+          <Check className="inline h-3 w-3 text-fa-success" aria-hidden /> requires at least one of the ticked genres ·{" "}
+          <X className="inline h-3 w-3 text-fa-danger" aria-hidden /> hides every title in a crossed-out one. Tap a lit
+          mark again to clear it.
         </p>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 fa-caption">
-          <span className="inline-flex items-center gap-1.5 text-fa-success">
-            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-fa-success/50 bg-fa-success/15">
-              <Plus className="h-2.5 w-2.5" />
-            </span>
-            include — must have at least one
-          </span>
-          <span className="inline-flex items-center gap-1.5 text-fa-danger">
-            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-fa-danger/50 bg-fa-danger/15">
-              <Minus className="h-2.5 w-2.5" />
-            </span>
-            exclude — must have none
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {GENRES.map((genre) => {
-            const state = genreState(draft, genre);
+        <div className="flex flex-wrap gap-1.5" data-testid="genre-chips">
+          {genreChips(chipReport, draft).map((chip) => {
+            const state = genreState(draft, chip.slug);
             // Only excluded chips carry a number, and only a positive one: the badge answers "what
             // is this chip costing me", which is a question an inactive chip does not raise.
-            const marginal = state === "exclude" ? formatMarginal(marginalFor(cost, "ExcludeGenre", genre)) : null;
+            const marginal = state === "exclude" ? formatMarginal(marginalFor(cost, "ExcludeGenre", chip.slug)) : null;
+            const reach = chipReport ? genreReach(chip) : null;
             return (
-              <button
-                key={genre}
-                type="button"
-                onClick={() => setDraft(cycleGenre(draft, genre))}
-                aria-label={
-                  marginal
-                    ? `${genre.replace("-", " ")} — ${GENRE_ARIA[state]}, ${marginal} titles if allowed`
-                    : `${genre.replace("-", " ")} — ${GENRE_ARIA[state]}`
-                }
-                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 fa-caption capitalize transition ${GENRE_TONE[state]}`}
-                data-testid={`genre-${genre}`}
+              <div
+                key={chip.slug}
+                role="group"
+                aria-label={`${chip.label} — ${GENRE_ARIA[state]}${reach ? `, ${reach}` : ""}${
+                  marginal ? `, ${marginal} titles if allowed` : ""
+                }`}
+                title={reach ?? undefined}
+                className={`inline-flex items-stretch overflow-hidden rounded-full border fa-caption ${GENRE_TONE[state]}`}
+                data-testid={`genre-${chip.slug}`}
                 data-state={state}
               >
-                {state === "include" && <Plus className="h-3 w-3" />}
-                {state === "exclude" && <Minus className="h-3 w-3" />}
-                {genre.replace("-", " ")}
-                {marginal && (
-                  <span className="tabular-nums normal-case opacity-80" data-testid={`genre-marginal-${genre}`}>
-                    {marginal}
-                  </span>
-                )}
-              </button>
+                <span className="inline-flex items-center gap-1 py-1 pl-2.5 pr-2 capitalize">
+                  {chip.label}
+                  {/* A saved rule under the catalogue bar: kept on screen so it can be cleared, and
+                      honest that it removes little or nothing. */}
+                  {chip.belowBar && (
+                    <span className="normal-case opacity-70" data-testid={`genre-below-bar-${chip.slug}`}>
+                      ({chip.movies + chip.shows === 0 ? "matches nothing in the catalogue" : `only ${genreReach(chip)}`})
+                    </span>
+                  )}
+                  {marginal && (
+                    <span className="tabular-nums normal-case opacity-80" data-testid={`genre-marginal-${chip.slug}`}>
+                      {marginal}
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDraft(toggleGenre(draft, chip.slug, "include"))}
+                  aria-pressed={state === "include"}
+                  aria-label={`Require ${chip.label}`}
+                  className={`${GENRE_BUTTON} ${state === "include" ? "bg-fa-success/25" : "opacity-70"}`}
+                  data-testid={`genre-${chip.slug}-include`}
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDraft(toggleGenre(draft, chip.slug, "exclude"))}
+                  aria-pressed={state === "exclude"}
+                  aria-label={`Exclude ${chip.label}`}
+                  className={`${GENRE_BUTTON} ${state === "exclude" ? "bg-fa-danger/25" : "opacity-70"}`}
+                  data-testid={`genre-${chip.slug}-exclude`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
             );
           })}
+          {!chipReport && !chipsFailed && (
+            <span className="h-7 w-48 rounded-full reel-shimmer" data-testid="genre-chips-loading" aria-hidden />
+          )}
         </div>
+        {!chipReport && chipsFailed && (
+          <LoadFailed
+            what="the genre list"
+            onRetry={() => void refetchChips()}
+            retrying={chipsLoading}
+            variant="inline"
+            testId="genre-chips-error"
+          />
+        )}
       </div>
 
       {/* ── The two ratings, adjacent and clearly labelled — they are different numbers. ────── */}

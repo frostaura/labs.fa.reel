@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  cycleGenre,
   DEFAULT_FILTERS,
+  genreChips,
+  genreLabel,
+  genreReach,
   genreState,
   isInvertedYearRange,
   normalizeFilters,
@@ -10,6 +12,7 @@ import {
   sameConditions,
   setGenreState,
   summaryChips,
+  toggleGenre,
   yearCeiling,
 } from "./pickConditions";
 import { DEFAULT_BROWSE_FILTER, type BrowseFilter } from "./browseFilter";
@@ -39,27 +42,31 @@ describe("genre tri-state", () => {
     expect(genreState(base({ includeGenres: ["horror"], excludeGenres: ["horror"] }), "horror")).toBe("exclude");
   });
 
-  it("cycles neutral → include → exclude → neutral", () => {
-    let f = base();
-    f = cycleGenre(f, "horror");
+  it("✓ requires, ✓ again clears; ✕ excludes, ✕ again clears", () => {
+    let f = toggleGenre(base(), "horror", "include");
     expect(genreState(f, "horror")).toBe("include");
-    expect(f.includeGenres).toEqual(["horror"]);
-
-    f = cycleGenre(f, "horror");
-    expect(genreState(f, "horror")).toBe("exclude");
-
-    f = cycleGenre(f, "horror");
+    f = toggleGenre(f, "horror", "include");
     expect(genreState(f, "horror")).toBe("neutral");
+
+    f = toggleGenre(f, "horror", "exclude");
+    expect(genreState(f, "horror")).toBe("exclude");
+    expect(f.includeGenres).toEqual([]);
+    f = toggleGenre(f, "horror", "exclude");
     expect(f.includeGenres).toEqual([]);
     expect(f.excludeGenres).toEqual([]);
   });
 
-  it("never leaves a genre on both lists as it cycles", () => {
+  it("goes straight from required to excluded in one tap — no pass through the other state", () => {
+    const f = toggleGenre(base({ includeGenres: ["horror"] }), "horror", "exclude");
+    expect(f.excludeGenres).toEqual(["horror"]);
+    expect(f.includeGenres).toEqual([]);
+  });
+
+  it("never leaves a genre on both lists, whatever the taps", () => {
     let f = base();
-    for (let i = 0; i < 7; i += 1) {
-      f = cycleGenre(f, "horror");
-      const onBoth = f.includeGenres.filter((g) => f.excludeGenres.includes(g));
-      expect(onBoth).toEqual([]);
+    for (const target of ["include", "exclude", "exclude", "include", "exclude", "include", "include"] as const) {
+      f = toggleGenre(f, "horror", target);
+      expect(f.includeGenres.filter((g) => f.excludeGenres.includes(g))).toEqual([]);
     }
   });
 
@@ -70,15 +77,59 @@ describe("genre tri-state", () => {
   });
 
   it("leaves every other genre untouched — one chip is one decision", () => {
-    const f = cycleGenre(base({ excludeGenres: ["documentary"], includeGenres: ["crime"] }), "horror");
+    const f = toggleGenre(base({ excludeGenres: ["documentary"], includeGenres: ["crime"] }), "horror", "include");
     expect(f.excludeGenres).toEqual(["documentary"]);
     expect(f.includeGenres).toEqual(["crime", "horror"]);
   });
 
   it("does not mutate the input", () => {
     const before = base({ excludeGenres: ["documentary"] });
-    cycleGenre(before, "documentary");
+    toggleGenre(before, "documentary", "exclude");
     expect(before.excludeGenres).toEqual(["documentary"]);
+  });
+});
+
+/** The catalogue's chips (H-7): what is offered, what is kept because a rule needs it, and how it reads. */
+describe("genreChips", () => {
+  const report = {
+    minTitles: 50,
+    chips: [
+      { slug: "drama", movies: 2100, shows: 640, composite: false, offered: true },
+      { slug: "reality", movies: 0, shows: 183, composite: false, offered: true },
+      { slug: "anime", movies: 41, shows: 30, composite: true, offered: true },
+      { slug: "sports", movies: 0, shows: 0, composite: false, offered: false },
+      { slug: "news", movies: 0, shows: 10, composite: false, offered: false },
+    ],
+  };
+
+  it("offers only chips over the catalogue bar, TV genres included, sorted by label", () => {
+    expect(genreChips(report, base()).map((c) => c.slug)).toEqual(["anime", "drama", "reality"]);
+  });
+
+  it("keeps a genre the account's rules use even under the bar, flagged, so it can be cleared", () => {
+    const chips = genreChips(report, base({ excludeGenres: ["sports"], includeGenres: ["western"] }));
+    expect(chips.find((c) => c.slug === "sports")).toMatchObject({ belowBar: true });
+    // Not in the catalogue at all: still listed for the same reason.
+    expect(chips.find((c) => c.slug === "western")).toMatchObject({ belowBar: true, movies: 0, shows: 0 });
+    expect(chips.find((c) => c.slug === "drama")).toMatchObject({ belowBar: false });
+  });
+
+  it("before the report lands, lists just the genres in the rules and flags none", () => {
+    expect(genreChips(undefined, base({ excludeGenres: ["horror"] }))).toEqual([
+      { slug: "horror", label: "horror", movies: 0, shows: 0, belowBar: false },
+    ]);
+  });
+
+  it("says what anime matches, and spells slugs as words", () => {
+    expect(genreLabel("anime")).toBe("anime (Japanese animation)");
+    expect(genreLabel("science-fiction")).toBe("science fiction");
+    expect(genreLabel("talk-show")).toBe("talk show");
+  });
+
+  it("states a chip's reach in films and shows", () => {
+    expect(genreReach({ movies: 0, shows: 183 })).toBe("183 shows");
+    expect(genreReach({ movies: 1204, shows: 1 })).toBe("1,204 films · 1 show");
+    expect(genreReach({ movies: 0, shows: 0 })).toBe("no titles in the catalogue");
   });
 });
 
@@ -374,9 +425,9 @@ describe("sameConditions — what marks the editor's draft unsaved", () => {
   it("toggling a genre all the way round returns to clean", () => {
     const saved = base({ excludeGenres: ["horror"] });
     let draft = normalizeFilters(saved);
-    draft = cycleGenre(draft, "war");
+    draft = toggleGenre(draft, "war", "include");
     expect(sameConditions(draft, saved)).toBe(false);
-    draft = cycleGenre(cycleGenre(draft, "war"), "war");
+    draft = toggleGenre(toggleGenre(draft, "war", "exclude"), "war", "exclude");
     expect(genreState(draft, "war")).toBe("neutral");
     expect(sameConditions(draft, saved)).toBe(true);
   });

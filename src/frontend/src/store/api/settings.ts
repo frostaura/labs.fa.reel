@@ -49,6 +49,26 @@ export interface FilterCostReport {
   suggestions: FilterCostSuggestion[];
 }
 
+/**
+ * One genre chip from the catalogue (WS-3, GET /api/search/filter-chips): the films and shows an
+ * exclusion of that slug would remove — the same predicate eligibility applies, so the number on a
+ * chip is what the chip controls. `offered` is false under the server's bar (`minTitles`); such a
+ * chip is listed so a saved rule for it still has a row, but it is not offered for new taps (H-7).
+ */
+export interface FilterChip {
+  slug: string;
+  movies: number;
+  shows: number;
+  /** A combination of facts rather than a tag: anime is animation in Japanese. */
+  composite: boolean;
+  offered: boolean;
+}
+
+export interface FilterChipReport {
+  minTitles: number;
+  chips: FilterChip[];
+}
+
 export interface AccountSettings {
   region: string;
   onboarded: boolean;
@@ -107,6 +127,11 @@ export const settingsApi = api.injectEndpoints({
     // query and not a mutation because it changes nothing: it needs the arg-keyed cache, since the
     // editor re-costs on every debounced chip tap and slider drag. `keepUnusedDataFor` matches the
     // server's own 60s window, so a user toggling a chip back and forth pays for it once.
+    // Catalogue-wide and slow-moving (the server caches it 30 minutes), so it is kept as long.
+    getFilterChips: b.query<FilterChipReport, void>({
+      query: () => "search/filter-chips",
+      keepUnusedDataFor: 1800,
+    }),
     filterCost: b.query<FilterCostReport, FiltersPayload>({
       query: (filters) => ({ url: "settings/filters/cost", method: "POST", body: filters }),
       keepUnusedDataFor: 60,
@@ -168,6 +193,8 @@ export const {
   useCreateCheckoutMutation,
   useSetPinMutation,
   useFilterCostQuery,
+  useLazyFilterCostQuery,
+  useGetFilterChipsQuery,
   useVerifyPinMutation,
   useRemovePinMutation,
   useLazyGetVapidPublicKeyQuery,

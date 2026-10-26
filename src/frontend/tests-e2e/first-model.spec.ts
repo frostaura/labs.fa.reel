@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 import { CONDITIONS_SCOPE_COPY } from "../src/lib/conditionsCopy";
 
 /**
@@ -214,6 +215,7 @@ async function bootSettings(page: Page, status: unknown) {
   await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
   await mockJson(page, "**/api/preferences/tags", []);
   await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
+  await mockFilterChips(page);
   await mockJson(page, "**/api/settings/filters", {
     excludeGenres: [],
     includeGenres: [],
@@ -234,7 +236,7 @@ test.describe("settings", () => {
     await bootSettings(page, AWAITING_TODAY);
 
     await expect(page.getByTestId("settings-pipeline")).toHaveText(
-      "Pipeline: waiting for your first model — tonight's refresh at the latest"
+      "You've rated enough — Reel builds your first model in tonight's refresh at the latest."
     );
     await expectNoFailure(page);
   });
@@ -242,7 +244,9 @@ test.describe("settings", () => {
   test("a failed first Train reads as stopped", async ({ page }) => {
     await bootSettings(page, TRAIN_FAILED);
 
-    await expect(page.getByTestId("settings-pipeline")).toHaveText("Pipeline: stopped");
+    await expect(page.getByTestId("settings-pipeline")).toHaveText(
+      "Building your picks stopped on Reel's side. Nothing you've rated is lost."
+    );
   });
 
   // R1-26, IR1S-06: Settings renders the one shared scope sentence. The typeahead does not apply the
@@ -255,6 +259,6 @@ test.describe("settings", () => {
     await expect(scope).toHaveText(CONDITIONS_SCOPE_COPY);
     await expect(scope).not.toContainText("airtight");
     await expect(scope).not.toContainText("all search");
-    await expect(page.getByTestId("settings-pipeline")).toHaveText("Pipeline: ready");
+    await expect(page.getByTestId("settings-pipeline")).toHaveText("Your picks are ready.");
   });
 });
