@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Search;
+using FrostAura.Reel.Application.Search.AskReel;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
@@ -267,12 +268,9 @@ public class OpenRouterSearchInterpreter(
                 // picks by a rejection nobody made. An unresolvable token is dropped outright: it
                 // does NOT fall through to the positive branch either, because searching for the
                 // thing inside a rejection is the original defect negation exists to prevent.
-                foreach (var candidate in new[] { token, altToken })
+                foreach (var keyword in NegatedKeywords(raw, token, altToken))
                 {
-                    if (candidate is { Length: > 2 } && SearchVocabulary.IsNegatableKeyword(candidate))
-                    {
-                        Add(excludeKeywords, candidate);
-                    }
+                    Add(excludeKeywords, keyword);
                 }
             }
             else if (raw.Length > 2 && !StopWords.Contains(raw))
@@ -304,6 +302,38 @@ public class OpenRouterSearchInterpreter(
         {
             if (!target.Contains(value)) target.Add(value);
         }
+    }
+
+    /// <summary>
+    /// The singular readings a negated token is tested against the vocabulary as, in preference
+    /// order: the scanner's crude singular, its "-ies" alternative, and then every shorter reading
+    /// <see cref="NegationTerms.Forms"/> generates from the RAW token. The crude singular alone only
+    /// strips a final "s", so "superheroes" became "superheroe", "witches" became "witche", and the
+    /// vocabulary — stored singular — recognised neither: "no superheroes please" produced no
+    /// exclusion at all and requested negations are read only from here (IREV1-SYS-03). Only
+    /// readings SHORTER than the raw token are offered, so the exclusion that lands is the
+    /// vocabulary's own singular ("superhero"), never the plural the user typed or a mangled form.
+    /// The generated readings are consulted only when neither crude reading landed, and the first
+    /// one the vocabulary knows ends the search; later ones would only be spellings of the same
+    /// concept.
+    /// </summary>
+    private static IReadOnlyList<string> NegatedKeywords(string raw, string token, string? altToken)
+    {
+        // The crude readings keep their historic behaviour: both "-ies" readings are offered, and
+        // either that the vocabulary knows becomes an exclusion.
+        var crude = new[] { token, altToken }
+            .OfType<string>()
+            .Where(candidate => candidate.Length > 2 && SearchVocabulary.IsNegatableKeyword(candidate))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (crude.Count > 0)
+        {
+            return crude;
+        }
+
+        var generated = NegationTerms.Forms(raw).FirstOrDefault(form =>
+            form.Length > 2 && form.Length < raw.Length && SearchVocabulary.IsNegatableKeyword(form));
+        return generated is null ? [] : [generated];
     }
 
     // The genre aliases moved to Application's SearchVocabulary, whole. They were private here, so
