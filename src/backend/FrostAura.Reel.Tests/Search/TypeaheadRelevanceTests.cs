@@ -1,65 +1,50 @@
-using FrostAura.Reel.Api.Endpoints;
+using FrostAura.Reel.Application.Search.Typeahead;
 
 namespace FrostAura.Reel.Tests.Search;
 
 /// <summary>
-/// Pins the relevance tiebreak that keeps a typo'd LOOKUP pointing at the title the user meant.
-///
-/// Adding trigram matching to typeahead widened the candidate set: before it, every row was an
-/// exact substring match, so re-sorting the survivors purely by predicted rating was harmless.
-/// Afterwards a loosely-similar title could outrank the one actually typed — "spiderman" surfaced
-/// Superman above Spider-Man, because Superman simply scored better for that account. Relevance
-/// has to dominate for a lookup; the personal lens is the tiebreak within a tier.
+/// The lookup's tiers (C-8, C*3): a name the user typed in full beats one that starts with it, which
+/// beats one where it starts a word, which beats a substring or a look-alike — "heat" must find Heat
+/// before Cheaters, "godfather" The Godfather before Godfather of Harlem. The SQL ranks by the same
+/// rules; these pin the in-memory twin and the literal-input helpers.
 /// </summary>
 public class TypeaheadRelevanceTests
 {
     [Theory]
-    [InlineData("Spider-Man", "spiderman")]
-    [InlineData("Inception", "inceptoin")]
-    [InlineData("Breaking Bad", "breakin bad")]
-    [InlineData("WALL·E", "wall e")]
-    public void The_intended_title_scores_above_a_merely_similar_one(string intended, string typed)
-    {
-        // The distractors are real cases from the live catalogue that outranked the intended title
-        // when predicted rating alone decided the order.
-        string[] distractors = ["Superman", "Deception", "Breakdown", "Wallace & Gromit"];
-
-        var intendedScore = TypeaheadEndpoints.TitleSimilarity(intended, typed);
-        foreach (var distractor in distractors)
-        {
-            Assert.True(
-                intendedScore > TypeaheadEndpoints.TitleSimilarity(distractor, typed),
-                $"'{typed}' should score '{intended}' above '{distractor}'.");
-        }
-    }
+    [InlineData("Heat", "heat", MatchTier.Exact)]
+    [InlineData("The Godfather", "godfather", MatchTier.Exact)]
+    [InlineData("An Education", "education", MatchTier.Exact)]
+    [InlineData("Godfather of Harlem", "godfather", MatchTier.Prefix)]
+    [InlineData("The Godfather Part II", "godfather", MatchTier.Prefix)]
+    [InlineData("Heat Wave", "heat", MatchTier.Prefix)]
+    [InlineData("Christopher Nolan", "nolan", MatchTier.WordStart)]
+    [InlineData("In the Heat of the Night", "heat", MatchTier.WordStart)]
+    [InlineData("Cheaters", "heat", MatchTier.Fuzzy)]
+    [InlineData("Theater Camp", "heat", MatchTier.Fuzzy)]
+    [InlineData("", "heat", MatchTier.Fuzzy)]
+    public void Tiers_order_exact_prefix_word_start_then_fuzzy(string name, string term, MatchTier expected) =>
+        Assert.Equal(expected, TypeaheadSearch.TierOf(name, term));
 
     [Fact]
-    public void An_exact_term_scores_higher_than_a_transposition()
+    public void Case_and_surrounding_space_do_not_change_the_tier()
     {
-        Assert.True(
-            TypeaheadEndpoints.TitleSimilarity("Inception", "inception")
-            > TypeaheadEndpoints.TitleSimilarity("Inception", "inceptoin"));
-    }
-
-    [Fact]
-    public void Punctuation_and_case_do_not_change_the_score()
-    {
-        // pg_trgm folds case and treats non-alphanumerics as separators, so "Spider-Man" and
-        // "spider man" must be indistinguishable — that equivalence is what makes a hyphen-less
-        // query find a hyphenated title at all.
-        Assert.Equal(
-            TypeaheadEndpoints.TitleSimilarity("Spider-Man", "spiderman"),
-            TypeaheadEndpoints.TitleSimilarity("spider man", "spiderman"),
-            precision: 10);
+        Assert.Equal(MatchTier.Exact, TypeaheadSearch.TierOf("ALIEN", "  Alien "));
+        Assert.Equal(MatchTier.Exact, TypeaheadSearch.TierOf("Alien", "alien"));
     }
 
     [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("   ")]
-    [InlineData("!!!")]
-    public void A_degenerate_name_scores_zero_rather_than_throwing(string? name)
+    [InlineData("%", "\\%")]
+    [InlineData("100%", "100\\%")]
+    [InlineData("a_b", "a\\_b")]
+    [InlineData("back\\slash", "back\\\\slash")]
+    [InlineData("heat", "heat")]
+    public void Like_input_is_escaped_so_it_matches_literally(string term, string escaped) =>
+        Assert.Equal(escaped, TypeaheadSearch.EscapeLike(term));
+
+    [Fact]
+    public void The_word_start_pattern_escapes_regex_metacharacters()
     {
-        Assert.Equal(0d, TypeaheadEndpoints.TitleSimilarity(name, "inception"));
+        Assert.Equal(@"\mnolan", TypeaheadSearch.WordStartPattern("nolan"));
+        Assert.Equal(@"\m50\.\(\)", TypeaheadSearch.WordStartPattern("50.()"));
     }
 }

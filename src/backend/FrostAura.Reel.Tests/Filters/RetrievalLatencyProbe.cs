@@ -242,6 +242,84 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         output.WriteLine(Summary("hybrid retrieve, round 2 (warm)", warm));
     }
 
+    /// <summary>
+    /// Embeds the most-carried labels on the slot (<c>REEL_PROBE_EMBED_CAP</c>, default 0 = counts
+    /// only) and then resolves words no synonym covers, through the nearest-label fallback. Paid:
+    /// one call per 100 labels plus one per phrase.
+    /// </summary>
+    [Fact]
+    public async Task Label_embeddings_and_the_nearest_label_fallback()
+    {
+        if (!Enabled || Environment.GetEnvironmentVariable("REEL_RETRIEVAL_PROBE_LIVE") != "1")
+        {
+            return;
+        }
+
+        var settings = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+            .ToDictionary(e => ((string)e.Key).Replace("__", ":", StringComparison.Ordinal), e => (string?)e.Value);
+        settings["ConnectionStrings:Postgres"] = ConnectionString;
+        settings["Background:KeywordVocabulary"] = "false";
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        var services = new ServiceCollection().AddLogging().AddSingleton<IConfiguration>(configuration);
+        FrostAura.Reel.Infrastructure.DependencyInjection.AddReelInfrastructure(services, configuration);
+        await using var provider = services.BuildServiceProvider();
+
+        var cap = int.TryParse(Environment.GetEnvironmentVariable("REEL_PROBE_EMBED_CAP"), CultureInfo.InvariantCulture, out var c) ? c : 0;
+        using (var scope = provider.CreateScope())
+        {
+            var refresh = await scope.ServiceProvider.GetRequiredService<KeywordLabelRefresher>().RefreshAsync(cap, default);
+            output.WriteLine($"refresh: counted {refresh.Counted}, embedded {refresh.Embedded} in {refresh.Calls} call(s), {refresh.Remaining} waiting");
+        }
+
+        foreach (var words in new[] { "stranded on a desert island", "bank job", "lumberjacks", "deep sea creature", "nuclear war", "ninja" })
+        {
+            using var scope = provider.CreateScope();
+            var resolver = scope.ServiceProvider.GetRequiredService<IConceptResolver>();
+            var concept = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
+            if (concept.ExactLabels is { Count: 0 })
+            {
+                // The embedding call may have missed the 1 s budget cold; it is cached once it lands.
+                await Task.Delay(2500);
+                concept = await resolver.ResolveAsync(new ConceptTerm(words, [], []), default);
+            }
+
+            output.WriteLine($"{words,-28} exact [{string.Join(", ", concept.ExactLabels ?? ["(regex)"])}]");
+        }
+    }
+
+    [Fact]
+    public async Task Typeahead_local_leg_canonical_first_and_p95()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var (accountId, _) = await AccountAsync();
+        string[] canonical = ["heat", "alien", "godfather", "nolan", "keanu", "inception", "matrix", "amelie", "the notebook", "oppenheimer"];
+        foreach (var term in canonical)
+        {
+            await using var db = Context();
+            var local = await new FrostAura.Reel.Application.Search.Typeahead.TypeaheadSearch(db, new EligibilityQueryBuilder(db)).LocalAsync(accountId, term, default);
+            output.WriteLine(
+                $"{term,-13} titles [{string.Join(" | ", local.Titles.Take(3).Select(t => $"{t.Name} ({t.Year}) {t.Tier}"))}]  people [{string.Join(" | ", local.People.Take(2).Select(p => $"{p.Name} {p.Tier}{(p.Affinity is null ? string.Empty : " ♥")}"))}]  strong {local.StrongMatches} hidden {local.HiddenByConditions}");
+        }
+
+        // n = 120 over a spread of real terms, prefixes as typed, one context per call like a request.
+        string[] terms = ["he", "hea", "heat", "ali", "alie", "alien", "go", "godf", "godfather", "no", "nol", "nolan", "ke", "kea", "keanu", "inc", "incep", "inception", "mat", "matrix", "bla", "blade", "blade runner", "dun", "dune", "int", "interstellar", "the dark", "breaking", "succession"];
+        var elapsed = new List<double>();
+        for (var i = 0; i < 120; i++)
+        {
+            await using var db = Context();
+            var search = new FrostAura.Reel.Application.Search.Typeahead.TypeaheadSearch(db, new EligibilityQueryBuilder(db));
+            var clock = Stopwatch.StartNew();
+            await search.LocalAsync(accountId, terms[i % terms.Length], default);
+            elapsed.Add(clock.Elapsed.TotalMilliseconds);
+        }
+
+        output.WriteLine(Summary("typeahead local leg", elapsed));
+    }
+
     internal static string Summary(string what, IReadOnlyList<double> elapsed)
     {
         var sorted = elapsed.Order().ToList();
