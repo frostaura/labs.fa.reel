@@ -244,6 +244,10 @@ public class AskReelV2UnitTests
         Assert.Equal(
             "1 heist movie checked against your request, and 3 more I couldn't check. 4 more fit but sit under your 6.0 bar.",
             reply.Reply);
+        // …and the live "something quiet and slow-burning" turn's "1 title that fit what you asked".
+        Assert.Equal(
+            "1 title that fits what you asked.",
+            new TurnComposer().Compose(Context(FinalMode.Picks) with { Topic = null, Media = MediaScope.Any, Picks = 1 }).Reply);
         Assert.Equal(
             "4 picks for you · 3 more not checked against what you asked · 7 held back by your 6.0 bar, 3 of them not checked against what you asked — shown below",
             reply.Reason);

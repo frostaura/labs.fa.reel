@@ -113,7 +113,7 @@ public sealed class TurnComposer : ITurnComposer
             string What(int count) => c.Topic is { Length: > 0 } topic ? $"{topic} {Noun(c.Media, count)}" : Noun(c.Media, count);
             sentences.Add(c.UnjudgedPicks > 0
                 ? Inv($"{c.Picks} {What(c.Picks)} checked against your request, and {c.UnjudgedPicks} more I couldn't check.")
-                : Inv($"{total} {What(total)} that fit what you asked."));
+                : Inv($"{total} {What(total)} that {(total == 1 ? "fits" : "fit")} what you asked."));
         }
 
         if (c.NearMissNames.Count > 0)
