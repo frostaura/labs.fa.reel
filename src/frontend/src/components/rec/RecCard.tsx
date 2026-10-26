@@ -5,10 +5,12 @@ import ScoreBadges from "./ScoreBadges";
 import CardQuickActions from "./CardQuickActions";
 import { logoUrl } from "../../lib/tmdbImages";
 import { formatRuntime } from "../../lib/format";
+import { evidenceChips } from "../../lib/evidenceChips";
 
 /** Collapsed recommendation card: poster · meta line · why-this · predicted rating. */
 export default function RecCard({ card }: { card: FeedCard }) {
   const location = useLocation();
+  const evidence = evidenceChips(card.evidence);
 
   return (
     <Link
@@ -56,6 +58,23 @@ export default function RecCard({ card }: { card: FeedCard }) {
         <p className="fa-caption text-fa-frost/80 line-clamp-2 leading-snug" data-testid="card-why">
           {card.lensClause ?? card.whyThis}
         </p>
+        {/* Anchored rows only: what this card verifiably shares with the row's anchor — the
+            evidence the server admitted it on — so "Because you loved X" is checkable on its face. */}
+        {evidence.length > 0 && (
+          <ul className="flex flex-wrap gap-1 pt-0.5" data-testid="card-evidence" aria-label="What it shares with the title this row is based on">
+            {evidence.map((chip) => (
+              <li
+                key={chip.text}
+                title={chip.description}
+                aria-label={chip.description}
+                className="max-w-full truncate rounded-full border border-fa-edge bg-fa-glass px-2 py-0.5 fa-caption leading-tight text-fa-frost-dim"
+                data-testid="card-evidence-chip"
+              >
+                {chip.text}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </Link>
   );

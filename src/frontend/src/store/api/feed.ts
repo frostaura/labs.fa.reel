@@ -18,8 +18,6 @@ export interface ModelLearned {
   newRatingsSinceLast: number;
   calibrationBias: number | null;
   calibrationMae: number | null;
-  /** Previous MAE minus current: positive means the model runs closer to the user's own scores. */
-  maeImprovement: number | null;
   spearman: number | null;
   picksChanged: number;
 }

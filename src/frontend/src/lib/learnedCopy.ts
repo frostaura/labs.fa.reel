@@ -4,28 +4,18 @@ import type { ModelLearned } from "../store/api";
 export const LEARNED_DISMISS_PREFIX = "reel.learned.dismissed:";
 
 /**
- * The band's sentence: what the retrain learned from, whether it made the model closer, and how
- * much of tonight's page moved as a result.
+ * The band's sentence: what the retrain learned from, and how much of tonight's page moved as a
+ * result.
  *
- * Every clause is dropped when its number is absent or does not support the claim. A band that
- * says "runs 0.0 closer" or "0 picks changed" is worse than a shorter one — it reads as the product
- * padding, which is exactly the impression the honest-from-day-one posture exists to avoid.
+ * It no longer says whether the model "runs closer on your scores": the server stopped sending that
+ * number (WS-5), because 0 of 101 evaluations beat popularity and a retrain-to-retrain MAE delta on
+ * that footing is noise dressed as progress. Every clause is dropped when its number is absent — a
+ * band that says "0 picks changed" reads as the product padding.
  */
 export function learnedCopy(learned: ModelLearned): string {
-  const parts: string[] = [
-    `Learned from ${learned.newRatingsSinceLast.toLocaleString("en-US")} new ${
-      learned.newRatingsSinceLast === 1 ? "rating" : "ratings"
-    }`,
-  ];
-
-  // Only claimed when it IMPROVED. A retrain that made calibration worse is real and must not be
-  // dressed up; the track-record page is where the full picture belongs.
-  const improvement = learned.maeImprovement;
-  if (improvement != null && improvement >= 0.05) {
-    parts.push(`runs ${improvement.toFixed(1)} closer on your scores now`);
-  }
-
-  const sentence = parts.join(" — ") + ".";
+  const sentence = `Learned from ${learned.newRatingsSinceLast.toLocaleString("en-US")} new ${
+    learned.newRatingsSinceLast === 1 ? "rating" : "ratings"
+  }.`;
   return learned.picksChanged > 0
     ? `${sentence} ${learned.picksChanged.toLocaleString("en-US")} ${
         learned.picksChanged === 1 ? "pick" : "picks"

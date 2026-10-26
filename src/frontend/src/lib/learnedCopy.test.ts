@@ -7,42 +7,34 @@ const learned = (overrides: Partial<ModelLearned> = {}): ModelLearned => ({
   newRatingsSinceLast: 14,
   calibrationBias: 0.2,
   calibrationMae: 1.1,
-  maeImprovement: 0.4,
   spearman: 0.31,
   picksChanged: 3,
   ...overrides,
 });
 
 describe("learnedCopy", () => {
-  it("says what the retrain learned, how much closer it runs, and what moved", () => {
-    expect(learnedCopy(learned())).toBe(
-      "Learned from 14 new ratings — runs 0.4 closer on your scores now. 3 picks changed."
-    );
+  it("says what the retrain learned from and what moved", () => {
+    expect(learnedCopy(learned())).toBe("Learned from 14 new ratings. 3 picks changed.");
   });
 
-  it("drops the improvement clause when the model did NOT get closer", () => {
-    // A retrain that made calibration worse is real and must not be dressed up.
-    expect(learnedCopy(learned({ maeImprovement: -0.3 }))).toBe("Learned from 14 new ratings. 3 picks changed.");
-  });
-
-  it("drops the improvement clause when it rounds to nothing", () => {
-    expect(learnedCopy(learned({ maeImprovement: 0.02 }))).toBe("Learned from 14 new ratings. 3 picks changed.");
-  });
-
-  it("drops the improvement clause when there is no previous evaluation to compare against", () => {
-    expect(learnedCopy(learned({ maeImprovement: null }))).toBe("Learned from 14 new ratings. 3 picks changed.");
+  it("makes no closeness claim, whatever an older server still sends", () => {
+    // WS-5 retired the number; a stale payload carrying it must not bring the claim back.
+    const stale = { ...learned(), maeImprovement: 0.4 } as ModelLearned;
+    expect(learnedCopy(stale)).not.toMatch(/closer/);
   });
 
   it("says nothing about picks when none changed", () => {
-    expect(learnedCopy(learned({ picksChanged: 0 }))).toBe(
-      "Learned from 14 new ratings — runs 0.4 closer on your scores now."
-    );
+    expect(learnedCopy(learned({ picksChanged: 0 }))).toBe("Learned from 14 new ratings.");
   });
 
   it("is singular where it should be", () => {
-    expect(learnedCopy(learned({ newRatingsSinceLast: 1, picksChanged: 1, maeImprovement: null }))).toBe(
+    expect(learnedCopy(learned({ newRatingsSinceLast: 1, picksChanged: 1 }))).toBe(
       "Learned from 1 new rating. 1 pick changed."
     );
+  });
+
+  it("formats large counts with separators", () => {
+    expect(learnedCopy(learned({ newRatingsSinceLast: 1204, picksChanged: 0 }))).toBe("Learned from 1,204 new ratings.");
   });
 });
 

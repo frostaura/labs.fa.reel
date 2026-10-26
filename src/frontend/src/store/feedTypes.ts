@@ -39,6 +39,22 @@ export interface FeedCard {
   mood?: string | null;
   /** The extracted scalars the chips fall back to. Absent on an unenriched title. */
   texture?: { darkness: number; pacing: number; complexity: number; humor: number } | null;
+  /**
+   * Anchored rows only (because-you-loved on Home, the title page's "More like this"): what this
+   * card verifiably shares with the anchor, strongest first, at most three — the evidence the
+   * server's anchor gate admitted it on. Null or absent on every other row.
+   */
+  evidence?: SharedEvidence[] | null;
+}
+
+/** One checkable thing a card shares with its row's anchor (WS-5 `SharedEvidence`). */
+export interface SharedEvidence {
+  /** "person", "keyword" or "theme"; an unknown kind is shown by its label alone. */
+  kind: string;
+  /** A person's name, a keyword or a theme. */
+  label: string;
+  /** For a person: "director", "writer" or "cast". */
+  role?: string | null;
 }
 
 /** The lens as the API returns it, with the honesty about where it came from. */

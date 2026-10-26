@@ -25,6 +25,7 @@ import { DISLIKE_REASONS } from "../lib/dislikeReasons";
 import type { ContributionDetail, CreditPerson } from "../store/titleTypes";
 import { formatRuntime } from "../lib/format";
 import { youTubeVideoId } from "../lib/youtube";
+import { featureLabel } from "../lib/featureLabel";
 import { canGoBack, titleFailure } from "../components/title/titleRouting";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import {
@@ -49,70 +50,6 @@ function CreditRow({ label, people }: { label: string; people: CreditPerson[] })
       </FadeScrollRow>
     </div>
   );
-}
-
-/** Humanize a model feature name for the breakdown bars. Covers every FeatureSchema scalar; any
- *  future/unmapped name falls back to a camelCase→words humanizer so no raw token ever shows. */
-function featureLabel(feature: string): string {
-  if (feature.startsWith("genre:")) return feature.slice(6).replace(/-/g, " ");
-  if (feature.startsWith("subgenreBucket:")) return "theme match";
-  // FeatureSchema v4 one-hot blocks — the vocabulary value is already the human word.
-  if (feature.startsWith("tone:")) return `${feature.slice(5).replace(/-/g, " ")} tone`;
-  if (feature.startsWith("era:")) return `${feature.slice(4).replace(/-/g, " ")} setting`;
-  const map: Record<string, string> = {
-    // cast & crew
-    castAffinity: "cast you rate highly",
-    lovedCastCount: "favourite cast members",
-    directorAffinity: "director affinity",
-    writerAffinity: "writer affinity",
-    hasCredits: "cast & crew data",
-    // genre / era
-    userGenreAffinity: "your genre taste",
-    genreDrift: "recent genre streak",
-    decadeAffinity: "your favourite era",
-    // crowd signals
-    traktRating: "crowd rating",
-    traktVotesLog: "vote volume",
-    tmdbPopularityLog: "popularity",
-    contrarianAdjustedRating: "your contrarian lens",
-    // title scalars
-    releaseAgeLog: "release-year fit",
-    runtimeMinutes: "runtime",
-    certificationOrdinal: "maturity rating",
-    isShow: "series format",
-    // LLM tone attributes
-    attrDarkness: "tone (darkness)",
-    attrPacing: "pacing",
-    attrComplexity: "complexity",
-    attrEmotionalIntensity: "emotional intensity",
-    attrHumor: "humor",
-    attrOptimism: "optimism",
-    attrEnsembleVsSolo: "ensemble vs. lead",
-    hasAttributes: "tone analysis",
-    // plot-embedding similarities
-    simLovedCentroid: "close in feel to titles you love",
-    simRecentCentroid: "matches your recent taste",
-    simTopLovedMax: "very close to a favourite",
-    simTopLovedMean: "feels like your favourites",
-    hasEmbedding: "story similarity",
-    // presence flags (FeatureSchema v4) — "we know this about the title", not the value itself
-    hasRuntime: "runtime data",
-    hasTraktRating: "crowd-rating data",
-    hasPopularity: "popularity data",
-    hasCertification: "maturity-rating data",
-    hasSubgenres: "subgenre data",
-    hasAttributesTone: "tone data",
-    hasAttributesEra: "setting data",
-    // synthetic serving-time entries (not model features)
-    dislikedSimilarity: "similar to titles you passed on",
-    // Ranking-time entries: these explain where the title SAT, not what the model predicted.
-    tastePriorNoHistoryGenre: "a genre you don't watch",
-    tastePriorGenreAffinity: "how you rate this genre",
-    tastePriorMedia: "films vs. series",
-  };
-  if (map[feature]) return map[feature];
-  // camelCase → spaced words, lower-cased (e.g. "simTopLovedMax" → "sim top loved max").
-  return feature.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
 }
 
 /**
