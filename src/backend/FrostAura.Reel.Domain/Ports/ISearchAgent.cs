@@ -24,16 +24,59 @@ public sealed record ChatTurn(string Role, string Text);
 /// and read back as history exactly like a real answer. A degraded reply must never be cached,
 /// never enter history, and be shown as degraded. <paramref name="Failure"/> says why, for the
 /// turn record and the per-purpose counters; it is null exactly when the reply is not degraded.</para>
+///
+/// <para><paramref name="FailureCode"/> is the same failure as the status API spells it —
+/// <c>budget_spent</c>, <c>payment_required</c>, <c>timed_out</c>, <c>no_answer</c> — so a turn
+/// record and the status panel can be joined on one code (IREV2-SYS-02). <paramref name="Failure"/>
+/// alone cannot do that: a 402 and a 401 are both <see cref="AgentFailureKind.ProviderRefused"/>,
+/// and an open breaker is <see cref="AgentFailureKind.ProviderUnavailable"/> whatever opened it.
+/// Null when the reply is not degraded, and for <see cref="AgentFailureKind.NoModel"/>, whose own
+/// turn flag already says why.</para>
+///
+/// <para>A degraded <paramref name="Reply"/> is chosen BY the failure: one of the constants below,
+/// never a sentence about the request. "Try asking again in a moment" is only true of a transient
+/// failure — a spent daily allowance resets at midnight UTC and a refused key or an empty account
+/// never recovers by waiting, so telling the user to retry sends them into the same wall.</para>
 /// </summary>
 public sealed record AgentReply(
     string Reply, SearchIntent Intent, SearchIntent? Requested = null, bool Degraded = false,
-    AgentFailureKind? Failure = null)
+    AgentFailureKind? Failure = null, string? FailureCode = null)
 {
     /// <summary>
-    /// The reply carried by a degraded turn. It claims nothing: no results, no genre reading, no
+    /// The reply carried by a degraded turn whose failure was transient — a timeout, a 5xx or 429,
+    /// an empty, cut-off or unreadable answer. It claims nothing: no results, no genre reading, no
     /// echo of the user's words — the model did not answer, so nothing here may sound as if it had.
     /// </summary>
     public const string DegradedReply = "I couldn't think that one through just now. Try asking again in a moment.";
+
+    /// <summary>
+    /// The degraded reply when the day's Ask allowance refused the call before it was sent. The
+    /// allowance is counted per UTC day, so the reset is stated rather than "in a moment".
+    /// </summary>
+    public const string BudgetSpentReply =
+        "Today's Ask allowance is used up, so I can't think this one through. It resets at midnight UTC.";
+
+    /// <summary>The degraded reply when the provider answered 402, or its breaker is open for one.</summary>
+    public const string OutOfCreditReply =
+        "The model provider account is out of credit, so I can't think this one through until it is topped up. "
+        + "Sync status has the detail.";
+
+    /// <summary>The degraded reply when the provider answered 401, or its breaker is open for one.</summary>
+    public const string KeyRejectedReply =
+        "The model provider is rejecting Reel's key, so I can't think this one through until the key is replaced. "
+        + "Sync status has the detail.";
+
+    /// <summary>
+    /// The degraded reply for every other refusal: a 403, or a breaker open for a reason this build
+    /// has no sentence of its own for.
+    /// </summary>
+    public const string ProviderRefusedReply =
+        "The model provider is refusing Reel's requests, so I can't think this one through for now. "
+        + "Sync status has the detail.";
+
+    /// <summary>The degraded reply of a keyless install: there is no model to wait for.</summary>
+    public const string NoModelReply =
+        "No language model is set up for Reel, so I can't think this one through.";
 
     /// <summary>
     /// The genres the user's own words asked for. Empty rather than null, because every caller

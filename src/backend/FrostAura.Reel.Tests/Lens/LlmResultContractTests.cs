@@ -83,6 +83,76 @@ public class LlmResultContractTests
         Assert.DoesNotContain("here are", AgentReply.DegradedReply, StringComparison.OrdinalIgnoreCase);
     }
 
+    // ── The degraded copy follows the cause (IREV2-SYS-02) ──────────────────────────────────
+
+    public static TheoryData<AgentFailureKind?, string?, string> DegradedCopyByCause => new()
+    {
+        { AgentFailureKind.BudgetSpent, "budget_spent", AgentReply.BudgetSpentReply },
+        { AgentFailureKind.BudgetSpent, null, AgentReply.BudgetSpentReply },
+        { AgentFailureKind.ProviderRefused, "payment_required", AgentReply.OutOfCreditReply },
+        { AgentFailureKind.ProviderUnavailable, "payment_required", AgentReply.OutOfCreditReply },
+        { AgentFailureKind.ProviderRefused, "unauthorized", AgentReply.KeyRejectedReply },
+        { AgentFailureKind.ProviderUnavailable, "unauthorized", AgentReply.KeyRejectedReply },
+        { AgentFailureKind.ProviderRefused, "forbidden", AgentReply.ProviderRefusedReply },
+        { AgentFailureKind.ProviderRefused, "error", AgentReply.ProviderRefusedReply },
+        { AgentFailureKind.ProviderUnavailable, null, AgentReply.ProviderRefusedReply },
+        { AgentFailureKind.NoModel, null, AgentReply.NoModelReply },
+        // A transient failure is the only one "in a moment" is true of — whatever code rides along.
+        { AgentFailureKind.TimedOut, "timed_out", AgentReply.DegradedReply },
+        { AgentFailureKind.ProviderError, "rate_limited", AgentReply.DegradedReply },
+        { AgentFailureKind.ProviderError, "payment_required", AgentReply.DegradedReply },
+        { AgentFailureKind.Truncated, "no_answer", AgentReply.DegradedReply },
+        { AgentFailureKind.Unknown, null, AgentReply.DegradedReply },
+        { null, null, AgentReply.DegradedReply },
+    };
+
+    [Theory]
+    [MemberData(nameof(DegradedCopyByCause))]
+    public void The_degraded_reply_is_chosen_by_the_failure(AgentFailureKind? kind, string? code, string expected) =>
+        Assert.Equal(expected, FrostAura.Reel.Application.Llm.LlmFailureCodes.DegradedReply(kind, code));
+
+    [Fact]
+    public void Every_degraded_reply_claims_nothing_and_only_a_transient_one_says_to_wait()
+    {
+        foreach (var kind in Enum.GetValues<AgentFailureKind>())
+        {
+            foreach (var code in new[] { null, "budget_spent", "payment_required", "unauthorized", "forbidden", "timed_out" })
+            {
+                var copy = FrostAura.Reel.Application.Llm.LlmFailureCodes.DegradedReply(kind, code);
+
+                Assert.False(string.IsNullOrWhiteSpace(copy));
+                Assert.DoesNotContain("{", copy, StringComparison.Ordinal);
+                Assert.DoesNotContain("pick", copy, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("here are", copy, StringComparison.OrdinalIgnoreCase);
+                var waitable = kind is not (AgentFailureKind.BudgetSpent or AgentFailureKind.NoModel
+                    or AgentFailureKind.ProviderRefused or AgentFailureKind.ProviderUnavailable);
+                Assert.Equal(waitable, copy.Contains("in a moment", StringComparison.Ordinal));
+            }
+        }
+    }
+
+    [Fact]
+    public void Every_status_code_a_degraded_turn_can_carry_has_its_reply()
+    {
+        // The code is ReasonCode's own answer, so the two functions must agree on every refusal
+        // status: a 402 that reads payment_required on the status panel reads "out of credit" here.
+        Assert.Equal(
+            AgentReply.OutOfCreditReply,
+            FrostAura.Reel.Application.Llm.LlmFailureCodes.DegradedReply(
+                AgentFailureKind.ProviderRefused,
+                FrostAura.Reel.Application.Llm.LlmFailureCodes.ReasonCode(AgentFailureKind.ProviderRefused, 402)));
+        Assert.Equal(
+            AgentReply.KeyRejectedReply,
+            FrostAura.Reel.Application.Llm.LlmFailureCodes.DegradedReply(
+                AgentFailureKind.ProviderUnavailable,
+                FrostAura.Reel.Application.Llm.LlmFailureCodes.ReasonCode(AgentFailureKind.ProviderUnavailable, breakerReason: "unauthorized")));
+        Assert.Equal(
+            AgentReply.BudgetSpentReply,
+            FrostAura.Reel.Application.Llm.LlmFailureCodes.DegradedReply(
+                AgentFailureKind.BudgetSpent,
+                FrostAura.Reel.Application.Llm.LlmFailureCodes.ReasonCode(AgentFailureKind.BudgetSpent)));
+    }
+
     // ── PositionDebiasedFit carries sources ─────────────────────────────────────────────────
 
     [Fact]

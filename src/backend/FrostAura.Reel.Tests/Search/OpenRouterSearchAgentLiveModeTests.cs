@@ -567,7 +567,9 @@ public class OpenRouterSearchAgentLiveModeTests
 
         Assert.True(reply.Degraded, scenario);
         Assert.Equal(expected, reply.Failure);
-        Assert.Equal(AgentReply.DegradedReply, reply.Reply);
+        Assert.Equal(
+            expected == AgentFailureKind.ProviderRefused ? AgentReply.OutOfCreditReply : AgentReply.DegradedReply,
+            reply.Reply);
         Assert.DoesNotContain("ninja", reply.Reply, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("picks for", reply.Reply, StringComparison.Ordinal);
         Assert.DoesNotContain("\u201C", reply.Reply, StringComparison.Ordinal);
@@ -702,7 +704,89 @@ public class OpenRouterSearchAgentLiveModeTests
         // A keyless install has no model: degraded, and says so.
         Assert.True(keyless.Degraded);
         Assert.Equal(AgentFailureKind.NoModel, keyless.Failure);
-        Assert.Equal(AgentReply.DegradedReply, keyless.Reply);
+        Assert.Equal(AgentReply.NoModelReply, keyless.Reply);
+        Assert.Null(keyless.FailureCode);
+    }
+
+    // ── The degraded reply names its cause (IREV2-SYS-02) ──────────────────────────────────
+
+    public static TheoryData<string, int, string, AgentFailureKind, string, string> DegradedCauses => new()
+    {
+        // A transient failure is the one case "in a moment" is true of.
+        { "http 503", 503, "{}", AgentFailureKind.ProviderError, "error", AgentReply.DegradedReply },
+        { "http 429", 429, "{}", AgentFailureKind.ProviderError, "rate_limited", AgentReply.DegradedReply },
+        { "unreadable twice", 200, Envelope("Sure! Ninja films are great."), AgentFailureKind.MalformedAnswer, "no_answer", AgentReply.DegradedReply },
+        // A refusal never recovers by waiting, and each status names a different fix.
+        { "402", 402, """{"error":{"message":"insufficient credits"}}""", AgentFailureKind.ProviderRefused, "payment_required", AgentReply.OutOfCreditReply },
+        { "401", 401, """{"error":{"message":"bad key"}}""", AgentFailureKind.ProviderRefused, "unauthorized", AgentReply.KeyRejectedReply },
+        { "403", 403, """{"error":{"message":"no"}}""", AgentFailureKind.ProviderRefused, "forbidden", AgentReply.ProviderRefusedReply },
+    };
+
+    [Theory]
+    [MemberData(nameof(DegradedCauses))]
+    public async Task A_degraded_reply_is_chosen_by_its_cause_and_carries_the_status_code(
+        string scenario, int status, string body, AgentFailureKind kind, string code, string expectedReply)
+    {
+        var handler = new CannedHandler(new CannedResponse((HttpStatusCode)status, body));
+
+        var reply = await Agent(handler).InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.True(reply.Degraded, scenario);
+        Assert.Equal(kind, reply.Failure);
+        Assert.Equal(code, reply.FailureCode);
+        Assert.Equal(expectedReply, reply.Reply);
+    }
+
+    [Fact]
+    public async Task A_spent_daily_allowance_says_when_it_resets_and_sends_nothing()
+    {
+        // The proof: with LLM_ASK_PLAN_DAILY_CALLS=17 the gate refused the 18th turn, and the reply
+        // told the user to try again in a moment — on a ceiling that resets with the UTC day.
+        var handler = new CannedHandler(Ok("""{"reply":"never sent","genres":["action"]}"""));
+        var interpreter = new HeuristicInterpreter();
+        var agent = new OpenRouterSearchAgent(
+            new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            interpreter, Recorder(), LiveConfig(), NullLogger<OpenRouterSearchAgent>.Instance,
+            gate: new RefusingGate());
+
+        var reply = await agent.InterpretAsync([], "ninja movies", "likes action", []);
+
+        Assert.Empty(handler.Bodies);
+        Assert.Equal(0, interpreter.InterpretCalls); // a refused allowance is not spent on a second prompt
+        Assert.True(reply.Degraded);
+        Assert.Equal(AgentFailureKind.BudgetSpent, reply.Failure);
+        Assert.Equal("budget_spent", reply.FailureCode);
+        Assert.Equal(AgentReply.BudgetSpentReply, reply.Reply);
+        Assert.Contains("midnight UTC", reply.Reply, StringComparison.Ordinal);
+        Assert.DoesNotContain("in a moment", reply.Reply, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.PaymentRequired, "payment_required", AgentReply.OutOfCreditReply)]
+    [InlineData(HttpStatusCode.Unauthorized, "unauthorized", AgentReply.KeyRejectedReply)]
+    public async Task Turns_after_a_refusal_name_the_open_breakers_cause_not_a_moment(
+        HttpStatusCode status, string code, string expectedReply)
+    {
+        // The 402 opened the breaker for fifteen minutes; the turns after it were refused before
+        // anything was sent and said "in a moment" — but the fix is credit, not patience.
+        var health = new FrostAura.Reel.Infrastructure.Llm.ProviderHealthService();
+        var handler = new CannedHandler(
+            new CannedResponse(status, """{"error":{"message":"no"}}"""), Ok("""{"reply":"never sent","genres":[]}"""));
+        var agent = new OpenRouterSearchAgent(
+            new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            new HeuristicInterpreter(), Recorder(), LiveConfig(), NullLogger<OpenRouterSearchAgent>.Instance,
+            health: health);
+
+        var tripping = await agent.InterpretAsync([], "ninja movies", "likes action", []);
+        var next = await agent.InterpretAsync([], "heist films", "likes action", []);
+
+        Assert.Single(handler.Bodies);
+        Assert.Equal(AgentFailureKind.ProviderRefused, tripping.Failure);
+        Assert.Equal(AgentFailureKind.ProviderUnavailable, next.Failure);
+        Assert.Equal(code, tripping.FailureCode);
+        Assert.Equal(code, next.FailureCode);
+        Assert.Equal(expectedReply, tripping.Reply);
+        Assert.Equal(expectedReply, next.Reply);
     }
 
     // ── The Ask-only request check and typed sources ───────────────────────────────────────
@@ -1124,6 +1208,15 @@ public class OpenRouterSearchAgentLiveModeTests
 
             return Task.FromResult(FrostAura.Reel.Application.Llm.LlmAdmission.Unmetered);
         }
+    }
+
+    /// <summary>Refuses every call, as a spent daily ceiling does.</summary>
+    private sealed class RefusingGate : FrostAura.Reel.Application.Llm.ILlmCallGate
+    {
+        public Task<FrostAura.Reel.Application.Llm.LlmAdmission> TryReserveAsync(
+            Guid? accountId, string purpose, long estimatedTokens, CancellationToken ct) =>
+            Task.FromResult(FrostAura.Reel.Application.Llm.LlmAdmission.Refuse(
+                "search-agent ceiling would be passed (17/17 calls)"));
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────
