@@ -90,7 +90,13 @@ public static class BillingEndpoints
                         var acct = await db.Accounts.FirstOrDefaultAsync(a => a.Id == accountId, ct);
                         if (acct is not null)
                         {
-                            acct.Tier = AccountTier.Paid;
+                            // A Founder who checks out (to test billing) stays Founder: Paid is a
+                            // lower tier, and a webhook must never take access away by granting it.
+                            if (acct.Tier != AccountTier.Founder)
+                            {
+                                acct.Tier = AccountTier.Paid;
+                            }
+
                             acct.StripeCustomerId = session.CustomerId;
                             acct.StripeSubscriptionId = session.SubscriptionId;
                             if (session.CustomerEmail is { Length: > 0 } email)

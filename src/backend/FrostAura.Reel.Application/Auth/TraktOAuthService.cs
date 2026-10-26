@@ -1,17 +1,26 @@
 using FrostAura.Reel.Application.Persistence;
+using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Sync;
 using FrostAura.Reel.Domain.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace FrostAura.Reel.Application.Auth;
 
 /// <summary>
 /// Sign in with Trakt: the authorization-code exchange IS account creation. A successful
 /// callback upserts the Account + encrypted TraktConnection, applies the geo-IP region
-/// default, and enqueues the first pipeline job.
+/// default and the founder allow-list, and enqueues the first pipeline job.
+///
+/// <para><b>Tenancy (J-11).</b> Sign-in is the one request that does not know its account until it
+/// is half done. The account lookup reads the unfiltered accounts table; once the account is known
+/// the request is PINNED to it, so every scoped read after that point — the in-flight job check
+/// here, the session payload the endpoint returns — is that account's, under
+/// <c>Tenancy__UnscopedReads=Throw</c> too. Pinning also overrides a stale <c>reel_at</c> cookie
+/// for a different account that the browser happened to send with the callback.</para>
 /// </summary>
 public class TraktOAuthService(
     IReelDbContext db,
@@ -19,6 +28,8 @@ public class TraktOAuthService(
     ISecretProtector secretProtector,
     OAuthStateCodec stateCodec,
     IConfiguration configuration,
+    IAccountContext accountContext,
+    IOptions<FounderAccessOptions> founderAccess,
     ILogger<TraktOAuthService> logger)
 {
     public record StartResult(string AuthorizeUrl, string State);
@@ -91,6 +102,17 @@ public class TraktOAuthService(
                 CreatedAt = now,
             };
             db.Accounts.Add(account);
+        }
+
+        accountContext.SetAccount(account.Id);
+
+        // K-10: the founder's own Trakt profile is Founder in every environment, not only behind the
+        // Development-only QA sign-in. Raise only; never demote (see FounderAccessOptions).
+        if (account.Tier != AccountTier.Founder && founderAccess.Value.IsFounder(profile.Slug))
+        {
+            logger.LogInformation(
+                "Granting the Founder tier to {Slug}: listed in {Key}.", profile.Slug, FounderAccessOptions.SlugsKey);
+            account.Tier = AccountTier.Founder;
         }
 
         account.TraktUsername = profile.Username;
