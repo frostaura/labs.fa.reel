@@ -161,7 +161,6 @@ public class PersistedEnumFallbackTests
     /// </summary>
     private static readonly Dictionary<string, string> PendingAdoption = new(StringComparer.Ordinal)
     {
-        ["OutboxPayload.MediaType"] = OutboxReaderPending,
     };
 
     /// <summary>
@@ -173,13 +172,7 @@ public class PersistedEnumFallbackTests
     /// </summary>
     private static readonly Dictionary<string, string> PendingReaders = new(StringComparer.Ordinal)
     {
-        ["OutboxDispatcher.OutboxPayload"] = OutboxReaderPending,
-        ["AskReelCarry.Parse"] =
-            "R1-43 CR-3 (WS-2, AskReelCarry.cs): read with PersistedJson.Options and UnrecognisedJsonEnumConverter<MediaType>, then drop media types that are not members",
     };
-
-    private const string OutboxReaderPending =
-        "R1-43 CR-2 (WS-4, OutboxDispatcher.cs): UnrecognisedJsonEnumConverter<MediaType> on the payload, and dead-letter any entry that is not an explicit Movie or Show before any Trakt call";
 
     private static IReadOnlyList<(string Path, Type EnumType, PropertyInfo? Property)> JsonPersistedEnums()
     {

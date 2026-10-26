@@ -105,6 +105,61 @@ public class OutboxDispatcherHistoryTests(PostgresFixture fixture)
         Assert.Equal(OutboxStatus.Sent, entry.Status);
     }
 
+    /// <summary>
+    /// R1-43 CR-2: an entry whose stored media type this build cannot name (a newer image wrote it)
+    /// is dead-lettered on its own before any Trakt call. A good movie entry of the same kind still
+    /// sends, and the unreadable entry's Trakt id reaches no history read and no sync batch.
+    /// </summary>
+    [Theory]
+    [InlineData(OutboxKind.AddRating, "\"Documentary\"")]
+    [InlineData(OutboxKind.AddRating, "7")]
+    [InlineData(OutboxKind.RemoveFromHistory, "null")]
+    [InlineData(OutboxKind.RemoveFromHistory, "\"Documentary\"")]
+    [InlineData(OutboxKind.AddToWatchlist, "\"movie\"")]
+    public async Task An_entry_with_a_media_type_this_build_cannot_name_dead_letters_before_any_trakt_call(
+        OutboxKind kind, string storedMediaType)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountWithConnectionAsync();
+        var rating = kind == OutboxKind.AddRating ? (short?)8 : null;
+        var watchedAt = kind == OutboxKind.RemoveFromHistory ? DateTime.UtcNow : (DateTime?)null;
+        var goodTraktId = Random.Shared.NextInt64(1, long.MaxValue);
+        var badTraktId = Random.Shared.NextInt64(1, long.MaxValue);
+        var goodId = await SeedEntryAsync(accountId, kind, MediaType.Movie, watchedAt, goodTraktId, rating);
+        var badId = await SeedEntryAsync(accountId, kind, MediaType.Show, watchedAt, badTraktId, rating);
+        await using (var edit = fixture.CreateContext(new AccountContext()))
+        {
+            var bad = await edit.TraktOutbox.SingleAsync(o => o.Id == badId);
+            Assert.Contains("\"MediaType\":\"Show\"", bad.PayloadJson, StringComparison.Ordinal);
+            bad.PayloadJson = bad.PayloadJson.Replace("\"MediaType\":\"Show\"", "\"MediaType\":" + storedMediaType, StringComparison.Ordinal);
+            await edit.SaveChangesAsync();
+        }
+
+        var trakt = new StubTraktClient { History = [] };
+        await RunOnceAsync(accountId, trakt);
+
+        await using var verify = fixture.CreateContext(new AccountContext());
+        var badEntry = await verify.TraktOutbox.SingleAsync(o => o.Id == badId);
+        Assert.Equal(OutboxStatus.DeadLetter, badEntry.Status);
+        Assert.Equal("unrecognised media type", badEntry.Error);
+        Assert.Equal(OutboxStatus.Sent, (await verify.TraktOutbox.SingleAsync(o => o.Id == goodId)).Status);
+
+        Assert.DoesNotContain(trakt.HistoryCalls, call => call.TraktId == badTraktId);
+        Assert.All(trakt.SyncBatches, batch => Assert.DoesNotContain(
+            badTraktId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            JsonSerializer.Serialize(batch.Payload),
+            StringComparison.Ordinal));
+        if (kind != OutboxKind.RemoveFromHistory)
+        {
+            var (_, sent) = Assert.Single(trakt.SyncBatches);
+            Assert.Contains(goodTraktId.ToString(System.Globalization.CultureInfo.InvariantCulture), JsonSerializer.Serialize(sent), StringComparison.Ordinal);
+        }
+    }
+
     private async Task RunOnceAsync(Guid accountId, StubTraktClient trakt)
     {
         await using var db = fixture.CreateContext(new AccountContext());
@@ -139,12 +194,12 @@ public class OutboxDispatcherHistoryTests(PostgresFixture fixture)
     }
 
     private async Task<Guid> SeedEntryAsync(
-        Guid accountId, OutboxKind kind, MediaType mediaType, DateTime? watchedAt, long? traktId = null)
+        Guid accountId, OutboxKind kind, MediaType mediaType, DateTime? watchedAt, long? traktId = null, short? rating = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var payload = new OutboxDispatcher.OutboxPayload(
             Guid.NewGuid(), mediaType, TmdbId: Random.Shared.NextInt64(1, long.MaxValue),
-            TraktId: traktId ?? Random.Shared.NextInt64(1, long.MaxValue), Rating: null, WatchedAt: watchedAt);
+            TraktId: traktId ?? Random.Shared.NextInt64(1, long.MaxValue), Rating: rating, WatchedAt: watchedAt);
         var entry = new TraktOutboxEntry
         {
             Id = Guid.NewGuid(),

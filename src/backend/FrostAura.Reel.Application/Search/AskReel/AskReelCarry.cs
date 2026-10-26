@@ -1,3 +1,4 @@
+using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 
@@ -69,6 +70,16 @@ public static class AskReelCarry
         "tv", "show", "shows", "series", "season", "seasons", "episode", "episodes", "miniseries", "sitcom", "sitcoms",
     };
 
+    private static readonly System.Text.Json.JsonSerializerOptions IntentReadOptions = CreateIntentReadOptions();
+
+    private static System.Text.Json.JsonSerializerOptions CreateIntentReadOptions()
+    {
+        var options = new System.Text.Json.JsonSerializerOptions(PersistedJson.Options);
+        options.Converters.Insert(0, new UnrecognisedJsonEnumConverter<MediaType>());
+        options.MakeReadOnly(populateMissingResolver: true);
+        return options;
+    }
+
     /// <summary>The previous reading, from the stored JSON of the last turn that had one; null when unreadable.</summary>
     public static SearchIntent? Parse(string? intentJson)
     {
@@ -79,7 +90,11 @@ public static class AskReelCarry
 
         try
         {
-            return System.Text.Json.JsonSerializer.Deserialize<SearchIntent>(intentJson);
+            // Read as a newer build may have written it: unknown roles fall back, and media types
+            // this build cannot name are dropped rather than pinning the next turn to a filter.
+            return System.Text.Json.JsonSerializer.Deserialize<SearchIntent>(intentJson, IntentReadOptions) is { } intent
+                ? intent with { MediaTypes = intent.MediaTypes.Where(Enum.IsDefined).ToList() }
+                : null;
         }
         catch (System.Text.Json.JsonException)
         {

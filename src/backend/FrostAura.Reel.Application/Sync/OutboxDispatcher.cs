@@ -40,7 +40,7 @@ public class OutboxDispatcher(
 
     public record OutboxPayload(
         Guid TitleId,
-        [property: JsonConverter(typeof(JsonStringEnumConverter))] MediaType MediaType,
+        [property: JsonConverter(typeof(UnrecognisedJsonEnumConverter<MediaType>))] MediaType MediaType,
         long? TmdbId,
         long? TraktId,
         short? Rating,
@@ -132,6 +132,16 @@ public class OutboxDispatcher(
             var payloads = entries
                 .Select(e => (Entry: e, Payload: JsonSerializer.Deserialize<OutboxPayload>(e.PayloadJson)!))
                 .ToList();
+
+            // A media type this build cannot name (a newer image wrote it) is neither a movie nor a
+            // show here, and either endpoint would be a wrong write on Trakt: dead-letter it before
+            // any Trakt call rather than guess.
+            foreach (var (entry, _) in payloads.Where(p => p.Payload.MediaType is not (MediaType.Movie or MediaType.Show)))
+            {
+                FailPermanently(entry, "unrecognised media type");
+            }
+
+            payloads = payloads.Where(p => p.Payload.MediaType is MediaType.Movie or MediaType.Show).ToList();
 
             // Resolve missing Trakt ids (TMDB-discovered titles) before any send.
             for (var i = 0; i < payloads.Count; i++)
@@ -256,7 +266,12 @@ public class OutboxDispatcher(
                 continue;
             }
 
-            var type = payload.MediaType == MediaType.Movie ? "movies" : "shows";
+            var type = payload.MediaType switch
+            {
+                MediaType.Movie => "movies",
+                MediaType.Show => "shows",
+                _ => throw new InvalidOperationException("unrecognised media types are dead-lettered before dispatch"),
+            };
             var history = await trakt.GetHistoryAsync(
                 token, type, payload.TraktId!.Value,
                 watchedAt - RemoveAnchorWindow, watchedAt + RemoveAnchorWindow, RatePriority.Interactive, ct);
