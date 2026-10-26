@@ -174,6 +174,49 @@ public class PersistedEnumRollbackTests(PostgresFixture fixture)
         Assert.Equal(DegradedReason.TraktRevoked, (await StatusAsync(degraded)).DegradedReason);
     }
 
+    /// <summary>
+    /// auth/me, auth/callback and dev/link print the stage through <see cref="SyncStatusQuery.EffectiveStageAsync"/>
+    /// (WS-8 CR-4); it must be the status poll's own reading in every case, including the one a
+    /// hand-rolled copy got wrong: a stage written by a newer build reads as the Degraded fallback on a
+    /// healthy link with no ratings, which the ratings-floor rule alone would call NotEnoughRatings.
+    /// </summary>
+    [Theory]
+    [InlineData("Hibernating", "Degraded")]
+    [InlineData("Degraded", "NotEnoughRatings")]
+    [InlineData("FeedReady", "FeedReady")]
+    public async Task The_shell_stage_is_the_status_polls_stage(string storedStage, string expected)
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            db.TraktConnections.Add(new TraktConnection
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                ExpiresAt = DateTime.UtcNow.AddDays(30),
+                Status = ConnectionStatus.Active,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await RawAsync(accountId, storedStage);
+
+        var scoped = new AccountContext();
+        scoped.SetAccount(accountId);
+        await using var read = fixture.CreateContext(scoped);
+        var account = await read.Accounts.AsNoTracking().SingleAsync(a => a.Id == accountId);
+        var shell = await new SyncStatusQuery(read, new UnmonitoredProviderHealthReader())
+            .EffectiveStageAsync(account, CancellationToken.None);
+
+        Assert.Equal(expected, shell.ToString());
+        Assert.Equal((await StatusAsync(accountId)).PipelineStage, shell);
+    }
+
     private async Task<Guid> SeedAccountAsync(PipelineStage stage = PipelineStage.FeedReady)
     {
         var accountId = Guid.NewGuid();

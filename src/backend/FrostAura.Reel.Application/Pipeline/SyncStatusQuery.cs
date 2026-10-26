@@ -69,10 +69,7 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             ? await db.UserRatings.CountAsync(r => r.AccountId == accountId && r.FirstRatedAt > since, ct)
             : 0;
 
-        var unrecognised = await HoldsUnrecognisedStateAsync(accountId, storedStage, connection, ct);
-        var (effectiveStage, floor) = unrecognised
-            ? (storedStage, null)
-            : await ResolveStageAsync(accountId, storedStage, connectionStatus, ct);
+        var (effectiveStage, floor, unrecognised) = await StageAsync(accountId, storedStage, connection, ct);
         var health = providerHealth.Current();
         var failures = await LastFailuresAsync(accountId, storedStage, now, ct);
 
@@ -104,6 +101,36 @@ public sealed class SyncStatusQuery(IReelDbContext db, IProviderHealthReader pro
             DegradedReason: ResolveDegradedReason(connectionStatus, outboxDead, effectiveStage, health, unrecognised),
             NotEnoughRatings: floor,
             Alerts: OperatorAlertsFor(account));
+    }
+
+    /// <summary>
+    /// The stage <c>/api/sync/status</c> reports for <paramref name="account"/> — the one every other
+    /// reader of "where is this account" must print (auth/me, auth/callback, dev/link; WS-8 CR-4), so
+    /// the shell and the status pill cannot disagree. It is <see cref="GetAsync"/>'s own reading, not
+    /// a copy: the connection read, the unrecognised-state check (a stage a newer image wrote reads
+    /// as the stored fallback, never as a cold-start park) and the ratings-floor reading.
+    /// </summary>
+    public async Task<PipelineStage> EffectiveStageAsync(Account account, CancellationToken ct)
+    {
+        var connection = await db.TraktConnections.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.AccountId == account.Id, ct);
+        var (stage, _, _) = await StageAsync(account.Id, account.PipelineStage, connection, ct);
+        return stage;
+    }
+
+    /// <summary>The effective stage, its ratings floor when it is the cold-start park, and whether the stored state is unrecognised.</summary>
+    private async Task<(PipelineStage Stage, RatingsFloor? Floor, bool Unrecognised)> StageAsync(
+        Guid accountId, PipelineStage storedStage, TraktConnection? connection, CancellationToken ct)
+    {
+        if (await HoldsUnrecognisedStateAsync(accountId, storedStage, connection, ct))
+        {
+            return (storedStage, null, true);
+        }
+
+        // No connection row is the same fact as a revoked one: nothing can sync (v1 semantics).
+        var (stage, floor) = await ResolveStageAsync(
+            accountId, storedStage, connection?.Status ?? ConnectionStatus.Revoked, ct);
+        return (stage, floor, false);
     }
 
     /// <summary>Operator alerts are the operator's: Founder tier sees them, every other tier an empty list.</summary>
