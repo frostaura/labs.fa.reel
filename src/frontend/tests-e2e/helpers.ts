@@ -60,8 +60,6 @@ export function syncJob(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
-export const EMPTY_SYNC = syncStatus({ pipelineStage: "Ingesting" });
-
 /**
  * Mocks a GET-ish endpoint with a JSON body.
  *
