@@ -1892,6 +1892,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("FetchedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTime?>("FirstSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(32)
