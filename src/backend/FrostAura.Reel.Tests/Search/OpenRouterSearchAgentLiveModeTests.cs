@@ -737,6 +737,38 @@ public class OpenRouterSearchAgentLiveModeTests
         Assert.Equal(expectedReply, reply.Reply);
     }
 
+    [Theory]
+    [InlineData("heist movies from the 2010s", 2010, 2019)]
+    [InlineData("'90s heist movies", 1990, 1999)]
+    [InlineData("heist movies after 2015", 2015, null)]
+    public async Task A_refused_turn_plans_on_a_reading_whose_dates_are_bounds_not_keywords(
+        string message, int? minYear, int? maxYear)
+    {
+        // IREV3-SYS-05, end to end through the REAL free reading: a 402 put the plan on it, and the
+        // decade came back as keyword "2010" — the supply matched titles tagged "2010" and the
+        // reply's topic read "heist or 2010". The window must arrive as bounds and nothing else.
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.PaymentRequired, """{"error":{"message":"insufficient credits"}}"""));
+        var stubConfig = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TestHelpers:ModelStubMode"] = "true" })
+            .Build();
+        var freeReading = new OpenRouterSearchInterpreter(
+            new HttpClient(), Recorder(), stubConfig, NullLogger<OpenRouterSearchInterpreter>.Instance);
+        var agent = new OpenRouterSearchAgent(
+            new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") },
+            freeReading, Recorder(), LiveConfig(), NullLogger<OpenRouterSearchAgent>.Instance);
+
+        var reply = await agent.InterpretAsync([], message, "likes action", []);
+
+        Assert.True(reply.Degraded);
+        Assert.Equal("payment_required", reply.FailureCode);
+        foreach (var reading in new[] { reply.Intent, reply.Requested! })
+        {
+            Assert.Equal(["heist"], reading.Keywords);
+            Assert.Equal(minYear, reading.MinYear);
+            Assert.Equal(maxYear, reading.MaxYear);
+        }
+    }
+
     [Fact]
     public async Task A_spent_daily_allowance_says_when_it_resets_and_sends_nothing()
     {

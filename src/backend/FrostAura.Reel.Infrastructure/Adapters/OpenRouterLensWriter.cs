@@ -48,7 +48,9 @@ public class OpenRouterLensWriter(
     ILlmPurposeCatalog? purposes = null,
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
-    ILlmCallGate? gate = null)
+    ILlmCallGate? gate = null,
+    // The per-purpose call counters (task 8); a DI singleton in production, none in a hand-built adapter.
+    LlmCallMetrics? metrics = null)
     : ILensWriter
 {
     /// <summary>
@@ -56,7 +58,7 @@ public class OpenRouterLensWriter(
     /// <c>taste-narrative</c>, <c>lens</c> and <c>lens-audit</c> purpose options now.
     /// </summary>
     private readonly OpenRouterChatClient _chat = new(
-        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate, metrics);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -68,8 +70,13 @@ public class OpenRouterLensWriter(
     /// highest, carries recent loves and dislikes, and labels sparse genres as sparse. A stored v1
     /// narrative was written from a fact sheet that could not distinguish twenty-six holiday films
     /// from eight hundred thrillers, so it means something different and must not be reused.</para>
+    ///
+    /// <para>v3: the crowd is given as a band (with / kinder than / harsher than, at ±0.3 — the
+    /// band the Taste DNA tile uses), and per-genre gaps only where they leave that band. A v2
+    /// narrative read "-0.18" as "you rate below the crowd overall" beside a tile reading "with the
+    /// crowd" (IREV3S-07), so a stored v2 claim about the crowd cannot be trusted.</para>
     /// </summary>
-    public const int CurrentNarrativePromptVersion = 2;
+    public const int CurrentNarrativePromptVersion = 3;
 
     /// <summary>
     /// The lens prompt generation, and half the lens cache key. Same bump rule.
@@ -217,6 +224,11 @@ public class OpenRouterLensWriter(
     // ── Lens copy ──────────────────────────────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<LensDraft?>> WriteLensAsync(
+        IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default) =>
+        (await AttemptLensAsync(titles, persona, ct)).Select(a => a.Draft).ToArray();
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<LensAttempt>> AttemptLensAsync(
         IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default)
     {
         if (titles.Count == 0)
@@ -226,14 +238,14 @@ public class OpenRouterLensWriter(
 
         if (StubMode)
         {
-            return titles.Select(t => (LensDraft?)new LensDraft(StubLens(t, persona), ModelId, null, null)).ToArray();
+            return titles.Select(t => new LensAttempt(new LensDraft(StubLens(t, persona), ModelId, null, null))).ToArray();
         }
 
         // One title per request, bounded concurrency, results written back in index order so the
         // batch stays row-aligned for the caller — the extractor's shape, and for its reason: a
         // single object per call is what makes strict schema enforcement meaningful per title.
         var maxConcurrency = Math.Max(1, configuration.GetValue("OPENROUTER_MAX_CONCURRENCY", 4));
-        var results = new LensDraft?[titles.Count];
+        var results = new LensAttempt[titles.Count];
         using var gate = new SemaphoreSlim(maxConcurrency);
         await Task.WhenAll(titles.Select(async (title, index) =>
         {
@@ -251,7 +263,7 @@ public class OpenRouterLensWriter(
         return results;
     }
 
-    private async Task<LensDraft?> WriteOneLensAsync(LensTitleInput title, LensPersona persona, CancellationToken ct)
+    private async Task<LensAttempt> WriteOneLensAsync(LensTitleInput title, LensPersona persona, CancellationToken ct)
     {
         var user = LensPrompt(title, persona);
         var first = await ChatAsync(
@@ -259,12 +271,12 @@ public class OpenRouterLensWriter(
         var (note, problems) = ParseLens(first.Content);
         if (note is not null)
         {
-            return new LensDraft(note, ModelId, first.Usage?.PromptTokens, first.Usage?.CompletionTokens);
+            return new LensAttempt(new LensDraft(note, ModelId, first.Usage?.PromptTokens, first.Usage?.CompletionTokens));
         }
 
         if (first.Content is null)
         {
-            return null;
+            return new LensAttempt(null, first.Stopped);
         }
 
         logger.LogWarning(
@@ -286,10 +298,12 @@ public class OpenRouterLensWriter(
                 "Lens for {Title} ({TitleId}) failed after the repair pass ({Detail}). Nothing written — the "
                 + "surface falls back rather than showing invented copy.",
                 title.Name, title.TitleId, string.Join("; ", stillWrong));
-            return null;
+            // The first answer was made and was unusable, so this title failed — unless the repair
+            // itself was refused before sending, which says nothing more about the title.
+            return new LensAttempt(null, second.Content is null && second.Stopped);
         }
 
-        return new LensDraft(repaired, ModelId, second.Usage?.PromptTokens, second.Usage?.CompletionTokens);
+        return new LensAttempt(new LensDraft(repaired, ModelId, second.Usage?.PromptTokens, second.Usage?.CompletionTokens));
     }
 
     /// <summary>
@@ -494,7 +508,11 @@ public class OpenRouterLensWriter(
 
     // ── Transport ──────────────────────────────────────────────────────────────────────────
 
-    private sealed record ChatOutcome(string? Content, OpenRouterUsage? Usage);
+    /// <summary>
+    /// One call's answer. <paramref name="Stopped"/>: refused before it was sent or by the provider's
+    /// account (budget, breaker, 401/402/403) — not a verdict on the title.
+    /// </summary>
+    private sealed record ChatOutcome(string? Content, OpenRouterUsage? Usage, bool Stopped = false);
 
     private async Task<ChatOutcome> ChatAsync(
         string system, string user, string? repairHint, object schema, string purpose, CancellationToken ct)
@@ -513,7 +531,8 @@ public class OpenRouterLensWriter(
 
         return new ChatOutcome(
             result.Succeeded ? result.Content : null,
-            new OpenRouterUsage(result.PromptTokens, result.CompletionTokens, null));
+            new OpenRouterUsage(result.PromptTokens, result.CompletionTokens, null),
+            result.Failure is LlmCallFailure.BudgetSpent or LlmCallFailure.ProviderUnavailable or LlmCallFailure.ProviderRefused);
     }
 
     // ── Schemas ────────────────────────────────────────────────────────────────────────────
@@ -629,8 +648,9 @@ public class OpenRouterLensWriter(
         + "  4. Describe the person, not the data. \"You reach for something bleak and slow before "
         + "you reach for something loud\" — not \"your darkness attribute is high\".\n"
         + "  5. No marketing voice, no flattery, no \"you have great taste\". Say what is true, "
-        + "including the awkward parts: what you avoid, where you disagree with the crowd, what you "
-        + "have gone off lately.\n"
+        + "including the awkward parts: what you avoid, where the crowd lines say you part from the "
+        + "crowd, what you have gone off lately. When they say \"with the crowd\", you do not "
+        + "disagree with it.\n"
         + "  6. Each sentence carries its own idea. Do not open two sentences the same way.\n"
         + "  7. OPEN WITH VOLUME. The first sentence describes what they actually watch most — the "
         + "\"Mostly watches\" line — and how they rate it. What a person reaches for again and again "
@@ -846,13 +866,23 @@ public class OpenRouterLensWriter(
                 t.SampleSize));
         }
 
+        // The crowd as a BAND, never a bare offset: given "-0.18" the model wrote "you rate below
+        // the crowd overall" beside a tile reading "with the crowd" (IREV3S-07). The band is the
+        // one the tile and the why-line clause use, and a genre is named only when it leaves it.
         sb.Append(string.Format(
-            c, "Against the crowd overall: {0:+0.00;-0.00} rating points.\n", facts.Contrarian.Overall));
-        if (facts.Contrarian.ByGenre.Count > 0)
+            c, "Against the crowd overall: {0} ({1:+0.00;-0.00} rating points). {2}\n",
+            StanceWords(facts.Contrarian.Stance()), facts.Contrarian.Overall,
+            facts.Contrarian.Stance() == CrowdStance.WithTheCrowd
+                ? "Do not say they rate above or below the crowd overall."
+                : "Say this, and no stronger."));
+        var gaps = facts.Contrarian.ByGenre
+            .Where(o => ContrarianFact.StanceOf(o.Offset) != CrowdStance.WithTheCrowd)
+            .ToList();
+        if (gaps.Count > 0)
         {
-            sb.Append("Against the crowd by genre: ");
-            sb.AppendJoin(" · ", facts.Contrarian.ByGenre.Select(o =>
-                string.Format(c, "{0} {1:+0.00;-0.00}", o.Genre, o.Offset)));
+            sb.Append("Against the crowd by genre (only genres that leave the band; no other genre is a gap): ");
+            sb.AppendJoin(" · ", gaps.Select(o =>
+                string.Format(c, "{0} {1} ({2:+0.00;-0.00})", o.Genre, StanceWords(ContrarianFact.StanceOf(o.Offset)), o.Offset)));
             sb.Append('\n');
         }
 
@@ -1025,6 +1055,14 @@ public class OpenRouterLensWriter(
         return sb.ToString();
     }
 
+    /// <summary>The band in the words the Taste DNA tile shows for it.</summary>
+    internal static string StanceWords(CrowdStance stance) => stance switch
+    {
+        CrowdStance.KinderThanTheCrowd => "kinder than the crowd",
+        CrowdStance.HarsherThanTheCrowd => "harsher than the crowd",
+        _ => "with the crowd",
+    };
+
     // ── Deterministic stubs ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -1058,9 +1096,12 @@ public class OpenRouterLensWriter(
             facts.Texture is { Complexity: > 0.5m }
                 ? "You would rather be made to work than be carried."
                 : "You do not need a film to be difficult to be worth your evening.",
-            facts.Contrarian.Overall > 0m
-                ? "You are kinder than the crowd about the things you choose."
-                : "You are harder on what you watch than most people are.",
+            facts.Contrarian.Stance() switch
+            {
+                CrowdStance.KinderThanTheCrowd => "You are kinder than the crowd about the things you choose.",
+                CrowdStance.HarsherThanTheCrowd => "You are harder on what you watch than most people are.",
+                _ => "Overall you rate much as the crowd does.",
+            },
             people.Count > 0
                 ? $"You have a real track record with {string.Join(" and ", people)}."
                 : "No single name has earned your trust yet.",
@@ -1114,7 +1155,7 @@ public class OpenRouterLensWriter(
         var genre = t.Genres.Count > 0 ? t.Genres[0] : "this kind of thing";
         var tone = t.Tone is { Length: > 0 } ? t.Tone : mood;
 
-        var lens = $"A {tone} {genre} piece, and it sits close to the register you keep coming back to. "
+        var lens = $"{LensClauses.Capitalise(LensClauses.IndefiniteArticle(tone))} {tone} {genre} piece, and it sits close to the register you keep coming back to. "
             + $"You get the {(t.MediaType.Equals("Show", StringComparison.OrdinalIgnoreCase) ? "series" : "film")} "
             + "on its own terms rather than a version sanded down for everyone.";
         var hook = $"The {tone} {genre} you have been circling.";

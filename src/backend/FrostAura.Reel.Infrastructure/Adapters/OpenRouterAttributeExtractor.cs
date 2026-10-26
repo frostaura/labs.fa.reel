@@ -42,7 +42,9 @@ public class OpenRouterAttributeExtractor(
     ILlmPurposeCatalog? purposes = null,
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
-    ILlmCallGate? gate = null)
+    ILlmCallGate? gate = null,
+    // The per-purpose call counters (task 8); a DI singleton in production, none in a hand-built adapter.
+    LlmCallMetrics? metrics = null)
     : ITitleAttributeExtractor, IClassifyingAttributeExtractor
 {
     /// <summary>
@@ -55,7 +57,7 @@ public class OpenRouterAttributeExtractor(
     /// breaker, and the per-purpose timeouts replace the 10-second resilience defaults.
     /// </summary>
     private readonly OpenRouterChatClient _chat = new(
-        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate, metrics);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 

@@ -28,6 +28,9 @@ public static class NarrativeEndpoints
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>The trigger of a rewrite the read queued because the writer has moved on from the stored text.</summary>
+    public const string OutdatedNarrativeReason = "narrative-outdated";
+
     /// <summary>The narrative as the client sees it. <c>text</c> is already the effective one.</summary>
     public sealed record NarrativeResponse(
         string? Text,
@@ -48,7 +51,7 @@ public static class NarrativeEndpoints
         group.MapGet("/", async (
             IReelDbContext db, IAccountContext accountContext, PersonalisationContext personalisation,
             FeatureVectorBuilder featureBuilder, TasteFactsBuilder factsBuilder, ILensWriter writer,
-            CancellationToken ct) =>
+            IProviderHealth health, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var narrative = await personalisation.CurrentAsync(accountId, ct);
@@ -68,13 +71,42 @@ public static class NarrativeEndpoints
             var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
             var built = await factsBuilder.BuildAsync(accountId, taste, DateTime.UtcNow, ct);
 
+            // Stale when the fingerprint moved OR the account crossed a crowd band the fingerprint's
+            // coarser bands miss — the narrative's crowd claim would otherwise sit beside a tile that
+            // contradicts it (IREV3S-07).
+            var crowdMoved = TasteNarrativeService.CrowdStanceMoved(narrative.FactsJson, built.Facts);
+            var stale = !string.Equals(narrative.ProfileHash, built.ProfileHash, StringComparison.Ordinal) || crowdMoved;
+
+            // Nothing else queues a rewrite for a narrative whose fingerprint has NOT moved but
+            // which the writer would no longer stand behind: one written under an older prompt (a
+            // v2 narrative read "-0.18" as "below the crowd"), or before a crowd-band crossing. The feed build only queues on a fingerprint move and the
+            // weekly pass only on Sundays, so the text would stand for days. Queued here once — the
+            // in-flight check is the partial unique index's own rule — and the user's edit is
+            // carried forward, as on every non-forced rewrite.
+            if (!regenerating
+                && writer.IsAvailable
+                && (narrative.PromptVersion != writer.NarrativePromptVersion || crowdMoved)
+                && health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.TasteNarrative) is null)
+            {
+                db.SyncJobs.Add(new SyncJob
+                {
+                    Id = Guid.NewGuid(),
+                    AccountId = accountId,
+                    Kind = JobKind.BuildTasteNarrative,
+                    Priority = 4,
+                    EnqueuedAt = DateTime.UtcNow,
+                    TriggerReason = OutdatedNarrativeReason,
+                });
+                regenerating = await db.SaveAbsorbingRebuildRaceAsync(ct) > 0 || regenerating;
+            }
+
             return Results.Ok(new NarrativeResponse(
                 narrative.Effective,
                 narrative.EditedText is { Length: > 0 },
                 narrative.Version,
                 narrative.RatingsCount,
                 narrative.GeneratedAt,
-                !string.Equals(narrative.ProfileHash, built.ProfileHash, StringComparison.Ordinal),
+                stale,
                 regenerating,
                 writer.IsAvailable));
         });

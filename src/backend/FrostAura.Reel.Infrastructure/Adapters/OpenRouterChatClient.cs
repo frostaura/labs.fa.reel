@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FrostAura.Reel.Application.Llm;
@@ -152,7 +153,8 @@ public sealed class OpenRouterChatClient(
     ILlmPurposeCatalog? purposes = null,
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
-    ILlmCallGate? gate = null)
+    ILlmCallGate? gate = null,
+    LlmCallMetrics? metrics = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -182,6 +184,17 @@ public sealed class OpenRouterChatClient(
     }
 
     public async Task<LlmChatResult> CompleteAsync(LlmChatRequest request, CancellationToken ct)
+    {
+        var lengthFinishes = new StrongBox<int>();
+        var result = await CompleteCoreAsync(request, lengthFinishes, ct);
+        // Task 8's counters. A call refused before any attempt was sent is a stop and is not
+        // counted (Record ignores zero attempts); a sent call that did not answer usably is a
+        // fallback for its caller.
+        metrics?.Record(request.Purpose, lengthFinishes.Value, result.HttpAttempts, fallback: !result.Succeeded);
+        return result;
+    }
+
+    private async Task<LlmChatResult> CompleteCoreAsync(LlmChatRequest request, StrongBox<int> lengthFinishes, CancellationToken ct)
     {
         var options = _purposes.For(request.Purpose);
         var model = options.Model;
@@ -234,6 +247,7 @@ public sealed class OpenRouterChatClient(
                         Answered();
                         if (string.Equals(last.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
                         {
+                            lengthFinishes.Value++;
                             if (options.RetryOnLength && !lengthRetried)
                             {
                                 lengthRetried = true;

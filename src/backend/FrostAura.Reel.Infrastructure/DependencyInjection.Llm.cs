@@ -42,6 +42,10 @@ public static partial class DependencyInjection
         services.AddSingleton<IProviderHealth>(sp => sp.GetRequiredService<ProviderHealthService>());
         services.AddSingleton<IProviderHealthReader>(sp => sp.GetRequiredService<ProviderHealthService>());
         services.AddSingleton<ILlmCallGate, LlmCallGate>();
+        // Per-purpose length / fallback / retry counters and their 2%-over-50 alarm (task 8), on the
+        // FrostAura.Reel meter; the reader is what the metrics report and status API consume.
+        services.AddSingleton<LlmCallMetrics>();
+        services.AddSingleton<ILlmCallHealthReader>(sp => sp.GetRequiredService<LlmCallMetrics>());
 
         // Every chat adapter goes through OpenRouterChatClient, which owns retries and the per-purpose
         // attempt/total timeouts. So these typed clients deliberately carry NO standard resilience

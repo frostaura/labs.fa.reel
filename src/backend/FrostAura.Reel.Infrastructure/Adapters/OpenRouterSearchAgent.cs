@@ -37,7 +37,9 @@ public class OpenRouterSearchAgent(
     ILlmPurposeCatalog? purposes = null,
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
-    ILlmCallGate? gate = null)
+    ILlmCallGate? gate = null,
+    // The per-purpose call counters (task 8); a DI singleton in production, none in a hand-built adapter.
+    LlmCallMetrics? metrics = null)
     : ISearchAgent
 {
     /// <summary>
@@ -46,7 +48,7 @@ public class OpenRouterSearchAgent(
     /// 400 and 900 were sized for gpt-5.4-mini and a reasoning model spent the 400 thinking.
     /// </summary>
     private readonly OpenRouterChatClient _chat = new(
-        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate, metrics);
 
     /// <summary>
     /// A conversational reply is one short sentence by contract. 400 chars is the outer bound of

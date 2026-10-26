@@ -59,7 +59,7 @@ public class LensClauseTests
         var lens = "Heists, double-crosses, rooftop chases and a slow-burn betrayal stretched across three cities and two "
             + "decades of grudges, where every partner is lying to you about something and the money is never the point.";
 
-        var clause = Note(lens).FirstClause()!;
+        var clause = Note(lens).FirstClause(160)!;
 
         Assert.Equal(
             "Heists, double-crosses, rooftop chases and a slow-burn betrayal stretched across three cities and two decades of grudges.",
@@ -113,7 +113,7 @@ public class LensClauseTests
     {
         // The refuter's round-1 sample still read "booby traps, puzzles, and a…"; a list cut at a
         // comma without its "and" reads as broken off just the same.
-        Assert.Equal(expected, Note(lens).FirstClause());
+        Assert.Equal(expected, Note(lens).FirstClause(160));
     }
 
     [Theory]
@@ -125,7 +125,7 @@ public class LensClauseTests
         "If you want crime with a fast, urban climb and a dirty edge, this is Ace moving from a dry cleaning job into Harlem cocaine dealing.")]
     public void A_long_main_clause_is_cut_before_a_subordinate_clause(string lens, string expected)
     {
-        Assert.Equal(expected, Note(lens).FirstClause());
+        Assert.Equal(expected, Note(lens).FirstClause(160));
     }
 
     [Fact]
@@ -161,7 +161,7 @@ public class LensClauseTests
 
         Assert.Equal(
             "If you like tense crime stories with a bleak edge and little patience for fluff, this puts Liam, an ex-con, back in London ahead of the 2012 Olympics.",
-            Note(lens).FirstClause());
+            Note(lens).FirstClause(160));
     }
 
     [Fact]
@@ -216,10 +216,32 @@ public class LensClauseTests
         }
 
         Assert.DoesNotContain("…", clause, StringComparison.Ordinal);
-        Assert.True(clause.Length <= 160, clause);
+        Assert.True(clause.Length <= LensNote.ClauseChars, clause);
         Assert.Matches(@"[.!?]$", clause);
         Assert.False(SecondPersonVoice.SoundsHedged(clause), clause);
         Assert.DoesNotMatch(@"\b(?:two cold|a new Terminator sent|intense)\.$", clause);
+    }
+
+    // ── The card's clause field is at most 120 characters (WS-1 task 7) ──────────────────────
+
+    [Fact]
+    public void The_default_clause_is_at_most_the_card_width()
+    {
+        Assert.Equal(120, LensNote.ClauseChars);
+    }
+
+    [Theory]
+    [InlineData(
+        "If you like brisk genre pieces like The Great Wall and Ready Player One, Abigail gives you a closed city, a missing father, and a hidden layer of magic under the rules. It keeps the fantasy front and center.",
+        "If you like brisk genre pieces like The Great Wall and Ready Player One, Abigail gives you a closed city.")]
+    [InlineData(
+        "A washed-up fighter takes one last bout in a city that has forgotten him. You will know the register.",
+        "A washed-up fighter takes one last bout in a city that has forgotten him.")]
+    public void A_clause_past_the_card_width_steps_down_the_ladder_rather_than_overflowing(string lens, string expected)
+    {
+        // 126 characters at the old 160 limit (the list re-closed with "and a missing father"); at
+        // 120 the cut moves back to the comma before the list, still a closed sentence.
+        Assert.Equal(expected, Note(lens).FirstClause());
     }
 
     // ── Never a hedge ────────────────────────────────────────────────────────────────────────

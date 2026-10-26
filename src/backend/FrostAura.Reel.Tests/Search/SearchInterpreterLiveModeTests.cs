@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Telemetry;
@@ -97,6 +98,72 @@ public class SearchInterpreterLiveModeTests
         await Interpreter(handler).InterpretAsync("something scary", [], default, filters);
 
         Assert.Equal(expected, UserMessageOf(handler.Bodies[0]));
+    }
+
+    // ── A release window is a bound, never a keyword (IREV3-SYS-05) ────────────────────────
+
+    [Theory]
+    [InlineData("heist movies from the 2010s", 2010, 2019)]
+    [InlineData("'90s heist movies", 1990, 1999)]
+    [InlineData("90s heist movies", 1990, 1999)]
+    [InlineData("1980s heist movies", 1980, 1989)]
+    [InlineData("heist movies from the nineties", 1990, 1999)]
+    [InlineData("heist movies after 2015", 2015, null)]
+    [InlineData("heist movies from 2012", 2012, null)]
+    [InlineData("heist movies before 2000", null, 2000)]
+    [InlineData("heist movies newer than 2010", 2010, null)]
+    public async Task On_a_refused_call_the_fallback_reads_the_date_as_a_window_and_keeps_it_out_of_the_keywords(
+        string query, int? minYear, int? maxYear)
+    {
+        // The proof: a 402 put the plan on this reading, which came back keywords [heist, 2010] —
+        // so the supply pulled titles tagged "2010" and the reply's topic was "heist or 2010".
+        var handler = new CannedHandler(new CannedResponse(HttpStatusCode.PaymentRequired, """{"error":{"message":"insufficient credits"}}"""));
+
+        var intent = await Interpreter(handler).InterpretAsync(query);
+
+        Assert.Single(handler.Bodies);
+        Assert.Equal(["heist"], intent.Keywords);
+        Assert.Equal(minYear, intent.MinYear);
+        Assert.Equal(maxYear, intent.MaxYear);
+        Assert.Equal([MediaType.Movie], intent.MediaTypes);
+        Assert.Equal(query, intent.FreeText);
+    }
+
+    [Fact]
+    public void The_free_heuristic_keeps_genres_beside_the_window_and_drops_only_the_date()
+    {
+        // The public port member the agent uses as its fallback, with a genre word in the mix and
+        // the decade leading: the genre must still resolve, and nothing date-shaped may survive.
+        var intent = Interpreter(new CannedHandler(Ok("{}"))).Heuristic("80s heist thrillers");
+
+        Assert.Contains("thriller", intent.Genres);
+        Assert.Equal(["heist"], intent.Keywords);
+        Assert.Equal((1980, 1989), (intent.MinYear, intent.MaxYear));
+    }
+
+    [Theory]
+    [InlineData("2001 heist", "2001")]
+    [InlineData("1917 war", "1917")]
+    public void A_bare_four_digit_number_is_still_a_title_word_not_a_window(string query, string number)
+    {
+        // The rule ParseYearRange states: "1917" and "2001" are titles far more often than dates.
+        // The strip removes only what the window parser consumed, so a bare number survives.
+        var intent = Interpreter(new CannedHandler(Ok("{}"))).Heuristic(query);
+
+        Assert.Contains(number, intent.Keywords);
+        Assert.Null(intent.MinYear);
+        Assert.Null(intent.MaxYear);
+    }
+
+    [Theory]
+    [InlineData("heist movies from the 2010s", "heist movies from the  ")]
+    [InlineData("nineties heist, no horror", "  heist, no horror")]
+    [InlineData("heist since 1999; no gore", "heist  ; no gore")]
+    public void The_strip_blanks_only_the_window_phrase_and_keeps_clause_boundaries(string lower, string expected)
+    {
+        // Phrases are replaced by a space, never removed with their punctuation: the negation scope
+        // reads the comma and semicolon as boundaries, so they must survive the strip.
+        Assert.Equal(expected, OpenRouterSearchInterpreter.StripYearPhrases(lower));
     }
 
     // ── helpers (mirrors OpenRouterSearchAgentLiveModeTests) ────────────────────────────────

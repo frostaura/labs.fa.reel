@@ -62,12 +62,14 @@ public class OpenRouterCrossReferenceJudge(
     ILlmPurposeCatalog? purposes = null,
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
-    ILlmCallGate? gate = null)
+    ILlmCallGate? gate = null,
+    // The per-purpose call counters (task 8); a DI singleton in production, none in a hand-built adapter.
+    LlmCallMetrics? metrics = null)
     : ICrossReferenceJudge
 {
     /// <summary>The shared transport: strict schema, effort, ceilings, retries, breaker, budget and ledger.</summary>
     private readonly OpenRouterChatClient _chat = new(
-        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate, metrics);
 
     /// <summary>
     /// The prompt generation, and part of the verdict key.

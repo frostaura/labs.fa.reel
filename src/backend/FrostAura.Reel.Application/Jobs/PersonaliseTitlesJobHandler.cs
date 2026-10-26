@@ -50,7 +50,75 @@ public sealed class PersonaliseTitlesJobHandler(
     /// <summary>Set on the cursor by the nightly pass to add the Saved prefetch to the selection.</summary>
     public const string SavedCursor = """{"Saved":true}""";
 
+    /// <summary>
+    /// The priority of a pass a title-open queued (or one it merged into): someone is waiting on
+    /// it, so it runs beside cross-reference (2), below a reactive build (1).
+    /// </summary>
+    public const short OnOpenPriority = 2;
+
+    /// <summary>The trigger a title-open's pass carries.</summary>
+    public const string OnOpenReason = "lens-open";
+
+    /// <summary>
+    /// The most opened titles one pass takes on. Each open merges its title into a pending pass;
+    /// this bounds a burst of opens, oldest dropped, and the account's daily ceiling binds anyway.
+    /// </summary>
+    public const int MaxRequestedPerRun = 10;
+
+    private const string RequestedKey = "TitleIds";
+
     public JobKind Kind => JobKind.PersonaliseTitles;
+
+    /// <summary>The titles a title-open asked this pass to write first, in the order they were asked.</summary>
+    public static IReadOnlyList<Guid> RequestedTitles(string? cursorJson)
+    {
+        if (string.IsNullOrWhiteSpace(cursorJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            return System.Text.Json.Nodes.JsonNode.Parse(cursorJson) is System.Text.Json.Nodes.JsonObject o
+                && o[RequestedKey] is System.Text.Json.Nodes.JsonArray ids
+                ? ids.Select(n => Guid.TryParse(n?.GetValue<string>(), out var id) ? id : Guid.Empty)
+                    .Where(id => id != Guid.Empty)
+                    .Distinct()
+                    .ToList()
+                : [];
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or FormatException)
+        {
+            // An unreadable cursor asks for nothing extra; the pass still writes its selection.
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="cursorJson"/> with <paramref name="titleId"/> added to the requested titles,
+    /// every other field (the nightly pass's <c>Saved</c>) kept. The newest
+    /// <see cref="MaxRequestedPerRun"/> requests are kept.
+    /// </summary>
+    public static string WithRequestedTitle(string? cursorJson, Guid titleId)
+    {
+        System.Text.Json.Nodes.JsonObject o;
+        try
+        {
+            o = !string.IsNullOrWhiteSpace(cursorJson)
+                && System.Text.Json.Nodes.JsonNode.Parse(cursorJson) is System.Text.Json.Nodes.JsonObject parsed
+                ? parsed
+                : [];
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            o = [];
+        }
+
+        var ids = RequestedTitles(cursorJson).Where(id => id != titleId).Append(titleId).TakeLast(MaxRequestedPerRun);
+        o[RequestedKey] = new System.Text.Json.Nodes.JsonArray(
+            ids.Select(id => (System.Text.Json.Nodes.JsonNode?)System.Text.Json.Nodes.JsonValue.Create(id.ToString())).ToArray());
+        return o.ToJsonString();
+    }
 
     public async Task ExecuteAsync(SyncJob job, CancellationToken ct)
     {
@@ -72,7 +140,11 @@ public sealed class PersonaliseTitlesJobHandler(
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
         var built = await facts.BuildAsync(accountId, taste, now, ct);
 
-        var titleIds = await SelectAsync(accountId, includeSaved, ct);
+        // Titles someone opened go first — the first batch writes them — then the day's selection,
+        // whose warm titles cost nothing.
+        var requested = RequestedTitles(job.CursorJson);
+        var selected = await SelectAsync(accountId, includeSaved, ct);
+        var titleIds = requested.Concat(selected.Where(id => !requested.Contains(id))).ToList();
         if (titleIds.Count == 0)
         {
             job.ProgressMessage = "nothing to personalise";

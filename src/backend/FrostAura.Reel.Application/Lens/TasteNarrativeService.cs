@@ -69,6 +69,7 @@ public sealed class TasteNarrativeService(
         if (!force
             && current is not null
             && current.ProfileHash == built.ProfileHash
+            && !CrowdStanceMoved(current.FactsJson, built.Facts)
             && current.PromptVersion == writer.NarrativePromptVersion
             && current.ModelId == writer.NarrativeCacheSalt)
         {
@@ -146,6 +147,34 @@ public sealed class TasteNarrativeService(
         current.EditedAt = current.EditedText is null ? null : now;
         await db.SaveChangesAsync(ct);
         return current;
+    }
+
+    /// <summary>
+    /// True when the account has crossed a crowd band (with / kinder than / harsher than, at
+    /// ±<see cref="ContrarianFact.Band"/>) since the stored narrative's facts were taken.
+    ///
+    /// <para>The profile fingerprint bands the contrarian offset at 0.5 with hysteresis, so an
+    /// account can move from -0.35 ("harsher than the crowd") to -0.2 ("with the crowd") without
+    /// the fingerprint moving — and the narrative would keep a crowd claim the page's own tile now
+    /// contradicts (IREV3S-07). A stored sheet that cannot be read counts as moved: a narrative
+    /// whose evidence is unreadable cannot be shown as current.</para>
+    /// </summary>
+    public static bool CrowdStanceMoved(string? storedFactsJson, TasteFacts current)
+    {
+        if (string.IsNullOrWhiteSpace(storedFactsJson))
+        {
+            return true;
+        }
+
+        try
+        {
+            var stored = JsonSerializer.Deserialize<TasteFacts>(storedFactsJson, JsonOptions);
+            return stored?.Contrarian is not { } contrarian || contrarian.Stance() != current.Contrarian.Stance();
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     /// <summary>

@@ -89,6 +89,19 @@ public sealed record LensTitleInput(
 /// <summary>What the writer produced, with the provider's own token counts for the ledger.</summary>
 public sealed record LensDraft(LensNote Note, string ModelId, long? PromptTokens, long? CompletionTokens);
 
+/// <summary>
+/// One title's lens attempt: the draft, or why there is none. <see cref="Stopped"/> separates a call
+/// that was never answered because the provider or the budget refused it before it was sent (a
+/// breaker, a spent allowance, a refused key) from a call that was made and came back unusable.
+/// Only the second is this title's failure, and only it is negatively cached — a stop says nothing
+/// about the title and must not keep it dark for hours after the allowance resets.
+/// </summary>
+public sealed record LensAttempt(LensDraft? Draft, bool Stopped = false)
+{
+    /// <summary>A call made and answered unusably, or not at all.</summary>
+    public bool Failed => Draft is null && !Stopped;
+}
+
 /// <summary>Sentences plus token counts — the narrative writer's answer.</summary>
 public sealed record NarrativeDraft(
     IReadOnlyList<string> Sentences, string ModelId, long? PromptTokens, long? CompletionTokens);
@@ -137,6 +150,15 @@ public interface ILensWriter
     /// </summary>
     Task<IReadOnlyList<LensDraft?>> WriteLensAsync(
         IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default);
+
+    /// <summary>
+    /// <see cref="WriteLensAsync"/> with the reason behind every missing draft — see
+    /// <see cref="LensAttempt"/>. The default reads every null as a failure, which is right for a
+    /// writer that cannot be refused before sending (the stub, a test double).
+    /// </summary>
+    async Task<IReadOnlyList<LensAttempt>> AttemptLensAsync(
+        IReadOnlyList<LensTitleInput> titles, LensPersona persona, CancellationToken ct = default) =>
+        (await WriteLensAsync(titles, persona, ct)).Select(d => new LensAttempt(d)).ToList();
 
     /// <summary>
     /// Scores an already-generated note against the founder-only audit rubric — specificity,

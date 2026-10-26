@@ -1,24 +1,30 @@
 using FrostAura.Reel.Application.Lens;
+using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Tenancy;
 using FrostAura.Reel.Domain.Lens;
+using FrostAura.Reel.Domain.Sync;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
 /// <summary>
-/// "Through your lens" on one title, on demand — the moment the user has already clicked, which is
-/// the highest-value place in the product to spend a generation.
+/// "Through your lens" on one title — read, never written, on the request path.
 ///
-/// <para>Synchronous with a hard ceiling rather than streamed: the modal already renders instantly
-/// from the title payload, so what this adds is prose that either arrives inside five seconds or
-/// does not arrive at all. A spinner that resolves to nothing is worse than copy that was always
-/// going to be adequate, so the response ALWAYS carries a <c>source</c> and the client renders the
-/// ladder — fresh, stale (flagged), or the templater sentence over the overview.</para>
+/// <para><b>Off the read path (WS-1 task 7, F-6).</b> This GET used to generate inline behind a
+/// five-second ceiling, so opening an uncached title held a request open on a provider and three
+/// opens could pay three times. It now answers from what is stored — fresh, stale (flagged), or
+/// nothing — in a couple of queries, and when the note is not current it queues the lens pass for
+/// the title (<see cref="LensService.RequestAsync"/>) and says so with <c>pending</c>. The client
+/// renders the ladder exactly as before; the next read after the pass shows the note. The response
+/// ALWAYS carries a <c>source</c> — honesty is the feature.</para>
 /// </summary>
 public static class LensEndpoints
 {
-    /// <summary>The lens as the client renders it. <c>source</c> is never omitted — honesty is the feature.</summary>
+    /// <summary>
+    /// The lens as the client renders it. <c>source</c> is never omitted. <c>pending</c> is true
+    /// when a pass that writes this title is queued — the copy shown now may be replaced shortly.
+    /// </summary>
     public sealed record LensResponse(
         string Source,
         string? Lens,
@@ -27,14 +33,15 @@ public static class LensEndpoints
         IReadOnlyList<LensAnchor> Anchors,
         string? Mood,
         string? WhenToWatch,
-        DateTime? GeneratedAt);
+        DateTime? GeneratedAt,
+        bool Pending = false);
 
-    public static LensResponse ToResponse(ResolvedLens resolved) =>
+    public static LensResponse ToResponse(ResolvedLens resolved, bool pending = false) =>
         resolved.Note is { } note
             ? new LensResponse(
                 resolved.Source, note.Lens, LensGuards.ServableHook(note), note.Caution, note.Anchors,
-                note.Mood, note.WhenToWatch, resolved.GeneratedAt)
-            : new LensResponse(LensSource.None, null, null, null, [], null, null, null);
+                note.Mood, note.WhenToWatch, resolved.GeneratedAt, pending)
+            : new LensResponse(LensSource.None, null, null, null, [], null, null, null, pending);
 
     public static void MapLensEndpoints(this IEndpointRouteBuilder app)
     {
@@ -43,7 +50,7 @@ public static class LensEndpoints
         group.MapGet("/{mediaType}/{tmdbId:long}/lens", async (
             string mediaType, long tmdbId,
             IReelDbContext db, IAccountContext accountContext, LensService lens,
-            FeatureVectorBuilder featureBuilder, TasteFactsBuilder facts, CancellationToken ct) =>
+            TasteFactsBuilder facts, IProviderHealth health, CancellationToken ct) =>
         {
             var title = await TitleEndpoints.ResolveTitleAsync(db, mediaType, tmdbId, ct);
             if (title is null)
@@ -52,30 +59,18 @@ public static class LensEndpoints
             }
 
             var accountId = accountContext.AccountId!.Value;
-            var now = DateTime.UtcNow;
-            // The taste state is needed here whatever happens — a generation reads it — so the
-            // full build is honest on this path, unlike the render paths that only need the hash.
-            var taste = await featureBuilder.BuildTasteStateAsync(accountId, now, ct);
-            var built = await facts.BuildAsync(accountId, taste, now, ct);
+            // The render paths' cached fingerprint, not a full fact-sheet build: this path writes
+            // nothing, so the hash is all it needs.
+            var profileHash = await facts.CurrentHashAsync(accountId, DateTime.UtcNow, ct);
+            var resolved = await lens.ResolveAsync(accountId, title.Id, profileHash, ct);
 
-            // The ceiling is enforced here as well as inside the service: the service's own budget
-            // bounds the provider call, and this bounds everything around it, so a slow database
-            // cannot turn a five-second promise into a fifteen-second one.
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(LensService.OnDemandCeiling);
-            try
-            {
-                var resolved = await lens.ResolveOrGenerateAsync(
-                    accountId, title.Id, taste, built.ProfileHash, timeout.Token);
-                return Results.Ok(ToResponse(resolved));
-            }
-            catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
-            {
-                // Out of time. Whatever is already cached is still the honest answer; nothing is
-                // an honest answer too, and the client's ladder handles both.
-                var cached = await lens.ResolveAsync(accountId, title.Id, built.ProfileHash, ct);
-                return Results.Ok(ToResponse(cached));
-            }
+            // Behind an open provider breaker a queued pass would only pause; saying "pending"
+            // would promise copy that is not coming.
+            var pending = resolved.Source != LensSource.Fresh
+                && health.OpenBreakerFor(ApiProvider.OpenRouter, ApiUsagePurpose.Lens) is null
+                && await lens.RequestAsync(accountId, title.Id, profileHash, resolved, ct) == LensService.RequestOutcome.Queued;
+
+            return Results.Ok(ToResponse(resolved, pending));
         });
 
         // "This spoiled it for me." Withdraws every note this account holds for the title so the

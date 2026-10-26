@@ -56,6 +56,26 @@ public sealed class LensService(
 
     private static readonly TimeSpan OnDemandBudget = TimeSpan.FromSeconds(4);
 
+    /// <summary>
+    /// How long a title whose lens call was made and came back unusable is left alone before it is
+    /// tried again at the same key. Without it, every open of a title the model cannot write for
+    /// queues another paid attempt that fails the same way (WS-1 task 7, F-6).
+    /// </summary>
+    public static readonly TimeSpan FailureBackoff = TimeSpan.FromHours(6);
+
+    /// <summary>What a title-open's lens request did — see <see cref="RequestAsync"/>.</summary>
+    public enum RequestOutcome
+    {
+        /// <summary>A current note exists; nothing to do.</summary>
+        Current,
+
+        /// <summary>A pass that will write this title is queued (new, merged, or already there).</summary>
+        Queued,
+
+        /// <summary>Nothing queued: no writer, a refusal on record, a recent failure, a spent budget, or a pass already running.</summary>
+        NotQueued,
+    }
+
     /// <summary>The background job's wall clock, and its soft budget. Nothing is waiting on it.</summary>
     public static readonly TimeSpan JobCeiling = TimeSpan.FromSeconds(90);
 
@@ -146,7 +166,7 @@ public sealed class LensService(
     }
 
     /// <summary>How a generation pass ended, for the caller's log line and the job's progress message.</summary>
-    public sealed record GenerateOutcome(int Written, int Rejected, int Skipped, string Reason);
+    public sealed record GenerateOutcome(int Written, int Rejected, int Skipped, string Reason, int Failed = 0);
 
     /// <summary>
     /// Generates missing notes for the given titles, in priority order, inside a time box and the
@@ -180,8 +200,16 @@ public sealed class LensService(
         // A Done row the read path can no longer render (a hedged hook written before that rule) is
         // not "known" either: it is rewritten in place, once, under today's guards — otherwise the
         // title would show no note until the taste fingerprint next moved.
+        // A Failed row is a negative cache: inside FailureBackoff it is known (no spend), after it
+        // the title is tried again, in place.
+        var retryAfter = DateTime.UtcNow - FailureBackoff;
         var known = atKey
-            .Where(c => (c.ModelId == salt && (c.Status != LensStatus.Done || Deserialise(c) is not null))
+            .Where(c => (c.ModelId == salt && c.Status switch
+            {
+                LensStatus.Done => Deserialise(c) is not null,
+                LensStatus.Failed => c.GeneratedAt > retryAfter,
+                _ => true,
+            })
                 || c.RejectionReason == LensRejectionReasons.UserReportedSpoiler)
             .Select(c => c.TitleId)
             .ToHashSet();
@@ -216,21 +244,31 @@ public sealed class LensService(
         var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
         var written = 0;
         var rejected = 0;
+        var failed = 0;
 
         using var loop = new LlmBudgetLoop(new LlmBudgetOptions(softBudget, ceiling, GenerateBatch), ct);
         var stop = await loop.RunAsync(built.Titles, async (batch, batchCt) =>
         {
-            var drafts = await writer.WriteLensAsync(batch, persona, batchCt);
+            var attempts = await writer.AttemptLensAsync(batch, persona, batchCt);
             // Read AFTER the call: a model that rejected the requested effort mid-call was answered
             // at its fallback, and the row must say which effort actually wrote it.
             var writtenAt = CacheSalt;
             for (var i = 0; i < batch.Count; i++)
             {
                 var title = batch[i];
-                var draft = i < drafts.Count ? drafts[i] : null;
-                if (draft is null)
+                var attempt = i < attempts.Count ? attempts[i] : new LensAttempt(null, Stopped: true);
+                if (attempt.Draft is not { } draft)
                 {
                     // The writer already logged why and already declined to invent a substitute.
+                    // A call that was made and failed is remembered for FailureBackoff, so the next
+                    // open does not pay for the same failure; a stop (budget, breaker, the pass's
+                    // own clock) says nothing about the title and is not remembered.
+                    if (attempt.Failed && !batchCt.IsCancellationRequested)
+                    {
+                        RecordFailure(accountId, title.TitleId, profileHash, writtenAt, superseded);
+                        failed++;
+                    }
+
                     continue;
                 }
 
@@ -302,7 +340,131 @@ public sealed class LensService(
         });
 
         return new GenerateOutcome(
-            written, rejected, Math.Max(0, titleIds.Count - written - rejected), stop.ToString());
+            written, rejected, Math.Max(0, titleIds.Count - written - rejected), stop.ToString(), failed);
+    }
+
+    /// <summary>
+    /// Marks one title's generation at this key as failed (the negative cache), reusing the row at
+    /// the key when there is one so the unique index on (account, title, hash, prompt) holds.
+    /// </summary>
+    private void RecordFailure(
+        Guid accountId, Guid titleId, string profileHash, string salt, Dictionary<Guid, TitleLensCopy> superseded)
+    {
+        if (superseded.GetValueOrDefault(titleId) is { Status: LensStatus.Done })
+        {
+            // An older model's usable note at this key stays rendered (as stale); failing to write
+            // a better one is no reason to take away the one that exists. Its in-place rewrite is
+            // simply tried again on a later pass.
+            return;
+        }
+
+        var row = superseded.GetValueOrDefault(titleId);
+        if (row is null)
+        {
+            row = new TitleLensCopy
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                TitleId = titleId,
+                ProfileHash = profileHash,
+                PromptVersion = PromptVersion,
+            };
+            db.TitleLensCopies.Add(row);
+            superseded[titleId] = row;
+        }
+
+        row.LensJson = "{}";
+        row.ModelId = salt;
+        row.PromptTokens = null;
+        row.CompletionTokens = null;
+        row.Status = LensStatus.Failed;
+        row.RejectionReason = null;
+        row.GeneratedAt = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// A title was opened and its note is not current: queue a pass that writes it, so the GET that
+    /// asked never waits on a provider (WS-1 task 7, F-6). Returns without queueing when nothing
+    /// would come of it — no writer, a refusal on record at this key, a failure inside
+    /// <see cref="FailureBackoff"/>, or a spent allowance — and never queues the same title twice:
+    /// a pass already pending takes the title on (it is written first), and a pass already running
+    /// is left alone (the next open asks again).
+    ///
+    /// <para>The job is <c>PersonaliseTitles</c>, one per account by the partial unique index, so a
+    /// request merges into a pending Fresh-build pass rather than racing it. A pass started this way
+    /// still writes the build's selection after the requested titles: those are the titles the next
+    /// build would queue anyway, and the warm ones cost nothing.</para>
+    /// </summary>
+    public async Task<RequestOutcome> RequestAsync(
+        Guid accountId, Guid titleId, string profileHash, ResolvedLens resolved, CancellationToken ct)
+    {
+        if (resolved.Source == LensSource.Fresh)
+        {
+            return RequestOutcome.Current;
+        }
+
+        if (!writer.IsAvailable)
+        {
+            return RequestOutcome.NotQueued;
+        }
+
+        var salt = CacheSalt;
+        var retryAfter = DateTime.UtcNow - FailureBackoff;
+        var onRecord = await db.TitleLensCopies
+            .Where(c => c.AccountId == accountId && c.TitleId == titleId
+                && c.ProfileHash == profileHash && c.PromptVersion == PromptVersion
+                && c.Status != LensStatus.Done)
+            .Select(c => new { c.Status, c.ModelId, c.RejectionReason, c.GeneratedAt })
+            .FirstOrDefaultAsync(ct);
+        if (onRecord is not null
+            && (onRecord.RejectionReason == LensRejectionReasons.UserReportedSpoiler
+                || (onRecord.ModelId == salt
+                    && (onRecord.Status == LensStatus.Rejected || onRecord.GeneratedAt > retryAfter))))
+        {
+            return RequestOutcome.NotQueued;
+        }
+
+        var inFlight = await db.SyncJobs
+            .Where(j => j.AccountId == accountId && j.Kind == Domain.Sync.JobKind.PersonaliseTitles
+                && (j.Status == Domain.Sync.JobStatus.Pending || j.Status == Domain.Sync.JobStatus.Running))
+            .FirstOrDefaultAsync(ct);
+        if (inFlight is { Status: Domain.Sync.JobStatus.Running })
+        {
+            return Jobs.PersonaliseTitlesJobHandler.RequestedTitles(inFlight.CursorJson).Contains(titleId)
+                ? RequestOutcome.Queued
+                : RequestOutcome.NotQueued;
+        }
+
+        if (inFlight is not null)
+        {
+            if (!Jobs.PersonaliseTitlesJobHandler.RequestedTitles(inFlight.CursorJson).Contains(titleId))
+            {
+                inFlight.CursorJson = Jobs.PersonaliseTitlesJobHandler.WithRequestedTitle(inFlight.CursorJson, titleId);
+                inFlight.Priority = Math.Min(inFlight.Priority, Jobs.PersonaliseTitlesJobHandler.OnOpenPriority);
+                await db.SaveChangesAsync(ct);
+            }
+
+            return RequestOutcome.Queued;
+        }
+
+        if (!(await budget.AllowanceAsync(accountId, ct)).HasHeadroom)
+        {
+            return RequestOutcome.NotQueued;
+        }
+
+        db.SyncJobs.Add(new Domain.Sync.SyncJob
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = Domain.Sync.JobKind.PersonaliseTitles,
+            Priority = Jobs.PersonaliseTitlesJobHandler.OnOpenPriority,
+            EnqueuedAt = DateTime.UtcNow,
+            TriggerReason = Jobs.PersonaliseTitlesJobHandler.OnOpenReason,
+            CursorJson = Jobs.PersonaliseTitlesJobHandler.WithRequestedTitle(null, titleId),
+        });
+        // A concurrent open (or build) that queued first wins the partial unique index; the loser's
+        // row is dropped. The title is then not on that job — the next open merges it.
+        return await db.SaveAbsorbingRebuildRaceAsync(ct) > 0 ? RequestOutcome.Queued : RequestOutcome.NotQueued;
     }
 
     /// <summary>
