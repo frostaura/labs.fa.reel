@@ -258,12 +258,176 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
         Assert.NotEqual(plain, horror);
     }
 
-    private async Task<RetrievalResult> RetrieveAsync(RetrievalQuery query)
+    [Fact]
+    public async Task A_mood_request_is_answered_by_titles_carrying_the_mood_not_the_best_rated_anything()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // WS-2's mood requests: "something cosy" had nothing to stand on but an uncached embedding,
+        // so it was answered with the pool's best-rated titles of any kind.
+        var accountId = await SeedAccountAsync();
+        var warm = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.TmdbVoteAverage = 8.4m; t.TmdbVoteCount = 30_000; });
+        await SeedAttributesAsync(warm, tone: "warm");
+        var smallTown = await SeedTitleAsync(t => { t.Genres = ["drama"]; t.Keywords = ["small town"]; t.TmdbVoteAverage = 8.3m; t.TmdbVoteCount = 30_000; });
+        var acclaimed = await SeedTitleAsync(t => { t.Genres = ["action"]; t.TmdbVoteAverage = 9.6m; t.TmdbVoteCount = 900_000; });
+        await SeedAttributesAsync(acclaimed, tone: "gritty");
+
+        var result = await RetrieveAsync(new RetrievalQuery(
+            accountId, HardConstraints.None, new SoftPreferences(["a cosy movie"], [], []), [], FacetRetriever.MaxWant)
+        {
+            Arms = RetrievalArms.Catalogue,
+        });
+        var byId = result.Candidates.ToDictionary(c => c.TitleId);
+
+        Assert.Contains(warm, byId.Keys);
+        Assert.Contains("mood:cosy", byId[warm].Evidence);
+        Assert.Contains("tone:warm", byId[warm].Evidence);
+        Assert.Contains(smallTown, byId.Keys);
+        Assert.Contains("keyword:small town", byId[smallTown].Evidence);
+        Assert.DoesNotContain(acclaimed, byId.Keys);
+        Assert.All(result.Candidates, c => Assert.Contains("mood:cosy", c.Evidence));
+    }
+
+    [Fact]
+    public async Task A_steer_re_ranks_a_references_neighbours_relative_to_the_reference_and_excludes_none()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // "Like X but funnier" (§4.6): the reference's neighbours, the ones funnier than X first.
+        var accountId = await SeedAccountAsync();
+        var vector = UniqueVector();
+        var reference = await SeedTitleAsync(_ => { }, vector);
+        await SeedAttributesAsync(reference, humor: 0.40m);
+        var funnier = await SeedTitleAsync(_ => { }, vector);
+        await SeedAttributesAsync(funnier, humor: 0.70m);
+        var graver = await SeedTitleAsync(_ => { }, vector);
+        await SeedAttributesAsync(graver, humor: 0.20m);
+        // Funnier than the midpoint but not than the reference: the pivot is the reference, not 0.5.
+        var slightly = await SeedTitleAsync(_ => { }, vector);
+        await SeedAttributesAsync(slightly, humor: 0.35m);
+
+        var result = await RetrieveAsync(new RetrievalQuery(
+            accountId,
+            HardConstraints.None,
+            new SoftPreferences([], [new AttributeDirection("humor", AttributeTrend.More)], [reference]),
+            [reference],
+            FacetRetriever.MaxWant)
+        {
+            Arms = RetrievalArms.Semantic | RetrievalArms.Facet,
+        });
+        var order = result.Candidates.Select(c => c.TitleId).ToList();
+        var byId = result.Candidates.ToDictionary(c => c.TitleId);
+
+        Assert.DoesNotContain(reference, order);
+        Assert.Contains(graver, order);
+        Assert.Contains(slightly, order);
+        Assert.True(order.IndexOf(funnier) < order.IndexOf(graver));
+        Assert.True(order.IndexOf(funnier) < order.IndexOf(slightly));
+        Assert.Contains("steer:humor+", byId[funnier].Evidence);
+        Assert.DoesNotContain("steer:humor+", byId[slightly].Evidence);
+        Assert.DoesNotContain("steer:humor+", byId[graver].Evidence);
+    }
+
+    [Fact]
+    public async Task Without_an_embedding_the_semantic_arm_stands_on_the_reached_labels_precomputed_embeddings()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var label = $"zephyrlull{Guid.NewGuid():N}"[..20];
+        var vector = UniqueVector();
+        var accountId = await SeedAccountAsync();
+        var tagged = await SeedTitleAsync(t => t.Keywords = [label], vector);
+        await using (var seed = Fixture.CreateContext(new AccountContext()))
+        {
+            seed.KeywordLabels.Add(new KeywordLabel
+            {
+                Label = label, TitleCount = 1, Embedding = new Vector(vector), EmbeddingModel = "text-embedding-3-small",
+                CountedAt = DateTime.UtcNow, EmbeddedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        try
+        {
+            var result = await RetrieveAsync(
+                new RetrievalQuery(accountId, HardConstraints.None, new SoftPreferences([label], [], []), [], 20)
+                {
+                    Arms = RetrievalArms.Catalogue | RetrievalArms.Semantic,
+                },
+                new UnavailableEmbeddings());
+
+            Assert.Equal(1, result.Timings.ElapsedMs["semantic-labels"]);
+            Assert.DoesNotContain("semantic", result.SkippedArms);
+            var hit = Assert.Single(result.Candidates, c => c.TitleId == tagged);
+            Assert.NotNull(hit.Similarity);
+            Assert.Contains($"keyword:{label}", hit.Evidence);
+        }
+        finally
+        {
+            await using var cleanup = Fixture.CreateContext(new AccountContext());
+            await cleanup.KeywordLabels.Where(l => l.Label == label).ExecuteDeleteAsync();
+        }
+    }
+
+    private static float[] UniqueVector()
+    {
+        var random = new Random(Guid.NewGuid().GetHashCode());
+        var v = new float[1536];
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] = (float)(random.NextDouble() - 0.5);
+        }
+
+        var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
+        return [.. v.Select(x => x / norm)];
+    }
+
+    private async Task SeedAttributesAsync(Guid titleId, string? tone = null, decimal humor = 0.5m)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        db.TitleAttributes.Add(new TitleAttributes
+        {
+            TitleId = titleId,
+            Darkness = 0.5m,
+            Pacing = 0.5m,
+            Complexity = 0.5m,
+            EmotionalIntensity = 0.5m,
+            Humor = humor,
+            Optimism = 0.5m,
+            EnsembleVsSolo = 0.5m,
+            Tone = tone,
+            Themes = [],
+            ExtractorModel = "fixture",
+            ExtractorVersion = 1,
+            Status = AttributeExtractionStatus.Done,
+            ExtractedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private sealed class UnavailableEmbeddings : Domain.Ports.IEmbeddingProvider
+    {
+        public bool IsAvailable => false;
+
+        public Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default) =>
+            throw new InvalidOperationException("No embedding provider.");
+    }
+
+    private async Task<RetrievalResult> RetrieveAsync(RetrievalQuery query, Domain.Ports.IEmbeddingProvider? provider = null)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
         var cache = new MemoryCache(new MemoryCacheOptions());
         var eligibility = new EligibilityQueryBuilder(db);
-        var embeddings = new ConceptEmbeddings(new StubEmbeddingProvider(), cache, NullLogger<ConceptEmbeddings>.Instance);
+        var embeddings = new ConceptEmbeddings(provider ?? new StubEmbeddingProvider(), cache, NullLogger<ConceptEmbeddings>.Instance);
         var retriever = new HybridRetriever(
             db,
             eligibility,
