@@ -75,6 +75,21 @@ public class EvaluationResult : IAccountScoped
     /// <summary>Per-origin NDCG and precision for the five rolling split origins (jsonb).</summary>
     public string? OriginsJson { get; set; }
 
+    /// <summary>
+    /// The baselines ledger at the primary origin (jsonb): the model's NDCG@10 beside random,
+    /// popularity, raw Trakt rating, vote-shrunk crowd and genre-affinity rankers over the identical
+    /// holdout, each with the paired lift and its bootstrap CI, and the as-of caveat. Null on rows
+    /// written before 2026-10-26 — they never measured these.
+    /// </summary>
+    public string? BaselinesJson { get; set; }
+
+    /// <summary>
+    /// SHA-256 (lowercase hex) of the primary origin's exact inputs — feature names, training matrix
+    /// and labels in training order, holdout vectors and ratings, threshold. With an equal
+    /// <c>TrainingRun.ConfigHash</c>, an equal value means an identical NDCG. Null before 2026-10-26.
+    /// </summary>
+    public string? FeatureSetHash { get; set; }
+
     /// <summary>Per-rank hit table, feature importances, calibration, gates, caveats (jsonb).</summary>
     public string DetailJson { get; set; } = "{}";
 

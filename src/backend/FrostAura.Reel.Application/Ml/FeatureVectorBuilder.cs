@@ -425,9 +425,46 @@ public class FeatureVectorBuilder(IReelDbContext db)
             personRoleRatings);
     }
 
-    /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
-    public async Task<Dictionary<Guid, float[]>> BuildAsync(
-        TasteState taste, IReadOnlyCollection<Guid> titleIds, DateTime asOf, CancellationToken ct)
+    /// <summary>
+    /// Every catalogue-side input a title's vector reads — the title row, its finished attribute
+    /// extraction, its embedding and its credits — read once. The eval harness loads one of these
+    /// per run and builds all five origins from it, so a catalogue refresh landing mid-run cannot
+    /// give two origins (or two runs it compares) different title features: the title side is
+    /// FROZEN per eval, and <c>FeatureSetHash</c> fingerprints exactly what was built from it.
+    /// </summary>
+    public sealed class TitleSide
+    {
+        private readonly HashSet<Guid> _requested;
+
+        internal TitleSide(
+            IEnumerable<Guid> requested,
+            Dictionary<Guid, Title> titles,
+            Dictionary<Guid, TitleAttributes> attributes,
+            Dictionary<Guid, float[]> embeddings,
+            Dictionary<Guid, List<CreditRow>> credits)
+        {
+            _requested = [.. requested];
+            Titles = titles;
+            Attributes = attributes;
+            Embeddings = embeddings;
+            Credits = credits;
+        }
+
+        /// <summary>The title rows, by id. A title missing here gets no vector.</summary>
+        public IReadOnlyDictionary<Guid, Title> Titles { get; }
+
+        internal Dictionary<Guid, TitleAttributes> Attributes { get; }
+
+        internal Dictionary<Guid, float[]> Embeddings { get; }
+
+        internal Dictionary<Guid, List<CreditRow>> Credits { get; }
+
+        /// <summary>True when every id in <paramref name="titleIds"/> was part of this snapshot's read.</summary>
+        internal bool Covers(IEnumerable<Guid> titleIds) => titleIds.All(_requested.Contains);
+    }
+
+    /// <summary>Reads the catalogue side of <paramref name="titleIds"/> once. See <see cref="TitleSide"/>.</summary>
+    public async Task<TitleSide> LoadTitleSideAsync(IReadOnlyCollection<Guid> titleIds, CancellationToken ct)
     {
         var ids = titleIds.Distinct().ToList();
         var titles = await db.Titles.Where(t => ids.Contains(t.Id)).ToDictionaryAsync(t => t.Id, ct);
@@ -441,6 +478,32 @@ public class FeatureVectorBuilder(IReelDbContext db)
                 .ToListAsync(ct))
             .GroupBy(c => c.TitleId)
             .ToDictionary(g => g.Key, g => g.ToList());
+        return new TitleSide(ids, titles, attributes, embeddings, creditsByTitle);
+    }
+
+    /// <summary>Builds vectors for the given titles against a prebuilt taste state.</summary>
+    public async Task<Dictionary<Guid, float[]>> BuildAsync(
+        TasteState taste, IReadOnlyCollection<Guid> titleIds, DateTime asOf, CancellationToken ct) =>
+        Build(taste, titleIds, asOf, await LoadTitleSideAsync(titleIds, ct));
+
+    /// <summary>
+    /// Builds vectors for the given titles against a prebuilt taste state and a title side read
+    /// earlier (<see cref="LoadTitleSideAsync"/>), touching no database. Every id must have been part
+    /// of that read — a title outside it would silently get no vector, so that is refused instead.
+    /// </summary>
+    public Dictionary<Guid, float[]> Build(
+        TasteState taste, IReadOnlyCollection<Guid> titleIds, DateTime asOf, TitleSide titleSide)
+    {
+        var ids = titleIds.Distinct().ToList();
+        if (!titleSide.Covers(ids))
+        {
+            throw new ArgumentException("Every title must be part of the frozen title side it is built from.", nameof(titleIds));
+        }
+
+        var titles = titleSide.Titles;
+        var attributes = titleSide.Attributes;
+        var embeddings = titleSide.Embeddings;
+        var creditsByTitle = titleSide.Credits;
 
         // ── Leave-one-out aggregates ───────────────────────────────────────────────────────
         // Rolled up ONCE per batch, not once per title: subtracting a title's own contribution is
@@ -766,7 +829,7 @@ public class FeatureVectorBuilder(IReelDbContext db)
         return TasteMath.ShrunkenMean(sum, count, prior);
     }
 
-    private sealed record CreditRow(Guid TitleId, Guid PersonId, CreditRole Role, int? CastOrder);
+    internal sealed record CreditRow(Guid TitleId, Guid PersonId, CreditRole Role, int? CastOrder);
 
     /// <summary>
     /// The neutral-LOW imputation for a person-affinity nothing is known about (schema v5):

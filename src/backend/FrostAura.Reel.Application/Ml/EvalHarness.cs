@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Ranking;
 using FrostAura.Reel.Application.Search;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
@@ -182,6 +183,11 @@ public class EvalHarness(
             .Where(r => r.AccountId == accountId
                 && (r.SubjectType == RatingSubjectType.Movie || r.SubjectType == RatingSubjectType.Show))
             .OrderBy(r => r.FirstRatedAt)
+            // A total order: ratings ingested in one walk share a FirstRatedAt, and Postgres returns
+            // ties in whatever order the plan produced, which reordered the training matrix between
+            // two runs over identical data and moved the NDCG. Equal FeatureSetHash ⇒ equal NDCG
+            // needs the rows in one order every time.
+            .ThenBy(r => r.TitleId)
             .Select(r => new SplitLabel(r.TitleId, r.Rating, r.FirstRatedAt))
             .ToListAsync(ct);
 
@@ -197,11 +203,16 @@ public class EvalHarness(
         var eligibleTitleIds = await EligibleEvaluationPoolAsync(accountId, ct);
         var frozenThreshold = await FrozenThresholdAsync(accountId, labels, ct);
 
+        // The title side (catalogue rows, attributes, embeddings, credits) is read ONCE and every
+        // origin builds from it, so a metadata refresh landing mid-run cannot hand two origins
+        // different title features, and FeatureSetHash fingerprints exactly what was measured.
+        var titleSide = await featureBuilder.LoadTitleSideAsync([.. labels.Select(l => l.TitleId).Distinct()], ct);
+
         var origins = new List<OriginOutcome>();
         foreach (var fraction in SplitOrigins)
         {
             var origin = await EvaluateOriginAsync(
-                accountId, labels, eligibleTitleIds, frozenThreshold, fraction, hyperparamsJson, ct);
+                accountId, labels, eligibleTitleIds, frozenThreshold, fraction, hyperparamsJson, titleSide, ct);
             if (origin is not null)
             {
                 origins.Add(origin);
@@ -355,6 +366,8 @@ public class EvalHarness(
             EligibleHoldoutCount = primary.EligibleHoldoutCount,
             UnfilteredHoldoutCount = primary.UnfilteredHoldoutCount,
             OriginsJson = JsonSerializer.Serialize(OriginPayloads(origins)),
+            BaselinesJson = JsonSerializer.Serialize(BaselineLedger(primary.Rows, primary.Ranked, primary.Threshold, primary.Baselines)),
+            FeatureSetHash = primary.FeatureSetHash,
             DetailJson = JsonSerializer.Serialize(detail),
             ComputedAt = DateTime.UtcNow,
         };
@@ -402,7 +415,9 @@ public class EvalHarness(
         decimal BaselineNdcg,
         IReadOnlyList<HoldoutRow> Rows,
         IReadOnlyList<(Guid TitleId, short Rating, double Predicted)> Ranked,
-        TrainedModel Model);
+        TrainedModel Model,
+        string FeatureSetHash,
+        IReadOnlyList<BaselineRanking> Baselines);
 
     private async Task<OriginOutcome?> EvaluateOriginAsync(
         Guid accountId,
@@ -411,6 +426,7 @@ public class EvalHarness(
         decimal frozenThreshold,
         double fraction,
         string hyperparamsJson,
+        FeatureVectorBuilder.TitleSide titleSide,
         CancellationToken ct)
     {
         // The split point has to be known before the watch-footprint query can be bounded by it, so
@@ -444,8 +460,8 @@ public class EvalHarness(
         var trainLabelByTitle = train
             .GroupBy(t => t.TitleId)
             .ToDictionary(g => g.Key, g => (float)g.Max(x => x.Rating));
-        var trainVectors = await featureBuilder.BuildAsync(taste, trainLabelByTitle.Keys.ToList(), splitAt, ct);
-        var holdoutVectors = await featureBuilder.BuildAsync(taste, holdout.Select(h => h.TitleId).ToList(), splitAt, ct);
+        var trainVectors = featureBuilder.Build(taste, trainLabelByTitle.Keys.ToList(), splitAt, titleSide);
+        var holdoutVectors = featureBuilder.Build(taste, holdout.Select(h => h.TitleId).ToList(), splitAt, titleSide);
 
         var matrixRows = trainVectors.Where(kv => trainLabelByTitle.ContainsKey(kv.Key)).ToList();
         if (matrixRows.Count == 0)
@@ -507,11 +523,7 @@ public class EvalHarness(
         // is 100% of what it knows. The model sees the same field as one slot of its vector, so the
         // measured lift is conservative rather than flattering. Do not "correct" for this by
         // weakening the baseline — the asymmetry runs against the model.
-        var scoreableIds = scoreable.Select(h => h.TitleId).ToList();
-        var popularity = await db.Titles
-            .Where(t => scoreableIds.Contains(t.Id))
-            .Select(t => new { t.Id, t.TmdbPopularity, t.TraktVotes })
-            .ToDictionaryAsync(t => t.Id, ct);
+        var popularity = titleSide.Titles;
         var baselineRanked = scoreable
             .OrderByDescending(h => popularity.GetValueOrDefault(h.TitleId)?.TmdbPopularity ?? 0m)
             .ThenByDescending(h => popularity.GetValueOrDefault(h.TitleId)?.TraktVotes ?? 0)
@@ -529,6 +541,11 @@ public class EvalHarness(
             .Select(h => new HoldoutRow(h.Rating, predictedByTitle[h.TitleId], baselineScoreByTitle[h.TitleId]))
             .ToList();
 
+        var featureSetHash = FeatureSetHash(
+            matrix, [.. scoreable.Select(h => (holdoutVectors[h.TitleId], h.Rating))], threshold);
+        var baselines = BaselineRankings(
+            scoreable.Select(h => (h.TitleId, h.Rating)).ToList(), titleSide.Titles, holdoutVectors);
+
         return new OriginOutcome(
             fraction,
             splitAt,
@@ -545,7 +562,9 @@ public class EvalHarness(
             NdcgAtK(baselineRanked.Select(r => r.Rating), threshold, NdcgDepth),
             rows,
             ranked,
-            model);
+            model,
+            featureSetHash,
+            baselines);
     }
 
     private static object[] OriginPayloads(IReadOnlyCollection<OriginOutcome> origins) =>
@@ -672,6 +691,179 @@ public class EvalHarness(
         }
 
         return latest.ConfigHash == configHash ? latest.Iteration : latest.Iteration + 1;
+    }
+
+    // ── The baselines ledger (WS-5 task 8) ────────────────────────────────────────────────
+
+    /// <summary>The seeded random orderings averaged into the random baseline's NDCG.</summary>
+    public const int RandomBaselinePermutations = 200;
+
+    /// <summary>
+    /// Persisted with every <c>BaselinesJson</c>. Four of the five baselines read catalogue values
+    /// as they are TODAY, not as they were at the split, because no history of them exists; only the
+    /// genre-affinity baseline is genuinely as-of the split. A baseline that ranks by a value the
+    /// split could not have known is flattered by it, so a lift over it is conservative.
+    /// </summary>
+    public const string BaselinesAsOfCaveat =
+        "Read at the primary 80% origin over the identical eligible, scoreable holdout. popularity, traktRating and "
+        + "shrunkCrowd rank by present-day catalogue values (no historical snapshots exist), so post-split crowd "
+        + "and popularity flatter those baselines; genreAffinity is the account's own genre taste as of the split; "
+        + "random is the mean over 200 seeded orderings and carries no CI.";
+
+    /// <summary>
+    /// One baseline's total order over an origin's scoreable holdout, as a descending score per title
+    /// (negated rank, so ties are already broken exactly as the ordering broke them).
+    /// </summary>
+    public sealed record BaselineRanking(string Name, string AsOf, IReadOnlyDictionary<Guid, double> ScoreByTitle);
+
+    /// <summary>
+    /// The four ordered baselines over one origin's scoreable holdout: present-day TMDB popularity,
+    /// the raw Trakt rating, the vote-shrunk crowd score the badge shows, and the account's own genre
+    /// affinity as of the split (the vector's <c>userGenreAffinity</c> slot). Each breaks ties by
+    /// votes and then by title id, so the order is total and reproducible. Public and pure so the
+    /// orderings themselves are testable.
+    /// </summary>
+    public static IReadOnlyList<BaselineRanking> BaselineRankings(
+        IReadOnlyList<(Guid TitleId, short Rating)> holdout,
+        IReadOnlyDictionary<Guid, Title> titles,
+        IReadOnlyDictionary<Guid, float[]> holdoutVectors)
+    {
+        var genreSlot = Array.IndexOf(FeatureSchema.AllNames(), "userGenreAffinity");
+        Title? TitleOf(Guid id) => titles.GetValueOrDefault(id);
+        int VotesOf(Guid id) => TitleOf(id)?.TraktVotes ?? 0;
+
+        BaselineRanking Rank(string name, string asOf, Func<Guid, double?> key) =>
+            new(
+                name,
+                asOf,
+                holdout
+                    .Select(h => h.TitleId)
+                    .OrderByDescending(id => key(id).HasValue)
+                    .ThenByDescending(id => key(id) ?? 0d)
+                    .ThenByDescending(VotesOf)
+                    .ThenBy(id => id)
+                    .Select((id, index) => (id, Score: -(double)index))
+                    .ToDictionary(x => x.id, x => x.Score));
+
+        return
+        [
+            Rank("popularity", "present-day", id => (double?)TitleOf(id)?.TmdbPopularity),
+            Rank("traktRating", "present-day", id => (double?)TitleOf(id)?.TraktRating),
+            Rank("shrunkCrowd", "present-day", id => TitleOf(id) is { } t ? (double?)CrowdPrior.ShrunkScoreOf(t) : null),
+            Rank(
+                "genreAffinity",
+                "as of the split",
+                id => genreSlot >= 0 && holdoutVectors.TryGetValue(id, out var v) ? v[genreSlot] : null),
+        ];
+    }
+
+    /// <summary>
+    /// The <c>BaselinesJson</c> payload: the model's NDCG@10 at the primary origin, then every
+    /// baseline's NDCG@10 with the paired model-minus-baseline lift and its bootstrap CI (the same
+    /// resampler and seed as the gate), and the random baseline as a seeded mean. Read beside the
+    /// gate, it answers the question the single popularity column could not: what does the model
+    /// beat, and by how much, against the cheapest rankers that could replace it.
+    /// </summary>
+    public static object BaselineLedger(
+        IReadOnlyList<HoldoutRow> rows,
+        IReadOnlyList<(Guid TitleId, short Rating, double Predicted)> ranked,
+        decimal threshold,
+        IReadOnlyList<BaselineRanking> baselines)
+    {
+        var modelNdcg = NdcgAtK(ranked.Select(r => r.Rating), threshold, NdcgDepth);
+        var entries = new List<object>();
+        foreach (var baseline in baselines)
+        {
+            var paired = ranked
+                .Select(r => new HoldoutRow(r.Rating, r.Predicted, baseline.ScoreByTitle[r.TitleId]))
+                .ToList();
+            var ndcg = NdcgAtK(
+                ranked.OrderByDescending(r => baseline.ScoreByTitle[r.TitleId]).Select(r => r.Rating), threshold, NdcgDepth);
+            var (low, high) = BootstrapPairedNdcgCi(paired, threshold, NdcgDepth, BootstrapResamples, BootstrapSeed);
+            entries.Add(new
+            {
+                name = baseline.Name,
+                asOf = baseline.AsOf,
+                ndcg,
+                lift = modelNdcg - ndcg,
+                ciLow = low,
+                ciHigh = high,
+            });
+        }
+
+        entries.Add(new
+        {
+            name = "random",
+            asOf = "none",
+            ndcg = RandomBaselineNdcg(ranked.Select(r => r.Rating).ToList(), threshold),
+            permutations = RandomBaselinePermutations,
+            seed = BootstrapSeed,
+        });
+
+        return new
+        {
+            origin = PrimaryOrigin,
+            depth = NdcgDepth,
+            holdout = rows.Count,
+            model = modelNdcg,
+            baselines = entries,
+            caveat = BaselinesAsOfCaveat,
+        };
+    }
+
+    /// <summary>The mean NDCG@10 of <see cref="RandomBaselinePermutations"/> seeded shuffles of the holdout.</summary>
+    public static decimal RandomBaselineNdcg(IReadOnlyList<short> ratings, decimal threshold)
+    {
+        if (ratings.Count == 0)
+        {
+            return 0m;
+        }
+
+        var rng = new Random(BootstrapSeed);
+        var buffer = ratings.ToArray();
+        var total = 0m;
+        for (var p = 0; p < RandomBaselinePermutations; p++)
+        {
+            rng.Shuffle(buffer);
+            total += NdcgAtK(buffer, threshold, NdcgDepth);
+        }
+
+        return Math.Round(total / RandomBaselinePermutations, 6);
+    }
+
+    /// <summary>
+    /// A SHA-256 over everything the origin's NDCG is a function of apart from the hyperparameters
+    /// (which <see cref="ConfigHash"/> already fingerprints): the schema version and feature names,
+    /// the training matrix row by row in the order it was trained, its labels, the holdout vectors
+    /// and ratings in scoring order, and the "loved" threshold. FastTree trains deterministically
+    /// (fixed seed), so two runs with equal FeatureSetHash and equal ConfigHash produce identical
+    /// NDCG — and a changed NDCG with an unchanged hash is a defect in the instrument, not a result.
+    /// </summary>
+    public static string FeatureSetHash(
+        TrainingMatrix matrix, IReadOnlyList<(float[] Vector, short Rating)> holdout, decimal threshold)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        void Text(string value) => hash.AppendData(Encoding.UTF8.GetBytes(value + "\n"));
+        void Floats(float[] values) => hash.AppendData(System.Runtime.InteropServices.MemoryMarshal.AsBytes(values.AsSpan()));
+
+        Text(FeatureSchema.Version.ToString(CultureInfo.InvariantCulture));
+        Text(string.Join(',', matrix.FeatureNames));
+        Text(matrix.Features.Length.ToString(CultureInfo.InvariantCulture));
+        foreach (var row in matrix.Features)
+        {
+            Floats(row);
+        }
+
+        Floats(matrix.Labels);
+        Text(holdout.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var (vector, rating) in holdout)
+        {
+            Floats(vector);
+            Text(rating.ToString(CultureInfo.InvariantCulture));
+        }
+
+        Text(threshold.ToString(CultureInfo.InvariantCulture));
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 
     // ── Pure metric maths (public so the harness LOGIC is testable, not just its plumbing) ──

@@ -377,6 +377,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         {
             e.HasIndex(r => r.TrainingRunId).IsUnique();
             e.Property(r => r.DetailJson).HasColumnType("jsonb");
+            e.Property(r => r.BaselinesJson).HasColumnType("jsonb");
+            e.Property(r => r.FeatureSetHash).HasMaxLength(64);
         });
 
         modelBuilder.Entity<TitleScore>(e =>

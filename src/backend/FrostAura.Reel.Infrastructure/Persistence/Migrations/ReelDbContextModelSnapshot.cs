@@ -1469,6 +1469,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<decimal>("BaselinePrecisionAt10")
                         .HasColumnType("numeric");
 
+                    b.Property<string>("BaselinesJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<decimal?>("CalibrationBias")
                         .HasColumnType("numeric");
 
@@ -1484,6 +1487,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<int?>("EligibleHoldoutCount")
                         .HasColumnType("integer");
+
+                    b.Property<string>("FeatureSetHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<int>("HoldoutPositiveCount")
                         .HasColumnType("integer");

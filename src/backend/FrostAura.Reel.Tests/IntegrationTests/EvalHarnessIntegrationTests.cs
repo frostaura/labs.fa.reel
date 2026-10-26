@@ -149,6 +149,56 @@ public class EvalHarnessIntegrationTests(PostgresFixture fixture)
         Assert.Equal(2, third!.Run.Iteration);
     }
 
+    [Fact]
+    public async Task The_ledger_carries_five_baselines_and_an_input_hash_that_pins_the_ndcg()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var seed = await SeedAsync();
+        var first = await RunAsync(seed.AccountId);
+        var second = await RunAsync(seed.AccountId);
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+
+        // Equal inputs, equal hash, identical NDCG — the instrument is reproducible.
+        Assert.Matches("^[0-9a-f]{64}$", first!.Result.FeatureSetHash);
+        Assert.Equal(first.Result.FeatureSetHash, second!.Result.FeatureSetHash);
+        Assert.Equal(first.Result.NdcgAt10Model, second.Result.NdcgAt10Model);
+        Assert.Equal(first.Result.BaselinesJson, second.Result.BaselinesJson);
+
+        // Every baseline is read at the primary origin, with the as-of caveat.
+        var ledger = JsonSerializer.Deserialize<JsonElement>(first.Result.BaselinesJson!);
+        Assert.Equal(EvalHarness.PrimaryOrigin, ledger.GetProperty("origin").GetDouble());
+        Assert.Equal(first.Result.NdcgAt10Model, ledger.GetProperty("model").GetDecimal());
+        Assert.Contains("present-day", ledger.GetProperty("caveat").GetString(), StringComparison.Ordinal);
+        var baselines = ledger.GetProperty("baselines").EnumerateArray().ToDictionary(b => b.GetProperty("name").GetString()!);
+        Assert.Equal(["popularity", "traktRating", "shrunkCrowd", "genreAffinity", "random"], baselines.Keys);
+        foreach (var (name, baseline) in baselines)
+        {
+            Assert.InRange(baseline.GetProperty("ndcg").GetDecimal(), 0m, 1m);
+            if (name != "random")
+            {
+                Assert.True(baseline.GetProperty("ciHigh").GetDecimal() >= baseline.GetProperty("ciLow").GetDecimal());
+            }
+        }
+
+        // The popularity entry is the gate's own baseline, not a second definition of it.
+        Assert.Equal(first.Result.NdcgAt10Baseline, baselines["popularity"].GetProperty("ndcg").GetDecimal());
+
+        // A title-side change moves the hash: the hash fingerprints features, not just config.
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            var rated = await db.UserRatings.Where(r => r.AccountId == seed.AccountId).Select(r => r.TitleId).ToListAsync();
+            await db.Titles.Where(t => rated.Contains(t.Id)).ExecuteUpdateAsync(u => u.SetProperty(t => t.TraktVotes, t => t.TraktVotes + 5_000));
+        }
+
+        var third = await RunAsync(seed.AccountId);
+        Assert.NotEqual(first.Result.FeatureSetHash, third!.Result.FeatureSetHash);
+    }
+
     // ── Harness construction ────────────────────────────────────────────────────────────
 
     private async Task<EvalHarness.HarnessOutcome?> RunAsync(Guid accountId, string? hyperparams = null)
