@@ -86,6 +86,17 @@ public class P1IngestRulesTests
         Assert.Equal(7.5m, title.TraktRating);
     }
 
+    [Fact]
+    public void A_minimal_trakt_object_does_not_zero_the_crowd_votes()
+    {
+        var title = new Title { MediaType = MediaType.Movie, TraktRating = 7.2m, TraktVotes = 5400 };
+        IngestMapper.ApplyMovie(title, Movie(["drama"]));
+        Assert.Equal((7.2m, 5400), (title.TraktRating!.Value, title.TraktVotes));
+
+        IngestMapper.ApplyMovie(title, Movie(["drama"]) with { Rating = 7.4m, Votes = 5600 });
+        Assert.Equal((7.4m, 5600), (title.TraktRating!.Value, title.TraktVotes));
+    }
+
     private static TraktMovie Movie(string[] genres) => new(
         "M", 2001, new TraktIds(1, "m", null, 2), null, null, null, null, null, null, null, 0, null, null, genres, null, null);
 }
