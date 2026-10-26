@@ -116,6 +116,24 @@ export interface SyncStatus {
   degradedReason: DegradedReason | null;
   /** The training floor, present only while the account is below it. */
   notEnoughRatings: { usableRatings: number; required: number } | null;
+  /**
+   * Operator alerts (WS-6 task 6, FD-20 default destination): a provider-wide 401/402/403 breaker
+   * (`provider_refused`) or repeated job failures (`job_failures`). Founder tier only; absent or
+   * empty for everyone else. Typed here so the contract check holds; rendering is WS-9's.
+   */
+  alerts?: OperatorAlert[];
+}
+
+/** One raised operator alert. `code` is a closed vocabulary; unknown codes must be ignored. */
+export interface OperatorAlert {
+  code: string;
+  since: string;
+  raisedAt: string;
+  reasonCode: string | null;
+  provider: "Trakt" | "Tmdb" | "OpenRouter" | null;
+  count: number | null;
+  threshold: number | null;
+  kinds: { kind: string; count: number }[] | null;
 }
 
 export const syncApi = api.injectEndpoints({
