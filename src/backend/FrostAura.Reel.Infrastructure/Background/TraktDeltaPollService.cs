@@ -35,62 +35,74 @@ public sealed class TraktDeltaPollService(
         {
             try
             {
-                using var scope = scopeFactory.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
-                var now = DateTime.UtcNow;
-
-                var candidates = await db.TraktConnections
-                    .Where(c => c.Status == ConnectionStatus.Active)
-                    .Join(db.Accounts, c => c.AccountId, a => a.Id, (c, a) => new
-                    {
-                        c.AccountId,
-                        c.LastDeltaSyncAt,
-                        a.LastSeenAt,
-                    })
-                    .ToListAsync(stoppingToken);
-
-                foreach (var candidate in candidates)
-                {
-                    var cadence = (now - candidate.LastSeenAt) switch
-                    {
-                        var idle when idle <= TimeSpan.FromHours(48) => TimeSpan.FromMinutes(hotMinutes),
-                        var idle when idle <= TimeSpan.FromDays(30) => TimeSpan.FromMinutes(defaultMinutes),
-                        _ => TimeSpan.FromHours(6),
-                    };
-
-                    var due = candidate.LastDeltaSyncAt is null || now - candidate.LastDeltaSyncAt.Value >= cadence;
-                    if (!due)
-                    {
-                        continue;
-                    }
-
-                    var inFlight = await db.SyncJobs.AnyAsync(
-                        j => j.AccountId == candidate.AccountId
-                            && (j.Kind == JobKind.DeltaSync || j.Kind == JobKind.FullIngest)
-                            && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running),
-                        stoppingToken);
-                    if (inFlight)
-                    {
-                        continue;
-                    }
-
-                    db.SyncJobs.Add(new SyncJob
-                    {
-                        Id = Guid.NewGuid(),
-                        AccountId = candidate.AccountId,
-                        Kind = JobKind.DeltaSync,
-                        Priority = 1,
-                        EnqueuedAt = now,
-                    });
-                }
-
-                await db.SaveChangesAsync(stoppingToken);
+                await ScheduleAsync(DateTime.UtcNow, hotMinutes, defaultMinutes, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogError(ex, "Delta poll scheduling pass failed; continuing.");
             }
         }
+    }
+
+    /// <summary>
+    /// One scheduling pass: queues a DeltaSync for every active connection that is due on its
+    /// cadence and has no sync in flight, and returns how many it queued. It reads every account's
+    /// connections and jobs, so it runs in system scope (J-11).
+    /// </summary>
+    internal async Task<int> ScheduleAsync(DateTime now, int hotMinutes, int defaultMinutes, CancellationToken ct)
+    {
+        using var scope = scopeFactory.CreateSystemScope();
+        var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
+        var queued = 0;
+
+        var candidates = await db.TraktConnections
+            .Where(c => c.Status == ConnectionStatus.Active)
+            .Join(db.Accounts, c => c.AccountId, a => a.Id, (c, a) => new
+            {
+                c.AccountId,
+                c.LastDeltaSyncAt,
+                a.LastSeenAt,
+            })
+            .ToListAsync(ct);
+
+        foreach (var candidate in candidates)
+        {
+            var cadence = (now - candidate.LastSeenAt) switch
+            {
+                var idle when idle <= TimeSpan.FromHours(48) => TimeSpan.FromMinutes(hotMinutes),
+                var idle when idle <= TimeSpan.FromDays(30) => TimeSpan.FromMinutes(defaultMinutes),
+                _ => TimeSpan.FromHours(6),
+            };
+
+            var due = candidate.LastDeltaSyncAt is null || now - candidate.LastDeltaSyncAt.Value >= cadence;
+            if (!due)
+            {
+                continue;
+            }
+
+            var inFlight = await db.SyncJobs.AnyAsync(
+                j => j.AccountId == candidate.AccountId
+                    && (j.Kind == JobKind.DeltaSync || j.Kind == JobKind.FullIngest)
+                    && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running),
+                ct);
+            if (inFlight)
+            {
+                continue;
+            }
+
+            queued++;
+            db.SyncJobs.Add(new SyncJob
+            {
+                Id = Guid.NewGuid(),
+                AccountId = candidate.AccountId,
+                Kind = JobKind.DeltaSync,
+                Priority = 1,
+                EnqueuedAt = now,
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+        return queued;
     }
 
     private static async ValueTask<bool> WaitAsync(PeriodicTimer timer, CancellationToken ct)

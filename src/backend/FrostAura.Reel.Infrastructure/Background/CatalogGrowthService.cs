@@ -67,7 +67,7 @@ public sealed class CatalogGrowthService(
         {
             try
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = scopeFactory.CreateSystemScope();
                 var tmdb = scope.ServiceProvider.GetRequiredService<ITmdbClient>();
                 var generator = scope.ServiceProvider.GetRequiredService<CandidateGenerator>();
                 var region = configuration["GEOIP_DEFAULT_REGION"] ?? "US";

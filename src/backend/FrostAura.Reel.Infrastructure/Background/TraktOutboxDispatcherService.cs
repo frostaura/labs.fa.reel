@@ -25,7 +25,7 @@ public sealed class TraktOutboxDispatcherService(
         {
             try
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = scopeFactory.CreateSystemScope();
                 var dispatcher = scope.ServiceProvider.GetRequiredService<OutboxDispatcher>();
                 var sent = await dispatcher.RunOnceAsync(stoppingToken);
                 if (sent > 0)

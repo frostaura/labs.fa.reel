@@ -69,7 +69,7 @@ public sealed class TraktRatingsBackfillService(
             var next = Interval;
             try
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = scopeFactory.CreateSystemScope();
                 var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
                 if (!await TraktRatingsBackfill.HasLiveConnectionAsync(db, stoppingToken))
                 {

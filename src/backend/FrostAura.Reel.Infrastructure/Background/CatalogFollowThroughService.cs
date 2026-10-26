@@ -64,7 +64,7 @@ public sealed class CatalogFollowThroughService(
         {
             try
             {
-                using var scope = scopeFactory.CreateScope();
+                using var scope = scopeFactory.CreateSystemScope();
                 var db = scope.ServiceProvider.GetRequiredService<ReelDbContext>();
                 var budget = scope.ServiceProvider.GetRequiredService<CatalogHydrationBudget>();
                 var extractor = scope.ServiceProvider.GetRequiredService<ITitleAttributeExtractor>();

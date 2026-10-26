@@ -399,6 +399,53 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
     }
 
     /// <summary>
+    /// XM-02: Saved is the user's own list, but a standing exclusion is airtight on every channel. A
+    /// save in a genre or on a keyword the account has since ruled out leaves the shelf and can never
+    /// be tonight's pin; the shelf says how many it is holding out, so nothing vanishes unexplained.
+    /// </summary>
+    [Fact]
+    public async Task A_save_the_accounts_rules_exclude_leaves_the_shelf_and_the_pin()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        var plain = await SeedTitleAsync("plain", runtimeMinutes: 100);
+        var horror = await SeedTitleAsync("horror", runtimeMinutes: 90);
+        var keyworded = await SeedTitleAsync("forbiddenword", runtimeMinutes: 95);
+        await SaveAllAsync(accountId, [plain, horror, keyworded]);
+        await using (var db = fixture.CreateContext(new AccountContext()))
+        {
+            (await db.Titles.SingleAsync(t => t.Id == horror)).Genres = ["horror"];
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.ExcludeGenre,
+                Value = "horror",
+                CreatedAt = Now,
+            });
+            db.ContentFilters.Add(new Domain.Filters.ContentFilter
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Kind = Domain.Filters.FilterKind.ExcludeKeyword,
+                Value = "forbiddenword",
+                CreatedAt = Now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var queue = await QueueAsync(accountId, sort: "added");
+
+        Assert.Equal(new[] { plain }, queue.Items.Select(i => i.TitleId).ToArray());
+        Assert.Equal(2, queue.HeldOutByRules);
+        Assert.DoesNotContain(queue.Items, i => i.WatchTonight && i.TitleId != plain);
+    }
+
+    /// <summary>
     /// G-3: "syncing…" was rendered for every save not on the managed list, so 116 cards said
     /// "syncing" with zero outbox rows pending. <c>listSync</c> now says "pending" only for a
     /// ListAdd write-back that is genuinely still waiting, so the number of pending cards equals the
@@ -655,8 +702,11 @@ public class SavedQueueEndpointTests(PostgresFixture fixture)
         await SaveAllAsync(accountId, [consumed]);
         await SeedRatingAsync(accountId, consumed, 7, Now.AddDays(-1));
 
+        // The boot runs in system scope (J-11), so its container carries a tenancy context as the
+        // host's does, and the database context reads through it.
         var services = new ServiceCollection()
-            .AddScoped(_ => fixture.CreateContext(new AccountContext()))
+            .AddScoped<IAccountContext>(_ => new AccountContext())
+            .AddScoped(sp => fixture.CreateContext(sp.GetRequiredService<IAccountContext>()))
             .BuildServiceProvider();
 
         DataRepairStartupService Boot(bool enabled) => new(
