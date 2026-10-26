@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 #
-# probe-gateway.sh — prove what the PORTAINER gateway descriptor actually does to a request,
+# probe-gateway.sh — prove what the PRODUCTION gateway config actually does to a request,
 # without going anywhere near the real stack.
 #
 # Why this exists
 # ---------------
-# `deploy/portainer-stack.yml` inlines its nginx config as a compose `configs:` block, because a
-# Portainer stack cannot mount a file out of a repository it never clones. That inline copy is the
-# one descriptor nobody runs locally, and on 2026-09-10 it was found to be rewriting `/api/…` to
+# `docker-compose.prod.yml` inlines its nginx config as the compose config `gateway_nginx`, because
+# a Portainer stack cannot mount a file out of a repository it never clones. That inline copy is the
+# one descriptor nobody runs locally, and on 2026-09-10 it (then in a second production file, since
+# removed) was found to be rewriting `/api/…` to
 # `/…` before the request reached the backend — a `proxy_pass` whose URI ends in a slash replaces
 # the matched location prefix. Every API call on the deployed host would have 404'd. Reading the
 # file did not reveal it; running it did.
 #
-# So: this script extracts the gateway config from the Portainer descriptor VERBATIM, stands it up
+# So: this script extracts the gateway config from the production descriptor VERBATIM, stands it up
 # against a stub upstream that echoes back the path it was actually handed, and prints both the
 # status code and that path.
 #
@@ -25,7 +26,7 @@
 # ports 8188/8189 only, with three `nginx:alpine` containers and no database at all. It tears the
 # project down on exit, including on failure.
 #
-# Usage:   deploy/probe-gateway.sh [path/to/portainer-stack.yml]
+# Usage:   deploy/probe-gateway.sh [path/to/docker-compose.prod.yml]
 # Exit:    0 when the upstream saw a path starting with /api, 1 otherwise.
 
 set -euo pipefail
@@ -35,7 +36,7 @@ GATEWAY_PORT=8188
 UPSTREAM_PORT=8189
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DESCRIPTOR="${1:-$REPO_ROOT/deploy/portainer-stack.yml}"
+DESCRIPTOR="${1:-$REPO_ROOT/docker-compose.prod.yml}"
 
 [ -f "$DESCRIPTOR" ] || { echo "No such descriptor: $DESCRIPTOR" >&2; exit 2; }
 
@@ -62,9 +63,12 @@ python3 - "$DESCRIPTOR" > "$WORK/gateway.conf" <<'PY'
 import re, sys, pathlib
 
 lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
-start = next((i for i, l in enumerate(lines) if re.match(r"^\s*content:\s*\|\s*$", l)), None)
+# The `content: |` block under `gateway_nginx:` — the descriptor carries other inline configs too.
+named = next((i for i, l in enumerate(lines) if re.match(r"^\s*gateway_nginx:\s*$", l)), None)
+start = None if named is None else next(
+    (i for i in range(named + 1, len(lines)) if re.match(r"^\s*content:\s*\|\s*$", lines[i])), None)
 if start is None:
-    sys.exit("No `content: |` block found in the descriptor — has the gateway config moved?")
+    sys.exit("No `gateway_nginx: content: |` block found in the descriptor — has the gateway config moved?")
 
 indent = len(lines[start]) - len(lines[start].lstrip())
 body = []
@@ -107,9 +111,8 @@ http {
 }
 CONF
 
-# Service names must match the ones the descriptor's `proxy_pass` targets: nginx resolves a literal
-# upstream host once, at config load, so the stubs also have to be listening before the gateway
-# starts.
+# Service names must match the ones the descriptor's `proxy_pass` targets (`backend`, `frontend`).
+# The gateway resolves them per request through Docker's DNS, so start order does not matter.
 cat > "$WORK/docker-compose.yml" <<COMPOSE
 services:
   backend:
@@ -163,12 +166,27 @@ echo "GET /sse/pipeline through the gateway   : HTTP $sse_code -> $sse_body"
 health_body="$(curl -s "localhost:$GATEWAY_PORT/health/ready" || true)"
 echo "GET /health/ready through the gateway   : $health_body"
 
+ask_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "localhost:$GATEWAY_PORT/api/search/ask" || true)"
+ask_body="$(curl -s -X POST "localhost:$GATEWAY_PORT/api/search/ask" || true)"
+echo "POST /api/search/ask through the gateway: HTTP $ask_code -> $ask_body"
+
+map_code="$(curl -s -o /dev/null -w '%{http_code}' "localhost:$GATEWAY_PORT/assets/index.js.map" || true)"
+echo "GET /assets/index.js.map                : HTTP $map_code (must be 404)"
+
+headers="$(curl -s -D - -o /dev/null "localhost:$GATEWAY_PORT/" || true)"
+server_header="$(printf '%s' "$headers" | tr -d '\r' | sed -n 's/^[Ss]erver: //p')"
+nosniff="$(printf '%s' "$headers" | tr -d '\r' | grep -ci '^x-content-type-options: nosniff' || true)"
+echo "Server header                           : ${server_header:-none} (no version expected)"
+echo "X-Content-Type-Options: nosniff         : $nosniff"
+
 echo "--- upstream access log ---"
 compose logs backend 2>/dev/null | grep "UPSTREAM SAW" || echo "(no upstream requests logged)"
 echo "---------------------------"
 
-if [ "$code" = "200" ] && [ "${seen#/api}" != "$seen" ]; then
-  echo "PASS: /api is preserved end to end (upstream saw '$seen')."
+ask_seen="$(printf '%s' "$ask_body" | sed -n 's/.*"upstreamSaw":"\([^"]*\)".*/\1/p')"
+if [ "$code" = "200" ] && [ "${seen#/api}" != "$seen" ] && [ "$ask_seen" = "/api/search/ask" ] \
+  && [ "$map_code" = "404" ] && [ "$server_header" = "nginx" ] && [ "$nosniff" = "1" ]; then
+  echo "PASS: /api and /api/search/ask are preserved end to end, source maps are refused and the headers are set."
   exit 0
 fi
 

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Reel database backups: nightly pg_dump -Fc with 14 daily + 8 weekly kept, plus a dump on
-# request before the API applies a pending migration. Canonical copy; docker-compose.prod.yml and
-# deploy/portainer-stack.yml inline it byte for byte (with $ escaped as $$), pinned by
-# BackupDescriptorParityTests. Runbook: docs/deployment.md#backups-and-restore.
+# request before the API applies a pending migration. Canonical copy; docker-compose.prod.yml
+# inlines it byte for byte (with $ escaped as $$), pinned by BackupDescriptorParityTests.
+# Runbook: docs/deployment.md#backups-and-restore.
 #
 #   reel-backup.sh          run forever (the sidecar)
 #   reel-backup.sh once     take one daily dump now and exit (drills, manual safety copies)
