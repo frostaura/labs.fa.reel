@@ -615,6 +615,79 @@ public class OpenRouterChatClientTests
         Assert.Equal("openai/gpt-6-luna|none", writer.NarrativeCacheSalt); // its own purpose, its own override
     }
 
+    // ── Task 8: per-purpose counters and the 2%-over-50 alarm ──────────────────────────────
+
+    [Fact]
+    public async Task Every_sent_call_is_counted_with_its_length_finishes_retries_and_fallback()
+    {
+        var metrics = new LlmCallMetrics();
+
+        // A length finish answered by its 2x retry: a success, one length finish, one retry.
+        await Client(new Script(Ok("{\"a\":", finish: "length"), Ok("""{"a":1}""")), metrics: metrics)
+            .CompleteAsync(Request(ApiUsagePurpose.AskJudge, Schema), default);
+        // Two length finishes, then the typed failure: a fallback.
+        await Client(new Script(Ok("{\"a\":", finish: "length"), Ok("{\"a\":", finish: "length")), metrics: metrics)
+            .CompleteAsync(Request(ApiUsagePurpose.AskJudge, Schema), default);
+        // A clean answer.
+        await Client(new Script(Ok("""{"a":1}""")), metrics: metrics)
+            .CompleteAsync(Request(ApiUsagePurpose.AskJudge, Schema), default);
+
+        var judge = Assert.Single(metrics.Snapshot(), h => h.Purpose == ApiUsagePurpose.AskJudge);
+        Assert.Equal(3, judge.Calls);
+        Assert.Equal(2, judge.LengthCalls);
+        Assert.Equal(1, judge.Fallbacks);
+        Assert.Equal(2, judge.Retries);
+        Assert.Equal(3, judge.WindowCalls);
+        // Under 50 calls the alarm cannot judge a rate.
+        Assert.False(judge.Alarming);
+    }
+
+    [Fact]
+    public async Task A_call_refused_before_sending_is_not_a_call()
+    {
+        // A spent allowance is a stop, not a model failure: counting it would raise the fallback
+        // alarm every evening the budget runs out.
+        var metrics = new LlmCallMetrics();
+
+        await Client(new Script(Ok("{}")), gate: new RefusingGate(), metrics: metrics)
+            .CompleteAsync(Request(ApiUsagePurpose.AskPlan, Schema), default);
+
+        Assert.DoesNotContain(metrics.Snapshot(), h => h.Purpose == ApiUsagePurpose.AskPlan);
+    }
+
+    [Theory]
+    [InlineData(49, 2, false)] // not yet 50 calls: no verdict
+    [InlineData(50, 1, false)] // exactly 2% is not above it
+    [InlineData(50, 2, true)]  // 4%
+    [InlineData(200, 2, false)] // the window is the LAST 50: two old failures have aged out
+    public void The_alarm_is_a_rate_above_two_percent_over_the_last_fifty_calls(int calls, int failuresFirst, bool alarming)
+    {
+        var metrics = new LlmCallMetrics();
+        for (var i = 0; i < calls; i++)
+        {
+            metrics.Record(ApiUsagePurpose.RerankFeed, lengthFinishes: 0, attempts: 1, fallback: i < failuresFirst);
+        }
+
+        var feed = Assert.Single(metrics.Snapshot());
+        Assert.Equal(Math.Min(calls, LlmCallMetrics.Window), feed.WindowCalls);
+        Assert.Equal(alarming, feed.Alarming);
+    }
+
+    [Fact]
+    public void A_length_rate_above_two_percent_alarms_on_its_own()
+    {
+        var metrics = new LlmCallMetrics();
+        for (var i = 0; i < LlmCallMetrics.Window; i++)
+        {
+            metrics.Record(ApiUsagePurpose.Lens, lengthFinishes: i < 2 ? 1 : 0, attempts: i < 2 ? 2 : 1, fallback: false);
+        }
+
+        var lens = Assert.Single(metrics.Snapshot());
+        Assert.Equal(0.04, lens.WindowLengthRate, 3);
+        Assert.Equal(0.0, lens.WindowFallbackRate, 3);
+        Assert.True(lens.Alarming);
+    }
+
     // ── Fixtures ───────────────────────────────────────────────────────────────────────────
 
     private static LlmChatRequest Request(string purpose, object? schema = null) =>
@@ -643,13 +716,15 @@ public class OpenRouterChatClientTests
         ModelCapabilities? capabilities = null,
         IProviderHealth? health = null,
         ILlmCallGate? gate = null,
-        Dictionary<string, string?>? config = null)
+        Dictionary<string, string?>? config = null,
+        LlmCallMetrics? metrics = null)
     {
         var configuration = Config(config);
         var http = new HttpClient(handler) { BaseAddress = new Uri("https://openrouter.invalid/api/v1/") };
         return new OpenRouterChatClient(
             http, recorder ?? Recorder(), configuration, NullLogger.Instance,
-            purposes: new LlmPurposeCatalog(configuration), capabilities: capabilities, health: health, gate: gate);
+            purposes: new LlmPurposeCatalog(configuration), capabilities: capabilities, health: health, gate: gate,
+            metrics: metrics);
     }
 
     private static Canned Ok(string content, string finish = "stop") =>

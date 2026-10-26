@@ -48,7 +48,9 @@ public class OpenRouterLensWriter(
     ILlmPurposeCatalog? purposes = null,
     ModelCapabilities? capabilities = null,
     IProviderHealth? health = null,
-    ILlmCallGate? gate = null)
+    ILlmCallGate? gate = null,
+    // The per-purpose call counters (task 8); a DI singleton in production, none in a hand-built adapter.
+    LlmCallMetrics? metrics = null)
     : ILensWriter
 {
     /// <summary>
@@ -56,7 +58,7 @@ public class OpenRouterLensWriter(
     /// <c>taste-narrative</c>, <c>lens</c> and <c>lens-audit</c> purpose options now.
     /// </summary>
     private readonly OpenRouterChatClient _chat = new(
-        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate);
+        httpClient, usageRecorder, configuration, logger, accountContext, purposes, capabilities, health, gate, metrics);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
