@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 /**
  * Settings saves report what actually happened (H-3, H-4, H+2, H-10, H-12).
@@ -44,6 +45,7 @@ async function boot(page: Page, { billing = { tier: "Founder", configured: false
   await mockJson(page, "**/api/billing/status", billing);
   await mockJson(page, "**/api/preferences/tags", []);
   await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
+  await mockFilterChips(page);
   await page.route(
     (u) => u.pathname === "/api/settings",
     (route) =>
@@ -68,6 +70,14 @@ async function routeFilters(page: Page, handler: (route: Route) => Promise<void>
   );
 }
 
+/** Opens the region combobox, searches, and picks the option with that code. */
+async function pickRegion(page: Page, query: string, code: string) {
+  const box = page.getByTestId("region-select");
+  await box.click();
+  await box.fill(query);
+  await page.locator(`[data-testid="region-option"][data-code="${code}"]`).click();
+}
+
 test.describe("conditions save outcomes", () => {
   const cases: { label: string; status: number; body: unknown; text: RegExp; retry: boolean }[] = [
     { label: "500", status: 500, body: {}, text: /^Couldn't save — nothing changed\./, retry: true },
@@ -84,7 +94,7 @@ test.describe("conditions save outcomes", () => {
       );
       await page.goto("/settings");
 
-      await page.getByTestId("genre-war").click();
+      await page.getByTestId("genre-war-include").click();
       await expect(page.getByTestId("conditions-unsaved")).toBeVisible();
       await page.getByTestId("save-prefs").click();
 
@@ -113,7 +123,7 @@ test.describe("conditions save outcomes", () => {
     });
     await page.goto("/settings");
 
-    await page.getByTestId("genre-war").click();
+    await page.getByTestId("genre-war-include").click();
     await page.getByTestId("save-prefs").click();
 
     const status = page.getByTestId("conditions-save-status");
@@ -134,7 +144,7 @@ test.describe("conditions save outcomes", () => {
     });
     await page.goto("/settings");
 
-    await page.getByTestId("genre-war").click();
+    await page.getByTestId("genre-war-include").click();
     await page.getByTestId("save-prefs").click();
     await expect(page.getByTestId("conditions-save-status")).toHaveAttribute("data-tone", "danger");
 
@@ -149,10 +159,10 @@ test.describe("conditions save outcomes", () => {
     await page.goto("/settings");
 
     const war = page.getByTestId("genre-war");
-    await war.click();
+    await page.getByTestId("genre-war-include").click();
     await expect(page.getByTestId("conditions-unsaved")).toBeVisible();
-    await war.click();
-    await war.click();
+    await page.getByTestId("genre-war-exclude").click();
+    await page.getByTestId("genre-war-exclude").click();
     await expect(war).toHaveAttribute("data-state", "neutral");
     await expect(page.getByTestId("conditions-unsaved")).toHaveCount(0);
   });
@@ -188,7 +198,7 @@ test.describe("leave guard", () => {
     await mockJson(page, "**/api/titles/rate-suggestions", []);
     await page.goto("/settings");
 
-    await page.getByTestId("genre-war").click();
+    await page.getByTestId("genre-war-include").click();
 
     const prompts: string[] = [];
     page.once("dialog", (dialog) => {
@@ -212,7 +222,7 @@ test.describe("leave guard", () => {
     await mockJson(page, "**/api/titles/rate-suggestions", []);
     await page.goto("/settings");
 
-    await page.getByTestId("genre-war").click();
+    await page.getByTestId("genre-war-include").click();
     await page.getByTestId("email-input").fill("me@example.com");
 
     const prompts: string[] = [];
@@ -255,13 +265,13 @@ test.describe("region and email", () => {
     );
     await page.goto("/settings");
 
-    await page.getByTestId("region-select").selectOption("ZA");
+    await pickRegion(page, "south africa", "ZA");
     const status = page.getByTestId("region-save-status");
     await expect(status).toHaveText(/^Couldn't save — nothing changed\./);
     await expect(status).toHaveAttribute("data-tone", "danger");
     await expect(page.getByTestId("region-save-status-retry")).toBeVisible();
     // The control snaps back to what is stored, which is what "nothing changed" claims.
-    await expect(page.getByTestId("region-select")).toHaveValue("US");
+    await expect(page.getByTestId("region-select")).toHaveValue("United States (US)");
     await expect(status).not.toContainText("Saved");
   });
 
@@ -275,8 +285,38 @@ test.describe("region and email", () => {
           : route.fallback()
     );
     await page.goto("/settings");
-    await page.getByTestId("region-select").selectOption("ZA");
+    await pickRegion(page, "south africa", "ZA");
     await expect(page.getByTestId("region-save-status")).toHaveAttribute("data-tone", "success");
+  });
+
+  test("the region picker is labelled and searchable by name or code, by mouse or keyboard (H-10)", async ({ page }) => {
+    await boot(page);
+    const puts: unknown[] = [];
+    await page.route(
+      (u) => u.pathname === "/api/settings",
+      (route) => {
+        if (route.request().method() !== "PUT") return route.fallback();
+        puts.push(route.request().postDataJSON());
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ region: "NZ", onboarded: true, email: null }) });
+      }
+    );
+    await routeFilters(page, (route) => route.fulfill({ status: 500, body: "{}" }));
+    await page.goto("/settings");
+
+    const box = page.getByRole("combobox", { name: "Your region" });
+    await expect(box).toHaveValue("United States (US)");
+    await box.click();
+    // Far beyond the 13 hand-picked codes the old select offered.
+    await box.fill("nz");
+    await expect(page.getByTestId("region-option").first()).toHaveAttribute("data-code", "NZ");
+    await box.press("Enter");
+    await expect.poll(() => puts).toEqual([{ region: "NZ" }]);
+
+    await box.click();
+    await box.fill("qqqq");
+    await expect(page.getByTestId("region-options")).toContainText("No region matches");
+    await box.press("Escape");
+    await expect(page.getByTestId("region-options")).toHaveCount(0);
   });
 
   test("the stored email is in the box on load, and an address the server keeps the old value for is refused", async ({ page }) => {

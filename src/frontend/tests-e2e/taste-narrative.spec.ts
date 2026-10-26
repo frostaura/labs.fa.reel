@@ -33,7 +33,7 @@ const DNA = {
   contrarianScore: 0.4,
   userMean: 6.7,
   topGenres: [{ genre: "thriller", affinity: 8.6, count: 214 }],
-  eras: [{ decade: 2010, affinity: 8.1 }],
+  eras: [{ decade: 2010, affinity: 8.1, count: 412 }],
   drift: [],
   creators: [],
   topActors: [],
@@ -229,6 +229,54 @@ test.describe("taste narrative", () => {
 
     await expect(page.getByTestId("taste-narrative")).toContainText("without a language model");
     await expect(page.getByTestId("narrative-regenerate")).toHaveCount(0);
+  });
+
+  test("it does not poll while nothing is pending (I*2)", async ({ page }) => {
+    await page.clock.install();
+    await bootDna(page);
+    await expect(page.getByTestId("narrative-text")).toBeVisible();
+
+    let gets = 0;
+    await page.route(
+      (u: URL) => u.pathname === "/api/taste/narrative",
+      (route) => {
+        gets += 1;
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(NARRATIVE) });
+      },
+    );
+    // Three of the old 4 s polls' worth of time.
+    await page.clock.runFor(13_000);
+    expect(gets).toBe(0);
+  });
+
+  test("a pending rewrite is polled until it lands, then polling stops", async ({ page }) => {
+    await page.clock.install();
+    await bootDna(page, { ...NARRATIVE, regenerating: true });
+    await expect(page.getByTestId("narrative-regenerate")).toContainText("Writing…");
+
+    const REWRITTEN = "You have been drifting toward slow drama.";
+    let gets = 0;
+    await page.route(
+      (u: URL) => u.pathname === "/api/taste/narrative",
+      (route) => {
+        gets += 1;
+        const landed = gets >= 2;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(landed ? { ...NARRATIVE, text: REWRITTEN, regenerating: false } : { ...NARRATIVE, regenerating: true }),
+        });
+      },
+    );
+
+    await page.clock.runFor(4_100);
+    await expect.poll(() => gets).toBe(1);
+    await page.clock.runFor(4_100);
+    await expect(page.getByTestId("narrative-text")).toHaveText(REWRITTEN);
+    const afterLanding = gets;
+
+    await page.clock.runFor(13_000);
+    expect(gets).toBe(afterLanding);
   });
 
   test("a queued rewrite shows as in progress and the button is not clickable twice", async ({ page }) => {

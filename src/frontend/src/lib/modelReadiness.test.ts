@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAwaitingModel, modelReadiness, noModelSentence, pipelineLabel, type ReadinessInput } from "./modelReadiness";
+import { isAwaitingModel, modelReadiness, noModelSentence, pipelineSentence, type ReadinessInput } from "./modelReadiness";
 
 /**
  * Fixtures are payloads the status API sends (SyncStatusContractTests), varied one field at a time:
@@ -103,23 +103,31 @@ describe("noModelSentence", () => {
   });
 });
 
-describe("pipelineLabel", () => {
+describe("pipelineSentence", () => {
   it("never shows the raw Degraded to an account that is only waiting", () => {
-    expect(pipelineLabel(FLOOR_MET)).toBe("waiting for your first model — tonight's refresh at the latest");
-    expect(pipelineLabel({ ...FLOOR_MET, retrain: { hasActiveModel: true } })).toBe(
-      "waiting for the next model build — tonight's refresh at the latest"
+    expect(pipelineSentence(FLOOR_MET)).toBe("You've rated enough — Reel builds your first model in tonight's refresh at the latest.");
+    expect(pipelineSentence({ ...FLOOR_MET, retrain: { hasActiveModel: true } })).toBe(
+      "Your picks are ready. Reel rebuilds your model in tonight's refresh at the latest."
     );
   });
 
-  it("names the real stops and the ordinary stages in words", () => {
-    expect(pipelineLabel({ ...FLOOR_MET, lastFailures: TRAIN_FAILED })).toBe("stopped");
-    expect(pipelineLabel({ ...FLOOR_MET, degradedReason: "TraktRevoked" })).toBe("stopped — Trakt needs reconnecting");
-    expect(pipelineLabel({ pipelineStage: "NotEnoughRatings", notEnoughRatings: { usableRatings: 4, required: 10 } })).toBe(
-      "needs more ratings (4 of 10)"
+  it("names the real stops and the ordinary stages in sentences", () => {
+    expect(pipelineSentence({ ...FLOOR_MET, lastFailures: TRAIN_FAILED })).toBe(
+      "Building your picks stopped on Reel's side. Nothing you've rated is lost."
     );
-    expect(pipelineLabel({ pipelineStage: "FeedReady" })).toBe("ready");
-    expect(pipelineLabel({ pipelineStage: "Training" })).toBe("training your model");
-    expect(pipelineLabel({ pipelineStage: "SomeNewStage" })).toBe("SomeNewStage");
-    expect(pipelineLabel(undefined)).toBeNull();
+    expect(pipelineSentence({ ...FLOOR_MET, degradedReason: "TraktRevoked" })).toMatch(/lost access to your Trakt account/);
+    expect(pipelineSentence({ pipelineStage: "NotEnoughRatings", notEnoughRatings: { usableRatings: 4, required: 10 } })).toBe(
+      "4 of 10 ratings — rate 6 more and Reel builds your model."
+    );
+    expect(pipelineSentence({ pipelineStage: "FeedReady" })).toBe("Your picks are ready.");
+    expect(pipelineSentence({ pipelineStage: "Training" })).toBe("Reel is training your model.");
+    expect(pipelineSentence(undefined)).toBeNull();
+  });
+
+  it("never prints an enum, even for a stage this client has never heard of (KILL-11)", () => {
+    for (const stage of ["SomeNewStage", "FeedReady", "Degraded", "Ingesting", "Extracting", "Evaluated"]) {
+      expect(pipelineSentence({ pipelineStage: stage })).not.toMatch(/[a-z][A-Z]|^[A-Z][a-z]+[A-Z]/);
+    }
+    expect(pipelineSentence({ pipelineStage: "SomeNewStage" })).toBe("Reel is working on your picks.");
   });
 });

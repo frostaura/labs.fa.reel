@@ -71,17 +71,51 @@ export function agreementNote(correlation: number | null): string {
 }
 
 /**
- * The retrain summary. The improvement clause is dropped whenever the retrain did NOT make the
- * model closer — a band claiming progress after a regression is the fastest way to make the whole
- * page untrustworthy.
+ * The retrain summary. It makes no "closer on your scores" claim: WS-5 retired the MAE-improvement
+ * number (R1-56) because it compared a retrain against a different holdout, and the server no
+ * longer sends it — so the old clause read "It did not get closer" after EVERY retrain, a claim
+ * nothing measured. The retrain's own calibration figures sit under the sentence instead.
  */
 export function learnedSentence(learned: NonNullable<AccuracyPayload["learnedThisWeek"]>): string {
-  const parts = [`Learned from ${learned.newRatings} new ratings.`];
+  const parts = [`Learned from ${learned.newRatings.toLocaleString("en-US")} new ${learned.newRatings === 1 ? "rating" : "ratings"}.`];
   parts.push(
-    learned.maeImprovement != null && learned.maeImprovement > 0.05
-      ? `Runs ${learned.maeImprovement.toFixed(2)} closer on your scores now.`
-      : "It did not get closer on your scores."
+    learned.picksChanged > 0
+      ? `${learned.picksChanged.toLocaleString("en-US")} ${learned.picksChanged === 1 ? "pick" : "picks"} changed.`
+      : "No picks changed."
   );
-  parts.push(learned.picksChanged > 0 ? `${learned.picksChanged} picks changed.` : "No picks changed.");
   return parts.join(" ");
+}
+
+/** The window switch's choices, narrowest first. */
+export const WINDOW_LABELS: Record<string, string> = {
+  "90d": "90 days",
+  "365d": "a year",
+  all: "all time",
+};
+
+const KNOWN_WINDOWS = Object.keys(WINDOW_LABELS);
+
+/**
+ * The windows worth offering (G-9): only those holding a different set of scored calls from every
+ * narrower one. On live all three tabs drew the same chart, because everything scored fell inside
+ * 90 days. A server from before WS-5 task 11 sends no summary, so every window is offered as before.
+ */
+export function offeredWindows(windows: AccuracyPayload["windows"]): string[] {
+  if (!windows || windows.length === 0) return KNOWN_WINDOWS;
+  const offered = windows.filter((w) => w.sameAs == null && w.key in WINDOW_LABELS).map((w) => w.key);
+  return offered.length > 0 ? offered : KNOWN_WINDOWS.slice(0, 1);
+}
+
+/**
+ * Said in place of a switch when there is only one window worth showing — so the missing buttons
+ * read as a fact about the data, not a feature that went away.
+ */
+export function singleWindowNote(windows: AccuracyPayload["windows"]): string | null {
+  if (!windows || windows.length === 0 || offeredWindows(windows).length > 1) return null;
+  const only = windows.find((w) => w.sameAs == null) ?? windows[0];
+  if (only.pairs === 0) return null;
+  const calls = `${only.pairs.toLocaleString("en-US")} scored ${only.pairs === 1 ? "call" : "calls"}`;
+  return only.key === "all"
+    ? `All ${calls}.`
+    : `All ${calls} fall in the last ${WINDOW_LABELS[only.key]}, so a longer window would show the same.`;
 }

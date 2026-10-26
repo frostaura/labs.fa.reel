@@ -28,11 +28,14 @@ test.describe("landing on phones", () => {
     });
   }
 
-  test("the full poster fan still shows from sm up", async ({ page }) => {
+  test("the three steps sit side by side from sm up, without overflow", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await page.goto("/");
-    await expect(page.getByText("Sci-fi", { exact: true })).toBeVisible();
-    await expect(page.getByText("Comedy", { exact: true })).toBeVisible();
+    const steps = page.getByTestId("landing-step");
+    await expect(steps).toHaveCount(3);
+    const boxes = await Promise.all([0, 1, 2].map((i) => steps.nth(i).boundingBox()));
+    // One row: every step starts at the same top edge.
+    expect(new Set(boxes.map((b) => Math.round(b!.y))).size).toBe(1);
     const { scrollWidth, innerWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
@@ -40,12 +43,15 @@ test.describe("landing on phones", () => {
     expect(scrollWidth).toBe(innerWidth);
   });
 
-  test("the mock pick is captioned as an illustration, not passed off as a real title", async ({ page }) => {
+  test("no made-up pick ships: no invented title, no scores, no 'streaming now' (KILL-10)", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.goto("/");
-    await expect(page.getByTestId("landing-illustration-caption")).toHaveText(
-      "An illustration of how a pick reads — the title and its numbers are made up."
-    );
-    await expect(page.getByTestId("landing-illustration")).toContainText("Neon Static");
+    await expect(page.getByTestId("landing-steps")).toBeVisible();
+    const body = page.locator("body");
+    await expect(body).not.toContainText("Neon Static");
+    await expect(body).not.toContainText("streaming now");
+    await expect(page.getByTestId("landing-illustration")).toHaveCount(0);
+    // No score badge of any kind on a page with no real title to score.
+    await expect(body).not.toContainText(/\b\d\.\d\b/);
   });
 });

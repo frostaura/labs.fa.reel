@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource, syncStatus } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 import { CONDITIONS_SCOPE_COPY } from "../src/lib/conditionsCopy";
 
 /**
@@ -90,11 +91,19 @@ async function expectNoFailure(page: Page) {
   await expect(page.getByText(/\bDegraded\b/)).toHaveCount(0);
 }
 
+/** GET /api/metrics/cross-reference with nothing measured yet (WS-5 task 11). */
+const XREF_EMPTY = {
+  window: "90d",
+  population: { name: "Titles served under a cross-reference standing that you have since rated", selectionNote: "" },
+  crossReference: { online: [], backtests: [], minimumOutcomes: 20 },
+};
+
 test.describe("track record with no model yet", () => {
   for (const [label, status] of [["today's payload", AWAITING_TODAY], ["the CR-6 reason", AWAITING_CR6]] as const) {
     test(`says the model comes tonight and stops asking for scored titles (${label})`, async ({ page }) => {
       await shell(page, status);
       await mockJson(page, "**/api/accuracy", ACCURACY_EMPTY);
+      await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
       await page.goto("/track-record");
 
       await expect(page.getByTestId("track-record-no-model")).toHaveText(WAIT_SENTENCE);
@@ -110,6 +119,7 @@ test.describe("track record with no model yet", () => {
   test("a failed first Train is a stop, not a wait with a promised time", async ({ page }) => {
     await shell(page, TRAIN_FAILED);
     await mockJson(page, "**/api/accuracy", ACCURACY_EMPTY);
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
     await page.goto("/track-record");
 
     await expect(page.getByTestId("track-record-no-model")).toHaveText(
@@ -125,6 +135,7 @@ test.describe("track record with no model yet", () => {
       source: "exposures",
       headline: { ...ACCURACY_EMPTY.headline, n: 65, withinOnePoint: 0.3, meanAbsoluteError: 1.8, bias: 0.4, correlation: 0.05 },
     });
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
     await page.goto("/track-record");
 
     await expect(page.getByTestId("source-note")).toHaveText("From 65 cards Reel actually put in front of you and you later rated.");
@@ -134,6 +145,7 @@ test.describe("track record with no model yet", () => {
   test("an account with a model keeps the usual empty-state line", async ({ page }) => {
     await shell(page, syncStatus());
     await mockJson(page, "**/api/accuracy", ACCURACY_EMPTY);
+    await mockJson(page, "**/api/metrics/cross-reference", XREF_EMPTY);
     await page.goto("/track-record");
 
     await expect(page.getByTestId("source-note")).toContainText("Rate a few titles it has already put a number on");
@@ -214,6 +226,7 @@ async function bootSettings(page: Page, status: unknown) {
   await mockJson(page, "**/api/billing/status", { tier: "Founder", configured: false });
   await mockJson(page, "**/api/preferences/tags", []);
   await mockJson(page, "**/api/settings/filters/cost", { total: 5000, eligible: 400, byRule: [], suggestions: [] });
+  await mockFilterChips(page);
   await mockJson(page, "**/api/settings/filters", {
     excludeGenres: [],
     includeGenres: [],
@@ -234,7 +247,7 @@ test.describe("settings", () => {
     await bootSettings(page, AWAITING_TODAY);
 
     await expect(page.getByTestId("settings-pipeline")).toHaveText(
-      "Pipeline: waiting for your first model — tonight's refresh at the latest"
+      "You've rated enough — Reel builds your first model in tonight's refresh at the latest."
     );
     await expectNoFailure(page);
   });
@@ -242,7 +255,9 @@ test.describe("settings", () => {
   test("a failed first Train reads as stopped", async ({ page }) => {
     await bootSettings(page, TRAIN_FAILED);
 
-    await expect(page.getByTestId("settings-pipeline")).toHaveText("Pipeline: stopped");
+    await expect(page.getByTestId("settings-pipeline")).toHaveText(
+      "Building your picks stopped on Reel's side. Nothing you've rated is lost."
+    );
   });
 
   // R1-26, IR1S-06: Settings renders the one shared scope sentence. The typeahead does not apply the
@@ -255,6 +270,6 @@ test.describe("settings", () => {
     await expect(scope).toHaveText(CONDITIONS_SCOPE_COPY);
     await expect(scope).not.toContainText("airtight");
     await expect(scope).not.toContainText("all search");
-    await expect(page.getByTestId("settings-pipeline")).toHaveText("Pipeline: ready");
+    await expect(page.getByTestId("settings-pipeline")).toHaveText("Your picks are ready.");
   });
 });

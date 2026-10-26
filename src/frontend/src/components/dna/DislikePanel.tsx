@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router";
-import { Undo2 } from "lucide-react";
+import { ChevronDown, Undo2 } from "lucide-react";
 import {
   useGetDislikesQuery,
   useUndoNotInterestedMutation,
@@ -49,6 +49,9 @@ function formatDate(iso: string): string {
  */
 export default function DislikePanel() {
   const [offset, setOffset] = useState(0);
+  // Collapsed by default (P1): the header and the "what I'm pushing down" sentence are the part a
+  // reader needs on every visit; the full list is for the visit where they go looking for a title.
+  const [open, setOpen] = useState(false);
   // `data` is the last page that loaded (any offset) and carries the totals and the profile, which do
   // not change between pages; `currentData` is THIS page only. Rows come from `currentData`, so a
   // failed "Older" never leaves page 1's rows on screen under page 2's range — the same bug the
@@ -98,14 +101,14 @@ export default function DislikePanel() {
     <section className="fa-card p-5 space-y-4" data-testid="dislike-panel">
       <div>
         <h2 className="fa-section-title">
-          You&rsquo;ve told me no to {data.total.toLocaleString()} {data.total === 1 ? "thing" : "things"}
+          You&rsquo;ve told me no to {data.total.toLocaleString("en-US")} {data.total === 1 ? "thing" : "things"}
         </h2>
         <p className="fa-caption text-fa-frost-dim mt-1" data-testid="dislike-summary">
           {demoted.length > 0 ? (
             <>
               Right now I&rsquo;m pushing down{" "}
               <span className="text-fa-frost">{demoted.join(", ")}</span> — from the{" "}
-              {profile.activeCount.toLocaleString()} you passed on in the last {profile.windowDays} days.
+              {profile.activeCount.toLocaleString("en-US")} you passed on in the last {profile.windowDays} days.
             </>
           ) : (
             <>
@@ -116,81 +119,97 @@ export default function DislikePanel() {
         </p>
       </div>
 
-      <SaveStatus message={revokeFailure?.message ?? null} onRetry={revokeFailure?.retry} testId="dislike-revoke-status" />
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls="dislike-list-region"
+        className="fa-button-ghost inline-flex items-center gap-2"
+        data-testid="dislike-toggle"
+      >
+        <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        {open ? "Hide the list" : `Show all ${data.total.toLocaleString("en-US")}`}
+      </button>
 
-      {isError && !currentData ? (
-        <LoadFailed
-          what="this page of the list"
-          onRetry={() => void refetch()}
-          retrying={isFetching}
-          variant="inline"
-          testId="dislikes-page-error"
-        />
-      ) : !currentData ? (
-        <div className="space-y-2" data-testid="dislikes-page-loading">
-          {Array.from({ length: 3 }, (_, i) => (
-            <div key={i} className="h-10 rounded-md reel-shimmer" />
-          ))}
-        </div>
-      ) : (
-        <ul className="space-y-2" data-testid="dislike-list">
-          {currentData.items.map((entry) => (
-            <li key={`${entry.titleId}:${entry.createdAt}`} className="flex items-center gap-3" data-testid="dislike-row">
-              <div className="min-w-0 flex-1">
-                {entry.tmdbId == null ? (
-                  <span className="fa-body text-fa-frost truncate block">{entry.name}</span>
-                ) : (
-                  <Link
-                    to={`/title/${entry.mediaType.toLowerCase()}/${entry.tmdbId}`}
-                    className="fa-body text-fa-frost hover:text-fa-frost-bright truncate block"
+      {open && (
+        <div id="dislike-list-region" className="space-y-4">
+          <SaveStatus message={revokeFailure?.message ?? null} onRetry={revokeFailure?.retry} testId="dislike-revoke-status" />
+
+          {isError && !currentData ? (
+            <LoadFailed
+              what="this page of the list"
+              onRetry={() => void refetch()}
+              retrying={isFetching}
+              variant="inline"
+              testId="dislikes-page-error"
+            />
+          ) : !currentData ? (
+            <div className="space-y-2" data-testid="dislikes-page-loading">
+              {Array.from({ length: 3 }, (_, i) => (
+                <div key={i} className="h-10 rounded-md reel-shimmer" />
+              ))}
+            </div>
+          ) : (
+            <ul className="space-y-2" data-testid="dislike-list">
+              {currentData.items.map((entry) => (
+                <li key={`${entry.titleId}:${entry.createdAt}`} className="flex items-center gap-3" data-testid="dislike-row">
+                  <div className="min-w-0 flex-1">
+                    {entry.tmdbId == null ? (
+                      <span className="fa-body text-fa-frost truncate block">{entry.name}</span>
+                    ) : (
+                      <Link
+                        to={`/title/${entry.mediaType.toLowerCase()}/${entry.tmdbId}`}
+                        className="fa-body text-fa-frost hover:text-fa-frost-bright truncate block"
+                      >
+                        {entry.name}
+                        {entry.year != null && <span className="text-fa-frost-dim"> ({entry.year})</span>}
+                      </Link>
+                    )}
+                    <span className="fa-caption text-fa-frost-dim">
+                      {reasonLine(entry)} · {formatDate(entry.createdAt)}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void revoke(entry)}
+                    className="fa-button-ghost shrink-0"
+                    aria-label={`Undo — ${entry.name}`}
+                    data-testid="dislike-revoke"
                   >
-                    {entry.name}
-                    {entry.year != null && <span className="text-fa-frost-dim"> ({entry.year})</span>}
-                  </Link>
-                )}
-                <span className="fa-caption text-fa-frost-dim">
-                  {reasonLine(entry)} · {formatDate(entry.createdAt)}
-                </span>
-              </div>
+                    <Undo2 className="h-3.5 w-3.5" /> Undo
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {(data.hasMore || offset > 0) && (
+            <div className="flex items-center justify-between">
               <button
                 type="button"
-                onClick={() => void revoke(entry)}
-                className="fa-button-ghost shrink-0"
-                aria-label={`Undo — ${entry.name}`}
-                data-testid="dislike-revoke"
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                disabled={offset === 0}
+                className="fa-button-ghost disabled:opacity-40"
+                data-testid="dislike-prev"
               >
-                <Undo2 className="h-3.5 w-3.5" /> Undo
+                Newer
               </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {(data.hasMore || offset > 0) && (
-        <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            disabled={offset === 0}
-            className="fa-button-ghost disabled:opacity-40"
-            data-testid="dislike-prev"
-          >
-            Newer
-          </button>
-          <span className="fa-caption text-fa-frost-dim tabular-nums" data-testid="dislike-range">
-            {currentData
-              ? `${currentData.offset + 1}–${currentData.offset + currentData.items.length} of ${currentData.total}`
-              : `from ${offset + 1} of ${data.total}`}
-          </span>
-          <button
-            type="button"
-            onClick={() => setOffset(offset + PAGE_SIZE)}
-            disabled={!currentData?.hasMore}
-            className="fa-button-ghost disabled:opacity-40"
-            data-testid="dislike-next"
-          >
-            Older
-          </button>
+              <span className="fa-caption text-fa-frost-dim tabular-nums" data-testid="dislike-range">
+                {currentData
+                  ? `${currentData.offset + 1}–${currentData.offset + currentData.items.length} of ${currentData.total}`
+                  : `from ${offset + 1} of ${data.total}`}
+              </span>
+              <button
+                type="button"
+                onClick={() => setOffset(offset + PAGE_SIZE)}
+                disabled={!currentData?.hasMore}
+                className="fa-button-ghost disabled:opacity-40"
+                data-testid="dislike-next"
+              >
+                Older
+              </button>
+            </div>
+          )}
         </div>
       )}
     </section>

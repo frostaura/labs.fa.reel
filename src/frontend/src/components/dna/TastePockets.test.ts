@@ -27,8 +27,16 @@ describe("visiblePockets", () => {
 });
 
 describe("pocketSummary", () => {
-  it("rounds the share and groups the count", () => {
-    expect(pocketSummary({ ordinal: 0, share: 0.152, titleCount: 252, exemplars: [] })).toBe("252 titles · 15% of what you love");
-    expect(pocketSummary({ ordinal: 0, share: 0.0349, titleCount: 1234, exemplars: [] })).toBe("1,234 titles · 3% of what you love");
+  it("rounds the share, groups the count, and names the share as weight rather than a share of the titles", () => {
+    expect(pocketSummary({ ordinal: 0, share: 0.152, titleCount: 252, exemplars: [] })).toBe("252 titles · 15% of your taste weight");
+    expect(pocketSummary({ ordinal: 0, share: 0.0349, titleCount: 1234, exemplars: [] })).toBe("1,234 titles · 3% of your taste weight");
+    expect(pocketSummary({ ordinal: 0, share: 0.05, titleCount: 1, exemplars: [] })).toBe("1 title · 5% of your taste weight");
+  });
+
+  it("never reads as a share of what you love — the live numbers made that contradict itself (IREV3S-06)", () => {
+    // 172 titles at 15% beside 175 at 11%: more titles, smaller percentage. Only true of weight.
+    const bigger = pocketSummary({ ordinal: 0, share: 0.11, titleCount: 175, exemplars: [] });
+    expect(bigger).not.toMatch(/of what you love/);
+    expect(bigger).toMatch(/taste weight/);
   });
 });

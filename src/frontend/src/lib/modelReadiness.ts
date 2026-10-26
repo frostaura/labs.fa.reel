@@ -143,33 +143,38 @@ export function noModelSentence(readiness: ModelReadiness | null): string | null
   }
 }
 
-/** The Settings pipeline line: what the account's pipeline is doing, in words rather than an enum. */
-export function pipelineLabel(status: ReadinessInput | null | undefined): string | null {
+/**
+ * The Settings status line: what Reel is doing with the account, as a sentence (KILL-11, H-11). It
+ * used to read "Pipeline: FeedReady" — an enum where a sentence belongs — and an unknown stage fell
+ * through to its raw name. Unknown stages now get a plain, true sentence instead.
+ */
+export function pipelineSentence(status: ReadinessInput | null | undefined): string | null {
   if (!status) return null;
-  if (status.degradedReason === UNRECOGNISED_STATE) return "set by a newer version of Reel";
-  const readiness = modelReadiness(status);
-  if (readiness?.kind === "needsRatings") {
-    const floor = readiness.floor;
-    return floor ? `needs more ratings (${floor.usableRatings} of ${floor.required})` : "needs more ratings";
+  if (status.degradedReason === UNRECOGNISED_STATE) {
+    return "This status comes from a newer version of Reel — reload the page to read it.";
   }
+  const readiness = modelReadiness(status);
+  if (readiness?.kind === "needsRatings") return ratingsNeededCopy(readiness.floor);
   if (isAwaitingModel(status)) {
     return status.retrain?.hasActiveModel
-      ? "waiting for the next model build — tonight's refresh at the latest"
-      : "waiting for your first model — tonight's refresh at the latest";
+      ? `Your picks are ready. ${NEXT_MODEL_TIMING}.`
+      : `You've rated enough — ${FIRST_MODEL_TIMING}.`;
   }
   switch (status.pipelineStage) {
     case "Ingesting":
-      return "importing your Trakt history";
+      return "Reel is importing your Trakt history.";
     case "Extracting":
-      return "reading your taste";
+      return "Reel is reading your taste from what you've watched and rated.";
     case "Training":
     case "Evaluated":
-      return "training your model";
+      return "Reel is training your model.";
     case "FeedReady":
-      return "ready";
+      return "Your picks are ready.";
     case "Degraded":
-      return readiness?.kind === "reconnect" ? "stopped — Trakt needs reconnecting" : "stopped";
+      return readiness?.kind === "reconnect"
+        ? "Reel has lost access to your Trakt account — reconnect it below to carry on."
+        : "Building your picks stopped on Reel's side. Nothing you've rated is lost.";
     default:
-      return status.pipelineStage;
+      return "Reel is working on your picks.";
   }
 }

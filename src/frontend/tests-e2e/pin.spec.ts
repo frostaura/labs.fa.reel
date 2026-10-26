@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 const FILTERS = {
   excludeGenres: [], includeGenres: [], excludeKeywords: [], maturityCeiling: null, minPredictedRating: null,
@@ -19,6 +20,7 @@ test.describe("settings PIN", () => {
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
     await mockJson(page, "**/api/settings/filters", FILTERS);
+    await mockFilterChips(page);
     await page.goto("/settings");
   }
 

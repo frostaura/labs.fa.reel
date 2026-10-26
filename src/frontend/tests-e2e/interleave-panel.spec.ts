@@ -120,7 +120,13 @@ const MODEL_METRICS = {
   runs: [],
 };
 
-async function boot(page: Page, interleave: unknown): Promise<void> {
+const XREF_EMPTY = {
+  window: "all",
+  population: { name: "Titles served under a cross-reference standing that you have since rated", selectionNote: "" },
+  crossReference: { online: [], backtests: [], minimumOutcomes: 20 },
+};
+
+async function boot(page: Page, interleave: unknown, xref: unknown = XREF_EMPTY): Promise<void> {
   await stubEventSource(page);
   await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
   await mockJson(page, "**/api/sync/status", {
@@ -129,6 +135,7 @@ async function boot(page: Page, interleave: unknown): Promise<void> {
   });
   await mockJson(page, "**/api/metrics/model", MODEL_METRICS);
   await mockJson(page, "**/api/metrics/interleave", interleave);
+  await mockJson(page, "**/api/metrics/cross-reference", xref);
   await page.goto("/lab");
   await expect(page.getByTestId("gate-badge")).toBeVisible();
 }
@@ -186,5 +193,30 @@ test.describe("interleaving panel", () => {
     await expect(page.getByTestId("interleave-state")).toHaveText("not running");
     await expect(page.getByTestId("interleave-empty")).toContainText("INTERLEAVE_ENABLED=true");
     await expect(page.getByTestId("interleave-standings")).toHaveCount(0);
+  });
+
+  test("the lab carries the cross-reference statistics the track record no longer shows (G-10)", async ({ page }) => {
+    await boot(page, NEVER_RUN, {
+      ...XREF_EMPTY,
+      crossReference: {
+        minimumOutcomes: 20,
+        online: [{ verdict: "Out", n: 4, meanLaterRating: 5.5, lovedRate: 0.25, dislikedRate: 0.5, answerable: false }],
+        backtests: [
+          {
+            promptVersion: 2, evaluatedAt: "2026-09-11T02:14:00Z", judged: 1194, auc: 0.655,
+            meanLaterRatingKeep: 6.83, meanLaterRatingOut: 6.16, keepLovedRate: 0.332, keepDislikedRate: 0.081,
+            falseRuleOutRate: 0.162, falseRuleOutLow: 0.123, falseRuleOutHigh: 0.21, trueRuleOutRate: 0.228,
+            unsureRate: 0.46, gating: "demote-only", caveat: "", current: true,
+          },
+        ],
+      },
+    });
+
+    const backtest = page.getByTestId("lab-xref-backtest");
+    await expect(backtest).toContainText("Prompt v2");
+    await expect(backtest).toContainText("running now");
+    await expect(backtest).toContainText("95% confidence 12.3–21.0%");
+    await expect(backtest).toContainText("(AUC): 0.655");
+    await expect(page.getByTestId("lab-xref-online-row")).toContainText("not yet answerable — 4 outcomes so far");
   });
 });

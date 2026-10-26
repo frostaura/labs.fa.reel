@@ -11,15 +11,71 @@ import type { BrowseFilter } from "./browseFilter";
  */
 
 /**
- * The genre vocabulary. This is the app's existing list, moved here from PreferencesSection rather
- * than re-invented — the slugs are what the backend filters on, so a new list would silently stop
- * matching.
+ * The genre chips the editor offers, from the catalogue (WS-3's chip counts, H-7) rather than a
+ * hand-written list: on live the hand-written one offered "sports" (0 titles) and "anime" (2) while
+ * reality (183 shows), soap (229) and talk-show (46) could not be excluded at all.
+ *
+ * - Offered chips are the ones the server puts over its bar (50 titles).
+ * - A genre already in the account's rules is ALWAYS listed, offered or not, so a saved rule can be
+ *   seen and removed — a chip that vanished while still filtering would be an invisible condition.
+ * - Sorted by label, so a long list can be scanned.
  */
-export const GENRES = [
-  "action", "adventure", "animation", "anime", "comedy", "crime", "documentary", "drama",
-  "family", "fantasy", "history", "holiday", "horror", "music", "musical", "mystery",
-  "romance", "science-fiction", "sports", "superhero", "suspense", "thriller", "war", "western",
-] as const;
+export interface GenreChip {
+  slug: string;
+  label: string;
+  movies: number;
+  shows: number;
+  /** In the account's rules but under the catalogue bar: shown so it can be cleared, flagged as such. */
+  belowBar: boolean;
+}
+
+/** A slug as words: "science-fiction" → "science fiction"; anime says what it actually matches. */
+export function genreLabel(slug: string): string {
+  if (slug === "anime") return "anime (Japanese animation)";
+  return slug.replace(/-/g, " ");
+}
+
+/** Where a chip's titles are, for its tooltip and screen-reader label: "183 shows", "1,204 films · 96 shows". */
+export function genreReach(chip: Pick<GenreChip, "movies" | "shows">): string {
+  const parts: string[] = [];
+  if (chip.movies > 0) parts.push(`${chip.movies.toLocaleString("en-US")} ${chip.movies === 1 ? "film" : "films"}`);
+  if (chip.shows > 0) parts.push(`${chip.shows.toLocaleString("en-US")} ${chip.shows === 1 ? "show" : "shows"}`);
+  return parts.length > 0 ? parts.join(" · ") : "no titles in the catalogue";
+}
+
+export function genreChips(
+  report: { chips: { slug: string; movies: number; shows: number; offered: boolean }[] } | undefined,
+  filters: GenreLists,
+): GenreChip[] {
+  const bySlug = new Map((report?.chips ?? []).map((c) => [c.slug, c]));
+  const active = [...filters.includeGenres, ...filters.excludeGenres];
+  const slugs = new Set<string>([
+    ...(report?.chips ?? []).filter((c) => c.offered).map((c) => c.slug),
+    ...active,
+  ]);
+  return [...slugs]
+    .map((slug) => {
+      const chip = bySlug.get(slug);
+      return {
+        slug,
+        label: genreLabel(slug),
+        movies: chip?.movies ?? 0,
+        shows: chip?.shows ?? 0,
+        // Unknown to a loaded report counts as under the bar too: the catalogue does not tag it.
+        belowBar: report !== undefined && !(chip?.offered ?? false),
+      };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label, "en"));
+}
+
+/**
+ * One tap on a chip's explicit ✓ (require) or ✕ (exclude): sets that state, or clears it when the
+ * genre is already in it. Replaces the three-state cycle, where "tap twice to exclude" meant every
+ * exclusion passed through "require" first and the chip's state had to be learned from its colour.
+ */
+export function toggleGenre<T extends GenreLists>(filters: T, genre: string, target: "include" | "exclude"): T {
+  return setGenreState(filters, genre, genreState(filters, genre) === target ? "neutral" : target);
+}
 
 /** Maturity ceilings, "" meaning no ceiling. */
 export const MATURITY_LEVELS = ["", "G", "PG", "PG-13", "R"] as const;
@@ -75,18 +131,6 @@ export function setGenreState<T extends GenreLists>(filters: T, genre: string, s
   if (state === "include") includeGenres.push(genre);
   if (state === "exclude") excludeGenres.push(genre);
   return { ...filters, includeGenres, excludeGenres };
-}
-
-/** neutral → include → exclude → neutral. Positive intent first: most taps mean "more of this". */
-export const NEXT_GENRE_STATE: Record<GenreState, GenreState> = {
-  neutral: "include",
-  include: "exclude",
-  exclude: "neutral",
-};
-
-/** One tap on a genre chip. */
-export function cycleGenre<T extends GenreLists>(filters: T, genre: string): T {
-  return setGenreState(filters, genre, NEXT_GENRE_STATE[genreState(filters, genre)]);
 }
 
 export interface YearRange {

@@ -81,14 +81,37 @@ const ACCURACY_EXPOSURES = {
     newRatings: 14,
     calibrationBias: 0.37,
     calibrationMae: 1.94,
-    maeImprovement: -0.2,
     spearman: 0.18,
     picksChanged: 3,
   },
-  // Always present, even when empty — the endpoint sends the block unconditionally, so the page
-  // never has to guess whether it exists. The panel itself is exercised in cross-reference.spec.ts.
+};
+
+/** GET /api/metrics/cross-reference — where the cross-reference block lives now (WS-5 task 11). */
+const XREF_EMPTY = {
+  window: "90d",
+  population: { name: "Titles served under a cross-reference standing that you have since rated", selectionNote: "It corroborates the offline backtest; it never gates anything." },
   crossReference: { online: [], backtests: [], minimumOutcomes: 20 },
 };
+
+const POPULATIONS = {
+  headline: {
+    name: "Titles Reel showed you that you went on to rate",
+    selectionNote: "You picked which of the shown titles to watch, so these lean towards the ones that looked best to you.",
+  },
+  counterfactual: {
+    name: "Your ratings of titles that reached you through Reel, beside everything else you rated in the same weeks",
+    selectionNote: "Both groups are titles you chose to watch.",
+  },
+  conversion: {
+    name: "Cards Reel logged as shown to you",
+    selectionNote: "Counts only what the exposure log recorded since it began.",
+  },
+  crossReference: XREF_EMPTY.population,
+};
+
+async function mockXref(page: Page, body: unknown = XREF_EMPTY) {
+  await mockJson(page, "**/api/metrics/cross-reference", body);
+}
 
 const ACCURACY_EMPTY = {
   ...ACCURACY_EXPOSURES,
@@ -109,6 +132,7 @@ async function boot(page: Page, accuracy: unknown) {
     lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
   });
   await mockJson(page, "**/api/accuracy", accuracy);
+  await mockXref(page);
   await page.goto("/track-record");
   await expect(page.getByTestId("track-record")).toBeVisible();
 }
@@ -176,12 +200,89 @@ test.describe("track record", () => {
     await expect(counterfactual).toContainText("6.74");
   });
 
-  test("admits a retrain that did not help", async ({ page }) => {
+  test("the retrain line claims nothing the server no longer measures (R1-56)", async ({ page }) => {
     await boot(page, ACCURACY_EXPOSURES);
 
-    await expect(page.getByTestId("learned-sentence")).toHaveText(
-      "Learned from 14 new ratings. It did not get closer on your scores. 3 picks changed."
+    await expect(page.getByTestId("learned-sentence")).toHaveText("Learned from 14 new ratings. 3 picks changed.");
+    await expect(page.getByTestId("learned")).not.toContainText("closer");
+  });
+
+  test("offers only the windows that differ, and says so when there is just one (G-9)", async ({ page }) => {
+    await boot(page, {
+      ...ACCURACY_EXPOSURES,
+      windows: [
+        { key: "90d", pairs: 116, sameAs: null },
+        { key: "365d", pairs: 116, sameAs: "90d" },
+        { key: "all", pairs: 116, sameAs: "90d" },
+      ],
+    });
+    await expect(page.getByTestId("window-switch")).toHaveCount(0);
+    await expect(page.getByTestId("single-window-note")).toHaveText(
+      "All 116 scored calls fall in the last 90 days, so a longer window would show the same."
     );
+  });
+
+  test("two windows that differ get a two-button switch", async ({ page }) => {
+    await boot(page, {
+      ...ACCURACY_EXPOSURES,
+      windows: [
+        { key: "90d", pairs: 40, sameAs: null },
+        { key: "365d", pairs: 116, sameAs: null },
+        { key: "all", pairs: 116, sameAs: "365d" },
+      ],
+    });
+    const buttons = page.getByTestId("window-switch").getByRole("button");
+    await expect(buttons).toHaveText(["90 days", "a year"]);
+  });
+
+  test("each block names who its numbers are about and how they were selected (G-8)", async ({ page }) => {
+    await boot(page, { ...ACCURACY_EXPOSURES, populations: POPULATIONS });
+    await expect(page.getByTestId("headline-population")).toContainText("Titles Reel showed you that you went on to rate");
+    await expect(page.getByTestId("headline-population")).toContainText("lean towards the ones that looked best to you");
+    await expect(page.getByTestId("conversion-population")).toContainText("Cards Reel logged as shown to you");
+    await expect(page.getByTestId("counterfactual-population")).toContainText("Both groups are titles you chose to watch");
+  });
+
+  test("a scored page still links to Rate (G-19)", async ({ page }) => {
+    await boot(page, ACCURACY_EXPOSURES);
+    await expect(page.getByTestId("track-record-rate")).toHaveAttribute("href", "/rate");
+  });
+
+  test("the cross-reference block reads in words; its statistics live in the lab (G-10)", async ({ page }) => {
+    await stubEventSource(page);
+    await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
+    await mockJson(page, "**/api/sync/status", {
+      pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
+      lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
+    });
+    await mockJson(page, "**/api/accuracy", ACCURACY_EXPOSURES);
+    await mockXref(page, {
+      ...XREF_EMPTY,
+      crossReference: {
+        minimumOutcomes: 20,
+        online: [{ verdict: "ProvisionalKeep", n: 31, meanLaterRating: 7.1, lovedRate: 0.35, dislikedRate: 0.1, answerable: true }],
+        backtests: [
+          {
+            promptVersion: 2, evaluatedAt: "2026-09-11T02:14:00Z", judged: 1194, auc: 0.655,
+            meanLaterRatingKeep: 6.83, meanLaterRatingOut: 6.16, keepLovedRate: 0.332, keepDislikedRate: 0.081,
+            falseRuleOutRate: 0.162, falseRuleOutLow: 0.123, falseRuleOutHigh: 0.21, trueRuleOutRate: 0.228,
+            unsureRate: 0.46, gating: "demote-only", caveat: "", current: true,
+          },
+        ],
+      },
+    });
+    await page.goto("/track-record");
+
+    const panel = page.getByTestId("cross-reference");
+    await expect(page.getByTestId("cross-reference-backtest")).toContainText(
+      "titles it kept went on to average 6.83; titles it ruled out averaged 6.16"
+    );
+    await expect(page.getByTestId("cross-reference-population")).toContainText("never gates anything");
+    await expect(page.getByTestId("cross-reference-online-row")).toContainText("31 rated since");
+    // The engineering readouts are gone from the consumer page (KILL-11).
+    for (const jargon of ["AUC", "Separation", "prompt v", "95% confidence", "version running now"]) {
+      await expect(panel).not.toContainText(jargon);
+    }
   });
 
   test("a new account gets a useful empty state, not a wall of zeros", async ({ page }) => {
@@ -206,6 +307,7 @@ test.describe("track record", () => {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
+    await mockXref(page);
     let fail = true;
     await page.route(
       (url) => url.pathname === "/api/accuracy",
@@ -233,6 +335,7 @@ test.describe("track record", () => {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
+    await mockXref(page);
     await page.route(
       (url) => url.pathname === "/api/accuracy",
       (route) =>
@@ -260,6 +363,7 @@ test.describe("track record", () => {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
       lastFullReconcileAt: null, activeJob: null, recentJobs: [], outboxPending: 0, outboxDeadLetters: 0,
     });
+    await mockXref(page);
     await page.route(
       (url) => url.pathname === "/api/accuracy",
       (route) => {

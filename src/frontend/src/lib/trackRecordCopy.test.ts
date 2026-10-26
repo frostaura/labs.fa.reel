@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   agreementNote,
+  offeredWindows,
+  singleWindowNote,
   biasNote,
   headlineSentence,
   learnedSentence,
@@ -107,45 +109,67 @@ describe("biasNote and agreementNote", () => {
 });
 
 describe("learnedSentence", () => {
-  it("reports a real improvement", () => {
-    expect(
-      learnedSentence({
-        trainedAt: "2026-09-09T03:00:00Z",
-        newRatings: 14,
-        calibrationBias: 0.2,
-        calibrationMae: 1.1,
-        maeImprovement: 0.4,
-        spearman: 0.31,
-        picksChanged: 3,
-      })
-    ).toBe("Learned from 14 new ratings. Runs 0.40 closer on your scores now. 3 picks changed.");
+  const learned = (overrides: Partial<NonNullable<AccuracyPayload["learnedThisWeek"]>> = {}) => ({
+    trainedAt: "2026-09-09T03:00:00Z",
+    newRatings: 14,
+    calibrationBias: 0.2,
+    calibrationMae: 1.1,
+    spearman: 0.31,
+    picksChanged: 3,
+    ...overrides,
   });
 
-  it("says outright that a retrain did NOT help, rather than going quiet", () => {
-    expect(
-      learnedSentence({
-        trainedAt: "2026-09-09T03:00:00Z",
-        newRatings: 14,
-        calibrationBias: 0.2,
-        calibrationMae: 1.4,
-        maeImprovement: -0.3,
-        spearman: 0.1,
-        picksChanged: 0,
-      })
-    ).toBe("Learned from 14 new ratings. It did not get closer on your scores. No picks changed.");
+  it("says what the retrain learned from and what it changed", () => {
+    expect(learnedSentence(learned())).toBe("Learned from 14 new ratings. 3 picks changed.");
   });
 
-  it("treats an improvement that rounds to nothing as no improvement", () => {
-    expect(
-      learnedSentence({
-        trainedAt: "2026-09-09T03:00:00Z",
-        newRatings: 2,
-        calibrationBias: null,
-        calibrationMae: null,
-        maeImprovement: 0.02,
-        spearman: null,
-        picksChanged: 1,
-      })
-    ).toContain("did not get closer");
+  it("makes no closeness claim — the number behind it is retired and no longer sent (R1-56)", () => {
+    // The old clause read "It did not get closer on your scores" whenever the field was missing,
+    // which after WS-5's change was every retrain.
+    expect(learnedSentence(learned())).not.toMatch(/closer/);
+    const stale = { ...learned(), maeImprovement: 0.4 } as NonNullable<AccuracyPayload["learnedThisWeek"]>;
+    expect(learnedSentence(stale)).not.toMatch(/closer/);
+  });
+
+  it("says when nothing changed, and is singular where it should be", () => {
+    expect(learnedSentence(learned({ picksChanged: 0 }))).toBe("Learned from 14 new ratings. No picks changed.");
+    expect(learnedSentence(learned({ newRatings: 1, picksChanged: 1 }))).toBe("Learned from 1 new rating. 1 pick changed.");
+  });
+});
+
+describe("offeredWindows / singleWindowNote (G-9)", () => {
+  it("offers only windows that hold a different set of scored calls", () => {
+    const windows = [
+      { key: "90d", pairs: 12, sameAs: null },
+      { key: "365d", pairs: 40, sameAs: null },
+      { key: "all", pairs: 40, sameAs: "365d" },
+    ];
+    expect(offeredWindows(windows)).toEqual(["90d", "365d"]);
+    expect(singleWindowNote(windows)).toBeNull();
+  });
+
+  it("collapses to one window, and says why, when everything scored is recent", () => {
+    const windows = [
+      { key: "90d", pairs: 65, sameAs: null },
+      { key: "365d", pairs: 65, sameAs: "90d" },
+      { key: "all", pairs: 65, sameAs: "90d" },
+    ];
+    expect(offeredWindows(windows)).toEqual(["90d"]);
+    expect(singleWindowNote(windows)).toBe("All 65 scored calls fall in the last 90 days, so a longer window would show the same.");
+  });
+
+  it("offers every window when the server sends no summary (a server from before the change)", () => {
+    expect(offeredWindows(undefined)).toEqual(["90d", "365d", "all"]);
+    expect(singleWindowNote(undefined)).toBeNull();
+  });
+
+  it("says nothing about windows on an empty page", () => {
+    const windows = [
+      { key: "90d", pairs: 0, sameAs: null },
+      { key: "365d", pairs: 0, sameAs: "90d" },
+      { key: "all", pairs: 0, sameAs: "90d" },
+    ];
+    expect(offeredWindows(windows)).toEqual(["90d"]);
+    expect(singleWindowNote(windows)).toBeNull();
   });
 });

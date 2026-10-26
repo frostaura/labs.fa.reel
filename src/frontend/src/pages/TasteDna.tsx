@@ -17,11 +17,11 @@ import { toPng } from "html-to-image";
 import { useGetSessionQuery, useGetSyncStatusQuery, useGetTasteDnaQuery } from "../store/api";
 import { modelReadiness, noModelSentence } from "../lib/modelReadiness";
 import { profileUrl } from "../lib/tmdbImages";
-import { genreBarGeometry, meanMarkerPct } from "../lib/tasteDna";
 import ShareCard from "../components/dna/ShareCard";
 import DislikePanel from "../components/dna/DislikePanel";
 import TasteNarrativePanel from "../components/dna/TasteNarrativePanel";
 import TastePockets from "../components/dna/TastePockets";
+import DivergingBars from "../components/dna/DivergingBars";
 import LoadFailed from "../components/ui/load-failed";
 
 const FROST = "#A4D4F4";
@@ -29,14 +29,29 @@ const FROST_DIM = "#5C8AB4";
 const GRID = "rgba(164,212,244,0.12)";
 const DRIFT_COLORS = ["#A4D4F4", "#7CE3B6", "#F6C667", "#C4B5FD", "#FDA4AF"];
 
-function ChartTip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number }[]; label?: string }) {
+/** Counts are whole numbers and shares are percentages — a tooltip reading "ratings: 12.00" was a
+ *  float format applied to an integer (P1, integer counts). */
+const asCount = (value: number) => Math.round(value).toLocaleString("en-US");
+const asShare = (value: number) => `${Math.round(value * 100)}%`;
+
+function ChartTip({
+  active,
+  payload,
+  label,
+  format,
+}: {
+  active?: boolean;
+  payload?: { name: string; value: number }[];
+  label?: string | number;
+  format: (value: number) => string;
+}) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-md border border-fa-edge bg-fa-ink/95 backdrop-blur px-3 py-2">
       {label != null && <p className="fa-overline text-fa-frost-dim mb-1">{label}</p>}
       {payload.map((entry) => (
         <p key={entry.name} className="fa-caption text-fa-frost">
-          {entry.name}: <span className="text-fa-frost-bright tabular-nums">{Number(entry.value).toFixed(2)}</span>
+          {entry.name}: <span className="text-fa-frost-bright tabular-nums">{format(Number(entry.value))}</span>
         </p>
       ))}
     </div>
@@ -118,7 +133,7 @@ export default function TasteDna() {
             {/* "rated", not "watched" — deliberately. Every title you have ever RATED feeds this,
                 with no cutoff; titles you watched without rating do not feed a feature yet, and the
                 copy must not claim them until they do. */}
-            every title you&apos;ve ever rated counts — all {data.ratingsCount.toLocaleString()} of them, with recent
+            every title you&apos;ve ever rated counts — all {data.ratingsCount.toLocaleString("en-US")} of them, with recent
             ones counting a little more · always yours, always free
           </p>
         </div>
@@ -154,11 +169,11 @@ export default function TasteDna() {
       <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="fa-card px-4 py-3">
           <p className="fa-stat-label">hours watched</p>
-          <p className="fa-stat-value">{Math.round(data.hoursWatched).toLocaleString()}</p>
+          <p className="fa-stat-value">{Math.round(data.hoursWatched).toLocaleString("en-US")}</p>
         </div>
         <div className="fa-card px-4 py-3">
           <p className="fa-stat-label">titles</p>
-          <p className="fa-stat-value">{data.titlesWatched.toLocaleString()}</p>
+          <p className="fa-stat-value">{data.titlesWatched.toLocaleString("en-US")}</p>
         </div>
         <div className="fa-card px-4 py-3">
           <p className="fa-stat-label">show completion</p>
@@ -175,58 +190,41 @@ export default function TasteDna() {
       </section>
 
       <div className="grid lg:grid-cols-2 gap-6">
-        {/* Genre fingerprint */}
+        {/* Genre fingerprint — diverging from your own mean, scaled to the spread (lib/tasteDna.ts).
+            On a 0–10 fill every genre sat at 65–72% of the track and the chart said nothing. */}
         <section className="fa-card p-5">
           <h2 className="fa-section-title mb-1">Genre fingerprint</h2>
-          {/* The track is a literal 0–10 axis and the bar is the affinity itself; the tick is the
-              user's own mean, so above/below reads against their bar rather than the scale's
-              midpoint. Why a fill rather than a mean-diverging span: lib/tasteDna.ts. */}
           <p className="fa-caption text-fa-frost-dim mb-3">
-            0–10, against your own {data.userMean.toFixed(1)} average — the tick
+            How each genre you rate a lot scores against your own {data.userMean.toFixed(1)} average.
           </p>
-          <div className="space-y-2.5">
-            {data.topGenres.map((g) => {
-              const bar = genreBarGeometry(g.affinity, data.userMean);
-              return (
-                <div key={g.genre} className="flex items-center gap-3">
-                  <span className="fa-body text-fa-frost w-36 truncate capitalize">{g.genre.replace("-", " ")}</span>
-                  <div
-                    className="relative flex-1 h-2.5 rounded-full bg-fa-glass overflow-hidden"
-                    role="img"
-                    aria-label={`${g.genre.replace("-", " ")}: ${g.affinity.toFixed(1)} out of 10, ${
-                      bar.aboveMean ? "at or above" : "below"
-                    } your ${data.userMean.toFixed(1)} average`}
-                  >
-                    <div
-                      className={`absolute inset-y-0 left-0 rounded-full ${bar.aboveMean ? "bg-fa-frost/80" : "bg-fa-frost-dim/70"}`}
-                      style={{ width: `${bar.fillPct}%` }}
-                    />
-                    {/* The mean tick — the reference every bar is read against. */}
-                    <div
-                      className="absolute inset-y-0 w-px bg-fa-frost-bright/70"
-                      style={{ left: `${meanMarkerPct(data.userMean)}%` }}
-                    />
-                  </div>
-                  <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{g.affinity.toFixed(1)}</span>
-                  <span className="fa-caption text-fa-frost-dim tabular-nums w-12 text-right">{g.count}×</span>
-                </div>
-              );
-            })}
-          </div>
+          <DivergingBars
+            testId="genre-fingerprint"
+            userMean={data.userMean}
+            rows={data.topGenres.map((g) => ({
+              key: g.genre,
+              label: g.genre.replace("-", " "),
+              affinity: g.affinity,
+              count: g.count,
+            }))}
+          />
         </section>
 
-        {/* Eras */}
+        {/* Eras — the same chart, so the two read on the same terms. */}
         <section className="fa-card p-5">
-          <h2 className="fa-section-title mb-2">Eras</h2>
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={data.eras} barCategoryGap="25%">
-              <CartesianGrid stroke={GRID} vertical={false} />
-              <XAxis dataKey="decade" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} tickFormatter={(d) => `${d}s`} />
-              <YAxis domain={[0, 10]} tick={{ fill: FROST_DIM, fontSize: 11 }} width={28} />
-              <Tooltip content={<ChartTip />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
-              <Bar dataKey="affinity" fill={FROST} radius={[4, 4, 0, 0]} name="affinity" />
-            </BarChart>
-          </ResponsiveContainer>
+          <h2 className="fa-section-title mb-1">Eras</h2>
+          <p className="fa-caption text-fa-frost-dim mb-3">
+            Each decade you&apos;ve rated at least five titles from, against the same average.
+          </p>
+          <DivergingBars
+            testId="era-fingerprint"
+            userMean={data.userMean}
+            rows={data.eras.map((e) => ({
+              key: String(e.decade),
+              label: `${e.decade}s`,
+              affinity: e.affinity,
+              count: e.count,
+            }))}
+          />
         </section>
       </div>
 
@@ -246,7 +244,7 @@ export default function TasteDna() {
               <CartesianGrid stroke={GRID} vertical={false} />
               <XAxis dataKey="year" type="category" tick={{ fill: FROST_DIM, fontSize: 11 }} />
               <YAxis tickFormatter={(v) => `${Math.round(v * 100)}%`} tick={{ fill: FROST_DIM, fontSize: 11 }} width={40} />
-              <Tooltip content={<ChartTip />} />
+              <Tooltip content={<ChartTip format={asShare} />} />
               <Legend wrapperStyle={{ fontSize: 11, color: FROST_DIM }} />
               {driftGenres.map((genre, index) => (
                 <Line
@@ -279,11 +277,17 @@ export default function TasteDna() {
                     </div>
                   )}
                 </div>
-                <span className="fa-body text-fa-frost w-40 truncate">{creator.name}</span>
-                <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
-                  <div className="h-full rounded-full bg-fa-frost/70" style={{ width: `${(creator.affinity / 10) * 100}%` }} />
+                {/* Name above the bar on phones, beside it from sm (P1): a 10rem name left a 390 px
+                    screen a bar too short to compare. */}
+                <div className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3" data-testid="creator-row">
+                  <span className="block fa-body text-fa-frost truncate sm:w-40 sm:shrink-0">{creator.name}</span>
+                  <div className="mt-1 flex flex-1 items-center gap-3 sm:mt-0">
+                    <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
+                      <div className="h-full rounded-full bg-fa-frost/70" style={{ width: `${(creator.affinity / 10) * 100}%` }} />
+                    </div>
+                    <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{creator.affinity.toFixed(1)}</span>
+                  </div>
                 </div>
-                <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{creator.affinity.toFixed(1)}</span>
               </div>
             ))}
           </div>
@@ -305,11 +309,17 @@ export default function TasteDna() {
                       </div>
                     )}
                   </div>
-                  <span className="fa-body text-fa-frost group-hover:text-fa-frost-bright w-40 truncate">{actor.name}</span>
-                  <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
-                    <div className="h-full rounded-full bg-fa-frost/70" style={{ width: `${(actor.rating / 10) * 100}%` }} />
+                  <div className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3">
+                    <span className="block fa-body text-fa-frost group-hover:text-fa-frost-bright truncate sm:w-40 sm:shrink-0">
+                      {actor.name}
+                    </span>
+                    <div className="mt-1 flex flex-1 items-center gap-3 sm:mt-0">
+                      <div className="flex-1 h-2 rounded-full bg-fa-glass overflow-hidden">
+                        <div className="h-full rounded-full bg-fa-frost/70" style={{ width: `${(actor.rating / 10) * 100}%` }} />
+                      </div>
+                      <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{actor.rating}</span>
+                    </div>
                   </div>
-                  <span className="fa-caption text-fa-frost-bright tabular-nums w-8 text-right">{actor.rating}</span>
                 </Link>
               ))}
             </div>
@@ -324,7 +334,7 @@ export default function TasteDna() {
               <CartesianGrid stroke={GRID} vertical={false} />
               <XAxis dataKey="rating" tick={{ fill: FROST_DIM, fontSize: 11 }} />
               <YAxis tick={{ fill: FROST_DIM, fontSize: 11 }} width={36} />
-              <Tooltip content={<ChartTip />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
+              <Tooltip content={<ChartTip format={asCount} />} cursor={{ fill: "rgba(164,212,244,0.06)" }} />
               <Bar dataKey="count" fill={FROST} radius={[4, 4, 0, 0]} name="ratings" />
             </BarChart>
           </ResponsiveContainer>

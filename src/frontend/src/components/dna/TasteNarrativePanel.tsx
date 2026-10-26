@@ -20,13 +20,21 @@ import { saveFailureMessage, type SaveMessage } from "../ui/save-outcome";
  * gives you no way to say so is one you stop arguing with and start ignoring. An edit wins
  * everywhere and survives every rewrite except the one you ask for.
  */
+/** How often a pending rewrite is checked on. */
+const NARRATIVE_POLL_MS = 4000;
+
 export default function TasteNarrativePanel() {
+  // Poll ONLY while a rewrite is pending, so the new text arrives without a reload. It used to poll
+  // every 4 s for as long as the page was open, rewrite or not (I*2). `pending` follows the server's
+  // own `regenerating` flag (adopted during render), so polling starts when a queued rewrite shows up
+  // — the regenerate mutation invalidates this query — and stops the moment the job clears.
+  const [pending, setPending] = useState(false);
   const { data, isLoading, isError, isFetching, refetch } = useGetNarrativeQuery(undefined, {
-    // While a rewrite is queued, poll so the new text arrives without a reload. Stops on its own
-    // the moment the job clears.
-    pollingInterval: 4000,
+    pollingInterval: pending ? NARRATIVE_POLL_MS : 0,
     skipPollingIfUnfocused: true,
   });
+  const regeneratingNow = data?.regenerating ?? false;
+  if (regeneratingNow !== pending) setPending(regeneratingNow);
   const [save, { isLoading: saving }] = useSaveNarrativeMutation();
   const [regenerate, { isLoading: queueing }] = useRegenerateNarrativeMutation();
 
@@ -115,7 +123,7 @@ export default function TasteNarrativePanel() {
           <h2 className="fa-section-title">Your taste, in words</h2>
           <p className="fa-caption text-fa-frost-dim mt-1" data-testid="narrative-provenance">
             {data.isEdited ? "your words · " : ""}
-            last written from {data.ratingsCount.toLocaleString()} ratings
+            last written from {data.ratingsCount.toLocaleString("en-US")} ratings
             {written ? ` on ${written}` : ""}
             {/* Stale is stated, not hidden. It is still the best description Reel has, and saying
                 so is cheaper than quietly showing something that no longer fits. */}

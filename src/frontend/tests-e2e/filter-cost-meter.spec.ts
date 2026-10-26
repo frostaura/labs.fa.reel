@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
+import { mockFilterChips } from "./filterChips.fixture";
 
 /**
  * The filter cost meter in the conditions editor.
@@ -92,6 +93,19 @@ async function openConditions(page: Page) {
   await mockJson(page, "**/api/feed/genres", { genres: [] });
   await mockJson(page, "**/api/digest/current", { weekStart: null, generatedAt: null, items: [] });
   await mockJson(page, "**/api/settings/filters", SAVED_FILTERS);
+  await mockFilterChips(page);
+  // The Home shell behind the dialog reads these while a test waits on the meter.
+  await mockJson(page, "**/api/accuracy", {
+    window: "90d", from: "2026-07-27T00:00:00Z", to: "2026-10-25T00:00:00Z", source: "none",
+    headline: { withinOnePoint: 0, n: 0, meanAbsoluteError: 0, bias: 0, correlation: null, meanPredicted: 0, meanActual: 0 },
+    calibration: [], moments: [],
+    conversion: { shown: 0, saved: 0, watched: 0, rated: 0, shownToSaved: null, savedToWatched: null, shownToRated: null, medianDaysToWatch: null },
+    counterfactual: [], learnedThisWeek: null,
+  });
+  await mockJson(page, "**/api/saved/recently-watched", { expectedAbsoluteError: 1.9, items: [] });
+  for (const path of ["/api/feed/cross-reference", "/api/feed/learned"]) {
+    await page.route((url) => url.pathname === path, (route) => route.fulfill({ status: 204, body: "" }));
+  }
   await mockJson(page, "**/api/feed", {
     generatedAt: new Date().toISOString(),
     hero: [],
@@ -131,10 +145,10 @@ test.describe("filter cost meter", () => {
     await openConditions(page);
     await expect(page.getByTestId("filter-cost-line")).toHaveText("These rules leave 158 of 5,319 titles");
 
-    // Excluding horror (neutral → include → exclude) adds a rule worth 12.
-    await page.getByTestId("genre-horror").click();
-    await page.getByTestId("genre-horror").click();
+    // Excluding horror — one tap on its ✕ — adds a rule worth 12.
+    await page.getByTestId("genre-horror-exclude").click();
     await expect(page.getByTestId("genre-horror")).toHaveAttribute("data-state", "exclude");
+    await expect(page.getByTestId("genre-horror-exclude")).toHaveAttribute("aria-pressed", "true");
 
     await expect(page.getByTestId("genre-marginal-horror")).toHaveText("+12");
     await expect(page.getByTestId("filter-cost-line")).toHaveText("These rules leave 146 of 5,319 titles");
@@ -143,8 +157,8 @@ test.describe("filter cost meter", () => {
     const last = cost.bodies().at(-1) as typeof SAVED_FILTERS;
     expect(last.excludeGenres).toContain("horror");
 
-    // Dropping comedy from the draft takes the rule — and its badge — away again.
-    await page.getByTestId("genre-comedy").click();
+    // Dropping comedy from the draft (its lit ✕ again) takes the rule — and its badge — away again.
+    await page.getByTestId("genre-comedy-exclude").click();
     await expect(page.getByTestId("genre-comedy")).toHaveAttribute("data-state", "neutral");
     await expect(page.getByTestId("genre-marginal-comedy")).toHaveCount(0);
     await expect(page.getByTestId("filter-cost-line")).toHaveText("These rules leave 326 of 5,319 titles");
@@ -180,5 +194,56 @@ test.describe("filter cost meter", () => {
     // Nothing was persisted — the founder decision is that the meter names the trade and the user
     // makes it, so a suggestion is a draft edit and never a save.
     expect(saves).toHaveLength(0);
+  });
+
+  test("a draft change aborts the cost request still in flight for the old draft (H-6)", async ({ page }) => {
+    const started: string[] = [];
+    const aborted: string[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    page.on("requestfailed", (request) => {
+      if (request.url().includes("/api/settings/filters/cost")) aborted.push(request.postData() ?? "");
+    });
+    await page.route("**/api/settings/filters/cost", async (route) => {
+      const body = route.request().postData() ?? "";
+      started.push(body);
+      // The first draft's answer is held, as a slow catalogue pass would be — never for longer than
+      // the test, so a failure cannot leave the handler waiting through teardown.
+      if (started.length === 1) await Promise.race([gate, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+      await route
+        .fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ total: 5319, eligible: 300, byRule: [], suggestions: [] }) })
+        .catch(() => undefined);
+    });
+    await openConditions(page);
+    await expect.poll(() => started.length).toBe(1);
+
+    // The user keeps editing while the first count is still running.
+    await page.getByTestId("genre-horror-exclude").click();
+    await expect.poll(() => aborted.length).toBe(1);
+    expect(JSON.parse(aborted[0]).excludeGenres).not.toContain("horror");
+
+    // The new draft is costed, and only the new one shows.
+    await expect.poll(() => started.length).toBe(2);
+    expect(JSON.parse(started[1]).excludeGenres).toContain("horror");
+    await expect(page.getByTestId("filter-cost-line")).toHaveText("These rules leave 300 of 5,319 titles");
+    release();
+  });
+
+  test("chips come from the catalogue: TV genres offered, anime named, under-bar chips not offered (H-7)", async ({ page }) => {
+    await mockCost(page);
+    await openConditions(page);
+
+    await expect(page.getByTestId("genre-reality")).toBeVisible();
+    await expect(page.getByTestId("genre-soap")).toBeVisible();
+    await expect(page.getByTestId("genre-anime")).toContainText("anime (Japanese animation)");
+    await expect(page.getByTestId("genre-reality")).toHaveAttribute("title", "183 shows");
+    // Under the 50-title bar and not in the rules: not offered at all.
+    await expect(page.getByTestId("genre-sports")).toHaveCount(0);
+    await expect(page.getByTestId("genre-news")).toHaveCount(0);
+    // Every chip has an explicit, labelled ✓ and ✕.
+    await expect(page.getByRole("button", { name: "Require reality" })).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByRole("button", { name: "Exclude reality" })).toHaveAttribute("aria-pressed", "false");
   });
 });

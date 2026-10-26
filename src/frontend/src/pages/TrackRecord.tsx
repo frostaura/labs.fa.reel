@@ -12,38 +12,51 @@ import {
 } from "recharts";
 import { Target } from "lucide-react";
 import LoadFailed from "../components/ui/load-failed";
-import { useGetAccuracyQuery, useGetSyncStatusQuery, type AccuracyMoment } from "../store/api";
+import {
+  useGetAccuracyQuery,
+  useGetCrossReferenceStatsQuery,
+  useGetSyncStatusQuery,
+  type AccuracyMoment,
+  type PopulationNote,
+} from "../store/api";
 import { modelReadiness, noModelSentence } from "../lib/modelReadiness";
 import { posterUrl } from "../lib/tmdbImages";
 import { verdictSurface } from "../lib/verdictCopy";
+import { relTime } from "../lib/format";
 import {
   NO_MODEL_SOURCE_NOTE,
+  WINDOW_LABELS,
   agreementNote,
   biasNote,
   headlineSentence,
   learnedSentence,
   num,
+  offeredWindows,
   pct,
   signed,
+  singleWindowNote,
   sourceNote,
 } from "../lib/trackRecordCopy";
-import {
-  xrefBacktestCaveat,
-  xrefBacktestSentence,
-  xrefOnlineNote,
-  xrefVerdictLabel,
-} from "../lib/xrefCopy";
+import { xrefBacktestSentence, xrefOnlineNote, xrefVerdictLabel } from "../lib/xrefCopy";
 
 const FROST = "#A4D4F4";
 const FROST_DIM = "#5C8AB4";
 const AMBER = "#F6C667";
 const GRID = "rgba(164,212,244,0.12)";
 
-const WINDOWS = [
-  { value: "90d", label: "90 days" },
-  { value: "365d", label: "a year" },
-  { value: "all", label: "all time" },
-] as const;
+/**
+ * Who a block's numbers are about, and how the account's own choices picked that group (G-8). Every
+ * rate on this page is over titles you CHOSE to watch, so none is a random sample; the note says
+ * which way that leans, beside the number rather than in a footnote.
+ */
+function Population({ note, testId }: { note: PopulationNote | undefined | null; testId: string }) {
+  if (!note) return null;
+  return (
+    <p className="fa-caption text-fa-frost-dim mt-2" data-testid={testId}>
+      <span className="text-fa-frost">{note.name}.</span> {note.selectionNote}
+    </p>
+  );
+}
 
 function ChartTip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number }[]; label?: string }) {
   if (!active || !payload?.length) return null;
@@ -114,6 +127,19 @@ export default function TrackRecord() {
   const { data: sync } = useGetSyncStatusQuery();
   const noModel = noModelSentence(modelReadiness(sync));
 
+  // Only the windows that hold a different set of scored calls (G-9). Until the first payload lands
+  // there is no summary, so the switch shows the window being loaded and nothing else.
+  // Held across loads: `currentData` is empty while another window loads, and the switch must not
+  // collapse under the user's finger. Refreshed from every payload that does land.
+  const [summary, setSummary] = useState<{ from: typeof data; offered: string[]; note: string | null } | null>(null);
+  if (data && summary?.from !== data) {
+    setSummary({ from: data, offered: offeredWindows(data.windows), note: singleWindowNote(data.windows) });
+  }
+  // Before any summary: while loading, only the window being asked for (no buttons to jump about);
+  // after a failure, every window, so another one is still one tap away.
+  const offered = summary?.offered ?? (isError ? offeredWindows(undefined) : [window_]);
+  const singleNote = summary?.note ?? null;
+
   // The window switch stays on screen through every state: a skeleton or an error that also took
   // the buttons away would leave no way to step back to the window that did load.
   const header = (
@@ -126,23 +152,31 @@ export default function TrackRecord() {
           How wrong Reel has been about you, and what it is doing about it.
         </p>
       </div>
-      <div className="flex items-center gap-1" role="group" aria-label="Time window">
-        {WINDOWS.map((w) => (
-          <button
-            key={w.value}
-            type="button"
-            onClick={() => setWindow(w.value)}
-            aria-pressed={window_ === w.value}
-            className={`fa-caption px-3 py-1.5 rounded-md border transition ${
-              window_ === w.value
-                ? "border-fa-frost/50 bg-fa-glass-strong text-fa-frost-bright"
-                : "border-fa-edge text-fa-frost-dim hover:text-fa-frost"
-            }`}
-          >
-            {w.label}
-          </button>
-        ))}
-      </div>
+      {offered.length > 1 ? (
+        <div className="flex items-center gap-1" role="group" aria-label="Time window" data-testid="window-switch">
+          {offered.map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setWindow(value)}
+              aria-pressed={window_ === value}
+              className={`fa-caption px-3 py-1.5 rounded-md border transition ${
+                window_ === value
+                  ? "border-fa-frost/50 bg-fa-glass-strong text-fa-frost-bright"
+                  : "border-fa-edge text-fa-frost-dim hover:text-fa-frost"
+              }`}
+            >
+              {WINDOW_LABELS[value] ?? value}
+            </button>
+          ))}
+        </div>
+      ) : (
+        singleNote && (
+          <p className="fa-caption text-fa-frost-dim max-w-xs sm:text-right" data-testid="single-window-note">
+            {singleNote}
+          </p>
+        )
+      )}
     </div>
   );
 
@@ -192,6 +226,7 @@ export default function TrackRecord() {
         <p className="fa-caption text-fa-frost-dim mt-2" data-testid="source-note">
           {empty && noModel ? NO_MODEL_SOURCE_NOTE : sourceNote(data)}
         </p>
+        {!empty && <Population note={data.populations?.headline} testId="headline-population" />}
         {/* The empty state's way forward. The page fills as you rate titles Reel had already scored
             for you; /rate offers what you've watched and never rated (plus popular titles), so the
             button says that rather than promising a list of scored titles it does not show. */}
@@ -226,6 +261,13 @@ export default function TrackRecord() {
               </p>
             </div>
           </div>
+        )}
+        {/* Every rating is a new scored call, so the way to a fairer number is always one tap away —
+            not only on the empty page (G-19). */}
+        {!empty && (
+          <Link to="/rate" className="fa-link fa-caption inline-flex mt-3" data-testid="track-record-rate">
+            Rate what you&apos;ve watched →
+          </Link>
         )}
       </section>
 
@@ -281,6 +323,8 @@ export default function TrackRecord() {
           Shown → saved → watched. This measures whether the loop closes, which is a different
           question from whether the number was right.
         </p>
+        <Population note={data.populations?.conversion} testId="conversion-population" />
+        <div className="mb-3" />
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="fa-card px-4 py-3">
             <p className="fa-stat-label">shown → saved</p>
@@ -315,6 +359,8 @@ export default function TrackRecord() {
             Your own ratings, split by how the title reached you. A negative gap means Reel steered
             you toward films you liked less than the ones you found on your own.
           </p>
+          <Population note={data.populations?.counterfactual} testId="counterfactual-population" />
+          <div className="mb-3" />
           <div className="space-y-1">
             {data.counterfactual.map((w) => (
               <p key={w.window} className="fa-body">
@@ -332,63 +378,10 @@ export default function TrackRecord() {
         </section>
       )}
 
-      {/* The deep pass, and what it has earned the right to do. Every figure comes from the API —
-          there is not one number typed into this panel, because the whole argument for showing it
-          is that it is the account's own measurement rather than a claim about the feature. */}
-      {/* Optional-chained deliberately: a tab left open across a deploy holds a payload from
-          before this block existed, and a hard crash on the honesty page is the worst possible
-          place to discover that. */}
-      {(data.crossReference?.backtests.length || data.crossReference?.online.length) ? (
-        <section className="fa-card p-5" data-testid="cross-reference">
-          <h2 className="fa-section-title mb-1">Cross-reference</h2>
-          <p className="fa-caption text-fa-frost-dim mb-3">
-            A second pass reads every eligible title beside the ones you have actually rated, and
-            says keep, rule out, or not sure. What that verdict is allowed to do to your page was
-            decided by testing it against your own history — below.
-          </p>
-
-          {data.crossReference.backtests.map((b) => (
-            <div key={b.promptVersion} className="mb-3 last:mb-0" data-testid="cross-reference-backtest">
-              <p className="fa-body text-fa-frost">
-                {xrefBacktestSentence(b)}
-                {b.current && (
-                  <span className="fa-caption text-fa-frost-dim"> (this is the version running now)</span>
-                )}
-              </p>
-              <p className="fa-caption text-fa-frost-dim mt-1">{xrefBacktestCaveat(b)}</p>
-              {b.auc != null && (
-                <p className="fa-caption text-fa-frost-dim mt-1">
-                  Separation between what you loved and what you disliked: {num(b.auc, 3)} — 0.500 would
-                  be no separation at all.
-                </p>
-              )}
-            </div>
-          ))}
-
-          {/* The online half. It cannot reach significance and says so per verdict rather than
-              once at the bottom: a demoted title is served less, and only ~2% of ratings are made
-              in the app, so this corroborates the backtest and never replaces it. */}
-          <div className="mt-4">
-            <p className="fa-overline text-fa-frost-dim">since it went live</p>
-            {data.crossReference.online.length === 0 ? (
-              <p className="fa-caption text-fa-frost-dim mt-1" data-testid="cross-reference-online-empty">
-                Nothing it has judged has reached you and come back with a rating yet.
-              </p>
-            ) : (
-              <div className="space-y-1 mt-1">
-                {data.crossReference.online.map((o) => (
-                  <p key={o.verdict} className="fa-body" data-testid="cross-reference-online-row">
-                    <span className="text-fa-frost-dim">{xrefVerdictLabel(o.verdict)}:</span>{" "}
-                    <span className={o.answerable ? "text-fa-frost" : "text-fa-frost-dim"}>
-                      {xrefOnlineNote(o)}
-                    </span>
-                  </p>
-                ))}
-              </div>
-            )}
-          </div>
-        </section>
-      ) : null}
+      {/* The cross-reference pass, in words. Its statistics (AUC, intervals, prompt generations) moved
+          to the lab (G-10, KILL-11); what stays is what a verdict is allowed to do to your page and
+          why, which the Home pill points here for. */}
+      <CrossReferenceSummary window={window_} />
 
       {/* What changed since last time — the "and what I'm doing about it" half. */}
       {data.learnedThisWeek && (
@@ -398,7 +391,7 @@ export default function TrackRecord() {
             {learnedSentence(data.learnedThisWeek)}
           </p>
           <p className="fa-caption text-fa-frost-dim mt-2">
-            Retrained {new Date(data.learnedThisWeek.trainedAt).toLocaleDateString()} · bias{" "}
+            Retrained {relTime(data.learnedThisWeek.trainedAt)} · bias{" "}
             {signed(data.learnedThisWeek.calibrationBias)} · average miss{" "}
             {num(data.learnedThisWeek.calibrationMae)}
           </p>
@@ -410,5 +403,68 @@ export default function TrackRecord() {
         figure. <Link to="/dna" className="underline underline-offset-2 hover:text-fa-frost">See your taste profile</Link>.
       </p>
     </div>
+  );
+}
+
+/**
+ * The cross-reference pass in plain words, from /api/metrics/cross-reference (WS-5 task 11). Renders
+ * nothing until there is something measured to say, and its own failure inline — never the page's.
+ */
+function CrossReferenceSummary({ window }: { window: string }) {
+  const { currentData, isError, isFetching, refetch } = useGetCrossReferenceStatsQuery({ window });
+  if (!currentData) {
+    return isError ? (
+      <LoadFailed
+        what="the cross-reference results"
+        onRetry={() => void refetch()}
+        retrying={isFetching}
+        variant="inline"
+        testId="cross-reference-error"
+      />
+    ) : null;
+  }
+
+  const { crossReference: xref, population } = currentData;
+  // The generation running now decides what a verdict may do; an older one is history for the lab.
+  const backtest = xref.backtests.find((b) => b.current) ?? xref.backtests[0];
+  if (!backtest && xref.online.length === 0) return null;
+
+  return (
+    <section className="fa-card p-5" data-testid="cross-reference">
+      <h2 className="fa-section-title mb-1">Cross-reference</h2>
+      <p className="fa-caption text-fa-frost-dim">
+        A second pass reads every eligible title beside the ones you have actually rated, and says
+        keep, rule out, or not sure. What that verdict is allowed to do to your page was decided by
+        testing it against your own history.
+      </p>
+      <Population note={population} testId="cross-reference-population" />
+
+      {backtest && (
+        <p className="fa-body text-fa-frost mt-3" data-testid="cross-reference-backtest">
+          {xrefBacktestSentence(backtest)}
+        </p>
+      )}
+
+      {/* The online half. It cannot reach significance and says so per verdict rather than once at
+          the bottom: only ~2% of ratings are made in the app, so this corroborates the backtest and
+          never replaces it. */}
+      <div className="mt-4">
+        <p className="fa-overline text-fa-frost-dim">since it went live</p>
+        {xref.online.length === 0 ? (
+          <p className="fa-caption text-fa-frost-dim mt-1" data-testid="cross-reference-online-empty">
+            Nothing it has judged has reached you and come back with a rating yet.
+          </p>
+        ) : (
+          <div className="space-y-1 mt-1">
+            {xref.online.map((o) => (
+              <p key={o.verdict} className="fa-body" data-testid="cross-reference-online-row">
+                <span className="text-fa-frost-dim">{xrefVerdictLabel(o.verdict)}:</span>{" "}
+                <span className={o.answerable ? "text-fa-frost" : "text-fa-frost-dim"}>{xrefOnlineNote(o)}</span>
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
