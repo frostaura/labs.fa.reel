@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { genreBarGeometry, meanMarkerPct } from "./tasteDna";
+import { divergingBars, genreBarGeometry, LARGEST_BAR_PCT, meanMarkerPct, MIN_SCALE } from "./tasteDna";
 
 /**
  * Regression for "the genre fingerprint lies below the midpoint". The old width was
@@ -77,5 +77,41 @@ describe("meanMarkerPct", () => {
   it("clamps out-of-range means onto the track", () => {
     expect(meanMarkerPct(-1)).toBe(0);
     expect(meanMarkerPct(11)).toBe(100);
+  });
+});
+
+describe("divergingBars (the page's charts, P1 G-12)", () => {
+  it("spreads the founder-shaped data: genres within ±0.4 of the mean still fill at least 40% of the chart", () => {
+    // Live shape: eight genres between 6.5 and 7.2 around a 6.8 mean.
+    const chart = divergingBars([7.2, 7.0, 6.9, 6.8, 6.7, 6.6, 6.5, 7.1], 6.8);
+    const widest = Math.max(...chart.bars.map((b) => b.widthPct));
+    expect(widest).toBeGreaterThanOrEqual(40);
+    expect(chart.scale).toBe(0.4);
+  });
+
+  it("puts a genre above the mean right of centre and one below left of it", () => {
+    const { bars } = divergingBars([7.2, 6.4], 6.8);
+    expect(bars[0]).toMatchObject({ side: "above", leftPct: 50, deltaLabel: "+0.4" });
+    expect(bars[1]).toMatchObject({ side: "below", deltaLabel: "−0.4" });
+    expect(bars[1].leftPct + bars[1].widthPct).toBe(50);
+  });
+
+  it("draws a value on the mean (at displayed precision) as level, with no bar", () => {
+    const { bars } = divergingBars([6.79, 7.3], 6.8);
+    expect(bars[0]).toEqual({ leftPct: 50, widthPct: 0, side: "level", deltaLabel: "±0.0" });
+  });
+
+  it("does not blow rounding noise up to full width: the scale never drops under MIN_SCALE", () => {
+    const chart = divergingBars([6.86, 6.74], 6.8);
+    expect(chart.scale).toBe(MIN_SCALE);
+    expect(Math.max(...chart.bars.map((b) => b.widthPct))).toBeLessThan(LARGEST_BAR_PCT);
+  });
+
+  it("keeps every bar inside the chart, whatever the input", () => {
+    const { bars } = divergingBars([10, 0, Number.NaN, 42], 5);
+    for (const bar of bars) {
+      expect(bar.leftPct).toBeGreaterThanOrEqual(0);
+      expect(bar.leftPct + bar.widthPct).toBeLessThanOrEqual(100);
+    }
   });
 });

@@ -69,11 +69,36 @@ async function bootDna(page: Page, dislikes: unknown = DISLIKES) {
   });
   await mockJson(page, "**/api/taste", DNA);
   await mockJson(page, "**/api/taste/dislikes", dislikes);
+  await mockJson(page, "**/api/taste/narrative", {
+    text: null, isEdited: false, version: null, ratingsCount: 0, generatedAt: null,
+    isStale: false, regenerating: false, writerAvailable: false,
+  });
   await page.goto("/dna");
   await expect(page.getByText("Your taste DNA")).toBeVisible();
 }
 
+/** The list is collapsed by default (P1); the tests that work with rows open it first. */
+async function openDislikes(page: Page) {
+  const toggle = page.getByTestId("dislike-toggle");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+}
+
 test.describe("taste DNA dislikes", () => {
+  test("the list starts collapsed: the count and what is pushed down show, the rows wait for a tap", async ({ page }) => {
+    await bootDna(page);
+
+    await expect(page.getByTestId("dislike-summary")).toContainText("horror, bleak");
+    const toggle = page.getByTestId("dislike-toggle");
+    await expect(toggle).toHaveText("Show all 175");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("dislike-row")).toHaveCount(0);
+
+    await toggle.click();
+    await expect(page.getByTestId("dislike-row")).toHaveCount(3);
+    await expect(toggle).toHaveText("Hide the list");
+  });
+
   test("counts the dislikes, names what is being demoted, and never conflates the two numbers", async ({ page }) => {
     await bootDna(page);
 
@@ -89,6 +114,7 @@ test.describe("taste DNA dislikes", () => {
 
   test("each row says the reason it was given, and admits when none was", async ({ page }) => {
     await bootDna(page);
+    await openDislikes(page);
 
     const rows = page.getByTestId("dislike-row");
     await expect(rows).toHaveCount(3);
@@ -99,6 +125,7 @@ test.describe("taste DNA dislikes", () => {
 
   test("undo goes to the existing revoke endpoint, with the right verb per reaction kind", async ({ page }) => {
     await bootDna(page);
+    await openDislikes(page);
 
     const calls: { method: string; url: string }[] = [];
     await page.route(/\/api\/titles\/.*\/reactions\/(not_interested|dropped)$/, (route) => {
@@ -118,6 +145,7 @@ test.describe("taste DNA dislikes", () => {
 
   test("paging asks for the next page and the panel disappears entirely when there is nothing to show", async ({ page }) => {
     await bootDna(page);
+    await openDislikes(page);
 
     const requested: string[] = [];
     await page.route(/\/api\/taste\/dislikes/, (route) => {
@@ -137,6 +165,7 @@ test.describe("taste DNA dislikes", () => {
 
   test("a failed Older page says so — page 1's rows never stand in for it — and Newer recovers", async ({ page }) => {
     await bootDna(page);
+    await openDislikes(page);
     await expect(page.getByText("Declined 1")).toBeVisible();
 
     await page.route(/\/api\/taste\/dislikes/, (route) =>
@@ -159,6 +188,7 @@ test.describe("taste DNA dislikes", () => {
 
   test("a failed undo says so and the row stays", async ({ page }) => {
     await bootDna(page);
+    await openDislikes(page);
     await page.route(/\/api\/titles\/.*\/reactions\/not_interested$/, (route) =>
       route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
     );
