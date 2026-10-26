@@ -97,6 +97,12 @@ public sealed record LensNote(
     public const int RequestCautionChars = 108;
 
     /// <summary>
+    /// The widest clause a card carries (the API's <c>lensClause</c> field). Two lines of a rail
+    /// card at phone width; a longer opening steps down the ladder below rather than overflowing.
+    /// </summary>
+    public const int ClauseChars = 120;
+
+    /// <summary>
     /// The first clause of <see cref="Lens"/> — what a rail card's two-line why and the hero's
     /// second line render — or null when the lens opens on nothing a pick card may carry.
     ///
@@ -131,7 +137,7 @@ public sealed record LensNote(
     /// No candidate that hedges (<see cref="Ports.SecondPersonVoice.SoundsHedged"/>) is taken;
     /// when the opening clause itself hedges there is nothing to show and the result is null.</para>
     /// </summary>
-    public string? FirstClause(int maxChars = 160)
+    public string? FirstClause(int maxChars = ClauseChars)
     {
         var text = Lens.Trim();
         if (text.Length == 0)
@@ -640,6 +646,37 @@ public static partial class LensClauses
     }
 
     /// <summary>The main clause on its own, as a sentence: its first letter capitalised.</summary>
+    /// <summary>
+    /// "a" or "an" for the word that follows, by its sound: "an atmospheric", "an hour-long", but
+    /// "a unique", "a one-room", "a European". Every lens template that puts an article in front
+    /// of a variable word goes through this (F-11: "A atmospheric crime piece").
+    /// </summary>
+    public static string IndefiniteArticle(string nextWord)
+    {
+        var w = nextWord.Trim().ToLowerInvariant();
+        if (w.Length == 0)
+        {
+            return "a";
+        }
+
+        if (SilentH.Any(h => w.StartsWith(h, StringComparison.Ordinal)))
+        {
+            return "an";
+        }
+
+        if (ConsonantSoundingVowels.Any(v => w.StartsWith(v, StringComparison.Ordinal)))
+        {
+            return "a";
+        }
+
+        return w[0] is 'a' or 'e' or 'i' or 'o' or 'u' ? "an" : "a";
+    }
+
+    private static readonly string[] SilentH = ["hour", "honest", "honour", "honor", "heir"];
+
+    private static readonly string[] ConsonantSoundingVowels =
+        ["uni", "use", "usu", "uti", "ure", "eu", "one", "once", "ewe"];
+
     public static string Capitalise(string clause) =>
         clause.Length == 0 ? clause : char.ToUpperInvariant(clause[0]) + clause[1..];
 

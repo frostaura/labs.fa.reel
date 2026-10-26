@@ -1141,7 +1141,7 @@ public class OpenRouterLensWriter(
         var genre = t.Genres.Count > 0 ? t.Genres[0] : "this kind of thing";
         var tone = t.Tone is { Length: > 0 } ? t.Tone : mood;
 
-        var lens = $"A {tone} {genre} piece, and it sits close to the register you keep coming back to. "
+        var lens = $"{LensClauses.Capitalise(LensClauses.IndefiniteArticle(tone))} {tone} {genre} piece, and it sits close to the register you keep coming back to. "
             + $"You get the {(t.MediaType.Equals("Show", StringComparison.OrdinalIgnoreCase) ? "series" : "film")} "
             + "on its own terms rather than a version sanded down for everyone.";
         var hook = $"The {tone} {genre} you have been circling.";
