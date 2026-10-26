@@ -3,9 +3,8 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FrostAura.Reel.Domain.Search;
 using FrostAura.Reel.Domain.Sync;
-using FrostAura.Reel.Infrastructure.Adapters;
 using FrostAura.Reel.Infrastructure.Persistence;
-using FrostAura.Reel.Infrastructure.Telemetry;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
@@ -219,6 +218,22 @@ public class ObservabilityEndpointsTests(PostgresFixture fixture, ReelApiFactory
             // Operator alerts are the Founder tier's; this caller is Free.
             Assert.Equal(0, report.GetProperty("alerts").GetArrayLength());
         }
+    }
+
+    [Fact]
+    public void Every_context_connection_carries_the_idle_in_transaction_bound()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        using var scope = api.Services.CreateScope();
+        var connectionString = scope.ServiceProvider.GetRequiredService<ReelDbContext>().Database.GetConnectionString();
+        Assert.Contains(
+            "idle_in_transaction_session_timeout=60000",
+            new Npgsql.NpgsqlConnectionStringBuilder(connectionString).Options,
+            StringComparison.Ordinal);
     }
 
     private static async Task<JsonElement> GetMetricsAsync(HttpClient client, int? hours = null)

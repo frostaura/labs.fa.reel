@@ -26,8 +26,10 @@ public static partial class DependencyInjection
         // Names a statement that stalls while it is stalled, with whatever is blocking it (F+1).
         services.TryAddSingleton(sp => new SlowCommandDiagnostics(
             sp.GetRequiredService<ILogger<SlowCommandDiagnostics>>(), connectionString));
+        // Every context connection carries the session bounds (idle-in-transaction, F+1).
+        services.TryAddSingleton(sp => DatabaseSessionSettings.From(connectionString, sp.GetService<IConfiguration>()));
         services.AddDbContext<ReelDbContext>((sp, options) => options
-            .UseNpgsql(connectionString, npgsql => npgsql.UseVector())
+            .UseNpgsql(sp.GetRequiredService<DatabaseSessionSettings>().ConnectionString, npgsql => npgsql.UseVector())
             .AddInterceptors(sp.GetRequiredService<SlowCommandDiagnostics>()));
         services.AddScoped<IReelDbContext>(sp => sp.GetRequiredService<ReelDbContext>());
 
