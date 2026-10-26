@@ -179,6 +179,7 @@ public sealed class LiveSearchExpansionService(
     /// <param name="Tier">One of <c>SearchTurnCardTier</c>; null only from a caller that predates it.</param>
     /// <param name="Satisfies">The judge's request verdict (<c>yes</c>/<c>partial</c>/<c>no</c>), or null when unjudged.</param>
     /// <param name="FitSource">Where <paramref name="LlmFit"/> came from, by name; null where there is no fit.</param>
+    /// <param name="SatisfiesEvidence">The v2 judge's evidence line for its verdict; null on v1 and where unjudged.</param>
     public readonly record struct TurnCard(
         Guid TitleId,
         long? TmdbId,
@@ -193,7 +194,8 @@ public sealed class LiveSearchExpansionService(
         bool BelowFloor = false,
         string? Tier = null,
         string? Satisfies = null,
-        string? FitSource = null);
+        string? FitSource = null,
+        string? SatisfiesEvidence = null);
 
     /// <summary>
     /// What the turn was, handed back to whoever has a place to put it.
@@ -221,6 +223,10 @@ public sealed class LiveSearchExpansionService(
     /// <param name="StageTimingsJson">The per-stage milliseconds, serialised.</param>
     /// <param name="ModelIdsJson">The models behind the turn by role, serialised.</param>
     /// <param name="ReasoningEffort">The effort the turn's model calls were made at.</param>
+    /// <param name="Act">The v2 planner's act, by name; null on a v1 turn.</param>
+    /// <param name="PlanSource">Where the v2 plan came from, by name; null on a v1 turn.</param>
+    /// <param name="TruncationCount">How many of a v2 turn's calls finished on <c>length</c>; null on v1.</param>
+    /// <param name="ConversationStateJson">The conversation's state after a v2 turn, for <c>SearchConversations.StateJson</c>.</param>
     public sealed record TurnOutcome(
         string? AssistantText,
         string? Reason,
@@ -238,7 +244,11 @@ public sealed class LiveSearchExpansionService(
         string? DegradedFlags = null,
         string? StageTimingsJson = null,
         string? ModelIdsJson = null,
-        string? ReasoningEffort = null)
+        string? ReasoningEffort = null,
+        string? Act = null,
+        string? PlanSource = null,
+        int? TruncationCount = null,
+        string? ConversationStateJson = null)
     {
         /// <summary>A turn that answered without the full pipeline — an empty query, a fallback, a filmography.</summary>
         public static TurnOutcome Answered(string? assistantText, string? reason, IReadOnlyList<TurnCard>? cards = null) =>
@@ -275,6 +285,10 @@ public sealed class LiveSearchExpansionService(
     /// <param name="Debug">Whether the founder-only diagnostics ride the terminal frame.</param>
     /// <param name="SourceTurnId">The assistant row this turn is, for the exposure key.</param>
     /// <param name="Progress">Where the turn records what it has emitted, so an abort can persist it.</param>
+    /// <param name="PriorIntent">The previous answer's reading, for what a silent follow-up inherits (v1).</param>
+    /// <param name="ConversationId">The conversation, for the v2 engine's state.</param>
+    /// <param name="AnswerNumber">This answer's number in the conversation, for its handles ("T{n}.{rank}").</param>
+    /// <param name="PersistCards">Writes cards the moment they are emitted (v2), so a turn that dies keeps what it showed.</param>
     public sealed record AskTurnInput(
         string Message,
         IReadOnlyList<ChatTurn> History,
@@ -286,7 +300,10 @@ public sealed class LiveSearchExpansionService(
         bool Debug = false,
         Guid? SourceTurnId = null,
         AskTurnProgress? Progress = null,
-        SearchIntent? PriorIntent = null);
+        SearchIntent? PriorIntent = null,
+        Guid? ConversationId = null,
+        int AnswerNumber = 1,
+        Func<IReadOnlyList<TurnCard>, Task>? PersistCards = null);
 
     /// <summary>
     /// Single-turn convenience overload (no conversation history / shown set) — a query EXPANDED

@@ -153,10 +153,14 @@ public static class SearchTurnMode
     /// </summary>
     public const string Clarify = "Clarify";
 
+    /// <summary>Ask Reel v2: an answer in words — an item question, a count, small talk — with the grid untouched.</summary>
+    public const string Answer = "Answer";
+
     /// <summary>The stored mode, or <see cref="Picks"/> for null and anything unknown.</summary>
     public static string Parse(string? stored) =>
         string.Equals(stored, NoneFound, StringComparison.Ordinal) ? NoneFound
         : string.Equals(stored, Clarify, StringComparison.Ordinal) ? Clarify
+        : string.Equals(stored, Answer, StringComparison.Ordinal) ? Answer
         : Picks;
 }
 
@@ -390,5 +394,18 @@ public class SearchTurn : IAccountScoped
     public string? ReasoningEffort { get; set; }
 
     /// <summary>When the turn reached <see cref="SearchTurnStatus.Completed"/> or <c>Failed</c>.</summary>
+    /// <summary>
+    /// Ask Reel v2's reading of the message — <c>NewRequest</c>, <c>Refine</c>, <c>CritiqueSet</c>,
+    /// <c>CritiqueItem</c>, <c>ItemQuestion</c> or <c>Chitchat</c> — by name. Null on v1 turns and user
+    /// rows; an unknown name reads as <c>NewRequest</c>.
+    /// </summary>
+    public string? Act { get; set; }
+
+    /// <summary>Where the v2 plan came from: <c>Llm</c>, <c>LlmRetry</c> or <c>CarriedForward</c> (the unknown fallback).</summary>
+    public string? PlanSource { get; set; }
+
+    /// <summary>How many of the turn's model calls finished on <c>length</c>; null on v1 turns.</summary>
+    public int? TruncationCount { get; set; }
+
     public DateTime? CompletedAt { get; set; }
 }

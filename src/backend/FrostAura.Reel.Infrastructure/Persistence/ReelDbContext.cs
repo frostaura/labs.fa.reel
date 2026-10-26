@@ -267,6 +267,8 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
         {
             e.HasIndex(c => new { c.AccountId, c.LastTurnAt });
             e.Property(c => c.Title).HasMaxLength(200);
+            // Ask Reel v2 (WS-2): the conversation's state, a cache of the turn record.
+            e.Property(c => c.StateJson).HasColumnType("jsonb");
         });
 
         modelBuilder.Entity<Domain.Search.SearchTurn>(e =>
@@ -301,6 +303,9 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(t => t.DegradedFlags).HasMaxLength(128);
             e.Property(t => t.ModelIds).HasColumnType("jsonb");
             e.Property(t => t.ReasoningEffort).HasMaxLength(32);
+            // Ask Reel v2 (WS-2): the act and where the plan came from, both enum names.
+            e.Property(t => t.Act).HasMaxLength(16);
+            e.Property(t => t.PlanSource).HasMaxLength(16);
         });
 
         modelBuilder.Entity<Domain.Search.SearchTurnCard>(e =>
@@ -328,6 +333,7 @@ public class ReelDbContext(DbContextOptions<ReelDbContext> options, IAccountCont
             e.Property(c => c.Tier).HasMaxLength(16);
             e.Property(c => c.Satisfies).HasMaxLength(16);
             e.Property(c => c.FitSource).HasMaxLength(16);
+            e.Property(c => c.SatisfiesEvidence).HasMaxLength(280);
 
             // A DATABASE-level default, not merely a CLR one. Every row written before the tray was
             // stored is a pick, and the default is what makes that true of the existing table

@@ -1938,6 +1938,12 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("LastTurnAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("StateJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<int>("StateVersion")
+                        .HasColumnType("integer");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -1961,6 +1967,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("Act")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
 
                     b.Property<Guid?>("ClientTurnId")
                         .HasColumnType("uuid");
@@ -2020,6 +2030,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("ModelIds")
                         .HasColumnType("jsonb");
 
+                    b.Property<string>("PlanSource")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
                     b.Property<string>("PromptVersion")
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
@@ -2054,6 +2068,9 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("Text")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<int?>("TruncationCount")
+                        .HasColumnType("integer");
 
                     b.HasKey("Id");
 
@@ -2116,6 +2133,10 @@ namespace FrostAura.Reel.Infrastructure.Persistence.Migrations
                     b.Property<string>("Satisfies")
                         .HasMaxLength(16)
                         .HasColumnType("character varying(16)");
+
+                    b.Property<string>("SatisfiesEvidence")
+                        .HasMaxLength(280)
+                        .HasColumnType("character varying(280)");
 
                     b.Property<double?>("Similarity")
                         .HasColumnType("double precision");
