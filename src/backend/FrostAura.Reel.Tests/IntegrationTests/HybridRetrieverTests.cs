@@ -76,6 +76,31 @@ public class HybridRetrieverTests(PostgresFixture fixture) : EmbeddedCatalogTest
     }
 
     [Fact]
+    public async Task The_facet_arm_ranks_by_the_vote_shrunk_crowd_score()
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        // Task 4 (D-12): a 10.0 on 2 votes ranks below a 7.0 on 5,000, and a widely-voted 5.0 below
+        // both — most-voted-first would have led with it.
+        var label = $"facetrank{Guid.NewGuid():N}"[..20];
+        var accountId = await SeedAccountAsync();
+        var thin = await SeedTitleAsync(t => { t.Keywords = [label]; t.TmdbVoteAverage = 10m; t.TmdbVoteCount = 2; });
+        var solid = await SeedTitleAsync(t => { t.Keywords = [label]; t.TmdbVoteAverage = 7m; t.TmdbVoteCount = 5_000; });
+        var popularButPoor = await SeedTitleAsync(t => { t.Keywords = [label]; t.TmdbVoteAverage = 5m; t.TmdbVoteCount = 9_000; });
+
+        var result = await RetrieveAsync(new RetrievalQuery(
+            accountId, new HardConstraints([new ConceptTerm(label, [], [])], [], null, null, MediaScope.Any), SoftPreferences.None, [], 10)
+        {
+            Arms = RetrievalArms.Facet,
+        });
+
+        Assert.Equal([solid, thin, popularButPoor], result.Candidates.Select(c => c.TitleId));
+    }
+
+    [Fact]
     public async Task A_mood_without_a_concept_draws_the_semantic_neighbours_from_the_eligible_pool()
     {
         if (!Fixture.Available)

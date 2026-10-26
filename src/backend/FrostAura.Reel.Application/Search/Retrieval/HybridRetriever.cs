@@ -17,8 +17,8 @@ namespace FrostAura.Reel.Application.Search.Retrieval;
 ///
 /// <list type="number">
 /// <item><b>Facet</b> — the resolved concepts (<see cref="ConceptResolver"/>) as an indexed overlap on
-/// exact vocabulary labels, whole-word name matches and genre tags (with TV stand-ins), most-voted
-/// first.</item>
+/// exact vocabulary labels, whole-word name matches and genre tags (with TV stand-ins), best
+/// vote-shrunk crowd score first.</item>
 /// <item><b>Full text</b> — <see cref="FullTextArm"/> over the name, keywords, themes and overview.</item>
 /// <item><b>Semantic</b> — kNN on the positive concept text (moods included, rejected words never),
 /// blended toward any reference titles. The embedding gets <see cref="SemanticBudget"/>; an uncached
@@ -120,7 +120,10 @@ public sealed class HybridRetriever(
         if (q.Arms.HasFlag(RetrievalArms.Facet))
         {
             clock.Restart();
-            lists["facet"] = await CrowdVotes.MostVotedFirst(conceptPool).Select(t => t.Id).Take(ArmDepth).ToListAsync(ct);
+            // Best vote-shrunk crowd score first (task 4, D-12): a 10.0 on 2 votes ranks below a 7.0
+            // on 5,000, so the facet arm's head - what the judge sees first - is the concept's
+            // best-regarded titles, not merely its most-voted or its luckiest few-vote outliers.
+            lists["facet"] = await CrowdVotes.BestShrunkFirst(conceptPool).Select(t => t.Id).Take(ArmDepth).ToListAsync(ct);
             timings["facet"] = clock.ElapsedMilliseconds;
         }
 
