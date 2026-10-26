@@ -4,6 +4,7 @@ import { useMarkNotInterestedMutation, useRateTitleMutation, useSaveForLaterMuta
 import { Popover, PopoverAnchor, PopoverContent } from "../ui/popover";
 import { DEFAULT_DISLIKE_REASON, DISLIKE_REASONS } from "../../lib/dislikeReasons";
 import { useCardUndo } from "../../lib/cardUndo";
+import { Button } from "../ui/button";
 
 interface Props {
   titleId: string;
@@ -42,7 +43,7 @@ const LONG_PRESS_MS = 450;
  * TARGET SIZE. On a phone these are the smallest real controls in the app — they measured 26 x 26
  * against WCAG 2.1 AA's 44 x 44 — and the fix cannot simply be a bigger pill, because the pill is
  * jewellery on a 163 px poster and a 44 px disc over the artwork reads as a badge, not a control.
- * So the hit area and the glyph are separated on any coarse pointer: the `<button>` is a transparent
+ * So the hit area and the glyph are separated on any coarse pointer: the button is a transparent
  * `min-h-11 min-w-11` box, the visible pill is a `<span>` centred inside it, and the icon does not
  * change size at all. The column's own gap goes to zero there because each box already carries
  * ~9 px of its own margin — three 44 px boxes stack to 132 px inside a 245 px poster with no
@@ -103,13 +104,16 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
   // The hero's row (below `lg`) is not over art, so there is nothing to reveal it against: it is
   // always visible, every box is a full 44 x 44 target, and the hover-reveal returns at `lg` with
   // the overlay.
-  const buttonClass = large
+  // The Button primitive (its focus ring) with its own padding, fill and type size cleared: the
+  // button is only the hit area, the pill inside it is what you see.
+  const bare = "h-auto gap-0 p-0 font-normal hover:bg-transparent ";
+  const buttonClass = bare + (large
     ? "pointer-events-auto inline-flex min-h-11 min-w-11 lg:[@media(pointer:fine)]:min-h-0 lg:[@media(pointer:fine)]:min-w-0 items-center justify-center " +
       "rounded-full text-fa-frost transition " +
       "lg:text-3 lg:opacity-0 lg:group-hover:opacity-100 lg:focus:opacity-100 lg:focus-visible:opacity-100 lg:[@media(pointer:coarse)]:opacity-60"
     : "pointer-events-auto inline-flex min-h-11 min-w-11 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0 items-center justify-center " +
       "rounded-full text-3 transition " +
-      "opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60"
+      "opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60");
   const pillClass = large
     ? "flex items-center justify-center rounded-full border border-fa-edge bg-fa-glass p-2.5 lg:border-transparent lg:bg-fa-ink/70 lg:p-2 backdrop-blur-sm"
     : "flex items-center justify-center rounded-full bg-fa-ink/70 p-1.5 backdrop-blur-sm";
@@ -163,8 +167,8 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
     >
       <Popover open={reasonsOpen} onOpenChange={setReasonsOpen}>
         <PopoverAnchor asChild>
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={(e) => {
               e.preventDefault();
               if (suppressClick.current) {
@@ -199,9 +203,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             data-testid="quick-not-interested"
           >
             <span className={pillClass}>
-              <EyeOff className={iconClass} />
+              <EyeOff className={iconClass} aria-hidden />
             </span>
-          </button>
+          </Button>
         </PopoverAnchor>
         <PopoverContent
           align="start"
@@ -213,24 +217,24 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           <p className="fa-overline text-3 px-2 pb-1.5">why not?</p>
           <div className="flex flex-col">
             {DISLIKE_REASONS.map((reason) => (
-              <button
+              <Button
                 key={reason.value}
-                type="button"
+                variant="ghost"
                 onClick={(e) => {
                   e.preventDefault();
                   dismiss(reason.value);
                 }}
-                className="fa-body min-h-11 rounded-md px-2 py-1.5 text-left text-fa-frost transition hover:bg-fa-frost/10 hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
+                className="h-auto min-h-11 justify-start rounded-md px-2 py-1.5 text-left font-normal text-fa-frost hover:bg-fa-frost/10 hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
                 data-testid={`quick-reason-${reason.value}`}
               >
-                {reason.label}
-              </button>
+                <span className="fa-body">{reason.label}</span>
+              </Button>
             ))}
           </div>
         </PopoverContent>
       </Popover>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
         onClick={(e) => {
           e.preventDefault();
           save();
@@ -241,13 +245,13 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
         data-testid="quick-save"
       >
         <span className={pillClass}>
-              <Bookmark className={iconClass} />
-            </span>
-      </button>
+          <Bookmark className={iconClass} aria-hidden />
+        </span>
+      </Button>
       <Popover open={rateOpen} onOpenChange={setRateOpen}>
         <PopoverAnchor asChild>
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={(e) => {
               e.preventDefault();
               setRateOpen((open) => !open);
@@ -260,9 +264,9 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
             data-testid="quick-rate"
           >
             <span className={pillClass}>
-              <Star className={iconClass} />
+              <Star className={iconClass} aria-hidden />
             </span>
-          </button>
+          </Button>
         </PopoverAnchor>
         {/* Two rows of five, not one row of ten: at 44 px a target (coarse pointers) a single row
             is 476 px wide and ran off a phone. Radix keeps it inside the viewport with 12 px to
@@ -277,19 +281,18 @@ export default function CardQuickActions({ titleId, mediaType, tmdbId, name, siz
           <p className="fa-overline text-3 px-0.5 pb-1.5">your score out of 10</p>
           <div className="grid grid-cols-5 gap-1">
             {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
-              <button
+              <Button
                 key={value}
-                type="button"
                 onClick={(e) => {
                   e.preventDefault();
                   rate(value);
                 }}
                 aria-label={`${value} out of 10`}
-                className="h-11 w-11 [@media(pointer:fine)]:h-8 [@media(pointer:fine)]:w-9 rounded-md border border-fa-edge bg-fa-glass fa-caption tabular-nums text-fa-frost transition hover:border-fa-frost/40 hover:text-fa-frost-bright"
+                className="h-11 w-11 p-0 font-normal [@media(pointer:fine)]:h-8 [@media(pointer:fine)]:w-9 rounded-md bg-fa-glass tabular-nums text-fa-frost hover:border-fa-frost/40 hover:bg-fa-glass hover:text-fa-frost-bright"
                 data-testid={`quick-rate-${value}`}
               >
-                {value}
-              </button>
+                <span className="fa-caption">{value}</span>
+              </Button>
             ))}
           </div>
         </PopoverContent>

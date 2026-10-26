@@ -36,6 +36,7 @@ import { MD_BREAKPOINT_PX, useMinWidth } from "../lib/useMinWidth";
 import type { TonightMood } from "../lib/tonightMood";
 import { pipelineStageCopy } from "../lib/syncCopy";
 import { heroContainerClass, heroShimmerClass, type HeroRows } from "../lib/heroLayout";
+import { Button } from "../components/ui/button";
 
 /** The hybrid home: a tonight's-picks hero answering one question, then an endless reel below. */
 export default function Home() {
@@ -196,16 +197,15 @@ export default function Home() {
               />
             )}
             {hasFresherPicks && (
-              <button
-                type="button"
+              <Button
                 onClick={() => setAdoptedKey(latestKey)}
                 data-testid="adopt-fresh-picks"
                 title="Load the newly generated picks — this resets the rows below"
-                className="fa-overline inline-flex min-h-11 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-fa-frost/40 bg-fa-glass px-2.5 py-2 text-fa-frost transition hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
+                className="h-auto min-h-11 shrink-0 gap-1.5 rounded-lg border-fa-frost/40 bg-fa-glass px-2.5 py-2 font-normal text-fa-frost hover:border-fa-frost/60 hover:bg-fa-glass-strong hover:text-fa-frost-bright [@media(pointer:fine)]:min-h-0"
               >
-                <Sparkles className="h-3.5 w-3.5" />
-                New picks ready
-              </button>
+                <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                <span className="fa-overline">New picks ready</span>
+              </Button>
             )}
             {/* Refresh sits right after the conditions on a phone so it is never scrolled out of
                 reach, and last from `md`, at the end of the control strip where it has always been.

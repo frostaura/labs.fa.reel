@@ -7,6 +7,7 @@ import { logoUrl } from "../../lib/tmdbImages";
 import { formatRuntime } from "../../lib/format";
 import { listSyncLabel, predictionWithBand, savedAgo } from "../../lib/savedQueue";
 import { cardProviders } from "../../lib/whereToWatch";
+import { Button } from "../ui/button";
 
 interface Props {
   item: SavedQueueItem;
@@ -109,18 +110,18 @@ export default function SavedQueueCard({ item, expectedAbsoluteError, onUnsave }
       {/* One-tap unsave, the feed cards' quick-action pattern: a 44 px target on any coarse pointer
           around a poster-sized pill, a sibling above the card's link overlay. */}
       {item.tmdbId != null && (
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           onClick={() => onUnsave(item)}
           aria-label={`Remove ${item.name} from Saved`}
           title="Remove from Saved"
-          className="absolute left-0 top-0 z-10 inline-flex min-h-11 min-w-11 items-center justify-center text-3 transition hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0"
+          className="absolute left-0 top-0 z-10 h-auto min-h-11 min-w-11 rounded-full p-0 text-3 hover:bg-transparent hover:text-fa-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-60 md:[@media(pointer:fine)]:left-1.5 md:[@media(pointer:fine)]:top-1.5 md:[@media(pointer:fine)]:min-h-0 md:[@media(pointer:fine)]:min-w-0"
           data-testid="saved-unsave"
         >
           <span className="flex items-center justify-center rounded-full bg-fa-ink/70 p-1.5 backdrop-blur-sm">
-            <BookmarkX className="h-3.5 w-3.5" />
+            <BookmarkX className="h-3.5 w-3.5" aria-hidden />
           </span>
-        </button>
+        </Button>
       )}
     </div>
   );

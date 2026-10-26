@@ -1,4 +1,5 @@
 import { RotateCw } from "lucide-react";
+import { Button } from "../ui/button";
 
 interface Props {
   onRetry: () => void;
@@ -19,10 +20,10 @@ export default function RailRetryTile({ onRetry, shape = "poster" }: Props) {
       data-testid="rail-retry"
     >
       <p className="fa-body text-fa-frost">Couldn&apos;t load</p>
-      <button type="button" onClick={onRetry} className="fa-button min-h-11" data-testid="rail-retry-button">
-        <RotateCw className="h-4 w-4" />
+      <Button onClick={onRetry} className="min-h-11" data-testid="rail-retry-button">
+        <RotateCw className="h-4 w-4" aria-hidden />
         Retry
-      </button>
+      </Button>
     </div>
   );
 

@@ -38,6 +38,7 @@ import {
 } from "../components/ui/dropdown-menu";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Dialog, DialogClose, DialogOverlay, DialogPortal, DialogTitle } from "../components/ui/dialog";
+import { Button } from "../components/ui/button";
 
 /** A labelled row of person chips (Director / Writers / Cast) — each a clickable, rateable avatar. */
 function CreditRow({ label, people }: { label: string; people: CreditPerson[] }) {
@@ -202,20 +203,19 @@ export default function TitleDetail() {
                   )}
                   <div className="flex items-center justify-center gap-2">
                     {failure === "error" && (
-                      <button
-                        type="button"
+                      <Button
                         onClick={() => void refetch()}
                         disabled={isFetching}
-                        className="fa-button min-h-11"
+                        className="min-h-11"
                         data-testid="title-retry"
                       >
-                        <RotateCw className="h-4 w-4" />
+                        <RotateCw className="h-4 w-4" aria-hidden />
                         {isFetching ? "Retrying…" : "Retry"}
-                      </button>
+                      </Button>
                     )}
-                    <button type="button" onClick={close} className="fa-button-ghost min-h-11" data-testid="title-failure-close">
+                    <Button variant="ghost" onClick={close} className="min-h-11" data-testid="title-failure-close">
                       Close
-                    </button>
+                    </Button>
                   </div>
                 </div>
               </>
@@ -306,35 +306,38 @@ export default function TitleDetail() {
                     {/* The trailer is an action like the rest, here with them — not a disc over the
                         art, where on a phone it sat on the title it was meant to sell (O-13). */}
                     {trailerKey && !trailerOpen && (
-                      <button
-                        type="button"
+                      <Button
                         onClick={() => setTrailerOpen(true)}
-                        className="fa-button min-h-11"
+                        className="min-h-11"
                         data-testid="play-trailer"
                       >
-                        <Play className="h-4 w-4" />
+                        <Play className="h-4 w-4" aria-hidden />
                         Trailer
-                      </button>
+                      </Button>
                     )}
                     <Popover open={ratePickerOpen} onOpenChange={setRatePickerOpen}>
                       <PopoverTrigger asChild>
-                        <button className={`${title.userState.userRating ? "fa-button-primary" : "fa-button"} min-h-11 [@media(pointer:fine)]:min-h-0`}>
-                          <Eye className="h-4 w-4" />
+                        <Button
+                          variant={title.userState.userRating ? "primary" : "default"}
+                          className="min-h-11 [@media(pointer:fine)]:min-h-0"
+                        >
+                          <Eye className="h-4 w-4" aria-hidden />
                           {title.userState.userRating ? `Seen it — you rated ${title.userState.userRating}` : "Seen it + rate"}
-                        </button>
+                        </Button>
                       </PopoverTrigger>
                       <PopoverContent align="start" className="w-auto">
                         <p className="fa-overline text-3 mb-2">one tap — seen &amp; rated</p>
                         {/* Two rows of five: ten 44 px targets in one row are wider than a phone. */}
                         <div className="grid grid-cols-5 gap-1">
                           {Array.from({ length: 10 }, (_, i) => i + 1).map((value) => (
-                            <button
+                            <Button
                               key={value}
                               onClick={() => {
                                 rate({ ...args, titleId: title.titleId, rating: value });
                                 setRatePickerOpen(false);
                               }}
-                              className={`h-11 w-11 [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9 rounded-md border text-sm tabular-nums transition ${
+                              aria-pressed={title.userState.userRating === value}
+                              className={`h-11 w-11 p-0 font-normal [@media(pointer:fine)]:h-9 [@media(pointer:fine)]:w-9 rounded-md tabular-nums ${
                                 title.userState.userRating === value
                                   ? "border-fa-frost bg-fa-frost/25 text-fa-frost-bright"
                                   : "border-fa-edge bg-fa-glass text-fa-frost hover:border-fa-frost/50 hover:bg-fa-frost/15"
@@ -342,19 +345,20 @@ export default function TitleDetail() {
                               data-testid={`rate-${value}`}
                             >
                               {value}
-                            </button>
+                            </Button>
                           ))}
                           {title.userState.userRating != null && (
-                            <button
+                            <Button
+                              variant="ghost"
                               onClick={() => {
                                 unrate(args);
                                 setRatePickerOpen(false);
                               }}
-                              className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-3"
+                              className="min-h-11 [@media(pointer:fine)]:min-h-0 col-span-5 text-3"
                               data-testid="clear-rating"
                             >
                               Clear rating
-                            </button>
+                            </Button>
                           )}
                         </div>
                         <p className="fa-caption text-3 mt-2">
@@ -365,29 +369,30 @@ export default function TitleDetail() {
                       </PopoverContent>
                     </Popover>
 
-                    <button
+                    <Button
+                      variant={title.userState.savedForLater ? "primary" : "default"}
                       onClick={() =>
                         title.userState.savedForLater
                           ? unsave({ ...args, titleId: title.titleId })
                           : save({ ...args, titleId: title.titleId })
                       }
-                      className={`${title.userState.savedForLater ? "fa-button-primary" : "fa-button"} min-h-11 [@media(pointer:fine)]:min-h-0`}
+                      className="min-h-11 [@media(pointer:fine)]:min-h-0"
                       data-testid="save-button"
                     >
-                      {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                      {title.userState.savedForLater ? <BookmarkCheck className="h-4 w-4" aria-hidden /> : <Bookmark className="h-4 w-4" aria-hidden />}
                       {title.userState.savedForLater ? "Saved — on your Up Next" : "Save for later"}
-                    </button>
+                    </Button>
 
                     {title.userState.notInterested ? (
-                      <button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="fa-button min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-danger/40 text-fa-danger">
-                        <Undo2 className="h-4 w-4" /> Not interested — undo
-                      </button>
+                      <Button onClick={() => undoNotInterested({ ...args, titleId: title.titleId })} className="min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-danger/40 text-fa-danger">
+                        <Undo2 className="h-4 w-4" aria-hidden /> Not interested — undo
+                      </Button>
                     ) : (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <button className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="not-interested">
-                            <EyeOff className="h-4 w-4" /> Not interested
-                          </button>
+                          <Button variant="ghost" className="min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="not-interested">
+                            <EyeOff className="h-4 w-4" aria-hidden /> Not interested
+                          </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
                           {DISLIKE_REASONS.map((reason) => (
@@ -405,13 +410,13 @@ export default function TitleDetail() {
                     {/* Drop — shows only; hides from Continue Watching (manual, revocable) */}
                     {title.mediaType === "Show" && (
                       title.userState.dropped ? (
-                        <button onClick={() => undrop({ ...args, titleId: title.titleId })} className="fa-button min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-frost/40 text-fa-frost" data-testid="undrop">
-                          <Undo2 className="h-4 w-4" /> Dropped — undo
-                        </button>
+                        <Button onClick={() => undrop({ ...args, titleId: title.titleId })} className="min-h-11 [@media(pointer:fine)]:min-h-0 border-fa-frost/40 text-fa-frost" data-testid="undrop">
+                          <Undo2 className="h-4 w-4" aria-hidden /> Dropped — undo
+                        </Button>
                       ) : (
-                        <button onClick={() => markDropped({ ...args, titleId: title.titleId })} className="fa-button-ghost min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="drop-show">
-                          <X className="h-4 w-4" /> Drop show
-                        </button>
+                        <Button variant="ghost" onClick={() => markDropped({ ...args, titleId: title.titleId })} className="min-h-11 [@media(pointer:fine)]:min-h-0" data-testid="drop-show">
+                          <X className="h-4 w-4" aria-hidden /> Drop show
+                        </Button>
                       )
                     )}
                   </div>
@@ -496,17 +501,18 @@ export default function TitleDetail() {
                           }
                           return (
                             <div key={contribution.feature}>
-                              <button
-                                type="button"
+                              <Button
+                                variant="ghost"
                                 onClick={() => setExpandedFeature(expanded ? null : contribution.feature)}
                                 aria-expanded={expanded}
-                                className="flex w-full items-center gap-3 rounded-md -mx-1 px-1 hover:bg-fa-frost/5 transition-colors"
+                                className="h-auto w-full justify-start gap-3 whitespace-normal rounded-md -mx-1 px-1 py-0 font-normal text-fa-frost hover:bg-fa-frost/5 hover:text-fa-frost"
                               >
                                 {bar}
                                 <ChevronDown
                                   className={`h-3.5 w-3.5 shrink-0 text-3 transition-transform ${expanded ? "rotate-180" : ""}`}
+                                  aria-hidden
                                 />
-                              </button>
+                              </Button>
                               {expanded && (
                                 <div data-testid="contribution-details" className="ml-1 mt-1.5 mb-1 space-y-1.5">
                                   {detail.people?.length ? (
