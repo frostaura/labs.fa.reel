@@ -635,8 +635,12 @@ public class LensPipelineTests(PostgresFixture fixture)
         var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
         var nightly = new SyncJob
         {
-            Id = Guid.NewGuid(), AccountId = accountId, Kind = JobKind.PersonaliseTitles, Priority = 3,
-            EnqueuedAt = DateTime.UtcNow, CursorJson = PersonaliseTitlesJobHandler.SavedCursor,
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            Kind = JobKind.PersonaliseTitles,
+            Priority = 3,
+            EnqueuedAt = DateTime.UtcNow,
+            CursorJson = PersonaliseTitlesJobHandler.SavedCursor,
         };
         db.SyncJobs.Add(nightly);
         await db.SaveChangesAsync();

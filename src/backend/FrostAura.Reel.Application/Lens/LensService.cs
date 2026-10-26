@@ -205,11 +205,11 @@ public sealed class LensService(
         var retryAfter = DateTime.UtcNow - FailureBackoff;
         var known = atKey
             .Where(c => (c.ModelId == salt && c.Status switch
-                {
-                    LensStatus.Done => Deserialise(c) is not null,
-                    LensStatus.Failed => c.GeneratedAt > retryAfter,
-                    _ => true,
-                })
+            {
+                LensStatus.Done => Deserialise(c) is not null,
+                LensStatus.Failed => c.GeneratedAt > retryAfter,
+                _ => true,
+            })
                 || c.RejectionReason == LensRejectionReasons.UserReportedSpoiler)
             .Select(c => c.TitleId)
             .ToHashSet();
