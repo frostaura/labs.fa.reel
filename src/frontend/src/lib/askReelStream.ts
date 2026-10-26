@@ -270,12 +270,19 @@ export class AskStreamError extends Error {
   readonly status: number;
   /** The server's stable error code, or null when the body was not the house error shape. */
   readonly code: string | null;
+  /**
+   * How long the server asked the client to wait before trying again, in whole seconds — the body's
+   * `retryAfterSeconds`, else the `Retry-After` header. Null when it named no wait. Only a refusal
+   * (429 `ask_rate_*`, 409 `turn_in_progress`) carries one.
+   */
+  readonly retryAfterSeconds: number | null;
 
-  constructor(status: number, code: string | null = null, message = `ask failed: ${status}`) {
+  constructor(status: number, code: string | null = null, message = `ask failed: ${status}`, retryAfterSeconds: number | null = null) {
     super(message);
     this.name = "AskStreamError";
     this.status = status;
     this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -324,21 +331,31 @@ export interface AskReelRequest {
 }
 
 /**
- * The server's stable `code` off an error body, or null. Deliberately total: a proxy's HTML error
- * page, an empty body and a JSON object with no `code` all mean "no code", and none of them may
- * turn a refusal the client could have handled into a thrown parse error.
+ * The server's stable `code` and its requested wait off an error body, or nulls. Deliberately total:
+ * a proxy's HTML error page, an empty body and a JSON object with no `code` all mean "no code", and
+ * none of them may turn a refusal the client could have handled into a thrown parse error. The wait
+ * falls back to the `Retry-After` header, which every refusal carries even when the body is lost.
  */
-async function errorCode(res: Response): Promise<string | null> {
+async function errorDetail(res: Response): Promise<{ code: string | null; retryAfterSeconds: number | null }> {
+  let code: string | null = null;
+  let retryAfterSeconds: number | null = null;
   try {
     const body: unknown = await res.json();
-    if (typeof body === "object" && body !== null && "code" in body) {
-      const code = (body as { code: unknown }).code;
-      return typeof code === "string" && code.length > 0 ? code : null;
+    if (typeof body === "object" && body !== null) {
+      const raw = body as { code?: unknown; retryAfterSeconds?: unknown };
+      if (typeof raw.code === "string" && raw.code.length > 0) code = raw.code;
+      retryAfterSeconds = wholeSeconds(raw.retryAfterSeconds);
     }
   } catch {
     // Not the house error shape — the status is all this response can tell us.
   }
-  return null;
+  retryAfterSeconds ??= wholeSeconds(Number(res.headers?.get?.("Retry-After") ?? Number.NaN));
+  return { code, retryAfterSeconds };
+}
+
+/** A positive, finite number of seconds as a whole number, or null. */
+function wholeSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value) : null;
 }
 
 /** Streams /api/search/ask, invoking onEvent per parsed SSE frame. Resolves when the stream ends. */
@@ -364,7 +381,8 @@ export async function streamAskReel(
     res = await fetch("/api/search/ask", init);
   }
   if (!res.ok || !res.body) {
-    throw new AskStreamError(res.status, await errorCode(res));
+    const { code, retryAfterSeconds } = await errorDetail(res);
+    throw new AskStreamError(res.status, code, undefined, retryAfterSeconds);
   }
 
   const reader = res.body.getReader();
