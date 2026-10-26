@@ -320,6 +320,52 @@ public class RetrievalLatencyProbe(ITestOutputHelper output)
         output.WriteLine(Summary("typeahead local leg", elapsed));
     }
 
+    /// <summary>
+    /// Task 11's acceptance: the resolved "ninja" concept's population (eligibility ignored — this is
+    /// recall of the concept, not of what the founder may be shown) holds at least 0.9 of the 20-film
+    /// list in <c>ninja-recall-list.json</c> (pending the founder's confirmation).
+    /// </summary>
+    [Fact]
+    public async Task Ninja_recall_on_the_twenty_film_list()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var list = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(SourceDirectory(), "ninja-recall-list.json")));
+        var films = list.RootElement.GetProperty("films").EnumerateArray()
+            .Select(f => (TmdbId: f.GetProperty("tmdbId").GetInt64(), Name: f.GetProperty("name").GetString()!))
+            .ToList();
+
+        await using var db = Context();
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var resolver = new ConceptResolver(
+            new KeywordVocabulary(db, cache),
+            new ConceptEmbeddings(new UnavailableEmbeddings(), cache, NullLogger<ConceptEmbeddings>.Instance),
+            db,
+            NullLogger<ConceptResolver>.Instance);
+        var concept = await resolver.ResolveAsync(new ConceptTerm("ninja movies", [], []), default);
+        var hard = new HardConstraints([concept], [], null, null, MediaScope.Movies);
+        var tmdbIds = films.Select(f => (long?)f.TmdbId).ToList();
+        var found = (await HardConstraintFilter.Apply(db.Titles, db, hard)
+                .Where(t => tmdbIds.Contains(t.TmdbId))
+                .Select(t => t.TmdbId!.Value)
+                .ToListAsync())
+            .ToHashSet();
+        foreach (var (tmdbId, name) in films.Where(f => !found.Contains(f.TmdbId)))
+        {
+            output.WriteLine($"missed: {name} ({tmdbId})");
+        }
+
+        var recall = (double)films.Count(f => found.Contains(f.TmdbId)) / films.Count;
+        output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"ninja recall {recall:F2} ({found.Count} of {films.Count})"));
+        Assert.True(recall >= 0.9, $"ninja recall {recall:F2} < 0.9");
+    }
+
+    private static string SourceDirectory([System.Runtime.CompilerServices.CallerFilePath] string path = "") =>
+        Path.GetDirectoryName(path)!;
+
     internal static string Summary(string what, IReadOnlyList<double> elapsed)
     {
         var sorted = elapsed.Order().ToList();
