@@ -5,7 +5,9 @@ import { tripwirePort, tripwireServer, unmockedApiReporter, viteProxyEnv } from 
  * Specs that need the PRODUCTION build (`*.preview.spec.ts`): hashed lazy chunks, the
  * `vite:preloadError` path, the built worker. Builds once, serves `dist/` with `vite preview`, and
  * mocks every /api call at the route layer like the dev-server specs. Service workers stay
- * blocked, as in every spec here. `vite preview` inherits the dev proxy, so it too points at the e2e
+ * blocked by default, as in every spec here; the one exception is service-worker.preview.spec.ts, which
+ * allows them to test the built worker itself and mocks on the context (which, in Chromium, also
+ * answers the worker's own fetches). `vite preview` inherits the dev proxy, so it too points at the e2e
  * tripwire and an unmocked call fails the run (see playwright.config.ts). Run with
  * `CI=1 PW_PORT=<free> npx playwright test -c playwright.preview.config.ts`.
  */

@@ -164,12 +164,19 @@ test.describe("error boundaries", () => {
 
     await expect.poll(() => reports.length).toBe(1);
     expect(reports[0]).toMatchObject({ origin: "caught", path: "/saved" });
+    // What WS-6's sink (POST /api/client-errors) accepts as one recorded report rather than
+    // refusing as invalid: a name, a message, an origin it knows and a path, not a URL.
+    expect(reports[0].name).toEqual(expect.stringMatching(/\S/));
+    expect(typeof reports[0].message).toBe("string");
+    expect(String(reports[0].path).startsWith("/")).toBe(true);
     expect(JSON.stringify(reports[0])).not.toContain("private");
 
     // Navigating away recovers without a reload.
     await mockJson(page, "**/api/saved", { ...SAVED_A, items: [] });
     await page.getByRole("link", { name: "Reel home" }).click();
     await expect(page.getByTestId("route-error-boundary")).toHaveCount(0);
+    // Still one: the throw (and React's retry of the render) is reported once, not per attempt.
+    expect(reports).toHaveLength(1);
   });
 
   test("a lazy chunk that fails to load after a deploy reloads once and recovers (I-3)", async ({ page }) => {
