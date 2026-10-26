@@ -109,10 +109,11 @@ public sealed class TurnComposer : ITurnComposer
         }
         else
         {
-            var what = c.Topic is { Length: > 0 } topic ? $"{topic} {Noun(c.Media, total)}" : Noun(c.Media, total);
+            // The noun agrees with the number in front of it: "1 heist movie checked …", never "1 heist movies".
+            string What(int count) => c.Topic is { Length: > 0 } topic ? $"{topic} {Noun(c.Media, count)}" : Noun(c.Media, count);
             sentences.Add(c.UnjudgedPicks > 0
-                ? Inv($"{c.Picks} {what} checked against your request, and {c.UnjudgedPicks} more I couldn't check.")
-                : Inv($"{total} {what} that fit what you asked."));
+                ? Inv($"{c.Picks} {What(c.Picks)} checked against your request, and {c.UnjudgedPicks} more I couldn't check.")
+                : Inv($"{total} {What(total)} that fit what you asked."));
         }
 
         if (c.NearMissNames.Count > 0)

@@ -13,6 +13,7 @@ using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Search;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using TurnCard = FrostAura.Reel.Application.Search.LiveSearchExpansionService.TurnCard;
@@ -52,8 +53,17 @@ public sealed class AskReelEngine(
     IConceptResolver resolver,
     FilterCostMeter costMeter,
     IServiceScopeFactory scopes,
+    IMemoryCache cache,
     ILogger<AskReelEngine> logger)
 {
+    /// <summary>
+    /// How long one account's persona is reused across turns. Building it reads the whole taste state
+    /// (0.4–1.8 s measured on the founder snapshot, all of it ahead of the plan call on the critical
+    /// path); it steers the planner's reading and the judge's fit, never eligibility, so a rating made
+    /// mid-conversation reaching it ten minutes late changes no card's right to be shown.
+    /// </summary>
+    public static readonly TimeSpan PersonaTtl = TimeSpan.FromMinutes(10);
+
     /// <summary>How many candidates the executor asks retrieval for.</summary>
     public const int RetrievalWant = 40;
 
@@ -212,8 +222,7 @@ public sealed class AskReelEngine(
 
         var accountId = turn.AccountId;
         var contextClock = Stopwatch.StartNew();
-        var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
-        var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
+        var persona = await PersonaAsync(accountId, ct);
         turn.Timings.Mark(AskStageTimings.PlanContext, contextClock.Elapsed.TotalMilliseconds);
         var tasteSummary = persona.Declined is { Length: > 0 } declined ? $"{persona.Taste}. {declined}" : persona.Taste;
         turn.Persona = persona.Taste.Length <= 300 ? persona.Taste : persona.Taste[..300];
@@ -1401,10 +1410,23 @@ public sealed class AskReelEngine(
 
     private async Task<string> PersonaLineAsync(Guid accountId, CancellationToken ct)
     {
+        var line = (await PersonaAsync(accountId, ct)).Taste;
+        return line.Length <= 300 ? line : line[..300];
+    }
+
+    /// <summary>The account's persona, built once per <see cref="PersonaTtl"/> (see there for why that is safe).</summary>
+    private async Task<Domain.Lens.LensPersona> PersonaAsync(Guid accountId, CancellationToken ct)
+    {
+        var key = string.Create(CultureInfo.InvariantCulture, $"askreel:persona:{accountId:N}");
+        if (cache.TryGetValue<Domain.Lens.LensPersona>(key, out var hit) && hit is not null)
+        {
+            return hit;
+        }
+
         var taste = await featureBuilder.BuildTasteStateAsync(accountId, DateTime.UtcNow, ct);
         var persona = await personalisation.PersonaForAsync(accountId, taste, ct);
-        var line = persona.Taste;
-        return line.Length <= 300 ? line : line[..300];
+        cache.Set(key, persona, PersonaTtl);
+        return persona;
     }
 
     /// <summary>The request the judge rules on: the message, in its conversation's requirements.</summary>

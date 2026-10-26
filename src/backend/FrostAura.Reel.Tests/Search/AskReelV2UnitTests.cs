@@ -205,6 +205,32 @@ public class AskReelV2UnitTests
         Assert.Equal("6 picks for you · 2 held back by your 6.0 bar — shown below · 1 close but not quite — tucked away below", reply.Reason);
     }
 
+    /// <summary>
+    /// The live "heist movies" turn said "1 heist movies checked against your request": the noun took the
+    /// total's number. A failed batch with one judged pick, and the bar holding back unchecked cards
+    /// too, which are counted as unchecked and never said to fit (XM-06).
+    /// </summary>
+    [Fact]
+    public void Picks_copy_agrees_in_number_and_never_says_an_unchecked_card_fits()
+    {
+        var reply = new TurnComposer().Compose(Context(FinalMode.Picks) with
+        {
+            Topic = "heist",
+            Picks = 1,
+            UnjudgedPicks = 3,
+            UnderBar = 7,
+            HeldUnchecked = 3,
+            JudgeFailed = true,
+        });
+
+        Assert.Equal(
+            "1 heist movie checked against your request, and 3 more I couldn't check. 4 more fit but sit under your 6.0 bar.",
+            reply.Reply);
+        Assert.Equal(
+            "4 picks for you · 3 more not checked against what you asked · 7 held back by your 6.0 bar, 3 of them not checked against what you asked — shown below",
+            reply.Reason);
+    }
+
     [Fact]
     public void A_carried_forward_turn_leads_with_the_section_4_10_sentence()
     {

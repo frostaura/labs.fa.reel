@@ -563,7 +563,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
             new ExposureLog(db, NullLogger<ExposureLog>.Instance), features, new PersonalisationContext(db, new DislikeSignal(db, cache)),
             new TurnComposer(), new PassThroughResolver(), new FilterCostMeter(db, eligibility, scoped, cache),
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
-            NullLogger<AskReelEngine>.Instance);
+            cache, NullLogger<AskReelEngine>.Instance);
 
         var events = new List<(string, JsonElement)>();
         LiveSearchExpansionService.Emit emit = (name, payload) =>
