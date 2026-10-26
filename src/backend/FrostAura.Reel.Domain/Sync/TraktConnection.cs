@@ -43,4 +43,15 @@ public class TraktConnection : IAccountScoped
     public long? ManagedListTraktId { get; set; }
 
     public string? ManagedListSlug { get; set; }
+
+    /// <summary>
+    /// The user's Trakt hidden and dropped items (sections progress_watched, recommendations and
+    /// dropped), as last read: a JSON array of {section, type, traktId, tmdbId, titleId, hiddenAt}.
+    /// Recorded, NOT applied — FD-17's default. Nothing reads it as an exclusion; if the founder
+    /// widens the footprint to count them, that reader is the change. Null until first read.
+    /// </summary>
+    public string? HiddenItemsJson { get; set; }
+
+    /// <summary>When <see cref="HiddenItemsJson"/> was last read from Trakt.</summary>
+    public DateTime? HiddenItemsSyncedAt { get; set; }
 }

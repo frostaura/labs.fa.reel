@@ -45,6 +45,9 @@ public class DeltaSyncJobHandler(
     /// <inheritdoc cref="PassiveWatchTarget"/>
     private const double PassiveWatchWeight = 0.2;
 
+    /// <summary>Progress calls a quiet delta may spend on the next-episode air-date back-fill.</summary>
+    internal const int NextEpisodeBackfillPerDelta = 5;
+
     public JobKind Kind => JobKind.DeltaSync;
 
     private record Cursor(bool Force);
@@ -176,6 +179,15 @@ public class DeltaSyncJobHandler(
                     done,
                     total));
         }
+        else if (!force)
+        {
+            // The next-episode air-date back-fill (N+5), riding the poll rather than a one-off job:
+            // a handful of progress calls per delta for rows that know their next episode but not
+            // when it aired, and none at all once that list is empty. Idempotent by construction —
+            // a filled row leaves the list — and rate-gated on the Backfill lane like every other
+            // progress call.
+            await ingestor.EnrichNextEpisodesAsync(accountId, token, budget: NextEpisodeBackfillPerDelta, ct, backfillOnly: true);
+        }
 
         IReadOnlyList<TraktLibraryIngestor.IngestedRating> ratings = [];
         var ratingsAdded = 0;
@@ -192,6 +204,21 @@ public class DeltaSyncJobHandler(
                 string.Create(CultureInfo.InvariantCulture, $"Ratings · {result.Count:N0}"),
                 result.Count,
                 result.Count);
+        }
+
+        // The Trakt watchlist into Saved (N-5), after ratings so a title rated in this same sync is
+        // already consumed and is not saved. Read-only towards Trakt; see WatchlistIntake.
+        var watchlistSaved = 0;
+        if (changes.Watchlist)
+        {
+            await ReportAsync(95, "Reading your Trakt watchlist…");
+            watchlistSaved = (await ingestor.IngestWatchlistAsync(accountId, token, RatePriority.DeltaPoll, ct)).Saved;
+        }
+
+        // Hidden and dropped items are recorded, not applied (FD-17).
+        if (changes.Hidden)
+        {
+            await ingestor.IngestHiddenAsync(connection, token, RatePriority.Backfill, ct);
         }
 
         // The cursor BEFORE this sync moved it — everything the passive-watch observe below is
@@ -262,7 +289,8 @@ public class DeltaSyncJobHandler(
         // New library data landed → regenerate the feed now, reusing the Active model (the seconds-long
         // serving pass, not a retrain), so fresh, still-eligible picks lazy-load in as the sync arrives
         // instead of waiting for the nightly build. Coalesced + committed in this job's transaction.
-        if (changes.Any)
+        // A watchlist entry that became a save is an exclusion the page must drop, so it rebuilds too.
+        if (changes.Any || watchlistSaved > 0)
         {
             await feedRefresh.RequestRebuildAsync(accountId, force ? "reconcile" : "delta-sync", ct);
         }
@@ -305,7 +333,12 @@ public class DeltaSyncJobHandler(
             accountId, changes.Movies, changes.Shows, changes.Ratings, force);
     }
 
-    public record ChangedCategories(bool Movies, bool Shows, bool Ratings)
+    /// <summary>
+    /// Which categories moved. <see cref="Any"/> is the library (watches and ratings) only: a moved
+    /// watchlist rebuilds the page only when it actually produced a save, and hidden items are
+    /// recorded without being applied, so neither alone is a reason to rebuild.
+    /// </summary>
+    public record ChangedCategories(bool Movies, bool Shows, bool Ratings, bool Watchlist = false, bool Hidden = false)
     {
         public bool Any => Movies || Shows || Ratings;
     }
@@ -315,7 +348,7 @@ public class DeltaSyncJobHandler(
     {
         if (force || previousJson is null)
         {
-            return new ChangedCategories(true, true, true);
+            return new ChangedCategories(true, true, true, Watchlist: true, Hidden: true);
         }
 
         using var previous = JsonDocument.Parse(previousJson);
@@ -333,7 +366,14 @@ public class DeltaSyncJobHandler(
         var ratings = Changed("movies", "rated_at") || Changed("shows", "rated_at")
             || Changed("seasons", "rated_at") || Changed("episodes", "rated_at");
 
-        return new ChangedCategories(movies, shows, ratings);
+        // The watchlist moves on any add or remove, Reel's own write-backs included — the ingest
+        // tells those apart, the gate only decides whether to look.
+        var watchlist = Changed("watchlist", "updated_at")
+            || Changed("movies", "watchlisted_at") || Changed("shows", "watchlisted_at");
+        var hidden = Changed("movies", "hidden_at") || Changed("shows", "hidden_at")
+            || Changed("seasons", "hidden_at") || Changed("shows", "dropped_at");
+
+        return new ChangedCategories(movies, shows, ratings, watchlist, hidden);
     }
 
     private static string? GetTimestamp(JsonElement root, string category, string field) =>

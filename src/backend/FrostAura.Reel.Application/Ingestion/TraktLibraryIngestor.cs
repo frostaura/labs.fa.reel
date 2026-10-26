@@ -1,11 +1,15 @@
+using System.Text.Json;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Application.Pipeline;
+using FrostAura.Reel.Application.Saved;
+using FrostAura.Reel.Application.Sync;
 using FrostAura.Reel.Domain.Catalog;
 using FrostAura.Reel.Domain.Library;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Trakt;
+using FrostAura.Reel.Domain.Sync;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -270,16 +274,66 @@ public class TraktLibraryIngestor(
     }
 
     /// <summary>
-    /// Next-episode enrichment for the most-resumable shows (budget-capped, best-effort).
+    /// How long a progress row that the back-fill already looked at waits before it is asked about
+    /// again. A show whose next episode Trakt has no air date for would otherwise cost a call on
+    /// every delta poll for ever.
+    /// </summary>
+    public static readonly TimeSpan NextEpisodeBackfillRetry = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// Progress rows that know their next episode but not when it aired — the back-fill's work list
+    /// (N+5: 123 of 123 rows had no air date because the progress call never asked for one).
+    /// </summary>
+    public static IQueryable<ShowWatchProgress> MissingNextEpisodeAirDate(IReelDbContext db, Guid accountId) =>
+        db.ShowWatchProgresses.Where(p => p.AccountId == accountId
+            && p.NextEpisodeSeason != null
+            && p.NextEpisodeAiredAt == null);
+
+    /// <summary>
+    /// Writes what Trakt's progress call said about the next episode onto <paramref name="row"/>.
+    /// A response with no next episode means the user is caught up on everything aired, so the old
+    /// next episode is cleared rather than left pointing at one they have since watched. A missing
+    /// response (404) changes nothing. <c>first_aired</c> is stored as UTC.
+    /// </summary>
+    public static void ApplyNextEpisode(ShowWatchProgress row, TraktShowProgress? progress, DateTime now)
+    {
+        if (progress is null)
+        {
+            return;
+        }
+
+        var next = progress.NextEpisode;
+        row.NextEpisodeSeason = next?.Season;
+        row.NextEpisodeNumber = next?.Number;
+        row.NextEpisodeAiredAt = next?.FirstAired is { } aired
+            ? DateTime.SpecifyKind(aired.Kind == DateTimeKind.Local ? aired.ToUniversalTime() : aired, DateTimeKind.Utc)
+            : null;
+        row.UpdatedAt = now;
+    }
+
+    /// <summary>
+    /// Next-episode enrichment for the most-resumable shows (budget-capped, best-effort). Rows that
+    /// know their next episode but not its air date go first, so the back-fill rides every run.
+    /// With <paramref name="backfillOnly"/> it touches ONLY those rows, and only ones not looked at
+    /// inside <see cref="NextEpisodeBackfillRetry"/> — the cheap path a delta poll takes when no show
+    /// moved, which costs no call at all once the back-fill has drained.
     /// <paramref name="onProgress"/> receives (done, total) after each show so a caller can surface
     /// a live x / y — this is the one ingest phase with genuine per-item granularity.
     /// </summary>
     public async Task EnrichNextEpisodesAsync(
-        Guid accountId, string token, int budget, CancellationToken ct, Func<int, int, Task>? onProgress = null)
+        Guid accountId, string token, int budget, CancellationToken ct, Func<int, int, Task>? onProgress = null,
+        bool backfillOnly = false)
     {
-        var candidates = await db.ShowWatchProgresses
-            .Where(p => p.AccountId == accountId)
-            .OrderByDescending(p => p.ResumeLikelihood)
+        var now = DateTime.UtcNow;
+        var retryBefore = now - NextEpisodeBackfillRetry;
+        var rows = backfillOnly
+            ? MissingNextEpisodeAirDate(db, accountId).Where(p => p.UpdatedAt < retryBefore)
+            : db.ShowWatchProgresses.Where(p => p.AccountId == accountId);
+
+        var candidates = await rows
+            .OrderByDescending(p => p.NextEpisodeSeason != null && p.NextEpisodeAiredAt == null)
+            .ThenByDescending(p => p.ResumeLikelihood)
+            .ThenBy(p => p.Id)
             .Take(budget)
             .Join(db.Titles.Where(t => t.TraktId != null), p => p.TitleId, t => t.Id, (p, t) => new { Progress = p, TraktId = t.TraktId!.Value })
             .ToListAsync(ct);
@@ -290,11 +344,7 @@ public class TraktLibraryIngestor(
             try
             {
                 var progress = await trakt.GetShowProgressAsync(token, candidate.TraktId, RatePriority.Backfill, ct);
-                if (progress?.NextEpisode is { } next)
-                {
-                    candidate.Progress.NextEpisodeSeason = next.Season;
-                    candidate.Progress.NextEpisodeNumber = next.Number;
-                }
+                ApplyNextEpisode(candidate.Progress, progress, now);
             }
             catch (HttpRequestException ex)
             {
@@ -306,6 +356,229 @@ public class TraktLibraryIngestor(
             {
                 await onProgress(done, candidates.Count);
             }
+        }
+    }
+
+    /// <summary>What a watchlist ingest did: entries read, and how many became saves.</summary>
+    public record WatchlistIngestResult(int Count, int Saved, int AlreadySaved, int ReelsOwnWrites, int Consumed, int Declined);
+
+    /// <summary>
+    /// Puts the Trakt watchlist into Saved (N-5), by the rules in <see cref="WatchlistIntake"/>: a new
+    /// save dated when the entry was listed, for every movie or show that is not already saved, not
+    /// Reel's own echo, not consumed since, and not turned down in Reel. Writes nothing to Trakt.
+    /// The caller saves.
+    /// </summary>
+    public async Task<WatchlistIngestResult> IngestWatchlistAsync(Guid accountId, string token, RatePriority priority, CancellationToken ct)
+    {
+        var items = (await trakt.GetWatchlistAsync(token, priority, ct))
+            .Where(i => i.Movie is not null || i.Show is not null)
+            .ToList();
+
+        var movieMap = await LoadTitleMapAsync(MediaType.Movie, items.Where(i => i.Movie is not null).Select(i => i.Movie!.Ids.Trakt), ct);
+        var showMap = await LoadTitleMapAsync(MediaType.Show, items.Where(i => i.Show is not null).Select(i => i.Show!.Ids.Trakt), ct);
+        var movieMapByTmdb = await LoadTitleMapByTmdbAsync(MediaType.Movie, items.Where(i => i.Movie is not null).Select(i => i.Movie!.Ids.Tmdb), ct);
+        var showMapByTmdb = await LoadTitleMapByTmdbAsync(MediaType.Show, items.Where(i => i.Show is not null).Select(i => i.Show!.Ids.Tmdb), ct);
+
+        var now = DateTime.UtcNow;
+        var listed = new List<(Title Title, DateTime ListedAt)>(items.Count);
+        foreach (var item in items)
+        {
+            Title title;
+            if (item.Movie is not null)
+            {
+                title = ResolveOrAddTitle(movieMap, movieMapByTmdb, MediaType.Movie, item.Movie.Ids.Trakt, item.Movie.Ids.Tmdb, now);
+                IngestMapper.ApplyMovie(title, item.Movie);
+            }
+            else
+            {
+                title = ResolveOrAddTitle(showMap, showMapByTmdb, MediaType.Show, item.Show!.Ids.Trakt, item.Show.Ids.Tmdb, now);
+                IngestMapper.ApplyShow(title, item.Show);
+            }
+
+            listed.Add((title, ToUtc(item.ListedAt)));
+        }
+
+        // One read per fact for the whole watchlist, not per entry.
+        var titleIds = listed.Select(l => l.Title.Id).Distinct().ToList();
+        var reactions = await db.UserTitleReactions
+            .Where(r => r.AccountId == accountId && titleIds.Contains(r.TitleId))
+            .Select(r => new { r.TitleId, r.Kind, r.RevokedAt })
+            .ToListAsync(ct);
+        var watchedAt = (await db.WatchedTitles
+                .Where(w => w.AccountId == accountId && w.IsFullyWatched && titleIds.Contains(w.TitleId))
+                .Select(w => new { w.TitleId, At = w.LastWatchedAt ?? w.UpdatedAt })
+                .ToListAsync(ct))
+            .GroupBy(w => w.TitleId)
+            .ToDictionary(g => g.Key, g => g.Max(w => w.At));
+        var ratedAt = (await db.UserRatings
+                .Where(r => r.AccountId == accountId && titleIds.Contains(r.TitleId))
+                .Select(r => new { r.TitleId, r.RatedAt })
+                .ToListAsync(ct))
+            .GroupBy(r => r.TitleId)
+            .ToDictionary(g => g.Key, g => g.Max(r => r.RatedAt));
+        var inFlight = (await db.TraktOutbox
+                .Where(o => o.AccountId == accountId
+                    && (o.Kind == OutboxKind.AddToWatchlist || o.Kind == OutboxKind.RemoveFromWatchlist)
+                    && (o.Status == OutboxStatus.Pending || o.Status == OutboxStatus.Failed))
+                .Select(o => o.PayloadJson)
+                .ToListAsync(ct))
+            .Select(OutboxTitleOf)
+            .Where(id => id is not null)
+            .Select(id => id!.Value)
+            .ToHashSet();
+
+        int saved = 0, alreadySaved = 0, reelsOwn = 0, consumed = 0, declined = 0;
+        foreach (var (title, listedAt) in listed.DistinctBy(l => l.Title.Id))
+        {
+            var mine = reactions.Where(r => r.TitleId == title.Id).ToList();
+            DateTime? lastConsumed = (watchedAt.TryGetValue(title.Id, out var w), ratedAt.TryGetValue(title.Id, out var r)) switch
+            {
+                (true, true) => w > r ? w : r,
+                (true, false) => w,
+                (false, true) => r,
+                _ => null,
+            };
+            var facts = new WatchlistFacts(
+                HasLiveSave: mine.Any(x => x.Kind == ReactionKind.SaveForLater && x.RevokedAt == null),
+                HasLiveDecline: mine.Any(x => x.Kind is ReactionKind.NotInterested or ReactionKind.Dropped && x.RevokedAt == null),
+                LatestSaveRevokedAt: mine.Where(x => x.Kind == ReactionKind.SaveForLater && x.RevokedAt != null).Max(x => x.RevokedAt),
+                WatchlistWriteInFlight: inFlight.Contains(title.Id),
+                LastConsumedAt: lastConsumed);
+
+            switch (WatchlistIntake.Decide(listedAt, facts))
+            {
+                case WatchlistDecision.Save:
+                    db.UserTitleReactions.Add(new UserTitleReaction
+                    {
+                        Id = Guid.NewGuid(),
+                        AccountId = accountId,
+                        TitleId = title.Id,
+                        Kind = ReactionKind.SaveForLater,
+                        // Dated when the user listed it, so "saved 41 days ago" is true and the
+                        // time-aware consumption rule measures a later watch against the real intent.
+                        CreatedAt = listedAt,
+                    });
+                    saved++;
+                    break;
+                case WatchlistDecision.AlreadySaved:
+                    alreadySaved++;
+                    break;
+                case WatchlistDecision.ReelsOwnWrite:
+                    reelsOwn++;
+                    break;
+                case WatchlistDecision.Consumed:
+                    consumed++;
+                    break;
+                default:
+                    declined++;
+                    break;
+            }
+        }
+
+        logger.LogInformation(
+            "Ingested {Count} watchlist entries for {AccountId}: {Saved} saved, {AlreadySaved} already saved, "
+            + "{ReelsOwn} Reel's own writes, {Consumed} consumed, {Declined} turned down in Reel.",
+            items.Count, accountId, saved, alreadySaved, reelsOwn, consumed, declined);
+        return new WatchlistIngestResult(items.Count, saved, alreadySaved, reelsOwn, consumed, declined);
+    }
+
+    /// <summary>The Trakt hidden-item sections Reel records (FD-17).</summary>
+    public static readonly IReadOnlyList<string> HiddenSections = ["progress_watched", "recommendations", "dropped"];
+
+    /// <summary>One recorded hidden item, as stored in <see cref="TraktConnection.HiddenItemsJson"/>.</summary>
+    public sealed record RecordedHiddenItem(
+        string Section, string Type, long? TraktId, long? TmdbId, Guid? TitleId, DateTime HiddenAt);
+
+    /// <summary>
+    /// Records the user's Trakt hidden and dropped items on the connection (FD-17: ingested, NOT
+    /// applied — nothing reads them as an exclusion until the founder widens the footprint). Titles
+    /// already in the catalogue are resolved to their id; nothing new is added to the catalogue for
+    /// a title the user hid. A section Trakt refuses is skipped and the rest are kept. The caller
+    /// saves. Returns how many items were recorded.
+    /// </summary>
+    public async Task<int> IngestHiddenAsync(TraktConnection connection, string token, RatePriority priority, CancellationToken ct)
+    {
+        var items = new List<TraktHiddenItem>();
+        var failedSections = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var section in HiddenSections)
+        {
+            try
+            {
+                items.AddRange(await trakt.GetHiddenItemsAsync(token, section, priority, ct));
+            }
+            catch (HttpRequestException ex)
+            {
+                // One unavailable section must not cost the others, and must not erase what was
+                // recorded for it last time: its previous items are carried over below.
+                failedSections.Add(section);
+                logger.LogWarning(ex, "Trakt hidden section {Section} could not be read; recording the others.", section);
+            }
+        }
+
+        if (failedSections.Count == HiddenSections.Count)
+        {
+            return 0;
+        }
+
+        var subjects = items
+            .Select(i => (Item: i, Ids: i.Movie?.Ids ?? i.Show?.Ids, Media: i.Movie is not null ? MediaType.Movie : MediaType.Show))
+            .Where(x => x.Ids is not null)
+            .ToList();
+        var movieMap = await LoadTitleMapAsync(MediaType.Movie, subjects.Where(s => s.Media == MediaType.Movie).Select(s => s.Ids!.Trakt), ct);
+        var showMap = await LoadTitleMapAsync(MediaType.Show, subjects.Where(s => s.Media == MediaType.Show).Select(s => s.Ids!.Trakt), ct);
+
+        var recorded = subjects
+            .Select(s => new RecordedHiddenItem(
+                s.Item.Section ?? "unknown",
+                s.Item.Type,
+                s.Ids!.Trakt,
+                s.Ids.Tmdb,
+                (s.Media == MediaType.Movie ? movieMap : showMap).TryGetValue(s.Ids.Trakt, out var title) ? title.Id : null,
+                ToUtc(s.Item.HiddenAt)))
+            .Concat(PreviousHiddenItems(connection).Where(p => failedSections.Contains(p.Section)))
+            .ToList();
+
+        connection.HiddenItemsJson = JsonSerializer.Serialize(recorded);
+        connection.HiddenItemsSyncedAt = DateTime.UtcNow;
+        logger.LogInformation(
+            "Recorded {Count} Trakt hidden item(s) for {AccountId} (not applied as exclusions — FD-17).",
+            recorded.Count, connection.AccountId);
+        return recorded.Count;
+    }
+
+    private static IReadOnlyList<RecordedHiddenItem> PreviousHiddenItems(TraktConnection connection)
+    {
+        if (string.IsNullOrWhiteSpace(connection.HiddenItemsJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<RecordedHiddenItem>>(connection.HiddenItemsJson) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static DateTime ToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
+
+    private static Guid? OutboxTitleOf(string payloadJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<OutboxDispatcher.OutboxPayload>(payloadJson)?.TitleId;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 

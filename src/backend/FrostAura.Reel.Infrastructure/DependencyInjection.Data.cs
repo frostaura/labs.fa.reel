@@ -44,6 +44,7 @@ public static partial class DependencyInjection
         services.AddScoped<Application.Sync.OutboxDispatcher>();
         services.AddScoped<Application.Sync.ManagedListReconciler>();
         services.AddScoped<Application.Ingestion.TraktLibraryIngestor>();
+        services.AddScoped<Application.Ingestion.TraktRatingsBackfill>();
         services.AddScoped<IJobHandler, FullIngestJobHandler>();
         services.AddScoped<IJobHandler, DeltaSyncJobHandler>();
         services.AddScoped<IJobHandler, HydrateCatalogJobHandler>();
@@ -67,6 +68,8 @@ public static partial class DependencyInjection
         services.AddHostedService<WeeklyDigestService>();
         // WS-4's one-off repairs, run on every boot (idempotent and self-terminating).
         services.AddHostedService<DataRepairStartupService>();
+        // Trakt community ratings for the catalogue (E-3): rate-gated, resumable, live stacks only.
+        services.AddHostedService<TraktRatingsBackfillService>();
 
         return services;
     }

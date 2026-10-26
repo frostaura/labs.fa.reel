@@ -57,4 +57,32 @@ public interface ITraktClient
 
     /// <summary>Adds or removes items on a personal list.</summary>
     Task PostListItemsAsync(string accessToken, long listId, object payload, bool remove, RatePriority priority, CancellationToken ct = default);
+
+    // The three reads below were added in trust-v1 P1 (WS-4 task 8) with default bodies, so a client
+    // written before them — the eval stack's offline client and the test fakes — still compiles and
+    // fails each call exactly as an unreachable Trakt does, which every caller already handles.
+
+    /// <summary>
+    /// The user's whole watchlist — movies and shows — walked page by page. Seasons and episodes are
+    /// not returned: Saved holds titles.
+    /// </summary>
+    Task<IReadOnlyList<TraktWatchlistItem>> GetWatchlistAsync(string accessToken, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<IReadOnlyList<TraktWatchlistItem>>(NotImplementedHere(nameof(GetWatchlistAsync)));
+
+    /// <summary>
+    /// The user's hidden items in one section (<c>progress_watched</c>, <c>recommendations</c>,
+    /// <c>dropped</c>, …), walked page by page; each item carries <paramref name="section"/>.
+    /// </summary>
+    Task<IReadOnlyList<TraktHiddenItem>> GetHiddenItemsAsync(string accessToken, string section, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<IReadOnlyList<TraktHiddenItem>>(NotImplementedHere(nameof(GetHiddenItemsAsync)));
+
+    /// <summary>
+    /// Trakt's community rating and ids for a TMDB title, or null when Trakt does not know it. Public
+    /// data: it needs the app's client id, never a user's token.
+    /// </summary>
+    Task<TraktCatalogRating?> GetCatalogRatingAsync(long tmdbId, bool movie, RatePriority priority, CancellationToken ct = default) =>
+        Task.FromException<TraktCatalogRating?>(NotImplementedHere(nameof(GetCatalogRatingAsync)));
+
+    private static HttpRequestException NotImplementedHere(string call) =>
+        new($"This Trakt client does not implement {call}; treated as Trakt being unreachable.");
 }
