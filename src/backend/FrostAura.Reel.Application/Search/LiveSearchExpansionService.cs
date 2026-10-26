@@ -741,22 +741,25 @@ public sealed class LiveSearchExpansionService(
                 .ThenBy(x => x.Title.Id)
                 .ToList();
 
-            var (ranked, outside) = PartitionByNegation(scoredPool, negations);
+            // Evidence first BEFORE any cut (IREV1-SYS-01): the seed is the very vector the kNN arm
+            // pulled its neighbours with, so a cosine cut fills with kNN titles by construction and a
+            // facet title the catalogue tags with the concept survived only if it was ALSO among the
+            // nearest. The reply then counted "5 unseen heist movies tagged that way" that no judge
+            // ever saw.
+            var (ranked, outside) = PartitionByNegation(scoredPool, negations, evidence.ContainsKey);
 
-            // The judge's order: titles carrying catalogue evidence for the concept first (facet
-            // arm), then by similarity. Stable, so equal footing keeps the cosine order.
-            var judgeOrder = ranked
-                .Select((x, index) => (x.Title, x.Sim, Index: index))
-                .OrderBy(x => evidence.ContainsKey(x.Title.Id) ? 0 : 1)
-                .ThenBy(x => x.Index)
+            // The judge's order is the partition's order: titles carrying catalogue evidence for the
+            // concept first (facet arm), then by similarity — and, when there are more tagged titles
+            // than the judge rules on, the tagged ones the account's bar lets through ahead of the
+            // rest (IREV2-SYS-01).
+            var floor = MinPredictedFloor(filterRows);
+            var judgeOrder = (await JudgeOrderAsync(accountId, ranked, evidence.ContainsKey, floor, now, taste, timings, ct))
                 .Take(AskReelJudge.MaxJudged)
-                .Select(x => (x.Title, x.Sim))
                 .ToList();
 
             // ── Score what can reach the screen ──────────────────────────────────────────────
             var sliceIds = judgeOrder.Concat(outside).Select(x => x.Title.Id).ToList();
             await Phase(new { stage = "scoring", found = sliceIds.Count, scored = 0 });
-            var floor = MinPredictedFloor(filterRows);
             IReadOnlyDictionary<Guid, decimal> scores;
             using (timings.Stage(AskStageTimings.Score))
             {
@@ -937,10 +940,16 @@ public sealed class LiveSearchExpansionService(
                     .ToList();
                 var underBar = heldMatches.Where(c => c.Predicted is not null).Select(c => c.Title.Name).ToList();
                 var unscoredHeld = heldMatches.Where(c => c.Predicted is null).Select(c => c.Title.Name).ToList();
+                // What the judge actually ruled on — a skipped or failed entry is not a check.
+                var judgedIds = placed
+                    .Where(p => p.Value.Placement != AskReelGate.Placement.Unjudged)
+                    .Select(p => p.Key)
+                    .ToList();
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded, ReplyAsync, degraded, timings, input,
-                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld);
+                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld,
+                    judgedIds);
             }
 
             await ReplyAsync(pickReply);
@@ -1239,9 +1248,11 @@ public sealed class LiveSearchExpansionService(
         string? effort,
         CancellationToken ct,
         IReadOnlyList<GatedCard>? uncheckedTray = null,
-        IReadOnlyList<string>? unscoredHeld = null)
+        IReadOnlyList<string>? unscoredHeld = null,
+        IReadOnlyCollection<Guid>? judgedIds = null)
     {
         uncheckedTray ??= [];
+        judgedIds ??= [];
         Retrieval.SupplyReport? supply = facet?.Supply;
         if (supply is null && supplyReporter is not null && (hard.HasConcepts || hard.People.Count > 0))
         {
@@ -1260,7 +1271,12 @@ public sealed class LiveSearchExpansionService(
         // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used.
         var concept = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
         var shownHere = supply is { ClearingFloor: > 0 }
-            ? await ShownInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct)
+            ? await ClearingInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct) ?? 0
+            : 0;
+        // How many of the tagged titles that clear the bar the judge actually ruled on (IREV2-SYS-01):
+        // the supply counts the whole catalogue, the judge at most MaxJudged a turn.
+        var checkedOfTagged = supply is { ClearingFloor: > 0 }
+            ? await ClearingInSupplyAsync(accountId, hard, supply, judgedIds, floor, ct)
             : 0;
         var text = NoneFoundCopy.Compose(new NoneFoundCopy.Facts(
             supply, concept, hard.Media, underBar, nearMiss.Count, floor,
@@ -1268,7 +1284,9 @@ public sealed class LiveSearchExpansionService(
             JudgedAny: judge?.JudgedAny ?? true,
             ShownHere: shownHere,
             UnscoredHeld: unscoredHeld,
-            NearMissNames: [.. nearMiss.Select(c => c.Title.Name)]));
+            NearMissNames: [.. nearMiss.Select(c => c.Title.Name)],
+            Checked: judgedIds.Count,
+            CheckedOfTagged: checkedOfTagged));
 
         // A follow-up that changes nothing hears that it was heard, not the same paragraph again.
         text = NoneFoundCopy.Again(text, PreviousReply(input.History));
@@ -1380,23 +1398,25 @@ public sealed class LiveSearchExpansionService(
             };
 
     /// <summary>
-    /// How many of the titles the supply counts as clearing the bar this conversation has already
-    /// shown — counted through the same eligibility and topic predicates, then the same bar. They were
-    /// excluded before anything was judged, so the reply names them as shown rather than as rejected
-    /// (D4). A failure costs the sentence, never the turn.
+    /// How many of <paramref name="titleIds"/> the supply counts as clearing the bar — counted through
+    /// the same eligibility and topic predicates, then the same bar. Asked of the titles this
+    /// conversation has already shown, which were excluded before anything was judged, so the reply
+    /// names them as shown rather than as rejected (D4); and of the titles the judge ruled on, so the
+    /// reply never says it checked tagged titles it never sent to the judge (IREV2-SYS-01). A failure
+    /// costs the sentence, never the turn: it answers null.
     /// </summary>
-    private async Task<int> ShownInSupplyAsync(
+    private async Task<int?> ClearingInSupplyAsync(
         Guid accountId, Retrieval.HardConstraints hard, Retrieval.SupplyReport supply,
-        IReadOnlyCollection<Guid> shownIds, decimal floor, CancellationToken ct)
+        IReadOnlyCollection<Guid> titleIds, decimal floor, CancellationToken ct)
     {
-        if (shownIds.Count == 0)
+        if (titleIds.Count == 0)
         {
             return 0;
         }
 
         try
         {
-            var ids = shownIds.ToList();
+            var ids = titleIds.ToList();
             var ceiling = await eligibility.MaturityCeilingAsync(accountId, ct);
             var topical = (await Retrieval.HardConstraintFilter.Apply(eligibility.EligibleTitles(accountId), db, hard)
                     .Where(t => ids.Contains(t.Id))
@@ -1426,8 +1446,8 @@ public sealed class LiveSearchExpansionService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Ask Reel: counting the conversation's shown titles failed; the reply omits them.");
-            return 0;
+            logger.LogWarning(ex, "Ask Reel: counting titles inside the supply failed; the reply omits the count.");
+            return null;
         }
     }
 
@@ -2128,6 +2148,48 @@ public sealed class LiveSearchExpansionService(
         || NegationTerms.MatchesPhrase(title.Overview, word, literalOnly: true);
 
     /// <summary>
+    /// The order the judge sees the ranked pool in: the partition's order (catalogue evidence first,
+    /// then similarity), except that when more tagged titles are ranked than the judge rules on, the
+    /// tagged titles the account's bar lets through go ahead of the tagged titles it holds back.
+    ///
+    /// <para><b>Why (IREV2-SYS-01).</b> The facet arm returns up to 24 tagged titles and the judge
+    /// rules on 16. Similarity says nothing about which of them can become a pick, so a heist turn
+    /// judged 16 tagged titles by cosine, never sent four of the five that cleared the bar, and
+    /// answered none-found. A tagged title under the bar can only ever reach the floor tray. Scored
+    /// only in that case: below the judge's cap every tagged title is judged anyway.</para>
+    /// </summary>
+    private async Task<List<(Title Title, double Sim)>> JudgeOrderAsync(
+        Guid accountId, List<(Title Title, double Sim)> ranked, Func<Guid, bool> hasEvidence, decimal floor,
+        DateTime now, FeatureVectorBuilder.TasteState taste, AskStageTimings timings, CancellationToken ct)
+    {
+        var tagged = ranked.Where(x => hasEvidence(x.Title.Id)).Select(x => x.Title.Id).ToList();
+        if (floor <= 0m || tagged.Count <= AskReelJudge.MaxJudged)
+        {
+            return ranked;
+        }
+
+        IReadOnlyDictionary<Guid, decimal> predicted;
+        using (timings.Stage(AskStageTimings.Score))
+        {
+            predicted = await scorer.ScoreAsync(accountId, tagged, now, ct, taste);
+        }
+
+        return OrderForJudge(ranked, hasEvidence, id => AskReelGate.Clears(predicted.TryGetValue(id, out var p) ? p : null, floor));
+    }
+
+    /// <summary>
+    /// Tagged titles the bar lets through, then the other tagged titles, then the rest — stably, so
+    /// equal footing keeps the partition's order.
+    /// </summary>
+    internal static List<(Title Title, double Sim)> OrderForJudge(
+        IReadOnlyList<(Title Title, double Sim)> ranked, Func<Guid, bool> hasEvidence, Func<Guid, bool> clearsBar) =>
+        [.. ranked
+            .Select((x, index) => (x, index))
+            .OrderBy(p => !hasEvidence(p.x.Title.Id) ? 2 : clearsBar(p.x.Title.Id) ? 0 : 1)
+            .ThenBy(p => p.index)
+            .Select(p => p.x)];
+
+    /// <summary>
     /// Splits the similarity-ordered pool into the picks, the flagged "outside your request"
     /// reserve — and, before either, drops everything the account permanently excludes.
     ///
@@ -2153,11 +2215,19 @@ public sealed class LiveSearchExpansionService(
     /// removes exactly the titles the account has said it never wants to see.</para>
     /// </summary>
     internal static (List<(Title Title, double Sim)> Ranked, List<(Title Title, double Sim)> Outside) PartitionByNegation(
-        IReadOnlyList<(Title Title, double Sim)> scoredPool, AskReelNegations negations)
+        IReadOnlyList<(Title Title, double Sim)> scoredPool, AskReelNegations negations, Func<Guid, bool>? hasEvidence = null)
     {
+        // Titles carrying catalogue evidence for the concept go ahead of every similarity-only title
+        // BEFORE either cut, stably, so equal footing keeps the cosine order (IREV1-SYS-01).
+        IEnumerable<(Title Title, double Sim)> ordered = hasEvidence is null
+            ? scoredPool
+            : scoredPool.Select((x, index) => (x, index))
+                .OrderBy(p => hasEvidence(p.x.Title.Id) ? 0 : 1)
+                .ThenBy(p => p.index)
+                .Select(p => p.x);
         var permitted = negations.HasStanding
-            ? scoredPool.Where(x => !TripsStandingExclusion(x.Title, negations)).ToList()
-            : [.. scoredPool];
+            ? ordered.Where(x => !TripsStandingExclusion(x.Title, negations)).ToList()
+            : [.. ordered];
         var contradicts = permitted.Where(x => RequestedDemerit(x.Title, negations) > 0).ToList();
         var clean = permitted.Where(x => RequestedDemerit(x.Title, negations) == 0).ToList();
         var ranked = clean.Take(ReturnCount).ToList();
@@ -2560,14 +2630,34 @@ public sealed class LiveSearchExpansionService(
     {
         var media = KeylessMedia(query, input);
         var shown = input.ShownTitleIds.ToHashSet();
-        List<LexicalSearchService.LexicalResult> hits;
+
+        // Read before anything is searched (IREV1-SYS-04). A message pointing at a card on screen
+        // ("how long is the second one?") is a question about that card, which nothing here can
+        // read — and its leftover words matched 14 unrelated titles. A message that only rules
+        // things out ("no superheroes please") has nothing to search FOR, and searching it as
+        // written answered 17 superhero titles. Neither is searched.
+        var reading = AskReelIntentSanitizer.ReadKeyless(query);
+        var pointer = AskReelPointer.Ordinal(query);
+        // Built directly rather than through FromRequest: its vocabulary floor guards a CAPTION, and
+        // a keyless card that trips a negated word is dropped, never captioned (see ReadKeyless).
+        var negations = new AskReelNegations(
+            [], [], [.. reading.Negated.SelectMany(SearchVocabulary.ResolveGenres).Distinct(StringComparer.Ordinal)], reading.Negated);
+        var nothingToSearch = pointer is not null
+            ? KeylessUnsearched.Pointer
+            : reading.Positive.Count == 0 ? KeylessUnsearched.NoPositiveWords : KeylessUnsearched.None;
+        List<LexicalSearchService.LexicalResult> hits = [];
         using (timings.Stage(AskStageTimings.Discover))
         {
-            hits = (await lexical.SearchAsync(accountId, query, ReturnCount * 2, ct))
-                .Where(h => !shown.Contains(h.Title.Id))
-                .Where(h => MatchesMedia(h.Title, media))
-                .Take(ReturnCount)
-                .ToList();
+            if (nothingToSearch == KeylessUnsearched.None)
+            {
+                hits = (await lexical.SearchAsync(accountId, string.Join(' ', reading.Positive), ReturnCount * 2, ct))
+                    .Where(h => !shown.Contains(h.Title.Id))
+                    .Where(h => MatchesMedia(h.Title, media))
+                    // What the user ruled out never reaches the screen as a keyword match.
+                    .Where(h => RequestedDemerit(h.Title, negations) == 0)
+                    .Take(ReturnCount)
+                    .ToList();
+            }
         }
 
         decimal floor;
@@ -2594,7 +2684,9 @@ public sealed class LiveSearchExpansionService(
             .ToList();
         var underBar = cards.Count(c => !AskReelGate.Clears(c.Predicted, floor));
 
-        var text = KeylessCopy(cards.Count, underBar, floor);
+        var text = nothingToSearch == KeylessUnsearched.None
+            ? KeylessCopy(cards.Count, underBar, floor)
+            : KeylessUnsearchedCopy(nothingToSearch, pointer);
         string[] flags = [SearchTurnDegraded.NoModel];
         await reply(text, true);
         var reason = AskReelReason.Build(new TurnCounts(Picks: 0, Outside: 0, Tray: 0, UncheckedTray: cards.Count), floor);
@@ -2650,10 +2742,40 @@ public sealed class LiveSearchExpansionService(
         return AskReelCarry.Media(AskReelCarry.MediaNamed(message), input.PriorIntent?.MediaTypes, message);
     }
 
+    /// <summary>Why a keyless turn ran no search at all — or <see cref="None"/> when it did.</summary>
+    internal enum KeylessUnsearched
+    {
+        /// <summary>The message named something to search for, and it was searched.</summary>
+        None,
+
+        /// <summary>The message points at a card on screen: a question about that card, not a search.</summary>
+        Pointer,
+
+        /// <summary>Every content word of the message is something the user ruled out, or filler.</summary>
+        NoPositiveWords,
+    }
+
+    private const string KeylessLead =
+        "Ask Reel has no language model connected right now, so I can’t read what you asked or check anything against it.";
+
+    /// <summary>
+    /// The keyless reply when nothing was searched (IREV1-SYS-04): it says why, and never implies a
+    /// search found nothing.
+    /// </summary>
+    internal static string KeylessUnsearchedCopy(KeylessUnsearched why, int? pointer) => why switch
+    {
+        KeylessUnsearched.Pointer =>
+            $"{KeylessLead} That includes a question about {PointerPhrase(pointer)}, so I haven’t searched — that title is still in my earlier answer above.",
+        _ => $"{KeylessLead} A plain keyword search needs a word for what you want, and your message only names what to skip — so I haven’t searched.",
+    };
+
+    private static string PointerPhrase(int? pointer) =>
+        pointer is { } position ? $"“{AskReelPointer.Named(position)}”" : "a title on screen";
+
     /// <summary>The keyless reply: what happened, what is below, and how many of those sit under the bar.</summary>
     internal static string KeylessCopy(int shown, int underBar, decimal floor)
     {
-        const string lead = "Ask Reel has no language model connected right now, so I can’t read what you asked or check anything against it.";
+        const string lead = KeylessLead;
         if (shown == 0)
         {
             return $"{lead} A plain keyword search for your words found nothing new either.";

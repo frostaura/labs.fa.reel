@@ -64,6 +64,30 @@ public class AskReelIntentSanitizerTests
         Assert.Equal(expected, AskReelIntentSanitizer.PositiveText(raw, ["superheroes", "ghosts", "gory"]));
 
     /// <summary>
+    /// IREV1-SYS-04: the keyless reading — what a keyword search may run on, and what it must drop.
+    /// "no superheroes please" names nothing to search FOR; a pointer question leaves only filler;
+    /// a negation inside a request keeps the request and rules the rest out — including a word no
+    /// vocabulary lists ("marvel"), since a keyless card that trips it is dropped, never captioned.
+    /// </summary>
+    [Theory]
+    [InlineData("no superheroes please", "", "superheroes")]
+    [InlineData("how long is the second one?", "long", "")]
+    [InlineData("heist movies but no superheroes", "heist", "superheroes")]
+    [InlineData("I don't want horror, give me a heist", "heist", "horror")]
+    [InlineData("samurai films without ghosts or zombies", "samurai", "ghosts zombies")]
+    [InlineData("nothing set in space", "", "space")]
+    [InlineData("superhero movies but no marvel", "superhero", "marvel")]
+    [InlineData("not too long please", "", "long")]
+    [InlineData("ninja ninja movies", "ninja", "")]
+    public void A_keyless_reading_searches_only_what_was_asked_for(string raw, string positive, string negated)
+    {
+        var reading = AskReelIntentSanitizer.ReadKeyless(raw);
+
+        Assert.Equal(positive, string.Join(' ', reading.Positive));
+        Assert.Equal(negated, string.Join(' ', reading.Negated));
+    }
+
+    /// <summary>
     /// Acceptance D2: the model wrote the standing MinYear=2000 into the ninja and samurai intents, so
     /// the supply counted post-2000 titles only (43 of a true 62) and never offered the year rule. A
     /// bound equal to the standing one is dropped unless the user's words name the year.

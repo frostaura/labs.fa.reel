@@ -1211,9 +1211,10 @@ public static class SearchEndpoints
                         ? (double?)llmFit
                         : null,
                     // The deterministic stub's sentence was stored as model output on thousands of
-                    // historical rows (B-6). Rows are never edited (FD-18); the replay simply stops
-                    // showing a sentence the model never wrote.
-                    why = LegacyStubWhy(c.Why) ? null : c.Why,
+                    // historical rows (B-6), and lines written before today's guards still carry what
+                    // a new turn discards (IR1S-05). Rows are never edited (FD-18); the replay simply
+                    // stops showing a sentence a new turn would not show.
+                    why = ReplayableWhy(c.Why, c.Satisfies),
                     seen = seen.Contains(c.TitleId),
                     blend = (double?)c.Blend,
                     outsideRequest = c.OutsideRequest,
@@ -1289,6 +1290,30 @@ public static class SearchEndpoints
             known.TryGetValue(c.TitleId, out var at)
             && turnTimes.TryGetValue(c.TurnId, out var answeredAt)
             && at < answeredAt);
+    }
+
+    /// <summary>
+    /// A stored why-line as a resumed thread may show it, or null where the card falls back to its
+    /// own deterministic line — under exactly the rule a new turn's rerank applies
+    /// (<c>OpenRouterSearchAgent.RejectsWhy</c>): the voice guard always, and the hedge guard
+    /// wherever the line captions a match (a "yes" verdict, or a row from before verdicts existed).
+    /// A partial or no verdict keeps its honest negative — on the near-miss and outside-request
+    /// channels it is the point.
+    ///
+    /// <para><b>Why at replay (IR1S-05).</b> New turns were guarded and the golden eval scores only
+    /// new turns, but 191 of 697 stored why-lines on one slot matched the hedge pattern, and
+    /// opening Recent rendered them on pick cards — "…, though the show leans on mystery". The
+    /// stored row is evidence and is never edited; the projection is where the screen is decided.</para>
+    /// </summary>
+    internal static string? ReplayableWhy(string? why, string? satisfies)
+    {
+        if (string.IsNullOrWhiteSpace(why) || LegacyStubWhy(why) || Domain.Ports.SecondPersonVoice.Rejects(why))
+        {
+            return null;
+        }
+
+        var captionsAMatch = satisfies is null || string.Equals(satisfies, "yes", StringComparison.OrdinalIgnoreCase);
+        return captionsAMatch && Domain.Ports.SecondPersonVoice.SoundsHedged(why) ? null : why;
     }
 
     /// <summary>

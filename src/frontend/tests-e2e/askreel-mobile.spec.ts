@@ -193,12 +193,22 @@ test.describe("Ask Reel on a phone", () => {
     const heightOf = () => composer.evaluate((el) => el.getBoundingClientRect().height);
     const overflowsSideways = () => composer.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
 
+    // The cap: four lines. Measured, not assumed per engine — WebKit lays the field out 244 px wide
+    // at 390 against Chromium's 254, so the same sentence wraps to a different number of lines.
+    const cap = 116;
+    const scrollsDown = () => composer.evaluate((el) => el.scrollHeight > el.clientHeight + 1);
+
     expect(await heightOf()).toBeGreaterThanOrEqual(44);
     const resting = await heightOf();
 
-    await composer.fill("a tense thriller with a clever ending, nothing supernatural, and a cast I have not seen before");
+    // A question two lines long in both engines (IR2S-05: the old 95-character one already hit the
+    // cap in WebKit, so "it grows, then it stops" could not be told apart there).
+    await composer.fill("a tense thriller with a clever ending, no ghosts");
     const grown = await heightOf();
     expect(grown).toBeGreaterThan(resting);
+    // Still growing, not yet at the cap — otherwise the stop below proves nothing.
+    expect(grown).toBeLessThan(cap);
+    expect(await scrollsDown()).toBe(false);
     // Wrapped, not scrolled sideways past the edge of the field.
     expect(await overflowsSideways()).toBe(false);
 
@@ -206,7 +216,9 @@ test.describe("Ask Reel on a phone", () => {
     await composer.fill("x".repeat(1000).replace(/(.{40})/g, "$1 "));
     const full = await heightOf();
     expect(full).toBeGreaterThan(grown);
-    expect(full).toBeLessThanOrEqual(116);
+    expect(full).toBe(cap);
+    // What does not fit scrolls inside the field, top to bottom — never sideways.
+    expect(await scrollsDown()).toBe(true);
     expect(await overflowsSideways()).toBe(false);
 
     // Deleting it back shrinks the field again rather than leaving a four-line box over one word.

@@ -188,7 +188,56 @@ public static class AskReelIntentSanitizer
     public static string PositiveText(string? raw, IEnumerable<string> negatedTerms)
     {
         var negated = negatedTerms.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
-        var kept = new List<string>();
+        var kept = Scoped(raw)
+            .Where(w => !w.Negated && !SearchVocabulary.IsFloorWord(w.Word)
+                        && !negated.Any(n => NegationTerms.EqualsAnyForm(w.Word, n)))
+            .Select(w => w.Word);
+        return string.Join(' ', kept);
+    }
+
+    /// <summary>
+    /// A raw sentence read with no model at all — the keyless install's only reading (IREV1-SYS-04):
+    /// the words it asks FOR, and the words it rules out. The search runs on the first and never on
+    /// the second; the second is applied to whatever the search finds.
+    ///
+    /// <para>The keyless path used to search the raw sentence, so "no superheroes please" answered
+    /// 17 titles every one of which carried the superhero keyword, and a question about a card on
+    /// screen matched 14 unrelated titles on its stop words. Both halves are CONTENT words: not a
+    /// pointer, a pronoun, a conversational verb or filler.</para>
+    ///
+    /// <para><b>The negated half is not floored by the vocabulary</b>, unlike a negation the model
+    /// reads (<see cref="SearchVocabulary.IsNegatable"/>). That floor exists because a keyed turn
+    /// quotes the word back in an outside-request caption and demotes an answer for it; a keyless
+    /// turn has no caption and no answer to demote — a hit it drops is simply not shown. "superhero
+    /// movies but no marvel" showed Marvel One-Shot when "marvel" met the floor and failed it.</para>
+    /// </summary>
+    public static KeylessReading ReadKeyless(string? raw)
+    {
+        var content = Scoped(raw)
+            .Where(w => w.Word.Length > 2
+                        && !StopWords.Contains(w.Word) && !PointerWords.Contains(w.Word)
+                        && !SearchVocabulary.IsFloorWord(w.Word))
+            .ToList();
+        var negated = content
+            .Where(w => w.Negated)
+            .Select(w => w.Word)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var positive = content
+            .Where(w => !w.Negated && !negated.Any(n => NegationTerms.EqualsAnyForm(w.Word, n)))
+            .Select(w => w.Word)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        return new KeylessReading(positive, negated);
+    }
+
+    /// <summary>
+    /// Every content word of a raw sentence with whether a negation cue governs it. A cue opens the
+    /// scope; "but", "and", "with", a comma, a full stop or a semicolon closes it. The cues and those
+    /// three conjunctions are never content themselves.
+    /// </summary>
+    private static IEnumerable<(string Word, bool Negated)> Scoped(string? raw)
+    {
         var suppressing = false;
         foreach (var token in (raw ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -202,10 +251,9 @@ public static class AskReelIntentSanitizer
                 {
                     suppressing = false;
                 }
-                else if (!suppressing && !SearchVocabulary.IsFloorWord(word)
-                         && !negated.Any(n => NegationTerms.EqualsAnyForm(word, n)))
+                else
                 {
-                    kept.Add(word);
+                    yield return (word, suppressing);
                 }
             }
 
@@ -215,7 +263,10 @@ public static class AskReelIntentSanitizer
                 suppressing = false;
             }
         }
-
-        return string.Join(' ', kept);
     }
 }
+
+/// <summary>A sentence read without a model: the words it asks for, and the words it rules out.</summary>
+/// <param name="Positive">Content words no negation cue governs — what a keyword search may run on.</param>
+/// <param name="Negated">Content words the user ruled out — applied to the hits, never searched.</param>
+public sealed record KeylessReading(IReadOnlyList<string> Positive, IReadOnlyList<string> Negated);
