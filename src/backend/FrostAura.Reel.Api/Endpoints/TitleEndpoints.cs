@@ -582,12 +582,17 @@ public static class TitleEndpoints
     /// so a freshly-hydrated (or simply never-scored) title still answers with a predictedRating
     /// instead of a silent null. Re-reads after scoring because <see cref="OnDemandScorer"/>
     /// upserts the row; no Active model ⇒ no row ⇒ null, which the response already tolerates.
+    ///
+    /// <para>A stored row with NO contributions is rescored too. Until 2026-10-26 the on-demand
+    /// scorer wrote numbers only, so a title first scored from Ask, typeahead or search carries a
+    /// number its page cannot explain — the waterfall read "−0.6 · +0.0" under a 6.2. Rescoring
+    /// writes the number and its contributions together, so the page explains the number it shows.</para>
     /// </summary>
     internal static async Task<TitleScore?> ResolveScoreAsync(
         IReelDbContext db, OnDemandScorer scorer, Guid accountId, Guid titleId, CancellationToken ct)
     {
         var score = await ActiveScoreAsync(db, accountId, titleId, ct);
-        if (score is not null)
+        if (score is not null && ParseContributions(score.ContributionsJson).Length > 0)
         {
             return score;
         }
@@ -600,8 +605,13 @@ public static class TitleEndpoints
     /// (lowercase property names, so serialize/deserialize round-trips without options).</summary>
     private sealed record ContributionEntry(string feature, decimal value);
 
+    /// <summary>
+    /// The Active artifact's row, untracked: the scorer writes through a raw upsert that a tracked
+    /// entity would not see, so the re-read after a rescore must hit the database, not the identity map.
+    /// </summary>
     private static Task<TitleScore?> ActiveScoreAsync(IReelDbContext db, Guid accountId, Guid titleId, CancellationToken ct) =>
         db.TitleScores
+            .AsNoTracking()
             .Where(s => s.AccountId == accountId && s.TitleId == titleId)
             .Join(db.ModelArtifacts.Where(a => a.Status == ArtifactStatus.Active),
                 s => s.ModelArtifactId, a => a.Id, (s, a) => s)

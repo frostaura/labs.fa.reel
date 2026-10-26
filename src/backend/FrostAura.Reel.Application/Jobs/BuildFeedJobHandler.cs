@@ -811,8 +811,7 @@ public class BuildFeedJobHandler(
             candidates.Select(candidate => new TitleScoreWriter.Score(
                 candidate.Title.Id,
                 Math.Round(candidate.Predicted, 2),
-                JsonSerializer.Serialize(
-                    candidate.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })))),
+                TitleScoreWriter.SerializeContributions(candidate.Row.TopContributions))),
             now,
             ct);
 

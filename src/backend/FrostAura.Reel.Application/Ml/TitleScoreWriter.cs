@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Ml;
 using Microsoft.EntityFrameworkCore;
@@ -41,18 +42,26 @@ public static class TitleScoreWriter
     public readonly record struct Score(Guid TitleId, decimal PredictedRating, string ContributionsJson);
 
     /// <summary>
+    /// The persisted shape of a score's top contributions — <c>[{"feature":…,"value":…}]</c>, values
+    /// at 3 dp — which the title page, the paginator and the refill all parse. One serializer for every
+    /// writer, so the shape cannot drift between them.
+    /// </summary>
+    public static string SerializeContributions(IEnumerable<(string Feature, float Contribution)> contributions) =>
+        JsonSerializer.Serialize(contributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) }));
+
+    /// <summary>
     /// Upserts every score in one statement and returns the number of rows inserted or updated.
     /// Duplicate title ids in one batch keep the LAST entry — Postgres refuses to update one row
     /// twice in a single <c>ON CONFLICT DO UPDATE</c>.
     /// </summary>
-    /// <param name="keepStoredContributions">
-    /// True for a writer that scores WITHOUT contributions (the on-demand scorer): a new row gets
-    /// whatever <see cref="Score.ContributionsJson"/> says (<c>[]</c>), and an existing row keeps the
-    /// contributions a build stored rather than having them erased by a number-only refresh.
-    /// </param>
+    /// <remarks>
+    /// The number and its contributions are always replaced together: every writer scores with
+    /// contributions, so a refresh that kept a stored row's reasons would pair a new number with the
+    /// explanation of an older one.
+    /// </remarks>
     public static async Task<int> UpsertAsync(
         IReelDbContext db, Guid accountId, Guid artifactId, IEnumerable<Score> scores, DateTime scoredAt,
-        CancellationToken ct, bool keepStoredContributions = false)
+        CancellationToken ct)
     {
         var byTitle = new Dictionary<Guid, Score>();
         foreach (var score in scores)
@@ -91,8 +100,8 @@ public static class TitleScoreWriter
             "INSERT INTO \"TitleScores\" (\"Id\", \"AccountId\", \"TitleId\", \"ModelArtifactId\", \"PredictedRating\", "
             + "\"ContributionsJson\", \"ScoredAt\") VALUES " + string.Join(", ", values)
             + " ON CONFLICT (\"AccountId\", \"TitleId\", \"ModelArtifactId\") DO UPDATE SET "
-            + "\"PredictedRating\" = EXCLUDED.\"PredictedRating\", \"ScoredAt\" = EXCLUDED.\"ScoredAt\""
-            + (keepStoredContributions ? string.Empty : ", \"ContributionsJson\" = EXCLUDED.\"ContributionsJson\"");
+            + "\"PredictedRating\" = EXCLUDED.\"PredictedRating\", \"ScoredAt\" = EXCLUDED.\"ScoredAt\", "
+            + "\"ContributionsJson\" = EXCLUDED.\"ContributionsJson\"";
 
         try
         {

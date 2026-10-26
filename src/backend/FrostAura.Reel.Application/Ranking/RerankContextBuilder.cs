@@ -26,8 +26,8 @@ public static class RerankContextBuilder
     ///
     /// <para><paramref name="topContributions"/> is the feed build's per-title explanation of why
     /// ITS model ranked the title where it did, so the judge can agree or disagree with a reason.
-    /// Ask Reel passes null: <c>OnDemandScorer</c> computes no contributions, and an empty list is
-    /// the honest answer rather than a fabricated one.</para>
+    /// Ask Reel passes null: its judge is weighing a request, not a feed build's ranking, and an
+    /// empty list is the honest answer rather than a fabricated one.</para>
     ///
     /// <para><b>Absence is null, never zero.</b> A title whose attribute extraction has not
     /// completed carries nulls through every scalar — a 0.0 darkness reads to the model as

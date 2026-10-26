@@ -1,4 +1,3 @@
-using System.Text.Json;
 using FrostAura.Reel.Application.Llm;
 using FrostAura.Reel.Application.Ml;
 using FrostAura.Reel.Application.Ml.ClosedLoop;
@@ -1112,8 +1111,7 @@ public sealed class FeedPaginator(
             taken.Select(s => new TitleScoreWriter.Score(
                 s.Title.Id,
                 Math.Round(s.Predicted, 2),
-                JsonSerializer.Serialize(
-                    s.Row.TopContributions.Select(c => new { feature = c.Feature, value = Math.Round(c.Contribution, 3) })))),
+                TitleScoreWriter.SerializeContributions(s.Row.TopContributions))),
             now,
             ct);
     }
