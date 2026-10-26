@@ -913,3 +913,6 @@ export function useAskReelChat() {
     clientFloorable: state.order.slice(Math.max(state.settled, state.pinned)),
   };
 }
+
+/** Everything the hook hands the page — the shape the Ask Reel components read. */
+export type AskReelChat = ReturnType<typeof useAskReelChat>;

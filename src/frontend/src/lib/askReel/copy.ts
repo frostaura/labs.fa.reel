@@ -308,3 +308,63 @@ export function refineChips(input: RefineInputs): string[] {
   if (input.hasCards) chips.push("More like the first one");
   return chips.slice(0, 4);
 }
+
+/**
+ * The narration line, driven by `phase` frames (WS-2 task 3).
+ *
+ * A v2 phase carries the engine's own sentence (`label`) and it is printed verbatim: the server
+ * knows what it is doing ("Checking 6 against your request") and the client would only be guessing.
+ * A v1 phase carries a stage and counts, narrated here. Every counted noun goes through `plural` —
+ * a narrow first turn genuinely does reach "Found 1 titles", and the live region reads it aloud.
+ */
+export function narrate(phase: { stage: string; found: number; label?: string } | null): string {
+  if (phase?.label?.trim()) return phase.label.trim();
+  switch (phase?.stage) {
+    case "planning":
+      return "Reading your request…";
+    case "searching":
+    case "retrieving":
+      return "Scanning the catalogue…";
+    case "discovered":
+      return `Found ${phase.found} ${plural(phase.found, "title")} — matching them to your taste…`;
+    case "embedding":
+      return `Reading ${phase.found} ${plural(phase.found, "plot")}…`;
+    case "scoring":
+      return `Scoring ${phase.found} ${plural(phase.found, "pick")} for you…`;
+    case "judging":
+      return "Checking each one against your request…";
+    case "ranking":
+      return "Ranking your picks…";
+    case "composing":
+      return "Writing it up…";
+    default:
+      return "Thinking…";
+  }
+}
+
+/**
+ * What a stopped turn says, in one place — the live region and the on-screen card must not be able
+ * to disagree, and the count is the turn's OWN: cards held over from the previous answer are on
+ * screen and are explicitly not what arrived before the user stopped. Picks from a turn that never
+ * reached `done` are unranked, and the sentence says so.
+ */
+export function stoppedMessage(arrived: number): string {
+  return arrived === 0
+    ? "Stopped before any picks arrived."
+    : `Stopped — ${arrived} ${plural(arrived, "pick")} arrived before you stopped. Unranked — stopped before Reel finished.`;
+}
+
+/**
+ * The near-miss tray's heading — FD-2's "Close, but not X", with X the topic the user asked for
+ * when the planner named one, and the plain wording when it did not.
+ */
+export function nearMissHeading(concepts: readonly string[]): string {
+  const topic = concepts.map((c) => c.trim()).filter(Boolean).slice(0, 2).join(" ");
+  return topic ? `Close, but not ${topic}` : "Close, but not quite";
+}
+
+/** The summary of an earlier answer kept under its own reply: what is inside, before it is opened. */
+export function earlierAnswerSummary(picks: number, trayed: number): string {
+  const head = picks > 0 ? `${picks} ${plural(picks, "pick")}` : "No picks";
+  return trayed > 0 ? `Earlier answer · ${head} · ${trayed} in its trays` : `Earlier answer · ${head}`;
+}

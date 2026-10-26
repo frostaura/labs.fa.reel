@@ -1,8 +1,12 @@
+import { useId, useState } from "react";
+import { SlidersHorizontal } from "lucide-react";
 import ConditionSummary from "../settings/ConditionSummary";
 import PickConditionsButton from "../rec/PickConditionsButton";
 import { useGetFiltersQuery } from "../../store/api";
 import { summaryChips } from "../../lib/pickConditions";
 import type { BrowseFilter } from "../../lib/browseFilter";
+import { plural } from "../../lib/askReel/copy";
+import { MD_BREAKPOINT_PX, useMinWidth } from "../../lib/useMinWidth";
 
 /**
  * Everything narrowing this thread's answers, on the page they narrow — readable in full, and
@@ -42,18 +46,50 @@ export default function SearchConditions({
   onBrowseChange?: (next: BrowseFilter) => void;
 }) {
   const { data: filters } = useGetFiltersQuery();
+  const wide = useMinWidth(MD_BREAKPOINT_PX);
+  const [open, setOpen] = useState(false);
+  const stripId = useId();
   // Waits for the real payload rather than rendering against the defaults — `normalizeFilters`
   // fills an absent one out to `languages: ["en"]`, so an in-flight query would briefly assert an
   // "English only" condition the account may not have. Same rule as `PickConditionsSummary`, and
   // the reason this is a sibling of it rather than a wrapper around it.
-  if (!filters || summaryChips(filters, browse).length === 0) return null;
+  const count = filters ? summaryChips(filters, browse).length : 0;
+  if (!filters || count === 0) return null;
+  const strip = (
+    <>
+      <ConditionSummary filters={filters} browse={browse} onBrowseChange={onBrowseChange} />
+      <PickConditionsButton />
+    </>
+  );
   return (
     <div
       className={`flex flex-wrap items-center gap-x-3 gap-y-2 [&_[data-testid=open-conditions]]:min-h-11 ${className}`}
       data-testid="askreel-conditions"
     >
-      <ConditionSummary filters={filters} browse={browse} onBrowseChange={onBrowseChange} />
-      <PickConditionsButton />
+      {/* 4. On a phone the strip collapses to ONE button that says how many (WS-2 task 3). Twelve
+          chips wrap to four rows at 390 px, and the reply and the first row of posters — the
+          answer — were pushed under the composer on the first screen. Nothing is hidden for good:
+          one tap opens every chip and the editor, exactly as the wide strip shows them. */}
+      {wide ? strip : (
+        <>
+          <button
+            type="button"
+            data-testid="askreel-conditions-toggle"
+            aria-expanded={open}
+            aria-controls={stripId}
+            onClick={() => setOpen((v) => !v)}
+            className="fa-caption inline-flex min-h-11 items-center gap-1.5 rounded-full border border-fa-frost/25 px-4 text-fa-frost-dim hover:text-fa-frost-bright hover:border-fa-frost/50 hover:bg-fa-frost/10 transition-colors"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+            {`${count} ${plural(count, "condition")}`}
+          </button>
+          {open && (
+            <div id={stripId} className="flex w-full flex-wrap items-center gap-x-3 gap-y-2">
+              {strip}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

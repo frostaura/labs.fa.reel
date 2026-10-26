@@ -264,7 +264,10 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     // progress.
     await expect(gridNames(page)).toHaveText(SETTLED_ORDER);
     await expect(page.getByTestId("askreel-previous-answer")).toBeVisible();
-    await expect(page.getByTestId("semantic-results")).toHaveClass(/opacity-40/);
+    // Labelled, and still readable: chat UI v2 holds the previous answer at 0.9, never below — the
+    // 40 % it used to drop to read as disabled for an answer the reader was entitled to use.
+    await expect(page.getByTestId("semantic-results")).toHaveClass(/opacity-90/);
+    expect(Number(await page.getByTestId("semantic-results").evaluate((el) => getComputedStyle(el).opacity))).toBeGreaterThanOrEqual(0.9);
 
     await page.getByTestId("askreel-stop").click();
 
@@ -274,19 +277,23 @@ test.describe("Ask Reel — outside-request channel and stream stability", () =>
     await expect(stopped).toHaveText(/Stopped before any picks arrived\./);
     await expect(stopped.getByTestId("askreel-retry")).toBeVisible();
 
-    // Full contrast, not 40% of it, and no "previous answer" label over an answer nothing replaced.
-    await expect(page.getByTestId("semantic-results")).not.toHaveClass(/opacity-40/);
+    // Full contrast, not 90% of it, and no "previous answer" label over an answer nothing replaced.
+    await expect(page.getByTestId("semantic-results")).not.toHaveClass(/opacity-/);
     await expect(page.getByTestId("askreel-previous-answer")).toHaveCount(0);
     // Instead, the seam that names the question these cards answer — the one directly above them in
     // the transcript being the one that was abandoned.
     await expect(page.getByTestId("askreel-kept-answer")).toContainText("a tense heist movie");
-    // The stopped row is ABOVE the grid it is about.
-    const stoppedPrecedesGrid = await page.evaluate(() => {
+    // Chat UI v2: the kept answer stays under the reply that produced it — ABOVE the question that
+    // was stopped and the stopped card about it — with its provenance line beside it, not under
+    // the stopped turn.
+    const keptAboveStopped = await page.evaluate(() => {
       const row = document.querySelector('[data-testid="askreel-stopped"]');
       const grid = document.querySelector('[data-testid="semantic-results"]');
-      return !!row && !!grid && !!(row.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const footnote = document.querySelector('[data-testid="askreel-footnote"]');
+      const follows = (a: Element | null, b: Element | null) => !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return { gridThenStopped: follows(grid, row), footnoteThenGrid: follows(footnote, grid) };
     });
-    expect(stoppedPrecedesGrid).toBe(true);
+    expect(keptAboveStopped).toEqual({ gridThenStopped: true, footnoteThenGrid: true });
 
     // Everything the Stop used to strip. Sixteen tray picks in the measured run.
     await expect(page.getByTestId("askreel-below-floor").locator("summary")).toHaveText("Show the 1 held back by your 6.0 bar");
@@ -1082,7 +1089,11 @@ test.describe("Ask Reel — the collision notice stays with its answer", () => {
     // Two notices, each with its own row: the answer keeps its account, the abandoned turn keeps its.
     const stopped = page.getByTestId("askreel-stopped");
     await expect(stopped.getByTestId("askreel-conflict")).toContainText("permanently exclude anime");
-    const inTranscript = page.getByTestId("askreel-transcript").getByTestId("askreel-conflict");
+    // The stopped card sits in the transcript now, under the turn it is about (chat UI v2), so the
+    // answer's own notices are the ones OUTSIDE it.
+    const inTranscript = page.locator(
+      '[data-testid="askreel-transcript"] [data-testid="askreel-conflict"]:not([data-testid="askreel-stopped"] *)',
+    );
     await expect(inTranscript).toHaveCount(1);
     await expect(inTranscript).toContainText("permanently exclude comedy and romance");
     await expect(inTranscript).not.toContainText("anime");
