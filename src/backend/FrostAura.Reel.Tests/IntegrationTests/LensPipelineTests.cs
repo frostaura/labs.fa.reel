@@ -621,6 +621,53 @@ public class LensPipelineTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task A_pass_an_open_queued_writes_the_opened_titles_only_unless_a_build_landed_since()
+    {
+        if (!fixture.Available)
+        {
+            return;
+        }
+
+        // Task 7's acceptance, "three opens of an uncached title add at most 1 ledger call", failed
+        // on the slot: the open's pass also wrote the day's whole selection, ten paid calls, because
+        // that selection was cold. The day's titles are the Fresh build's pass to write; an open's
+        // pass writes what was opened — unless a Fresh build landed after it was queued, whose own
+        // enqueue the one-per-account index then absorbed into it.
+        var accountId = await SeedAccountAsync();
+        await SeedSnapshotAsync(accountId, heroCount: 3, rails: 1, perRail: 3, generatedAt: DateTime.UtcNow.AddHours(-1));
+        var opened = await SeedTitleAsync("Soldado", 2018);
+        await using var db = fixture.CreateContext(Scoped(accountId));
+        var deps = new Deps(db, StubConfig());
+        var handler = new PersonaliseTitlesJobHandler(
+            db, deps.Features, deps.Facts, deps.Lens, NullLogger<PersonaliseTitlesJobHandler>.Instance);
+        var hash = await deps.Facts.CurrentHashAsync(accountId, DateTime.UtcNow, default);
+        var none = new ResolvedLens(null, LensSource.None, hash, null);
+
+        for (var open = 0; open < 3; open++)
+        {
+            Assert.Equal(LensService.RequestOutcome.Queued, await deps.Lens.RequestAsync(accountId, opened, hash, none, default));
+        }
+
+        var job = await db.SyncJobs.SingleAsync(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles);
+        await handler.ExecuteAsync(job, CancellationToken.None);
+        await CompleteAsync(db, job);
+        Assert.Equal([opened], await WrittenAsync(db, accountId));
+
+        // A Fresh build lands after the next open queued its pass: the pass now carries the day.
+        var second = await SeedTitleAsync("Sicario", 2015);
+        Assert.Equal(LensService.RequestOutcome.Queued, await deps.Lens.RequestAsync(accountId, second, hash, none, default));
+        var job2 = await db.SyncJobs.SingleAsync(j => j.AccountId == accountId && j.Kind == JobKind.PersonaliseTitles && j.Status == JobStatus.Pending);
+        await db.FeedSnapshots.Where(x => x.AccountId == accountId)
+            .ExecuteUpdateAsync(x => x.SetProperty(f => f.Status, SnapshotStatus.Superseded));
+        await SeedSnapshotAsync(accountId, heroCount: 2, rails: 0, perRail: 0, generatedAt: job2.EnqueuedAt.AddSeconds(1));
+        await handler.ExecuteAsync(job2, CancellationToken.None);
+        await CompleteAsync(db, job2);
+        var written = await WrittenAsync(db, accountId);
+        Assert.Equal(4, written.Count); // the two opened titles and the new snapshot's two heroes
+        Assert.Contains(second, written);
+    }
+
+    [Fact]
     public async Task A_pending_build_pass_takes_the_opened_title_first_and_keeps_its_own_fields()
     {
         if (!fixture.Available)
@@ -1184,15 +1231,22 @@ public class LensPipelineTests(PostgresFixture fixture)
         return title.Id;
     }
 
+    private static async Task<List<Guid>> WrittenAsync(ReelDbContext db, Guid accountId) =>
+        await db.TitleLensCopies
+            .Where(c => c.AccountId == accountId && c.Status == LensStatus.Done)
+            .Select(c => c.TitleId)
+            .Distinct()
+            .ToListAsync();
+
     /// <summary>An Active snapshot with a hero and the requested rails, so selection has shape to read.</summary>
-    private async Task SeedSnapshotAsync(Guid accountId, int heroCount, int rails, int perRail)
+    private async Task SeedSnapshotAsync(Guid accountId, int heroCount, int rails, int perRail, DateTime? generatedAt = null)
     {
         await using var db = fixture.CreateContext(new AccountContext());
         var snapshot = new FeedSnapshot
         {
             Id = Guid.NewGuid(),
             AccountId = accountId,
-            GeneratedAt = DateTime.UtcNow,
+            GeneratedAt = generatedAt ?? DateTime.UtcNow,
             Status = SnapshotStatus.Active,
         };
         db.FeedSnapshots.Add(snapshot);

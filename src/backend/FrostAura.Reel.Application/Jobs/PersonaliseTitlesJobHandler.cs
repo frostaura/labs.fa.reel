@@ -141,9 +141,15 @@ public sealed class PersonaliseTitlesJobHandler(
         var built = await facts.BuildAsync(accountId, taste, now, ct);
 
         // Titles someone opened go first — the first batch writes them — then the day's selection,
-        // whose warm titles cost nothing.
+        // whose warm titles cost nothing. A pass an open queued writes the opened titles ONLY: the
+        // day's selection is the Fresh build's pass to write, and on a cold selection the open used
+        // to buy all of it — ten paid calls for one title someone was waiting on (task 7's "three
+        // opens add at most one call"). The exception is a Fresh build that landed after the open
+        // queued this pass: its own enqueue was absorbed into this one by the one-per-account index.
         var requested = RequestedTitles(job.CursorJson);
-        var selected = await SelectAsync(accountId, includeSaved, ct);
+        var selected = await CarriesTheDayAsync(job, accountId, includeSaved, ct)
+            ? await SelectAsync(accountId, includeSaved, ct)
+            : [];
         var titleIds = requested.Concat(selected.Where(id => !requested.Contains(id))).ToList();
         if (titleIds.Count == 0)
         {
@@ -165,6 +171,22 @@ public sealed class PersonaliseTitlesJobHandler(
         logger.LogInformation(
             "Lens pass for {AccountId}: {Written} written, {Rejected} rejected by guards, {Skipped} skipped ({Reason}).",
             accountId, outcome.Written, outcome.Rejected, outcome.Skipped, outcome.Reason);
+    }
+
+    /// <summary>
+    /// Whether this pass writes the day's selection: every pass a build or the nightly run queued
+    /// does; a pass an open queued does only once a Fresh snapshot is newer than the pass.
+    /// </summary>
+    private async Task<bool> CarriesTheDayAsync(SyncJob job, Guid accountId, bool includeSaved, CancellationToken ct)
+    {
+        if (includeSaved || !string.Equals(job.TriggerReason, OnOpenReason, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var enqueuedAt = job.EnqueuedAt;
+        return await db.FeedSnapshots.AnyAsync(
+            s => s.AccountId == accountId && s.Status == SnapshotStatus.Active && s.GeneratedAt > enqueuedAt, ct);
     }
 
     /// <summary>
