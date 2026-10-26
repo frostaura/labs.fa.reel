@@ -47,11 +47,16 @@ public static class PlanSanitizer
             .ToList();
         negations = negations.Where(n => !concepts.Any(c => NegationTerms.EqualsAnyForm(c, n))).ToList();
 
+        // The user's own media word is never lost to a plan that left media unset: "how many ninja
+        // movies are left?" was counted over movies AND shows. Only a message naming exactly one.
+        var mediaNamed = Retrieval.MediaScopes.From(AskReelCarry.MediaNamed(message));
+        var media = delta.Media ?? (mediaNamed == Retrieval.MediaScope.Any ? null : mediaNamed);
+
         var clarify = state.ClarifiedOnce ? null : plan.ClarifyQuestion;
         return plan with
         {
             References = references,
-            Delta = delta with { Concepts = concepts, Negations = negations },
+            Delta = delta with { Concepts = concepts, Negations = negations, Media = media },
             ClarifyQuestion = clarify,
             ClarifyOptions = clarify is null ? [] : plan.ClarifyOptions.Take(3).ToList(),
         };

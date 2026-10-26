@@ -176,6 +176,29 @@ public class AskReelV2UnitTests
         Assert.Equal(kept, clean.Delta.Concepts.Count == 1);
     }
 
+    /// <summary>The live "how many ninja movies are left?" plan left media unset and was counted over shows too.</summary>
+    [Theory]
+    [InlineData("how many ninja movies are left?", null, MediaScope.Movies)]
+    [InlineData("any good ninja shows?", null, MediaScope.Shows)]
+    [InlineData("ninja movies or shows", null, null)]
+    [InlineData("more of those", null, null)]
+    [InlineData("ninja movies", MediaScope.Shows, MediaScope.Shows)]
+    public void The_users_own_media_word_survives_a_plan_that_left_media_unset(string message, MediaScope? planned, MediaScope? expected)
+    {
+        var plan = Plan(TurnAct.NewRequest, ConversationStateDelta.None with { Media = planned });
+        Assert.Equal(expected, PlanSanitizer.Clean(plan, message, ConversationState.Empty, FilterRuleSet.FromRows([])).Delta.Media);
+    }
+
+    [Fact]
+    public void A_supply_answer_agrees_in_number()
+    {
+        var hard = HardConstraints.None with { Concepts = [new ConceptTerm("ninja", [], [])], Media = MediaScope.Movies };
+        var one = new SupplyReport(20, 19, 0, 0, 1, 0, 0, [], 0, 50, 6.0m, true);
+        Assert.Equal(
+            "You have 1 unseen ninja movie left that clears your conditions and your bar; you've seen 19.",
+            AskReelEngine.SupplyAnswer(one, hard));
+    }
+
     [Fact]
     public void Only_one_clarifying_question_is_asked_per_conversation()
     {

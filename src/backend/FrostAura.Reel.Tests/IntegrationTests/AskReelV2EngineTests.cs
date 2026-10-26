@@ -101,7 +101,8 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.NotNull(state);
         Assert.Equal(4, state.LastPresented.Count);
         Assert.Equal(1, state.Version);
-        Assert.Equal($"4 {topic} titles that fit what you asked. 3 more are close but not quite — tucked away below.", outcome.AssistantText);
+        // "movies" because the message says so (the sanitizer keeps the user's media word).
+        Assert.Equal($"4 {topic} movies that fit what you asked. 3 more are close but not quite — tucked away below.", outcome.AssistantText);
     }
 
     [Fact]
@@ -171,7 +172,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
 
         var outcome = await engine.StreamAsync(Input($"how many {topic} movies are left?"), accountId, emit, CancellationToken.None);
 
-        Assert.Equal($"You have 3 unseen {topic} titles left inside your conditions; you've seen 2.", outcome.AssistantText);
+        Assert.Equal($"You have 3 unseen {topic} movies left inside your conditions; you've seen 2.", outcome.AssistantText);
         Assert.Equal(SearchTurnMode.Answer, outcome.Mode);
         Assert.Equal(0, judge.Batches);
         Assert.DoesNotContain(events, e => e.Event is "picks" or "tray");
@@ -424,7 +425,7 @@ public class AskReelV2EngineTests(PostgresFixture fixture, ReelApiFactory api)
         Assert.Equal(3, supply.GetProperty("alreadySeen").GetInt32());
         Assert.Equal(SearchTurnMode.NoneFound, outcome.Mode);
         Assert.Equal(0, judge.Batches);
-        Assert.StartsWith($"There are no {topic} titles left for you.", outcome.AssistantText, StringComparison.Ordinal);
+        Assert.StartsWith($"There are no {topic} movies left for you.", outcome.AssistantText, StringComparison.Ordinal);
     }
 
     /// <summary>

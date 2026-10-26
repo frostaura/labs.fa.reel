@@ -485,11 +485,19 @@ public sealed class AskReelEngine(
     internal static string SupplyAnswer(SupplyReport report, HardConstraints hard)
     {
         var topic = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords + " " : string.Empty;
-        var noun = hard.Media switch { MediaScope.Movies => "movies", MediaScope.Shows => "shows", _ => "titles" };
         var barred = report.PredictedFloor is > 0m;
         var left = Math.Max(0, barred ? report.Offerable : report.Eligible - report.AlreadyShown);
+        var noun = (hard.Media, left == 1) switch
+        {
+            (MediaScope.Movies, true) => "movie",
+            (MediaScope.Movies, false) => "movies",
+            (MediaScope.Shows, true) => "show",
+            (MediaScope.Shows, false) => "shows",
+            (_, true) => "title",
+            _ => "titles",
+        };
         var lead = barred
-            ? FormattableString.Invariant($"You have {left} unseen {topic}{noun} left that clear your conditions and your bar")
+            ? FormattableString.Invariant($"You have {left} unseen {topic}{noun} left that {(left == 1 ? "clears" : "clear")} your conditions and your bar")
             : FormattableString.Invariant($"You have {left} unseen {topic}{noun} left inside your conditions");
         var parts = new List<string> { lead };
         if (report.AlreadySeen > 0)
