@@ -8,8 +8,8 @@ import { useEffect, useState, type RefObject } from "react";
  * It is a distance, not a count. On a cold Home with personalised rows (three, or even one, at
  * 1440×900 and 390×844) every genre rail starts beyond it and none fetches; on a feed with no
  * personalised rows the first genre rail is on screen, and it does fetch, as a rail on screen
- * should. `hero-rails-paging.spec.ts` pins both shapes, and that every rail that asks was inside
- * the margin when it asked.
+ * should. `hero-rails-paging.spec.ts` pins both shapes, and that every rail that asks does so only
+ * after this observer has reported it within the margin.
  */
 export const RAIL_PREFETCH_MARGIN_PX = 200;
 

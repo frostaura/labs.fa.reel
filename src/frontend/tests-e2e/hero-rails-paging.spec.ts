@@ -20,6 +20,18 @@ import { SESSION_FOUNDER, mockJson, stubEventSource } from "./helpers";
  * timer; every `/api` request the page makes is answered by a fixture here (an unanswered one is a
  * test failure, not a proxy error); and "nothing more happened" is checked after a round trip
  * through the page rather than after a sleep.
+ *
+ * Round 2 of R1-23 (13 whole-spec runs, 3 red) found three more clocks the spec was racing:
+ * - Leaving Home is not the URL changing. Saved is a lazy chunk, and the router keeps Home mounted
+ *   until it loads — long enough for an 800 ms 503 to land on a still-mounted Home, whose retry is
+ *   then legitimate. Saved is now warmed with Home; the in-flight 503 is HELD until Home has
+ *   actually unmounted, so it lands on a departed rail every time; and the page's clock is paused
+ *   from then on (`clock.install()` alone keeps time running on its own).
+ * - A rail's position at its `fetch` is a React render after the observer latched it, and a rail
+ *   loading above it can move it a pixel or two in between (1046 against a limit of 1045). The
+ *   margin is now checked where it is decided: the observer's own entry for that rail.
+ * - "Wait 3 s and count" is gone: the lazy cases wait until the page is quiet — every request
+ *   answered, two frames painted, a probe round-tripped — twice in a row.
  */
 
 const GENRES = ["action", "comedy", "drama", "horror", "thriller", "romance", "documentary", "animation"];
@@ -79,10 +91,10 @@ interface BootOptions {
   rows?: typeof ROWS;
   /** The weekly digest rail's cards. */
   digest?: ReturnType<typeof card>[];
-  /** Milliseconds before a failing /feed/more answers, so a request can be caught in flight. */
-  failDelayMs?: number;
   /** Install Playwright's clock before the page loads, so the backoff can be advanced explicitly. */
   clock?: boolean;
+  /** Hold the first failing /feed/more unanswered until `release()` — a request caught in flight. */
+  holdFirst?: boolean;
 }
 
 interface Booted {
@@ -90,6 +102,8 @@ interface Booted {
   bodies: MoreBody[];
   /** How many /feed/more requests have been answered — a request in flight is `bodies.length - answered()`. */
   answered: () => number;
+  /** Lets a held request (`holdFirst`) answer. */
+  release: () => void;
 }
 
 /** Paths the page asked for that no fixture answers, per test; asserted empty after each one. */
@@ -190,6 +204,8 @@ async function bootHome(page: Page, more: "ok" | "fail", options: BootOptions = 
   });
   await mockJson(page, "**/api/feed", { generatedAt: new Date().toISOString(), hero: HERO, rows, lockedRowCount: 0 });
   let page_ = 0;
+  let release: () => void = () => undefined;
+  const held = options.holdFirst ? new Promise<void>((resolve) => (release = resolve)) : null;
   await page.route(
     (u) => u.pathname === "/api/feed/more",
     async (route) => {
@@ -198,7 +214,7 @@ async function bootHome(page: Page, more: "ok" | "fail", options: BootOptions = 
       // includes it.
       bodies.push(body);
       if (more === "fail") {
-        if (options.failDelayMs) await new Promise((resolve) => setTimeout(resolve, options.failDelayMs));
+        if (held && bodies.length === 1) await held;
         await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
         answered += 1;
         return;
@@ -212,41 +228,86 @@ async function bootHome(page: Page, more: "ok" | "fail", options: BootOptions = 
       answered += 1;
     }
   );
-  await page.addInitScript(recordRailTopsAtRequest);
+  await page.addInitScript(recordObserverAndRequests);
   if (options.clock) await page.clock.install();
   await page.goto("/home");
   await expect(page.getByTestId("hero-card").first()).toBeVisible();
-  return { bodies, answered: () => answered };
+  return { bodies, answered: () => answered, release: () => release() };
+}
+
+interface RailLog {
+  /** Each genre rail's observer entries that reported it in range, in order. */
+  near: Record<string, { seq: number; top: number; viewport: number }[]>;
+  /** The sequence number of each genre rail's /feed/more requests, in order. */
+  asked: Record<string, number[]>;
 }
 
 /**
- * Records, in the page, where each genre rail sat at the instant its `/feed/more` was issued.
+ * Records, in the page, when the prefetch observer reported each genre rail in range (and where the
+ * rail sat in that entry), and when each genre rail's `/feed/more` went out, on one shared sequence.
  *
- * Measuring from the route handler instead (as this spec once did) reads the rail a round trip
- * LATER, after the rails above it may have loaded and pushed it down — one isolated run measured a
- * rail that asked from inside the margin at 1px outside it. `fetch` is wrapped before the app
- * loads; the tops are read synchronously at the call, then keyed by the genre once the body is read.
+ * The margin is decided by the observer's entry, so that is where it is measured. Reading the rail
+ * at its request (as this spec did in round 1) reads it a React render later, and a rail above it
+ * that has just loaded can push it a pixel or two in between — 1046 against a limit of 1045 in one
+ * whole-spec run. Reading it in the route handler was later still: a full round trip.
  */
-function recordRailTopsAtRequest(): void {
-  const w = window as unknown as { __railTopAtRequest: Record<string, { top: number; viewport: number }[]> };
-  w.__railTopAtRequest = {};
+function recordObserverAndRequests(): void {
+  const w = window as unknown as { __railLog: RailLog };
+  const log: RailLog = { near: {}, asked: {} };
+  w.__railLog = log;
+  let seq = 0;
+  const Native = window.IntersectionObserver;
+  if (Native) {
+    window.IntersectionObserver = class extends Native {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        super((entries, observer) => {
+          for (const entry of entries) {
+            const genre = (entry.target as HTMLElement).dataset?.genre;
+            if (genre && entry.isIntersecting) {
+              (log.near[genre] ??= []).push({ seq: ++seq, top: entry.boundingClientRect.top, viewport: window.innerHeight });
+            }
+          }
+          callback(entries, observer);
+        }, options);
+      }
+    };
+  }
   const original = window.fetch.bind(window);
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url.includes("/api/feed/more")) {
-      const tops: Record<string, number> = {};
-      document.querySelectorAll<HTMLElement>('[data-testid="genre-rail"]').forEach((el) => {
-        tops[el.dataset.genre!] = el.getBoundingClientRect().top;
-      });
-      const viewport = window.innerHeight;
+      const at = ++seq;
       const body = input instanceof Request ? input.clone().text() : Promise.resolve(String(init?.body ?? ""));
       void body.then((text) => {
         const genre = (JSON.parse(text) as { genre?: string | null }).genre;
-        if (genre) (w.__railTopAtRequest[genre] ??= []).push({ top: tops[genre] ?? Number.NaN, viewport });
+        if (genre) (log.asked[genre] ??= []).push(at);
       });
     }
     return original(input, init);
   };
+}
+
+/** Two painted frames: layout has run, and the observers have delivered what it changed. */
+async function frames(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+}
+
+/**
+ * Waits until Home has stopped asking: every /feed/more answered, two frames painted (so a rail a
+ * loaded rail pushed into or out of range has been observed) and a probe round-tripped (so a request
+ * that observation started has reached its handler) — with no new request, twice running. The
+ * replacement for "wait three seconds and count".
+ */
+async function quiesce(page: Page, booted: Booted): Promise<void> {
+  let quiet = 0;
+  for (let round = 0; round < 40 && quiet < 2; round++) {
+    const before = booted.bodies.length;
+    await expect.poll(() => booted.answered() === booted.bodies.length).toBe(true);
+    await frames(page);
+    await settle(page);
+    quiet = booted.bodies.length === before && booted.answered() === before ? quiet + 1 : 0;
+  }
+  expect(quiet, "Home stopped asking for pages").toBe(2);
 }
 
 /**
@@ -260,6 +321,9 @@ test.beforeAll(async ({ browser }, testInfo) => {
   const page = await browser.newPage();
   try {
     await bootHome(page, "ok");
+    // Saved too: the navigation case leaves Home for it, and an uncompiled chunk keeps Home mounted.
+    await page.getByRole("link", { name: /saved/i }).first().click();
+    await expect(page.getByRole("heading", { level: 1, name: "Saved" })).toBeVisible();
     expect(unmocked).toEqual([]);
   } finally {
     await page.close();
@@ -274,7 +338,7 @@ async function scrollThrough(page: Page): Promise<void> {
       return window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
     });
     // Two frames: the scroll is painted and the observers have run before the next step.
-    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await frames(page);
     if (done) break;
   }
 }
@@ -283,8 +347,11 @@ test.describe("lazy rails", () => {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     test(`a cold Home at ${viewport.width}×${viewport.height} asks for at most 2 pages and no genre rail`, async ({ page }) => {
       await page.setViewportSize(viewport);
-      const { bodies } = await bootHome(page, "ok");
-      await page.waitForTimeout(3000);
+      const booted = await bootHome(page, "ok");
+      const { bodies } = booted;
+      // The hero's seed of five is under its top-up line, so it always asks; then Home goes quiet.
+      await expect.poll(() => bodies.some((b) => b.row === "hero")).toBe(true);
+      await quiesce(page, booted);
       expect(bodies.length, JSON.stringify(bodies.map(railOf))).toBeLessThanOrEqual(2);
       expect(bodies.filter((b) => b.row === "genre")).toHaveLength(0);
     });
@@ -303,16 +370,20 @@ test.describe("lazy rails", () => {
     for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
       test(`with ${label} at ${viewport.width}×${viewport.height}, exactly the genre rails near the fold fetch`, async ({ page }) => {
         await page.setViewportSize(viewport);
-        const { bodies } = await bootHome(page, "ok", { rows: ROWS.slice(0, rowCount) });
-        await page.waitForTimeout(3000);
+        const booted = await bootHome(page, "ok", { rows: ROWS.slice(0, rowCount) });
+        const { bodies } = booted;
+        await expect.poll(() => bodies.some((b) => b.row === "hero")).toBe(true);
+        await quiesce(page, booted);
         const asked = bodies.filter((b) => b.row === "genre");
-        const tops = await page.evaluate(
-          () => (window as unknown as { __railTopAtRequest: Record<string, { top: number; viewport: number }[]> }).__railTopAtRequest
-        );
-        for (const body of asked) {
-          const at = tops[body.genre!]?.[0];
-          expect(at, `genre:${body.genre} has a measurement`).toBeDefined();
-          expect(at!.top, `genre:${body.genre} asked from ${at!.top}`).toBeLessThanOrEqual(at!.viewport + 200 + 1);
+        const log = await page.evaluate(() => (window as unknown as { __railLog: RailLog }).__railLog);
+        for (const genre of new Set(asked.map((b) => b.genre!))) {
+          const first = log.asked[genre]?.[0];
+          expect(first, `genre:${genre} has a recorded request`).toBeDefined();
+          // The observer reported the rail in range BEFORE it asked, from within the margin.
+          const inRange = (log.near[genre] ?? []).filter((n) => n.seq < first!);
+          expect(inRange.length, `genre:${genre} asked without the observer reporting it in range`).toBeGreaterThanOrEqual(1);
+          const at = inRange[0];
+          expect(at.top, `genre:${genre} came into range at ${at.top}`).toBeLessThanOrEqual(at.viewport + 200 + 1);
         }
         const fetched = new Set(asked.map((b) => b.genre));
         const nearNow = await page.evaluate(() =>
@@ -379,27 +450,41 @@ test.describe("page-wide exclusions", () => {
 
 test.describe("leaving a rail while its request is out", () => {
   test("navigating away mid-request schedules nothing more", async ({ page }) => {
-    const { bodies, answered } = await bootHome(page, "fail", { failDelayMs: 800, clock: true });
-    // The hero tops up at once and the answer is 800 ms away: leave Home inside that window.
+    const { bodies, answered, release } = await bootHome(page, "fail", { holdFirst: true, clock: true });
+    // The hero tops up at once, and its answer is held: the request is out when the user leaves.
     await expect.poll(() => bodies.filter((b) => b.row === "hero").length).toBe(1);
     expect(answered()).toBe(0);
+    // From here the page's time moves only when the test moves it: `install()` alone leaves it
+    // running, and a timer firing during the navigation would race the unmount.
+    await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
     await page.getByRole("link", { name: /saved/i }).first().click();
-    await expect(page).toHaveURL(/\/saved/);
-    const atExit = bodies.length;
-    // The in-flight 503 lands after the user has left...
-    await expect.poll(() => answered()).toBe(bodies.length);
+    // Left means unmounted, not the URL changing: the router keeps Home up until Saved has loaded.
+    await expect(page.getByRole("heading", { level: 1, name: "Saved" })).toBeVisible();
+    await expect(page.getByTestId("hero-card")).toHaveCount(0);
+    await expect(page.getByTestId("genre-rail")).toHaveCount(0);
+    // Nothing can have been scheduled yet: no request has failed, and the clock has not moved.
+    expect(bodies).toHaveLength(1);
+    // The held 503 lands on a Home that has gone...
+    release();
+    await expect.poll(() => answered()).toBe(1);
     // ...and then the whole ladder (1 s + 2 s + 4 s) and more passes on the page's clock. A row that
     // re-armed its backoff from beyond the grave would fire now.
     await page.clock.runFor(30_000);
     await settle(page);
-    expect(bodies.length - atExit, JSON.stringify(bodies.slice(atExit).map(railOf))).toBe(0);
+    expect(bodies.length - 1, JSON.stringify(bodies.slice(1).map(railOf))).toBe(0);
   });
 
   test("switching the medium mid-request retires the old hero; only the new one pages", async ({ page }) => {
-    const { bodies, answered } = await bootHome(page, "fail", { failDelayMs: 800, clock: true });
+    const { bodies, answered, release } = await bootHome(page, "fail", { holdFirst: true, clock: true });
     await expect.poll(() => bodies.filter((b) => b.row === "hero").length).toBe(1);
+    // The old hero's request is held and the page's time is paused, so nothing of the old hero can
+    // fire before the switch, however slow the click.
+    await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
     await page.getByTestId("browse-filters").getByRole("button", { name: "Movies" }).click();
     const newHero = () => bodies.filter((b) => b.row === "hero" && b.mediaType === "movie");
+    // The new hero has asked, so the old one is gone: its 503 lands on a retired rail.
+    await expect.poll(() => newHero().length).toBeGreaterThanOrEqual(1);
+    release();
     // The new hero runs its ladder to the Retry tile on the page's clock.
     await advanceUntil(page, async () => answered() === bodies.length && (await page.getByTestId("rail-retry").count()) === 1);
     // Long past the ladder, nothing else asks.
