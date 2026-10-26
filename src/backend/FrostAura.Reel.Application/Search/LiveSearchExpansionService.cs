@@ -715,13 +715,21 @@ public sealed class LiveSearchExpansionService(
             // ── Embed eligible candidates that lack a vector, then cosine pre-rank ───────────
             await Phase(new { stage = "embedding", found = eligible.Count, scored = 0 });
             using var embedStage = timings.Stage(AskStageTimings.Embed);
-            await EnsureEmbeddedAsync(eligible, ct);
+            await EnsureEmbeddedAsync(eligible, ct, timings);
             var vectorsByTitle = await LoadVectorsAsync(eligible.Select(t => t.Id).ToList(), ct);
             var tagVectors = await LoadPreferenceTagVectorsAsync(accountId, ct);
 
             // The POSITIVE reading of the turn, never the raw sentence: an embedding has no "not".
             var seedText = RankingSeedText(agentReply, trimmed, negations);
-            var queryVec = await RankingSeedVectorAsync(accountId, seedText, referenceVectors, conceptVector, ct);
+            // Timed on its own: the concept embedding started before discovery, so this is only the
+            // part of it the arms did not hide — the number that says whether an uncached embedding
+            // is what the first card is waiting on (R1-07).
+            float[]? queryVec;
+            using (timings.Stage(AskStageTimings.EmbedSeed))
+            {
+                queryVec = await RankingSeedVectorAsync(accountId, seedText, referenceVectors, conceptVector, ct);
+            }
+
             embedStage.Dispose();
 
             var scoredPool = eligible
@@ -756,7 +764,7 @@ public sealed class LiveSearchExpansionService(
                 // so it passed eligibility on what its list row carried. Once hydrated it is judged
                 // again — the arm's own contract for a provisional title — and one that now trips a
                 // standing condition or the maturity ceiling never reaches the judge or the screen.
-                if (await HydrateAsync(sliceIds, ct) > 0)
+                if (await HydrateAsync(sliceIds, ct, timings) > 0)
                 {
                     var stillEligible = (await baseQuery
                             .Where(t => sliceIds.Contains(t.Id))
@@ -2289,7 +2297,7 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyDictionary<Guid, decimal> scores;
         using (timings.Stage(AskStageTimings.Score))
         {
-            await HydrateAsync(sliceIds, ct);
+            await HydrateAsync(sliceIds, ct, timings);
             scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
         }
 
@@ -2392,7 +2400,13 @@ public sealed class LiveSearchExpansionService(
             .ToListAsync(ct);
     }
 
-    private async Task EnsureEmbeddedAsync(IReadOnlyList<Title> eligible, CancellationToken ct)
+    /// <summary>
+    /// Embeds the titles in <paramref name="eligible"/> that have no vector yet. When it has work to do,
+    /// that work is timed as <see cref="AskStageTimings.EmbedTitles"/> on <paramref name="timings"/>;
+    /// nothing is recorded when every title already had a vector.
+    /// </summary>
+    private async Task EnsureEmbeddedAsync(
+        IReadOnlyList<Title> eligible, CancellationToken ct, AskStageTimings? timings = null)
     {
         var ids = eligible.Select(t => t.Id).ToList();
         var already = await db.TitleEmbeddings.Where(e => ids.Contains(e.TitleId)).Select(e => e.TitleId).ToListAsync(ct);
@@ -2402,6 +2416,7 @@ public sealed class LiveSearchExpansionService(
             return;
         }
 
+        using var titlesStage = timings?.Stage(AskStageTimings.EmbedTitles);
         var texts = missing.Select(EmbeddingText.Build).ToList();
 
         // Embedding newly-discovered titles is an ENRICHMENT step, not the answer. It used to be
@@ -2470,8 +2485,12 @@ public sealed class LiveSearchExpansionService(
         }
     }
 
-    /// <summary>Hydrates the slice's titles that have never been refreshed; returns how many it hydrated.</summary>
-    private async Task<int> HydrateAsync(IReadOnlyList<Guid> sliceIds, CancellationToken ct)
+    /// <summary>
+    /// Hydrates the slice's titles that have never been refreshed; returns how many it hydrated. The
+    /// TMDB round trips are timed as <see cref="AskStageTimings.ScoreHydrate"/> on
+    /// <paramref name="timings"/> when there are any.
+    /// </summary>
+    private async Task<int> HydrateAsync(IReadOnlyList<Guid> sliceIds, CancellationToken ct, AskStageTimings? timings = null)
     {
         var needs = await db.Titles
             .Where(t => sliceIds.Contains(t.Id) && t.LastMetadataRefreshAt == null && t.TmdbId != null)
@@ -2481,6 +2500,7 @@ public sealed class LiveSearchExpansionService(
             return 0;
         }
 
+        using var hydrateStage = timings?.Stage(AskStageTimings.ScoreHydrate);
         await hydrator.HydrateBatchAsync(needs, ct);
         try
         {

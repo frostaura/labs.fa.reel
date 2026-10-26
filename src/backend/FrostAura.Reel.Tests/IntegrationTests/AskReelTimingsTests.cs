@@ -19,6 +19,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Pgvector;
 
 namespace FrostAura.Reel.Tests.IntegrationTests;
 
@@ -75,6 +76,12 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
             stage => Assert.Contains($"{stage}=", line, StringComparison.Ordinal));
         Assert.DoesNotContain($"{AskStageTimings.DiscoverFacet}=", line, StringComparison.Ordinal);
 
+        // Every discovered title is new to the catalogue, so it is embedded and hydrated on the turn,
+        // and the ranking seed is awaited: all three show up as their own breakdowns.
+        Assert.All(
+            new[] { AskStageTimings.EmbedTitles, AskStageTimings.EmbedSeed, AskStageTimings.ScoreHydrate },
+            stage => Assert.Contains($"{stage}=", line, StringComparison.Ordinal));
+
         var done = Assert.Single(events, e => e.Event == "done");
         var timings = done.Data.GetProperty("timingsMs");
         Assert.Equal(JsonValueKind.Object, timings.ValueKind);
@@ -99,6 +106,8 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
         Assert.True(recorded[AskStageTimings.DiscoverTmdb] <= recorded[AskStageTimings.Discover] + 1);
         Assert.True(recorded[AskStageTimings.DiscoverKnn] <= recorded[AskStageTimings.Discover] + 1);
         Assert.True(recorded[AskStageTimings.RerankFirstBatch] <= recorded[AskStageTimings.Rerank] + 1);
+        Assert.True(recorded[AskStageTimings.EmbedTitles] + recorded[AskStageTimings.EmbedSeed] <= recorded[AskStageTimings.Embed] + 2);
+        Assert.True(recorded[AskStageTimings.ScoreHydrate] <= recorded[AskStageTimings.Score] + 1);
         Assert.True(recorded[AskStageTimings.FirstCard] <= sw.Elapsed.TotalMilliseconds + 1);
 
         // The pipeline's stages are sequential and disjoint, so their sum cannot exceed the turn. A
@@ -166,6 +175,89 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
         Assert.True(
             !done.Data.TryGetProperty("timingsMs", out var timings) || timings.ValueKind == JsonValueKind.Null,
             "a turn that did not ask for diagnostics must not carry them.");
+    }
+
+    /// <summary>
+    /// R1-07: the first card's wait, attributed. §4.11's retrieve budget (0.3 s p50, 1.0 s p95) has no
+    /// line for three costs this pipeline can pay before the first judge call — embedding titles new to
+    /// the catalogue, hydrating them from TMDB, and the part of an uncached concept embedding the
+    /// discovery arms did not hide — so each is its own breakdown, and a latency run can say which one
+    /// a slow first card was waiting on instead of leaving it inside <c>embed</c> and <c>score</c>.
+    ///
+    /// <para>Two fixtures. COLD: the titles come from TMDB and are new, TMDB details take 60 ms each,
+    /// the new titles' embedding 250 ms, and the concept embedding 2.0 s — longer than the kNN arm's
+    /// 1.0 s budget. WARM: the titles are already catalogued, hydrated and embedded, and the concept
+    /// embeds instantly. The same turn must report the cold costs where they were paid and none of
+    /// them warm.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_first_card_breakdown_names_what_it_waited_on(bool cold)
+    {
+        if (!Fixture.Available)
+        {
+            return;
+        }
+
+        var accountId = await SeedAccountAsync();
+        await MarkAllExistingTitlesSeenAsync(accountId);
+
+        IReadOnlyList<TmdbListItem> fromTmdb = cold ? Discoverable(51201, 4) : [];
+        if (!cold)
+        {
+            for (var i = 0; i < 4; i++)
+            {
+                await SeedCataloguedTitleAsync(51301 + i, $"Catalogued Title {51301 + i}", i + 3);
+            }
+        }
+
+        var conceptDelayCold = TimeSpan.FromMilliseconds(2000);
+        var conceptDelay = cold ? conceptDelayCold : TimeSpan.Zero;
+        var titlesDelay = TimeSpan.FromMilliseconds(250);
+        var tmdb = new ScriptedTmdbClient(fromTmdb, detailsDelay: TimeSpan.FromMilliseconds(60));
+        var log = new CapturingLogger();
+        var (service, events) = BuildService(
+            accountId, tmdb, new ScriptedAgent(), new DelayedEmbeddingProvider(conceptDelay, titlesDelay), out var emit, log);
+
+        await service.StreamAsync(
+            "something brooding and futuristic", [], [], "US", [], ApiUsagePurpose.RerankAsk, emit,
+            CancellationToken.None, debug: true);
+
+        var done = Assert.Single(events, e => e.Event == "done");
+        var recorded = done.Data.GetProperty("timingsMs").EnumerateObject()
+            .ToDictionary(p => p.Name, p => p.Value.GetInt64(), StringComparer.Ordinal);
+        Assert.Contains(AskStageTimings.FirstCard, recorded.Keys);
+
+        if (cold)
+        {
+            // The kNN arm stops waiting at its budget; the rest of the embedding lands on the seed.
+            Assert.InRange(recorded[AskStageTimings.DiscoverKnn], 0, (long)LiveSearchExpansionService.SemanticEmbedBudget.TotalMilliseconds + 400);
+            Assert.True(
+                recorded[AskStageTimings.EmbedSeed] >= 200,
+                $"the seed waited {recorded[AskStageTimings.EmbedSeed]} ms on a 2.0 s embedding that discovery cut off at 1.0 s.");
+            Assert.True(recorded[AskStageTimings.EmbedTitles] >= 240, $"embed.titles was {recorded[AskStageTimings.EmbedTitles]} ms for a 250 ms call.");
+            Assert.True(recorded[AskStageTimings.ScoreHydrate] >= 55, $"score.hydrate was {recorded[AskStageTimings.ScoreHydrate]} ms for 60 ms TMDB calls.");
+
+            // The first card waited for all of it: none of the three runs underneath anything else.
+            Assert.True(
+                recorded[AskStageTimings.FirstCard]
+                    >= recorded[AskStageTimings.EmbedSeed] + recorded[AskStageTimings.EmbedTitles] + recorded[AskStageTimings.ScoreHydrate],
+                "the first card arrived before work that sits on its critical path finished.");
+            Assert.True(
+                recorded[AskStageTimings.FirstCard] >= (long)conceptDelay.TotalMilliseconds,
+                "the ranking seed waits for the whole concept embedding, so the first card cannot beat it.");
+        }
+        else
+        {
+            // Nothing new to embed or hydrate is ABSENT, not zero; a finished concept costs the seed nothing.
+            Assert.DoesNotContain(AskStageTimings.EmbedTitles, recorded.Keys);
+            Assert.DoesNotContain(AskStageTimings.ScoreHydrate, recorded.Keys);
+            Assert.InRange(recorded[AskStageTimings.EmbedSeed], 0, 100);
+            Assert.True(
+                recorded[AskStageTimings.FirstCard] < conceptDelayCold.TotalMilliseconds,
+                $"a warm turn's first card took {recorded[AskStageTimings.FirstCard]} ms with no model or TMDB latency in it.");
+        }
     }
 
     /// <summary>The accumulate-don't-append rule, pinned without a database.</summary>
@@ -268,6 +360,52 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
         return account.Id;
     }
 
+    /// <summary>A global, English, already-hydrated, UNSEEN title that already carries an embedding.</summary>
+    private async Task SeedCataloguedTitleAsync(long tmdbId, string name, int seed)
+    {
+        await using var db = Fixture.CreateContext(new AccountContext());
+        var title = new Title
+        {
+            Id = Guid.NewGuid(),
+            MediaType = MediaType.Movie,
+            TmdbId = tmdbId,
+            TraktSlug = string.Empty,
+            Name = name,
+            Genres = ["science-fiction"],
+            Language = "en",
+            Overview = "A brooding, futuristic search for what is real.",
+            LastMetadataRefreshAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+        };
+        db.Add(title);
+        db.TitleEmbeddings.Add(new TitleEmbedding
+        {
+            TitleId = title.Id,
+            Embedding = new Vector(Unit(seed)),
+            EmbeddingModel = EmbeddingText.Model,
+            SourceTextHash = EmbeddingText.Hash(name),
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static float[] Unit(int seed)
+    {
+        var v = new float[1536];
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] = (float)Math.Sin(seed + i);
+        }
+
+        var norm = (float)Math.Sqrt(v.Sum(x => (double)x * x));
+        for (var i = 0; i < v.Length; i++)
+        {
+            v[i] /= norm;
+        }
+
+        return v;
+    }
+
     private async Task MarkAllExistingTitlesSeenAsync(Guid accountId)
     {
         await using var db = Fixture.CreateContext(new AccountContext());
@@ -352,6 +490,28 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
             }).ToArray());
     }
 
+    /// <summary>
+    /// An embedding provider with a latency per kind of call: the turn's concept (one text that is not a
+    /// catalogue title) or a batch of title texts. Vectors are the same deterministic unit vectors.
+    /// </summary>
+    private sealed class DelayedEmbeddingProvider(TimeSpan conceptDelay, TimeSpan titlesDelay) : IEmbeddingProvider
+    {
+        public bool IsAvailable => true;
+
+        public async Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct = default)
+        {
+            var titles = texts.Any(t => t.Contains("Timed Title", StringComparison.Ordinal)
+                || t.Contains("Catalogued Title", StringComparison.Ordinal));
+            var delay = titles ? titlesDelay : conceptDelay;
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, ct);
+            }
+
+            return texts.Select(t => Unit(t.Length)).ToArray();
+        }
+    }
+
     /// <summary>A keyless install — the condition that routes a turn down the lexical branch.</summary>
     private sealed class UnavailableEmbeddingProvider : IEmbeddingProvider
     {
@@ -361,7 +521,7 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
             throw new InvalidOperationException("No embedding provider is configured.");
     }
 
-    private sealed class ScriptedTmdbClient(IReadOnlyList<TmdbListItem> rows) : ITmdbClient
+    private sealed class ScriptedTmdbClient(IReadOnlyList<TmdbListItem> rows, TimeSpan detailsDelay = default) : ITmdbClient
     {
         // TMDB knows every concept the fixture asks about, so the discovery arm pulls (R1-52).
         public Task<IReadOnlyList<TmdbKeyword>> SearchKeywordsAsync(string query, CancellationToken ct = default) =>
@@ -384,8 +544,15 @@ public class AskReelTimingsTests(PostgresFixture fixture) : EmbeddedCatalogTestB
         public Task<IReadOnlyList<TmdbListItem>> GetPersonCreditsAsync(long personId, PersonCreditRole role, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<TmdbListItem>>([]);
 
-        public Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default) =>
-            Task.FromResult<TmdbTitleDetails?>(null);
+        public async Task<TmdbTitleDetails?> GetMovieAsync(long tmdbId, CancellationToken ct = default)
+        {
+            if (detailsDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(detailsDelay, ct);
+            }
+
+            return null;
+        }
 
         public Task<TmdbTitleDetails?> GetTvAsync(long tmdbId, CancellationToken ct = default) =>
             Task.FromResult<TmdbTitleDetails?>(null);

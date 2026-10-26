@@ -58,6 +58,25 @@ public sealed class AskStageTimings
     /// <summary>Inside <see cref="Discover"/>: the semantic kNN arm, including any wait on its embedding.</summary>
     public const string DiscoverKnn = "discover.knn";
 
+    /// <summary>
+    /// Inside <see cref="Embed"/>: embedding the eligible titles that had no vector yet — newly discovered
+    /// ones, mostly. Absent when every eligible title was already embedded.
+    /// </summary>
+    public const string EmbedTitles = "embed.titles";
+
+    /// <summary>
+    /// Inside <see cref="Embed"/>: waiting on the ranking seed — the concept embedding started before
+    /// discovery. Near zero when it finished underneath the arms; the remainder of an uncached
+    /// embedding when it did not, which §4.11's retrieve budget does not allow for.
+    /// </summary>
+    public const string EmbedSeed = "embed.seed";
+
+    /// <summary>
+    /// Inside <see cref="Score"/>: hydrating the shortlist's never-refreshed titles from TMDB. Absent
+    /// when every title on the shortlist was already hydrated.
+    /// </summary>
+    public const string ScoreHydrate = "score.hydrate";
+
     /// <summary>Inside <see cref="Rerank"/>: from the start of judging to the first batch returning.</summary>
     public const string RerankFirstBatch = "rerank.first";
 
@@ -67,10 +86,13 @@ public sealed class AskStageTimings
     /// <summary>
     /// Canonical order — the order the work happens in, which is the order a reader wants it. The
     /// snapshot is built from this list, so a stage that never ran is simply absent rather than zero.
-    /// The dotted entries are breakdowns of the stage before them and are not added to it again.
+    /// The dotted entries are breakdowns of the undotted stage above them and are not added to it again.
     /// </summary>
     public static readonly IReadOnlyList<string> Order =
-        [Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, Score, Rerank, RerankFirstBatch, Blend, Emit, FirstCard];
+        [
+            Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
+            Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
+        ];
 
     /// <summary>
     /// The pipeline's own stages — sequential and disjoint, so they sum to no more than the turn. The

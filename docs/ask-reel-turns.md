@@ -360,8 +360,12 @@ say.
    `embedding`) and `ReasoningEffort` — the effort the purpose catalog sends at, `none` today;
    `plan/judge` when the two differ, `provider-default` where no effort parameter is sent, and null
    on a turn that made no model call (keyless, Clarify). `StageTimingsJson` carries the sequential
-   stages plus breakdowns: `discover.tmdb`, `discover.facet`, `discover.knn`, `rerank.first` (the
-   first judge batch) and `firstCard` (turn start to the first pick on the wire).
+   stages plus breakdowns: `discover.tmdb`, `discover.facet`, `discover.knn`, `embed.titles`
+   (embedding titles that had no vector), `embed.seed` (the part of the concept embedding the arms
+   did not hide), `score.hydrate` (TMDB hydration of never-refreshed titles), `rerank.first` (the
+   first judge batch) and `firstCard` (turn start to the first pick on the wire). A breakdown whose
+   work did not happen is absent, not zero. All three middle ones sit on the first card's critical
+   path, and §4.11's retrieve budget has no line for any of them.
 9. **Failure** — a crash stamps the row `Failed` with a `FailureCode` and stores no cards. An
    abandoned stream (`client_aborted`) stores **what was already on the wire**: the reply and every
    card emitted, in emission order, so the next turn's history and no-repeat set contain them — and
