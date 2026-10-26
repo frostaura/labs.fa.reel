@@ -301,8 +301,11 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
         Assert.Contains(titles, t => excluded.Any(i => i.Title.Id == t));
     }
 
-    [Fact]
-    public async Task An_anchored_page_serves_only_cards_with_shared_evidence_and_carries_it()
+    [Theory]
+    [InlineData(FeedRowContext.BecauseYouLoved)]
+    // The title page's "More like this" (WS-10A's Similar evidence): the same gate, the same chips.
+    [InlineData(FeedRowContext.Similar)]
+    public async Task An_anchored_page_serves_only_cards_with_shared_evidence_and_carries_it(FeedRowContext context)
     {
         if (!Fixture.Available)
         {
@@ -322,7 +325,7 @@ public class FeedPaginatorTrustTests(PostgresFixture fixture) : EmbeddedCatalogT
 
         var items = await MoreAsync(
             accountId,
-            new MoreFeedRequest(FeedRowContext.BecauseYouLoved, anchor[0], null, [], 12),
+            new MoreFeedRequest(context, anchor[0], null, [], 12),
             new UnavailableSearchAgent());
 
         Assert.NotEmpty(items);
