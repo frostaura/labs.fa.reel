@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { AlertTriangle, Eye, Search, Sparkles } from "lucide-react";
-import { useSearchTypeaheadGlobalQuery, useSearchTypeaheadQuery } from "../../store/api";
-import { shouldQueryGlobal } from "../../lib/globalTypeahead";
+import {
+  useLazySearchTypeaheadQuery,
+  useSearchTypeaheadGlobalQuery,
+  useSearchTypeaheadQuery,
+  useTypeaheadScoresQuery,
+} from "../../store/api";
+import { enterTarget, hiddenLine, peopleFirst, shouldQueryGlobal, strongMatchCount } from "../../lib/globalTypeahead";
 import { mintHandoff } from "../../lib/useAskReelChat";
 import PosterImage from "../rec/PosterImage";
 import PredictedRatingBadge from "../rec/PredictedRatingBadge";
@@ -14,10 +19,19 @@ import PredictedRatingBadge from "../rec/PredictedRatingBadge";
  * "Ask Reel" row (or Enter) runs natural-language search. A hint, never a silent mode switch.
  *
  * Spec §7 asks for title AND person results, and the dropdown is a proper combobox: Up/Down move
- * an active option, Enter takes it (falling back to Ask Reel only when nothing is active), Escape
- * dismisses. Before that there was no keyboard path to a typeahead result at all — Enter was hard
- * wired to Ask Reel, so a keyboard or screen-reader user could never reach the list.
+ * an active option, Enter takes it, Escape dismisses. Before that there was no keyboard path to a
+ * typeahead result at all — Enter was hard wired to Ask Reel, so a keyboard or screen-reader user
+ * could never reach the list.
+ *
+ * The lookup is tiered (WS-3 task 10): rows arrive ranked exact → prefix → word start → fuzzy, the
+ * people group leads when it answers better ("nolan"), Enter with nothing active OPENS an exact
+ * match ("inception" + Enter never spends an Ask Reel turn — it asks for the lookup of what was
+ * typed if it has not answered yet), and anything the conditions hide is counted on a line instead
+ * of silently missing (FD-5). The predicted-rating badge is fetched after the rows.
  */
+
+/** How long Enter waits for the lookup of the typed text before falling back to Ask Reel. */
+const ENTER_WAIT_MS = 1500;
 
 const LISTBOX_ID = "reel-typeahead-listbox";
 const optionId = (index: number) => `reel-typeahead-opt-${index}`;
@@ -46,28 +60,48 @@ export default function SearchBox() {
 
   // `isError` is destructured on purpose: without it a 500 rendered exactly like a genuine
   // no-match, so a broken search backend looked like an obscure film.
-  const { data, isFetching, isError } = useSearchTypeaheadQuery(debounced, {
+  const { data, currentData, isFetching, isError } = useSearchTypeaheadQuery(debounced, {
     skip: debounced.length < 2,
   });
 
   const titles = data?.titles ?? [];
   const people = data?.people ?? [];
 
-  // The global TMDB leg fires only after the LOCAL query has resolved sparse — a lookup beyond
-  // the ~4k ingested pool ("jeanne dielman" → something, not nothing). Gating on `data` being
-  // present keeps it strictly after local resolution for the CURRENT term.
-  const globalEligible = !isError && data !== undefined && shouldQueryGlobal(debounced, titles.length);
+  // The badge, after the rows: the lookup itself loads no model, so it answers fast.
+  const scoredIds = titles.filter((t) => !t.isFullyWatched).map((t) => t.titleId).join(",");
+  const { data: scoreData } = useTypeaheadScoresQuery(scoredIds, { skip: scoredIds.length === 0 });
+  const predictedFor = (t: (typeof titles)[number]) => scoreData?.scores[t.titleId] ?? t.predictedRating;
+
+  // The global TMDB leg fires only after the LOCAL query has resolved with few STRONG matches — a
+  // lookup beyond the ingested pool ("jeanne dielman" → something, not nothing). Gating on `data`
+  // being present keeps it strictly after local resolution for the CURRENT term.
+  const globalEligible = !isError && data !== undefined && shouldQueryGlobal(debounced, strongMatchCount(data));
   const { data: globalData, isFetching: isGlobalFetching } = useSearchTypeaheadGlobalQuery(debounced, {
     skip: !globalEligible,
   });
-  const globalRows = globalEligible ? (globalData?.global ?? []) : [];
+  // A global row for a title the local list already shows is the same title: drawn once.
+  const localKeys = new Set(titles.map((t) => `${t.mediaType.toLowerCase()}-${t.tmdbId}`));
+  const globalRows = globalEligible
+    ? (globalData?.global ?? []).filter((g) => !localKeys.has(`${g.mediaType}-${g.tmdbId}`))
+    : [];
+  const hidden = hiddenLine((data?.hiddenByConditions ?? 0) + (globalEligible ? (globalData?.hiddenByConditions ?? 0) : 0));
 
+  // Render order is option order: the better-matching group first.
+  const peopleLead = peopleFirst(data);
+  const titleOptions = titles.map((t) => ({ path: `/title/${t.mediaType.toLowerCase()}/${t.tmdbId}`, overlay: true }));
+  const personOptions = people.map((p) => ({ path: `/person/${p.personId}`, overlay: false }));
+  const titleOffset = peopleLead ? people.length : 0;
+  const personOffset = peopleLead ? 0 : titles.length;
   const options: Option[] = [
-    ...titles.map((t) => ({ path: `/title/${t.mediaType.toLowerCase()}/${t.tmdbId}`, overlay: true })),
-    ...people.map((p) => ({ path: `/person/${p.personId}`, overlay: false })),
+    ...(peopleLead ? [...personOptions, ...titleOptions] : [...titleOptions, ...personOptions]),
     // Global rows navigate exactly like local title rows — the detail endpoint hydrates on demand.
     ...globalRows.map((g) => ({ path: `/title/${g.mediaType}/${g.tmdbId}`, overlay: true })),
   ];
+
+  // Enter pressed before the lookup of what was typed has answered asks for it directly (sharing
+  // the cache entry the dropdown would have used) and decides when it lands.
+  const [lookupNow] = useLazySearchTypeaheadQuery();
+  const latestQuery = useRef("");
   // Clamped rather than reset in an effect: a shorter result set must never leave the active
   // descendant pointing at an option that no longer exists.
   const active = activeIndex < options.length ? activeIndex : -1;
@@ -116,6 +150,24 @@ export default function SearchBox() {
     navigate(option.path, option.overlay ? { state: { backgroundLocation: location } } : undefined);
   };
 
+  /** Enter with nothing active: an exact match opens; anything less asks Reel. */
+  const resolveEnter = (payload: typeof data) => {
+    const target = enterTarget(payload);
+    if (target.kind === "title" && payload) {
+      const t = payload.titles[target.index];
+      go({ path: `/title/${t.mediaType.toLowerCase()}/${t.tmdbId}`, overlay: true });
+    } else if (target.kind === "person" && payload) {
+      go({ path: `/person/${payload.people[target.index].personId}`, overlay: false });
+    } else {
+      askReel();
+    }
+  };
+
+
+  // ≥5 words or comparator phrasing promotes the Ask row — a hint, not a switch.
+  const looksNatural =
+    query.trim().split(/\s+/).length >= 5 || /\b(like|but|similar to|vibe|feels|without)\b/i.test(query);
+
   const move = (delta: number) => {
     if (options.length === 0) return;
     setOpen(true);
@@ -131,9 +183,33 @@ export default function SearchBox() {
     }
     if (e.key === "Enter") {
       e.preventDefault();
-      // Enter takes the active option; with nothing active it still means "ask Reel".
-      if (active >= 0 && options[active]) go(options[active]);
-      else askReel();
+      // Enter takes the active option. With nothing active, a sentence asks Reel at once; a
+      // lookup-shaped term opens its exact match — waiting for the lookup of exactly what was typed
+      // when it has not answered yet — and asks Reel only when there is none.
+      if (active >= 0 && options[active]) {
+        go(options[active]);
+        return;
+      }
+      const typed = query.trim();
+      if (typed.length === 0) return;
+      if (looksNatural || typed.length < 2) {
+        askReel();
+        return;
+      }
+      if (debounced === typed && currentData !== undefined) {
+        resolveEnter(currentData);
+        return;
+      }
+      // Not answered yet: ask for exactly this text, wait at most ENTER_WAIT_MS, and act only if the
+      // box still holds it — typing on cancels the Enter. A failed lookup still asks Reel.
+      const timeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), ENTER_WAIT_MS));
+      void Promise.race([lookupNow(typed, true).unwrap(), timeout])
+        .catch(() => null)
+        .then((payload) => {
+          if (latestQuery.current.trim() !== typed) return;
+          if (payload) resolveEnter(payload);
+          else askReel();
+        });
       return;
     }
     if (e.key === "Escape") {
@@ -142,9 +218,6 @@ export default function SearchBox() {
     }
   };
 
-  // ≥5 words or comparator phrasing promotes the Ask row — a hint, not a switch.
-  const looksNatural =
-    query.trim().split(/\s+/).length >= 5 || /\b(like|but|similar to|vibe|feels|without)\b/i.test(query);
 
   const showDropdown = open && debounced.length >= 2;
 
@@ -158,6 +231,7 @@ export default function SearchBox() {
             setQuery(e.target.value);
             setOpen(true);
             setActiveIndex(-1);
+            latestQuery.current = e.target.value;
           }}
           onFocus={() => setOpen(true)}
           onKeyDown={onKeyDown}
@@ -187,56 +261,19 @@ export default function SearchBox() {
             <div className="px-4 py-3 fa-caption text-fa-frost-dim">searching…</div>
           ) : options.length === 0 && !(globalEligible && isGlobalFetching) ? (
             <div className="px-4 py-3 fa-caption text-fa-frost-dim" data-testid="typeahead-empty">
-              Nothing by that name.
+              Nothing by that name{hidden ? " that your conditions allow" : ""}.
             </div>
           ) : (
             <div id={LISTBOX_ID} role="listbox" aria-label="Search suggestions" className="max-h-[70vh] overflow-y-auto">
-              {titles.length > 0 && (
-                <div role="group" aria-label="Titles">
-                  {titles.map((title, i) => (
-                    <Link
-                      key={title.titleId}
-                      ref={i === active ? activeRef : undefined}
-                      id={optionId(i)}
-                      role="option"
-                      aria-selected={i === active}
-                      to={`/title/${title.mediaType.toLowerCase()}/${title.tmdbId}`}
-                      state={{ backgroundLocation: location }}
-                      onClick={() => setOpen(false)}
-                      className={`flex items-center gap-3 px-3 py-2 transition ${i === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
-                      data-testid="typeahead-result"
-                    >
-                      {/* PosterImage, not a bare <img>: it carries the shimmer and the
-                          gradient-initials fallback for both a null path and a broken URL. */}
-                      <div className="w-8 shrink-0">
-                        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="fa-body text-fa-frost-bright truncate">{title.name}</p>
-                        <p className="fa-caption text-fa-frost-dim">
-                          {title.year ?? ""} · {title.mediaType === "Movie" ? "film" : "series"}
-                        </p>
-                      </div>
-                      {title.isFullyWatched && (
-                        <span className="inline-flex items-center gap-1 fa-caption text-fa-frost-dim shrink-0">
-                          <Eye className="h-3.5 w-3.5" /> seen
-                        </span>
-                      )}
-                      {title.predictedRating != null && !title.isFullyWatched && (
-                        <PredictedRatingBadge rating={title.predictedRating} />
-                      )}
-                    </Link>
-                  ))}
-                </div>
-              )}
-
+              {peopleLead ? (
+                <>
               {/* People. The server has always returned them; the dropdown simply never drew them,
                   so spec §7's "instant title/person results" was half-shipped. */}
               {people.length > 0 && (
                 <div role="group" aria-label="People">
                   <p className="fa-overline px-3 pt-2 pb-1 text-fa-frost-dim" aria-hidden="true">People</p>
                   {people.map((person, i) => {
-                    const index = titles.length + i;
+                    const index = personOffset + i;
                     return (
                       <Link
                         key={person.personId}
@@ -263,6 +300,120 @@ export default function SearchBox() {
                   })}
                 </div>
               )}
+              {titles.length > 0 && (
+                <div role="group" aria-label="Titles">
+                  {titles.map((title, i) => (
+                    <Link
+                      key={title.titleId}
+                      ref={titleOffset + i === active ? activeRef : undefined}
+                      id={optionId(titleOffset + i)}
+                      role="option"
+                      aria-selected={titleOffset + i === active}
+                      to={`/title/${title.mediaType.toLowerCase()}/${title.tmdbId}`}
+                      state={{ backgroundLocation: location }}
+                      onClick={() => setOpen(false)}
+                      className={`flex items-center gap-3 px-3 py-2 transition ${titleOffset + i === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
+                      data-testid="typeahead-result"
+                    >
+                      {/* PosterImage, not a bare <img>: it carries the shimmer and the
+                          gradient-initials fallback for both a null path and a broken URL. */}
+                      <div className="w-8 shrink-0">
+                        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="fa-body text-fa-frost-bright truncate">{title.name}</p>
+                        <p className="fa-caption text-fa-frost-dim">
+                          {title.year ?? ""} · {title.mediaType === "Movie" ? "film" : "series"}
+                        </p>
+                      </div>
+                      {title.isFullyWatched && (
+                        <span className="inline-flex items-center gap-1 fa-caption text-fa-frost-dim shrink-0">
+                          <Eye className="h-3.5 w-3.5" /> seen
+                        </span>
+                      )}
+                      {predictedFor(title) != null && !title.isFullyWatched && (
+                        <PredictedRatingBadge rating={predictedFor(title)!} />
+                      )}
+                    </Link>
+                  ))}
+                </div>
+              )}
+                </>
+              ) : (
+                <>
+              {titles.length > 0 && (
+                <div role="group" aria-label="Titles">
+                  {titles.map((title, i) => (
+                    <Link
+                      key={title.titleId}
+                      ref={titleOffset + i === active ? activeRef : undefined}
+                      id={optionId(titleOffset + i)}
+                      role="option"
+                      aria-selected={titleOffset + i === active}
+                      to={`/title/${title.mediaType.toLowerCase()}/${title.tmdbId}`}
+                      state={{ backgroundLocation: location }}
+                      onClick={() => setOpen(false)}
+                      className={`flex items-center gap-3 px-3 py-2 transition ${titleOffset + i === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
+                      data-testid="typeahead-result"
+                    >
+                      {/* PosterImage, not a bare <img>: it carries the shimmer and the
+                          gradient-initials fallback for both a null path and a broken URL. */}
+                      <div className="w-8 shrink-0">
+                        <PosterImage path={title.posterPath} alt={title.name} size="w185" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="fa-body text-fa-frost-bright truncate">{title.name}</p>
+                        <p className="fa-caption text-fa-frost-dim">
+                          {title.year ?? ""} · {title.mediaType === "Movie" ? "film" : "series"}
+                        </p>
+                      </div>
+                      {title.isFullyWatched && (
+                        <span className="inline-flex items-center gap-1 fa-caption text-fa-frost-dim shrink-0">
+                          <Eye className="h-3.5 w-3.5" /> seen
+                        </span>
+                      )}
+                      {predictedFor(title) != null && !title.isFullyWatched && (
+                        <PredictedRatingBadge rating={predictedFor(title)!} />
+                      )}
+                    </Link>
+                  ))}
+                </div>
+              )}
+              {/* People. The server has always returned them; the dropdown simply never drew them,
+                  so spec §7's "instant title/person results" was half-shipped. */}
+              {people.length > 0 && (
+                <div role="group" aria-label="People">
+                  <p className="fa-overline px-3 pt-2 pb-1 text-fa-frost-dim" aria-hidden="true">People</p>
+                  {people.map((person, i) => {
+                    const index = personOffset + i;
+                    return (
+                      <Link
+                        key={person.personId}
+                        ref={index === active ? activeRef : undefined}
+                        id={optionId(index)}
+                        role="option"
+                        aria-selected={index === active}
+                        to={`/person/${person.personId}`}
+                        onClick={() => setOpen(false)}
+                        className={`flex items-center gap-3 px-3 py-2 transition ${index === active ? "bg-fa-glass" : "hover:bg-fa-glass"}`}
+                        data-testid="typeahead-person"
+                      >
+                        <div className="w-8 shrink-0">
+                          <PosterImage path={person.profilePath} alt={person.name} size="w185" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="fa-body text-fa-frost-bright truncate">{person.name}</p>
+                          <p className="fa-caption text-fa-frost-dim truncate">
+                            {person.knownFor ?? "person"}
+                          </p>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+                </>
+              )}
 
               {/* Beyond your catalogue — raw TMDB lookup rows for a sparse local shortlist.
                   Lookup, not suggestion: never scored, never eligibility-filtered, no for-you
@@ -280,7 +431,7 @@ export default function SearchBox() {
                     </div>
                   ) : (
                     globalRows.map((row, i) => {
-                      const index = titles.length + people.length + i;
+                      const index = titles.length + people.length + i; // global rows always come last
                       return (
                         <Link
                           key={`${row.mediaType}-${row.tmdbId}`}
@@ -310,6 +461,13 @@ export default function SearchBox() {
                 </div>
               )}
             </div>
+          )}
+
+          {/* FD-5: what the conditions hide is counted, not silently missing. */}
+          {hidden && !isError && (
+            <p className="px-4 py-2 fa-caption text-fa-frost-dim border-t border-fa-edge/50" aria-live="polite" data-testid="typeahead-hidden">
+              {hidden}
+            </p>
           )}
 
           {!looksNatural && <AskRow query={query} onAsk={askReel} />}
