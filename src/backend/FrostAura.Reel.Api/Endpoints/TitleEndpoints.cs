@@ -13,6 +13,7 @@ using FrostAura.Reel.Domain.Ml;
 using FrostAura.Reel.Domain.Ports;
 using FrostAura.Reel.Domain.Ports.Tmdb;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace FrostAura.Reel.Api.Endpoints;
 
@@ -109,15 +110,17 @@ public static class TitleEndpoints
             ITmdbClient tmdb, CandidateGenerator candidateGenerator, TitleHydrator hydrator,
             ICatalogWorkCoordinator coordinator, OnDemandScorer scorer, FeatureVectorBuilder featureBuilder,
             DislikeSignal dislikes, Application.Lens.LensService lens, TasteFactsBuilder tasteFacts,
-            CancellationToken ct) =>
+            IMemoryCache cache, CancellationToken ct) =>
         {
             var accountId = accountContext.AccountId!.Value;
             var title = await ResolveTitleAsync(db, mediaType, tmdbId, ct);
 
             // Unknown locally ≠ nonexistent: the global typeahead can point at any TMDB title, and
             // a bare 404 here would dead-end that navigation. Hydrate on demand instead — only a
-            // genuine TMDB 404 (or an unparseable media type) still falls through to NotFound.
-            title ??= await HydrateOnDemandAsync(db, tmdb, candidateGenerator, hydrator, coordinator, mediaType, tmdbId, ct);
+            // genuine TMDB 404 (or an unparseable media type) still falls through to NotFound, and
+            // a 404 TMDB has already given is answered from the negative cache without asking again.
+            title ??= await HydrateOnDemandAsync(
+                db, tmdb, candidateGenerator, hydrator, coordinator, mediaType, tmdbId, ct, cache);
             if (title is null)
             {
                 return Results.NotFound();
@@ -369,6 +372,16 @@ public static class TitleEndpoints
     }
 
     /// <summary>
+    /// How long a TMDB 404 is remembered. TMDB never reuses an id, so a 404 only turns into a title
+    /// if that id is created later — an hour bounds how long a brand-new entry could read as missing,
+    /// while a dead link opened again in a session is answered without a TMDB call.
+    /// </summary>
+    internal static readonly TimeSpan TmdbNotFoundTtl = TimeSpan.FromHours(1);
+
+    /// <summary>The negative-cache key for one TMDB id of one media type.</summary>
+    internal static string TmdbNotFoundKey(MediaType type, long tmdbId) => $"tmdb404:{type}:{tmdbId}";
+
+    /// <summary>
     /// Fetches, upserts and hydrates a title Reel has never seen, so a global-typeahead navigation
     /// lands on a real detail page instead of a 404. Single-flighted per (mediaType, tmdbId): two
     /// concurrent opens of the same unknown title share one TMDB fetch + upsert, exactly like Ask
@@ -378,7 +391,7 @@ public static class TitleEndpoints
     internal static async Task<Title?> HydrateOnDemandAsync(
         IReelDbContext db, ITmdbClient tmdb, CandidateGenerator candidateGenerator,
         TitleHydrator hydrator, ICatalogWorkCoordinator coordinator,
-        string mediaType, long tmdbId, CancellationToken ct)
+        string mediaType, long tmdbId, CancellationToken ct, IMemoryCache? notFoundCache = null)
     {
         var type = mediaType.ToLowerInvariant() switch
         {
@@ -387,6 +400,16 @@ public static class TitleEndpoints
             _ => (MediaType?)null,
         };
         if (type is null)
+        {
+            return null;
+        }
+
+        // The negative cache: an id TMDB has just 404'd is answered locally for
+        // TmdbNotFoundTtl. A bad deep link is opened, retried and refreshed, and each open used to
+        // queue a fresh TMDB round trip behind the rate gate's backfill lane — 1.33 s for a page
+        // whose answer was already known (WS-10A's 1 s not-found budget).
+        var notFoundKey = TmdbNotFoundKey(type.Value, tmdbId);
+        if (notFoundCache is not null && notFoundCache.TryGetValue(notFoundKey, out _))
         {
             return null;
         }
@@ -401,6 +424,7 @@ public static class TitleEndpoints
                 : await tmdb.GetTvAsync(tmdbId, CancellationToken.None);
             if (details is null)
             {
+                notFoundCache?.Set(notFoundKey, true, TmdbNotFoundTtl);
                 return null;
             }
 
@@ -521,7 +545,8 @@ public static class TitleEndpoints
             personsByTitle.GetValueOrDefault(title.Id) ?? ExplanationTemplater.NoPersons,
             title.Genres.Where(taste.GenreRatings.ContainsKey).ToHashSet(),
             AnchorName: null,
-            Tone: tone));
+            Tone: tone,
+            AccountContrarianOffset: taste.OverallContrarianOffset));
 
         // The generic fallback is not personalisation — it is the templater admitting it found
         // nothing. Never worth pushing above the synopsis.

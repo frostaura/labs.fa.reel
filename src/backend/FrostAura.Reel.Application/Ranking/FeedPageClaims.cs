@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using FrostAura.Reel.Application.Persistence;
 using FrostAura.Reel.Domain.Feed;
 using Microsoft.EntityFrameworkCore;
@@ -15,8 +16,8 @@ namespace FrostAura.Reel.Application.Ranking;
 /// titles on a 1440 px Home appearing in two or more sections (NCIS in five). The client therefore
 /// sends one opaque token per page view; each request CLAIMS its cards against the token's set
 /// under a lock, and a card another rail already claimed is skipped for the next-best one. The set
-/// is seeded with the Active snapshot's titles, so a genre rail also never repeats tonight's picks
-/// or a because-you-loved rail above it.</para>
+/// is seeded with the Active snapshot's titles and this week's digest, so a genre rail also never
+/// repeats tonight's picks, a because-you-loved rail above it, or the digest rail beside it.</para>
 ///
 /// <para><b>Claims belong to a row.</b> Each claimed title remembers the row key that claimed it,
 /// and a title is free for the row that owns it. An RTK refetch or a tag invalidation re-requests a
@@ -54,6 +55,9 @@ public static class FeedPageClaims
 
     /// <summary>The owner recorded for a title seeded from tonight's snapshot: no rail may claim it.</summary>
     private const string SnapshotOwner = "\u0000snapshot";
+
+    /// <summary>The owner recorded for a title seeded from this week's digest: no rail may claim it.</summary>
+    private const string DigestOwner = "\u0000digest";
 
     /// <summary>
     /// The titles of <paramref name="orderedTitleIds"/> that another row of this page already holds —
@@ -179,7 +183,43 @@ public static class FeedPageClaims
             page.Owners[titleId] = SnapshotOwner;
         }
 
+        // …and with this week's digest, which Home renders as its own rail ("New & high for you
+        // this week"). Without it a genre rail dealt the same new release a second time on the same
+        // page. A digest title already on tonight's snapshot keeps the snapshot as its owner.
+        foreach (var titleId in await DigestTitleIdsAsync(db, accountId, now, ct))
+        {
+            page.Owners.TryAdd(titleId, DigestOwner);
+        }
+
         return page;
+    }
+
+    /// <summary>
+    /// The titles of the account's digest for the ISO week containing <paramref name="now"/> — the
+    /// one <c>GET /api/digest/current</c> serves. Empty when the week has no digest, and when its
+    /// stored items cannot be read (an unreadable digest renders no rail, so it claims nothing).
+    /// </summary>
+    internal static async Task<IReadOnlyList<Guid>> DigestTitleIdsAsync(
+        IReelDbContext db, Guid accountId, DateTime now, CancellationToken ct)
+    {
+        var weekStart = DigestWeek.MondayOf(now);
+        var itemsJson = await db.AccountDigests
+            .Where(d => d.AccountId == accountId && d.WeekStart == weekStart)
+            .Select(d => d.ItemsJson)
+            .FirstOrDefaultAsync(ct);
+        if (string.IsNullOrWhiteSpace(itemsJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<DigestItem>>(itemsJson)?.Select(i => i.TitleId).ToList() ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     /// <summary>Drops idle pages, then the account's and the process's least recently used beyond the caps.</summary>
