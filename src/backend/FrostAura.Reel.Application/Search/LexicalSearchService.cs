@@ -9,6 +9,10 @@ namespace FrostAura.Reel.Application.Search;
 /// scores eligible titles on genre overlap + keyword/overview/name hits. Honest and useful
 /// today; the embedding-based semantic ranker transparently supersedes it when the OpenAI
 /// key lands. Recommendation floors (MinPredictedRating) apply downstream.
+///
+/// <para>Superseded by <see cref="Retrieval.KeylessTextSearch"/> (task 12). It stays only until the
+/// v1 keyless path in <c>LiveSearchExpansionService</c> and its tests switch over, then this file and
+/// its two test classes are deleted.</para>
 /// </summary>
 public class LexicalSearchService(EligibilityQueryBuilder eligibility)
 {
