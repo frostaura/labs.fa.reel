@@ -60,6 +60,7 @@ import {
   wasPaged,
   resumedConflict,
   markLastReplyUnchecked,
+  removedNote,
   type ChatTurn,
   type StreamTag,
 } from "./useAskReelChat";
@@ -1159,6 +1160,23 @@ describe("chatReducer — resume with stored cards", () => {
     expect(state.shown).toEqual([1, 2, 3, 77]);
     expect(state.lastQuery).toBe("a tense heist");
     expect(state.conversationId).toBe("conv-9");
+  });
+
+  it.each([
+    [undefined, 0],
+    [1, 1],
+    [2, 2],
+    [5, 2],
+    [-1, 0],
+    ["1", 0],
+  ])("reads_removedEarlier_%j_as_%i_and_never_past_removed", (removedEarlier, expected) => {
+    // R1-11: the count of removals the account had made BEFORE the answer, untrusted like the rest.
+    const state = chatReducer(initialChatState, {
+      type: "resume",
+      payload: { ...payload, removedEarlier: removedEarlier as number | undefined },
+    });
+    expect(state.removed).toBe(2);
+    expect(state.removedEarlier).toBe(expected);
   });
 
   it("resumes_a_transcript_only_thread_with_no_cards_at_all", () => {
@@ -3611,3 +3629,19 @@ describe("chatReducer — WS-2 review round 1", () => {
 });
 
 type AskKnockoutShape = { kind: string; value: string; contentFilterId: string | null; label: string; wouldUnlock: number };
+
+describe("removedNote (R1-11)", () => {
+  it.each([
+    [0, 0, null],
+    [1, 0, "1 pick is gone from this answer — you’ve since rated, watched, saved or dismissed it."],
+    [10, 0, "10 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them."],
+    [1, 1, "1 pick is gone from this answer — you’d already rated, watched, saved or dismissed it when it was given."],
+    [10, 10, "10 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given."],
+    [10, 8, "10 picks are gone from this answer — you’d already rated, watched, saved or dismissed 8 of them when it was given, and you’ve acted on 2 since."],
+    // An out-of-range count from the wire never claims more than were removed, or fewer than none.
+    [2, 9, "2 picks are gone from this answer — you’d already rated, watched, saved or dismissed them when it was given."],
+    [2, -3, "2 picks are gone from this answer — you’ve since rated, watched, saved or dismissed them."],
+  ])("removedNote(%i, %i)", (removed, earlier, note) => {
+    expect(removedNote(removed, earlier)).toBe(note);
+  });
+});

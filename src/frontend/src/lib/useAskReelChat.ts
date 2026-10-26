@@ -405,6 +405,11 @@ export interface ConversationPayload {
   conflict?: PersistedConflict | null;
   /** Stored cards the eligibility re-filter dropped since the turn ran, across BOTH lists. */
   removed?: number;
+  /**
+   * How many of `removed` the account had already rated, watched, saved or dismissed when the
+   * answer was given (a person query shows seen titles). Absent on an older server, read as 0.
+   */
+  removedEarlier?: number;
   lastQuery?: string | null;
   /** The media filter that turn ran under, in request tokens ("movie" / "tv"). */
   mediaTypes?: string[];
@@ -1397,6 +1402,8 @@ interface State {
    * founder-locked "never show things I've already seen" rule is why it went.
    */
   removed: number;
+  /** How many of {@link removed} were already acted on when the answer was given — see {@link removedNote}. */
+  removedEarlier: number;
   /**
    * When this thread last stored cards, as the server reports it. `null` means it never did — a
    * thread from before results were kept, which is the ONLY state that may say "transcript only".
@@ -1558,12 +1565,29 @@ export function failureFor(err: unknown): ChatAction {
   return { type: "error", reason: null };
 }
 
+/**
+ * The resume note for cards that left a stored answer (R1-11). "Since" is said only of the cards
+ * the account acted on AFTER the answer was given: a resumed Nolan answer (a person query shows
+ * seen titles) lost cards rated in 2020–2025 under a 2026 answer, and "you’ve since rated…" about
+ * them was false. Null when nothing left.
+ */
+export function removedNote(removed: number, removedEarlier: number): string | null {
+  if (removed <= 0) return null;
+  const earlier = Math.max(0, Math.min(removedEarlier, removed));
+  const since = removed - earlier;
+  const head = `${removed} ${removed === 1 ? "pick is" : "picks are"} gone from this answer`;
+  const acts = "rated, watched, saved or dismissed";
+  if (earlier === 0) return `${head} — you’ve since ${acts} ${removed === 1 ? "it" : "them"}.`;
+  if (since === 0) return `${head} — you’d already ${acts} ${removed === 1 ? "it" : "them"} when it was given.`;
+  return `${head} — you’d already ${acts} ${earlier} of them when it was given, and you’ve acted on ${since} since.`;
+}
+
 export const initialChatState: State = {
   turns: [], status: "idle", phase: null, byId: {}, order: [], reason: null, shown: [],
   conversationId: null, appending: false, lastQuery: "", exhausted: false, paged: false,
   conflict: null, conflictTerms: [], turnConflict: null, turnConflictTerms: [],
   belowFloor: [], nearMiss: [], unchecked: [], mode: null, knockouts: [], droppedByFloor: null, errorReason: null,
-  holdingPrevious: false, arrived: 0, removed: 0, lastCardsAt: null, settled: 0,
+  holdingPrevious: false, arrived: 0, removed: 0, removedEarlier: 0, lastCardsAt: null, settled: 0,
   lastTurnAt: null, resumedTail: null, answeredQuery: "", stream: 0, pageQuery: "",
   pageTurnId: null, activeTurnId: null, pageRefusal: null, pagePriorStatus: "idle",
 };
@@ -1846,6 +1870,11 @@ export function chatReducer(state: State, action: ChatAction): State {
         // the wrong question and what it cost (F4-03).
         paged: wasPaged(p.turns),
         removed: p.removed ?? 0,
+        // Untrusted like every resume field: a non-number or a count past `removed` reads as none.
+        removedEarlier:
+          typeof p.removedEarlier === "number" && p.removedEarlier >= 0
+            ? Math.min(p.removedEarlier, p.removed ?? 0)
+            : 0,
         lastCardsAt: p.lastCardsAt ?? null,
         lastTurnAt: p.lastTurnAt ?? null,
         // What the server was left holding, and which question the grid above it belongs to.
@@ -2590,6 +2619,8 @@ export function useAskReelChat() {
      * silently disappears between two views of the same answer looks exactly like a bug.
      */
     removed: state.removed,
+    /** How many of `removed` were already acted on when the answer was given. */
+    removedEarlier: state.removedEarlier,
     /**
      * When this thread last stored cards. `null` is the ONLY state that may claim the thread
      * predates saved picks — it was previously the only branch a resume could reach at all, which

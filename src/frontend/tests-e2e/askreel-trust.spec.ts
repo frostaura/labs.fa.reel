@@ -83,6 +83,52 @@ test.describe("Ask Reel — WS-2 review round 1", () => {
     await expect(page.getByTestId("askreel-composer")).toBeEditable();
   });
 
+  test("a pointer with nothing to point at is a question back, never an empty search", async ({ page }) => {
+    // R1-04: the server answers "the second one" with nothing on screen as mode Clarify — a reply
+    // and no cards. The page must not add "No matches for that one" under it.
+    await bootSearch(page);
+    await ask(page, "more like the second one");
+
+    await askPush(page, "assistant-message", {
+      text: "There’s nothing on screen yet for “the second one” to point at — I haven’t shown you any titles in this conversation. Tell me what you’re in the mood for and I’ll look.",
+      conflict: false,
+      degraded: false,
+    });
+    await askPush(page, "done", {
+      results: [], streamed: 0, kept: 0, droppedByFloor: 0, belowFloor: [], nearMiss: [], unchecked: [],
+      mode: "Clarify", supply: null, degraded: [], reason: "nothing on screen to point at", timingsMs: null, debug: null,
+    });
+    await askEnd(page);
+
+    await expect(page.getByText("nothing on screen yet for “the second one”", { exact: false })).toBeVisible();
+    await expect(page.getByTestId("semantic-empty")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-none-found")).toHaveCount(0);
+    await expect(page.getByTestId("askreel-composer")).toBeEditable();
+  });
+
+  test("the floor tray says its cards matched only when the judge said so, and skipped titles mark the reply", async ({ page }) => {
+    // R1-01: since the floor tray holds judged matches only, its caption says they matched — and a
+    // turn whose judge skipped titles (judge-missing) carries the unchecked pill though no batch failed.
+    await bootSearch(page);
+    await ask(page, "samurai films");
+
+    await askPush(page, "assistant-message", { text: "None of your unseen samurai movies clears your 6.0 bar.", conflict: false });
+    await askPush(page, "done", {
+      results: [], streamed: 1, kept: 0, droppedByFloor: 1,
+      belowFloor: [{ ...card("b1", "Blade of the 47 Ronin"), predictedRating: 5.3, satisfies: "yes" }],
+      nearMiss: [], unchecked: [card("c1", "Tornado")],
+      mode: "NoneFound", supply: null, degraded: ["judge-missing:1/2"],
+      reason: "1 not checked against what you asked — shown below · 1 held back by your 6.0 bar — shown below",
+      timingsMs: null, debug: null,
+    });
+    await askEnd(page);
+
+    await page.getByTestId("askreel-below-floor-toggle").click();
+    await expect(page.getByTestId("askreel-below-floor")).toContainText("Reel judged these a match for what you asked");
+    await expect(page.getByTestId("askreel-unchecked-toggle")).toHaveText("Not checked against your request — 1 title");
+    await expect(page.getByTestId("askreel-reply-unchecked")).toHaveText("some cards unchecked");
+  });
+
   test("a stream that closes without its done frame is a failure, never a spinner", async ({ page }) => {
     await bootSearch(page);
     await ask(page, "samurai films");

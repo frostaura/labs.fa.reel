@@ -55,7 +55,9 @@ public sealed class LiveSearchExpansionService(
     ILogger<LiveSearchExpansionService> logger,
     Retrieval.IAskReelRetriever? retriever = null,
     Retrieval.ISupplyReporter? supplyReporter = null,
-    AskReelJudge? askJudge = null)
+    AskReelJudge? askJudge = null,
+    Retrieval.TmdbDiscoveryArm? tmdbDiscovery = null,
+    ILlmPurposeCatalog? purposes = null)
 {
     /// <summary>
     /// The request judge. Optional on the constructor only so the many hand-built test fixtures stay
@@ -68,12 +70,30 @@ public sealed class LiveSearchExpansionService(
 
     private AskReelJudge? fallbackJudge;
 
+    /// <summary>
+    /// WS-3's TMDB discovery arm (R1-52): standing options sent with the fetch, up to three pages, a
+    /// 1.5 s deadline, title search only for a title-shaped message. Optional on the constructor for
+    /// the same reason <see cref="Judge"/> is; a fixture that passes none gets the same arm over its
+    /// own TMDB client, catalogue and cache.
+    /// </summary>
+    private Retrieval.TmdbDiscoveryArm TmdbArm => tmdbDiscovery
+        ?? (fallbackTmdbArm ??= new Retrieval.TmdbDiscoveryArm(tmdb, db, eligibility, cache));
+
+    private Retrieval.TmdbDiscoveryArm? fallbackTmdbArm;
+
+    /// <summary>
+    /// The semantic arm's wait for an UNCACHED concept embedding (§4.7): a new text takes 1.2–2.7 s to
+    /// embed, so the kNN pull gives up on it after this long — measured from when the embedding was
+    /// started, which is before the TMDB arm, so the arm's own 1.5 s usually covers it — and fusion
+    /// proceeds without the arm. The ranking seed still waits for the same call; it is never repeated.
+    /// </summary>
+    internal static readonly TimeSpan SemanticEmbedBudget = TimeSpan.FromSeconds(1.0);
+
     private const int MaxCandidates = 40;
     private const int ReturnCount = 24;
     private const int PersonReturnCount = 40; // a filmography can run long — show more than a vibe match
     private const int HydrateScoreSlice = 12;
     private const int SemanticNeighbourCount = 40; // semantic kNN pull size — mirrors the TMDB arm's ceiling
-    private const int SearchPages = 1;
 
     /// <summary>
     /// The floor that makes "no results" a bug rather than an outcome. If a turn's eligible pool
@@ -353,24 +373,52 @@ public sealed class LiveSearchExpansionService(
         string? conflictJson = null;
         var degraded = new List<string>();
 
-        progress.Attach(timings, ModelIdsJson(), SearchTurnDegraded.ProviderDefaultEffort);
+        // The reply of a turn answered before the model is consulted (a pointer with no target, a
+        // keyless install): recorded on the progress exactly as the main path records its reply.
+        async Task ReplyOnce(string text, bool degradedReply)
+        {
+            assistantText = text;
+            progress.Replied(text, degradedReply);
+            await emit("assistant-message", new { text, conflict = false, degraded = degradedReply });
+        }
+
+        // The effort the turn's calls are actually sent at, read from the same purpose catalog the
+        // chat client sends from (R1-09) — never a hard-coded "provider-default".
+        var effort = EffortSent(input.RerankPurpose);
+        var turnClock = System.Diagnostics.Stopwatch.StartNew();
+
+        // Time to the first card on the wire — the number §4.11's first-card gate is about, recorded
+        // on the turn so it is a query rather than a stopwatch someone has to hold (R1-07).
+        var firstCardMarked = false;
+        void MarkFirstCard()
+        {
+            if (!firstCardMarked)
+            {
+                firstCardMarked = true;
+                timings.Mark(AskStageTimings.FirstCard, turnClock.Elapsed.TotalMilliseconds);
+            }
+        }
+        progress.Attach(timings, ModelIdsJson(), effort);
         try
         {
             await Phase(new { stage = "searching", found = 0, scored = 0 });
 
-            // No embeddings provider → can't rank semantically. Fall back to the local lexical
-            // engine so Ask Reel still answers (keyless installs); stream those, unscored-by-rank.
+            // "The second one" with nothing on screen for it to point at is a question to ask back,
+            // not a search (R1-04): answered deterministically, before any model call.
+            if (AskReelPointer.Ordinal(trimmed) is { } pointer && !AskReelPointer.CanResolve(pointer, input.Presented))
+            {
+                return await NothingToPointAtAsync(pointer, input, timings, ReplyOnce, emit);
+            }
+
+            // No embeddings provider → no model to rank or judge with (a keyless install). The local
+            // lexical engine still finds keyword matches, but nothing checks them against the request,
+            // so they are answered honestly as unchecked — never as picks (R1-10).
             if (!embeddings.IsAvailable)
             {
-                TurnOutcome fallback;
-                using (timings.Stage(AskStageTimings.Emit))
-                {
-                    fallback = await StreamLexicalFallbackAsync(accountId, trimmed, emit, ct);
-                }
-
+                var keyless = await StreamKeylessAsync(accountId, trimmed, input, timings, ReplyOnce, emit, ct);
                 logger.LogInformation(
-                    "Ask Reel '{Query}': lexical fallback (no embeddings provider). {StageTimings}", trimmed, timings);
-                return fallback;
+                    "Ask Reel '{Query}': keyless lexical answer (no embeddings provider). {StageTimings}", trimmed, timings);
+                return keyless;
             }
 
             var account = await db.Accounts.FirstAsync(a => a.Id == accountId, ct);
@@ -501,35 +549,69 @@ public sealed class LiveSearchExpansionService(
                 : await ResolveReferenceTitlesAsync(intent, ct);
             var referenceIds = referenceTitles.Select(t => t.Id).ToHashSet();
 
-            // The request's hard constraints as WS-3's retrieval contract reads them. The facet arm
-            // runs only when the request names a concrete concept (a keyword): a genre-only mood
-            // request would put the most-voted titles of that genre ahead of the semantic matches.
+            // The request's hard constraints as WS-3's retrieval contract reads them, built from ONE
+            // resolved topic: the keywords the supply counts and the words the reply names them by
+            // are the same list (R1-02). The facet arm runs only when the request names a concrete
+            // concept (a keyword): a genre-only mood request would put the most-voted titles of that
+            // genre ahead of the semantic matches.
+            var topic = AskReelTopic.Resolve(intent.Keywords, trimmed, input.History);
             var hard = Retrieval.IntentConstraints.FromIntent(
-                intent, input.MediaFilter, ConceptWords(intent));
+                intent with { Keywords = [.. topic.Keywords] }, input.MediaFilter, topic.Label);
             Retrieval.RetrievalResult? facet = null;
             var evidence = new Dictionary<Guid, IReadOnlyList<string>>();
+
+            // The concept embedding is a network call that needs no database, so it starts NOW and
+            // runs underneath the TMDB arm instead of after it (R1-07: discovery ran its arms one
+            // after another, 2.8–4.9 s a turn). The kNN arm and the ranking seed both read this one
+            // call; it is never made twice.
+            var conceptVector = isPersonQuery
+                ? null
+                : StartConceptVector(accountId, ConceptText(agentReply, trimmed, negations), ct);
 
             // ── Discover, widening until there is enough to rank ─────────────────────────────
             var discovered = new List<Guid>();
             var eligible = new List<Title>();
             var relaxation = 0;
-            for (; relaxation < MaxRelaxations; relaxation++)
+            // A request with a topic the user named ("ninja") never widens past it (§4.8): the
+            // ladder's lower rungs drop the keywords, so everything they add is off-topic filler the
+            // judge then rejects — paid for in TMDB round trips, embeddings and judge calls (the
+            // "ninja movies" turn ran all three rungs and took 25 s). Mood and genre requests keep
+            // their genres on every rung, so they still widen.
+            var namedTopic = topic.Keywords.Count > 0;
+            var widest = namedTopic ? 1 : MaxRelaxations;
+            for (; relaxation < widest; relaxation++)
             {
                 var pass = Relax(intent, relaxation);
                 using (timings.Stage(AskStageTimings.Discover))
                 {
-                    var candidateIds = await DiscoverCandidateIdsAsync(WithStandingGenres(pass, standingRules), input.Region, ct);
-                    var semanticIds = isPersonQuery
-                        ? new List<Guid>()
-                        : await SemanticNeighbourIdsAsync(
-                            accountId, agentReply with { Intent = pass }, referenceVectors, negations, trimmed, ct);
-                    if (relaxation == 0 && retriever is not null && !isPersonQuery && intent.Keywords.Count > 0)
+                    List<Guid> candidateIds;
+                    using (timings.Stage(AskStageTimings.DiscoverTmdb))
                     {
-                        facet = await FacetArmAsync(accountId, hard, shownSet, referenceIds, ct);
+                        candidateIds = await DiscoverCandidateIdsAsync(
+                            accountId, pass, negations, trimmed, input.Region, ct);
+                    }
+
+                    if (relaxation == 0 && retriever is not null && !isPersonQuery && topic.Keywords.Count > 0)
+                    {
+                        using (timings.Stage(AskStageTimings.DiscoverFacet))
+                        {
+                            facet = await FacetArmAsync(accountId, hard, shownSet, referenceIds, ct);
+                        }
+
                         foreach (var c in facet?.Candidates ?? [])
                         {
                             evidence[c.TitleId] = c.Evidence;
                         }
+                    }
+
+                    List<Guid> semanticIds;
+                    using (timings.Stage(AskStageTimings.DiscoverKnn))
+                    {
+                        semanticIds = isPersonQuery
+                            ? []
+                            : await SemanticNeighbourIdsAsync(
+                                accountId, agentReply with { Intent = pass }, referenceVectors, negations, trimmed,
+                                relaxation == 0 ? conceptVector : null, ct);
                     }
 
                     discovered = discovered
@@ -568,10 +650,16 @@ public sealed class LiveSearchExpansionService(
                 }
             }
 
+            // The level discovery actually ran at: a concept request that stopped at its only pass
+            // did not widen, whatever the loop counter says.
+            relaxation = Math.Min(relaxation, widest - 1);
+
             // Last resort: the user's own eligible catalogue, nearest-by-taste. Every one of these
             // is still JUDGED against the request before it can reach the screen, so a last resort
-            // that matches nothing ends as an honest none-found rather than as filler.
-            if (eligible.Count == 0)
+            // that matches nothing ends as an honest none-found rather than as filler. Never for a
+            // request with a named topic: popular titles are not ninja films, and judging them only
+            // spends a judge call and the user's time to say so (§4.8, R1-07).
+            if (eligible.Count == 0 && !namedTopic)
             {
                 using var lastResortStage = timings.Stage(AskStageTimings.Eligible);
                 eligible = (await baseQuery
@@ -612,7 +700,7 @@ public sealed class LiveSearchExpansionService(
                     accountId, hard, facet, intent, relaxation, eligibleCount: 0, eligiblePoolSize, discovered.Count,
                     underBar: [], nearMiss: [], belowFloor: [], floor: MinPredictedFloor(filterRows),
                     agentReply.Degraded, ReplyAsync, degraded, timings, input, emit, conflictJson, conflict?.Message,
-                    judged: 0, judge: null, ct);
+                    judged: 0, judge: null, effort, ct);
             }
 
             // Person queries are a filmography, not a vibe match: order chronologically, badge what
@@ -627,13 +715,21 @@ public sealed class LiveSearchExpansionService(
             // ── Embed eligible candidates that lack a vector, then cosine pre-rank ───────────
             await Phase(new { stage = "embedding", found = eligible.Count, scored = 0 });
             using var embedStage = timings.Stage(AskStageTimings.Embed);
-            await EnsureEmbeddedAsync(eligible, ct);
+            await EnsureEmbeddedAsync(eligible, ct, timings);
             var vectorsByTitle = await LoadVectorsAsync(eligible.Select(t => t.Id).ToList(), ct);
             var tagVectors = await LoadPreferenceTagVectorsAsync(accountId, ct);
 
             // The POSITIVE reading of the turn, never the raw sentence: an embedding has no "not".
             var seedText = RankingSeedText(agentReply, trimmed, negations);
-            var queryVec = await RankingSeedVectorAsync(accountId, seedText, referenceVectors, ct);
+            // Timed on its own: the concept embedding started before discovery, so this is only the
+            // part of it the arms did not hide — the number that says whether an uncached embedding
+            // is what the first card is waiting on (R1-07).
+            float[]? queryVec;
+            using (timings.Stage(AskStageTimings.EmbedSeed))
+            {
+                queryVec = await RankingSeedVectorAsync(accountId, seedText, referenceVectors, conceptVector, ct);
+            }
+
             embedStage.Dispose();
 
             var scoredPool = eligible
@@ -664,11 +760,31 @@ public sealed class LiveSearchExpansionService(
             IReadOnlyDictionary<Guid, decimal> scores;
             using (timings.Stage(AskStageTimings.Score))
             {
-                await HydrateAsync(sliceIds, ct);
+                // A title TMDB discovery has just added arrives with no keywords and no certification,
+                // so it passed eligibility on what its list row carried. Once hydrated it is judged
+                // again — the arm's own contract for a provisional title — and one that now trips a
+                // standing condition or the maturity ceiling never reaches the judge or the screen.
+                if (await HydrateAsync(sliceIds, ct, timings) > 0)
+                {
+                    var stillEligible = (await baseQuery
+                            .Where(t => sliceIds.Contains(t.Id))
+                            .Select(t => t.Id)
+                            .ToListAsync(ct))
+                        .ToHashSet();
+                    bool Keeps((Title Title, double Sim) x) =>
+                        stillEligible.Contains(x.Title.Id)
+                        && EligibilityQueryBuilder.PassesMaturity(x.Title, account.Settings.MaturityCeiling)
+                        && !TripsStandingExclusion(x.Title, negations);
+                    judgeOrder = judgeOrder.Where(Keeps).ToList();
+                    outside = outside.Where(Keeps).ToList();
+                    sliceIds = judgeOrder.Concat(outside).Select(x => x.Title.Id).ToList();
+                }
+
                 scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
 
-                // A card with no prediction CLEARS the floor, so an unscored card is an unannounced
-                // exemption from the user's own bar: one more attempt on exactly those first.
+                // A card with no prediction never clears a set bar (AskReelGate.Clears), so a card the
+                // scorer missed would be held back for want of a number rather than on its merits:
+                // one more attempt on exactly those first.
                 if (floor > 0m)
                 {
                     var unscored = sliceIds.Where(id => !scores.ContainsKey(id)).ToList();
@@ -713,16 +829,26 @@ public sealed class LiveSearchExpansionService(
             var placed = new Dictionary<Guid, (AskReelGate.Placement Placement, RerankResult? Verdict)>();
             var picks = new List<GatedCard>();
             AskReelJudge.Summary judgeSummary;
-            // A failed batch is recorded on the progress AS IT RETURNS, so a turn aborted before the
-            // judge finishes still persists the judge flag (D9).
-            var judgeBatches = (Math.Min(inputs.Count, AskReelJudge.MaxJudged) + AskReelJudge.BatchSize - 1) / AskReelJudge.BatchSize;
+            // A failed batch — and every title a batch skipped — is recorded on the progress AS IT
+            // RETURNS, so a turn aborted before the judge finishes still persists the judge flags (D9).
+            var judgeBatches = AskReelJudge.BatchCount(inputs.Count);
+            var judgedCount = Math.Min(inputs.Count, AskReelJudge.MaxJudged);
             var failedSoFar = 0;
+            var missingSoFar = 0;
+            var judgeClock = System.Diagnostics.Stopwatch.StartNew();
+            var firstBatchTimed = false;
             using (timings.Stage(AskStageTimings.Rerank))
             {
                 judgeSummary = await Judge.JudgeAsync(
                     accountId, rerankQuery, persona, inputs, input.RerankPurpose,
                     async batch =>
                     {
+                        if (!firstBatchTimed)
+                        {
+                            firstBatchTimed = true;
+                            timings.Mark(AskStageTimings.RerankFirstBatch, judgeClock.Elapsed.TotalMilliseconds);
+                        }
+
                         if (batch.Failed)
                         {
                             failedSoFar++;
@@ -730,11 +856,18 @@ public sealed class LiveSearchExpansionService(
                                 $"{SearchTurnDegraded.JudgePrefix}{failedSoFar}/{judgeBatches}"));
                         }
 
+                        if (batch.Missing > 0)
+                        {
+                            missingSoFar += batch.Missing;
+                            progress.Degrade(FormattableString.Invariant(
+                                $"{SearchTurnDegraded.JudgeMissingPrefix}{missingSoFar}/{judgedCount}"));
+                        }
+
                         var accepted = new List<GatedCard>();
                         foreach (var item in batch.Inputs)
                         {
                             var verdict = batch.Results.GetValueOrDefault(item.TitleId);
-                            var satisfies = verdict is { FitSource: ResultSource.Llm } ? verdict.Satisfies : null;
+                            var satisfies = AskReelJudge.Ruled(verdict) ? verdict!.Satisfies : null;
                             var placement = AskReelGate.Place(satisfies, PredictedOf(item.TitleId), floor);
                             placed[item.TitleId] = (placement, verdict);
                             if (placement == AskReelGate.Placement.Pick)
@@ -751,6 +884,7 @@ public sealed class LiveSearchExpansionService(
                             await ReplyAsync(pickReply);
                             picks.Add(card);
                             await EmitCardAsync(card, progress, emit);
+                            MarkFirstCard();
                         }
                     },
                     ct);
@@ -763,13 +897,22 @@ public sealed class LiveSearchExpansionService(
                 degraded.Add(judgeFlag);
             }
 
+            // Any title the judge did not rule on is a degraded judge, not only a batch that ruled on
+            // none (R1-01): one skipped entry is a card on screen that nobody checked.
+            if (judgeSummary.Missing > 0)
+            {
+                degraded.Add(FormattableString.Invariant(
+                    $"{SearchTurnDegraded.JudgeMissingPrefix}{judgeSummary.Missing}/{judgeSummary.Judged}"));
+            }
+
             // ── Place everything the judge did not accept outright ───────────────────────────
             using var blendStage = timings.Stage(AskStageTimings.Blend);
             GatedCard Of((Title Title, double Sim) x, AskReelGate.Placement placement) =>
                 Gate(x.Title, x.Sim, PredictedOf(x.Title.Id), placed[x.Title.Id].Verdict, TagBoost(x.Title.Id), placement);
 
             // Unjudged cards, in retrieval order, with no why (§4.10): below every judged pick when
-            // there is one, in the "not checked" tray when there is none (§4.8, D1).
+            // there is one and the card clears the bar, in the "not checked" tray otherwise (§4.8, D1,
+            // R1-01). Never in the floor tray, which holds judged matches only.
             var unjudged = judgeOrder
                 .Where(x => placed.TryGetValue(x.Title.Id, out var p) && p.Placement == AskReelGate.Placement.Unjudged)
                 .Select(x => Of(x, AskReelGate.Placement.Unjudged))
@@ -797,20 +940,30 @@ public sealed class LiveSearchExpansionService(
                 return await NoneFoundAsync(
                     accountId, hard, facet, intent, relaxation, eligible.Count, eligiblePoolSize, discovered.Count,
                     underBar, nearMiss, belowFloor, floor, agentReply.Degraded, ReplyAsync, degraded, timings, input,
-                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, ct, unjudged, unscoredHeld);
+                    emit, conflictJson, conflict?.Message, judgeOrder.Count, judgeSummary, effort, ct, unjudged, unscoredHeld);
             }
 
             await ReplyAsync(pickReply);
             var judgedPicks = picks.Count;
+            var uncheckedTray = new List<GatedCard>();
             foreach (var card in unjudged)
             {
-                picks.Add(card);
-                await EmitCardAsync(card, progress, emit);
+                if (AskReelGate.UnjudgedTier(judgedPicks, AskReelGate.Clears(card.Predicted, floor)) == SearchTurnCardTier.Pick)
+                {
+                    picks.Add(card);
+                    await EmitCardAsync(card, progress, emit);
+                }
+                else
+                {
+                    uncheckedTray.Add(card);
+                }
             }
 
             // Outside cards trail every pick, each captioned with the exclusion it trips. They are
             // shown only beside real picks — never as an answer of their own — and the bar binds
-            // them like any other card: one under it joins the floor tray rather than vanishing (1e).
+            // them like any other card. Nobody judged them against the request either, so one under
+            // the bar joins the unchecked tray rather than vanishing (1e) — never the floor tray,
+            // which is read as "matches your bar held back" (R1-01).
             var outsideAll = outside
                 .Select(x => Gate(x.Title, x.Sim, PredictedOf(x.Title.Id), verdict: null, TagBoost(x.Title.Id),
                     AskReelGate.Placement.Unjudged) with
@@ -820,9 +973,7 @@ public sealed class LiveSearchExpansionService(
                 })
                 .ToList();
             var outsideCards = outsideAll.Where(c => AskReelGate.Clears(c.Predicted, floor)).ToList();
-            belowFloor.AddRange(outsideAll
-                .Where(c => !AskReelGate.Clears(c.Predicted, floor))
-                .Select(c => c with { Placement = AskReelGate.Placement.BelowFloor }));
+            uncheckedTray.AddRange(outsideAll.Where(c => !AskReelGate.Clears(c.Predicted, floor)));
             foreach (var card in outsideCards)
             {
                 await EmitCardAsync(card, progress, emit);
@@ -830,14 +981,15 @@ public sealed class LiveSearchExpansionService(
 
             using var emitStage = timings.Stage(AskStageTimings.Emit);
             var final = picks.Concat(outsideCards).ToList();
-            var storedCards = Stored(final, nearMiss, belowFloor, uncheckedTray: []);
+            var storedCards = Stored(final, nearMiss, belowFloor, uncheckedTray);
             var reason = AskReelReason.Build(
                 new TurnCounts(
                     Picks: judgedPicks,
                     Outside: outsideCards.Count,
                     Tray: belowFloor.Count,
                     NearMiss: nearMiss.Count,
-                    Unchecked: picks.Count - judgedPicks),
+                    Unchecked: picks.Count - judgedPicks,
+                    UncheckedTray: uncheckedTray.Count),
                 floor);
 
             await emit("done", new
@@ -851,7 +1003,7 @@ public sealed class LiveSearchExpansionService(
                 droppedByFloor = belowFloor.Count,
                 belowFloor = belowFloor.Select(CardOf).ToList(),
                 nearMiss = nearMiss.Select(CardOf).ToList(),
-                @unchecked = Array.Empty<object>(),
+                @unchecked = uncheckedTray.Select(CardOf).ToList(),
                 mode = SearchTurnMode.Picks,
                 // Present and null on a turn with picks: one key set for one event name.
                 supply = (object?)null,
@@ -868,6 +1020,8 @@ public sealed class LiveSearchExpansionService(
                         judged = judgeOrder.Count,
                         judgeBatches = judgeSummary.Batches,
                         judgeFailedBatches = judgeSummary.FailedBatches,
+                        judgeMissing = judgeSummary.Missing,
+                        topic = topic.Label,
                         streamed = final.Count + belowFloor.Count,
                         kept = final.Count,
                         droppedByFloor = belowFloor.Count,
@@ -927,7 +1081,7 @@ public sealed class LiveSearchExpansionService(
                 DegradedFlagsOf(degraded),
                 TimingsJson(timings),
                 ModelIdsJson(),
-                SearchTurnDegraded.ProviderDefaultEffort);
+                effort);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -955,7 +1109,7 @@ public sealed class LiveSearchExpansionService(
             {
                 StageTimingsJson = TimingsJson(timings),
                 ModelIdsJson = ModelIdsJson(),
-                ReasoningEffort = SearchTurnDegraded.ProviderDefaultEffort,
+                ReasoningEffort = effort,
             };
         }
     }
@@ -1009,8 +1163,9 @@ public sealed class LiveSearchExpansionService(
     }
 
     /// <summary>
-    /// The stored rows: picks and outside cards first (ranks 0..n-1), then the near-miss tray, then the
-    /// floor tray, then the unchecked tray.
+    /// The stored rows, in the order the screen renders them: picks and outside cards first (ranks
+    /// 0..n-1), then the floor tray, then the near-miss tray, then the unchecked tray — so a tray card's
+    /// stored rank is its position on screen, which is what its handle ("the second one") counts.
     /// </summary>
     private static List<TurnCard> Stored(
         IReadOnlyList<GatedCard> final, IReadOnlyList<GatedCard> nearMiss, IReadOnlyList<GatedCard> belowFloor,
@@ -1019,9 +1174,9 @@ public sealed class LiveSearchExpansionService(
         var rows = new List<TurnCard>(final.Count + nearMiss.Count + belowFloor.Count + uncheckedTray.Count);
         rows.AddRange(final.Select((c, i) => Row(c, i, SearchTurnCardTier.Pick)));
         var offset = rows.Count;
-        rows.AddRange(nearMiss.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.NearMiss)));
-        offset = rows.Count;
         rows.AddRange(belowFloor.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.BelowFloor)));
+        offset = rows.Count;
+        rows.AddRange(nearMiss.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.NearMiss)));
         offset = rows.Count;
         rows.AddRange(uncheckedTray.Select((c, i) => Row(c, offset + i, SearchTurnCardTier.Unchecked)));
         return rows;
@@ -1081,6 +1236,7 @@ public sealed class LiveSearchExpansionService(
         string? conflictMessage,
         int judged,
         AskReelJudge.Summary? judge,
+        string? effort,
         CancellationToken ct,
         IReadOnlyList<GatedCard>? uncheckedTray = null,
         IReadOnlyList<string>? unscoredHeld = null)
@@ -1101,6 +1257,7 @@ public sealed class LiveSearchExpansionService(
             }
         }
 
+        // The same resolved topic the supply counted (R1-02): the words are the ones the predicate used.
         var concept = hard.Concepts.Count > 0 ? hard.Concepts[0].UserWords : null;
         var shownHere = supply is { ClearingFloor: > 0 }
             ? await ShownInSupplyAsync(accountId, hard, supply, input.ShownTitleIds, floor, ct)
@@ -1110,7 +1267,8 @@ public sealed class LiveSearchExpansionService(
             Unchecked: uncheckedTray.Count,
             JudgedAny: judge?.JudgedAny ?? true,
             ShownHere: shownHere,
-            UnscoredHeld: unscoredHeld));
+            UnscoredHeld: unscoredHeld,
+            NearMissNames: [.. nearMiss.Select(c => c.Title.Name)]));
 
         // A follow-up that changes nothing hears that it was heard, not the same paragraph again.
         text = NoneFoundCopy.Again(text, PreviousReply(input.History));
@@ -1155,6 +1313,8 @@ public sealed class LiveSearchExpansionService(
                     judged,
                     judgeBatches = judge?.Batches ?? 0,
                     judgeFailedBatches = judge?.FailedBatches ?? 0,
+                    judgeMissing = judge?.Missing ?? 0,
+                    topic = concept,
                     streamed = belowFloor.Count,
                     kept = 0,
                     droppedByFloor = belowFloor.Count,
@@ -1181,7 +1341,7 @@ public sealed class LiveSearchExpansionService(
             DegradedFlagsOf(degraded),
             TimingsJson(timings),
             ModelIdsJson(),
-            SearchTurnDegraded.ProviderDefaultEffort);
+            effort);
     }
 
     /// <summary>
@@ -1311,31 +1471,6 @@ public sealed class LiveSearchExpansionService(
         }
     }
 
-    /// <summary>
-    /// The user's words for the request's concept: its first positive keyword. Read by the supply
-    /// report and the none-found reply ("ninja movies"); every keyword still rides the concept's
-    /// catalogue labels.
-    /// </summary>
-    private static string? ConceptWords(SearchIntent intent) =>
-        intent.Keywords.Count > 0 ? intent.Keywords[0] : null;
-
-    /// <summary>
-    /// The discovery intent with the account's excluded GENRES added back as TMDB exclusions,
-    /// deterministically. The model's own copy of the standing rules was stripped by
-    /// <see cref="AskReelIntentSanitizer"/>; the pull still should not spend its forty slots on
-    /// titles eligibility is about to remove.
-    /// </summary>
-    private static SearchIntent WithStandingGenres(SearchIntent intent, FilterRuleSet standing) =>
-        standing.ExcludeGenres.Count == 0
-            ? intent
-            : intent with
-            {
-                ExcludeGenres = (intent.ExcludeGenres ?? [])
-                    .Concat(standing.ExcludeGenres.Select(g => g.Trim().ToLowerInvariant()))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList(),
-            };
-
     /// <summary>The account's active model artifact, or null.</summary>
     private Task<Guid?> ActiveArtifactAsync(Guid accountId, CancellationToken ct) =>
         db.ModelArtifacts
@@ -1362,17 +1497,106 @@ public sealed class LiveSearchExpansionService(
         });
 
     /// <summary>
-    /// The TMDB discovery arm. Returns empty on any failure ⇒ the semantic arm carries the turn
-    /// alone — the mirror of what <see cref="SemanticNeighbourIdsAsync"/> already does when the
-    /// concept embedding fails, and for the same reason: a blip on ONE of two arms must not
-    /// discard the other. Before this guard a TMDB timeout, a 429 or a keyword-search failure
-    /// propagated to the turn's catch-all and returned "search hit a snag" with zero results,
-    /// even though every semantically-nearest unseen title was already in hand and needed no
-    /// network at all.
+    /// The TMDB discovery arm — WS-3's <see cref="Retrieval.TmdbDiscoveryArm"/> for a request
+    /// (R1-52), and the person-credit pull for a filmography. Returns the catalogue ids of what it
+    /// found that the account could be shown: eligible catalogue titles as they stand, and new titles
+    /// upserted so they can be hydrated and judged again before they reach the screen.
+    ///
+    /// <para><b>What the arm changes.</b> The old pull sent TMDB no language, no crowd floor and only
+    /// the exclusions the model happened to echo, fetched one page by popularity, and searched the
+    /// whole sentence as a title on every turn; 30 probes pulled 1,090 titles of which 22.8% were
+    /// eligible. The arm sends the account's standing conditions WITH the fetch, pages up to three
+    /// times until enough usable titles are in hand, searches by title only for a title-shaped
+    /// message, and stops at its own 1.5 s deadline so a slow TMDB costs the turn the arm, never the
+    /// answer (§4.7). The turn's own rejections ride along as the user's words only — the model's
+    /// inferred exclusions never do.</para>
+    ///
+    /// <para><b>Cached per account and request</b> for <see cref="DiscoveryTtl"/>: a byte-identical
+    /// repeat pulls nothing from TMDB, exactly as the old intent cache did. The account is on the key
+    /// because the arm reads that account's conditions; the ids are re-checked by eligibility on every
+    /// turn, so a cached list can never show a title the account has since seen.</para>
+    ///
+    /// <para>Returns empty on any failure ⇒ the facet and semantic arms carry the turn alone. A blip
+    /// on ONE arm must not discard the others: before this guard a TMDB timeout or a 429 returned
+    /// "search hit a snag" with zero results while every semantically-nearest unseen title was
+    /// already in hand.</para>
     /// </summary>
-    private async Task<List<Guid>> DiscoverCandidateIdsAsync(SearchIntent intent, string? region, CancellationToken ct)
+    private async Task<List<Guid>> DiscoverCandidateIdsAsync(
+        Guid accountId, SearchIntent intent, AskReelNegations negations, string message, string? region,
+        CancellationToken ct)
     {
-        var key = IntentKey(intent, region);
+        if (intent.People is { Count: > 0 })
+        {
+            return await PersonCreditIdsAsync(intent, ct);
+        }
+
+        var key = ArmCacheKey(accountId, intent, negations, message, region, agent.ModelId);
+        if (cache.TryGetValue<List<Guid>>(key, out var cached) && cached is { Count: > 0 })
+        {
+            return cached;
+        }
+
+        try
+        {
+            var result = await TmdbArm.DiscoverAsync(
+                new Retrieval.TmdbDiscoveryRequest(
+                    accountId,
+                    intent.Genres,
+                    intent.Keywords,
+                    negations.RequestedGenres,
+                    negations.RequestedKeywords,
+                    Retrieval.MediaScopes.From(intent.MediaTypes),
+                    intent.MinYear is null && intent.MaxYear is null
+                        ? null
+                        : new Retrieval.YearRange(
+                            intent.MinYear is { } lo ? ClampYear(lo) : null,
+                            intent.MaxYear is { } hi ? ClampYear(hi) : null),
+                    intent.MaxRuntimeMinutes,
+                    message,
+                    region,
+                    MaxCandidates),
+                ct);
+            if (result.TimedOut)
+            {
+                logger.LogInformation(
+                    "Ask Reel TMDB arm: deadline reached after {Elapsed} ms; fusing what arrived ({Items} items, {Pages} page(s)).",
+                    result.ElapsedMs, result.Items.Count, result.Pages);
+            }
+
+            var ids = result.EligibleItems
+                .Select(i => i.CatalogueTitleId)
+                .OfType<Guid>()
+                .ToList();
+            var provisional = result.ProvisionalItems.Select(i => i.Item).Take(MaxCandidates).ToList();
+            if (provisional.Count > 0)
+            {
+                ids.AddRange(await UpsertAndCollectIdsAsync(provisional, ct));
+            }
+
+            ids = ids.Distinct().ToList();
+            // A timed-out pull is not remembered: the next turn deserves the arm's full answer.
+            if (ids.Count > 0 && !result.TimedOut)
+            {
+                cache.Set(key, ids, DiscoveryTtl);
+            }
+
+            return ids;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel TMDB arm: discovery failed; falling back to the catalogue arms only.");
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// A named person's credits, pulled once per (person, role, media, years) even under concurrent
+    /// identical asks and cached for <see cref="DiscoveryTtl"/>: a filmography is a lookup, so the
+    /// standing conditions are applied afterwards by the content filter, not sent with the fetch.
+    /// </summary>
+    private async Task<List<Guid>> PersonCreditIdsAsync(SearchIntent intent, CancellationToken ct)
+    {
+        var key = IntentKey(intent, region: null);
         if (cache.TryGetValue<List<Guid>>(CacheKey(key, agent.ModelId), out var cached) && cached is { Count: > 0 })
         {
             return cached;
@@ -1380,12 +1604,11 @@ public sealed class LiveSearchExpansionService(
 
         try
         {
-            // The TMDB firehose for this intent runs once even under concurrent identical searches;
-            // CancellationToken.None so a disconnecting waiter can't starve a sharer (dev StrictMode
-            // remount), and it warms the cache regardless.
+            // CancellationToken.None so a disconnecting waiter can't starve a sharer, and the pull
+            // warms the cache regardless.
             var items = await coordinator.RunOnceAsync(
-                $"askreel:fetch:{key}",
-                () => FetchFromTmdbAsync(intent, region, CancellationToken.None));
+                $"askreel:credits:{key}",
+                () => FetchPeopleCreditsAsync(intent.People!, intent, CancellationToken.None));
             if (items.Count == 0)
             {
                 return [];
@@ -1397,10 +1620,24 @@ public sealed class LiveSearchExpansionService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Ask Reel TMDB arm: discovery failed; falling back to semantic-only discovery.");
+            logger.LogWarning(ex, "Ask Reel: the person-credit pull failed; falling back to the catalogue arms only.");
             return [];
         }
     }
+
+    /// <summary>
+    /// The TMDB arm's cache key: everything the arm is asked — the request's reading, the user's own
+    /// rejections, the message (it decides the title search), the region — plus the account, because
+    /// the arm sends that account's standing conditions with the fetch.
+    /// </summary>
+    internal static string ArmCacheKey(
+        Guid accountId, SearchIntent intent, AskReelNegations negations, string message, string? region, string modelId) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"askreel:arm:{AskReelPromptVersion.Current}:{modelId}:{accountId}:{IntentKey(intent, region)}|" +
+            $"-{string.Join(',', negations.RequestedGenres.OrderBy(g => g, StringComparer.Ordinal))}|" +
+            $"-{string.Join(',', negations.RequestedKeywords.OrderBy(k => k, StringComparer.Ordinal))}|" +
+            $"m={NormalizeQuery(message)}");
 
     /// <summary>
     /// The semantic discovery arm — pgvector cosine kNN over the account's own embedded UNSEEN
@@ -1423,7 +1660,7 @@ public sealed class LiveSearchExpansionService(
     /// </summary>
     private async Task<List<Guid>> SemanticNeighbourIdsAsync(
         Guid accountId, AgentReply agentReply, IReadOnlyList<float[]> referenceVectors, AskReelNegations negations,
-        string rawQuery, CancellationToken ct)
+        string rawQuery, ConceptVector? started, CancellationToken ct)
     {
         var concept = ConceptText(agentReply, rawQuery, negations);
         if (concept.Length == 0 && referenceVectors.Count == 0)
@@ -1432,55 +1669,47 @@ public sealed class LiveSearchExpansionService(
         }
 
         float[] queryVec;
-        try
+        if (concept.Length > 0)
         {
-            if (concept.Length > 0)
-            {
-                // The OTHER half of "discovery", and the one that was still being bought on every
-                // repeat. The TMDB arm has been cached per intent since F2-02 and it hits — a
-                // byte-identical question re-pulls nothing from TMDB — yet the `discover` stage
-                // still cost 1.5 seconds on a measured repeat. This embedding is why: a paid
-                // provider call, on the critical path, for a string the process resolved moments
-                // ago.
-                //
-                // The CONCEPT is cached, not the neighbour list, and the difference matters. The
-                // kNN underneath is local, cheap, and reads the account's own catalogue — which the
-                // enrichment sweep grows continuously — so running it fresh is what makes the pool
-                // current rather than stale. (The 87-then-86 pool sizes the finder measured across
-                // two identical turns are that catalogue moving, which is correct.) Caching the
-                // resolved ids instead would have frozen a recall decision for the sake of a
-                // millisecond query and skipped titles embedded since.
-                //
-                // The window is InterpretTtl rather than DiscoveryTtl because past ten minutes the
-                // interpret cache has expired anyway, the model re-reads the question and the
-                // concept can legitimately change — a longer TTL here would rarely be reachable.
-                var conceptKey = ConceptVectorKey(accountId, concept, agent.ModelId);
-                if (cache.TryGetValue<float[]>(conceptKey, out var remembered) && remembered is { Length: > 0 })
-                {
-                    queryVec = remembered;
-                }
-                else
-                {
-                    var embedded = await embeddings.EmbedAsync([concept], ct);
-                    if (embedded.Length == 0 || embedded[0].Length == 0)
-                    {
-                        return [];
-                    }
+            // The CONCEPT is cached, not the neighbour list (EmbedConceptAsync): the kNN underneath
+            // is local, cheap and reads the account's own catalogue, which the enrichment sweep grows
+            // continuously — so running it fresh is what keeps the pool current.
+            var inFlight = started is not null && string.Equals(started.Text, concept, StringComparison.Ordinal)
+                ? started
+                : StartConceptVector(accountId, concept, ct)!;
 
-                    queryVec = embedded[0];
-                    cache.Set(conceptKey, queryVec, InterpretTtl);
+            // §4.7: an uncached text takes 1.2–2.7 s to embed, so the arm waits at most
+            // SemanticEmbedBudget from when the embedding STARTED and fusion proceeds without it.
+            // The call is not abandoned — the ranking seed reads the same task.
+            if (!inFlight.Vector.IsCompleted)
+            {
+                var remaining = SemanticEmbedBudget - inFlight.Started.Elapsed;
+                if (remaining > TimeSpan.Zero)
+                {
+                    await Task.WhenAny(inFlight.Vector, Task.Delay(remaining, ct));
+                    ct.ThrowIfCancellationRequested();
+                }
+
+                if (!inFlight.Vector.IsCompleted)
+                {
+                    logger.LogInformation(
+                        "Ask Reel semantic arm: the concept embedding is still in flight after {Budget} ms; fusing without kNN.",
+                        (long)SemanticEmbedBudget.TotalMilliseconds);
+                    return [];
                 }
             }
-            else
+
+            if (await inFlight.Vector is not { } embedded)
             {
-                // No concept text at all but the user named references — anchor purely on them.
-                queryVec = new float[referenceVectors[0].Length];
+                return [];
             }
+
+            queryVec = embedded;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        else
         {
-            logger.LogWarning(ex, "Ask Reel semantic arm: concept embedding failed; falling back to TMDB-only discovery.");
-            return [];
+            // No concept text at all but the user named references — anchor purely on them.
+            queryVec = new float[referenceVectors[0].Length];
         }
 
         // Blend the reference-title embeddings in, so the kNN pull happens in the reference's
@@ -1580,6 +1809,50 @@ public sealed class LiveSearchExpansionService(
             : await db.Titles.FirstOrDefaultAsync(t => t.Id == ids[0], ct);
     }
 
+    /// <summary>A concept embedding in flight: the text, the call, and when it started.</summary>
+    private sealed record ConceptVector(string Text, Task<float[]?> Vector, System.Diagnostics.Stopwatch Started);
+
+    /// <summary>
+    /// Starts embedding <paramref name="concept"/> — a network call that touches no database, so it can
+    /// run underneath the database-bound arms. Null for an empty concept.
+    /// </summary>
+    private ConceptVector? StartConceptVector(Guid accountId, string concept, CancellationToken ct) =>
+        concept.Length == 0
+            ? null
+            : new ConceptVector(concept, EmbedConceptAsync(accountId, concept, ct), System.Diagnostics.Stopwatch.StartNew());
+
+    /// <summary>
+    /// The concept's vector, from the cache when this process embedded the same text inside
+    /// <see cref="InterpretTtl"/> (the repeat that used to re-buy a paid embedding on every turn), else
+    /// from the provider. Null — never a throw — when the provider gives nothing usable: the arms
+    /// degrade to the ones that need no vector.
+    /// </summary>
+    private async Task<float[]?> EmbedConceptAsync(Guid accountId, string concept, CancellationToken ct)
+    {
+        var key = ConceptVectorKey(accountId, concept, agent.ModelId);
+        if (cache.TryGetValue<float[]>(key, out var remembered) && remembered is { Length: > 0 })
+        {
+            return remembered;
+        }
+
+        try
+        {
+            var embedded = await embeddings.EmbedAsync([concept], ct);
+            if (embedded is [{ Length: > 0 } vector, ..])
+            {
+                cache.Set(key, vector, InterpretTtl);
+                return vector;
+            }
+
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ask Reel: the concept embedding failed; the turn continues without a similarity signal.");
+            return null;
+        }
+    }
+
     /// <summary>
     /// The reference-anchored ranking seed, or <c>null</c> when the provider gave nothing usable to
     /// anchor on.
@@ -1591,27 +1864,17 @@ public sealed class LiveSearchExpansionService(
     /// seed on its own, exactly as the semantic arm already does.</para>
     /// </summary>
     private async Task<float[]?> RankingSeedVectorAsync(
-        Guid accountId, string seedText, IReadOnlyList<float[]> referenceVectors, CancellationToken ct)
+        Guid accountId, string seedText, IReadOnlyList<float[]> referenceVectors, ConceptVector? started, CancellationToken ct)
     {
         float[]? seed = null;
         if (seedText.Length > 0)
         {
-            // The same text the semantic arm embedded a moment ago, under the same key — the seed and
-            // the concept are one string now (A-9), so a second paid embedding of it is pure waste.
-            var key = ConceptVectorKey(accountId, seedText, agent.ModelId);
-            if (cache.TryGetValue<float[]>(key, out var remembered) && remembered is { Length: > 0 })
-            {
-                seed = remembered;
-            }
-            else
-            {
-                var embedded = await embeddings.EmbedAsync([seedText], ct);
-                if (embedded is [{ Length: > 0 }, ..])
-                {
-                    seed = embedded[0];
-                    cache.Set(key, seed, InterpretTtl);
-                }
-            }
+            // The same text the semantic arm embedded, as the same call: the seed and the concept are
+            // one string (A-9), so the embedding started before discovery is awaited here rather than
+            // bought twice — and when the arm's budget ran out on it, this is where it lands.
+            seed = started is not null && string.Equals(started.Text, seedText, StringComparison.Ordinal)
+                ? await started.Vector
+                : await EmbedConceptAsync(accountId, seedText, ct);
         }
 
         if (seed is not null)
@@ -2034,7 +2297,7 @@ public sealed class LiveSearchExpansionService(
         IReadOnlyDictionary<Guid, decimal> scores;
         using (timings.Stage(AskStageTimings.Score))
         {
-            await HydrateAsync(sliceIds, ct);
+            await HydrateAsync(sliceIds, ct, timings);
             scores = await scorer.ScoreAsync(accountId, sliceIds, now, ct, taste);
         }
 
@@ -2087,82 +2350,6 @@ public sealed class LiveSearchExpansionService(
         return watched.Concat(rated).ToHashSet();
     }
 
-    private async Task<IReadOnlyList<TmdbListItem>> FetchFromTmdbAsync(SearchIntent intent, string? region, CancellationToken ct)
-    {
-        // A named-person query resolves to that person's TMDB credits — a name has no business in
-        // keyword/title search. Falls through to the normal path only if no person resolves.
-        if (intent.People is { Count: > 0 } people)
-        {
-            var credits = await FetchPeopleCreditsAsync(people, intent, ct);
-            if (credits.Count > 0)
-            {
-                return credits;
-            }
-        }
-
-        var movieGenreIds = intent.Genres.Where(TmdbGenres.SlugToIds.ContainsKey)
-            .Select(g => TmdbGenres.SlugToIds[g].Movie).OfType<int>().ToList();
-        var tvGenreIds = intent.Genres.Where(TmdbGenres.SlugToIds.ContainsKey)
-            .Select(g => TmdbGenres.SlugToIds[g].Tv).OfType<int>().ToList();
-
-        // Rejected genres/keywords are resolved the same way the positive ones are and handed to
-        // TMDB as without_genres / without_keywords. This is the half of negation that was missing:
-        // exclusions used to exist only as a ranking demerit applied AFTER the pool had been cut to
-        // the top ReturnCount by cosine similarity, so "horror but no ghosts" filled the pool with
-        // ghost stories (they are the closest match to "horror") and the demerit could only shuffle
-        // them, never replace them with something the user would accept.
-        var excludeMovieGenreIds = (intent.ExcludeGenres ?? []).Where(TmdbGenres.SlugToIds.ContainsKey)
-            .Select(g => TmdbGenres.SlugToIds[g].Movie).OfType<int>().ToList();
-        var excludeTvGenreIds = (intent.ExcludeGenres ?? []).Where(TmdbGenres.SlugToIds.ContainsKey)
-            .Select(g => TmdbGenres.SlugToIds[g].Tv).OfType<int>().ToList();
-
-        var keywordIds = await ResolveKeywordIdsAsync(intent.Keywords, ct);
-        var excludeKeywordIds = await ResolveKeywordIdsAsync(intent.ExcludeKeywords ?? [], ct);
-
-        var wantMovies = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Movie);
-        var wantTv = intent.MediaTypes.Count == 0 || intent.MediaTypes.Contains(MediaType.Show);
-        var after = YearStart(intent.MinYear);
-        var before = YearEnd(intent.MaxYear);
-
-        var tasks = new List<Task<IReadOnlyList<TmdbListItem>>>();
-        if (wantMovies)
-        {
-            tasks.Add(tmdb.DiscoverByConceptAsync(true, movieGenreIds, keywordIds, region, after, SearchPages, excludeMovieGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct: ct));
-            tasks.Add(tmdb.SearchTitlesAsync(true, intent.FreeText, SearchPages, ct));
-        }
-
-        if (wantTv)
-        {
-            tasks.Add(tmdb.DiscoverByConceptAsync(false, tvGenreIds, keywordIds, null, after, SearchPages, excludeTvGenreIds, excludeKeywordIds, before, intent.MaxRuntimeMinutes, ct: ct));
-            tasks.Add(tmdb.SearchTitlesAsync(false, intent.FreeText, SearchPages, ct));
-        }
-
-        var batches = await Task.WhenAll(tasks);
-        return batches
-            .SelectMany(b => b)
-            .GroupBy(i => (i.IsMovie, i.Id))
-            .Select(g => g.First())
-            .OrderByDescending(i => i.Popularity)
-            .Take(MaxCandidates)
-            .ToList();
-    }
-
-    /// <summary>Resolves up to four free-text phrases to TMDB keyword ids, dropping anything unmatched.</summary>
-    private async Task<List<int>> ResolveKeywordIdsAsync(IReadOnlyList<string> phrases, CancellationToken ct)
-    {
-        var ids = new List<int>();
-        foreach (var phrase in phrases.Take(4))
-        {
-            var matches = await tmdb.SearchKeywordsAsync(phrase, ct);
-            if (matches.Count > 0)
-            {
-                ids.Add(matches[0].Id);
-            }
-        }
-
-        return ids;
-    }
-
     /// <summary>Resolve each named person → their TMDB credits (role-sliced), unioned + deduped, newest first.</summary>
     private async Task<IReadOnlyList<TmdbListItem>> FetchPeopleCreditsAsync(IReadOnlyList<PersonQuery> people, SearchIntent intent, CancellationToken ct)
     {
@@ -2213,7 +2400,13 @@ public sealed class LiveSearchExpansionService(
             .ToListAsync(ct);
     }
 
-    private async Task EnsureEmbeddedAsync(IReadOnlyList<Title> eligible, CancellationToken ct)
+    /// <summary>
+    /// Embeds the titles in <paramref name="eligible"/> that have no vector yet. When it has work to do,
+    /// that work is timed as <see cref="AskStageTimings.EmbedTitles"/> on <paramref name="timings"/>;
+    /// nothing is recorded when every title already had a vector.
+    /// </summary>
+    private async Task EnsureEmbeddedAsync(
+        IReadOnlyList<Title> eligible, CancellationToken ct, AskStageTimings? timings = null)
     {
         var ids = eligible.Select(t => t.Id).ToList();
         var already = await db.TitleEmbeddings.Where(e => ids.Contains(e.TitleId)).Select(e => e.TitleId).ToListAsync(ct);
@@ -2223,6 +2416,7 @@ public sealed class LiveSearchExpansionService(
             return;
         }
 
+        using var titlesStage = timings?.Stage(AskStageTimings.EmbedTitles);
         var texts = missing.Select(EmbeddingText.Build).ToList();
 
         // Embedding newly-discovered titles is an ENRICHMENT step, not the answer. It used to be
@@ -2291,16 +2485,22 @@ public sealed class LiveSearchExpansionService(
         }
     }
 
-    private async Task HydrateAsync(IReadOnlyList<Guid> sliceIds, CancellationToken ct)
+    /// <summary>
+    /// Hydrates the slice's titles that have never been refreshed; returns how many it hydrated. The
+    /// TMDB round trips are timed as <see cref="AskStageTimings.ScoreHydrate"/> on
+    /// <paramref name="timings"/> when there are any.
+    /// </summary>
+    private async Task<int> HydrateAsync(IReadOnlyList<Guid> sliceIds, CancellationToken ct, AskStageTimings? timings = null)
     {
         var needs = await db.Titles
             .Where(t => sliceIds.Contains(t.Id) && t.LastMetadataRefreshAt == null && t.TmdbId != null)
             .ToListAsync(ct);
         if (needs.Count == 0)
         {
-            return;
+            return 0;
         }
 
+        using var hydrateStage = timings?.Stage(AskStageTimings.ScoreHydrate);
         await hydrator.HydrateBatchAsync(needs, ct);
         try
         {
@@ -2310,6 +2510,8 @@ public sealed class LiveSearchExpansionService(
         {
             logger.LogWarning(ex, "Concurrent hydration conflict on {Count} live-search titles; continuing.", needs.Count);
         }
+
+        return needs.Count;
     }
 
     private async Task<Dictionary<Guid, float[]>> LoadVectorsAsync(IReadOnlyList<Guid> ids, CancellationToken ct)
@@ -2340,29 +2542,192 @@ public sealed class LiveSearchExpansionService(
         return best;
     }
 
-    private async Task<TurnOutcome> StreamLexicalFallbackAsync(Guid accountId, string query, Emit emit, CancellationToken ct)
+    /// <summary>
+    /// A keyless install's turn (R1-10): no model reads the request and none checks a card against
+    /// it, so nothing here is a pick. The local lexical engine still finds titles carrying the user's
+    /// words, inside every standing condition and the media the turn is about, and they are shown as
+    /// what they are — unchecked — with the account's bar on every card and counted in the reply.
+    /// Honest copy, the <see cref="SearchTurnDegraded.NoModel"/> flag, stage timings and no exposure:
+    /// the same record a keyed turn keeps.
+    ///
+    /// <para>It used to stream the lexical hits straight into the grid as picks, with no reply, no
+    /// flag and no timings: "ninja movies" answered American Ninja Warrior, a reality series, and the
+    /// follow-up answered 24 unrelated titles, 8 of them under the founder's 6.0 bar.</para>
+    /// </summary>
+    private async Task<TurnOutcome> StreamKeylessAsync(
+        Guid accountId, string query, AskTurnInput input, AskStageTimings timings,
+        Func<string, bool, Task> reply, Emit emit, CancellationToken ct)
     {
-        var hits = await lexical.SearchAsync(accountId, query, ReturnCount, ct);
-        var cards = new List<object>();
-        var stored = new List<TurnCard>();
-        foreach (var hit in hits)
+        var media = KeylessMedia(query, input);
+        var shown = input.ShownTitleIds.ToHashSet();
+        List<LexicalSearchService.LexicalResult> hits;
+        using (timings.Stage(AskStageTimings.Discover))
         {
-            var similarity = Math.Round(hit.MatchScore, 3);
-            var card = Card(hit.Title, similarity: similarity, predicted: null);
-            cards.Add(card);
-            // Stored in the SAME order as the wire, so a lexical turn replays as itself rather
-            // than as an empty transcript. It has no blend — nothing blended it — and zero is the
-            // honest value for a rank that came from the match score alone.
-            stored.Add(new TurnCard(
-                hit.Title.Id, hit.Title.TmdbId, stored.Count, OutsideRequest: false,
-                similarity, PredictedRating: null, LlmFit: null, Blend: 0m,
-                Why: null, ExposureWhySource.Generic));
-            await emit("candidate", card);
+            hits = (await lexical.SearchAsync(accountId, query, ReturnCount * 2, ct))
+                .Where(h => !shown.Contains(h.Title.Id))
+                .Where(h => MatchesMedia(h.Title, media))
+                .Take(ReturnCount)
+                .ToList();
         }
 
-        var reason = cards.Count == 0 ? "no matches" : "matched on concepts & keywords";
-        await emit("done", new { results = cards, reason });
-        return TurnOutcome.Answered(assistantText: null, reason, stored);
+        decimal floor;
+        IReadOnlyDictionary<Guid, decimal> scores;
+        using (timings.Stage(AskStageTimings.Score))
+        {
+            floor = MinPredictedFloor(await db.ContentFilters.Where(f => f.AccountId == accountId).ToListAsync(ct));
+            scores = hits.Count == 0
+                ? new Dictionary<Guid, decimal>()
+                : await scorer.ScoreAsync(accountId, hits.Select(h => h.Title.Id).ToList(), DateTime.UtcNow, ct);
+        }
+
+        // Clearing the bar first, each half in match order: the bar is still the user's own rule,
+        // and a card under it never leads.
+        var cards = hits
+            .Select((h, index) => (
+                Card: new GatedCard(
+                    h.Title, Math.Round(h.MatchScore, 3), scores.TryGetValue(h.Title.Id, out var p) ? p : null,
+                    Verdict: null, Blend: 0d, AskReelGate.Placement.Unjudged, Outside: false, Why: null),
+                Index: index))
+            .OrderBy(x => AskReelGate.Clears(x.Card.Predicted, floor) ? 0 : 1)
+            .ThenBy(x => x.Index)
+            .Select(x => x.Card)
+            .ToList();
+        var underBar = cards.Count(c => !AskReelGate.Clears(c.Predicted, floor));
+
+        var text = KeylessCopy(cards.Count, underBar, floor);
+        string[] flags = [SearchTurnDegraded.NoModel];
+        await reply(text, true);
+        var reason = AskReelReason.Build(new TurnCounts(Picks: 0, Outside: 0, Tray: 0, UncheckedTray: cards.Count), floor);
+        await emit("done", new
+        {
+            results = Array.Empty<object>(),
+            streamed = 0,
+            kept = 0,
+            droppedByFloor = 0,
+            belowFloor = Array.Empty<object>(),
+            nearMiss = Array.Empty<object>(),
+            @unchecked = cards.Select(CardOf).ToList(),
+            mode = SearchTurnMode.NoneFound,
+            supply = (object?)null,
+            degraded = flags,
+            reason,
+            timingsMs = input.Debug ? timings.Snapshot() : null,
+            debug = (object?)null,
+        });
+
+        return new TurnOutcome(
+            text,
+            reason,
+            Failed: false,
+            FailureCode: null,
+            Relaxation: null,
+            FloorRelaxed: false,
+            DiscoveredCount: hits.Count,
+            IntentJson: null,
+            ModelArtifactId: await ActiveArtifactAsync(accountId, ct),
+            ModelId: null,
+            Stored([], [], [], cards),
+            ConflictJson: null,
+            SearchTurnMode.NoneFound,
+            DegradedFlagsOf(flags),
+            TimingsJson(timings),
+            ModelIdsJson: null,
+            ReasoningEffort: null);
+    }
+
+    /// <summary>
+    /// The media a keyless turn is about, with no model to read it: the UI's explicit filter, else
+    /// the message's own media words ("movies", "shows"), else the previous answer's single media
+    /// type when the message names none (<see cref="AskReelCarry.Media"/>).
+    /// </summary>
+    internal static IReadOnlyList<MediaType> KeylessMedia(string message, AskTurnInput input)
+    {
+        if (input.MediaFilter.Count > 0)
+        {
+            return input.MediaFilter.Distinct().ToList();
+        }
+
+        return AskReelCarry.Media(AskReelCarry.MediaNamed(message), input.PriorIntent?.MediaTypes, message);
+    }
+
+    /// <summary>The keyless reply: what happened, what is below, and how many of those sit under the bar.</summary>
+    internal static string KeylessCopy(int shown, int underBar, decimal floor)
+    {
+        const string lead = "Ask Reel has no language model connected right now, so I can’t read what you asked or check anything against it.";
+        if (shown == 0)
+        {
+            return $"{lead} A plain keyword search for your words found nothing new either.";
+        }
+
+        var below = FormattableString.Invariant(
+            $"Below {(shown == 1 ? "is 1 title" : $"are {shown} titles")} carrying your words — a keyword match only, marked as unchecked.");
+        if (underBar <= 0 || floor <= 0m)
+        {
+            return $"{lead} {below}";
+        }
+
+        var bar = AskReelReason.FormatFloor(floor);
+        return shown == 1
+            ? $"{lead} {below} It scores under your {bar} bar."
+            : FormattableString.Invariant($"{lead} {below} {underBar} of them {(underBar == 1 ? "scores" : "score")} under your {bar} bar.");
+    }
+
+    /// <summary>
+    /// A pointer with nothing on screen to point at (R1-04): asked back, deterministically, with no
+    /// model call and no search — so nothing is guessed from the sentence's leftover words.
+    /// </summary>
+    private static async Task<TurnOutcome> NothingToPointAtAsync(
+        int pointer, AskTurnInput input, AskStageTimings timings, Func<string, bool, Task> reply, Emit emit)
+    {
+        var text = AskReelPointer.NothingToPointAt(pointer, input.Presented);
+        await reply(text, false);
+        const string reason = "nothing on screen to point at";
+        await emit("done", new
+        {
+            results = Array.Empty<object>(),
+            streamed = 0,
+            kept = 0,
+            droppedByFloor = 0,
+            belowFloor = Array.Empty<object>(),
+            nearMiss = Array.Empty<object>(),
+            @unchecked = Array.Empty<object>(),
+            mode = SearchTurnMode.Clarify,
+            supply = (object?)null,
+            degraded = Array.Empty<string>(),
+            reason,
+            timingsMs = input.Debug ? timings.Snapshot() : null,
+            debug = (object?)null,
+        });
+
+        return new TurnOutcome(
+            text, reason, Failed: false, FailureCode: null, Relaxation: null, FloorRelaxed: false, DiscoveredCount: null,
+            IntentJson: null, ModelArtifactId: null, ModelId: null, [], ConflictJson: null, SearchTurnMode.Clarify,
+            DegradedFlags: null, TimingsJson(timings), ModelIdsJson: null, ReasoningEffort: null);
+    }
+
+    /// <summary>
+    /// The reasoning effort this turn's model calls are sent at (R1-09), read from the purpose
+    /// catalog the chat client sends from: the plan's and the judge's, written once when they agree
+    /// and as <c>plan/judge</c> when they do not. Null when no model is available — nothing was sent.
+    /// A fixture built without the catalog records the provider default, which is what an absent
+    /// effort parameter means.
+    /// </summary>
+    private string? EffortSent(string rerankPurpose)
+    {
+        if (!agent.IsAvailable)
+        {
+            return null;
+        }
+
+        if (purposes is null)
+        {
+            return SearchTurnDegraded.ProviderDefaultEffort;
+        }
+
+        string Of(string purpose) => purposes.For(purpose).ReasoningEffort ?? SearchTurnDegraded.ProviderDefaultEffort;
+        var plan = Of(ApiUsagePurpose.SearchAgent);
+        var judge = Of(rerankPurpose);
+        return string.Equals(plan, judge, StringComparison.Ordinal) ? plan : $"{plan}/{judge}";
     }
 
     /// <summary>

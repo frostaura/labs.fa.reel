@@ -697,6 +697,7 @@ public static class SearchEndpoints
                 @unchecked = replay.Unchecked ?? [],
                 mode = replay.Mode,
                 removed = replay.Removed,
+                removedEarlier = replay.RemovedEarlier,
             });
         });
 
@@ -1030,6 +1031,7 @@ public static class SearchEndpoints
             // the explanation rather than to the cards.
             conflict = replay.Conflict,
             removed = replay.Removed,
+            removedEarlier = replay.RemovedEarlier,
             lastQuery,
             mediaTypes = MediaTypeTokens(mediaFilter),
             shown,
@@ -1071,10 +1073,16 @@ public static class SearchEndpoints
     /// <param name="NearMiss">The stored near-miss tray, on the same terms as the floor tray.</param>
     /// <param name="Mode">The newest turn's mode — <c>Picks</c> or <c>NoneFound</c>.</param>
     /// <param name="Unchecked">The stored "not checked against your request" tray, on the same terms.</param>
+    /// <param name="RemovedEarlier">
+    /// How many of <paramref name="Removed"/> the account had ALREADY rated, watched, saved or
+    /// dismissed when the answer was given — a person query shows seen titles (FD-3's lookup), so a
+    /// resumed Nolan answer drops cards rated years before it. The client says "since" only of the
+    /// rest (R1-11): "you've since rated" about a 2020 rating under a 2026 answer was false.
+    /// </param>
     private sealed record ReplayedTurns(
         IReadOnlyList<object> Cards, IReadOnlyList<object> BelowFloor, int Removed, string? Reason,
         object? Conflict = null, IReadOnlyList<object>? NearMiss = null, string? Mode = null,
-        IReadOnlyList<object>? Unchecked = null);
+        IReadOnlyList<object>? Unchecked = null, int RemovedEarlier = 0);
 
     /// <summary>
     /// THE read projection. Every route that hands a stored turn back to a client goes through
@@ -1143,6 +1151,11 @@ public static class SearchEndpoints
             .Where(c => !interacted.Contains(c.TitleId) && titles.ContainsKey(c.TitleId))
             .ToList();
         var removed = stored.Count - survivors.Count;
+        var removedEarlier = removed == 0
+            ? 0
+            : await RemovedEarlierAsync(
+                db, accountId, stored.Where(c => interacted.Contains(c.TitleId)).ToList(),
+                turns.ToDictionary(t => t.Id, t => t.CreatedAt), ct);
 
         // Null, superseded, or hidden by the schema filter — all three are "not the artifact behind
         // the numbers this account is shown today", and all three re-score.
@@ -1226,7 +1239,56 @@ public static class SearchEndpoints
                 .Select(Project).ToList(),
             mode,
             survivors.Where(c => Domain.Search.SearchTurnCardTier.Of(c) == Domain.Search.SearchTurnCardTier.Unchecked)
-                .Select(Project).ToList());
+                .Select(Project).ToList(),
+            removedEarlier);
+    }
+
+    /// <summary>
+    /// How many of the cards the re-filter dropped carry an interaction Reel knew of BEFORE the answer
+    /// that showed them: a rating first seen or dated before it, a watch synced or dated before it, or
+    /// a save, drop or not-interested made before it. Everything else was acted on since. Per card,
+    /// against its own turn's time, because a block can span several answers.
+    /// </summary>
+    private static async Task<int> RemovedEarlierAsync(
+        IReelDbContext db, Guid accountId, IReadOnlyList<Domain.Search.SearchTurnCard> removedCards,
+        IReadOnlyDictionary<Guid, DateTime> turnTimes, CancellationToken ct)
+    {
+        var ids = removedCards.Select(c => c.TitleId).Distinct().ToList();
+        var known = new Dictionary<Guid, DateTime>();
+        void Earliest(Guid titleId, DateTime at)
+        {
+            known[titleId] = known.TryGetValue(titleId, out var seen) && seen <= at ? seen : at;
+        }
+
+        foreach (var r in await db.UserRatings
+                     .Where(r => r.AccountId == accountId && ids.Contains(r.TitleId))
+                     .Select(r => new { r.TitleId, r.RatedAt, r.FirstRatedAt })
+                     .ToListAsync(ct))
+        {
+            Earliest(r.TitleId, r.RatedAt < r.FirstRatedAt ? r.RatedAt : r.FirstRatedAt);
+        }
+
+        foreach (var w in await db.WatchedTitles
+                     .Where(w => w.AccountId == accountId && ids.Contains(w.TitleId))
+                     .Select(w => new { w.TitleId, w.FirstSyncedAt, w.LastWatchedAt })
+                     .ToListAsync(ct))
+        {
+            Earliest(w.TitleId, w.LastWatchedAt is { } watched && watched < w.FirstSyncedAt ? watched : w.FirstSyncedAt);
+        }
+
+        foreach (var x in await db.UserTitleReactions
+                     .Where(x => x.AccountId == accountId && x.RevokedAt == null && ids.Contains(x.TitleId)
+                         && (x.Kind == ReactionKind.NotInterested || x.Kind == ReactionKind.SaveForLater || x.Kind == ReactionKind.Dropped))
+                     .Select(x => new { x.TitleId, x.CreatedAt })
+                     .ToListAsync(ct))
+        {
+            Earliest(x.TitleId, x.CreatedAt);
+        }
+
+        return removedCards.Count(c =>
+            known.TryGetValue(c.TitleId, out var at)
+            && turnTimes.TryGetValue(c.TurnId, out var answeredAt)
+            && at < answeredAt);
     }
 
     /// <summary>
@@ -1284,10 +1346,18 @@ public static class SearchEndpoints
     private const int PresentedAnswers = 3;
 
     /// <summary>
-    /// The cards of the conversation's last <see cref="PresentedAnswers"/> answers that put cards on
-    /// screen, each with its handle: the answer's number (1-based over assistant rows in sequence
-    /// order) and the card's on-screen position (its stored rank plus one). Picks and outside cards
-    /// only — the trays sit behind fences and are not "the second one" of anything.
+    /// The cards earlier answers put on screen, each with its handle: the answer's number (1-based
+    /// over assistant rows in sequence order) and the card's on-screen position. An answer with picks
+    /// is referred to by its picks (and outside cards) — stored rank plus one — and its trays sit behind
+    /// fences that "the second one" does not reach into. An answer that showed NO picks is referred to
+    /// by its tray cards, in the order the screen renders the trays (<see cref="HandleCards"/>),
+    /// because they are the only thing it showed: "more like the second one you showed me first time
+    /// round" after a none-found answer means its second tray card, and with no handle for it the
+    /// model searched for "you", "showed" and "round" instead (R1-04).
+    ///
+    /// <para>The last <see cref="PresentedAnswers"/> answers with picks, and separately the last
+    /// <see cref="PresentedAnswers"/> tray-only answers, so a run of none-found answers can never
+    /// push the last real picks out of the model's handles (D8).</para>
     ///
     /// <para>A turn the client aborted counts: its cards were on screen (B-3). A failed turn's
     /// cards never were, and none are stored.</para>
@@ -1307,38 +1377,64 @@ public static class SearchEndpoints
 
         var answerNumber = assistantRows.Select((id, index) => (id, index)).ToDictionary(x => x.id, x => x.index + 1);
 
-        // Answers that put PICKS on screen, decided before the cut to the last three: a tray-only
-        // none-found answer is not "the second one" of anything, and three of them in a row used to
-        // push the last real answer out of the model's handles (D8). The tier is read through
-        // SearchTurnCardTier.Of in memory — a row older than the column has no tier to query on.
-        var withCards = (await db.SearchTurnCards
+        // The tier is read through SearchTurnCardTier.Of in memory — a row older than the column has
+        // no tier to query on.
+        var byAnswer = (await db.SearchTurnCards
                 .Where(c => c.ConversationId == conversationId)
-                .Select(c => new { c.TurnId, c.Tier, c.BelowFloor })
+                .Join(db.Titles, c => c.TitleId, t => t.Id, (c, t) => new ShownCard(c, t.Name, t.Year, t.MediaType))
                 .ToListAsync(ct))
-            .Where(c => Domain.Search.SearchTurnCardTier.Of(
-                new Domain.Search.SearchTurnCard { Tier = c.Tier, BelowFloor = c.BelowFloor }) == Domain.Search.SearchTurnCardTier.Pick)
-            .Select(c => c.TurnId)
-            .Distinct()
+            .Where(x => answerNumber.ContainsKey(x.Card.TurnId))
+            .GroupBy(x => x.Card.TurnId)
+            .Select(g => (Number: answerNumber[g.Key], HasPicks: g.Any(IsPick), Cards: HandleCards(g, answerNumber[g.Key])))
+            .Where(a => a.Cards.Count > 0)
             .ToList();
-        var recent = withCards
-            .Where(answerNumber.ContainsKey)
-            .OrderByDescending(id => answerNumber[id])
+        IEnumerable<PresentedCard> Recent(bool withPicks) => byAnswer
+            .Where(a => a.HasPicks == withPicks)
+            .OrderByDescending(a => a.Number)
             .Take(PresentedAnswers)
-            .ToList();
-        if (recent.Count == 0)
-        {
-            return [];
-        }
-
-        var cards = await db.SearchTurnCards
-            .Where(c => recent.Contains(c.TurnId))
-            .Join(db.Titles, c => c.TitleId, t => t.Id, (c, t) => new { Card = c, t.Name, t.Year, t.MediaType })
-            .ToListAsync(ct);
-        return cards
-            .Where(x => Domain.Search.SearchTurnCardTier.Of(x.Card) == Domain.Search.SearchTurnCardTier.Pick)
-            .Select(x => new PresentedCard(answerNumber[x.Card.TurnId], x.Card.Rank + 1, x.Card.TitleId, x.Name, x.Year, x.MediaType))
+            .SelectMany(a => a.Cards);
+        return Recent(withPicks: true)
+            .Concat(Recent(withPicks: false))
             .OrderByDescending(p => p.Turn)
             .ThenBy(p => p.Rank)
+            .ToList();
+    }
+
+    /// <summary>A stored card with what a handle line prints.</summary>
+    private sealed record ShownCard(Domain.Search.SearchTurnCard Card, string Name, int? Year, MediaType Media);
+
+    private static bool IsPick(ShownCard x) =>
+        Domain.Search.SearchTurnCardTier.Of(x.Card) == Domain.Search.SearchTurnCardTier.Pick;
+
+    /// <summary>The order the screen renders the trays in: the floor tray, the near misses, the unchecked.</summary>
+    private static int TrayOrder(string tier) => tier switch
+    {
+        Domain.Search.SearchTurnCardTier.BelowFloor => 0,
+        Domain.Search.SearchTurnCardTier.NearMiss => 1,
+        _ => 2,
+    };
+
+    /// <summary>
+    /// One answer's cards as the model may refer to them: its picks by stored rank when it has any,
+    /// otherwise its tray cards in on-screen order — at most <see cref="AskReelHandles.MaxHistoryHandles"/>
+    /// of those, so one long tray never crowds the prompt's handle list.
+    /// </summary>
+    private static List<PresentedCard> HandleCards(IEnumerable<ShownCard> ofOneAnswer, int answer)
+    {
+        var cards = ofOneAnswer.ToList();
+        var picks = cards.Where(IsPick).ToList();
+        if (picks.Count > 0)
+        {
+            return picks
+                .Select(x => new PresentedCard(answer, x.Card.Rank + 1, x.Card.TitleId, x.Name, x.Year, x.Media))
+                .ToList();
+        }
+
+        return cards
+            .OrderBy(x => TrayOrder(Domain.Search.SearchTurnCardTier.Of(x.Card)))
+            .ThenBy(x => x.Card.Rank)
+            .Take(AskReelHandles.MaxHistoryHandles)
+            .Select((x, index) => new PresentedCard(answer, index + 1, x.Card.TitleId, x.Name, x.Year, x.Media))
             .ToList();
     }
 
@@ -1406,16 +1502,14 @@ public static class SearchEndpoints
             .ToListAsync(ct);
         var answerNumber = assistantRows.Select((id, index) => (id, index)).ToDictionary(x => x.id, x => x.index + 1);
         var assistantIds = rows.Where(r => r.Role == "assistant").Select(r => r.Id).ToList();
+        // The same handles PresentedAsync gives each answer — its picks, or the trays of an answer
+        // that showed none — so the transcript and the handle list never number a card differently.
         var shownByTurn = (await db.SearchTurnCards
                 .Where(c => assistantIds.Contains(c.TurnId))
-                .Join(db.Titles, c => c.TitleId, t => t.Id, (c, t) => new { Card = c, t.Name, t.Year, t.MediaType })
+                .Join(db.Titles, c => c.TitleId, t => t.Id, (c, t) => new ShownCard(c, t.Name, t.Year, t.MediaType))
                 .ToListAsync(ct))
-            .Where(x => Domain.Search.SearchTurnCardTier.Of(x.Card) == Domain.Search.SearchTurnCardTier.Pick)
             .GroupBy(x => x.Card.TurnId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(x => new PresentedCard(
-                    answerNumber.GetValueOrDefault(x.Card.TurnId), x.Card.Rank + 1, x.Card.TitleId, x.Name, x.Year, x.MediaType)).ToList());
+            .ToDictionary(g => g.Key, g => HandleCards(g, answerNumber.GetValueOrDefault(g.Key)));
 
         // Whitelisted roles: the role reaches the provider's messages array, and "system" there is a
         // different instruction set. The column holds only "user" and "assistant" today; this keeps
@@ -1427,6 +1521,60 @@ public static class SearchEndpoints
                     t.Text + (shownByTurn.TryGetValue(t.Id, out var cards) ? AskReelHandles.HistorySuffix(cards) : string.Empty))
                 : new Domain.Ports.ChatTurn("user", t.Text))
             .ToList();
+    }
+
+    /// <summary>
+    /// The exposures of a turn the client ended (R1-12). Decision: a pick that was streamed onto the
+    /// screen IS an exposure, aborted or not. An exposure records that the product recommended a title
+    /// at a rank, and that happened the moment the card went out; the same cards already enter the
+    /// conversation's history and no-repeat set for exactly that reason (B-3). The live turn writes its
+    /// exposures after <c>done</c>, which an aborted turn never reaches — so the aborted "Salting the
+    /// Battlefield" pick was on screen and missing from the log.
+    ///
+    /// <para>Same rules as the finished turn: Pick tier only (no tray is a recommendation), a card
+    /// with no prediction is not logged, the why-source is the typed one the card was stored with,
+    /// the account's active artifact, keyed on the turn. Written only when the turn has no exposure
+    /// rows yet, so a turn cancelled while its own write was in flight is never logged twice.</para>
+    /// </summary>
+    private static async Task RecordAbortedExposuresAsync(
+        IServiceProvider services, IReelDbContext db, Guid accountId, Guid turnId,
+        IReadOnlyList<LiveSearchExpansionService.TurnCard> cards)
+    {
+        var shown = cards
+            .Where(c => c.Tier == Domain.Search.SearchTurnCardTier.Pick && c.PredictedRating is not null)
+            .ToList();
+        if (shown.Count == 0
+            || await db.ExposureEvents.AnyAsync(e => e.SourceTurnId == turnId, CancellationToken.None))
+        {
+            return;
+        }
+
+        var artifactId = await db.ModelArtifacts
+            .Where(a => a.AccountId == accountId && a.Status == ArtifactStatus.Active)
+            .OrderByDescending(a => a.Version)
+            .Select(a => (Guid?)a.Id)
+            .FirstOrDefaultAsync(CancellationToken.None);
+        if (artifactId is not { } activeArtifactId)
+        {
+            return;
+        }
+
+        await services.GetRequiredService<Application.Ml.ClosedLoop.ExposureLog>().RecordAsync(
+            accountId,
+            Domain.Feed.ExposureSurface.AskReel,
+            feedSnapshotId: null,
+            activeArtifactId,
+            DateTime.UtcNow,
+            shown.Select(c => new Application.Ml.ClosedLoop.ExposureCard(
+                    c.TitleId,
+                    c.Rank,
+                    c.PredictedRating!.Value,
+                    LlmFit: c.LlmFit,
+                    WhySentence: c.Why,
+                    WhySource: Application.Ml.ClosedLoop.ExposureWhySource.Parse(c.WhySource)))
+                .ToList(),
+            CancellationToken.None,
+            turnId);
     }
 
     /// <summary>The legacy stub reply — "Here are some X picks for “…”" — as it was stored.</summary>
@@ -1539,6 +1687,7 @@ public static class SearchEndpoints
             // this many of its cards no longer belong on a suggestion surface.
             replayed = true,
             removed = replay.Removed,
+            removedEarlier = replay.RemovedEarlier,
             // Present, and null. The contract's rule is that a client has ONE shape to render for
             // one event name, and these two keys carry that rule — a replay that omitted them made
             // `done` a three-shape event and handed every consumer an `undefined` to guard. There
@@ -1734,6 +1883,11 @@ public static class SearchEndpoints
             }
 
             await db.SaveChangesAsync(CancellationToken.None);
+
+            if (outcome.FailureCode == Domain.Search.SearchTurnFailure.ClientAborted)
+            {
+                await RecordAbortedExposuresAsync(scope.ServiceProvider, db, accountId, turnId, outcome.Cards);
+            }
         }
         catch (Exception ex)
         {

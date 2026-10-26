@@ -10,8 +10,8 @@ namespace FrostAura.Reel.Application.Search.AskReel;
 /// second one" as the keywords <c>["second", "one"]</c>; both then fed TMDB keyword discovery and the
 /// ranking vector, so the turn chased exactly what the user rejected or a word that names nothing
 /// (A-3, A-9, M NEW-3). A keyword is dropped when it carries a negation cue as a word, when it is the
-/// whole raw sentence of a multi-word request, or when every word in it is an ordinal or a filler
-/// word.</para>
+/// whole raw sentence of a multi-word request, or when every word in it is an ordinal, a pronoun, a
+/// conversational verb or a filler word (R1-04).</para>
 ///
 /// <para><b>Standing conditions copied into the exclusions.</b> The interpret prompt is shown the
 /// account's standing conditions and restates them, unpredictably, as genre or keyword exclusions —
@@ -45,6 +45,29 @@ public static class AskReelIntentSanitizer
         "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
         "last", "previous", "above", "below", "earlier", "latter", "former", "next", "other", "same",
         "more", "less", "movie", "movies", "film", "films", "show", "shows", "series", "title", "titles",
+    };
+
+    /// <summary>
+    /// Words that carry no topic on their own — pronouns, auxiliaries, the verbs a person uses to talk
+    /// ABOUT the conversation ("you showed me first time round"), and filler. A keyword made only of
+    /// these and <see cref="PointerWords"/> is dropped (R1-04: the ninja ordinal turn read
+    /// <c>["you", "showed", "round"]</c> as its topic and replied "9 unseen you movies"). A keyword that
+    /// pairs one of them with a real topic word ("time travel", "found footage") is kept.
+    /// </summary>
+    private static readonly IReadOnlySet<string> StopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "i", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "they", "them", "their", "he",
+        "him", "his", "she", "her", "it", "its", "this", "that", "these", "those", "one", "ones", "the", "a",
+        "an", "and", "or", "of", "to", "in", "on", "at", "for", "with", "from", "by", "about", "as", "is",
+        "are", "was", "were", "be", "been", "being", "am", "do", "does", "did", "have", "has", "had", "can",
+        "could", "would", "should", "will", "shall", "may", "might", "must", "showed", "shown", "showing",
+        "give", "gave", "given", "get", "got", "see", "saw", "seen", "watch", "watched", "want", "wanted",
+        "like", "liked", "find", "found", "recommend", "recommended", "suggest", "suggested", "pick", "picks",
+        "picked", "tell", "told", "said", "say", "mean", "meant", "again", "time", "times", "round", "once",
+        "twice", "back", "please", "thanks", "thank", "some", "any", "something", "anything", "stuff",
+        "thing", "things", "kind", "sort", "type", "lot", "lots", "bit", "just", "really", "very", "so",
+        "too", "also", "then", "than", "now", "here", "there", "what", "which", "who", "how", "why", "when",
+        "where", "let", "lets", "let's", "ok", "okay", "yes", "yeah", "maybe", "earlier", "before", "after",
     };
 
     /// <summary>The intent with non-positive keywords removed and standing conditions stripped from its exclusions.</summary>
@@ -122,7 +145,7 @@ public static class AskReelIntentSanitizer
             return true;
         }
 
-        return words.All(w => PointerWords.Contains(w) || SearchVocabulary.IsFloorWord(w));
+        return words.All(w => PointerWords.Contains(w) || StopWords.Contains(w) || SearchVocabulary.IsFloorWord(w));
     }
 
     /// <summary>Lower-cased words, split on anything that is not a letter, a digit or an apostrophe.</summary>

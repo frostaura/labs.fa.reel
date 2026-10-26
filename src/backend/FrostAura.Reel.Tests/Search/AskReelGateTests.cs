@@ -17,19 +17,22 @@ public class AskReelGateTests
     [InlineData(Satisfies.Partial, 3.0, 6.0, AskReelGate.Placement.NearMiss)]
     [InlineData(Satisfies.No, 9.9, 0.0, AskReelGate.Placement.Dropped)]
     [InlineData(null, 7.0, 6.0, AskReelGate.Placement.Unjudged)]
-    [InlineData(null, 5.0, 6.0, AskReelGate.Placement.BelowFloor)]
+    [InlineData(null, 5.0, 6.0, AskReelGate.Placement.Unjudged)]
+    [InlineData(null, 3.0, 0.0, AskReelGate.Placement.Unjudged)]
     public void A_card_lands_where_its_verdict_and_the_bar_put_it(
         Satisfies? satisfies, double predicted, double floor, AskReelGate.Placement expected) =>
         Assert.Equal(expected, AskReelGate.Place(satisfies, (decimal)predicted, (decimal)floor));
 
     /// <summary>
-    /// §4.8: "Unscored cards with no on-demand score are never picks." Under a bar a missing score is
-    /// held back with the under-bar cards, whatever the verdict; with no bar there is nothing to miss.
-    /// A <c>no</c> is dropped and a <c>partial</c> is a near miss either way — neither reaches the grid.
+    /// §4.8: "Unscored cards with no on-demand score are never picks." Under a bar a judged match with
+    /// no score is held back with the under-bar cards; with no bar there is nothing to miss. A card
+    /// with no verdict is unjudged whatever its score (R1-01) — it never lands in the floor tray, which
+    /// is read as "matches your bar held back". A <c>no</c> is dropped and a <c>partial</c> is a near
+    /// miss either way — neither reaches the grid.
     /// </summary>
     [Theory]
     [InlineData(Satisfies.Yes, 6.0, AskReelGate.Placement.BelowFloor)]
-    [InlineData(null, 6.0, AskReelGate.Placement.BelowFloor)]
+    [InlineData(null, 6.0, AskReelGate.Placement.Unjudged)]
     [InlineData(Satisfies.Partial, 6.0, AskReelGate.Placement.NearMiss)]
     [InlineData(Satisfies.No, 6.0, AskReelGate.Placement.Dropped)]
     [InlineData(Satisfies.Yes, 0.0, AskReelGate.Placement.Pick)]
@@ -42,12 +45,15 @@ public class AskReelGateTests
     /// and in the unchecked tray — with the turn in NoneFound — when it has none.
     /// </summary>
     [Theory]
-    [InlineData(0, SearchTurnCardTier.Unchecked, SearchTurnMode.NoneFound)]
-    [InlineData(1, SearchTurnCardTier.Pick, SearchTurnMode.Picks)]
-    [InlineData(6, SearchTurnCardTier.Pick, SearchTurnMode.Picks)]
-    public void Unjudged_cards_reach_the_grid_only_beneath_a_judged_pick(int judgedPicks, string tier, string mode)
+    [InlineData(0, true, SearchTurnCardTier.Unchecked, SearchTurnMode.NoneFound)]
+    [InlineData(0, false, SearchTurnCardTier.Unchecked, SearchTurnMode.NoneFound)]
+    [InlineData(1, true, SearchTurnCardTier.Pick, SearchTurnMode.Picks)]
+    [InlineData(1, false, SearchTurnCardTier.Unchecked, SearchTurnMode.Picks)]
+    [InlineData(6, true, SearchTurnCardTier.Pick, SearchTurnMode.Picks)]
+    public void Unjudged_cards_reach_the_grid_only_beneath_a_judged_pick_and_above_the_bar(
+        int judgedPicks, bool clearsFloor, string tier, string mode)
     {
-        Assert.Equal(tier, AskReelGate.UnjudgedTier(judgedPicks));
+        Assert.Equal(tier, AskReelGate.UnjudgedTier(judgedPicks, clearsFloor));
         Assert.Equal(mode, AskReelGate.ModeFor(judgedPicks));
     }
 
@@ -112,7 +118,8 @@ public class AskReelGateTests
     [InlineData(null, SearchTurnMode.Picks)]
     [InlineData("Picks", SearchTurnMode.Picks)]
     [InlineData("NoneFound", SearchTurnMode.NoneFound)]
-    [InlineData("Clarify", SearchTurnMode.Picks)]
+    [InlineData("Clarify", SearchTurnMode.Clarify)]
+    [InlineData("SomethingNew", SearchTurnMode.Picks)]
     public void A_stored_mode_reads_back_safely(string? stored, string expected) =>
         Assert.Equal(expected, SearchTurnMode.Parse(stored));
 
@@ -122,6 +129,8 @@ public class AskReelGateTests
     [InlineData("judge:1/3", false)]
     [InlineData("judge:1/3,plan", true)]
     [InlineData("planned", false)]
+    [InlineData("no-model", true)]
+    [InlineData("judge-missing:2/16", false)]
     public void A_degraded_plan_is_read_off_the_flags(string? flags, bool planFailed) =>
         Assert.Equal(planFailed, SearchTurnDegraded.PlanFailed(flags));
 
@@ -132,6 +141,10 @@ public class AskReelGateTests
     [InlineData("plan,judge:3/3", true)]
     [InlineData("judge:0/3", false)]
     [InlineData("judge:", false)]
+    [InlineData("judge-missing:2/16", true)]
+    [InlineData("judge-missing:0/16", false)]
+    [InlineData("judge:0/3,judge-missing:1/16", true)]
+    [InlineData("no-model", true)]
     public void A_failed_judge_is_read_off_the_flags(string? flags, bool judgeFailed) =>
         Assert.Equal(judgeFailed, SearchTurnDegraded.JudgeFailed(flags));
 }

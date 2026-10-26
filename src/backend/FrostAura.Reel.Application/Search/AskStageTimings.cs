@@ -49,11 +49,56 @@ public sealed class AskStageTimings
     /// <summary>The terminal frame and the exposure write that follows it.</summary>
     public const string Emit = "emit";
 
+    /// <summary>Inside <see cref="Discover"/>: WS-3's TMDB arm (or the person-credit pull), deadline included.</summary>
+    public const string DiscoverTmdb = "discover.tmdb";
+
+    /// <summary>Inside <see cref="Discover"/>: the facet arm and the supply report behind it.</summary>
+    public const string DiscoverFacet = "discover.facet";
+
+    /// <summary>Inside <see cref="Discover"/>: the semantic kNN arm, including any wait on its embedding.</summary>
+    public const string DiscoverKnn = "discover.knn";
+
+    /// <summary>
+    /// Inside <see cref="Embed"/>: embedding the eligible titles that had no vector yet — newly discovered
+    /// ones, mostly. Absent when every eligible title was already embedded.
+    /// </summary>
+    public const string EmbedTitles = "embed.titles";
+
+    /// <summary>
+    /// Inside <see cref="Embed"/>: waiting on the ranking seed — the concept embedding started before
+    /// discovery. Near zero when it finished underneath the arms; the remainder of an uncached
+    /// embedding when it did not, which §4.11's retrieve budget does not allow for.
+    /// </summary>
+    public const string EmbedSeed = "embed.seed";
+
+    /// <summary>
+    /// Inside <see cref="Score"/>: hydrating the shortlist's never-refreshed titles from TMDB. Absent
+    /// when every title on the shortlist was already hydrated.
+    /// </summary>
+    public const string ScoreHydrate = "score.hydrate";
+
+    /// <summary>Inside <see cref="Rerank"/>: from the start of judging to the first batch returning.</summary>
+    public const string RerankFirstBatch = "rerank.first";
+
+    /// <summary>From the start of the turn to the first pick on the wire — §4.11's first-card number.</summary>
+    public const string FirstCard = "firstCard";
+
     /// <summary>
     /// Canonical order — the order the work happens in, which is the order a reader wants it. The
     /// snapshot is built from this list, so a stage that never ran is simply absent rather than zero.
+    /// The dotted entries are breakdowns of the undotted stage above them and are not added to it again.
     /// </summary>
     public static readonly IReadOnlyList<string> Order =
+        [
+            Interpret, Discover, DiscoverTmdb, DiscoverFacet, DiscoverKnn, Eligible, Embed, EmbedTitles, EmbedSeed,
+            Score, ScoreHydrate, Rerank, RerankFirstBatch, Blend, Emit, FirstCard,
+        ];
+
+    /// <summary>
+    /// The pipeline's own stages — sequential and disjoint, so they sum to no more than the turn. The
+    /// rest of <see cref="Order"/> are breakdowns of one of these, or a point in time.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Sequential =
         [Interpret, Discover, Eligible, Embed, Score, Rerank, Blend, Emit];
 
     private readonly Dictionary<string, double> _elapsedMs = new(StringComparer.Ordinal);
@@ -73,6 +118,12 @@ public sealed class AskStageTimings
     /// running total. Use as <c>using var _ = timings.Stage(AskStageTimings.Embed);</c>.
     /// </summary>
     public IDisposable Stage(string name) => new Scope(this, name);
+
+    /// <summary>
+    /// Records a duration measured elsewhere — a point in time rather than a span this class wraps
+    /// (<see cref="FirstCard"/>, <see cref="RerankFirstBatch"/>). Accumulates like a stage.
+    /// </summary>
+    public void Mark(string name, double milliseconds) => Record(name, milliseconds);
 
     /// <summary>
     /// Whole milliseconds per stage that actually ran, in <see cref="Order"/>. Milliseconds because
