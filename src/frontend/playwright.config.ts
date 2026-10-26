@@ -17,6 +17,13 @@ const isCI = !!process.env.CI;
  *   PW_PORT (default 5173); the tripwire takes PW_PORT + 10000 unless PW_TRIPWIRE_PORT is set.
  * - Service workers stay blocked for the same reason.
  * - Chromium and WebKit run the same specs (`make ci-e2e` runs both projects).
+ * - **127.0.0.1, never "localhost".** Vite binds 127.0.0.1 (vite.config.ts), and on macOS
+ *   "localhost" resolves to IPv6 ::1 first, so every navigation began with a refused connection.
+ * - **WebKit alone gets 1 retry** (IREV3S-03). About 1 WebKit test in 75 hangs in `page.goto`
+ *   "waiting until load" with not one request in its trace — not even the document — so the stall
+ *   is inside the engine before the navigation reaches the network, and no app or spec change can
+ *   remove it. The list reporter prints a pass-on-retry as "flaky", so it stays visible; a test that
+ *   fails twice still fails the run.
  */
 const port = Number(process.env.PW_PORT ?? 5173);
 const tripwire = tripwirePort(port);
@@ -33,14 +40,14 @@ export default defineConfig({
     tripwireServer(tripwire),
     {
       command: `npm run dev -- --port ${port} --strictPort`,
-      url: `http://localhost:${port}`,
+      url: `http://127.0.0.1:${port}`,
       env: viteProxyEnv(tripwire),
       reuseExistingServer: false,
       timeout: 120_000,
     },
   ],
   use: {
-    baseURL: `http://localhost:${port}`,
+    baseURL: `http://127.0.0.1:${port}`,
     serviceWorkers: "block",
     headless: isCI,
     viewport: { width: 1440, height: 900 },
@@ -56,6 +63,7 @@ export default defineConfig({
     },
     {
       name: "webkit",
+      retries: 1,
       use: { ...devices["Desktop Safari"] },
     },
   ],
