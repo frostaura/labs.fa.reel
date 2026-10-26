@@ -228,7 +228,20 @@ const DEGRADED_REASON_COPY: Record<string, string> = {
   NotEnoughRatings: "waiting for a few more ratings",
   ProviderDown: "the model provider is down",
   PipelineFailed: "a step failed and stopped your picks updating",
+  // A newer build of Reel recorded the account's state and this one cannot name it. The header
+  // raises nothing for it, so the fallback ("the sync status in the header says what") would point
+  // at a header with nothing to say.
+  UnrecognisedState: "a newer version of Reel recorded where your setup got to — nothing is lost",
 };
+
+/**
+ * The onboarding stop for `degradedReason = UnrecognisedState` (WS-6 status v2), as a whole
+ * sentence. Nothing failed and nothing needs reconnecting: a newer build wrote a state this one
+ * cannot name, which happens when an update is rolled back. So the copy offers no reconnect and
+ * claims no failure, and promises no timing it cannot keep. For WS-10B's `failureCopy`.
+ */
+export const UNRECOGNISED_STATE_COPY =
+  "A newer version of Reel recorded where your setup got to, and this one can't read it yet. Nothing is lost, and there's nothing to reconnect.";
 
 /** What Degraded says with no reason, or one this build does not know. */
 export const PIPELINE_DEGRADED_FALLBACK = "something needs a look — the sync status in the header says what";
@@ -293,6 +306,25 @@ export const FAILURE_NOUN_FALLBACK = "A background job";
 
 export function failureNoun(sseKind: string | null | undefined): string {
   return (sseKind && FAILURE_NOUNS[sseKind]) || FAILURE_NOUN_FALLBACK;
+}
+
+/**
+ * What still stands after a failed run of this kind, where the page goes on showing that kind's
+ * earlier results. Home's cross-reference band keeps counting titles judged by earlier passes while
+ * the latest pass fails; without this line the pill's "Cross-reference failed" and the band's
+ * "Cross-referenced 452 titles" read as a contradiction (R1-20). Kinds with nothing left standing
+ * have no line.
+ */
+const FAILURE_AFTERMATH: Record<string, string> = {
+  xref: "Titles earlier passes judged keep their verdicts.",
+  feed: "Your current picks stay up until a rebuild succeeds.",
+  narrative: "Your last taste profile stays up.",
+  availability: "Where-to-watch shows the last good answer.",
+  digest: "Last week's digest stays up.",
+};
+
+export function failureAftermath(sseKind: string | null | undefined): string | null {
+  return (sseKind && FAILURE_AFTERMATH[sseKind]) || null;
 }
 
 /**

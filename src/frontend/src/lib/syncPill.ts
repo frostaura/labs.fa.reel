@@ -3,6 +3,7 @@ import type { LiveProgress, SyncSummary } from "../store/syncSlice";
 import { relTime } from "./format";
 import {
   activeJobLabel,
+  failureAftermath,
   failureNoun,
   isTerminalReason,
   purposeCopy,
@@ -41,6 +42,8 @@ export interface PillIssue {
   detail: string;
   /** True when the fix is to reconnect Trakt — the pill then offers that action. */
   reconnect: boolean;
+  /** What still stands despite the failure (earlier results the page keeps showing), if anything. */
+  aftermath?: string | null;
 }
 
 export interface PillView {
@@ -91,6 +94,16 @@ const BROKEN_CONNECTION = new Set(["RefreshFailed", "Revoked"]);
 /** A failure streak this long reads as danger, not a passing blip. */
 export const FAILURE_STREAK_DANGER = 3;
 
+/**
+ * A failed run of work nobody is waiting on — a background job or the named cross-reference pass —
+ * stops reading as an alarm once its latest failure is this old (R1-20). Nothing has retried it
+ * since, nothing the user did is blocked on it, and a red header that stays red for days beside a
+ * page still showing that work's earlier results is wallpaper, not news. It stays a warning with
+ * its reason and its age. Work the user waits on (a Trakt sync, a picks build they started) and
+ * terminal refusals (401/402/403) never age: those keep the danger state until they are fixed.
+ */
+export const AGED_FAILURE_MS = 24 * 60 * 60_000;
+
 const IN_FLIGHT = new Set(["Pending", "Running"]);
 
 /** The active job, if it is one the header may show at all. */
@@ -111,20 +124,29 @@ export function statusPollInterval(status: SyncStatus | undefined): number {
 
 const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
 
-function failureIssue(failure: JobFailure): PillIssue {
+/** True when this failure has aged out of the danger state (see {@link AGED_FAILURE_MS}). */
+export function isAgedFailure(failure: JobFailure, now: number = Date.now()): boolean {
+  if (failure.visibility === "UserVisible" || isTerminalReason(failure.reasonCode)) return false;
+  const failedAt = Date.parse(failure.failedAt);
+  return Number.isFinite(failedAt) && now - failedAt > AGED_FAILURE_MS;
+}
+
+function failureIssue(failure: JobFailure, now: number): PillIssue {
   const streak = failure.consecutiveFailures;
-  const danger = streak >= FAILURE_STREAK_DANGER || isTerminalReason(failure.reasonCode);
+  const danger =
+    isTerminalReason(failure.reasonCode) || (streak >= FAILURE_STREAK_DANGER && !isAgedFailure(failure, now));
   const times = streak > 1 ? `Failed ${streak} times in a row` : "Failed";
   return {
     tone: danger ? "danger" : "warn",
     label: `${failureNoun(failure.sseKind)} failed`,
     detail: `${reasonCopy(failure.reasonCode)} ${times}, last ${relTime(failure.failedAt)}.`,
     reconnect: false,
+    aftermath: failureAftermath(failure.sseKind),
   };
 }
 
 /** Every health issue the status reports, most severe first (stable within a tone). */
-export function healthIssues(status: SyncStatus | undefined, statusFailed: boolean): PillIssue[] {
+export function healthIssues(status: SyncStatus | undefined, statusFailed: boolean, now: number = Date.now()): PillIssue[] {
   const issues: PillIssue[] = [];
 
   if (statusFailed) {
@@ -177,7 +199,7 @@ export function healthIssues(status: SyncStatus | undefined, statusFailed: boole
 
   const failures = [...(status.lastFailures ?? [])]
     .sort((a, b) => b.failedAt.localeCompare(a.failedAt))
-    .map(failureIssue);
+    .map((failure) => failureIssue(failure, now));
   issues.push(...failures);
 
   if (reason === "PipelineFailed") {
@@ -225,7 +247,7 @@ function healthView(issue: PillIssue, issues: PillIssue[]): PillView {
     count: null,
     reconnect: issues.some((i) => i.reconnect),
     title: issue.tone === "danger" ? "Sync needs attention" : "Worth a look",
-    lines: [issue.detail],
+    lines: issue.aftermath ? [issue.detail, issue.aftermath] : [issue.detail],
     issues,
   };
 }
@@ -276,7 +298,7 @@ function activeView(job: SyncJobSummary, live: LiveProgress | null, issues: Pill
 }
 
 export function derivePill({ status, statusFailed, live, summary, summaryAt, now = Date.now() }: PillInput): PillView | null {
-  const issues = healthIssues(status, statusFailed);
+  const issues = healthIssues(status, statusFailed, now);
   const danger = issues.find((i) => i.tone === "danger");
   if (danger) return healthView(danger, issues);
 

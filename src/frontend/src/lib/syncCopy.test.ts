@@ -7,6 +7,8 @@ import {
   PIPELINE_STAGE_FALLBACK,
   REASON_FALLBACK,
   activeJobLabel,
+  UNRECOGNISED_STATE_COPY,
+  failureAftermath,
   failureNoun,
   isTerminalReason,
   pipelineStageCopy,
@@ -255,5 +257,33 @@ describe("purposeCopy", () => {
     expect(purposeCopy("some-future-purpose")).toBe(PURPOSE_FALLBACK);
     expect(purposeCopy(null)).toBe(PURPOSE_FALLBACK);
     expect(purposeCopy(undefined)).toBe(PURPOSE_FALLBACK);
+  });
+});
+
+describe("failureAftermath", () => {
+  it("names what still stands for kinds whose earlier results stay on the page", () => {
+    expect(failureAftermath("xref")).toBe("Titles earlier passes judged keep their verdicts.");
+    expect(failureAftermath("feed")).toBe("Your current picks stay up until a rebuild succeeds.");
+  });
+
+  it("says nothing for a kind with no earlier result on show, or one this build does not know", () => {
+    expect(failureAftermath("delta")).toBeNull();
+    expect(failureAftermath("some-future-kind")).toBeNull();
+    expect(failureAftermath(null)).toBeNull();
+  });
+});
+
+describe("UnrecognisedState (status v2)", () => {
+  it("has its own Degraded clause instead of pointing at a header that raises nothing for it", () => {
+    const clause = pipelineStageCopy("Degraded", "UnrecognisedState");
+    expect(clause).toBe("a newer version of Reel recorded where your setup got to — nothing is lost");
+    expect(clause).not.toBe(PIPELINE_DEGRADED_FALLBACK);
+  });
+
+  it("the onboarding sentence claims no failure and offers no reconnect", () => {
+    expect(UNRECOGNISED_STATE_COPY).toMatch(/^A newer version of Reel/);
+    expect(UNRECOGNISED_STATE_COPY).not.toMatch(/fail|error|stopped|try again/i);
+    expect(UNRECOGNISED_STATE_COPY).toMatch(/nothing to reconnect/);
+    expect(UNRECOGNISED_STATE_COPY).not.toMatch(/UnrecognisedState/);
   });
 });

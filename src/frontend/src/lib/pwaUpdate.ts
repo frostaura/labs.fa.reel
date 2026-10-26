@@ -18,6 +18,14 @@ type Listener = () => void;
 let updateReady = false;
 let applyUpdate: ((reloadPage?: boolean) => Promise<void>) | null = null;
 const listeners = new Set<Listener>();
+let reloading = false;
+
+/** The page reloads once onto the new build, however many signals say the new worker took over. */
+function reloadOnce(): void {
+  if (reloading) return;
+  reloading = true;
+  window.location.reload();
+}
 
 const emit = () => listeners.forEach((listener) => listener());
 
@@ -26,6 +34,7 @@ export function startPwaUpdates(): void {
 
   applyUpdate = registerSW({
     immediate: true,
+    onNeedReload: reloadOnce,
     onNeedRefresh() {
       updateReady = true;
       emit();
@@ -55,8 +64,16 @@ export function usePwaUpdateReady(): boolean {
   return useSyncExternalStore(subscribePwaUpdate, isPwaUpdateReady, () => false);
 }
 
-/** Activates the waiting worker; the page reloads when it takes control. */
+/**
+ * Activates the waiting worker; the page reloads when it takes control.
+ *
+ * workbox-window reloads on that takeover only if a worker already controlled the page when it
+ * registered. The tab whose own first visit installed the worker is the exception: Reload activated
+ * the new worker and nothing else happened, so the prompt sat there, still offering it. The
+ * takeover is therefore watched here too; `reloadOnce` keeps it to one reload either way.
+ */
 export function acceptPwaUpdate(): void {
+  navigator.serviceWorker?.addEventListener("controllerchange", reloadOnce, { once: true });
   void applyUpdate?.(true);
 }
 

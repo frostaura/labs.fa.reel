@@ -109,9 +109,16 @@ test.describe("sync pill", () => {
     await expect(chip).toHaveAttribute("data-health", "danger");
     await expect(page.getByTestId("sync-health-label")).toHaveText("Cross-reference failed");
 
+    // Keyboard: Enter on the pill opens the details; Escape closes them and hands focus back.
     await chip.focus();
-    const tooltip = page.getByRole("tooltip");
-    await expect(tooltip).toContainText("The model returned no usable answer. Failed 3 times in a row, last 20m ago.");
+    await page.keyboard.press("Enter");
+    const details = page.getByTestId("sync-tooltip");
+    await expect(details).toContainText("The model returned no usable answer. Failed 3 times in a row, last 20m ago.");
+    await expect(details).toContainText("Titles earlier passes judged keep their verdicts.");
+    await expect(chip).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Escape");
+    await expect(details).toHaveCount(0);
+    await expect(chip).toBeFocused();
   });
 
   test("the cross-reference pass is named, with no percentage and no count, and never quotes the job's text", async ({ page }) => {
@@ -134,8 +141,9 @@ test.describe("sync pill", () => {
     await expect(page.getByTestId("sync-pill-label")).toHaveText("Cross-referencing · first pass");
     await expect(pill).not.toContainText("%");
     await expect(pill).not.toContainText("nothing cross-referenced");
-    await pill.focus();
-    await expect(page.getByRole("tooltip")).not.toContainText("640 / 2,242");
+    await pill.click();
+    await expect(page.getByTestId("sync-tooltip")).toBeVisible();
+    await expect(page.getByTestId("sync-tooltip")).not.toContainText("640 / 2,242");
   });
 
   test("a retrying job is a warning with its reason, not a stuck 100%", async ({ page }) => {
@@ -151,22 +159,35 @@ test.describe("sync pill", () => {
     await expect(pill).toHaveAttribute("data-tone", "warn");
     await expect(page.getByTestId("sync-pill-label")).toHaveText("Retrying · Syncing with Trakt");
     await expect(pill).not.toContainText("%");
-    await pill.focus();
-    await expect(page.getByRole("tooltip")).toContainText("It timed out. Attempt 2 of 3.");
+    await pill.click();
+    await expect(page.getByTestId("sync-tooltip")).toContainText("It timed out. Attempt 2 of 3.");
   });
 
   test("a late progress frame followed by idle polls clears within one poll (H-17)", async ({ page }) => {
+    // The page's clock, not the wall clock, decides when the next poll is due: on a loaded machine
+    // a real 5 s cadence against a 7 s wait failed in a full run (R1-22).
+    await page.clock.install();
     const shell = await bootShell(page, syncStatus({ activeJob: syncJob({ progressPct: 30 }) }));
     await page.goto("/home");
     await expect(page.getByTestId("sync-pill-label")).toHaveText("Syncing with Trakt");
+    await page.clock.pauseAt(Date.now() + 1_000);
 
     // The job ends on the server; one more frame arrives late, after the job is over.
     shell.set(syncStatus({ lastDeltaSyncAt: new Date().toISOString() }));
     await emit(page, "job-progress", { kind: "delta", pct: 100 });
+    await expect(page.getByTestId("sync-pill-label")).toHaveText("Syncing with Trakt");
     const pollsAtEnd = shell.polls();
 
-    // User-visible work polls every 5 s; the next answer says idle and the pill must follow it.
-    await expect(page.getByTestId("sync-pill")).toHaveCount(0, { timeout: 7_000 });
+    // User-visible work polls every 5 s: one poll interval later the answer says idle and the pill
+    // must follow it. The clock stays paused, so after the poll it moves in frame-sized steps — the
+    // store's render batching runs on page timers too — and can never reach a second poll.
+    await page.clock.runFor(5_000);
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(50);
+        return page.getByTestId("sync-pill").count();
+      })
+      .toBe(0);
     await expect(page.getByTestId("sync-health-label")).toHaveText(/^Synced/);
     expect(shell.polls() - pollsAtEnd).toBeLessThanOrEqual(1);
   });
@@ -196,6 +217,87 @@ test.describe("sync pill", () => {
     await expect(page.getByTestId("sync-health")).toHaveAttribute("data-health", "warn");
     await expect(page.getByTestId("sync-health-label")).toHaveText("Picks build failed");
     await expect(page.getByTestId("sync-health")).not.toContainText("after 3 attempts");
+  });
+});
+
+/** The reviewer's case (R1-20): four failed cross-reference passes, the latest two days old. */
+const STALE_XREF = () =>
+  syncStatus({
+    lastDeltaSyncAt: new Date().toISOString(),
+    lastFailures: [
+      {
+        kind: "CrossReference",
+        sseKind: "xref",
+        visibility: "NamedPass",
+        failedAt: new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString(),
+        consecutiveFailures: 4,
+        attempts: 3,
+        reasonCode: "no_answer",
+      },
+    ],
+  });
+
+test.describe("pill details on a phone (R1-20)", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
+
+  test("a tap opens the failure reason, and a tap elsewhere closes it", async ({ page }) => {
+    await bootShell(page, STALE_XREF());
+    await page.goto("/home");
+
+    const chip = page.getByTestId("sync-health");
+    // Two days old and nobody is waiting on it: a warning, not the red alarm.
+    await expect(chip).toHaveAttribute("data-health", "warn");
+    await expect(page.getByTestId("sync-health-label")).toHaveText("Cross-reference failed");
+
+    await chip.tap();
+    const details = page.getByTestId("sync-tooltip");
+    await expect(details).toBeVisible();
+    await expect(details).toContainText("Failed 4 times in a row, last 2d ago.");
+    await expect(details).toContainText("Titles earlier passes judged keep their verdicts.");
+    const box = await details.boundingBox();
+    expect(box && box.x >= 0 && box.x + box.width <= 390).toBe(true);
+
+    await page.locator("main").tap({ position: { x: 20, y: 400 } });
+    await expect(details).toHaveCount(0);
+  });
+
+  test("the reconnect pill keeps its one-tap fix and the reason sits behind its own button", async ({ page }) => {
+    await bootShell(page, syncStatus({ connectionStatus: "RefreshFailed", degradedReason: "TraktRefreshFailed" }));
+    await page.goto("/home");
+
+    await expect(page.getByTestId("sync-reconnect")).toHaveText("Reconnect Trakt");
+    await page.getByRole("button", { name: "Why Trakt needs reconnecting" }).tap();
+    await expect(page.getByTestId("sync-tooltip")).toContainText("Trakt stopped accepting Reel's sign-in");
+  });
+});
+
+test.describe("pill details with a mouse (R1-20)", () => {
+  test("hovering peeks without taking focus; a click pins it open", async ({ page }) => {
+    await bootShell(page, STALE_XREF());
+    await page.goto("/home");
+
+    const chip = page.getByTestId("sync-health");
+    const details = page.getByTestId("sync-tooltip");
+    await chip.hover();
+    await expect(details).toBeVisible();
+    await expect(chip).not.toBeFocused();
+
+    // Leaving closes a peek.
+    await page.mouse.move(5, 600);
+    await expect(details).toHaveCount(0);
+
+    // A click pins it: leaving no longer closes it.
+    await chip.hover();
+    await expect(details).toBeVisible();
+    await chip.click();
+    await page.mouse.move(5, 600);
+    await page.waitForTimeout(400);
+    await expect(details).toBeVisible();
+    await expect(chip).toHaveAttribute("aria-expanded", "true");
+
+    // A second click closes it.
+    await chip.click();
+    await expect(details).toHaveCount(0);
   });
 });
 

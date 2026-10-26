@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { components } from "../store/generated/openapi";
 import type { JobFailure, SyncJobSummary, SyncStatus } from "../store/api/sync";
 import {
   ACTIVE_POLL_MS,
+  AGED_FAILURE_MS,
   IDLE_POLL_MS,
   SUMMARY_FRESH_MS,
   derivePill,
   healthIssues,
+  isAgedFailure,
   shownActiveJob,
   statusPollInterval,
 } from "./syncPill";
@@ -305,5 +308,99 @@ describe("unknown values", () => {
     );
     expect(issues.map((i) => i.detail)).toEqual(["Some model features: A provider is rate-limiting Reel (429)."]);
     expect(JSON.stringify(issues)).not.toMatch(/OpenRouter|some-future-purpose/);
+  });
+});
+
+describe("aged failures and what still stands (R1-20)", () => {
+  const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
+  const DAY = 24 * 60 * 60_000;
+
+  it("a cross-reference streak whose last failure is 2 days old is a warning, not danger, with its age", () => {
+    const view = pill(status({ lastFailures: [failure({ consecutiveFailures: 4, failedAt: ago(2 * DAY) })] }))!;
+    expect(view).toMatchObject({ mode: "health", tone: "warn", label: "Cross-reference failed" });
+    expect(view.lines).toEqual([
+      "The model returned no usable answer. Failed 4 times in a row, last 2d ago.",
+      "Titles earlier passes judged keep their verdicts.",
+    ]);
+  });
+
+  it("the same streak inside the window is still danger, and still says what stands", () => {
+    const view = pill(status({ lastFailures: [failure({ consecutiveFailures: 4, failedAt: ago(AGED_FAILURE_MS) })] }))!;
+    expect(view.tone).toBe("danger");
+    expect(view.lines[1]).toBe("Titles earlier passes judged keep their verdicts.");
+    const aged = pill(status({ lastFailures: [failure({ consecutiveFailures: 4, failedAt: ago(AGED_FAILURE_MS + 60_000) })] }))!;
+    expect(aged.tone).toBe("warn");
+  });
+
+  it("work the user waits on never ages: a Trakt sync failing for 3 days stays danger", () => {
+    const view = pill(
+      status({
+        lastFailures: [
+          failure({ kind: "DeltaSync", sseKind: "delta", visibility: "UserVisible", consecutiveFailures: 3, failedAt: ago(3 * DAY), reasonCode: "timed_out" }),
+        ],
+      })
+    )!;
+    expect(view).toMatchObject({ tone: "danger", label: "Trakt sync failed" });
+    // A sync has no earlier result for the page to keep showing.
+    expect(view.lines).toEqual(["It timed out. Failed 3 times in a row, last 3d ago."]);
+  });
+
+  it("a terminal refusal never ages, even on background work", () => {
+    const view = pill(
+      status({
+        lastFailures: [
+          failure({ kind: "EnrichCatalog", sseKind: "enrich", visibility: "Background", failedAt: ago(5 * DAY), reasonCode: "payment_required" }),
+        ],
+      })
+    )!;
+    expect(view).toMatchObject({ tone: "danger", label: "Title reading failed" });
+  });
+
+  it("an unreadable timestamp is not treated as old", () => {
+    expect(isAgedFailure(failure({ consecutiveFailures: 3, failedAt: "not a date" }), NOW.getTime())).toBe(false);
+    expect(pill(status({ lastFailures: [failure({ consecutiveFailures: 3, failedAt: "not a date" })] }))!.tone).toBe("danger");
+  });
+
+  it("an aged warning does not take the pill from a sync the user started", () => {
+    const view = pill(status({ activeJob: job(), lastFailures: [failure({ consecutiveFailures: 5, failedAt: ago(3 * DAY) })] }))!;
+    expect(view).toMatchObject({ mode: "active", label: "Syncing with Trakt" });
+    expect(view.issues.map((i) => i.tone)).toEqual(["warn"]);
+  });
+
+  it("ages against the clock it is given, not only the wall clock", () => {
+    const f = failure({ consecutiveFailures: 3, failedAt: "2026-10-20T00:00:00Z" });
+    expect(isAgedFailure(f, Date.parse("2026-10-20T12:00:00Z"))).toBe(false);
+    expect(isAgedFailure(f, Date.parse("2026-10-21T00:00:01Z"))).toBe(true);
+  });
+});
+
+describe("the server decides what is shown (WS-6 CR: no kind list copied on the frontend)", () => {
+  // Every job kind the backend can send, checked against the generated contract so it cannot drift.
+  // It is the universe the property below quantifies over, not a classification: the header must
+  // treat every kind alike and read only `visibility`.
+  const ALL_KINDS = [
+    "FullIngest", "DeltaSync", "FullReconcile", "HydrateCatalog", "EnrichCatalog", "Train", "Evaluate", "BuildFeed",
+    "RefreshAvailability", "BuildDigest", "BuildTasteNarrative", "PersonaliseTitles", "SeedCatalog", "CrossReference",
+  ] as const;
+  type SameMembers<A, B> = [Exclude<A, B>, Exclude<B, A>] extends [never, never] ? true : never;
+  const covered: SameMembers<(typeof ALL_KINDS)[number], components["schemas"]["JobKind"]> = true;
+
+  it.each(ALL_KINDS)("%s is shown or hidden by its visibility alone", (kind) => {
+    expect(covered).toBe(true);
+    const as = (visibility: SyncJobSummary["visibility"]) =>
+      status({ activeJob: job({ kind, sseKind: "some-kind", visibility }) });
+    expect(shownActiveJob(as("Background"))).toBeNull();
+    expect(shownActiveJob(as("UserVisible"))?.kind).toBe(kind);
+    expect(shownActiveJob(as("NamedPass"))?.kind).toBe(kind);
+    expect(statusPollInterval(as("UserVisible"))).toBe(ACTIVE_POLL_MS);
+    expect(statusPollInterval(as("Background"))).toBe(IDLE_POLL_MS);
+  });
+});
+
+describe("UnrecognisedState (status v2)", () => {
+  it("raises no issue, no reconnect and no failure copy on a Degraded account", () => {
+    const s = status({ pipelineStage: "Degraded", degradedReason: "UnrecognisedState" });
+    expect(healthIssues(s, false)).toEqual([]);
+    expect(pill(s)).toMatchObject({ mode: "health", tone: "ok", reconnect: false, label: "Synced 3m ago" });
   });
 });

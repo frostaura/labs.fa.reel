@@ -1,14 +1,16 @@
 import { lazy, Suspense, type ReactNode } from "react";
 import {
-  BrowserRouter,
   Link,
   Navigate,
   Route,
   Routes,
+  createBrowserRouter,
   matchPath,
   useLocation,
+  useRouteError,
   type Location,
 } from "react-router";
+import { RouterProvider } from "react-router/dom";
 import Footer from "./components/Footer";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
@@ -166,10 +168,24 @@ function AppRoutes() {
   );
 }
 
+/**
+ * A render error that escaped every boundary inside the routes (the Layout's route boundary catches
+ * the signed-in pages first). A data router would otherwise render its own default error screen and
+ * swallow the error; rethrowing hands it to the root boundary in main.tsx, which shows Reel's own
+ * screen. React's onCaughtError/onUncaughtError hooks report it either way.
+ */
+function RethrowToRootBoundary(): never {
+  throw useRouteError();
+}
+
+/**
+ * A data router (R1-54). The routes themselves are unchanged — one splat route renders the same
+ * descendant `<Routes>` as before, which the title overlay's pinned background location depends
+ * on — but navigation now runs through the router, so `useBlocker` can question the browser's
+ * Back button and programmatic `navigate()` calls, not only link clicks.
+ */
+const router = createBrowserRouter([{ path: "*", element: <AppRoutes />, ErrorBoundary: RethrowToRootBoundary }]);
+
 export default function App() {
-  return (
-    <BrowserRouter>
-      <AppRoutes />
-    </BrowserRouter>
-  );
+  return <RouterProvider router={router} />;
 }

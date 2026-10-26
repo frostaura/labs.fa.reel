@@ -33,6 +33,12 @@ test.describe("mobile navigation", () => {
 
   async function bootHome(page: import("@playwright/test").Page) {
     await stubEventSource(page);
+    // Every call this spec does not answer below is answered empty: no request leaves for a real
+    // API (the e2e tripwire fails the run otherwise). Registered first, so the mocks below win.
+    await page.route(
+      (url) => url.pathname.startsWith("/api/"),
+      (route) => route.fulfill({ status: 204, body: "" })
+    );
     await mockJson(page, "**/api/auth/me", SESSION_FOUNDER);
     await mockJson(page, "**/api/sync/status", {
       pipelineStage: "FeedReady", connectionStatus: "Active", lastDeltaSyncAt: null,
